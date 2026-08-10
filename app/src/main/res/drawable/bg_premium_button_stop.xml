@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  xKey Premium Stop Button Background
+  Teal gradient for active/stop state.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="32dp" />
+            <gradient
+                android:type="linear"
+                android:startColor="@color/tertiary_30"
+                android:endColor="@color/tertiary_40"
+                android:angle="90" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="32dp" />
+            <gradient
+                android:type="linear"
+                android:startColor="@color/tertiary"
+                android:endColor="@color/tertiary_40"
+                android:angle="90" />
+        </shape>
+    </item>
+</selector>

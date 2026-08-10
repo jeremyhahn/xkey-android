@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Bottom Navigation Item Color State List (Dark Theme)
+  =====================================================
+  Defines color states for bottom navigation items in dark mode.
+  - Selected: Primary dark color for active state
+  - Unselected: On-surface-variant dark for inactive state
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="@color/primary_dark" android:state_checked="true" />
+    <item android:color="@color/on_surface_variant_dark" android:state_checked="false" />
+</selector>

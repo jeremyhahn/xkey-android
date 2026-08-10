@@ -1,0 +1,399 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Bluetooth permissions for BLE FIDO2 communication -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <!-- Biometric authentication -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!-- Foreground service for persistent BLE connection -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Wake lock for keeping BLE radio active while screen is off -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Battery optimization exemption for reliable background BLE operation -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Full-screen intent permission for biometric prompts over lock screen (Android 10+) -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!-- Camera for QR code scanning -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Media access for auto-signing -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Hardware features -->
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.fingerprint"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.usb.accessory"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <application
+        android:name=".XKeyApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.xKey"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+                android:resource="@xml/usb_accessory_filter" />
+        </activity>
+
+        <!-- Settings activity for biometric configuration -->
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Key Management activity for viewing and managing stored keys -->
+        <activity
+            android:name=".ui.KeyManagementActivity"
+            android:exported="false"
+            android:label="@string/key_management_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Key Detail activity for viewing individual key details -->
+        <activity
+            android:name=".ui.KeyDetailActivity"
+            android:exported="false"
+            android:label="@string/key_detail_title"
+            android:parentActivityName=".ui.KeyManagementActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.KeyManagementActivity" />
+        </activity>
+
+        <!-- Paired Devices activity for viewing and managing paired devices -->
+        <activity
+            android:name=".ui.PairedDevicesActivity"
+            android:exported="false"
+            android:label="@string/paired_devices_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Device Detail activity for viewing individual device details -->
+        <activity
+            android:name=".ui.DeviceDetailActivity"
+            android:exported="false"
+            android:label="@string/device_detail_title"
+            android:parentActivityName=".ui.PairedDevicesActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.PairedDevicesActivity" />
+        </activity>
+
+        <!-- Trust Store activity for managing trusted CA certificates -->
+        <activity
+            android:name=".ui.TrustStoreActivity"
+            android:exported="false"
+            android:label="@string/trust_store_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Certificate Management activity for X.509 certificate lifecycle -->
+        <activity
+            android:name=".ui.CertificateManagementActivity"
+            android:exported="false"
+            android:label="@string/certificate_management_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Certificate Detail activity for viewing individual certificate details -->
+        <activity
+            android:name=".ui.CertificateDetailActivity"
+            android:exported="false"
+            android:label="@string/cert_detail_title"
+            android:parentActivityName=".ui.CertificateManagementActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.CertificateManagementActivity" />
+        </activity>
+
+        <!-- Audit Log activity for viewing security event history -->
+        <activity
+            android:name=".ui.AuditLogActivity"
+            android:exported="false"
+            android:label="@string/audit_log_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Transparent activity for showing biometric prompts from background service -->
+        <activity
+            android:name=".ui.TransparentBiometricActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.xKey.Transparent"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
+
+        <!-- Crypto signing activity for PER_OPERATION mode biometric-bound signing -->
+        <activity
+            android:name=".ui.CryptoSigningActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.xKey.Transparent"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
+
+        <!-- BLE GATT Server Service for FIDO2 -->
+        <service
+            android:name=".ble.XKeyGattService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- Credential Provider Service (Android 14+) -->
+        <service
+            android:name=".credential.XKeyCredentialService"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.BIND_CREDENTIAL_PROVIDER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.credentials.CredentialProviderService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.credentials.provider"
+                android:resource="@xml/credential_provider_meta" />
+        </service>
+
+        <!-- Credential Selector Activity for biometric auth during credential operations -->
+        <activity
+            android:name=".credential.ui.CredentialSelectorActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.xKey.Transparent"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="" />
+
+        <!-- Contact Management activity for recipient key management -->
+        <activity
+            android:name=".ui.ContactManagementActivity"
+            android:exported="false"
+            android:label="@string/contact_management_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- File Operation activity for Share sheet sign/verify/encrypt/decrypt -->
+        <activity
+            android:name=".ui.FileOperationActivity"
+            android:exported="true"
+            android:label="@string/file_operation_title">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- Passkeys list activity for viewing FIDO2 credentials -->
+        <activity
+            android:name=".ui.PasskeysActivity"
+            android:exported="false"
+            android:label="@string/passkeys_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Passkey detail activity for viewing individual passkey details -->
+        <activity
+            android:name=".ui.PasskeyDetailActivity"
+            android:exported="false"
+            android:label="@string/passkey_detail_title"
+            android:parentActivityName=".ui.PasskeysActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.PasskeysActivity" />
+        </activity>
+
+        <!-- OATH Authenticator activity for TOTP/HOTP management -->
+        <activity
+            android:name=".ui.OathActivity"
+            android:exported="false"
+            android:label="@string/oath_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Password manager activity -->
+        <activity
+            android:name=".ui.PasswordManagementActivity"
+            android:exported="false"
+            android:label="@string/passwords_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- QR Scanner activity for scanning OATH otpauth:// QR codes -->
+        <activity
+            android:name=".ui.QrScannerActivity"
+            android:exported="false"
+            android:label="@string/oath_qr_title"
+            android:parentActivityName=".ui.OathActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.OathActivity" />
+        </activity>
+
+        <!-- PIN Management activity for SO/User PIN lifecycle -->
+        <activity
+            android:name=".ui.PinManagementActivity"
+            android:exported="false"
+            android:label="PIN Management"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- PIV Smart Card activity for NIST SP 800-73 key slots -->
+        <activity
+            android:name=".ui.PivActivity"
+            android:exported="false"
+            android:label="PIV Smart Card"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- PIV Slot Detail activity for viewing individual PIV slot details -->
+        <activity
+            android:name=".ui.PivSlotDetailActivity"
+            android:exported="false"
+            android:label="PIV Slot Details"
+            android:parentActivityName=".ui.PivActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.PivActivity" />
+        </activity>
+
+        <!-- Co-Sign activity for multi-party attestation -->
+        <activity
+            android:name=".ui.CoSignActivity"
+            android:exported="false"
+            android:label="@string/cosign_title"
+            android:parentActivityName=".ui.MainActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.MainActivity" />
+        </activity>
+
+        <!-- Verified Media Viewer activity -->
+        <activity
+            android:name=".ui.VerifiedMediaViewerActivity"
+            android:exported="true"
+            android:label="@string/verified_viewer_title">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- Media Signing Service for auto-signing photos/videos -->
+        <service
+            android:name=".media.MediaSigningService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
+        <!-- FileProvider for sharing exported audit logs -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+
+</manifest>

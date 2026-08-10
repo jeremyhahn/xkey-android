@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/menu_export_json"
+        android:title="@string/audit_log_export_json"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_export_csv"
+        android:title="@string/audit_log_export_csv"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_clear_filters"
+        android:title="@string/audit_log_clear_filters"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_clear_all_logs"
+        android:title="@string/audit_clear_all"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_delete_older"
+        android:title="@string/audit_delete_older"
+        app:showAsAction="never" />
+
+</menu>

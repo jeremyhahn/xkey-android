@@ -1,0 +1,1252 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App Name -->
+    <string name="app_name">xKey</string>
+    <string name="app_tagline">Hardware Security Key</string>
+
+    <!-- Main Screen Sections -->
+    <string name="section_quick_actions">Quick Actions</string>
+
+    <!-- Connection Status -->
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting...</string>
+    <string name="status_advertising">Advertising</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_authenticating">Authenticating</string>
+
+    <!-- Connection Descriptions -->
+    <string name="connection_indicator_disconnected">No device connected</string>
+    <string name="connection_indicator_connecting">Establishing secure connection...</string>
+    <string name="connection_indicator_connected">Secure connection established</string>
+
+    <!-- Advertising Status -->
+    <string name="advertising_on">Advertising: ON</string>
+    <string name="advertising_off">Advertising: OFF</string>
+    <string name="advertising_waiting">Waiting for connection...</string>
+
+    <!-- Buttons -->
+    <string name="button_start">Start xKey</string>
+    <string name="button_stop">Stop xKey</string>
+    <string name="button_retry">Retry</string>
+    <string name="button_cancel">Cancel</string>
+    <string name="btn_start_advertising">Start Advertising</string>
+    <string name="btn_stop_advertising">Stop Advertising</string>
+
+    <!-- Card Titles -->
+    <string name="device_info_title">Device Information</string>
+    <string name="device_info_model">Device Model</string>
+    <string name="device_info_android_version">Android Version</string>
+    <string name="device_info_security_patch">Security Patch</string>
+    <string name="device_info_strongbox">StrongBox</string>
+    <string name="device_info_tee">TEE</string>
+    <string name="device_info_ble_name">Device Name</string>
+    <string name="device_info_ble_address">BLE Address</string>
+    <string name="device_info_biometrics">Biometrics</string>
+    <string name="device_info_available">Available</string>
+    <string name="device_info_not_available">Not Available</string>
+    <string name="connected_device_title">Connected Device</string>
+    <string name="recent_activity_title">Recent Activity</string>
+    <string name="auth_request_title">Authentication Request</string>
+
+    <!-- Authentication -->
+    <string name="auth_request_processing">Processing authentication request...</string>
+    <string name="auth_icon_description">Authentication icon</string>
+
+    <!-- Biometric -->
+    <string name="biometric_prompt_title">Authenticate</string>
+    <string name="biometric_prompt_subtitle">Confirm your identity to sign</string>
+    <string name="biometric_prompt_negative">Cancel</string>
+
+    <!-- Notifications -->
+    <string name="notification_channel_name">xKey Service</string>
+    <string name="notification_channel_description">Notifications for xKey FIDO2 operations</string>
+    <string name="notification_title">xKey Active</string>
+    <string name="notification_text">Ready for authentication requests</string>
+
+    <!-- Errors -->
+    <string name="error_bluetooth_not_supported">Bluetooth LE is not supported on this device</string>
+    <string name="error_bluetooth_disabled">Please enable Bluetooth</string>
+    <string name="error_permission_denied">Required permissions not granted</string>
+    <string name="error_biometric_not_available">Biometric authentication not available</string>
+    <string name="error_keystore_not_available">Hardware-backed keystore not available</string>
+
+    <!-- Permissions -->
+    <string name="permission_denied">Bluetooth permissions are required for xKey to work</string>
+    <string name="permission_bluetooth_rationale">Bluetooth is required to communicate with your computer</string>
+    <string name="permission_notification_rationale">Notifications are needed to show authentication requests</string>
+
+    <!-- Settings -->
+    <string name="settings_button_description">Settings</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_biometric_required_title">Biometric Authentication</string>
+    <string name="settings_biometric_required_description">Require biometric verification for passkey operations</string>
+    <string name="settings_auth_mode_title">Authentication Mode</string>
+    <string name="settings_auth_mode_description">Choose when biometric verification is required</string>
+    <string name="settings_auth_mode_per_operation">Per operation</string>
+    <string name="settings_auth_mode_per_operation_description">Require biometric for every signing operation (most secure)</string>
+    <string name="settings_auth_mode_time_window">Time window</string>
+    <string name="settings_auth_mode_time_window_description">Require biometric once per time window</string>
+    <string name="settings_auth_mode_per_session">Per session</string>
+    <string name="settings_auth_mode_per_session_description">Require biometric once until app goes to background</string>
+    <string name="settings_time_window_title">Time Window Duration</string>
+    <string name="settings_time_window_description">Authentication remains valid for this duration</string>
+    <string name="settings_security_info">For maximum security, use per-operation mode. Time window and per-session modes provide convenience but reduce security by allowing multiple operations with a single authentication.</string>
+    <string name="security_info_icon_description">Security information icon</string>
+
+    <!-- Attestation Biometric Policy -->
+    <string name="settings_attestation_policy_title">Attestation Authentication</string>
+    <string name="settings_attestation_policy_description">Control when biometric verification is required for key attestation requests</string>
+    <string name="settings_attestation_policy_always">Always require</string>
+    <string name="settings_attestation_policy_always_desc">Most secure - require biometric for all attestation requests</string>
+    <string name="settings_attestation_policy_paired_skip">Skip for paired devices</string>
+    <string name="settings_attestation_policy_paired_skip_desc">Skip biometric for known/paired devices only</string>
+    <string name="settings_attestation_policy_never">Never require</string>
+    <string name="settings_attestation_policy_never_desc">Convenience mode - attestation only proves key existence</string>
+
+    <!-- Credential Provider Settings (Android 14+) -->
+    <string name="settings_credential_provider_title">Platform Passkey Provider</string>
+    <string name="settings_credential_provider_description">Act as a passkey provider for apps and websites on this device</string>
+    <string name="settings_credential_provider_system_settings">Open System Settings</string>
+
+    <!-- Accessibility -->
+    <string name="content_description_status_indicator">Connection status indicator</string>
+
+    <!-- Key Management -->
+    <string name="key_management_title">Key Management</string>
+    <string name="key_management_button">Key Management</string>
+    <string name="key_management_empty">No keys stored</string>
+    <string name="key_detail_title">Key Details</string>
+
+    <!-- Key Vault (Premium UI) -->
+    <string name="key_vault_title">Key Vault</string>
+    <string name="key_vault_subtitle">Manage your cryptographic keys</string>
+    <string name="key_vault_key_label">Key</string>
+    <string name="key_vault_keys_label">Keys</string>
+    <string name="key_vault_empty_title">Your key vault is empty</string>
+    <string name="key_vault_empty_description">Create your first key to get started with secure authentication</string>
+    <string name="key_vault_create_first">Create Your First Key</string>
+
+    <!-- Key Filters -->
+    <string name="key_filter_all">All</string>
+    <string name="key_filter_fido2">FIDO2</string>
+    <string name="key_filter_tls">TLS</string>
+    <string name="key_filter_signing">Signing</string>
+    <string name="key_filter_encryption">Encryption</string>
+    <string name="key_filter_secret">Secret</string>
+    <string name="key_filter_hmac">HMAC</string>
+    <string name="key_filter_ssh">SSH</string>
+    <string name="key_filter_ca">CA</string>
+    <string name="key_filter_attestation">Attestation</string>
+    <string name="no_keys_for_filter">No %s keys found</string>
+    <string name="no_keys_for_filter_desc">Create your first %s key to get started</string>
+    <string name="create_key_of_type">Create %s Key</string>
+    <string name="clear_filter">Clear Filter</string>
+
+    <!-- Key List -->
+    <string name="key_created_date">Created %1$s</string>
+    <string name="key_badge_strongbox">StrongBox</string>
+    <string name="key_badge_biometric">Biometric</string>
+    <string name="key_badge_system">System</string>
+    <string name="key_badge_shared">Shared</string>
+    <string name="key_deleted">Key deleted</string>
+
+    <!-- Key Context Menu -->
+    <string name="key_menu_share_settings">Share Settings</string>
+    <string name="key_menu_view_details">View Details</string>
+    <string name="key_menu_export_public">Export Public Key</string>
+    <string name="key_menu_delete">Delete</string>
+    <string name="key_system_explanation">This is a system key used by the Android framework. Deleting it would corrupt app data.</string>
+
+    <!-- Key Detail Sections -->
+    <string name="key_section_general">General Information</string>
+    <string name="key_section_usage">Usage</string>
+    <string name="key_section_security">Security</string>
+    <string name="key_section_fido2">FIDO2 Metadata</string>
+    <string name="key_section_actions">Actions</string>
+
+    <!-- Key Detail Fields -->
+    <string name="key_detail_id">Key ID</string>
+    <string name="key_detail_type">Type</string>
+    <string name="key_detail_algorithm">Algorithm</string>
+    <string name="key_detail_key_size">Key Size</string>
+    <string name="key_detail_source">Source</string>
+    <string name="key_detail_remote_backend">Remote Backend</string>
+    <string name="key_detail_label">Label</string>
+    <string name="key_detail_created">Created</string>
+    <string name="key_detail_last_used">Last Used</string>
+    <string name="key_detail_use_count">Use Count</string>
+    <string name="key_detail_never">Never</string>
+    <string name="key_detail_strongbox">StrongBox</string>
+    <string name="key_detail_biometric">Biometric</string>
+    <string name="key_detail_auth_duration">Auth Duration</string>
+    <string name="key_detail_exportable">Exportable</string>
+    <string name="key_detail_shareable">Shareable</string>
+    <string name="key_detail_rp_id">RP ID</string>
+    <string name="key_detail_rp_name">RP Name</string>
+    <string name="key_detail_user_name">User Name</string>
+    <string name="key_detail_user_display_name">Display Name</string>
+    <string name="key_detail_discoverable">Discoverable</string>
+    <string name="key_detail_sign_count">Sign Count</string>
+    <string name="key_detail_yes">Yes</string>
+    <string name="key_detail_no">No</string>
+    <string name="key_detail_required">Required</string>
+    <string name="key_detail_not_required">Not Required</string>
+
+    <!-- Key Sources -->
+    <string name="key_source_local">Local</string>
+    <string name="key_source_remote_ble">Remote (BLE)</string>
+    <string name="key_source_remote_usb">Remote (USB)</string>
+    <string name="key_source_xkmsd">xKMS Daemon</string>
+
+    <!-- Key Actions -->
+    <string name="key_action_shareable">Allow paired device access</string>
+    <string name="key_action_export_public_key">Export Public Key (PEM)</string>
+    <string name="key_action_delete">Delete Key</string>
+    <string name="key_delete_title">Delete Key</string>
+    <string name="key_delete_message">Delete \"%1$s\"? This cannot be undone.</string>
+    <string name="key_delete_confirm">Delete</string>
+    <string name="key_public_key_copied">Public key copied to clipboard</string>
+    <string name="key_public_key_unavailable">Public key not available</string>
+
+    <!-- USB HSM Settings -->
+    <string name="settings_usb_hsm_title">USB HSM Mode (ADB — Development Only)</string>
+    <string name="settings_usb_hsm_description">Enable TCP server for USB-connected device access via ADB. Requires ADB to be enabled on this device.</string>
+    <string name="settings_usb_hsm_port_title">TCP Port</string>
+    <string name="settings_usb_hsm_port_description">Port for the localhost TCP server (default: 8444)</string>
+    <string name="settings_usb_hsm_security_info">\u26A0 USB HSM mode requires ADB (Android Debug Bridge) to be enabled, which is a security risk. ADB grants full device access to any connected computer. Only use this mode in a physically secure location or for development purposes. All communication uses Noise XX encryption with the same keys as BLE pairing. For production use, enable the Native USB mode instead.</string>
+
+    <!-- Remote Keys -->
+    <string name="key_filter_remote">Remote</string>
+    <string name="key_badge_remote">Remote</string>
+    <string name="key_badge_hardware">HW-backed</string>
+    <string name="remote_keys_sync_failed">Failed to sync remote keys</string>
+    <string name="remote_keys_synced">Remote keys synced</string>
+    <string name="remote_key_delete_message">Remove \"%1$s\" from local cache? The key remains on the device.</string>
+
+    <!-- Key Creation -->
+    <string name="key_create_title">Create Key</string>
+    <string name="key_create_label_hint">Key label</string>
+    <string name="key_create_purpose">Purpose</string>
+    <string name="key_create_algorithm">Algorithm</string>
+    <string name="key_create_biometric">Require biometric</string>
+    <string name="key_create_strongbox">Use StrongBox</string>
+    <string name="key_create_success">Key created</string>
+    <string name="key_create_error">Failed to create key</string>
+    <string name="key_create_purpose_signing">Signing</string>
+    <string name="key_create_purpose_tls">TLS</string>
+    <string name="key_create_purpose_ssh">SSH</string>
+    <string name="key_create_purpose_encryption">Encryption</string>
+    <string name="key_create_purpose_secret">Secret (AES)</string>
+    <string name="key_create_purpose_hmac">HMAC</string>
+
+    <!-- Attestation -->
+    <string name="key_section_attestation">Attestation</string>
+    <string name="attest_button">Verify Key Attestation</string>
+    <string name="attest_button_remote">Verify Remote Attestation</string>
+    <string name="attest_running">Verifying attestation\u2026</string>
+    <string name="attest_title">Attestation Report</string>
+    <string name="attest_verified">Verified</string>
+    <string name="attest_failed">Verification Failed</string>
+    <string name="attest_not_available">Attestation not available for this key</string>
+    <string name="attest_error">Attestation failed: %1$s</string>
+    <string name="attest_security_level">Security Level</string>
+    <string name="attest_security_software">Software</string>
+    <string name="attest_security_tee">Trusted Execution Environment (TEE)</string>
+    <string name="attest_security_strongbox">StrongBox</string>
+    <string name="attest_chain_length">Certificate Chain</string>
+    <string name="attest_chain_count">%1$d certificates</string>
+    <string name="attest_chain_verified">Chain Verified</string>
+    <string name="attest_format">Format</string>
+    <string name="attest_nonce_match">Nonce Match</string>
+    <string name="attest_cert_subject">Subject</string>
+    <string name="attest_cert_issuer">Issuer</string>
+    <string name="attest_cert_serial">Serial</string>
+    <string name="attest_cert_not_before">Not Before</string>
+    <string name="attest_cert_not_after">Not After</string>
+    <string name="attest_cert_key_type">Key Type</string>
+    <string name="attest_cert_is_ca">Is CA</string>
+    <string name="attest_version">Attestation Version</string>
+    <string name="attest_keymaster_version">Keymaster Version</string>
+    <string name="attest_keymaster_security">Keymaster Security</string>
+    <string name="attest_purpose">Purpose</string>
+    <string name="attest_key_size">Key Size</string>
+    <string name="attest_algorithm">Algorithm</string>
+    <string name="attest_device_locked">Device Locked</string>
+    <string name="attest_boot_state">Verified Boot State</string>
+    <string name="attest_section_summary">Summary</string>
+    <string name="attest_section_extension">Key Attestation Extension</string>
+    <string name="attest_section_chain">Certificate Chain Details</string>
+    <string name="attest_section_root_of_trust">Root of Trust</string>
+    <string name="attest_cert_label_leaf">Leaf (Attestation)</string>
+    <string name="attest_cert_label_intermediate">Intermediate</string>
+    <string name="attest_cert_label_root">Root</string>
+    <string name="attest_cert_label_generic">Certificate</string>
+    <string name="attest_description_local">Prove this key is hardware-backed by generating a fresh attestation certificate chain from Android Keystore</string>
+    <string name="attest_description_remote">Request attestation proof from the device for this remotely-managed key</string>
+    <string name="attest_no_attestation_yet">No attestation has been performed yet. Tap the button below to verify this key\'s hardware backing.</string>
+    <string name="attest_badge_verified">Attested</string>
+
+    <!-- FIDO2 Sharing Policy Settings -->
+    <string name="settings_fido2_sharing_title">FIDO2 Credential Sharing</string>
+    <string name="settings_fido2_sharing_description">Control whether the paired device can use your FIDO2 passkeys</string>
+    <string name="settings_fido2_policy_private">Private</string>
+    <string name="settings_fido2_policy_private_desc">FIDO2 keys are phone-only (most secure)</string>
+    <string name="settings_fido2_policy_shared">Shared</string>
+    <string name="settings_fido2_policy_shared_desc">Device can use shareable FIDO2 keys</string>
+    <string name="settings_fido2_policy_ask">Ask</string>
+    <string name="settings_fido2_policy_ask_desc">Prompt each time the device requests a credential</string>
+
+    <!-- Pairing Confirmation -->
+    <string name="pairing_dialog_title">Pairing Request</string>
+    <string name="pairing_dialog_message">"%1$s" wants to pair with this phone.\n\nFingerprint: %2$s\n\nAllow this device to connect?</string>
+    <string name="pairing_dialog_allow">Allow</string>
+    <string name="pairing_dialog_deny">Deny</string>
+
+    <!-- Paired Devices Settings -->
+    <string name="settings_paired_devices_title">Paired Devices</string>
+    <string name="settings_paired_devices_description">Devices that have been approved to connect</string>
+    <string name="settings_paired_devices_empty">No paired devices</string>
+    <string name="settings_paired_devices_unpair">Unpair</string>
+    <string name="settings_paired_devices_fingerprint">Fingerprint: %1$s</string>
+
+    <!-- Paired Devices Activity -->
+    <string name="paired_devices_title">Paired Devices</string>
+    <string name="paired_devices_label">Devices</string>
+    <string name="paired_devices_empty">No paired devices</string>
+    <string name="paired_devices_empty_title">No Paired Devices</string>
+    <string name="paired_devices_empty_subtitle">Pair with your device to enable secure authentication</string>
+    <string name="paired_devices_summary_none">No devices paired</string>
+    <string name="paired_devices_paired_date">Paired %1$s</string>
+    <string name="paired_devices_no_connections">No connections yet</string>
+    <string name="paired_devices_last_connection">Last connection: %1$s</string>
+    <string name="paired_devices_last_seen">Last seen %1$s</string>
+    <string name="paired_devices_never_connected">Never connected</string>
+    <string name="paired_devices_connected_count">%1$d connected</string>
+    <string name="paired_devices_trusted">Trusted</string>
+    <string name="paired_devices_attestation_never">Never</string>
+    <string name="paired_devices_attestation_expired">Expired</string>
+    <string name="paired_devices_attestation_verified">Verified</string>
+
+    <!-- Device Detail Activity -->
+    <string name="device_detail_title">Device Details</string>
+    <string name="device_section_connection">Connection</string>
+    <string name="device_section_attestation">Attestation Status</string>
+    <string name="device_section_settings">Settings</string>
+    <string name="device_section_danger_zone">Danger Zone</string>
+    <string name="device_connection_status">Status</string>
+    <string name="device_last_connected">Last Connected</string>
+    <string name="device_last_connected_at">Last connected %1$s</string>
+    <string name="device_connection_duration">Connection Duration</string>
+    <string name="device_never_connected">Not connected</string>
+    <string name="device_connected">Connected</string>
+    <string name="device_disconnected">Disconnected</string>
+    <string name="device_status_connected">Connected</string>
+    <string name="device_status_disconnected">Disconnected</string>
+    <string name="device_unpair_warning">Unpairing will remove this device and require re-pairing to reconnect.</string>
+    <string name="device_fingerprint_copied">Fingerprint copied to clipboard</string>
+    <string name="device_attestation_status">Status</string>
+    <string name="device_last_attested">Last Attested</string>
+    <string name="device_grace_period">Grace Period</string>
+    <string name="device_time_remaining">Time Remaining</string>
+    <string name="device_boot_verified">Boot Verified</string>
+    <string name="device_boot_hash">Boot Hash</string>
+    <string name="device_fingerprint">Device Fingerprint</string>
+    <string name="device_reattest_button">Re-attest Now</string>
+    <string name="device_reattest_requires_connection">Re-attestation requires an active desktop connection</string>
+    <string name="device_reattest_in_progress">Requesting device attestation…</string>
+    <string name="device_reattest_success">Device attestation verified successfully</string>
+    <string name="device_reattest_failed">Device attestation failed</string>
+    <string name="device_require_attest_key_use">Require attestation for key use</string>
+    <string name="device_require_attest_key_attest">Require attestation for key attestation</string>
+    <string name="device_grace_period_label">Grace Period</string>
+    <string name="device_unpair_button">Unpair Device</string>
+    <string name="device_unpair_title">Unpair Device</string>
+    <string name="device_unpair_message">Are you sure you want to unpair \"%1$s\"? This device will need to be re-paired to use.</string>
+    <string name="device_unpair_confirm">Unpair</string>
+    <string name="device_unpaired">Device unpaired</string>
+    <string name="device_attest_status_never">NEVER</string>
+    <string name="device_attest_status_expired">EXPIRED</string>
+    <string name="device_attest_status_current">CURRENT</string>
+    <string name="device_unknown">Unknown</string>
+    <string name="device_na">N/A</string>
+    <string name="device_just_now">Just now</string>
+    <string name="device_minutes_ago">%1$dm ago</string>
+    <string name="device_hours_ago">%1$dh ago</string>
+    <string name="device_time_hms">%1$dh %2$dm %3$ds</string>
+    <string name="device_time_ms">%1$dm %2$ds</string>
+    <string name="device_time_s">%1$ds</string>
+    <string name="device_reattest_title">Re-attestation</string>
+    <string name="device_reattest_instructions">To re-attest \"%1$s\", run the following command on your device:\n\npasskey phone attest &lt;key-id&gt;\n\nYour phone is advertising and ready to accept the connection.</string>
+    <string name="device_reattest_service_unavailable">xKey service is not running. Please return to the main screen and start the service.</string>
+    <string name="device_reattest_wait">Wait for Connection</string>
+    <string name="device_reattest_waiting">Waiting for device to connect…</string>
+    <string name="device_reattest_timeout">Connection timed out. Please run the command on your device.</string>
+    <string name="device_reattest_connecting">Connecting to device…</string>
+    <string name="device_reattest_connected">Connected to device</string>
+    <string name="device_reattest_connection_failed">Failed to connect to device</string>
+    <string name="device_reattest_no_keys">No encryption keys available. Please re-pair the device.</string>
+    <string name="button_ok">OK</string>
+
+    <!-- Plurals -->
+    <plurals name="paired_devices_summary_count">
+        <item quantity="one">%d device paired</item>
+        <item quantity="other">%d devices paired</item>
+    </plurals>
+
+    <!-- Battery Optimization -->
+    <string name="battery_optimization_title">Background Operation</string>
+    <string name="battery_optimization_message">For reliable BLE connections while your phone screen is off, xKey needs to be exempted from battery optimization.\n\nThis allows the app to maintain connections and respond to authentication requests even when the screen is locked.</string>
+    <string name="battery_optimization_settings">Allow</string>
+    <string name="battery_optimization_later">Later</string>
+    <string name="battery_optimization_error">Unable to open battery settings</string>
+
+    <!-- Trusted Computing Settings -->
+    <string name="settings_trusted_computing_title">Trusted Computing</string>
+    <string name="settings_trusted_computing_description">TPM-based device identity verification for zero-trust authentication</string>
+    <string name="settings_trusted_computing_enabled">Enable Trusted Computing</string>
+    <string name="settings_trusted_computing_act_as_ca">Act as Certificate Authority</string>
+    <string name="settings_trusted_computing_act_as_ca_desc">Issue IDevID certificates directly from this device</string>
+    <string name="settings_trusted_computing_ca_url">CA Server URL</string>
+    <string name="settings_trusted_computing_ca_url_hint">https://ca.example.com</string>
+    <string name="settings_trusted_computing_fetch_ca">Fetch CA Bundle</string>
+    <string name="settings_trusted_computing_fetch_success">CA bundle imported successfully</string>
+    <string name="settings_trusted_computing_fetch_error">Failed to fetch CA bundle: %1$s</string>
+    <string name="settings_trusted_computing_require_idevid">Require Trusted IDevID</string>
+    <string name="settings_trusted_computing_require_idevid_desc">Reject connections without verified device identity</string>
+    <string name="settings_trusted_computing_full_attestation">Require Full Attestation</string>
+    <string name="settings_trusted_computing_full_attestation_desc">TCG-CSR-IDEVID enrollment with EK verification</string>
+    <string name="settings_trusted_computing_trust_new">Trust New Devices</string>
+    <string name="settings_trusted_computing_trust_new_desc">Allow first-time pairing without pre-provisioning</string>
+    <string name="settings_trusted_computing_manage_trust_store">Manage Trust Store</string>
+    <string name="settings_trusted_computing_security_info">When acting as CA, this device issues IDevID certificates to paired devices after verifying their TPM attestation. When using external CA, certificates are verified against the imported CA bundle.</string>
+
+    <!-- IDevID Certificate Section -->
+    <string name="device_section_idevid">IDevID Certificate</string>
+    <string name="device_idevid_status">Status</string>
+    <string name="device_idevid_subject">Subject</string>
+    <string name="device_idevid_expires">Expires</string>
+    <string name="device_idevid_trust_level">Trust Level</string>
+    <string name="device_idevid_fingerprint">Fingerprint</string>
+    <string name="device_idevid_verified">VERIFIED</string>
+    <string name="device_idevid_not_verified">NOT VERIFIED</string>
+    <string name="device_idevid_expired">EXPIRED</string>
+    <string name="device_idevid_self_signed">SELF-SIGNED (REJECTED)</string>
+
+    <!-- Trust Store Activity -->
+    <string name="trust_store_title">Trust Store</string>
+    <string name="trust_store_empty">No trusted CA certificates</string>
+    <string name="trust_store_empty_hint">Import CA certificates to verify device identity</string>
+    <string name="trust_store_import_url">Import from URL</string>
+    <string name="trust_store_import_file">Import from File</string>
+    <string name="trust_store_import_from_url">Import from URL</string>
+    <string name="trust_store_import_title">Import CA Bundle</string>
+    <string name="trust_store_import_message">Enter the URL of your CA server. The endpoint should serve a PEM-encoded certificate chain.</string>
+    <string name="trust_store_import_button">Import</string>
+    <string name="trust_store_url_hint">https://ca.example.com</string>
+    <string name="trust_store_label_hint">Label (optional)</string>
+    <string name="trust_store_import_success">Imported %1$d certificate(s)</string>
+    <string name="trust_store_import_partial">Imported %1$d certificate(s), %2$d error(s)</string>
+    <string name="trust_store_import_all_exist">All certificates already imported</string>
+    <string name="trust_store_import_failed">Import failed: %1$s</string>
+    <string name="trust_store_import_error">Error importing certificates: %1$s</string>
+    <string name="trust_store_fetch_error">Failed to fetch CA bundle: %1$s</string>
+    <string name="trust_store_cert_subject">Subject: %1$s</string>
+    <string name="trust_store_cert_issuer">Issuer: %1$s</string>
+    <string name="trust_store_cert_expires">Expires: %1$s</string>
+    <string name="trust_store_cert_source">Source: %1$s</string>
+    <string name="trust_store_delete_cert">Delete Certificate</string>
+    <string name="trust_store_delete_confirm">Remove this CA certificate from the trust store?</string>
+    <string name="trust_store_cert_count">%1$d certificates</string>
+    <string name="trust_store_summary_none">No trusted certificates imported</string>
+    <string name="trust_store_card_description">Manage trusted CA certificates</string>
+    <plurals name="trust_store_card_count">
+        <item quantity="one">%d certificate trusted</item>
+        <item quantity="other">%d certificates trusted</item>
+    </plurals>
+    <plurals name="trust_store_summary_count">
+        <item quantity="one">%1$d trusted certificate</item>
+        <item quantity="other">%1$d trusted certificates</item>
+    </plurals>
+    <string name="trust_store_expired_warning">%1$d certificate(s) expired</string>
+    <string name="trust_store_expired_badge">(EXPIRED)</string>
+    <string name="trust_store_detail_title">Certificate Details</string>
+    <string name="trust_store_detail_subject">Subject:</string>
+    <string name="trust_store_detail_issuer">Issuer:</string>
+    <string name="trust_store_detail_valid_from">Valid from:</string>
+    <string name="trust_store_detail_valid_until">Valid until:</string>
+    <string name="trust_store_detail_fingerprint">SHA-256 Fingerprint:</string>
+    <string name="trust_store_detail_source">Source:</string>
+    <string name="trust_store_detail_label">Label:</string>
+    <string name="trust_store_delete">Delete</string>
+    <string name="trust_store_delete_title">Delete Certificate?</string>
+    <string name="trust_store_delete_message">Remove \"%1$s\" from the trust store? Devices with certificates signed by this CA will no longer be trusted.</string>
+    <string name="trust_store_deleted">Certificate deleted</string>
+    <string name="trust_store_clear_title">Clear Trust Store?</string>
+    <string name="trust_store_clear_message">Remove all trusted CA certificates? This will prevent verification of all device IDevID certificates.</string>
+    <string name="trust_store_clear_all">Clear All</string>
+    <string name="trust_store_cleared">Trust store cleared</string>
+    <string name="trust_store_item_expires">Expires %1$s</string>
+    <string name="trust_store_item_expired">Expired %1$s</string>
+    <string name="source_internal_ca">AndroidCA</string>
+    <string name="cert_system_installed">System</string>
+    <string name="install_to_system">Install to Android System</string>
+    <string name="install_to_system_desc">Add this certificate to the Android trusted certificate store</string>
+    <string name="cert_install_success">Certificate installed to system trust store</string>
+    <string name="cert_install_failed">Certificate installation was cancelled or failed</string>
+    <string name="cert_already_system">Already in system trust store</string>
+    <string name="syncing_ca_certs">Syncing CA certificates…</string>
+
+    <!-- Biometric Notification Channel -->
+    <string name="biometric_channel_name">Biometric Requests</string>
+    <string name="biometric_channel_description">High-priority notifications for authentication requests requiring biometric verification</string>
+    <string name="biometric_notification_title">Authentication Required</string>
+    <string name="biometric_notification_text">Tap to approve request from %1$s</string>
+    <string name="biometric_notification_timeout">Request expired</string>
+
+    <!-- Key Sharing Settings -->
+    <string name="sharing_settings_title">Sharing</string>
+    <string name="sharing_policy_private">Private</string>
+    <string name="sharing_policy_private_desc">This key cannot be used by paired devices</string>
+    <string name="sharing_policy_all_peers">All Paired Devices</string>
+    <string name="sharing_policy_all_peers_desc">Any paired device can use this key</string>
+    <string name="sharing_policy_selected_peers">Selected Devices</string>
+    <string name="sharing_policy_selected_peers_desc">Only specific devices can use this key</string>
+    <string name="sharing_select_devices">Select Devices</string>
+    <string name="sharing_no_paired_devices">No paired devices available</string>
+    <string name="sharing_manage_button">Manage Sharing</string>
+    <string name="sharing_badge_private">Private</string>
+    <string name="sharing_badge_shared">Shared</string>
+    <string name="sharing_badge_selected">Shared with %1$d device(s)</string>
+    <string name="sharing_no_devices_selected">No devices selected for sharing</string>
+    <string name="sharing_selected_count_desc">Shared with %1$d paired device(s)</string>
+    <string name="key_detail_status">Status</string>
+
+    <!-- CA Bootstrap Settings -->
+    <string name="bootstrap_settings_title">CA Bootstrap</string>
+    <string name="bootstrap_settings_description">Configure how CA certificates are fetched securely</string>
+    <string name="bootstrap_auto_enabled">Auto-Bootstrap</string>
+    <string name="bootstrap_auto_desc">Automatically try methods in order: DANE, Noise, SPKI, Direct</string>
+    <string name="bootstrap_dane_enabled">DANE (DNS-based Authentication)</string>
+    <string name="bootstrap_dane_desc">Authenticate CA server using TLSA DNS records</string>
+    <string name="bootstrap_dane_dot">DNS over TLS</string>
+    <string name="bootstrap_dane_dnssec">Require DNSSEC</string>
+    <string name="bootstrap_noise_enabled">Noise Protocol</string>
+    <string name="bootstrap_noise_desc">Encrypted key exchange using pre-shared server public key</string>
+    <string name="bootstrap_noise_server_address">Server Address</string>
+    <string name="bootstrap_noise_server_hint">kms.example.com:8445</string>
+    <string name="bootstrap_noise_static_key">Server Static Key</string>
+    <string name="bootstrap_spki_enabled">SPKI Pinning</string>
+    <string name="bootstrap_spki_desc">Pin server certificate using public key hash</string>
+    <string name="bootstrap_spki_pin_label">SPKI Pin (SHA-256)</string>
+    <string name="bootstrap_direct_enabled">Direct HTTPS</string>
+    <string name="bootstrap_direct_desc">Standard HTTPS with system trust anchors</string>
+    <string name="bootstrap_server_url_hint">https://ca.example.com</string>
+    <string name="bootstrap_dns_server_hint">DNS Server (e.g., 8.8.8.8:53)</string>
+    <string name="bootstrap_static_key_hint">64 hex characters</string>
+    <string name="bootstrap_spki_pin_hint">64 hex characters</string>
+    <string name="bootstrap_timeout_label">Per-Method Timeout</string>
+
+    <!-- Audit Log -->
+    <string name="audit_log_title">Audit Log</string>
+    <string name="audit_log_subtitle">Security event history</string>
+    <string name="audit_log_entries_label">Entries</string>
+    <string name="audit_log_entry_label">Entry</string>
+    <string name="audit_log_no_filters">All events</string>
+    <string name="audit_log_filtered_by">Filtered: %1$s</string>
+    <string name="audit_log_date_filtered">date range</string>
+    <string name="audit_log_search_hint">Search by key label...</string>
+    <string name="audit_log_date_range">Select date range</string>
+    <string name="audit_log_select_date_range">Select Date Range</string>
+    <string name="audit_log_filter_operation">Operation Type</string>
+    <string name="audit_log_filter_key_type">Key Type</string>
+    <string name="audit_log_filter_all">All</string>
+    <string name="audit_log_empty_title">No audit entries</string>
+    <string name="audit_log_empty_description">Security events will appear here as they occur</string>
+    <string name="audit_log_export_title">Export Audit Log</string>
+    <string name="audit_log_export_failed">Failed to export audit log</string>
+    <string name="audit_log_device_id">Device ID</string>
+    <string name="audit_log_error">Error</string>
+    <string name="audit_log_duration">Duration</string>
+    <string name="audit_log_details">Details</string>
+
+    <!-- Audit Log Operation Types -->
+    <string name="audit_log_op_key_created">Key Created</string>
+    <string name="audit_log_op_key_deleted">Key Deleted</string>
+    <string name="audit_log_op_key_used">Key Used</string>
+    <string name="audit_log_op_key_attested">Key Attested</string>
+    <string name="audit_log_op_sharing_changed">Sharing Changed</string>
+    <string name="audit_log_op_exported">Exported</string>
+    <string name="audit_log_op_signing">Signing</string>
+    <string name="audit_log_op_encryption">Encryption</string>
+    <string name="audit_log_op_decryption">Decryption</string>
+    <string name="audit_log_op_derivation">Key Derivation</string>
+    <string name="audit_log_op_hmac">HMAC</string>
+    <string name="audit_log_op_fido2_reg">FIDO2 Registration</string>
+    <string name="audit_log_op_fido2">FIDO2 Auth</string>
+    <string name="audit_log_op_pairing">Pairing Approved</string>
+    <string name="audit_log_op_pairing_denied">Pairing Denied</string>
+    <string name="audit_log_op_unpaired">Device Unpaired</string>
+    <string name="audit_log_op_connection">Connected</string>
+    <string name="audit_log_op_disconnection">Disconnected</string>
+    <string name="audit_log_op_device_attested">Device Attested</string>
+    <string name="audit_log_op_device_enrolled">Device Enrolled</string>
+    <string name="audit_log_op_settings">Settings Changed</string>
+    <string name="audit_log_op_trust_import">Trust Store Import</string>
+    <string name="audit_log_op_trust_delete">Trust Store Delete</string>
+    <string name="audit_log_op_biometric_ok">Biometric OK</string>
+    <string name="audit_log_op_biometric_fail">Biometric Failed</string>
+    <string name="audit_log_op_policy_denied">Policy Denied</string>
+    <string name="audit_log_op_service_started">Service Started</string>
+    <string name="audit_log_op_service_stopped">Service Stopped</string>
+    <string name="audit_log_op_cert_issued">Certificate Issued</string>
+    <string name="audit_log_op_cert_revoked">Certificate Revoked</string>
+    <string name="audit_log_op_csr_signed">CSR Signed</string>
+    <string name="audit_log_op_crl_generated">CRL Generated</string>
+    <string name="audit_log_op_cert_exported">Certificate Exported</string>
+    <string name="audit_log_export_json">Export as JSON</string>
+    <string name="audit_log_export_csv">Export as CSV</string>
+    <string name="audit_log_clear_filters">Clear Filters</string>
+    <string name="audit_clear_all">Clear All Logs</string>
+    <string name="audit_clear_all_confirm">Delete all audit log entries? This cannot be undone.</string>
+    <string name="audit_delete_older">Delete Older Than 30 Days</string>
+    <string name="audit_delete_older_confirm">Delete all audit log entries older than 30 days? This cannot be undone.</string>
+    <string name="audit_logs_cleared">All audit logs cleared</string>
+    <string name="audit_old_logs_deleted">Old audit logs deleted (%1$d removed)</string>
+    <string name="audit_log_card_description">View security event history</string>
+
+    <!-- Passkeys -->
+    <string name="passkeys_title">Passkeys</string>
+    <string name="passkeys_card_description">FIDO2/WebAuthn credentials</string>
+    <string name="passkeys_count_one">1 passkey</string>
+    <string name="passkeys_count">%d passkeys</string>
+    <string name="passkeys_empty_title">No Passkeys</string>
+    <string name="passkeys_empty_description">Passkeys are created when you register with websites and apps</string>
+    <string name="passkey_detail_title">Passkey Details</string>
+    <string name="passkey_card_description">FIDO2 Credential Details</string>
+    <string name="passkey_section_site">Site Information</string>
+    <string name="passkey_section_account">Account</string>
+    <string name="passkey_section_credential">Credential Details</string>
+    <string name="passkey_section_security">Security</string>
+    <string name="passkey_section_usage">Usage</string>
+    <string name="passkey_section_actions">Actions</string>
+    <string name="passkey_rp_name">Site Name</string>
+    <string name="passkey_rp_id">Site ID</string>
+    <string name="passkey_user_name">Username</string>
+    <string name="passkey_user_display_name">Display Name</string>
+    <string name="passkey_type">Type</string>
+    <string name="passkey_type_value">FIDO2 Passkey</string>
+    <string name="passkey_algorithm">Algorithm</string>
+    <string name="passkey_key_size">Key Size</string>
+    <string name="passkey_key_size_value">%d bits</string>
+    <string name="passkey_discoverable">Discoverable</string>
+    <string name="passkey_sign_count">Sign Count</string>
+    <string name="passkey_strongbox">StrongBox</string>
+    <string name="passkey_biometric">Biometric Required</string>
+    <string name="passkey_source">Source</string>
+    <string name="passkey_sharing">Sharing Policy</string>
+    <string name="passkey_created">Created</string>
+    <string name="passkey_last_used">Last Used</string>
+    <string name="passkey_use_count">Use Count</string>
+    <string name="passkey_never_used">Never</string>
+    <string name="passkey_times_used">%d times</string>
+    <string name="passkey_delete_title">Delete Passkey</string>
+    <string name="passkey_delete_message">Delete passkey for \"%1$s\"? You won\'t be able to sign in with this passkey anymore.</string>
+    <string name="passkey_deleted">Passkey deleted</string>
+    <string name="passkey_context_view_details">View Details</string>
+    <string name="passkey_context_delete">Delete</string>
+    <string name="passkey_last_used_date">Used %1$s</string>
+
+    <!-- BLE Toggle Switch -->
+    <string name="ble_switch_on">BLE Active</string>
+    <string name="ble_switch_off">BLE Off</string>
+    <string name="ble_switch_description">Toggle Bluetooth advertising</string>
+
+    <!-- Settings Card -->
+    <string name="settings_card_title">Settings</string>
+    <string name="settings_card_description">Configure xKey preferences</string>
+
+    <!-- User-friendly explanations -->
+    <string name="explain_trusted_computing">Trusted Computing verifies that the devices connecting to your phone haven\'t been tampered with. It uses a security chip (TPM) built into the device to prove its identity, similar to how your phone uses fingerprint to prove yours.</string>
+    <string name="explain_act_as_ca">When enabled, your phone becomes its own certificate authority - it creates and signs digital ID cards for your devices. When disabled, an external server handles this instead.</string>
+    <string name="explain_require_idevid">An IDevID is like a digital passport for a device. Enabling this means only devices with a verified digital passport can connect. This prevents unauthorized devices from pairing.</string>
+    <string name="explain_full_attestation">Full attestation checks that a device\'s security chip is genuine and its software hasn\'t been modified. This is the strongest form of device verification but requires TPM 2.0 hardware.</string>
+    <string name="explain_trust_new_devices">When enabled, new devices can pair with your phone on first contact. When disabled, you must manually add each device to the trust store before it can connect.</string>
+    <string name="explain_attestation_policy">Attestation proves your security keys are stored in tamper-resistant hardware. This setting controls when your phone requires fingerprint verification before sharing that proof.</string>
+    <string name="explain_credential_provider">Registers xKey as a passkey provider on your device. Apps and websites can then use your hardware-backed keys for passwordless sign-in, just like using a physical security key.</string>
+    <string name="explain_usb_hsm">USB HSM mode connects your phone to a computer for hardware security module operations. The ADB-based mode is for development only \u2014 enabling ADB on your phone allows any authorized computer full access to your device. Use Native USB mode for production environments.</string>
+    <string name="explain_bootstrap">Bootstrap methods determine how your phone securely downloads CA certificates when first connecting to a new server. Each method offers different security trade-offs.</string>
+    <string name="explain_dane">Uses special DNS records to verify the CA server\'s identity. Like checking a phone number in a trusted directory before calling.</string>
+    <string name="explain_noise">Uses a pre-shared encryption key to create a secure channel. Both sides must know a shared secret before communicating.</string>
+    <string name="explain_spki">Pins the exact server certificate fingerprint. Your phone will only trust a server whose certificate matches a known fingerprint.</string>
+    <string name="explain_direct">Downloads certificates over standard HTTPS. Relies on the same trust system as your web browser.</string>
+    <string name="explain_biometric_auth">Controls whether you need to use your fingerprint or face to approve security operations. Each mode balances security against convenience.</string>
+
+    <!-- CA Subject Configuration -->
+    <string name="ca_subject_title">Certificate Subject</string>
+    <string name="ca_subject_explanation">These fields identify your CA in the certificates it issues. At minimum, set an Organization name.</string>
+    <string name="ca_subject_org">Organization</string>
+    <string name="ca_subject_org_hint">e.g., My Company</string>
+    <string name="ca_subject_ou">Organizational Unit</string>
+    <string name="ca_subject_ou_hint">e.g., IT Security</string>
+    <string name="ca_subject_locality">Locality (City)</string>
+    <string name="ca_subject_locality_hint">e.g., San Francisco</string>
+    <string name="ca_subject_province">State / Province</string>
+    <string name="ca_subject_province_hint">e.g., California</string>
+    <string name="ca_subject_country">Country Code</string>
+    <string name="ca_subject_country_hint">e.g., US</string>
+    <string name="ca_subject_cn">Common Name</string>
+    <string name="ca_subject_cn_hint">e.g., xKey Root CA</string>
+
+    <!-- CA Status and Generation -->
+    <string name="ca_status_title">CA Status</string>
+    <string name="ca_status_not_generated">Not Generated</string>
+    <string name="ca_status_active">Active</string>
+    <string name="ca_status_expired">Expired</string>
+    <string name="ca_generate_root">Generate Root CA</string>
+    <string name="ca_generate_intermediate">Generate Intermediate CA</string>
+    <string name="ca_reset">Reset CA</string>
+    <string name="ca_reset_title">Reset Certificate Authority?</string>
+    <string name="ca_reset_message">This will delete all CA keys and certificates. All issued device certificates will become invalid. This cannot be undone.</string>
+    <string name="ca_platform_ca_title">Platform CA</string>
+    <string name="ca_platform_ca_explanation">The platform CA signs device certificates and attestations. Using the Intermediate CA is recommended - it can be rotated without replacing the root.</string>
+    <string name="ca_platform_root">Root CA</string>
+    <string name="ca_platform_intermediate">Intermediate CA (Recommended)</string>
+    <string name="ca_generating">Generating certificate…</string>
+    <string name="ca_generated_success">Certificate generated successfully</string>
+    <string name="ca_generated_error">Failed to generate certificate: %1$s</string>
+    <string name="ca_root_required">Generate the Root CA first</string>
+
+    <!-- Certificate Management -->
+    <string name="certificate_management_title">Certificates</string>
+    <string name="certificate_management_subtitle">X.509 Certificate Lifecycle</string>
+    <string name="certificate_count">%1$d certificates</string>
+    <string name="certificate_count_with_expired">%1$d certificates (%2$d expired)</string>
+    <string name="certificate_count_zero">No certificates</string>
+
+    <!-- Certificate Filters -->
+    <string name="cert_filter_all">All</string>
+    <string name="cert_filter_tls_server">TLS Server</string>
+    <string name="cert_filter_tls_client">TLS Client</string>
+    <string name="cert_filter_idevid">IDevID</string>
+    <string name="cert_filter_code_signing">Code Signing</string>
+    <string name="cert_filter_email">Email</string>
+    <string name="cert_filter_ocsp">OCSP</string>
+    <string name="cert_filter_timestamping">Timestamping</string>
+    <string name="cert_filter_ca">CA</string>
+    <string name="cert_filter_revoked">Revoked</string>
+    <string name="cert_filter_expired">Expired</string>
+
+    <!-- Certificate Issue Dialog -->
+    <string name="cert_issue_title">Issue Certificate</string>
+    <string name="cert_issue_profile">Certificate Profile</string>
+    <string name="cert_issue_subject_cn">Subject Common Name</string>
+    <string name="cert_issue_subject_cn_hint">e.g., example.com</string>
+    <string name="cert_issue_organization">Organization</string>
+    <string name="cert_issue_organization_hint">e.g., My Company</string>
+    <string name="cert_issue_validity_days">Validity (days)</string>
+    <string name="cert_issue_sans">Subject Alternative Names</string>
+    <string name="cert_issue_sans_hint">DNS names or IPs, one per line</string>
+    <string name="cert_issue_email_hint">Email addresses, one per line</string>
+    <string name="cert_issue_success">Certificate issued successfully</string>
+    <string name="cert_issue_error">Failed to issue certificate: %1$s</string>
+
+    <!-- Certificate Revocation -->
+    <string name="cert_revoke_title">Revoke Certificate</string>
+    <string name="cert_revoke_message">Are you sure you want to revoke this certificate? This action cannot be undone.</string>
+    <string name="cert_revoke_confirm">Revoke</string>
+    <string name="cert_revoke_reason">Revocation Reason</string>
+    <string name="cert_revoke_success">Certificate revoked</string>
+    <string name="cert_revoke_error">Failed to revoke certificate: %1$s</string>
+
+    <!-- Certificate Revocation Reasons -->
+    <string name="cert_reason_unspecified">Unspecified</string>
+    <string name="cert_reason_key_compromise">Key Compromise</string>
+    <string name="cert_reason_ca_compromise">CA Compromise</string>
+    <string name="cert_reason_affiliation_changed">Affiliation Changed</string>
+    <string name="cert_reason_superseded">Superseded</string>
+    <string name="cert_reason_cessation">Cessation of Operation</string>
+    <string name="cert_reason_certificate_hold">Certificate Hold</string>
+    <string name="cert_reason_privilege_withdrawn">Privilege Withdrawn</string>
+
+    <!-- Certificate Status Badges -->
+    <string name="cert_status_valid">Valid</string>
+    <string name="cert_status_expired">Expired</string>
+    <string name="cert_status_expiring">Expiring Soon</string>
+    <string name="cert_status_revoked">Revoked</string>
+    <string name="cert_status_ca">CA</string>
+
+    <!-- Certificate Export -->
+    <string name="cert_export_copied">Certificate PEM copied to clipboard</string>
+    <string name="cert_export_chain_copied">Certificate chain PEM copied to clipboard</string>
+
+    <!-- Certificate Detail -->
+    <string name="cert_detail_title">Certificate Details</string>
+    <string name="cert_detail_subject">Subject</string>
+    <string name="cert_detail_issuer">Issuer</string>
+    <string name="cert_detail_serial">Serial Number</string>
+    <string name="cert_detail_not_before">Valid From</string>
+    <string name="cert_detail_not_after">Valid Until</string>
+    <string name="cert_detail_fingerprint">SHA-256 Fingerprint</string>
+    <string name="cert_detail_profile">Profile</string>
+    <string name="cert_detail_key_usage">Key Usage</string>
+    <string name="cert_detail_ext_key_usage">Extended Key Usage</string>
+    <string name="cert_detail_san">Subject Alternative Names</string>
+    <string name="cert_detail_revocation">Revocation Status</string>
+    <string name="cert_detail_validity">Validity</string>
+    <string name="cert_detail_security">Security</string>
+    <string name="cert_detail_signature_algorithm">Signature Algorithm</string>
+    <string name="cert_detail_basic_constraints">Basic Constraints</string>
+    <string name="cert_detail_is_ca">Certificate Authority</string>
+    <string name="cert_detail_path_length">Path Length Constraint</string>
+    <string name="cert_detail_chain">Certificate Chain</string>
+    <string name="cert_detail_chain_verified">Chain Verified</string>
+    <string name="cert_detail_chain_unverified">Chain Unverified</string>
+    <string name="cert_detail_actions">Actions</string>
+    <string name="cert_detail_export">Export PEM</string>
+    <string name="cert_detail_status_valid">Valid</string>
+    <string name="cert_detail_status_expired">Expired</string>
+    <string name="cert_detail_status_revoked">Revoked</string>
+    <string name="cert_detail_status_ca">CA Certificate</string>
+    <string name="cert_detail_dns_names">DNS Names</string>
+    <string name="cert_detail_ip_addresses">IP Addresses</string>
+    <string name="cert_detail_email_addresses">Email Addresses</string>
+    <string name="cert_detail_revoke_reason">Revocation Reason</string>
+    <string name="cert_detail_verified">Verified</string>
+    <string name="cert_detail_unverified">Unverified</string>
+    <string name="cert_detail_general_info">General Information</string>
+    <string name="cert_detail_delete">Delete Certificate</string>
+    <string name="cert_detail_revoke">Revoke Certificate</string>
+
+    <!-- Certificate Empty State -->
+    <string name="cert_empty_title">No Certificates</string>
+    <string name="cert_empty_description">Issue certificates using the button below to get started.</string>
+
+    <!-- Certificate Summary -->
+    <string name="cert_summary_total">Total</string>
+    <string name="cert_summary_expired">Expired</string>
+    <string name="cert_summary_expiring">Expiring</string>
+    <string name="cert_summary_revoked">Revoked</string>
+
+    <!-- Certificate Delete -->
+    <string name="cert_delete_title">Delete Certificate</string>
+    <string name="cert_delete_message">Are you sure you want to delete this certificate record? This does not un-issue the certificate.</string>
+    <string name="cert_delete_confirm">Delete</string>
+
+    <!-- Settings Section Headers -->
+    <string name="settings_section_auth">Authentication &amp; Passkeys</string>
+    <string name="settings_section_auth_desc">Biometric authentication and passkey settings</string>
+    <string name="settings_section_ca">Certificate Authority</string>
+    <string name="settings_section_ca_desc">CA management and bootstrap methods</string>
+    <string name="settings_section_trust">Device Trust</string>
+    <string name="settings_section_trust_desc">TPM-based device identity verification</string>
+    <string name="settings_section_connectivity">Connectivity</string>
+    <string name="settings_section_connectivity_desc">USB and Bluetooth device access</string>
+    <string name="settings_bootstrap_methods">Bootstrap Methods</string>
+
+    <!-- CA URL Description -->
+    <string name="ca_url_description">URL of your Enterprise or Privacy CA server. Used with Trusted Computing to import CA certificates and verify device identities instead of using the local AndroidCA.</string>
+
+    <!-- Native USB Settings -->
+    <string name="settings_usb_native_title">Native USB Mode</string>
+    <string name="settings_usb_native_description">Direct USB connection without ADB. Recommended for production use.</string>
+    <string name="settings_usb_tcp_title">TCP Pairing (ADB)</string>
+    <string name="settings_usb_tcp_description">Accept desktop pairing over ADB-forwarded TCP on loopback :8444. For development and emulator testing.</string>
+    <string name="usb_accessory_connected">USB device connected</string>
+    <string name="usb_accessory_disconnected">USB device disconnected</string>
+    <string name="explain_usb_native">Native USB connects your phone directly to a computer via USB cable without requiring ADB. The phone acts as a USB accessory device. This is the recommended mode for production environments.</string>
+    <string name="explain_usb_tcp">TCP pairing lets a desktop connect over an ADB-forwarded TCP socket (loopback port 8444). It is intended for development and automated emulator testing, and is bound to localhost only. All traffic is still protected by the Noise XX handshake.</string>
+    <string name="settings_developer_options">Developer Options</string>
+    <string name="settings_developer_options_desc">ADB-based debugging transport for development use only</string>
+    <string name="passwords_title">Passwords</string>
+    <string name="passwords_card_desc">Encrypted password manager with desktop sync</string>
+
+    <!-- Phone-initiated sync -->
+    <string name="sync_now_title">Sync with Desktop</string>
+    <string name="sync_now_desc">Push and pull OATH, passwords, and trust store</string>
+    <string name="sync_not_connected">Not connected — pair and connect to a desktop first</string>
+    <string name="sync_in_progress">Syncing…</string>
+    <string name="sync_complete">Sync complete: %1$d sent, %2$d received</string>
+    <string name="sync_failed">Sync failed: %1$s</string>
+
+    <!-- OATH/TOTP Authenticator -->
+    <string name="oath_title">Authenticator</string>
+    <string name="oath_card_description">TOTP/HOTP one-time passwords</string>
+    <string name="oath_count_zero">No credentials</string>
+    <string name="oath_count">%d credentials</string>
+    <string name="oath_count_one">1 credential</string>
+    <string name="oath_empty_title">No Credentials</string>
+    <string name="oath_empty_description">Add TOTP/HOTP credentials to generate one-time passwords</string>
+    <string name="oath_add_manual">Manual Entry</string>
+    <string name="oath_add_scan">Scan QR Code</string>
+    <string name="oath_add_uri">Paste URI</string>
+    <string name="oath_add_scan_qr">Scan QR Code</string>
+    <string name="oath_add_enter_manually">Enter Manually</string>
+    <string name="oath_add_choose_method">Add Credential</string>
+    <string name="oath_qr_instruction">Point camera at authenticator QR code</string>
+    <string name="oath_qr_invalid">Not a valid authenticator QR code</string>
+    <string name="oath_qr_title">Scan QR Code</string>
+    <string name="oath_dialog_title">Add Credential</string>
+    <string name="oath_field_issuer">Issuer</string>
+    <string name="oath_field_account">Account Name</string>
+    <string name="oath_field_secret">Secret Key</string>
+    <string name="oath_field_type">Type</string>
+    <string name="oath_field_algorithm">Algorithm</string>
+    <string name="oath_field_digits">Digits</string>
+    <string name="oath_field_period">Period (seconds)</string>
+    <string name="oath_code_copied">Code copied to clipboard</string>
+    <string name="oath_delete_confirm">Delete this credential?</string>
+    <string name="oath_delete_message">This will permanently remove the %s credential for %s.</string>
+    <string name="oath_context_view_details">View Details</string>
+    <string name="oath_context_delete">Delete</string>
+    <string name="oath_detail_title">Credential Details</string>
+    <string name="oath_detail_issuer">Issuer</string>
+    <string name="oath_detail_account">Account</string>
+    <string name="oath_detail_type">Type</string>
+    <string name="oath_detail_algorithm">Algorithm</string>
+    <string name="oath_detail_digits">Digits</string>
+    <string name="oath_detail_period">Period</string>
+    <string name="oath_detail_counter">Counter</string>
+    <string name="oath_detail_source">Source</string>
+    <string name="oath_detail_created">Created</string>
+    <string name="oath_detail_last_used">Last Used</string>
+    <string name="oath_detail_use_count">Use Count</string>
+    <string name="oath_detail_security">Secret Storage</string>
+    <string name="oath_detail_security_value">AES-256-GCM (Android Keystore)</string>
+    <string name="oath_detail_never_used">Never</string>
+    <string name="oath_detail_period_value">%1$d seconds</string>
+    <string name="oath_detail_times_used">%1$d times</string>
+
+    <!-- Contact Management -->
+    <string name="contact_management_title">Contacts</string>
+    <string name="contact_management_subtitle">Recipient public keys</string>
+    <string name="contact_management_card_desc">Manage recipient public keys</string>
+    <string name="contact_empty_title">No Contacts</string>
+    <string name="contact_empty_description">Import recipient public keys to encrypt files for them</string>
+    <string name="contact_import_file">Import from File</string>
+    <string name="contact_import_qr">Scan QR Code</string>
+    <string name="contact_import_paste">Paste Public Key</string>
+    <string name="contact_export_qr">Show My Public Key QR</string>
+    <string name="contact_name_hint">Contact name</string>
+    <string name="contact_name_prompt">Enter a name for this contact</string>
+    <string name="contact_imported">Contact imported</string>
+    <string name="contact_import_error">Failed to import contact: %1$s</string>
+    <string name="contact_import_duplicate">Contact with this key already exists</string>
+    <string name="contact_deleted">Contact deleted</string>
+    <string name="contact_delete_title">Delete Contact</string>
+    <string name="contact_delete_message">Remove \"%1$s\" from your contacts?</string>
+    <string name="contact_delete_confirm">Delete</string>
+    <string name="contact_fingerprint">Fingerprint: %1$s</string>
+    <string name="contact_algorithm">Algorithm: %1$s</string>
+    <string name="contact_imported_date">Imported %1$s</string>
+    <string name="contact_source">Source: %1$s</string>
+    <string name="contact_paste_hint">Paste PEM-encoded public key</string>
+    <string name="contact_card_description">Manage recipient public keys</string>
+    <plurals name="contact_summary_count">
+        <item quantity="one">%d contact</item>
+        <item quantity="other">%d contacts</item>
+    </plurals>
+    <string name="contact_summary_none">No contacts imported</string>
+
+    <!-- File Operations -->
+    <string name="file_operation_title">xKey File Operation</string>
+    <string name="file_operation_sign">Sign</string>
+    <string name="file_operation_verify">Verify</string>
+    <string name="file_operation_encrypt">Encrypt</string>
+    <string name="file_operation_decrypt">Decrypt</string>
+    <string name="file_operation_select_key">Select key</string>
+    <string name="file_operation_select_recipient">Select recipient</string>
+    <string name="file_operation_process">Process</string>
+    <string name="file_operation_processing">Processing…</string>
+    <string name="file_operation_file_info">File: %1$s (%2$s)</string>
+    <string name="file_operation_sign_success">File signed successfully</string>
+    <string name="file_operation_verify_success">Signature verified</string>
+    <string name="file_operation_verify_failed">Signature verification failed</string>
+    <string name="file_operation_encrypt_success">File encrypted successfully</string>
+    <string name="file_operation_decrypt_success">File decrypted successfully</string>
+    <string name="file_operation_error">Operation failed: %1$s</string>
+    <string name="file_operation_no_keys">No suitable keys available</string>
+    <string name="file_operation_no_contacts">No contacts available for encryption</string>
+    <string name="file_operation_pick_sidecar">Select .xkeysig signature file</string>
+
+    <!-- Verification Results -->
+    <string name="verify_signer_verified">Verified</string>
+    <string name="verify_signer_unknown">Unknown Signer</string>
+    <string name="verify_signer_failed">Verification Failed</string>
+    <string name="verify_no_signatures">No signatures found</string>
+    <string name="verify_role_creator">Creator</string>
+    <string name="verify_role_witness">Witness</string>
+    <string name="verify_role_attestor">Attestor</string>
+
+    <!-- Media Signing -->
+    <string name="settings_media_signing_title">Media Signing</string>
+    <string name="settings_media_signing_description">Automatically sign photos and videos with your key</string>
+    <string name="settings_media_signing_auto">Auto-Sign Media</string>
+    <string name="settings_media_signing_auto_desc">Automatically sign new photos and videos captured by the camera</string>
+    <string name="settings_media_signing_key">Signing Key</string>
+    <string name="settings_media_signing_photos">Sign Photos</string>
+    <string name="settings_media_signing_videos">Sign Videos</string>
+    <string name="media_signing_channel_name">xKey Media Signing</string>
+    <string name="media_signing_channel_description">Notifications for auto-signing media files</string>
+    <string name="media_signing_notification_title">Media Signing Active</string>
+    <string name="media_signing_notification_text">Auto-signing new photos and videos</string>
+    <string name="media_signing_signed">Media signed: %1$s</string>
+    <string name="media_signing_error">Failed to sign media: %1$s</string>
+    <string name="explain_media_signing">When enabled, xKey automatically signs photos and videos taken by your camera. The digital signature is embedded in the file metadata (EXIF for JPEG, sidecar for video), proving the image was taken on your device and hasn\'t been modified.</string>
+
+    <!-- Co-Signing -->
+    <string name="cosign_title">Co-Sign</string>
+    <string name="cosign_subtitle">Multi-party attestation</string>
+    <string name="cosign_select_media">Select Signed Media</string>
+    <string name="cosign_mode_qr">QR Code</string>
+    <string name="cosign_mode_ble">Bluetooth</string>
+    <string name="cosign_initiator_title">Request Co-Signatures</string>
+    <string name="cosign_witness_title">Co-Sign Media</string>
+    <string name="cosign_scan_request">Scan the request QR code</string>
+    <string name="cosign_show_response">Show this QR to the requester</string>
+    <string name="cosign_approve_title">Co-Sign Request</string>
+    <string name="cosign_approve_message">Sign this content as %1$s?\n\nContent hash: %2$s</string>
+    <string name="cosign_approve">Sign</string>
+    <string name="cosign_deny">Decline</string>
+    <string name="cosign_success">Co-signature added</string>
+    <string name="cosign_error">Co-signing failed: %1$s</string>
+    <string name="cosign_waiting_ble">Waiting for co-sign responses via BLE…</string>
+    <string name="cosign_received_ble">Received co-signature from %1$s</string>
+    <string name="cosign_no_file_selected">No file selected</string>
+    <string name="cosign_current_signatures">Current Signatures</string>
+    <string name="cosign_signature_placeholder">Select a signed media file to view signatures</string>
+    <string name="cosign_generate_qr">Generate Co-Sign QR</string>
+    <string name="cosign_witness_description">As a witness, you sign someone else\'s content hash to attest your presence.</string>
+    <string name="cosign_hash_hint">Paste content hash from initiator</string>
+    <string name="cosign_hash_required">Please enter the content hash</string>
+    <string name="cosign_select_media_first">Select a signed media file first</string>
+    <string name="cosign_read_signatures_error">Failed to read signatures: %1$s</string>
+    <string name="cosign_hash_preview">Hash: %1$s...</string>
+
+    <!-- Verified Media Viewer -->
+    <string name="verified_viewer_title">Verified Media</string>
+    <string name="verified_viewer_no_signatures">No signatures found in this file</string>
+    <string name="verified_viewer_verification_title">Signature Verification</string>
+    <string name="verified_viewer_signers">Signers (%1$d)</string>
+    <string name="verified_viewer_signed_at">Signed: %1$s</string>
+
+    <!-- Audit Log - New Operation Types -->
+    <string name="audit_log_op_file_signed">File Signed</string>
+    <string name="audit_log_op_file_verified">File Verified</string>
+    <string name="audit_log_op_file_encrypted">File Encrypted</string>
+    <string name="audit_log_op_file_decrypted">File Decrypted</string>
+    <string name="audit_log_op_media_auto_signed">Media Auto-Signed</string>
+    <string name="audit_log_op_contact_imported">Contact Imported</string>
+    <string name="audit_log_op_contact_deleted">Contact Deleted</string>
+    <string name="audit_log_op_oath_created">OATH Credential Created</string>
+    <string name="audit_log_op_oath_deleted">OATH Credential Deleted</string>
+    <string name="audit_log_op_oath_code">OATH Code Generated</string>
+    <string name="audit_log_op_oath_sync">OATH Sync Performed</string>
+    <string name="audit_log_op_cosign_initiated">Co-Sign Initiated</string>
+    <string name="audit_log_op_cosign_received">Co-Sign Received</string>
+
+    <!-- PIN audit operations -->
+    <string name="audit_log_op_pin_so_set">SO PIN Set</string>
+    <string name="audit_log_op_pin_so_changed">SO PIN Changed</string>
+    <string name="audit_log_op_pin_user_set">User PIN Set</string>
+    <string name="audit_log_op_pin_user_changed">User PIN Changed</string>
+    <string name="audit_log_op_pin_verify_ok">PIN Verified</string>
+    <string name="audit_log_op_pin_verify_fail">PIN Verification Failed</string>
+    <string name="audit_log_op_pin_lockout">PIN Lockout Triggered</string>
+    <string name="audit_log_op_pin_lockout_reset">PIN Lockout Reset</string>
+
+    <!-- PIV audit operations -->
+    <string name="audit_log_op_piv_key_generated">PIV Key Generated</string>
+    <string name="audit_log_op_piv_cert_imported">PIV Cert Imported</string>
+    <string name="audit_log_op_piv_sign_request">PIV Sign Request</string>
+    <string name="audit_log_op_piv_key_deleted">PIV Key Deleted</string>
+
+    <!-- PIV Smart Card -->
+    <string name="piv_title">PIV Smart Card</string>
+    <string name="piv_subtitle">NIST SP 800-73 certificate slots</string>
+    <string name="piv_count_zero">No keys loaded</string>
+    <string name="piv_count_one">1 key loaded</string>
+    <string name="piv_count">%d keys loaded</string>
+    <string name="piv_section_primary">PRIMARY SLOTS</string>
+    <string name="piv_section_retired_toggle">RETIRED KEY MANAGEMENT (%d slots)</string>
+    <string name="piv_empty_title">No PIV Keys</string>
+    <string name="piv_empty_description">Generate keys in PIV slots to use smart card authentication</string>
+    <string name="piv_slot_created">Created %s</string>
+    <string name="piv_cert_expired">Expired</string>
+    <string name="piv_cert_expiring">Expiring</string>
+    <string name="piv_cert_valid">Valid</string>
+    <string name="piv_generate_key">Generate Key</string>
+    <string name="piv_view_details">View Details</string>
+    <string name="piv_generate_title">Generate Key in Slot %s</string>
+    <string name="piv_generate_message">Select an algorithm for the %s key slot:</string>
+    <string name="piv_generate_success">Key generated in slot %s</string>
+    <string name="piv_generate_error">Key generation failed: %s</string>
+    <string name="piv_section_retired">Retired Key History Slots</string>
+    <string name="piv_cert_subject">Subject</string>
+    <string name="piv_cert_issuer">Issuer</string>
+    <string name="piv_cert_serial">Serial Number</string>
+    <string name="piv_cert_not_before">Valid From</string>
+    <string name="piv_cert_not_after">Valid Until</string>
+    <string name="piv_cert_export">Export Certificate</string>
+    <string name="piv_slot_empty">Empty</string>
+
+    <!-- PIV Slot Detail -->
+    <string name="piv_detail_title">PIV Slot Details</string>
+    <string name="piv_detail_algorithm">Algorithm</string>
+    <string name="piv_detail_created">Created</string>
+    <string name="piv_detail_last_used">Last Used</string>
+    <string name="piv_detail_use_count">Use Count</string>
+    <string name="piv_detail_never_used">Never</string>
+    <string name="piv_detail_public_key">Public Key Fingerprint</string>
+    <string name="piv_detail_certificate">Certificate</string>
+    <string name="piv_detail_no_certificate">No certificate imported</string>
+    <string name="piv_detail_cert_subject">Subject</string>
+    <string name="piv_detail_cert_issuer">Issuer</string>
+    <string name="piv_detail_cert_expires">Expires</string>
+    <string name="piv_detail_sign_test">Test Sign</string>
+    <string name="piv_detail_sign_success">Signature successful (%dms)</string>
+    <string name="piv_detail_sign_error">Sign failed: %s</string>
+    <string name="piv_detail_export_cert">Export Certificate</string>
+    <string name="piv_detail_delete_key">Delete Key</string>
+    <string name="piv_detail_delete_confirm_title">Delete PIV Key?</string>
+    <string name="piv_detail_delete_confirm_message">This will permanently delete the key in slot %s (%s). This action cannot be undone.</string>
+    <string name="piv_detail_delete_success">Key deleted from slot %s</string>
+    <string name="piv_detail_subtitle">Slot %s - %s</string>
+    <string name="piv_section_info">Key Information</string>
+    <string name="piv_detail_slot_id">Slot ID</string>
+    <string name="piv_detail_label">Label</string>
+    <string name="piv_detail_key_size">Key Size</string>
+    <string name="piv_detail_key_size_value">%d bits</string>
+    <string name="piv_detail_times_used">%d times</string>
+    <string name="piv_section_public_key">Public Key</string>
+    <string name="piv_detail_fingerprint">SHA-256 Fingerprint</string>
+    <string name="piv_detail_export_pubkey">Export Public Key (DER)</string>
+    <string name="piv_section_certificate">Certificate</string>
+    <string name="piv_section_actions">Actions</string>
+    <string name="piv_action_sign_test">Sign Test Data</string>
+    <string name="piv_action_delete">Delete Key</string>
+    <string name="piv_delete_title">Delete Key</string>
+    <string name="piv_delete_message">Delete the key in PIV slot %s (%s)? This action cannot be undone.</string>
+    <string name="piv_deleted">Key deleted from slot %s</string>
+    <string name="piv_sign_test_success">Signature successful (%d ms)</string>
+    <string name="piv_sign_test_error">Signing failed: %s</string>
+    <string name="piv_fingerprint_copied">Fingerprint copied to clipboard</string>
+    <string name="piv_no_certificate">No certificate imported</string>
+    <string name="piv_cert_parse_failed">Failed to parse certificate</string>
+    <string name="piv_public_key_der_copied">Public key DER copied to clipboard</string>
+    <string name="piv_certificate_der_copied">Certificate DER copied to clipboard</string>
+
+    <!-- Co-Sign -->
+    <string name="cosign_card_description">Multi-party attestation</string>
+
+    <!-- Tab Headers -->
+    <string name="tab_apps_title">Applications</string>
+    <string name="tab_apps_subtitle">Authenticator, Passkeys &amp; Smart Card</string>
+    <string name="tab_store_title">Key Store</string>
+    <string name="tab_store_subtitle">Keys, certificates &amp; trust management</string>
+    <string name="tab_management_title">Management</string>
+    <string name="tab_management_subtitle">Device administration &amp; settings</string>
+
+    <!-- BLE Address -->
+    <string name="device_info_ble_address_randomized">Randomized (Privacy)</string>
+
+    <!-- Contact QR Import / Export -->
+    <string name="contact_import_action">Import</string>
+    <string name="contact_default_name">Contact</string>
+    <string name="contact_qr_scan_instruction">Point the camera at an xKey contact QR code</string>
+    <string name="contact_qr_scan_cancelled">QR scan cancelled</string>
+    <string name="contact_qr_camera_denied">Camera permission is required to scan QR codes</string>
+    <string name="contact_qr_invalid">That QR code does not contain an xKey contact or a public key</string>
+    <string name="contact_export_select_key">Select a key to share</string>
+    <string name="contact_export_key_entry">%1$s (%2$s)</string>
+    <string name="contact_export_no_keys">This device has no public keys to share yet. Generate a key first.</string>
+    <string name="contact_export_qr_failed">Could not generate the QR code</string>
+    <string name="contact_export_qr_instruction">Scan this code from another xKey device to add this key as a contact</string>
+
+    <!-- PIN Management -->
+    <string name="pin_management_title">PIN Management</string>
+    <string name="pin_management_subtitle">Manage SO PIN and User PIN</string>
+    <string name="pin_status_title">PIN Status</string>
+    <string name="pin_label_so">SO PIN</string>
+    <string name="pin_label_user">User PIN</string>
+    <string name="pin_label_initialized">Initialized</string>
+    <string name="pin_badge_set">Set</string>
+    <string name="pin_badge_not_set">Not Set</string>
+    <string name="pin_lockout_title">Lockout Status</string>
+    <string name="pin_lockout_badge">LOCKED</string>
+    <string name="pin_actions_header">Actions</string>
+
+    <!-- PIN Management: lockout detail text -->
+    <string name="pin_lockout_so_attempts">SO PIN: %1$d/%2$d failed attempts</string>
+    <string name="pin_lockout_user_attempts">User PIN: %1$d/%2$d failed attempts</string>
+    <string name="pin_lockout_locked_suffix"> (LOCKED)</string>
+    <string name="pin_lockout_minutes_remaining">%1$dm %2$ds remaining</string>
+    <string name="pin_lockout_seconds_remaining">%1$ds remaining</string>
+    <string name="pin_lockout_time_remaining">Time remaining: %1$s</string>
+    <string name="pin_lockout_expired">Lockout expired. PIN can be retried.</string>
+
+    <!-- PIN Management: action cards -->
+    <string name="pin_action_set_so_title">Set SO PIN</string>
+    <string name="pin_action_set_so_desc">Initialize the Security Officer PIN. Required before setting a User PIN.</string>
+    <string name="pin_action_set_user_title">Set User PIN</string>
+    <string name="pin_action_set_user_desc">Provision a User PIN. Requires SO PIN authentication.</string>
+    <string name="pin_action_change_so_title">Change SO PIN</string>
+    <string name="pin_action_change_so_desc">Change the Security Officer PIN. Requires current SO PIN.</string>
+    <string name="pin_action_change_user_title">Change User PIN</string>
+    <string name="pin_action_change_user_desc">Change the User PIN. Requires current User PIN.</string>
+    <string name="pin_action_reset_lockout_title">Reset Lockout</string>
+    <string name="pin_action_reset_lockout_desc">Reset the User PIN lockout counter. Requires SO PIN authentication.</string>
+
+    <!-- PIN Management: dialogs -->
+    <string name="pin_hint_new_so">New SO PIN</string>
+    <string name="pin_hint_confirm_so">Confirm SO PIN</string>
+    <string name="pin_hint_new_user">New User PIN</string>
+    <string name="pin_hint_confirm_user">Confirm User PIN</string>
+    <string name="pin_hint_current_so">Current SO PIN</string>
+    <string name="pin_hint_confirm_new_so">Confirm New SO PIN</string>
+    <string name="pin_hint_current_user">Current User PIN</string>
+    <string name="pin_hint_confirm_new_user">Confirm New User PIN</string>
+    <string name="pin_dialog_set_so_message">Enter a new Security Officer PIN (6-63 characters).</string>
+    <string name="pin_dialog_set_user_message">Authenticate with SO PIN, then enter a new User PIN (6-63 characters).</string>
+    <string name="pin_dialog_change_so_message">Enter your current SO PIN and a new SO PIN (6-63 characters).</string>
+    <string name="pin_dialog_change_user_message">Enter your current User PIN and a new User PIN (6-63 characters).</string>
+    <string name="pin_dialog_reset_lockout_message">Enter the SO PIN to reset the User PIN lockout counter.</string>
+    <string name="pin_button_set">Set</string>
+    <string name="pin_button_change">Change</string>
+    <string name="pin_button_reset">Reset</string>
+
+    <!-- PIN Management: feedback -->
+    <string name="pin_error_mismatch">PINs do not match</string>
+    <string name="pin_error_operation_failed">PIN operation failed</string>
+    <string name="pin_error_invalid_length">Invalid PIN length</string>
+    <string name="pin_error_so_locked">SO PIN is locked: %1$ds remaining</string>
+    <string name="pin_error_user_locked">User PIN is locked: %1$ds remaining</string>
+    <string name="pin_error_locked">PIN is locked: %1$ds remaining</string>
+    <string name="pin_success_so_set">SO PIN set successfully</string>
+    <string name="pin_success_user_set">User PIN set successfully</string>
+    <string name="pin_success_so_changed">SO PIN changed successfully</string>
+    <string name="pin_success_user_changed">User PIN changed successfully</string>
+    <string name="pin_success_lockout_reset">User PIN lockout reset successfully</string>
+
+    <!-- Password Manager -->
+    <string name="password_empty_message">No passwords yet.\nTap + to add one, or sync from your desktop.</string>
+    <string name="password_add_fab">Add</string>
+    <string name="password_add_title">Add password</string>
+    <string name="password_save">Save</string>
+    <string name="password_field_name">Name / title</string>
+    <string name="password_field_username">Username</string>
+    <string name="password_field_password">Password</string>
+    <string name="password_field_url">URL</string>
+    <string name="password_field_notes">Notes</string>
+    <string name="password_required">Name and password are required</string>
+    <string name="password_detail_name">Name: %1$s</string>
+    <string name="password_detail_username">Username: %1$s</string>
+    <string name="password_detail_password">Password: %1$s</string>
+    <string name="password_detail_url">URL: %1$s</string>
+    <string name="password_detail_notes">Notes: %1$s</string>
+    <string name="password_copy">Copy password</string>
+    <string name="password_delete">Delete</string>
+    <string name="password_close">Close</string>
+    <string name="password_delete_title">Delete password?</string>
+    <string name="password_delete_message">Delete \"%1$s\"? This cannot be undone.</string>
+    <string name="password_copied">Password copied</string>
+</resources>

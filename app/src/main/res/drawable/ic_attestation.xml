@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?attr/colorControlNormal">
+    <!-- Shield body -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12 5.16,-1.26 9,-6.45 9,-12V5L12,1zM12,21.93C7.61,20.74 4.5,16.18 4.5,11V6.3L12,2.77l7.5,3.53V11c0,5.18 -3.11,9.74 -7.5,10.93z" />
+    <!-- Document/certificate lines inside shield -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M8,8h8v1.5H8z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M8,11h8v1.5H8z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M8,14h5v1.5H8z" />
+    <!-- Seal/stamp circle at bottom-right -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M15.5,16m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+</vector>

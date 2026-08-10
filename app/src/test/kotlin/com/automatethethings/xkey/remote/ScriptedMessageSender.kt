@@ -1,0 +1,86 @@
+/*
+ * Copyright (c) 2025 Jeremy Hahn
+ * Copyright (c) 2025 Automate The Things, LLC
+ *
+ * This file is part of xKey.
+ *
+ * xKey is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+package com.automatethethings.xkey.remote
+
+import android.util.Log
+import com.automatethethings.xkey.protocol.Request
+import io.mockk.every
+import io.mockk.mockkStatic
+
+/**
+ * Test double for the paired-desktop transport shared by the `remote.*` client
+ * tests.
+ *
+ * It parses each outbound [Request], records it for wire assertions, and feeds
+ * the scripted reply straight back through the real
+ * [BidirectionalMessageRouter] so request/response correlation by id is
+ * exercised without a socket. A script returning `null` models a peer that
+ * never answers, which drives the client's timeout path; a script that throws
+ * models a dead link.
+ */
+class ScriptedMessageSender(
+    private val router: BidirectionalMessageRouter,
+    private var script: (Request) -> String? = { null }
+) : MessageSender {
+
+    /** Every request handed to the transport, in order. */
+    val sent: MutableList<Request> = mutableListOf()
+
+    /** The most recent outbound request. */
+    val lastRequest: Request get() = sent.last()
+
+    /** Replaces the reply script for subsequent requests. */
+    fun replyWith(script: (Request) -> String?) {
+        this.script = script
+    }
+
+    /** Scripts a JSON-RPC success reply whose `result` is [resultJson]. */
+    fun succeedWith(resultJson: String) {
+        replyWith { request -> """{"id":${request.id},"result":$resultJson}""" }
+    }
+
+    /** Scripts a JSON-RPC error reply with [code] and [message]. */
+    fun failWith(code: Int, message: String) {
+        replyWith { request ->
+            """{"id":${request.id},"error":{"code":$code,"message":"$message"}}"""
+        }
+    }
+
+    /** Scripts a peer that never replies, so the caller must time out. */
+    fun neverReply() {
+        replyWith { null }
+    }
+
+    override suspend fun sendEncryptedMessage(data: ByteArray) {
+        val request = Request.fromJson(data)
+        sent += request
+        script(request)?.let { router.processMessage(it.toByteArray(Charsets.UTF_8)) }
+    }
+}
+
+/**
+ * Stubs `android.util.Log`, which throws "not mocked" in JVM unit tests.
+ *
+ * Call from `@Before`; pair with `unmockkAll()` in `@After`.
+ */
+fun stubAndroidLog() {
+    mockkStatic(Log::class)
+    every { Log.d(any(), any()) } returns 0
+    every { Log.i(any(), any()) } returns 0
+    every { Log.w(any(), any<String>()) } returns 0
+    every { Log.w(any(), any<String>(), any<Throwable>()) } returns 0
+    every { Log.e(any(), any()) } returns 0
+    every { Log.e(any(), any<String>(), any<Throwable>()) } returns 0
+}

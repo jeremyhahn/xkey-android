@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2026 Jeremy Hahn
+  Copyright (c) 2026 Automate The Things, LLC
+
+  This file is part of xKey. Dual-licensed AGPL-3.0 / Commercial.
+
+  Diagnostics for a device enrollment this phone refused. The ceremony has
+  never run against real hardware, so these rows are the only account of why a
+  paired laptop carries no certificate that a user can read without logcat.
+-->
+<resources>
+
+    <!-- Rows on the attestation card, shown only when an enrollment was refused. -->
+    <string name="device_enrollment_refused_label">Enrollment refused</string>
+    <string name="device_enrollment_refused_detail">What failed</string>
+    <string name="device_enrollment_refused_when">Refused</string>
+
+    <!-- The refusal cases. Each answers a different question about the device. -->
+    <string name="device_enrollment_refused_malformed_package">Package malformed</string>
+    <string name="device_enrollment_refused_untrusted_endorsement">Endorsement not trusted</string>
+    <string name="device_enrollment_refused_activation_mismatch">Wrong activation secret</string>
+    <string name="device_enrollment_refused_activation_unsupported">Activation not completed</string>
+    <string name="device_enrollment_refused_quote_invalid">Quote not valid</string>
+    <string name="device_enrollment_refused_signing_key_not_certified">Signing key not certified by the attestation key</string>
+
+</resources>

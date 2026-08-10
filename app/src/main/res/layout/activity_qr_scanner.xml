@@ -1,0 +1,55 @@
+<!--
+  Copyright (c) 2025 Jeremy Hahn
+  Copyright (c) 2025 Automate The Things, LLC
+
+  This file is part of xKey.
+
+  xKey is dual-licensed:
+
+  1. GNU Affero General Public License v3.0 (AGPL-3.0)
+     See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+
+  2. Commercial License
+     Contact licensing@automatethethings.com for commercial licensing options.
+-->
+<FrameLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".ui.QrScannerActivity">
+
+    <!-- Camera preview -->
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Semi-transparent overlay -->
+    <View
+        android:id="@+id/overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#66000000" />
+
+    <!-- Instruction text at top -->
+    <TextView
+        android:id="@+id/textInstruction"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_marginTop="96dp"
+        android:gravity="center"
+        android:paddingHorizontal="32dp"
+        android:text="@string/oath_qr_instruction"
+        android:textAppearance="?attr/textAppearanceTitleMedium"
+        android:textColor="@android:color/white" />
+
+    <!-- Snackbar anchor (invisible, at bottom) -->
+    <View
+        android:id="@+id/snackbarAnchor"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_gravity="bottom" />
+
+</FrameLayout>

@@ -1,0 +1,374 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  xKey Premium Color System
+  =========================
+  Copyright (c) 2024 xKey. All rights reserved.
+
+  A security-focused, premium palette designed to convey trust, authority,
+  and institutional-grade security. Built on three pillars:
+
+  Primary:   Deep Navy (#1A237E family) - Vault-like trust and authority
+  Secondary: Warm Gold (#FFB300 family) - Premium distinction and achievement
+  Tertiary:  Rich Teal (#00897B family) - Digital security and verification
+
+  Design Principles:
+  - Surfaces carry warm ivory undertones for refined legibility
+  - Security indicators use intentional, curated status colors
+  - Dark theme uses navy-charcoal, never pure black
+  - All colors tested for WCAG AA+ contrast compliance
+-->
+<resources>
+
+    <!-- ================================================================== -->
+    <!-- PRIMARY: Deep Navy (#1A237E family)                                -->
+    <!-- Evokes security vaults, authority, and institutional trust.        -->
+    <!-- Based on Material Deep Purple 900 shifted toward navy.             -->
+    <!-- ================================================================== -->
+    <color name="primary">#1A237E</color>
+    <color name="primary_variant">#0D1442</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="primary_container">#DEE0FF</color>
+    <color name="on_primary_container">#00006E</color>
+
+    <!-- Primary tonal palette for fine-grained usage -->
+    <color name="primary_10">#00006E</color>
+    <color name="primary_20">#0D1442</color>
+    <color name="primary_30">#1A237E</color>
+    <color name="primary_40">#303F9F</color>
+    <color name="primary_50">#3949AB</color>
+    <color name="primary_60">#5C6BC0</color>
+    <color name="primary_70">#7986CB</color>
+    <color name="primary_80">#9FA8DA</color>
+    <color name="primary_90">#C5CAE9</color>
+    <color name="primary_95">#DEE0FF</color>
+    <color name="primary_99">#FEFBFF</color>
+
+    <!-- ================================================================== -->
+    <!-- SECONDARY: Warm Gold (#FFB300 family)                              -->
+    <!-- Premium accent that signals quality, achievement, and distinction. -->
+    <!-- Warm complement to the cool navy primary.                          -->
+    <!-- ================================================================== -->
+    <color name="secondary">#FFB300</color>
+    <color name="secondary_variant">#C68400</color>
+    <color name="on_secondary">#3E2800</color>
+    <color name="secondary_container">#FFDEA6</color>
+    <color name="on_secondary_container">#271900</color>
+
+    <!-- Secondary tonal palette -->
+    <color name="secondary_10">#271900</color>
+    <color name="secondary_20">#3E2800</color>
+    <color name="secondary_30">#5C3D00</color>
+    <color name="secondary_40">#7C5500</color>
+    <color name="secondary_50">#9E6D00</color>
+    <color name="secondary_60">#C68400</color>
+    <color name="secondary_70">#FFB300</color>
+    <color name="secondary_80">#FFCA47</color>
+    <color name="secondary_90">#FFDEA6</color>
+    <color name="secondary_95">#FFEFD4</color>
+    <color name="secondary_99">#FFFBFF</color>
+
+    <!-- ================================================================== -->
+    <!-- TERTIARY: Rich Teal (#00897B family)                               -->
+    <!-- Security verification accent. Used for authenticated states,       -->
+    <!-- crypto indicators, biometric confirmations, and trust badges.      -->
+    <!-- ================================================================== -->
+    <color name="tertiary">#00897B</color>
+    <color name="tertiary_variant">#00695C</color>
+    <color name="on_tertiary">#FFFFFF</color>
+    <color name="tertiary_container">#A7F3EC</color>
+    <color name="on_tertiary_container">#002020</color>
+
+    <!-- Tertiary tonal palette -->
+    <color name="tertiary_10">#002020</color>
+    <color name="tertiary_20">#003D3A</color>
+    <color name="tertiary_30">#00695C</color>
+    <color name="tertiary_40">#00897B</color>
+    <color name="tertiary_50">#00A99B</color>
+    <color name="tertiary_60">#26BFAC</color>
+    <color name="tertiary_70">#4DD0C5</color>
+    <color name="tertiary_80">#7DE0D8</color>
+    <color name="tertiary_90">#A7F3EC</color>
+    <color name="tertiary_95">#C8FFF8</color>
+    <color name="tertiary_99">#F2FFFC</color>
+
+    <!-- ================================================================== -->
+    <!-- SURFACE AND BACKGROUND: Warm Ivory                                 -->
+    <!-- Subtle warmth prevents sterile appearance. Faint ivory undertone   -->
+    <!-- creates a premium, paper-like reading experience.                  -->
+    <!-- ================================================================== -->
+    <color name="background">#FFFBFE</color>
+    <color name="on_background">#1C1B1F</color>
+    <color name="surface">#FFFBFE</color>
+    <color name="on_surface">#1C1B1F</color>
+    <color name="surface_variant">#E7E0EC</color>
+    <color name="on_surface_variant">#49454F</color>
+
+    <!-- Material 3 Surface Container hierarchy -->
+    <color name="surface_container_lowest">#FFFFFF</color>
+    <color name="surface_container_low">#F7F2FA</color>
+    <color name="surface_container">#F3EDF7</color>
+    <color name="surface_container_high">#ECE6F0</color>
+    <color name="surface_container_highest">#E6E0E9</color>
+
+    <!-- Surface dim for reduced emphasis areas -->
+    <color name="surface_dim">#DED8E1</color>
+    <color name="surface_bright">#FFFBFE</color>
+
+    <!-- ================================================================== -->
+    <!-- ERROR: Deep Crimson                                                -->
+    <!-- Serious but not alarming. Richer than default Material red.        -->
+    <!-- ================================================================== -->
+    <color name="error">#BA1A1A</color>
+    <color name="on_error">#FFFFFF</color>
+    <color name="error_container">#FFDAD6</color>
+    <color name="on_error_container">#410002</color>
+
+    <!-- ================================================================== -->
+    <!-- SECURITY INDICATOR COLORS                                          -->
+    <!-- Curated status colors for security-focused UI elements.            -->
+    <!--                                                                    -->
+    <!-- Verified:     Emerald Green - Authenticated, secure, trusted       -->
+    <!-- Warning:      Amber Gold    - Caution, attention needed            -->
+    <!-- Danger:       Deep Crimson  - Critical, requires immediate action  -->
+    <!-- Neutral:      Warm Slate    - Dormant, inactive, disconnected      -->
+    <!-- ================================================================== -->
+
+    <!-- Security Status: Verified / Success -->
+    <color name="security_verified">#1B8A50</color>
+    <color name="security_verified_variant">#0E6B3A</color>
+    <color name="on_security_verified">#FFFFFF</color>
+    <color name="security_verified_container">#C8F5D0</color>
+    <color name="on_security_verified_container">#002110</color>
+
+    <!-- Security Status: Warning / Caution -->
+    <color name="security_warning">#E6A700</color>
+    <color name="security_warning_variant">#C68400</color>
+    <color name="on_security_warning">#3E2800</color>
+    <color name="security_warning_container">#FFEFD4</color>
+    <color name="on_security_warning_container">#271900</color>
+
+    <!-- Security Status: Danger / Error -->
+    <color name="security_danger">#C62828</color>
+    <color name="security_error">#C62828</color>
+    <color name="security_danger_variant">#9A0007</color>
+    <color name="on_security_danger">#FFFFFF</color>
+    <color name="security_danger_container">#FFDAD6</color>
+    <color name="on_security_danger_container">#410002</color>
+
+    <!-- Security Status: Neutral / Inactive -->
+    <!-- Informational state. Placed at the same OKLCH lightness and chroma as
+         security_verified so the two carry equal weight side by side; only the
+         hue differs, which is the only thing that should differ between two
+         states of equal severity. -->
+    <color name="security_info">#3C75BF</color>
+    <color name="security_info_variant">#205AA2</color>
+    <color name="on_security_info">#FFFFFF</color>
+
+    <color name="security_neutral">#6B7280</color>
+    <color name="security_neutral_variant">#4B5563</color>
+    <color name="on_security_neutral">#FFFFFF</color>
+    <color name="security_neutral_container">#E5E7EB</color>
+    <color name="on_security_neutral_container">#1F2937</color>
+
+    <!-- ================================================================== -->
+    <!-- CONNECTION STATUS COLORS                                           -->
+    <!-- Visual indicators for BLE/device connection states.                -->
+    <!-- ================================================================== -->
+    <color name="status_connected">#1B8A50</color>
+    <color name="status_disconnected">#6B7280</color>
+    <color name="status_advertising">#E6A700</color>
+    <color name="status_error">#C62828</color>
+    <color name="status_pairing">#5C6BC0</color>
+
+    <!-- ================================================================== -->
+    <!-- GRADIENT COLORS                                                    -->
+    <!-- Premium gradient pairs for headers, cards, and hero sections.      -->
+    <!-- ================================================================== -->
+
+    <!-- Primary gradient: Deep Navy flow -->
+    <color name="gradient_primary_start">#1A237E</color>
+    <color name="gradient_primary_end">#303F9F</color>
+
+    <!-- Secondary gradient: Golden shimmer -->
+    <color name="gradient_secondary_start">#FFB300</color>
+    <color name="gradient_secondary_end">#FFCA28</color>
+
+    <!-- Tertiary gradient: Teal wave -->
+    <color name="gradient_tertiary_start">#00897B</color>
+    <color name="gradient_tertiary_end">#26A69A</color>
+
+    <!-- Premium gradient: Navy to gold diagonal -->
+    <color name="gradient_premium_start">#1A237E</color>
+    <color name="gradient_premium_mid">#303F9F</color>
+    <color name="gradient_premium_end">#FFB300</color>
+
+    <!-- Security gradient: Teal to navy -->
+    <color name="gradient_security_start">#00897B</color>
+    <color name="gradient_security_end">#1A237E</color>
+
+    <!-- Dark gradient: For dark theme headers -->
+    <color name="gradient_dark_start">#0D1442</color>
+    <color name="gradient_dark_end">#1A237E</color>
+
+    <!-- ================================================================== -->
+    <!-- OUTLINE: Warm Neutrals                                             -->
+    <!-- Subtle warm-toned borders that complement ivory surfaces.          -->
+    <!-- ================================================================== -->
+    <color name="outline">#79747E</color>
+    <color name="outline_variant">#CAC4D0</color>
+
+    <!-- ================================================================== -->
+    <!-- INVERSE COLORS                                                     -->
+    <!-- Used for snackbars, tooltips, and inverted UI elements.            -->
+    <!-- ================================================================== -->
+    <color name="inverse_surface">#313033</color>
+    <color name="inverse_on_surface">#F4EFF4</color>
+    <color name="inverse_primary">#C5CAE9</color>
+
+    <!-- ================================================================== -->
+    <!-- SCRIM AND OVERLAY                                                  -->
+    <!-- Modal overlays and background dimming.                             -->
+    <!-- ================================================================== -->
+    <color name="scrim">#000000</color>
+    <color name="scrim_light">#1A000000</color>
+    <color name="scrim_medium">#4D000000</color>
+    <color name="scrim_heavy">#80000000</color>
+
+    <!-- ================================================================== -->
+    <!-- SURFACE TINT                                                       -->
+    <!-- Used for Material 3 elevation overlays.                            -->
+    <!-- ================================================================== -->
+    <color name="surface_tint">#1A237E</color>
+
+    <!-- ================================================================== -->
+    <!-- DARK THEME COLORS                                                  -->
+    <!-- Named with _dark suffix for explicit dark theme control.           -->
+    <!-- Navy-charcoal surfaces, never pure black.                          -->
+    <!-- ================================================================== -->
+
+    <!-- Dark: Primary - Luminous indigo on dark navy -->
+    <color name="primary_dark">#C5CAE9</color>
+    <color name="primary_variant_dark">#9FA8DA</color>
+    <color name="on_primary_dark">#00006E</color>
+    <color name="primary_container_dark">#0D1442</color>
+    <color name="on_primary_container_dark">#DEE0FF</color>
+
+    <!-- Dark: Secondary - Luminous gold on dark warmth -->
+    <color name="secondary_dark">#FFCA47</color>
+    <color name="secondary_variant_dark">#FFB300</color>
+    <color name="on_secondary_dark">#3E2800</color>
+    <color name="secondary_container_dark">#5C3D00</color>
+    <color name="on_secondary_container_dark">#FFDEA6</color>
+
+    <!-- Dark: Tertiary - Luminous teal on dark depth -->
+    <color name="tertiary_dark">#7DE0D8</color>
+    <color name="tertiary_variant_dark">#4DD0C5</color>
+    <color name="on_tertiary_dark">#003D3A</color>
+    <color name="tertiary_container_dark">#00695C</color>
+    <color name="on_tertiary_container_dark">#A7F3EC</color>
+
+    <!-- Dark: Surfaces - Deep navy-charcoal blend -->
+    <color name="background_dark">#1C1B1F</color>
+    <color name="on_background_dark">#E6E1E5</color>
+    <color name="surface_dark">#1C1B1F</color>
+    <color name="on_surface_dark">#E6E1E5</color>
+    <color name="surface_variant_dark">#49454F</color>
+    <color name="on_surface_variant_dark">#CAC4D0</color>
+
+    <!-- Dark: Surface Container hierarchy -->
+    <color name="surface_container_lowest_dark">#0D0D11</color>
+    <color name="surface_container_low_dark">#1C1B1F</color>
+    <color name="surface_container_dark">#211F26</color>
+    <color name="surface_container_high_dark">#2B2930</color>
+    <color name="surface_container_highest_dark">#36343B</color>
+
+    <color name="surface_dim_dark">#1C1B1F</color>
+    <color name="surface_bright_dark">#3B383E</color>
+
+    <!-- Dark: Error - Softened crimson for dark backgrounds -->
+    <color name="error_dark">#FFB4AB</color>
+    <color name="on_error_dark">#690005</color>
+    <color name="error_container_dark">#93000A</color>
+    <color name="on_error_container_dark">#FFDAD6</color>
+
+    <!-- Dark: Security Status Colors -->
+    <color name="security_verified_dark">#6EE795</color>
+    <color name="on_security_verified_dark">#00391C</color>
+    <color name="security_verified_container_dark">#00522A</color>
+    <color name="on_security_verified_container_dark">#8AFFAF</color>
+
+    <color name="security_warning_dark">#FFCA47</color>
+    <color name="on_security_warning_dark">#3E2800</color>
+    <color name="security_warning_container_dark">#5C3D00</color>
+    <color name="on_security_warning_container_dark">#FFEFD4</color>
+
+    <color name="security_danger_dark">#FFB4AB</color>
+    <color name="security_error_dark">#FFB4AB</color>
+    <color name="on_security_danger_dark">#690005</color>
+    <color name="security_danger_container_dark">#93000A</color>
+    <color name="on_security_danger_container_dark">#FFDAD6</color>
+
+    <color name="security_neutral_dark">#9CA3AF</color>
+    <color name="on_security_neutral_dark">#1F2937</color>
+    <color name="security_neutral_container_dark">#374151</color>
+    <color name="on_security_neutral_container_dark">#E5E7EB</color>
+
+    <!-- Dark: Connection Status Colors -->
+    <color name="status_connected_dark">#6EE795</color>
+    <color name="status_disconnected_dark">#9CA3AF</color>
+    <color name="status_advertising_dark">#FFCA47</color>
+    <color name="status_error_dark">#FFB4AB</color>
+    <color name="status_pairing_dark">#C5CAE9</color>
+
+    <!-- Dark: Outline -->
+    <color name="outline_dark">#938F99</color>
+    <color name="outline_variant_dark">#49454F</color>
+
+    <!-- Dark: Inverse -->
+    <color name="inverse_surface_dark">#E6E1E5</color>
+    <color name="inverse_on_surface_dark">#313033</color>
+    <color name="inverse_primary_dark">#1A237E</color>
+
+    <!-- Dark: Surface Tint -->
+    <color name="surface_tint_dark">#C5CAE9</color>
+
+    <!-- Dark: Gradient Colors -->
+    <color name="gradient_primary_start_dark">#0D1442</color>
+    <color name="gradient_primary_end_dark">#1A237E</color>
+    <color name="gradient_secondary_start_dark">#C68400</color>
+    <color name="gradient_secondary_end_dark">#FFB300</color>
+    <!-- =====================================================================
+         Category palette
+
+         Seven families, one per kind of thing the app holds. Generated in
+         OKLCH, not picked by eye: lightness is constant across the set
+         (L 0.52 start, 0.38 end), so no family shouts louder than another and
+         white text clears WCAG AA on every one (5.2:1 to 6.2:1). Chroma is 80%
+         of what each hue can reach in sRGB, because holding chroma constant
+         instead would drag the whole set down to the weakest hue's limit.
+
+         The hue arc runs violet 310 -> green 150 and passes through the brand
+         navy at 270. The brand gold (hue 78) is deliberately absent: it is the
+         accent, and an accent that also means "one of seven categories" stops
+         being an accent.
+
+         A gradient's two stops share a hue and differ only in lightness. A
+         gradient that also shifts hue is the thing that makes a UI look
+         unconsidered.
+         ===================================================================== -->
+    <color name="category_identity_start">#8E34C1</color>
+    <color name="category_identity_end">#5B1E7E</color>
+    <color name="category_authority_start">#6046E2</color>
+    <color name="category_authority_end">#3D249D</color>
+    <color name="category_transport_start">#2868B9</color>
+    <color name="category_transport_end">#164279</color>
+    <color name="category_attestation_start">#2C728F</color>
+    <color name="category_attestation_end">#19485C</color>
+    <color name="category_exchange_start">#2D757B</color>
+    <color name="category_exchange_end">#194B4F</color>
+    <color name="category_integrity_start">#2D7867</color>
+    <color name="category_integrity_end">#1A4C41</color>
+    <color name="category_lifecycle_start">#2D7B44</color>
+    <color name="category_lifecycle_end">#194F29</color>
+
+</resources>

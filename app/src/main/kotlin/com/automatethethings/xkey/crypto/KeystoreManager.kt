@@ -1,0 +1,1984 @@
+/*
+ * Copyright (c) 2025 Jeremy Hahn
+ * Copyright (c) 2025 Automate The Things, LLC
+ *
+ * This file is part of xKey.
+ *
+ * xKey is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+package com.automatethethings.xkey.crypto
+
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import androidx.annotation.RequiresApi
+import androidx.biometric.BiometricPrompt
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import com.automatethethings.xkey.audit.AuditLogger
+import java.security.KeyFactory
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.PublicKey
+import java.security.Signature
+import java.security.cert.Certificate
+import java.security.interfaces.ECPublicKey
+import java.security.interfaces.RSAPublicKey
+import java.security.spec.ECGenParameterSpec
+import java.security.spec.PKCS8EncodedKeySpec
+import java.security.spec.X509EncodedKeySpec
+import javax.crypto.Cipher
+import javax.crypto.KeyAgreement
+import javax.crypto.KeyGenerator
+import javax.crypto.Mac
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+/**
+ * Manages cryptographic keys in Android Keystore for FIDO2 operations.
+ *
+ * This class provides hardware-backed key storage with StrongBox support
+ * when available, and integrates with biometric authentication for
+ * signing operations. Keys stored here never leave the secure hardware,
+ * providing strong protection against extraction.
+ *
+ * Features:
+ * - Hardware-backed key storage (StrongBox when available)
+ * - Biometric binding for signing operations
+ * - ECDSA P-256 key generation (ES256 algorithm)
+ * - COSE public key encoding for WebAuthn/FIDO2
+ * - Key attestation support
+ *
+ * Usage:
+ * ```kotlin
+ * val manager = KeystoreManager(context)
+ *
+ * // Generate a new credential key
+ * val cosePublicKey = manager.generateKey("credential-id-base64", requireBiometric = true)
+ *
+ * // Sign data with biometric verification
+ * val signature = manager.sign("credential-id-base64", dataHash, biometricHelper)
+ * ```
+ *
+ * @param context Application context for checking device capabilities.
+ */
+class KeystoreManager(private val context: Context) {
+
+    private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply {
+        load(null)
+    }
+
+    /**
+     * Check if StrongBox secure hardware is available on this device.
+     *
+     * StrongBox is a hardware-backed keystore backed by a dedicated
+     * secure element, providing the highest level of key protection.
+     * Available on devices running Android 9 (API 28) and above with
+     * appropriate hardware.
+     *
+     * @return true if StrongBox is available.
+     */
+    fun isStrongBoxAvailable(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            context.packageManager.hasSystemFeature(
+                PackageManager.FEATURE_STRONGBOX_KEYSTORE
+            )
+        } else {
+            false
+        }
+    }
+
+    /**
+     * Generate a new ECDSA P-256 key for a FIDO2 credential.
+     *
+     * The key is stored in Android Keystore with the following properties:
+     * - Algorithm: ECDSA with P-256 curve (ES256)
+     * - Purpose: Signing only (cannot be used for encryption)
+     * - User authentication: Required if [requireBiometric] is true
+     * - Hardware backing: StrongBox if available, otherwise TEE
+     *
+     * @param credentialId Base64-encoded credential ID (used as key alias).
+     * @param requireBiometric If true, biometric authentication is required
+     *                         for every signing operation.
+     * @param requireStrongBox If true, key generation fails if StrongBox
+     *                         is not available.
+     * @return COSE-encoded public key bytes for use in WebAuthn responses.
+     * @throws KeyGenerationException if key generation fails.
+     * @throws StrongBoxUnavailableException if StrongBox is required but unavailable.
+     */
+    suspend fun generateKey(
+        credentialId: String,
+        requireBiometric: Boolean = true,
+        requireStrongBox: Boolean = false
+    ): ByteArray {
+        val alias = buildAlias(credentialId)
+
+        // Check StrongBox requirement
+        if (requireStrongBox && !isStrongBoxAvailable()) {
+            throw StrongBoxUnavailableException()
+        }
+
+        // Delete existing key if present (credential regeneration)
+        if (keyStore.containsAlias(alias)) {
+            keyStore.deleteEntry(alias)
+        }
+
+        try {
+            val specBuilder = KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec(EC_CURVE))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setUserAuthenticationRequired(requireBiometric)
+
+            // Configure authentication parameters for API 30+
+            if (requireBiometric) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    specBuilder.setUserAuthenticationParameters(
+                        AUTH_TIMEOUT_SECONDS,
+                        KeyProperties.AUTH_BIOMETRIC_STRONG
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    specBuilder.setUserAuthenticationValidityDurationSeconds(AUTH_TIMEOUT_SECONDS)
+                }
+            }
+
+            // Try to use StrongBox if available
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()) {
+                specBuilder.setIsStrongBoxBacked(true)
+            }
+
+            // Enable key attestation if supported
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                specBuilder.setAttestationChallenge(generateAttestationChallenge())
+            }
+
+            val keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC,
+                KEYSTORE_PROVIDER
+            )
+            keyPairGenerator.initialize(specBuilder.build())
+
+            val keyPair = keyPairGenerator.generateKeyPair()
+            val strongBoxBacked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()
+
+            // Log key creation
+            AuditLogger.logKeyCreated(
+                keyId = credentialId,
+                keyLabel = credentialId,
+                keyType = "fido2",
+                algorithm = "ES256",
+                strongBox = strongBoxBacked
+            )
+
+            return encodeCOSEPublicKey(keyPair.public)
+        } catch (e: Exception) {
+            // Handle StrongBox fallback - some devices claim StrongBox but fail
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                isStrongBoxAvailable() &&
+                !requireStrongBox
+            ) {
+                return generateKeyWithoutStrongBox(alias, requireBiometric)
+            }
+            throw KeyGenerationException("Failed to generate key", e)
+        }
+    }
+
+    /**
+     * Generate a key with configurable authentication duration.
+     *
+     * This method provides fine-grained control over how authentication is
+     * handled for the generated key:
+     * - authDurationSeconds == 0: Require authentication for every use (PER_OPERATION)
+     * - authDurationSeconds > 0: Key remains unlocked for N seconds after authentication
+     * - authDurationSeconds < 0: Key does not require authentication (UV disabled)
+     *
+     * @param credentialId Credential identifier (used as key alias).
+     * @param authDurationSeconds Time in seconds the key remains unlocked after auth.
+     *                           0 = require auth for every use (PER_OPERATION)
+     *                          -1 = key does not require authentication (UV disabled)
+     * @param requireStrongBox Whether to require StrongBox hardware.
+     * @return COSE-encoded public key bytes for use in WebAuthn responses.
+     * @throws KeyGenerationException if key generation fails.
+     * @throws StrongBoxUnavailableException if StrongBox is required but unavailable.
+     */
+    suspend fun generateKeyWithAuthDuration(
+        credentialId: String,
+        authDurationSeconds: Int,
+        requireStrongBox: Boolean = false
+    ): ByteArray {
+        val alias = buildAlias(credentialId)
+
+        // Check StrongBox requirement
+        if (requireStrongBox && !isStrongBoxAvailable()) {
+            throw StrongBoxUnavailableException()
+        }
+
+        // Delete existing key if present (credential regeneration)
+        if (keyStore.containsAlias(alias)) {
+            keyStore.deleteEntry(alias)
+        }
+
+        try {
+            val specBuilder = KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec(EC_CURVE))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+
+            // Configure authentication based on authDurationSeconds
+            when {
+                authDurationSeconds < 0 -> {
+                    // No authentication required (UV disabled)
+                    specBuilder.setUserAuthenticationRequired(false)
+                }
+                authDurationSeconds == 0 -> {
+                    // Require authentication for every use (PER_OPERATION)
+                    specBuilder.setUserAuthenticationRequired(true)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        specBuilder.setUserAuthenticationParameters(
+                            0, // 0 = require auth for every use
+                            // Device credential counts as user verification, so
+                            // passkeys still work on devices with only a PIN.
+                            KeyProperties.AUTH_BIOMETRIC_STRONG or
+                                KeyProperties.AUTH_DEVICE_CREDENTIAL
+                        )
+                    } else {
+                        // On older APIs, -1 means require auth for every cryptographic operation
+                        @Suppress("DEPRECATION")
+                        specBuilder.setUserAuthenticationValidityDurationSeconds(-1)
+                    }
+                }
+                else -> {
+                    // Authentication valid for N seconds
+                    specBuilder.setUserAuthenticationRequired(true)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        specBuilder.setUserAuthenticationParameters(
+                            authDurationSeconds,
+                            KeyProperties.AUTH_BIOMETRIC_STRONG or
+                                KeyProperties.AUTH_DEVICE_CREDENTIAL
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        specBuilder.setUserAuthenticationValidityDurationSeconds(authDurationSeconds)
+                    }
+                }
+            }
+
+            // Try to use StrongBox if available
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()) {
+                specBuilder.setIsStrongBoxBacked(true)
+            }
+
+            // Enable key attestation if supported
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                specBuilder.setAttestationChallenge(generateAttestationChallenge())
+            }
+
+            val keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC,
+                KEYSTORE_PROVIDER
+            )
+            keyPairGenerator.initialize(specBuilder.build())
+
+            val keyPair = keyPairGenerator.generateKeyPair()
+            return encodeCOSEPublicKey(keyPair.public)
+        } catch (e: Exception) {
+            // Handle StrongBox fallback - some devices claim StrongBox but fail
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                isStrongBoxAvailable() &&
+                !requireStrongBox
+            ) {
+                return generateKeyWithAuthDurationWithoutStrongBox(alias, authDurationSeconds)
+            }
+            throw KeyGenerationException("Failed to generate key with auth duration", e)
+        }
+    }
+
+    /**
+     * Fallback key generation with auth duration without StrongBox.
+     */
+    private fun generateKeyWithAuthDurationWithoutStrongBox(
+        alias: String,
+        authDurationSeconds: Int
+    ): ByteArray {
+        try {
+            val specBuilder = KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec(EC_CURVE))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+
+            // Configure authentication based on authDurationSeconds
+            when {
+                authDurationSeconds < 0 -> {
+                    specBuilder.setUserAuthenticationRequired(false)
+                }
+                authDurationSeconds == 0 -> {
+                    specBuilder.setUserAuthenticationRequired(true)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        specBuilder.setUserAuthenticationParameters(
+                            0,
+                            KeyProperties.AUTH_BIOMETRIC_STRONG
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        specBuilder.setUserAuthenticationValidityDurationSeconds(-1)
+                    }
+                }
+                else -> {
+                    specBuilder.setUserAuthenticationRequired(true)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        specBuilder.setUserAuthenticationParameters(
+                            authDurationSeconds,
+                            KeyProperties.AUTH_BIOMETRIC_STRONG or
+                                KeyProperties.AUTH_DEVICE_CREDENTIAL
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        specBuilder.setUserAuthenticationValidityDurationSeconds(authDurationSeconds)
+                    }
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                specBuilder.setAttestationChallenge(generateAttestationChallenge())
+            }
+
+            val keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC,
+                KEYSTORE_PROVIDER
+            )
+            keyPairGenerator.initialize(specBuilder.build())
+
+            val keyPair = keyPairGenerator.generateKeyPair()
+            return encodeCOSEPublicKey(keyPair.public)
+        } catch (e: Exception) {
+            throw KeyGenerationException("Failed to generate key with auth duration without StrongBox", e)
+        }
+    }
+
+    /**
+     * Fallback key generation without StrongBox.
+     */
+    private fun generateKeyWithoutStrongBox(
+        alias: String,
+        requireBiometric: Boolean
+    ): ByteArray {
+        try {
+            val specBuilder = KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec(EC_CURVE))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setUserAuthenticationRequired(requireBiometric)
+
+            if (requireBiometric) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    specBuilder.setUserAuthenticationParameters(
+                        AUTH_TIMEOUT_SECONDS,
+                        KeyProperties.AUTH_BIOMETRIC_STRONG
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    specBuilder.setUserAuthenticationValidityDurationSeconds(AUTH_TIMEOUT_SECONDS)
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                specBuilder.setAttestationChallenge(generateAttestationChallenge())
+            }
+
+            val keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC,
+                KEYSTORE_PROVIDER
+            )
+            keyPairGenerator.initialize(specBuilder.build())
+
+            val keyPair = keyPairGenerator.generateKeyPair()
+            return encodeCOSEPublicKey(keyPair.public)
+        } catch (e: Exception) {
+            throw KeyGenerationException("Failed to generate key without StrongBox", e)
+        }
+    }
+
+    /**
+     * Sign a data hash using a credential key.
+     *
+     * This operation requires biometric verification if the key was created
+     * with [requireBiometric] = true and the authentication has expired.
+     * Due to AUTH_TIMEOUT_SECONDS, a recent biometric auth may still be valid,
+     * allowing signing without prompting again (grace period for rapid requests).
+     *
+     * @param credentialId Base64-encoded credential ID.
+     * @param dataHash SHA-256 hash of the data to sign (32 bytes).
+     * @param biometricHelper Helper for showing biometric prompts.
+     * @param title Title for the biometric prompt.
+     * @param subtitle Subtitle for the biometric prompt (e.g., relying party).
+     * @return DER-encoded ECDSA signature.
+     * @throws KeyNotFoundException if no key exists for the credential.
+     * @throws SigningException if signing fails.
+     * @throws UserCancelledException if user cancels biometric.
+     * @throws BiometricLockoutException if biometric is locked out.
+     */
+    suspend fun sign(
+        credentialId: String,
+        dataHash: ByteArray,
+        biometricHelper: BiometricHelper,
+        title: String = "xKey Authentication",
+        subtitle: String = "Verify your identity to sign"
+    ): ByteArray {
+        // Resolve across both alias namespaces, as signWithoutBiometric does.
+        // With the FIDO2-only alias, a passkey the desktop created through
+        // local.generateKey could never be signed with a prompt either.
+        val alias = resolveKeystoreAlias(credentialId) ?: throw KeyNotFoundException(credentialId)
+
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+            ?: throw KeyNotFoundException(credentialId)
+
+        // First, try to sign without biometric (uses cached auth if within timeout)
+        try {
+            val signature = Signature.getInstance(SIGNATURE_ALGORITHM)
+            signature.initSign(privateKey)
+            signature.update(dataHash)
+            return signature.sign()
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            // Key requires fresh biometric authentication - proceed with prompt
+        } catch (e: Exception) {
+            // Anything else here is a real failure, not a reason to prompt. The
+            // algorithm is fixed to ECDSA, so a non-EC key resolved by
+            // resolveKeystoreAlias throws InvalidKeyException — which used to
+            // escape past this function's documented SigningException contract
+            // and surface to the desktop as INTERNAL_ERROR.
+            throw SigningException("Signing operation failed", e)
+        }
+
+        // Biometric required - show prompt
+        try {
+            val signature = Signature.getInstance(SIGNATURE_ALGORITHM)
+            signature.initSign(privateKey)
+
+            // Create CryptoObject for biometric binding
+            val cryptoObject = BiometricPrompt.CryptoObject(signature)
+
+            // Authenticate with biometric - this unlocks the signature object
+            biometricHelper.authenticate(
+                cryptoObject = cryptoObject,
+                title = title,
+                subtitle = subtitle
+            )
+
+            // After successful biometric, the signature object is unlocked
+            signature.update(dataHash)
+            return signature.sign()
+        } catch (e: XKeyCryptoException) {
+            // Re-throw our typed exceptions
+            throw e
+        } catch (e: Exception) {
+            throw SigningException("Signing operation failed", e)
+        }
+    }
+
+    /**
+     * Sign without showing biometric prompt.
+     *
+     * This works when the key doesn't require auth or auth is cached
+     * (within the authentication validity duration configured at key generation).
+     *
+     * Use cases:
+     * - Keys generated with [generateKeyWithAuthDuration] with authDurationSeconds < 0 (no auth required)
+     * - Keys within their authentication validity window after a recent biometric auth
+     * - Keys generated with [generateKey] with requireBiometric = false
+     *
+     * @param credentialId Base64-encoded credential ID.
+     * @param dataHash SHA-256 hash of the data to sign (32 bytes).
+     * @return DER-encoded ECDSA signature.
+     * @throws KeyNotFoundException if no key exists for the credential.
+     * @throws BiometricRequiredException if key requires biometric authentication
+     *         and the authentication has expired or was never performed.
+     * @throws SigningException if signing fails.
+     */
+    suspend fun signWithoutBiometric(
+        credentialId: String,
+        dataHash: ByteArray
+    ): ByteArray {
+        // Resolve across BOTH alias namespaces, as the DER/PEM/SSH/COSE exports do.
+        // The FIDO2-only alias alone means a passkey created through the general
+        // key path — which is how the desktop creates one — can never be signed.
+        val alias = resolveKeystoreAlias(credentialId) ?: throw KeyNotFoundException(credentialId)
+
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+            ?: throw KeyNotFoundException(credentialId)
+
+        try {
+            val signature = Signature.getInstance(SIGNATURE_ALGORITHM)
+            signature.initSign(privateKey)
+            signature.update(dataHash)
+            return signature.sign()
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            throw BiometricRequiredException()
+        } catch (e: Exception) {
+            throw SigningException("Signing operation failed", e)
+        }
+    }
+
+    /**
+     * Check if a key exists for a credential.
+     *
+     * @param credentialId Base64-encoded credential ID.
+     * @return true if a key exists for this credential.
+     */
+    fun keyExists(credentialId: String): Boolean {
+        val alias = resolveKeystoreAlias(credentialId) ?: return false
+        return keyStore.containsAlias(alias)
+    }
+
+    /**
+     * Delete a credential key from the keystore.
+     *
+     * @param credentialId Base64-encoded credential ID.
+     * @return true if the key was deleted, false if it didn't exist.
+     */
+    fun deleteKey(credentialId: String): Boolean {
+        // Resolving here also means a key created in the general namespace is
+        // actually removed; callers that deleted through the FIDO2-only alias
+        // were silently leaking those entries.
+        val alias = resolveKeystoreAlias(credentialId) ?: return false
+        keyStore.deleteEntry(alias)
+
+        // Log key deletion
+        AuditLogger.logKeyDeleted(
+            keyId = credentialId,
+            keyLabel = credentialId,
+            keyType = "fido2"
+        )
+
+        return true
+    }
+
+    /**
+     * Get the public key for a credential.
+     *
+     * @param credentialId Base64-encoded credential ID.
+     * @return The public key, or null if not found.
+     */
+    fun getPublicKey(credentialId: String): PublicKey? {
+        val alias = resolveKeystoreAlias(credentialId) ?: return null
+        return keyStore.getCertificate(alias)?.publicKey
+    }
+
+    /**
+     * Get the COSE-encoded public key for a credential.
+     *
+     * @param credentialId Base64-encoded credential ID.
+     * @return COSE-encoded public key bytes, or null if not found.
+     */
+    fun getCOSEPublicKey(credentialId: String): ByteArray? {
+        // Resolve across BOTH alias namespaces, as the DER/PEM/SSH exports do.
+        // Using the FIDO2-only alias here made `local.getPublicKey` with
+        // format=cose fail for every key created through local.generateKey.
+        val alias = resolveKeystoreAlias(credentialId) ?: return null
+        val publicKey = runCatching { keyStore.getCertificate(alias)?.publicKey }.getOrNull()
+            ?: return null
+        return encodeCOSEPublicKey(publicKey)
+    }
+
+    /**
+     * Get the attestation certificate chain for a key.
+     *
+     * The certificate chain can be used to verify that the key was generated
+     * in secure hardware (StrongBox or TEE) and includes key attestation
+     * information if the device supports it.
+     *
+     * @param credentialId Base64-encoded credential ID.
+     * @return Certificate chain, or null if not available.
+     */
+    fun getAttestationChain(credentialId: String): List<Certificate>? {
+        // Resolve across both alias namespaces, as the export and signing paths do.
+        val alias = resolveKeystoreAlias(credentialId) ?: return null
+        return keyStore.getCertificateChain(alias)?.toList()
+    }
+
+    /**
+     * List all xKey credential IDs stored in the keystore.
+     *
+     * @return List of credential IDs (without the key alias prefix).
+     */
+    fun listCredentials(): List<String> {
+        return keyStore.aliases().toList()
+            .filter { it.startsWith(KEY_ALIAS_PREFIX) }
+            .map { it.removePrefix(KEY_ALIAS_PREFIX) }
+    }
+
+    /**
+     * Check if a key is backed by StrongBox.
+     *
+     * Note: This requires accessing the key's security level from the
+     * certificate chain extension, which may not be available on all devices.
+     *
+     * @param credentialId Base64-encoded credential ID.
+     * @return true if the key is StrongBox-backed, false otherwise or if unknown.
+     */
+    fun isKeyStrongBoxBacked(credentialId: String): Boolean {
+        // Key security level is in the attestation extension
+        // Simplified check: if StrongBox was available during generation
+        // and the key exists, assume it's StrongBox-backed
+        if (!isStrongBoxAvailable()) return false
+        return keyExists(credentialId)
+    }
+
+    // -------------------------------------------------------------------------
+    // Multi-Algorithm Key Generation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Generate a key using the specified algorithm.
+     *
+     * Supports EC (P-256, P-384, P-521) and RSA (2048, 3072, 4096) keys.
+     * EC algorithms generate ECDSA signing keys on the specified curve.
+     * RSA algorithms generate RSA signing (and decryption) keys of the
+     * specified bit length.
+     *
+     * @param keyId Unique key identifier.
+     * @param algorithm One of "ES256", "ES384", "ES512", "RS256", "RS384", "RS512".
+     * @param authDurationSeconds Authentication validity: -1 = no auth, 0 = per-op, >0 = seconds.
+     * @param preferStrongBox Whether to prefer StrongBox hardware.
+     * @return DER-encoded public key bytes.
+     * @throws KeyGenerationException if key generation fails.
+     * @throws UnsupportedAlgorithmException if the algorithm is not supported.
+     */
+    suspend fun generateKeyForAlgorithm(
+        keyId: String,
+        algorithm: String,
+        authDurationSeconds: Int = 5,
+        preferStrongBox: Boolean = true
+    ): ByteArray {
+        val alias = buildGeneralAlias(keyId)
+
+        // Delete existing key if present
+        if (keyStore.containsAlias(alias)) {
+            keyStore.deleteEntry(alias)
+        }
+
+        val isEC = algorithm.startsWith("ES")
+        val isRSA = algorithm.startsWith("RS")
+        val isEd25519 = algorithm == "Ed25519"
+        if (!isEC && !isRSA && !isEd25519) {
+            throw UnsupportedAlgorithmException(algorithm)
+        }
+
+        try {
+            val keyPair = when {
+                isEd25519 -> {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                        throw UnsupportedAlgorithmException("Ed25519 requires API 33+")
+                    }
+                    generateEd25519KeyPair(alias, authDurationSeconds)
+                }
+                isEC -> generateECKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
+                else -> generateRSAKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
+            }
+
+            // Log key creation
+            val strongBoxBacked = preferStrongBox &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                isStrongBoxAvailable()
+            AuditLogger.logKeyCreated(
+                keyId = keyId,
+                keyLabel = keyId,
+                keyType = "signing",
+                algorithm = algorithm,
+                strongBox = strongBoxBacked
+            )
+
+            return keyPair.public.encoded
+        } catch (e: UnsupportedAlgorithmException) {
+            throw e
+        } catch (e: KeyGenerationException) {
+            throw e
+        } catch (e: Exception) {
+            throw KeyGenerationException("Failed to generate $algorithm key", e)
+        }
+    }
+
+    /**
+     * Generate an EC key pair for the specified algorithm.
+     */
+    private fun generateECKeyPair(
+        alias: String,
+        algorithm: String,
+        authDurationSeconds: Int,
+        preferStrongBox: Boolean
+    ): java.security.KeyPair {
+        val curve = getECCurve(algorithm)
+        val digest = getDigestProperty(algorithm)
+
+        // PURPOSE_AGREE_KEY (API 31+) is required for local.ecdh; Keystore
+        // rejects KeyAgreement on keys generated without it.
+        val ecPurposes = KeyProperties.PURPOSE_SIGN or
+            (if (android.os.Build.VERSION.SDK_INT >= 31) KeyProperties.PURPOSE_AGREE_KEY else 0)
+
+        val specBuilder = KeyGenParameterSpec.Builder(
+            alias,
+            ecPurposes
+        )
+            .setAlgorithmParameterSpec(ECGenParameterSpec(curve))
+            .setDigests(digest)
+
+        applyAuthDuration(specBuilder, authDurationSeconds)
+        applyStrongBox(specBuilder, preferStrongBox)
+        applyAttestationChallenge(specBuilder)
+
+        try {
+            val keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC,
+                KEYSTORE_PROVIDER
+            )
+            keyPairGenerator.initialize(specBuilder.build())
+            return keyPairGenerator.generateKeyPair()
+        } catch (e: Exception) {
+            // StrongBox fallback
+            if (preferStrongBox && isStrongBoxAvailable()) {
+                val fallbackBuilder = KeyGenParameterSpec.Builder(
+                    alias,
+                    ecPurposes
+                )
+                    .setAlgorithmParameterSpec(ECGenParameterSpec(curve))
+                    .setDigests(digest)
+
+                applyAuthDuration(fallbackBuilder, authDurationSeconds)
+                applyAttestationChallenge(fallbackBuilder)
+
+                val keyPairGenerator = KeyPairGenerator.getInstance(
+                    KeyProperties.KEY_ALGORITHM_EC,
+                    KEYSTORE_PROVIDER
+                )
+                keyPairGenerator.initialize(fallbackBuilder.build())
+                return keyPairGenerator.generateKeyPair()
+            }
+            throw e
+        }
+    }
+
+    /**
+     * Generate an RSA key pair for the specified algorithm.
+     */
+    /**
+     * Generates an RSA key for OAEP encryption at an explicit modulus size.
+     *
+     * [generateKeyForAlgorithm] derives the modulus from a *signature* algorithm
+     * name, so every encryption key came out at the RS256 size of 2048 no matter
+     * what the caller asked for. Bumping the algorithm name is not a fix either:
+     * that would also change the permitted digest, and [rsaDecrypt] is fixed to
+     * `OAEPWithSHA-256AndMGF1Padding`, so Keystore would refuse every decrypt.
+     * Size and digest are therefore separated here.
+     *
+     * @param keyId Logical key identifier; stored under the general alias namespace.
+     * @param keySizeBits Modulus size — 2048, 3072 or 4096.
+     * @param authDurationSeconds Seconds the key stays unlocked; -1 for no authentication.
+     * @param preferStrongBox Whether to prefer StrongBox hardware.
+     * @return DER-encoded public key bytes.
+     * @throws KeyGenerationException if key generation fails.
+     */
+    suspend fun generateRSAEncryptionKey(
+        keyId: String,
+        keySizeBits: Int,
+        authDurationSeconds: Int = 5,
+        preferStrongBox: Boolean = true
+    ): ByteArray {
+        require(keySizeBits in setOf(2048, 3072, 4096)) {
+            "Unsupported RSA modulus size: $keySizeBits"
+        }
+        val alias = buildGeneralAlias(keyId)
+        if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+
+        val specBuilder = KeyGenParameterSpec.Builder(
+            alias,
+            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setKeySize(keySizeBits)
+            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+
+        applyAuthDuration(specBuilder, authDurationSeconds)
+        applyStrongBox(specBuilder, preferStrongBox)
+        applyAttestationChallenge(specBuilder)
+
+        try {
+            val generator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_RSA,
+                KEYSTORE_PROVIDER
+            )
+            generator.initialize(specBuilder.build())
+            return generator.generateKeyPair().public.encoded
+        } catch (e: Exception) {
+            throw KeyGenerationException("Failed to generate RSA encryption key", e)
+        }
+    }
+
+    private fun generateRSAKeyPair(
+        alias: String,
+        algorithm: String,
+        authDurationSeconds: Int,
+        preferStrongBox: Boolean
+    ): java.security.KeyPair {
+        val keySize = getRSAKeySize(algorithm)
+        val digest = getDigestProperty(algorithm)
+
+        val specBuilder = KeyGenParameterSpec.Builder(
+            alias,
+            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setKeySize(keySize)
+            .setDigests(digest)
+            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+
+        applyAuthDuration(specBuilder, authDurationSeconds)
+        applyStrongBox(specBuilder, preferStrongBox)
+        applyAttestationChallenge(specBuilder)
+
+        try {
+            val keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_RSA,
+                KEYSTORE_PROVIDER
+            )
+            keyPairGenerator.initialize(specBuilder.build())
+            return keyPairGenerator.generateKeyPair()
+        } catch (e: Exception) {
+            // StrongBox fallback
+            if (preferStrongBox && isStrongBoxAvailable()) {
+                val fallbackBuilder = KeyGenParameterSpec.Builder(
+                    alias,
+                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_DECRYPT
+                )
+                    .setKeySize(keySize)
+                    .setDigests(digest)
+                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+
+                applyAuthDuration(fallbackBuilder, authDurationSeconds)
+                applyAttestationChallenge(fallbackBuilder)
+
+                val keyPairGenerator = KeyPairGenerator.getInstance(
+                    KeyProperties.KEY_ALGORITHM_RSA,
+                    KEYSTORE_PROVIDER
+                )
+                keyPairGenerator.initialize(fallbackBuilder.build())
+                return keyPairGenerator.generateKeyPair()
+            }
+            throw e
+        }
+    }
+
+    /**
+     * Generate an Ed25519 key pair using JCE software provider.
+     *
+     * Android Keystore does not support Ed25519, so the private key is stored
+     * in EncryptedSharedPreferences (AES-256-GCM encrypted).
+     */
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private fun generateEd25519KeyPair(
+        alias: String,
+        authDurationSeconds: Int
+    ): java.security.KeyPair {
+        val keyPairGenerator = KeyPairGenerator.getInstance("Ed25519")
+        val keyPair = keyPairGenerator.generateKeyPair()
+
+        // Store private key in EncryptedSharedPreferences since Android Keystore
+        // does not support Ed25519
+        val prefs = EncryptedSharedPreferences.create(
+            context,
+            ED25519_PREFS_NAME,
+            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+        prefs.edit()
+            .putString(alias, Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP))
+            .apply()
+
+        return keyPair
+    }
+
+    /**
+     * Retrieve an Ed25519 private key from EncryptedSharedPreferences.
+     */
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    fun getEd25519PrivateKey(alias: String): PrivateKey? {
+        val prefs = EncryptedSharedPreferences.create(
+            context,
+            ED25519_PREFS_NAME,
+            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+        val encoded = prefs.getString(alias, null) ?: return null
+        val keyBytes = Base64.decode(encoded, Base64.NO_WRAP)
+        val keyFactory = KeyFactory.getInstance("Ed25519")
+        return keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
+    }
+
+    /**
+     * Check if an Ed25519 key exists in EncryptedSharedPreferences.
+     */
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private fun hasEd25519Key(alias: String): Boolean {
+        return try {
+            val prefs = EncryptedSharedPreferences.create(
+                context,
+                ED25519_PREFS_NAME,
+                MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+            prefs.contains(alias)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Generate an AES symmetric key stored in Android Keystore.
+     *
+     * The key supports AES-GCM encryption and decryption operations.
+     * AES-GCM provides both confidentiality and authenticity through
+     * authenticated encryption with associated data (AEAD).
+     *
+     * @param keyId Unique key identifier.
+     * @param keySizeBits Key size: 128 or 256 bits.
+     * @param authDurationSeconds Authentication validity: -1 = no auth, 0 = per-op, >0 = seconds.
+     * @throws KeyGenerationException if key generation fails.
+     */
+    suspend fun generateSymmetricKey(
+        keyId: String,
+        keySizeBits: Int = 256,
+        authDurationSeconds: Int = -1
+    ) {
+        val alias = buildGeneralAlias(keyId)
+
+        if (keySizeBits != 128 && keySizeBits != 256) {
+            throw KeyGenerationException("AES key size must be 128 or 256 bits, got $keySizeBits")
+        }
+
+        // Delete existing key if present
+        if (keyStore.containsAlias(alias)) {
+            keyStore.deleteEntry(alias)
+        }
+
+        try {
+            val specBuilder = KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setKeySize(keySizeBits)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+
+            applyAuthDuration(specBuilder, authDurationSeconds)
+
+            val keyGenerator = KeyGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_AES,
+                KEYSTORE_PROVIDER
+            )
+            keyGenerator.init(specBuilder.build())
+            keyGenerator.generateKey()
+        } catch (e: KeyGenerationException) {
+            throw e
+        } catch (e: Exception) {
+            throw KeyGenerationException("Failed to generate AES-$keySizeBits key", e)
+        }
+    }
+
+    /**
+     * Generate an HMAC key stored in Android Keystore.
+     *
+     * Supports HMAC-SHA256 and HMAC-SHA512 for message authentication
+     * code computation.
+     *
+     * @param keyId Unique key identifier.
+     * @param algorithm "HMAC-SHA256" or "HMAC-SHA512".
+     * @throws KeyGenerationException if key generation fails.
+     * @throws UnsupportedAlgorithmException if the algorithm is not supported.
+     */
+    suspend fun generateHMACKey(
+        keyId: String,
+        algorithm: String = "HMAC-SHA256"
+    ) {
+        val alias = buildGeneralAlias(keyId)
+
+        val jcaAlgorithm = when (algorithm) {
+            "HMAC-SHA256" -> KeyProperties.KEY_ALGORITHM_HMAC_SHA256
+            "HMAC-SHA512" -> KeyProperties.KEY_ALGORITHM_HMAC_SHA512
+            else -> throw UnsupportedAlgorithmException(algorithm)
+        }
+
+        // Delete existing key if present
+        if (keyStore.containsAlias(alias)) {
+            keyStore.deleteEntry(alias)
+        }
+
+        try {
+            val specBuilder = KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+            )
+
+            val keyGenerator = KeyGenerator.getInstance(jcaAlgorithm, KEYSTORE_PROVIDER)
+            keyGenerator.init(specBuilder.build())
+            keyGenerator.generateKey()
+        } catch (e: UnsupportedAlgorithmException) {
+            throw e
+        } catch (e: Exception) {
+            throw KeyGenerationException("Failed to generate $algorithm key", e)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Multi-Algorithm Signing
+    // -------------------------------------------------------------------------
+
+    /**
+     * Sign data with an algorithm-aware signature.
+     *
+     * Uses the appropriate JCA signature algorithm based on the specified
+     * COSE/JOSE algorithm name. The data is signed raw (not pre-hashed)
+     * as the JCA Signature API handles hashing internally.
+     *
+     * @param keyId Key identifier.
+     * @param data Data to sign (raw bytes, not pre-hashed).
+     * @param algorithm Signing algorithm: "ES256", "ES384", "ES512", "RS256", "RS384", "RS512".
+     * @return Signature bytes (DER-encoded for EC, PKCS#1 for RSA).
+     * @throws KeyNotFoundException if no key exists for the identifier.
+     * @throws BiometricRequiredException if key requires biometric authentication.
+     * @throws SigningException if signing fails.
+     */
+    suspend fun signWithAlgorithm(
+        keyId: String,
+        data: ByteArray,
+        algorithm: String
+    ): ByteArray {
+        val alias = buildGeneralAlias(keyId)
+        val jcaAlgorithm = getJCASignatureAlgorithm(algorithm)
+
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+            ?: throw KeyNotFoundException(keyId)
+
+        try {
+            val signature = Signature.getInstance(jcaAlgorithm)
+            signature.initSign(privateKey)
+            signature.update(data)
+            return signature.sign()
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            throw BiometricRequiredException()
+        } catch (e: Exception) {
+            throw SigningException("Signing with $algorithm failed", e)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // RSA Decryption
+    // -------------------------------------------------------------------------
+
+    /**
+     * Decrypt data using an RSA key with OAEP padding.
+     *
+     * Uses RSA/ECB/OAEPWithSHA-256AndMGF1Padding for decryption, which
+     * provides semantic security against chosen-ciphertext attacks.
+     *
+     * @param keyId Key identifier.
+     * @param ciphertext Data to decrypt.
+     * @return Decrypted plaintext bytes.
+     * @throws KeyNotFoundException if no key exists for the identifier.
+     * @throws BiometricRequiredException if key requires biometric authentication.
+     * @throws DecryptionException if decryption fails.
+     */
+    suspend fun rsaDecrypt(keyId: String, ciphertext: ByteArray): ByteArray {
+        val alias = buildGeneralAlias(keyId)
+
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+            ?: throw KeyNotFoundException(keyId)
+
+        try {
+            val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, privateKey)
+            return cipher.doFinal(ciphertext)
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            throw BiometricRequiredException()
+        } catch (e: Exception) {
+            throw DecryptionException("RSA decryption failed", e)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AES-GCM Symmetric Encryption / Decryption
+    // -------------------------------------------------------------------------
+
+    /**
+     * Encrypt data using an AES-GCM key.
+     *
+     * Produces output in the format: IV (12 bytes) || ciphertext || tag.
+     * The IV is generated by Android Keystore and prepended to the output
+     * for use during decryption. The 128-bit authentication tag is appended
+     * by the GCM cipher mode.
+     *
+     * @param keyId Key identifier.
+     * @param plaintext Data to encrypt.
+     * @param aad Optional additional authenticated data.
+     * @return Concatenation of IV (12 bytes) + ciphertext + authentication tag.
+     * @throws KeyNotFoundException if no key exists for the identifier.
+     * @throws BiometricRequiredException if key requires biometric authentication.
+     * @throws EncryptionException if encryption fails.
+     */
+    suspend fun symmetricEncrypt(
+        keyId: String,
+        plaintext: ByteArray,
+        aad: ByteArray? = null
+    ): ByteArray {
+        val alias = buildGeneralAlias(keyId)
+
+        val secretKey = keyStore.getKey(alias, null) as? SecretKey
+            ?: throw KeyNotFoundException(keyId)
+
+        try {
+            val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+
+            if (aad != null) {
+                cipher.updateAAD(aad)
+            }
+
+            val iv = cipher.iv
+            val encrypted = cipher.doFinal(plaintext)
+
+            // Return IV || ciphertext || tag
+            return iv + encrypted
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            throw BiometricRequiredException()
+        } catch (e: Exception) {
+            throw EncryptionException("AES-GCM encryption failed", e)
+        }
+    }
+
+    /**
+     * Decrypt data using an AES-GCM key.
+     *
+     * Expects input in the format: IV (12 bytes) || ciphertext || tag.
+     * The first 12 bytes are extracted as the initialization vector,
+     * and the remainder is the ciphertext with appended authentication tag.
+     *
+     * @param keyId Key identifier.
+     * @param ciphertext IV (12 bytes) + ciphertext + authentication tag.
+     * @param aad Optional additional authenticated data (must match what was used during encryption).
+     * @return Decrypted plaintext bytes.
+     * @throws KeyNotFoundException if no key exists for the identifier.
+     * @throws BiometricRequiredException if key requires biometric authentication.
+     * @throws DecryptionException if decryption fails or authentication tag verification fails.
+     */
+    suspend fun symmetricDecrypt(
+        keyId: String,
+        ciphertext: ByteArray,
+        aad: ByteArray? = null
+    ): ByteArray {
+        val alias = buildGeneralAlias(keyId)
+
+        if (ciphertext.size < GCM_IV_SIZE) {
+            throw DecryptionException("Ciphertext too short: must be at least $GCM_IV_SIZE bytes for IV")
+        }
+
+        val secretKey = keyStore.getKey(alias, null) as? SecretKey
+            ?: throw KeyNotFoundException(keyId)
+
+        try {
+            val iv = ciphertext.copyOfRange(0, GCM_IV_SIZE)
+            val encryptedData = ciphertext.copyOfRange(GCM_IV_SIZE, ciphertext.size)
+
+            val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+
+            if (aad != null) {
+                cipher.updateAAD(aad)
+            }
+
+            return cipher.doFinal(encryptedData)
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            throw BiometricRequiredException()
+        } catch (e: DecryptionException) {
+            throw e
+        } catch (e: Exception) {
+            throw DecryptionException("AES-GCM decryption failed", e)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // HMAC
+    // -------------------------------------------------------------------------
+
+    /**
+     * Compute an HMAC over the provided data.
+     *
+     * The HMAC algorithm (SHA-256 or SHA-512) is determined by the key type
+     * that was specified during key generation with [generateHMACKey].
+     *
+     * @param keyId Key identifier.
+     * @param data Data to authenticate.
+     * @return HMAC bytes (32 bytes for SHA-256, 64 bytes for SHA-512).
+     * @throws KeyNotFoundException if no key exists for the identifier.
+     * @throws HMACException if HMAC computation fails.
+     */
+    suspend fun computeHMAC(keyId: String, data: ByteArray): ByteArray {
+        val alias = buildGeneralAlias(keyId)
+
+        val secretKey = keyStore.getKey(alias, null) as? SecretKey
+            ?: throw KeyNotFoundException(keyId)
+
+        try {
+            // Determine HMAC algorithm from key algorithm
+            val macAlgorithm = when (secretKey.algorithm) {
+                KeyProperties.KEY_ALGORITHM_HMAC_SHA256, "HmacSHA256" -> "HmacSHA256"
+                KeyProperties.KEY_ALGORITHM_HMAC_SHA512, "HmacSHA512" -> "HmacSHA512"
+                else -> "HmacSHA256"
+            }
+
+            val mac = Mac.getInstance(macAlgorithm)
+            mac.init(secretKey)
+            return mac.doFinal(data)
+        } catch (e: Exception) {
+            throw HMACException("Failed to compute HMAC", e)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // ECDH Key Agreement
+    // -------------------------------------------------------------------------
+
+    /**
+     * Perform ECDH key agreement using a local EC private key and a peer's public key.
+     *
+     * Derives a shared secret using the Elliptic Curve Diffie-Hellman protocol.
+     * The local key must be an EC key generated with [generateKeyForAlgorithm]
+     * using an ES256/ES384/ES512 algorithm.
+     *
+     * @param keyId Local EC key identifier.
+     * @param peerPublicKeyDer DER-encoded (X.509 SubjectPublicKeyInfo) peer public key.
+     * @return Shared secret bytes.
+     * @throws KeyNotFoundException if no local key exists for the identifier.
+     * @throws BiometricRequiredException if key requires biometric authentication.
+     * @throws ECDHException if key agreement fails.
+     */
+    suspend fun performECDH(keyId: String, peerPublicKeyDer: ByteArray): ByteArray {
+        val alias = buildGeneralAlias(keyId)
+
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+            ?: throw KeyNotFoundException(keyId)
+
+        try {
+            val keyFactory = KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC)
+            val peerPublicKey = keyFactory.generatePublic(X509EncodedKeySpec(peerPublicKeyDer))
+
+            val keyAgreement = KeyAgreement.getInstance("ECDH")
+            keyAgreement.init(privateKey)
+            keyAgreement.doPhase(peerPublicKey, true)
+            return keyAgreement.generateSecret()
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            throw BiometricRequiredException()
+        } catch (e: Exception) {
+            throw ECDHException("ECDH key agreement failed", e)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Public Key Export
+    // -------------------------------------------------------------------------
+
+    /**
+     * Get a general key's public key in DER format (X.509 SubjectPublicKeyInfo).
+     *
+     * @param keyId Key identifier.
+     * @return DER-encoded public key bytes, or null if the key does not exist.
+     */
+    fun getPublicKeyDER(keyId: String): ByteArray? {
+        val alias = resolveKeystoreAlias(keyId) ?: return null
+        val cert = keyStore.getCertificate(alias) ?: return null
+        return cert.publicKey.encoded
+    }
+
+    /**
+     * Get a general key's public key in PEM format.
+     *
+     * The PEM format wraps the DER-encoded public key in Base64 with
+     * standard "BEGIN PUBLIC KEY" / "END PUBLIC KEY" header and footer.
+     *
+     * @param keyId Key identifier.
+     * @return PEM-encoded public key string, or null if the key does not exist.
+     */
+    fun getPublicKeyPEM(keyId: String): String? {
+        val der = getPublicKeyDER(keyId) ?: return null
+        val base64 = Base64.encodeToString(der, Base64.NO_WRAP)
+
+        val sb = StringBuilder()
+        sb.appendLine("-----BEGIN PUBLIC KEY-----")
+        var offset = 0
+        while (offset < base64.length) {
+            val end = minOf(offset + PEM_LINE_LENGTH, base64.length)
+            sb.appendLine(base64.substring(offset, end))
+            offset = end
+        }
+        sb.append("-----END PUBLIC KEY-----")
+        return sb.toString()
+    }
+
+    /**
+     * Get a general key's public key in OpenSSH authorized_keys format.
+     *
+     * Encodes the public key using the OpenSSH wire format as defined in
+     * RFC 4253 (SSH Transport Layer Protocol) and RFC 5656 (EC SSH keys).
+     *
+     * Supported key types:
+     * - EC P-256: "ecdsa-sha2-nistp256"
+     * - EC P-384: "ecdsa-sha2-nistp384"
+     * - EC P-521: "ecdsa-sha2-nistp521"
+     * - RSA: "ssh-rsa"
+     *
+     * @param keyId Key identifier.
+     * @return OpenSSH public key string, or null if the key does not exist or type is unsupported.
+     */
+    fun getPublicKeySSH(keyId: String): String? {
+        val alias = resolveKeystoreAlias(keyId) ?: return null
+        val cert = keyStore.getCertificate(alias) ?: return null
+        val publicKey = cert.publicKey
+
+        return when (publicKey) {
+            is ECPublicKey -> encodeSSHECPublicKey(publicKey)
+            is RSAPublicKey -> encodeSSHRSAPublicKey(publicKey)
+            else -> null
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Key Attestation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Get key attestation certificate chain with caller-provided challenge.
+     *
+     * Generates a dedicated ephemeral attestation key with the caller's
+     * challenge bound via [KeyGenParameterSpec.Builder.setAttestationChallenge].
+     * The resulting certificate chain proves the device's TEE/StrongBox is
+     * genuine and includes the caller's challenge for freshness verification.
+     *
+     * The ephemeral key is deleted after retrieving the certificate chain.
+     *
+     * @param keyId Key identifier (used to namespace the temporary alias).
+     * @param challenge Nonce bytes from the requesting party, embedded in the
+     *                  attestation extension of the leaf certificate.
+     * @return Certificate chain (leaf -> intermediate -> root), or null if
+     *         attestation is not supported (API < 24).
+     */
+    fun getKeyAttestationWithChallenge(
+        keyId: String,
+        challenge: ByteArray
+    ): List<Certificate>? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
+
+        val tempAlias = "xkey_attest_${keyId}_${System.nanoTime()}"
+        try {
+            val specBuilder = KeyGenParameterSpec.Builder(
+                tempAlias,
+                KeyProperties.PURPOSE_SIGN
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec(EC_CURVE))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setAttestationChallenge(challenge)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()) {
+                specBuilder.setIsStrongBoxBacked(true)
+            }
+
+            val chain = try {
+                generateAttestationKeyPair(tempAlias, specBuilder)
+            } catch (e: Exception) {
+                // StrongBox fallback: retry without StrongBox backing
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()) {
+                    val fallbackBuilder = KeyGenParameterSpec.Builder(
+                        tempAlias,
+                        KeyProperties.PURPOSE_SIGN
+                    )
+                        .setAlgorithmParameterSpec(ECGenParameterSpec(EC_CURVE))
+                        .setDigests(KeyProperties.DIGEST_SHA256)
+                        .setAttestationChallenge(challenge)
+                    generateAttestationKeyPair(tempAlias, fallbackBuilder)
+                } else {
+                    throw e
+                }
+            }
+
+            return chain
+        } catch (e: Exception) {
+            throw AttestationException("Failed to generate attestation key", e)
+        } finally {
+            try {
+                keyStore.deleteEntry(tempAlias)
+            } catch (_: Exception) {
+                // Best-effort cleanup
+            }
+        }
+    }
+
+    /**
+     * Generate an ephemeral key pair and return its attestation certificate chain.
+     */
+    private fun generateAttestationKeyPair(
+        alias: String,
+        specBuilder: KeyGenParameterSpec.Builder
+    ): List<Certificate> {
+        // Delete if a stale entry exists from a previous failed attempt
+        if (keyStore.containsAlias(alias)) {
+            keyStore.deleteEntry(alias)
+        }
+        val keyPairGenerator = KeyPairGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_EC,
+            KEYSTORE_PROVIDER
+        )
+        keyPairGenerator.initialize(specBuilder.build())
+        keyPairGenerator.generateKeyPair()
+
+        return keyStore.getCertificateChain(alias)?.toList()
+            ?: throw AttestationException("No certificate chain available for attestation key")
+    }
+
+    /**
+     * Generate an ephemeral attestation key with the specified challenge.
+     *
+     * This method generates a new ephemeral EC key with the provided nonce
+     * embedded in the attestation extension. The certificate chain is returned
+     * for device-level attestation verification, including RootOfTrust parsing.
+     *
+     * Unlike [getKeyAttestationWithChallenge], this method does NOT delete the
+     * key automatically - the caller is responsible for cleanup via
+     * [deleteGeneralKey] after parsing the certificate chain.
+     *
+     * @param keyId Key identifier for the ephemeral attestation key.
+     * @param challenge Nonce bytes embedded in the attestation extension.
+     * @return Certificate chain (leaf -> intermediate -> root), or null if
+     *         attestation is not supported (API < 24).
+     * @throws AttestationException if key generation fails.
+     */
+    fun generateKeyWithAttestationChallenge(
+        keyId: String,
+        challenge: ByteArray
+    ): List<Certificate>? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
+
+        val alias = buildGeneralAlias(keyId)
+
+        // Delete if a stale entry exists
+        if (keyStore.containsAlias(alias)) {
+            keyStore.deleteEntry(alias)
+        }
+
+        try {
+            val specBuilder = KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec(EC_CURVE))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setAttestationChallenge(challenge)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()) {
+                specBuilder.setIsStrongBoxBacked(true)
+            }
+
+            return try {
+                generateAttestationKeyPair(alias, specBuilder)
+            } catch (e: Exception) {
+                // StrongBox fallback: retry without StrongBox backing
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()) {
+                    val fallbackBuilder = KeyGenParameterSpec.Builder(
+                        alias,
+                        KeyProperties.PURPOSE_SIGN
+                    )
+                        .setAlgorithmParameterSpec(ECGenParameterSpec(EC_CURVE))
+                        .setDigests(KeyProperties.DIGEST_SHA256)
+                        .setAttestationChallenge(challenge)
+                    generateAttestationKeyPair(alias, fallbackBuilder)
+                } else {
+                    throw e
+                }
+            }
+        } catch (e: Exception) {
+            throw AttestationException("Failed to generate attestation key with challenge", e)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Key Management (General Keys)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Resolves a key identifier to its actual Android Keystore alias.
+     *
+     * Tries the following patterns in order:
+     * 1. FIDO2 credential alias: xkey_credential_ + keyId
+     * 2. General key alias: xkey_key_ + keyId
+     * 3. Raw alias: keyId itself (for non-xKey keys)
+     *
+     * @param keyId The key identifier to resolve.
+     * @return The Keystore alias, or null if no matching entry exists.
+     */
+    fun resolveKeystoreAlias(keyId: String): String? {
+        val credentialAlias = KEY_ALIAS_PREFIX + keyId
+        if (keyStore.containsAlias(credentialAlias)) return credentialAlias
+
+        val generalAlias = KEY_ALIAS_PREFIX_GENERAL + keyId
+        if (keyStore.containsAlias(generalAlias)) return generalAlias
+
+        if (keyStore.containsAlias(keyId)) return keyId
+
+        // Check Ed25519 software-backed keys
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (hasEd25519Key(generalAlias) || hasEd25519Key(keyId)) return keyId
+        }
+
+        return null
+    }
+
+    /**
+     * List all key aliases managed by xKey.
+     *
+     * Returns both credential keys (prefixed with "xkey_credential_") and
+     * general-purpose keys (prefixed with "xkey_key_"), with their prefixes
+     * stripped.
+     *
+     * @return List of key identifiers without alias prefixes.
+     */
+    fun listAllKeys(): List<String> {
+        return keyStore.aliases().toList()
+            .filter { it.startsWith(KEY_ALIAS_PREFIX) || it.startsWith(KEY_ALIAS_PREFIX_GENERAL) }
+            .map { alias ->
+                when {
+                    alias.startsWith(KEY_ALIAS_PREFIX_GENERAL) -> alias.removePrefix(KEY_ALIAS_PREFIX_GENERAL)
+                    alias.startsWith(KEY_ALIAS_PREFIX) -> alias.removePrefix(KEY_ALIAS_PREFIX)
+                    else -> alias
+                }
+            }
+    }
+
+    /**
+     * List all key aliases in the Android Keystore.
+     *
+     * Returns every alias this app has access to, regardless of prefix.
+     * This includes FIDO2 credentials, general keys, and any other keys
+     * stored by the app or system libraries.
+     *
+     * @return List of all Keystore aliases.
+     */
+    fun listAllKeystoreAliases(): List<String> {
+        return keyStore.aliases().toList()
+    }
+
+    /**
+     * Delete a key by its raw Keystore alias.
+     *
+     * @param alias The Keystore alias to delete.
+     * @return true if the key was deleted, false if it didn't exist.
+     */
+    fun deleteByAlias(alias: String): Boolean {
+        if (!keyStore.containsAlias(alias)) return false
+        keyStore.deleteEntry(alias)
+        return true
+    }
+
+    /**
+     * Check if a general-purpose key exists in the keystore.
+     *
+     * @param keyId Key identifier.
+     * @return true if the key exists.
+     */
+    fun generalKeyExists(keyId: String): Boolean {
+        val alias = buildGeneralAlias(keyId)
+        return keyStore.containsAlias(alias)
+    }
+
+    /**
+     * Delete a general-purpose key from the keystore.
+     *
+     * @param keyId Key identifier.
+     * @return true if the key was deleted, false if it did not exist.
+     */
+    fun deleteGeneralKey(keyId: String): Boolean {
+        val alias = buildGeneralAlias(keyId)
+        if (!keyStore.containsAlias(alias)) {
+            return false
+        }
+        keyStore.deleteEntry(alias)
+
+        // Log key deletion
+        AuditLogger.logKeyDeleted(
+            keyId = keyId,
+            keyLabel = keyId,
+            keyType = "general"
+        )
+
+        return true
+    }
+
+    // -------------------------------------------------------------------------
+    // Private Helpers - Key Generation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Apply authentication duration settings to a key spec builder.
+     *
+     * Configures user authentication requirements based on the duration:
+     * - Negative: no authentication required
+     * - Zero: authentication required for every cryptographic operation
+     * - Positive: authentication remains valid for the specified number of seconds
+     */
+    private fun applyAuthDuration(
+        specBuilder: KeyGenParameterSpec.Builder,
+        authDurationSeconds: Int
+    ) {
+        when {
+            authDurationSeconds < 0 -> {
+                specBuilder.setUserAuthenticationRequired(false)
+            }
+            authDurationSeconds == 0 -> {
+                specBuilder.setUserAuthenticationRequired(true)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    specBuilder.setUserAuthenticationParameters(
+                        0,
+                        KeyProperties.AUTH_BIOMETRIC_STRONG
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    specBuilder.setUserAuthenticationValidityDurationSeconds(-1)
+                }
+            }
+            else -> {
+                specBuilder.setUserAuthenticationRequired(true)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    specBuilder.setUserAuthenticationParameters(
+                        authDurationSeconds,
+                        KeyProperties.AUTH_BIOMETRIC_STRONG
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    specBuilder.setUserAuthenticationValidityDurationSeconds(authDurationSeconds)
+                }
+            }
+        }
+    }
+
+    /**
+     * Apply StrongBox backing to a key spec builder if available and preferred.
+     */
+    private fun applyStrongBox(
+        specBuilder: KeyGenParameterSpec.Builder,
+        preferStrongBox: Boolean
+    ) {
+        if (preferStrongBox &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            isStrongBoxAvailable()
+        ) {
+            specBuilder.setIsStrongBoxBacked(true)
+        }
+    }
+
+    /**
+     * Apply attestation challenge to a key spec builder if supported.
+     */
+    private fun applyAttestationChallenge(specBuilder: KeyGenParameterSpec.Builder) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            specBuilder.setAttestationChallenge(generateAttestationChallenge())
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Private Helpers - Algorithm Mapping
+    // -------------------------------------------------------------------------
+
+    /**
+     * Get the EC curve name for a COSE/JOSE algorithm identifier.
+     *
+     * @param algorithm "ES256", "ES384", or "ES512".
+     * @return SEC curve name (e.g., "secp256r1").
+     * @throws KeyGenerationException if the algorithm is not a supported EC algorithm.
+     */
+    private fun getECCurve(algorithm: String): String = when (algorithm) {
+        "ES256" -> EC_CURVE_P256
+        "ES384" -> EC_CURVE_P384
+        "ES512" -> EC_CURVE_P521
+        else -> throw KeyGenerationException("Unsupported EC algorithm: $algorithm")
+    }
+
+
+    /**
+     * Get the RSA key size in bits from a JOSE algorithm identifier.
+     *
+     * @param algorithm "RS256", "RS384", or "RS512".
+     * @return RSA key size in bits.
+     * @throws KeyGenerationException if the algorithm is not a supported RSA algorithm.
+     */
+    private fun getRSAKeySize(algorithm: String): Int = when (algorithm) {
+        "RS256" -> 2048
+        "RS384" -> 3072
+        "RS512" -> 4096
+        else -> throw KeyGenerationException("Unsupported RSA algorithm: $algorithm")
+    }
+
+    /**
+     * Get the JCA signature algorithm name from a COSE/JOSE algorithm identifier.
+     *
+     * @param algorithm "ES256", "ES384", "ES512", "RS256", "RS384", or "RS512".
+     * @return JCA signature algorithm name (e.g., "SHA256withECDSA").
+     * @throws SigningException if the algorithm is not supported.
+     */
+    private fun getJCASignatureAlgorithm(algorithm: String): String = when (algorithm) {
+        "ES256" -> SIG_ALGORITHM_ES256
+        "ES384" -> SIG_ALGORITHM_ES384
+        "ES512" -> SIG_ALGORITHM_ES512
+        "RS256" -> SIG_ALGORITHM_RS256
+        "RS384" -> SIG_ALGORITHM_RS384
+        "RS512" -> SIG_ALGORITHM_RS512
+        else -> throw SigningException("Unsupported algorithm: $algorithm")
+    }
+
+    /**
+     * Get the JCA digest property constant from a COSE/JOSE algorithm identifier.
+     *
+     * @param algorithm Algorithm identifier.
+     * @return Android KeyProperties digest constant.
+     */
+    private fun getDigestProperty(algorithm: String): String = when (algorithm) {
+        "ES256", "RS256" -> KeyProperties.DIGEST_SHA256
+        "ES384", "RS384" -> KeyProperties.DIGEST_SHA384
+        "ES512", "RS512" -> KeyProperties.DIGEST_SHA512
+        else -> KeyProperties.DIGEST_SHA256
+    }
+
+    /**
+     * Build the keystore alias for a general-purpose key.
+     */
+    private fun buildGeneralAlias(keyId: String): String = KEY_ALIAS_PREFIX_GENERAL + keyId
+
+    // -------------------------------------------------------------------------
+    // Private Helpers - SSH Key Encoding
+    // -------------------------------------------------------------------------
+
+    /**
+     * Encode an EC public key in OpenSSH wire format.
+     *
+     * Format: "ecdsa-sha2-{curve} {base64-encoded-blob}"
+     * Blob: string(key-type) || string(curve-name) || string(ec-point)
+     */
+    private fun encodeSSHECPublicKey(publicKey: ECPublicKey): String {
+        val params = publicKey.params
+        val fieldSize = params.curve.field.fieldSize
+
+        val (keyType, curveName, coordinateSize) = when (fieldSize) {
+            256 -> Triple("ecdsa-sha2-nistp256", "nistp256", EC_COORDINATE_SIZE_P256)
+            384 -> Triple("ecdsa-sha2-nistp384", "nistp384", EC_COORDINATE_SIZE_P384)
+            521 -> Triple("ecdsa-sha2-nistp521", "nistp521", EC_COORDINATE_SIZE_P521)
+            else -> return ""
+        }
+
+        val x = padCoordinate(publicKey.w.affineX.toByteArray(), coordinateSize)
+        val y = padCoordinate(publicKey.w.affineY.toByteArray(), coordinateSize)
+
+        // EC point: 0x04 || x || y (uncompressed)
+        val ecPoint = byteArrayOf(0x04) + x + y
+
+        val blob = java.io.ByteArrayOutputStream()
+        writeSSHString(blob, keyType.toByteArray(Charsets.UTF_8))
+        writeSSHString(blob, curveName.toByteArray(Charsets.UTF_8))
+        writeSSHString(blob, ecPoint)
+
+        val base64Blob = Base64.encodeToString(blob.toByteArray(), Base64.NO_WRAP)
+        return "$keyType $base64Blob"
+    }
+
+    /**
+     * Encode an RSA public key in OpenSSH wire format.
+     *
+     * Format: "ssh-rsa {base64-encoded-blob}"
+     * Blob: string("ssh-rsa") || mpint(e) || mpint(n)
+     */
+    private fun encodeSSHRSAPublicKey(publicKey: RSAPublicKey): String {
+        val keyType = "ssh-rsa"
+
+        val blob = java.io.ByteArrayOutputStream()
+        writeSSHString(blob, keyType.toByteArray(Charsets.UTF_8))
+        writeSSHMPInt(blob, publicKey.publicExponent.toByteArray())
+        writeSSHMPInt(blob, publicKey.modulus.toByteArray())
+
+        val base64Blob = Base64.encodeToString(blob.toByteArray(), Base64.NO_WRAP)
+        return "$keyType $base64Blob"
+    }
+
+    /**
+     * Write a length-prefixed string in SSH wire format (uint32 length + data).
+     */
+    private fun writeSSHString(out: java.io.ByteArrayOutputStream, data: ByteArray) {
+        val length = data.size
+        out.write((length shr 24) and 0xFF)
+        out.write((length shr 16) and 0xFF)
+        out.write((length shr 8) and 0xFF)
+        out.write(length and 0xFF)
+        out.write(data)
+    }
+
+    /**
+     * Write an SSH mpint (multiple precision integer).
+     *
+     * MPInt format: uint32 length followed by the integer in two's complement
+     * big-endian format. If the high bit is set, a leading zero byte is prepended.
+     */
+    private fun writeSSHMPInt(out: java.io.ByteArrayOutputStream, data: ByteArray) {
+        writeSSHString(out, data)
+    }
+
+    // -------------------------------------------------------------------------
+    // Existing Private Methods
+    // -------------------------------------------------------------------------
+
+    /**
+     * Encode a public key in COSE_Key format for WebAuthn.
+     *
+     * @param publicKey The EC public key to encode.
+     * @return CBOR-encoded COSE_Key bytes.
+     * @throws KeyGenerationException if encoding fails.
+     */
+    private fun encodeCOSEPublicKey(publicKey: PublicKey): ByteArray {
+        val ecKey = publicKey as? ECPublicKey
+            ?: throw KeyGenerationException("Public key is not an EC key")
+
+        val point = ecKey.w
+        val x = padCoordinate(point.affineX.toByteArray(), EC_COORDINATE_SIZE)
+        val y = padCoordinate(point.affineY.toByteArray(), EC_COORDINATE_SIZE)
+
+        return CborEncoder.encodeCOSEEC2Key(x, y)
+    }
+
+    /**
+     * Pad or trim an EC coordinate to the required size.
+     *
+     * BigInteger.toByteArray() may return:
+     * - A leading zero byte if the high bit is set (to indicate positive)
+     * - Fewer than required bytes if the value is small
+     */
+    private fun padCoordinate(bytes: ByteArray, size: Int): ByteArray {
+        return when {
+            bytes.size == size -> bytes
+            bytes.size > size -> {
+                // Remove leading zeros (e.g., sign byte)
+                bytes.takeLast(size).toByteArray()
+            }
+            else -> {
+                // Pad with leading zeros
+                ByteArray(size - bytes.size) + bytes
+            }
+        }
+    }
+
+    /**
+     * Generate a random attestation challenge.
+     */
+    private fun generateAttestationChallenge(): ByteArray {
+        val challenge = ByteArray(ATTESTATION_CHALLENGE_SIZE)
+        java.security.SecureRandom().nextBytes(challenge)
+        return challenge
+    }
+
+    /**
+     * Build the keystore alias from a credential ID.
+     */
+    private fun buildAlias(credentialId: String): String {
+        return KEY_ALIAS_PREFIX + credentialId
+    }
+
+    companion object {
+        /** Android Keystore provider name. */
+        private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+
+        /** Prefix for all xKey credential key aliases. */
+        private const val KEY_ALIAS_PREFIX = "xkey_credential_"
+
+        /** Prefix for general-purpose key aliases. */
+        private const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
+
+        /** EncryptedSharedPreferences file for Ed25519 software-backed keys. */
+        private const val ED25519_PREFS_NAME = "xkey_ed25519_keys"
+
+        /** EC curve for FIDO2 (NIST P-256). */
+        private const val EC_CURVE = "secp256r1"
+
+        /** EC curves. */
+        private const val EC_CURVE_P256 = "secp256r1"
+        private const val EC_CURVE_P384 = "secp384r1"
+        private const val EC_CURVE_P521 = "secp521r1"
+
+        /** EC coordinate sizes in bytes. */
+        private const val EC_COORDINATE_SIZE_P256 = 32
+        private const val EC_COORDINATE_SIZE_P384 = 48
+        private const val EC_COORDINATE_SIZE_P521 = 66
+
+        /** Signature algorithms. */
+        private const val SIG_ALGORITHM_ES256 = "SHA256withECDSA"
+        private const val SIG_ALGORITHM_ES384 = "SHA384withECDSA"
+        private const val SIG_ALGORITHM_ES512 = "SHA512withECDSA"
+        private const val SIG_ALGORITHM_RS256 = "SHA256withRSA"
+        private const val SIG_ALGORITHM_RS384 = "SHA384withRSA"
+        private const val SIG_ALGORITHM_RS512 = "SHA512withRSA"
+
+        /** Signature algorithm (ECDSA with SHA-256). */
+        private const val SIGNATURE_ALGORITHM = "SHA256withECDSA"
+
+        /** EC coordinate size for P-256 in bytes. */
+        private const val EC_COORDINATE_SIZE = 32
+
+        /** Attestation challenge size in bytes. */
+        private const val ATTESTATION_CHALLENGE_SIZE = 32
+
+        /** AES-GCM IV size in bytes. */
+        private const val GCM_IV_SIZE = 12
+
+        /** AES-GCM authentication tag length in bits. */
+        private const val GCM_TAG_LENGTH_BITS = 128
+
+        /** RSA OAEP cipher transformation. */
+        private const val RSA_OAEP_TRANSFORMATION = "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
+
+        /** AES GCM cipher transformation. */
+        private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
+
+        /** PEM line length for Base64 encoding. */
+        private const val PEM_LINE_LENGTH = 64
+
+        /**
+         * Authentication timeout in seconds.
+         * After biometric auth, the key remains unlocked for this duration.
+         * This prevents double prompts when Chrome sends rapid sequential requests
+         * (e.g., conditional UI discovery + actual auth).
+         * Value of 5 seconds balances UX with security.
+         */
+        private const val AUTH_TIMEOUT_SECONDS = 5
+    }
+}

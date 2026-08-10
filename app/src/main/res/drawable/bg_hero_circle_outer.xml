@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  xKey Hero Circle Outer Ring
+  Decorative outer ring for hero section icon.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <stroke
+        android:width="2dp"
+        android:color="#40FFFFFF" />
+    <solid android:color="@android:color/transparent" />
+    <size
+        android:width="120dp"
+        android:height="120dp" />
+</shape>

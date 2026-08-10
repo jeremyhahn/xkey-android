@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?attr/colorControlNormal">
+    <!-- Key with person/passkey icon -->
+    <!-- Person silhouette (head) -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,4c1.1,0 2,0.9 2,2s-0.9,2 -2,2 -2,-0.9 -2,-2 0.9,-2 2,-2z" />
+    <!-- Person silhouette (body) -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,10c-2.67,0 -8,1.34 -8,4v2h16v-2c0,-2.66 -5.33,-4 -8,-4zM6,14c0.22,-0.72 3.31,-2 6,-2s5.78,1.28 6,2H6z" />
+    <!-- Key blade extending from bottom -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M19,17h2v3h-2v2h-2v-5h4zM17,19h-2v-2h2z" />
+</vector>

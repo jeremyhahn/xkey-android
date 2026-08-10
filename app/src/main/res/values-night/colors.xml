@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2025 Jeremy Hahn
+  Copyright (c) 2025 Automate The Things, LLC
+
+  This file is part of xKey. Dual-licensed AGPL-3.0 / Commercial.
+-->
+<resources>
+
+    <!-- Category palette, dark ground.
+
+         Same seven hues and the same construction as the light set, lifted to
+         L 0.62 start / 0.48 end. A dark surface needs the lighter band to hold
+         the same apparent weight; reusing the light values here would leave
+         every hero reading as a hole in the page. -->
+    <color name="category_identity_start">#AF51E8</color>
+    <color name="category_identity_end">#7F2EAD</color>
+    <color name="category_authority_start">#7B74E8</color>
+    <color name="category_authority_end">#5635D6</color>
+    <color name="category_transport_start">#3885E8</color>
+    <color name="category_transport_end">#235DA6</color>
+    <color name="category_attestation_start">#3B91B5</color>
+    <color name="category_attestation_end">#266680</color>
+    <color name="category_exchange_start">#3C959D</color>
+    <color name="category_exchange_end">#27686E</color>
+    <color name="category_integrity_start">#3C9884</color>
+    <color name="category_integrity_end">#276B5C</color>
+    <color name="category_lifecycle_start">#3C9D58</color>
+    <color name="category_lifecycle_end">#276E3C</color>
+
+</resources>

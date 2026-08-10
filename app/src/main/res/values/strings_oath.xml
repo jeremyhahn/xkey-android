@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2026 Jeremy Hahn
+  Copyright (c) 2026 Automate The Things, LLC
+
+  This file is part of xKey.
+
+  xKey is dual-licensed:
+
+  1. GNU Affero General Public License v3.0 (AGPL-3.0)
+     See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+
+  2. Commercial License
+     Contact licensing@automatethethings.com for commercial licensing options.
+
+  User-facing text for the OATH (TOTP/HOTP) screens that was previously
+  hardcoded in OathActivity and AddOathDialog. The rest of the OATH copy lives
+  in strings.xml under the same oath_ prefix.
+-->
+<resources>
+
+    <!-- Delete confirmation -->
+    <string name="oath_delete_title">Delete Credential</string>
+    <string name="oath_delete_prompt">Delete \"%1$s\"? This action cannot be undone.</string>
+    <string name="oath_credential_deleted">Credential deleted</string>
+
+    <!-- Import results -->
+    <string name="oath_credential_added">Credential added</string>
+    <string name="oath_error">Error: %1$s</string>
+
+    <!-- Add-credential validation -->
+    <string name="oath_account_required">Enter the account this credential belongs to</string>
+    <string name="oath_secret_required">Enter the Base32 secret key from the service</string>
+
+</resources>

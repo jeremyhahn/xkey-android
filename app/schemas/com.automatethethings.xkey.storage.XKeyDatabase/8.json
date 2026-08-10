@@ -1,0 +1,932 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 8,
+    "identityHash": "313088ece4540024ab6d2ab971166eb9",
+    "entities": [
+      {
+        "tableName": "credential_metadata",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `credential_id` TEXT NOT NULL, `rp_id` TEXT NOT NULL, `rp_name` TEXT NOT NULL, `user_id` TEXT NOT NULL, `user_name` TEXT NOT NULL, `user_display_name` TEXT NOT NULL, `public_key_cose` BLOB NOT NULL, `sign_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `is_discoverable` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "credentialId",
+            "columnName": "credential_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rpId",
+            "columnName": "rp_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rpName",
+            "columnName": "rp_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "user_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userName",
+            "columnName": "user_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userDisplayName",
+            "columnName": "user_display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publicKeyCose",
+            "columnName": "public_key_cose",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "signCount",
+            "columnName": "sign_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastUsedAt",
+            "columnName": "last_used_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isDiscoverable",
+            "columnName": "is_discoverable",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_credential_metadata_credential_id",
+            "unique": true,
+            "columnNames": [
+              "credential_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_credential_metadata_credential_id` ON `${TABLE_NAME}` (`credential_id`)"
+          },
+          {
+            "name": "index_credential_metadata_rp_id",
+            "unique": false,
+            "columnNames": [
+              "rp_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_credential_metadata_rp_id` ON `${TABLE_NAME}` (`rp_id`)"
+          },
+          {
+            "name": "index_credential_metadata_user_id_rp_id",
+            "unique": false,
+            "columnNames": [
+              "user_id",
+              "rp_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_credential_metadata_user_id_rp_id` ON `${TABLE_NAME}` (`user_id`, `rp_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "keys",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `key_id` TEXT NOT NULL, `key_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `label` TEXT NOT NULL, `public_key_der` BLOB, `public_key_cose` BLOB, `key_size_bits` INTEGER NOT NULL, `strongbox_backed` INTEGER NOT NULL, `biometric_required` INTEGER NOT NULL, `auth_duration_seconds` INTEGER NOT NULL, `exportable` INTEGER NOT NULL, `shareable` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `source` TEXT NOT NULL, `remote_backend` TEXT, `use_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `rp_id` TEXT, `rp_name` TEXT, `user_id` TEXT, `user_name` TEXT, `user_display_name` TEXT, `is_discoverable` INTEGER NOT NULL, `sign_count` INTEGER NOT NULL, `is_system_key` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "keyId",
+            "columnName": "key_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "keyType",
+            "columnName": "key_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "algorithm",
+            "columnName": "algorithm",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "label",
+            "columnName": "label",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publicKeyDer",
+            "columnName": "public_key_der",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "publicKeyCose",
+            "columnName": "public_key_cose",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "keySizeBits",
+            "columnName": "key_size_bits",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strongBoxBacked",
+            "columnName": "strongbox_backed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "biometricRequired",
+            "columnName": "biometric_required",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authDurationSeconds",
+            "columnName": "auth_duration_seconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exportable",
+            "columnName": "exportable",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "shareable",
+            "columnName": "shareable",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sharingPolicy",
+            "columnName": "sharing_policy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteBackend",
+            "columnName": "remote_backend",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "useCount",
+            "columnName": "use_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastUsedAt",
+            "columnName": "last_used_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rpId",
+            "columnName": "rp_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "rpName",
+            "columnName": "rp_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "user_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "userName",
+            "columnName": "user_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "userDisplayName",
+            "columnName": "user_display_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "isDiscoverable",
+            "columnName": "is_discoverable",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "signCount",
+            "columnName": "sign_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isSystemKey",
+            "columnName": "is_system_key",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_keys_key_id",
+            "unique": true,
+            "columnNames": [
+              "key_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_keys_key_id` ON `${TABLE_NAME}` (`key_id`)"
+          },
+          {
+            "name": "index_keys_key_type",
+            "unique": false,
+            "columnNames": [
+              "key_type"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_keys_key_type` ON `${TABLE_NAME}` (`key_type`)"
+          },
+          {
+            "name": "index_keys_algorithm",
+            "unique": false,
+            "columnNames": [
+              "algorithm"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_keys_algorithm` ON `${TABLE_NAME}` (`algorithm`)"
+          },
+          {
+            "name": "index_keys_source",
+            "unique": false,
+            "columnNames": [
+              "source"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_keys_source` ON `${TABLE_NAME}` (`source`)"
+          },
+          {
+            "name": "index_keys_rp_id",
+            "unique": false,
+            "columnNames": [
+              "rp_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_keys_rp_id` ON `${TABLE_NAME}` (`rp_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "key_sharing_policies",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key_id` TEXT NOT NULL, `peer_public_key_hex` TEXT NOT NULL, `allowed` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`key_id`, `peer_public_key_hex`), FOREIGN KEY(`key_id`) REFERENCES `keys`(`key_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "keyId",
+            "columnName": "key_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerPublicKeyHex",
+            "columnName": "peer_public_key_hex",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "allowed",
+            "columnName": "allowed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "key_id",
+            "peer_public_key_hex"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_key_sharing_policies_key_id",
+            "unique": false,
+            "columnNames": [
+              "key_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_key_sharing_policies_key_id` ON `${TABLE_NAME}` (`key_id`)"
+          },
+          {
+            "name": "index_key_sharing_policies_peer_public_key_hex",
+            "unique": false,
+            "columnNames": [
+              "peer_public_key_hex"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_key_sharing_policies_peer_public_key_hex` ON `${TABLE_NAME}` (`peer_public_key_hex`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "keys",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "key_id"
+            ],
+            "referencedColumns": [
+              "key_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "audit_logs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `timestamp` INTEGER NOT NULL, `operation_type` TEXT NOT NULL, `key_id` TEXT, `key_label` TEXT, `key_type` TEXT, `device_id` TEXT, `device_name` TEXT, `success` INTEGER NOT NULL, `error_message` TEXT, `details` TEXT, `duration_ms` INTEGER)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationType",
+            "columnName": "operation_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "keyId",
+            "columnName": "key_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "keyLabel",
+            "columnName": "key_label",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "keyType",
+            "columnName": "key_type",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "deviceId",
+            "columnName": "device_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "deviceName",
+            "columnName": "device_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "success",
+            "columnName": "success",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "errorMessage",
+            "columnName": "error_message",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "details",
+            "columnName": "details",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "duration_ms",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_audit_logs_timestamp",
+            "unique": false,
+            "columnNames": [
+              "timestamp"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_audit_logs_timestamp` ON `${TABLE_NAME}` (`timestamp`)"
+          },
+          {
+            "name": "index_audit_logs_operation_type",
+            "unique": false,
+            "columnNames": [
+              "operation_type"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_audit_logs_operation_type` ON `${TABLE_NAME}` (`operation_type`)"
+          },
+          {
+            "name": "index_audit_logs_key_id",
+            "unique": false,
+            "columnNames": [
+              "key_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_audit_logs_key_id` ON `${TABLE_NAME}` (`key_id`)"
+          },
+          {
+            "name": "index_audit_logs_key_type",
+            "unique": false,
+            "columnNames": [
+              "key_type"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_audit_logs_key_type` ON `${TABLE_NAME}` (`key_type`)"
+          },
+          {
+            "name": "index_audit_logs_device_id",
+            "unique": false,
+            "columnNames": [
+              "device_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_audit_logs_device_id` ON `${TABLE_NAME}` (`device_id`)"
+          },
+          {
+            "name": "index_audit_logs_success",
+            "unique": false,
+            "columnNames": [
+              "success"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_audit_logs_success` ON `${TABLE_NAME}` (`success`)"
+          }
+        ]
+      },
+      {
+        "tableName": "certificates",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `serial_number` TEXT NOT NULL, `subject_dn` TEXT NOT NULL, `issuer_dn` TEXT NOT NULL, `not_before` INTEGER NOT NULL, `not_after` INTEGER NOT NULL, `profile` TEXT NOT NULL, `fingerprint` TEXT NOT NULL, `certificate_pem` TEXT NOT NULL, `chain_pem` TEXT, `key_id` TEXT, `device_id` TEXT, `revoked` INTEGER NOT NULL, `revoked_at` INTEGER, `revoked_reason` INTEGER, `is_ca` INTEGER NOT NULL, `created_at` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "serialNumber",
+            "columnName": "serial_number",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "subjectDN",
+            "columnName": "subject_dn",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "issuerDN",
+            "columnName": "issuer_dn",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notBefore",
+            "columnName": "not_before",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notAfter",
+            "columnName": "not_after",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profile",
+            "columnName": "profile",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fingerprint",
+            "columnName": "fingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "certificatePEM",
+            "columnName": "certificate_pem",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chainPEM",
+            "columnName": "chain_pem",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "keyId",
+            "columnName": "key_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "deviceId",
+            "columnName": "device_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "revoked",
+            "columnName": "revoked",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revokedAt",
+            "columnName": "revoked_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "revokedReason",
+            "columnName": "revoked_reason",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isCA",
+            "columnName": "is_ca",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_certificates_serial_number",
+            "unique": true,
+            "columnNames": [
+              "serial_number"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_certificates_serial_number` ON `${TABLE_NAME}` (`serial_number`)"
+          },
+          {
+            "name": "index_certificates_profile",
+            "unique": false,
+            "columnNames": [
+              "profile"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_certificates_profile` ON `${TABLE_NAME}` (`profile`)"
+          },
+          {
+            "name": "index_certificates_key_id",
+            "unique": false,
+            "columnNames": [
+              "key_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_certificates_key_id` ON `${TABLE_NAME}` (`key_id`)"
+          },
+          {
+            "name": "index_certificates_revoked",
+            "unique": false,
+            "columnNames": [
+              "revoked"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_certificates_revoked` ON `${TABLE_NAME}` (`revoked`)"
+          },
+          {
+            "name": "index_certificates_not_after",
+            "unique": false,
+            "columnNames": [
+              "not_after"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_certificates_not_after` ON `${TABLE_NAME}` (`not_after`)"
+          },
+          {
+            "name": "index_certificates_is_ca",
+            "unique": false,
+            "columnNames": [
+              "is_ca"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_certificates_is_ca` ON `${TABLE_NAME}` (`is_ca`)"
+          },
+          {
+            "name": "index_certificates_fingerprint",
+            "unique": false,
+            "columnNames": [
+              "fingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_certificates_fingerprint` ON `${TABLE_NAME}` (`fingerprint`)"
+          }
+        ]
+      },
+      {
+        "tableName": "contacts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `public_key_der` BLOB NOT NULL, `public_key_fingerprint` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `imported_at` INTEGER NOT NULL, `source` TEXT NOT NULL, `notes` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publicKeyDer",
+            "columnName": "public_key_der",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publicKeyFingerprint",
+            "columnName": "public_key_fingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "algorithm",
+            "columnName": "algorithm",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "importedAt",
+            "columnName": "imported_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_contacts_public_key_fingerprint",
+            "unique": true,
+            "columnNames": [
+              "public_key_fingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_contacts_public_key_fingerprint` ON `${TABLE_NAME}` (`public_key_fingerprint`)"
+          },
+          {
+            "name": "index_contacts_name",
+            "unique": false,
+            "columnNames": [
+              "name"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_contacts_name` ON `${TABLE_NAME}` (`name`)"
+          },
+          {
+            "name": "index_contacts_algorithm",
+            "unique": false,
+            "columnNames": [
+              "algorithm"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_contacts_algorithm` ON `${TABLE_NAME}` (`algorithm`)"
+          }
+        ]
+      },
+      {
+        "tableName": "oath_credentials",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `oath_id` TEXT NOT NULL, `oath_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `digits` INTEGER NOT NULL, `period_seconds` INTEGER NOT NULL, `counter` INTEGER NOT NULL, `issuer` TEXT, `account_name` TEXT NOT NULL, `secret_encrypted` BLOB NOT NULL, `source` TEXT NOT NULL, `remote_device_id` TEXT, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER, `use_count` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "oathId",
+            "columnName": "oath_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "oathType",
+            "columnName": "oath_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "algorithm",
+            "columnName": "algorithm",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "digits",
+            "columnName": "digits",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "periodSeconds",
+            "columnName": "period_seconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "counter",
+            "columnName": "counter",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "issuer",
+            "columnName": "issuer",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "accountName",
+            "columnName": "account_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "secretEncrypted",
+            "columnName": "secret_encrypted",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteDeviceId",
+            "columnName": "remote_device_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastUsedAt",
+            "columnName": "last_used_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "useCount",
+            "columnName": "use_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_oath_credentials_oath_id",
+            "unique": true,
+            "columnNames": [
+              "oath_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_oath_credentials_oath_id` ON `${TABLE_NAME}` (`oath_id`)"
+          },
+          {
+            "name": "index_oath_credentials_issuer",
+            "unique": false,
+            "columnNames": [
+              "issuer"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_oath_credentials_issuer` ON `${TABLE_NAME}` (`issuer`)"
+          },
+          {
+            "name": "index_oath_credentials_source",
+            "unique": false,
+            "columnNames": [
+              "source"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_oath_credentials_source` ON `${TABLE_NAME}` (`source`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '313088ece4540024ab6d2ab971166eb9')"
+    ]
+  }
+}

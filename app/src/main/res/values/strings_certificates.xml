@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ~ Copyright (c) 2026 Jeremy Hahn
+  ~ Copyright (c) 2026 Automate The Things, LLC
+  ~
+  ~ This file is part of xKey.
+  ~
+  ~ xKey is dual-licensed:
+  ~
+  ~ 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+  ~    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+  ~
+  ~ 2. Commercial License
+  ~    Contact licensing@automatethethings.com for commercial licensing options.
+  -->
+<resources>
+
+    <!-- =====================================================================
+         Certificate management
+         ===================================================================== -->
+
+    <!--
+      The label of the context-menu entry that exports a PEM. A control says
+      what it will do; the confirmation that it happened is cert_export_copied.
+    -->
+    <string name="cert_export_action">Export PEM</string>
+
+    <!-- Confirmation shown after a certificate record has been deleted. -->
+    <string name="cert_delete_success">Certificate deleted</string>
+
+    <!-- Shown when issuance is attempted before the local CA exists. -->
+    <string name="cert_ca_not_initialized_title">CA Not Initialized</string>
+    <string name="cert_ca_not_initialized_message">The local Certificate Authority has not been initialized. Please initialize it in Settings first.</string>
+
+    <!-- =====================================================================
+         Certificate detail
+         ===================================================================== -->
+
+    <string name="cert_detail_status_label">Status</string>
+    <string name="cert_detail_verification">Verification</string>
+    <string name="cert_detail_chain_length">Chain Length</string>
+    <!-- Number of certificates making up a stored chain. -->
+    <string name="cert_detail_chain_length_value">%1$d certificate(s)</string>
+    <string name="cert_detail_revoked_label">Revoked</string>
+    <string name="cert_detail_revoked_at">Revoked At</string>
+    <!-- Affirmative value of a yes/no detail row. -->
+    <string name="cert_detail_value_yes">Yes</string>
+    <!-- Basic-constraints path length when the CA imposes no limit. -->
+    <string name="cert_detail_path_length_unlimited">Unlimited</string>
+
+    <!-- =====================================================================
+         Trust store: import options
+         ===================================================================== -->
+
+    <string name="trust_store_import_bootstrap_title">Bootstrap from Server</string>
+    <string name="trust_store_import_bootstrap_subtitle">Enter server URL and method</string>
+    <string name="trust_store_import_url_title">Import from URL</string>
+    <string name="trust_store_import_url_subtitle">Fetch CA bundle from HTTPS endpoint</string>
+    <string name="trust_store_import_file_title">Import from File</string>
+    <string name="trust_store_import_file_subtitle">PEM or DER certificate files</string>
+
+    <!-- Bootstrap dialog validation. -->
+    <string name="trust_store_url_required">Please enter a server URL</string>
+
+    <!-- The picked file held nothing that parses as an X.509 certificate. -->
+    <string name="trust_store_no_certificates_in_file">No valid certificates found in file</string>
+
+    <!-- =====================================================================
+         Trust store: import outcomes
+         ===================================================================== -->
+
+    <!--
+      Every certificate offered was refused. This is distinct from
+      trust_store_import_all_exist: nothing was stored and the user has to act.
+    -->
+    <string name="trust_store_import_rejected">Rejected %1$d untrusted certificate(s): self-signed certificates are never accepted</string>
+
+    <!-- Part of the bundle was stored and part of it was refused. -->
+    <string name="trust_store_import_partial_rejected">Imported %1$d certificate(s), rejected %2$d as untrusted</string>
+
+    <!-- =====================================================================
+         Trust store: certificate detail sheet
+         ===================================================================== -->
+
+    <string name="trust_store_copy_fingerprint">Copy fingerprint</string>
+
+    <string name="trust_store_status_valid">VALID</string>
+    <string name="trust_store_status_expiring">EXPIRING SOON</string>
+    <string name="trust_store_status_expired">EXPIRED</string>
+
+    <!-- Caption under the trusted-certificate count on the summary card. -->
+    <plurals name="trust_store_total_certificates">
+        <item quantity="one">Trusted Certificate</item>
+        <item quantity="other">Trusted Certificates</item>
+    </plurals>
+
+</resources>

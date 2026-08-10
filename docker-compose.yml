@@ -1,0 +1,85 @@
+services:
+  # Build debug APK
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: root
+    volumes:
+      # Cache Gradle dependencies between builds
+      - gradle-cache:/root/.gradle
+      # Output build directory to host
+      - ./app/build:/app/app/build
+    environment:
+      - GRADLE_USER_HOME=/root/.gradle
+    command: ./gradlew assembleDebug --no-daemon
+
+  # Build release APK
+  build-release:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: root
+    volumes:
+      - gradle-cache:/root/.gradle
+      - ./app/build:/app/app/build
+    environment:
+      - GRADLE_USER_HOME=/root/.gradle
+    command: ./gradlew assembleRelease --no-daemon
+
+  # Run unit tests
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: root
+    volumes:
+      - gradle-cache:/root/.gradle
+      - ./app/build:/app/app/build
+    environment:
+      - GRADLE_USER_HOME=/root/.gradle
+    command: ./gradlew test --no-daemon
+
+  # Run lint checks
+  lint:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: root
+    volumes:
+      - gradle-cache:/root/.gradle
+      - ./app/build:/app/app/build
+    environment:
+      - GRADLE_USER_HOME=/root/.gradle
+    command: ./gradlew lint --no-daemon
+
+  # Clean build artifacts
+  clean:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: root
+    volumes:
+      - gradle-cache:/root/.gradle
+      - ./app/build:/app/app/build
+    environment:
+      - GRADLE_USER_HOME=/root/.gradle
+    command: ./gradlew clean --no-daemon
+
+  # Interactive shell for debugging
+  shell:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: root
+    volumes:
+      - gradle-cache:/root/.gradle
+      - ./app/build:/app/app/build
+    environment:
+      - GRADLE_USER_HOME=/root/.gradle
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+
+volumes:
+  gradle-cache:

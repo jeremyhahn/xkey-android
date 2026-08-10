@@ -1,0 +1,36 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+
+# Local configuration
+local.properties
+keystore.properties
+
+# Signing
+*.jks
+*.keystore
+!debug.keystore
+
+# Logs
+*.log
+
+# Generated
+*.apk
+*.ap_
+*.aab
+
+# OS
+.DS_Store
+Thumbs.db
+go.work
+go.work.sum

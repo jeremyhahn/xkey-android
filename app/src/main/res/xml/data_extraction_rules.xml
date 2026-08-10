@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Data extraction rules for Android 12+ (API 31+).
+   Passkey stores cryptographic keys in hardware-backed keystore,
+   so cloud backup is disabled for security.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Do not backup any data to cloud -->
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <!-- Do not transfer any data during device-to-device migration -->
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

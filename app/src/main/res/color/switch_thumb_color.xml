@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Switch Thumb Color Selector
+  Copyright (c) 2025 xKey. All rights reserved.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="#FFFFFF" android:state_checked="true"/>
+    <item android:color="#E0E0E0"/>
+</selector>

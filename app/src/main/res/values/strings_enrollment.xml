@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2025 Jeremy Hahn
+  Copyright (c) 2025 Automate The Things, LLC
+
+  This file is part of xKey. Dual-licensed AGPL-3.0 / Commercial.
+-->
+<resources>
+
+    <!-- Which authority signs device identity (IDevID) certificates. -->
+    <string name="settings_ca_source_title">Certificate Authority</string>
+    <string name="settings_ca_source_xkms">xKMS enterprise CA</string>
+    <string name="settings_ca_source_xkms_desc">Your xKMS server signs. Use this where an enterprise authority already exists.</string>
+    <string name="settings_ca_source_this_device">This device</string>
+    <string name="settings_ca_source_this_device_desc">xKey signs with its own hardware-backed CA. Use this without an xKMS server.</string>
+    <string name="settings_ca_source_none">No certificate authority</string>
+    <string name="settings_ca_source_none_desc">Devices pair but carry no issued identity.</string>
+    <string name="settings_xkms_endpoint_hint">xKMS server address</string>
+
+</resources>

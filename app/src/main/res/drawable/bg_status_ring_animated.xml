@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  xKey Animated Status Ring
+  Premium ring indicator for connection status.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <stroke
+        android:width="3dp"
+        android:color="@color/primary_60" />
+    <solid android:color="@android:color/transparent" />
+    <size
+        android:width="72dp"
+        android:height="72dp" />
+</shape>
