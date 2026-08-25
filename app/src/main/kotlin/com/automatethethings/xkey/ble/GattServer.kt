@@ -39,6 +39,7 @@ import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.PairingConfirmParams
 import com.automatethethings.xkey.protocol.PairingConfirmResult
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
+import com.automatethethings.xkey.protocol.SessionBinding
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.CertificateAuthoritySource
 import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
@@ -758,6 +759,7 @@ class GattServer(
 
         // Clear connected device public key from request handler
         requestHandler.setConnectedDevicePublicKeyHex(null)
+        requestHandler.setSessionBindingProvider(null)
 
         connectedDevice = null
         noiseSession = null
@@ -899,6 +901,21 @@ class GattServer(
     }
 
     /**
+     * The static keys and prologue `local.attestDevice` binds its attestation to
+     * (go-xkms#129 §5).
+     *
+     * This end is always the Noise **responder** over GATT — the desktop opens
+     * the handshake — so the peer's static key is the initiator's. Null before
+     * the handshake authenticates a peer, which the handler treats as "cannot
+     * bind" and refuses rather than attesting to no channel.
+     */
+    private fun sessionBinding(session: NoiseSession): SessionBinding? {
+        val initiator = session.getRemoteStaticKey() ?: return null
+        val responder = session.getStaticPublicKey() ?: return null
+        return SessionBinding(initiator, responder, session.getPrologue())
+    }
+
+    /**
      * Converts a hex string to byte array.
      */
     private fun String.hexStringToByteArray(): ByteArray {
@@ -929,6 +946,7 @@ class GattServer(
             if (session.isHandshakeComplete()) {
                 val deviceName = device.name ?: "Unknown"
                 authenticatedPeerKeyHex = session.getRemoteStaticKey()?.toHexString()
+                requestHandler.setSessionBindingProvider { sessionBinding(session) }
                 _connectionState.value = ConnectionState.Connected(deviceName, device.address)
                 Log.i(TAG, "Noise handshake complete with ${device.address}")
 

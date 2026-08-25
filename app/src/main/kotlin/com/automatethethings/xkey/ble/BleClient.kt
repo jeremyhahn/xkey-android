@@ -1203,6 +1203,17 @@ class NoiseInitiatorSession(
 
     fun getLocalStaticPublicKey(): ByteArray = localStaticPublicKey
 
+    /**
+     * The prologue this session ran its handshake under — 32 bytes once the
+     * identity ack bound a known device's fingerprint, empty on a first pairing.
+     *
+     * An initiator needs its own view of this to derive the device-attestation
+     * channel binding (go-xkms#129 §5), which commits to the prologue so a first
+     * pairing and a reconnect can never produce the same value. Returns a copy:
+     * the prologue is part of a completed handshake's transcript.
+     */
+    fun getPrologue(): ByteArray = prologue.copyOf()
+
     // --- Private crypto helpers ---
 
     private fun initializeHandshakeState() {

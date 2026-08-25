@@ -149,6 +149,12 @@ class RequestHandlerBiometricGateTest {
     fun resetHandlerState() {
         handler.setActivity(null)
         handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        // local.attestDevice binds its signature to the live Noise session and
+        // refuses without one, so every path through the biometric gate needs a
+        // session present before the gate is what fails.
+        handler.setSessionBindingProvider {
+            SessionBinding(ByteArray(32) { 0x11 }, ByteArray(32) { 0x22 }, ByteArray(0))
+        }
         pairedDevices.updateDeviceSettings(
             publicKeyHex = peerKeyHex,
             requireAttestationForKeyUse = false,
@@ -187,7 +193,7 @@ class RequestHandlerBiometricGateTest {
     fun attestDeviceUnderTheAlwaysPolicyRefusesWhenItCannotPrompt() {
         requireBiometricFor(AttestationBiometricPolicy.ALWAYS)
 
-        val response = call("local.attestDevice", JSONObject().put("nonce", b64(randomNonce())))
+        val response = call("local.attestDevice", attestDeviceParams())
 
         assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
         assertTrue(response.errorMessage().contains("biometric prompt"))
@@ -241,7 +247,7 @@ class RequestHandlerBiometricGateTest {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
         handler.setConnectedDevicePublicKeyHex(peerKeyHex)
 
-        val result = call("local.attestDevice", JSONObject().put("nonce", b64(randomNonce()))).ok()
+        val result = call("local.attestDevice", attestDeviceParams()).ok()
 
         assertEquals("android-keystore", result.getString("format"))
     }
@@ -270,7 +276,7 @@ class RequestHandlerBiometricGateTest {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
         handler.setConnectedDevicePublicKeyHex(UNKNOWN_PEER_HEX)
 
-        val response = call("local.attestDevice", JSONObject().put("nonce", b64(randomNonce())))
+        val response = call("local.attestDevice", attestDeviceParams())
 
         assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
         assertTrue(response.errorMessage().contains("biometric prompt"))
@@ -300,7 +306,7 @@ class RequestHandlerBiometricGateTest {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
         handler.setConnectedDevicePublicKeyHex(null)
 
-        val response = call("local.attestDevice", JSONObject().put("nonce", b64(randomNonce())))
+        val response = call("local.attestDevice", attestDeviceParams())
 
         assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
         assertTrue(response.errorMessage().contains("biometric prompt"))
@@ -447,7 +453,7 @@ class RequestHandlerBiometricGateTest {
         requireBiometricFor(AttestationBiometricPolicy.ALWAYS)
 
         withActivityAttached {
-            val response = call("local.attestDevice", JSONObject().put("nonce", b64(randomNonce())))
+            val response = call("local.attestDevice", attestDeviceParams())
 
             assertTrue(response.isError())
             assertTrue(!response.errorMessage().contains("No activity"))
@@ -603,6 +609,12 @@ class RequestHandlerBiometricGateTest {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
         return runBlocking { handler.handleRequest(request) }
     }
+
+    /** A protocol version 2 `local.attestDevice` request (go-xkms#129). */
+    private fun attestDeviceParams(): JSONObject = JSONObject()
+        .put("protocolVersion", AttestTranscript.PROTOCOL_VERSION)
+        .put("nonce", b64(randomNonce()))
+        .put("purpose", AttestTranscript.PURPOSE_REATTEST)
 
     private fun randomNonce(): ByteArray =
         ByteArray(32).also { SecureRandom().nextBytes(it) }

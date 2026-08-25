@@ -154,6 +154,18 @@ class NoiseSession {
     }
 
     /**
+     * The prologue this session ran its handshake under — empty when none was
+     * set.
+     *
+     * Needed by the device-attestation channel binding (go-xkms#129 §5), which
+     * commits to the prologue so that a first pairing and a reconnect can never
+     * derive the same binding. Returns a copy: the prologue is part of a
+     * completed handshake's transcript and a caller must not be able to edit it
+     * out from under the session.
+     */
+    fun getPrologue(): ByteArray = prologue.copyOf()
+
+    /**
      * Loads the static key from encrypted storage.
      */
     suspend fun loadStaticKey(context: Context) {

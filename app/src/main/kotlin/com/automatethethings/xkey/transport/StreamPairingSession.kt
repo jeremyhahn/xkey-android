@@ -23,6 +23,7 @@ import com.automatethethings.xkey.protocol.PairingConfirmParams
 import com.automatethethings.xkey.protocol.PairingConfirmResult
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
+import com.automatethethings.xkey.protocol.SessionBinding
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -112,6 +113,7 @@ class StreamPairingSession(
             activeOutput = output
             activeSession = noiseSession
             authenticatedPeerKeyHex = noiseSession.getRemoteStaticKey()?.toHex()
+            requestHandler.setSessionBindingProvider { sessionBinding(noiseSession) }
 
             // A device the user already approved does not have to re-confirm on
             // every reconnect: the Noise handshake cryptographically proves it
@@ -130,7 +132,23 @@ class StreamPairingSession(
             pairingConfirmed = false
             messageRouter?.cancelAllPending()
             requestHandler.setConnectedDevicePublicKeyHex(null)
+            requestHandler.setSessionBindingProvider(null)
         }
+    }
+
+    /**
+     * The static keys and prologue `local.attestDevice` binds its attestation to
+     * (go-xkms#129 §5).
+     *
+     * This end is always the Noise **responder** on this transport — the desktop
+     * opens the handshake — so the peer's static key is the initiator's. Null
+     * before the handshake authenticates a peer, which the handler treats as
+     * "cannot bind" and refuses rather than attesting to no channel.
+     */
+    private fun sessionBinding(session: NoiseSession): SessionBinding? {
+        val initiator = session.getRemoteStaticKey() ?: return null
+        val responder = session.getStaticPublicKey() ?: return null
+        return SessionBinding(initiator, responder, session.getPrologue())
     }
 
     private suspend fun performHandshake(input: InputStream, output: OutputStream, session: NoiseSession) {
@@ -167,6 +185,8 @@ class StreamPairingSession(
         val publicKey = first.copyOfRange(1, first.size)
         val publicKeyHex = publicKey.toHex()
         val paired = pairedDeviceRepository?.getDevice(publicKeyHex)
+        // The phone's OWN attested-key SPKI fingerprint, captured at pairing
+        // (#93). The desktop byte-compares it and mixes it into the prologue.
         val fingerprint = paired?.deviceFingerprint
 
         if (paired != null && fingerprint != null && fingerprint.length == FINGERPRINT_SIZE * 2) {

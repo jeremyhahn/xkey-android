@@ -31,6 +31,8 @@ import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.BeforeClass
@@ -63,8 +65,12 @@ import java.util.concurrent.atomic.AtomicLong
  * vs unlocked) are properties of the device the suite runs on and are checked
  * for validity, not for a particular answer.
  *
- * Both handlers clean up their own ephemeral keystore entries, so this suite
- * leaves nothing behind; [tearDown] only sweeps the paired-peer row it adds.
+ * `local.attestKey` cleans up its own ephemeral keystore entry. `local.attestDevice`
+ * does not, and must not: since go-xkms#129 it answers with this install's
+ * **persistent** Device Attestation Key, whose whole purpose is to outlive the
+ * exchange. Reusing it across runs is the behaviour under test in
+ * [attestDeviceKeepsTheSameAttestedKeyAcrossChallenges], so [tearDown] sweeps
+ * only the paired-peer row this suite adds.
  */
 @RunWith(AndroidJUnit4::class)
 class RequestHandlerAttestationTest {
@@ -87,6 +93,22 @@ class RequestHandlerAttestationTest {
 
         /** The security levels the Keystore attestation extension can report. */
         private val securityLevels = setOf("software", "tee", "strongbox")
+
+        /**
+         * A stand-in for the live Noise session. The real transports supply the
+         * peer's and this device's static keys and the handshake prologue; the
+         * values only have to be well-formed and stable, because what is under
+         * test is that the handler binds to *its own* session rather than to
+         * anything the request carries.
+         */
+        private val initiatorStatic = ByteArray(32) { (0xa0 + it).toByte() }
+        private val responderStatic = ByteArray(32) { (0x50 + it).toByte() }
+        private val sessionPrologue = ByteArray(32) { (0x10 + it).toByte() }
+
+        /** What the handler must derive, computed independently of the handler. */
+        private val sessionChannelBinding: ByteArray by lazy {
+            AttestTranscript.channelBinding(initiatorStatic, responderStatic, sessionPrologue)
+        }
 
         @JvmStatic
         @BeforeClass
@@ -117,6 +139,9 @@ class RequestHandlerAttestationTest {
     @Before
     fun resetHandlerState() {
         handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        handler.setSessionBindingProvider {
+            SessionBinding(initiatorStatic, responderStatic, sessionPrologue)
+        }
         pairedDevices.updateDeviceSettings(
             publicKeyHex = peerKeyHex,
             requireAttestationForKeyUse = false,
@@ -234,13 +259,13 @@ class RequestHandlerAttestationTest {
     fun attestDeviceReportsTheAndroidKeystoreRootOfTrust() {
         val nonce = randomNonce()
 
-        val result = call(
-            "local.attestDevice",
-            JSONObject().put("nonce", b64(nonce))
-        ).ok()
+        val result = attestDevice(nonce, AttestTranscript.PURPOSE_PAIR).ok()
 
+        assertEquals(2, result.getInt("protocolVersion"))
         assertEquals("android-keystore", result.getString("format"))
         assertEquals(b64(nonce), result.getString("nonce"))
+        assertEquals(AttestTranscript.PURPOSE_PAIR, result.getString("purpose"))
+        assertEquals("ES256", result.getString("signatureAlgorithm"))
         assertTrue(
             "securityLevel must be one of $securityLevels, got ${result.getString("securityLevel")}",
             securityLevels.contains(result.getString("securityLevel"))
@@ -265,46 +290,183 @@ class RequestHandlerAttestationTest {
         Base64.getDecoder().decode(result.getString("verifiedBootHash"))
     }
 
+    /**
+     * The leaf carries the Device Attestation Key's **genesis** challenge, never
+     * the live nonce.
+     *
+     * This is the inversion of the version 1 contract, and the whole reason the
+     * owner changed the model: Keystore seals the attestation challenge at key
+     * generation, so a leaf that embedded the pairing nonce could only ever
+     * belong to a key minted for that pairing. The desktop verifier leaves its
+     * `ExpectedNonce` unset for exactly this reason and checks the genesis prefix
+     * instead.
+     */
     @Test
-    fun attestDeviceBindsTheChallengeToTheLeafCertificate() {
+    fun attestDeviceLeafCarriesTheGenesisChallengeAndNotTheNonce() {
         val nonce = randomNonce()
 
-        val result = call(
-            "local.attestDevice",
-            JSONObject().put("nonce", b64(nonce))
-        ).ok()
+        val leaf = attestDevice(nonce, AttestTranscript.PURPOSE_PAIR).leaf()
 
-        val leaf = certificates(result.getJSONArray("certificateChain")).first()
         val extension = leaf.getExtensionValue(ATTESTATION_EXTENSION_OID)
         if (extension != null) {
             assertTrue(
-                "the attestation extension must embed the challenge the peer sent",
+                "the leaf must embed the genesis challenge",
+                containsSubsequence(extension, AttestTranscript.GENESIS_CHALLENGE)
+            )
+            assertFalse(
+                "the leaf must NOT embed the live nonce; that model is dead",
                 containsSubsequence(extension, nonce)
             )
         }
     }
 
     /**
-     * Two device attestations must not be interchangeable, whatever the device
-     * reports about itself.
+     * Identity is stable. Two challenges must return the *same* attested key —
+     * this is what makes the SPKI usable as a device fingerprint at all, and it
+     * is precisely what version 1 could not do.
      */
     @Test
-    fun attestDeviceIsFreshForEveryChallenge() {
-        val first = attestDeviceLeaf(randomNonce())
-        val second = attestDeviceLeaf(randomNonce())
+    fun attestDeviceKeepsTheSameAttestedKeyAcrossChallenges() {
+        val first = attestDevice(randomNonce(), AttestTranscript.PURPOSE_PAIR).leaf()
+        val second = attestDevice(randomNonce(), AttestTranscript.PURPOSE_REATTEST).leaf()
+
+        assertEquals(
+            "the device attestation key must persist across exchanges",
+            AttestedKeyFingerprint.hexOf(first.encoded),
+            AttestedKeyFingerprint.hexOf(second.encoded)
+        )
+    }
+
+    /**
+     * Freshness moved from the certificate to the signature, so that is where
+     * two exchanges must differ. Without this, a stable key would make every
+     * attestation replayable.
+     */
+    @Test
+    fun attestDeviceSignsEveryChallengeDifferently() {
+        val first = attestDevice(randomNonce(), AttestTranscript.PURPOSE_REATTEST).ok()
+        val second = attestDevice(randomNonce(), AttestTranscript.PURPOSE_REATTEST).ok()
 
         assertNotEquals(
-            Base64.getEncoder().encodeToString(first.encoded),
-            Base64.getEncoder().encodeToString(second.encoded)
+            "a fresh nonce must produce a fresh signature",
+            first.getString("signature"),
+            second.getString("signature")
+        )
+    }
+
+    /**
+     * The core prover check: this replays the desktop verifier's final step
+     * (go-xkms#129 §6.7) against a real hardware-backed key — rebuild the
+     * transcript from what *the verifier asked for* plus the fingerprint the
+     * verifier derives, and check the signature under the leaf's public key.
+     */
+    @Test
+    fun attestDeviceSignatureVerifiesOverTheTranscriptTheVerifierRebuilds() {
+        val nonce = randomNonce()
+
+        val result = attestDevice(nonce, AttestTranscript.PURPOSE_REATTEST).ok()
+        val leaf = certificates(result.getJSONArray("certificateChain")).first()
+
+        assertTrue(
+            "the signature must verify over the rebuilt transcript",
+            verifyTranscript(leaf, result, nonce, AttestTranscript.PURPOSE_REATTEST, sessionChannelBinding)
+        )
+    }
+
+    /**
+     * A signature gathered while pairing must not satisfy a reconnect. The
+     * purpose is inside the signed bytes, so swapping it has to break
+     * verification — otherwise an attacker who watched a pairing could answer a
+     * reconnect challenge with it.
+     */
+    @Test
+    fun attestDeviceSignatureIsBoundToItsPurpose() {
+        val nonce = randomNonce()
+
+        val result = attestDevice(nonce, AttestTranscript.PURPOSE_PAIR).ok()
+        val leaf = certificates(result.getJSONArray("certificateChain")).first()
+
+        assertTrue(
+            verifyTranscript(leaf, result, nonce, AttestTranscript.PURPOSE_PAIR, sessionChannelBinding)
+        )
+        assertFalse(
+            "a 'pair' signature must not verify as a 'reattest'",
+            verifyTranscript(leaf, result, nonce, AttestTranscript.PURPOSE_REATTEST, sessionChannelBinding)
+        )
+    }
+
+    // An `attestDeviceDoesNotSignTheChannelBindingThePeerSent` test stood here
+    // until the go-xkms#129 addendum removed `channelBinding` from the request.
+    // It sent a relayed binding and asserted the signature did not verify under
+    // it. With no such field there is nothing to relay and nothing to echo, so
+    // the behaviour it guarded is now unreachable rather than merely forbidden
+    // — a regression path that cannot be expressed needs no test. Deleted
+    // rather than adapted, on purpose: the alternative is a test that pretends
+    // to check a property the wire no longer permits anyone to violate.
+    //
+    // What still protects the derivation: the pinned vectors and the role-swap
+    // assertion in AttestTranscriptTest, and
+    // attestDeviceSignatureVerifiesOverTheTranscriptTheVerifierRebuilds below,
+    // which catches a WRONG derivation because the expected binding is computed
+    // here independently of the handler.
+
+    /**
+     * With no session there is no channel to bind to, and a transcript that
+     * commits to no channel is one the desktop can only reject. Refusing says
+     * why, instead of returning a well-formed signature that fails verification
+     * for reasons neither side can see.
+     */
+    @Test
+    fun attestDeviceRefusesWhenThereIsNoSessionToBindTo() {
+        handler.setSessionBindingProvider(null)
+
+        assertEquals(
+            ErrorCodes.ATTESTATION_FAILED,
+            attestDevice(randomNonce(), AttestTranscript.PURPOSE_PAIR).errorCode()
+        )
+    }
+
+    /** Version 1 is gone, and asking for it must not quietly get it. */
+    @Test
+    fun attestDeviceRefusesAVersion1Request() {
+        val params = JSONObject()
+            .put("protocolVersion", 1)
+            .put("nonce", b64(randomNonce()))
+            .put("purpose", AttestTranscript.PURPOSE_PAIR)
+
+        assertEquals(
+            ErrorCodes.ATTEST_PROTOCOL_DOWNGRADE,
+            call("local.attestDevice", params).errorCode()
         )
     }
 
     @Test
-    fun attestDeviceRequiresANonce() {
-        assertEquals(ErrorCodes.INVALID_PARAMS, call("local.attestDevice").errorCode())
+    fun attestDeviceRequiresItsParameters() {
         assertEquals(
+            "a request with no params at all is malformed, not a downgrade",
             ErrorCodes.INVALID_PARAMS,
+            call("local.attestDevice").errorCode()
+        )
+        assertEquals(
+            "params that name no version are a version 1 caller",
+            ErrorCodes.ATTEST_PROTOCOL_DOWNGRADE,
             call("local.attestDevice", JSONObject()).errorCode()
+        )
+        assertEquals(
+            "a version 2 request still needs a purpose",
+            ErrorCodes.INVALID_PARAMS,
+            call(
+                "local.attestDevice",
+                JSONObject().put("protocolVersion", 2).put("nonce", b64(randomNonce()))
+            ).errorCode()
+        )
+        assertEquals(
+            "a version 2 request still needs a nonce",
+            ErrorCodes.INVALID_PARAMS,
+            call(
+                "local.attestDevice",
+                JSONObject().put("protocolVersion", 2).put("purpose", AttestTranscript.PURPOSE_PAIR)
+            ).errorCode()
         )
     }
 
@@ -324,15 +486,84 @@ class RequestHandlerAttestationTest {
             attestationGracePeriodMinutes = 60
         )
 
-        val response = call(
-            "local.attestDevice",
-            JSONObject().put("nonce", b64(randomNonce()))
-        )
+        val response = attestDevice(randomNonce(), AttestTranscript.PURPOSE_PAIR)
 
         assertTrue(
             "attestDevice must stay reachable for a peer that has never attested: " +
                 response.toJsonString(),
             response.isSuccess()
+        )
+    }
+
+    /**
+     * The reconnect capture: at `xkey device pair` the phone must record
+     * SHA-256 of its own attested leaf's SubjectPublicKeyInfo — the exact value
+     * the desktop stores and byte-compares on reconnect, and the value the
+     * identity ack echoes to rebuild the Noise prologue.
+     */
+    @Test
+    fun attestDeviceBindsTheAttestedKeyFingerprintWhenPairing() {
+        // Start from a clean binding so the assertion is about THIS attestation.
+        pairedDevices.removeDevice(peerKeyHex)
+        pairedDevices.addDevice(peerKeyHex, peerName)
+        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        assertNull(
+            "precondition: a freshly paired device carries no fingerprint yet",
+            pairedDevices.getDevice(peerKeyHex)?.deviceFingerprint
+        )
+
+        val leaf = attestDevice(randomNonce(), AttestTranscript.PURPOSE_PAIR).leaf()
+
+        val stored = pairedDevices.getDevice(peerKeyHex)?.deviceFingerprint
+        assertNotNull("attesting a known, connected peer must bind a fingerprint", stored)
+        assertEquals(
+            "the bound value must be SHA-256 of the attested leaf SPKI",
+            AttestedKeyFingerprint.hexOf(leaf.encoded),
+            stored
+        )
+    }
+
+    /**
+     * A reconnect never rewrites the stored fingerprint.
+     *
+     * On `reattest` the desktop is checking that the attested key is still the
+     * one it recorded. Rebinding here would be a silent rebind to whatever key
+     * answered — exactly the case `ErrDeviceIdentityChanged` exists to fail
+     * closed on. A rotated key is meant to cost a re-pair.
+     */
+    @Test
+    fun attestDeviceDoesNotRebindTheFingerprintOnReattest() {
+        pairedDevices.removeDevice(peerKeyHex)
+        pairedDevices.addDevice(peerKeyHex, peerName)
+        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        val stale = "ff".repeat(32)
+        pairedDevices.updateDeviceFingerprint(peerKeyHex, stale)
+
+        attestDevice(randomNonce(), AttestTranscript.PURPOSE_REATTEST).ok()
+
+        assertEquals(
+            "a reattest must leave the recorded identity alone",
+            stale,
+            pairedDevices.getDevice(peerKeyHex)?.deviceFingerprint
+        )
+    }
+
+    /**
+     * The binding is only written for the peer the handshake authenticated: an
+     * attestation with no connected peer identity must not guess which record
+     * to touch.
+     */
+    @Test
+    fun attestDeviceWithoutAConnectedPeerBindsNothing() {
+        pairedDevices.removeDevice(peerKeyHex)
+        pairedDevices.addDevice(peerKeyHex, peerName)
+        handler.setConnectedDevicePublicKeyHex(null)
+
+        attestDevice(randomNonce(), AttestTranscript.PURPOSE_PAIR).ok()
+
+        assertNull(
+            "no connected peer means no fingerprint may be bound",
+            pairedDevices.getDevice(peerKeyHex)?.deviceFingerprint
         )
     }
 
@@ -348,12 +579,49 @@ class RequestHandlerAttestationTest {
         return certificates(result.getJSONArray("certificateChain")).first()
     }
 
-    private fun attestDeviceLeaf(nonce: ByteArray): X509Certificate {
-        val result = call(
-            "local.attestDevice",
-            JSONObject().put("nonce", b64(nonce))
-        ).ok()
-        return certificates(result.getJSONArray("certificateChain")).first()
+    /**
+     * Sends a protocol version 2 `local.attestDevice` request.
+     *
+     * Three fields, and no channel binding: the phone derives that from its own
+     * session and the request has no way to suggest one.
+     */
+    private fun attestDevice(
+        nonce: ByteArray,
+        purpose: String,
+    ): Response = call(
+        "local.attestDevice",
+        JSONObject()
+            .put("protocolVersion", AttestTranscript.PROTOCOL_VERSION)
+            .put("nonce", b64(nonce))
+            .put("purpose", purpose)
+    )
+
+    private fun Response.leaf(): X509Certificate =
+        certificates(ok().getJSONArray("certificateChain")).first()
+
+    /**
+     * Verifies the response's signature the way the desktop does: rebuild the
+     * transcript from the values the verifier holds, then check it under the
+     * leaf's public key.
+     */
+    private fun verifyTranscript(
+        leaf: X509Certificate,
+        result: JSONObject,
+        nonce: ByteArray,
+        purpose: String,
+        channelBinding: ByteArray,
+    ): Boolean {
+        val transcript = AttestTranscript.build(
+            purpose = purpose,
+            nonce = nonce,
+            channelBinding = channelBinding,
+            deviceFingerprint = AttestedKeyFingerprint.of(leaf.encoded)
+        )
+        return java.security.Signature.getInstance("SHA256withECDSA").run {
+            initVerify(leaf.publicKey)
+            update(transcript)
+            verify(Base64.getDecoder().decode(result.getString("signature")))
+        }
     }
 
     /** Decodes the wire chain, which is what the go-xkms verifier has to do. */

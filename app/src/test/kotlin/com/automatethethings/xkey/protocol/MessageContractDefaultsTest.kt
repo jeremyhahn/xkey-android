@@ -381,26 +381,40 @@ class MessageContractDefaultsTest {
     }
 
     @Test
-    fun `LocalAttestDeviceParams decodes its nonce and the result carries RootOfTrust`() {
-        val nonce = java.util.Base64.getEncoder().encodeToString(byteArrayOf(9, 8, 7))
-        val params = LocalAttestDeviceParams(nonce = nonce)
+    fun `LocalAttestDeviceParams decodes its nonce and the result carries the version 2 proof`() {
+        val nonceBytes = ByteArray(32) { (9 - it % 3).toByte() }
+        val nonce = java.util.Base64.getEncoder().encodeToString(nonceBytes)
+        val params = LocalAttestDeviceParams(
+            protocolVersion = 2,
+            nonce = nonce,
+            purpose = "reattest"
+        )
         assertEquals(nonce, params.nonce)
-        assertArrayEquals(byteArrayOf(9, 8, 7), params.getNonceBytes())
+        assertEquals("reattest", params.purpose)
+        assertArrayEquals(nonceBytes, params.getNonceBytes())
 
         val result = LocalAttestDeviceResult(
+            protocolVersion = 2,
             format = "android-keystore",
             certificateChain = listOf("bGVhZg=="),
             securityLevel = "strongbox",
             nonce = nonce,
+            purpose = "reattest",
+            signature = "c2ln",
+            signatureAlgorithm = "ES256",
             bootState = 0,
             deviceLocked = true,
             verifiedBootKey = "a2V5",
             verifiedBootHash = "aGFzaA=="
         )
+        assertEquals(2, result.protocolVersion)
         assertEquals("android-keystore", result.format)
         assertEquals(listOf("bGVhZg=="), result.certificateChain)
         assertEquals("strongbox", result.securityLevel)
         assertEquals(nonce, result.nonce)
+        assertEquals("reattest", result.purpose)
+        assertEquals("c2ln", result.signature)
+        assertEquals("ES256", result.signatureAlgorithm)
         assertEquals(0, result.bootState)
         assertTrue(result.deviceLocked)
         assertEquals("a2V5", result.verifiedBootKey)

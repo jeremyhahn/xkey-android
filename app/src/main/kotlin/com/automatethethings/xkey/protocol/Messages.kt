@@ -312,6 +312,22 @@ object ErrorCodes {
      */
     const val NOT_APPLICABLE = -32036
 
+    /**
+     * A device attestation request did not speak protocol version 2.
+     *
+     * Version 1 proved freshness by embedding the pairing nonce in the attested
+     * key's own certificate, which forced a new key per pairing and so could
+     * never carry a stable device identity (go-xkms#129). Version 2 replaced it
+     * with a live signature over a transcript.
+     *
+     * The two are not interchangeable and this prover never falls back: a peer
+     * asking for version 1 gets a refusal, not a version 1 answer. Silently
+     * downgrading would let anyone who can ask for the weaker exchange have it,
+     * which is the whole value of a flag day thrown away. Mirrors the desktop's
+     * `ErrAttestProtocolDowngrade`.
+     */
+    const val ATTEST_PROTOCOL_DOWNGRADE = -32037
+
     // PIV errors
     const val PIV_SLOT_NOT_FOUND = -32026
     const val PIV_SLOT_OCCUPIED = -32027
@@ -1501,48 +1517,133 @@ data class LocalAttestKeyResult(
 }
 
 /**
- * Parameters for local.attestDevice - device-level attestation.
+ * Parameters for `local.attestDevice` — device attestation protocol **version 2**
+ * (go-xkms#129).
  *
- * @property nonce Base64-encoded 32-byte challenge nonce.
+ * @property protocolVersion Always [AttestTranscript.PROTOCOL_VERSION]. A request
+ *   carrying anything else is refused rather than answered at the older version.
+ * @property nonce Base64-encoded 32-byte challenge, drawn by the desktop.
+ * @property purpose `"pair"` on a first pairing, `"reattest"` on a reconnect or an
+ *   explicit re-attest. Signed, so a signature gathered during pairing cannot
+ *   satisfy a reconnect.
+ *
+ * ## The request deliberately carries no channel binding
+ *
+ * An earlier draft of version 2 sent the desktop's own `channelBinding` here for
+ * diagnostics, with the spec forbidding the prover from echoing it. That was a
+ * footgun: a 32-byte field of that name reads as "sign this" when it means the
+ * exact opposite, and a prover that echoed it would produce a signature the
+ * verifier **accepts** — the relayed signature verifies even though the phone
+ * never committed to the session it was actually on. The verifier cannot detect
+ * the mistake.
+ *
+ * The field was removed from the wire (go-xkms#129 addendum) so that echoing is
+ * structurally impossible rather than merely forbidden. The binding is derived
+ * locally, from this device's own Noise session, and never received.
  */
 data class LocalAttestDeviceParams(
-    val nonce: String
+    val protocolVersion: Int,
+    val nonce: String,
+    val purpose: String
 ) {
     companion object {
         fun fromJson(params: JSONObject): LocalAttestDeviceParams {
+            val version = params.optInt("protocolVersion", 0)
+            if (version != AttestTranscript.PROTOCOL_VERSION) {
+                throw ProtocolException(
+                    "Device attestation protocol version ${AttestTranscript.PROTOCOL_VERSION} " +
+                        "is required; this request asked for " +
+                        if (version == 0) "none" else "$version",
+                    errorCode = ErrorCodes.ATTEST_PROTOCOL_DOWNGRADE
+                )
+            }
+
+            val purpose = params.getStringOrNull("purpose")
+                ?: throw ProtocolException("Missing 'purpose'", errorCode = ErrorCodes.INVALID_PARAMS)
+            if (purpose != AttestTranscript.PURPOSE_PAIR && purpose != AttestTranscript.PURPOSE_REATTEST) {
+                throw ProtocolException(
+                    "Unknown attestation purpose '$purpose'",
+                    errorCode = ErrorCodes.INVALID_PARAMS
+                )
+            }
+
             return LocalAttestDeviceParams(
+                protocolVersion = version,
                 nonce = params.getStringOrNull("nonce")
-                    ?: throw ProtocolException("Missing 'nonce'", errorCode = ErrorCodes.INVALID_PARAMS)
+                    ?: throw ProtocolException("Missing 'nonce'", errorCode = ErrorCodes.INVALID_PARAMS),
+                purpose = purpose
             )
         }
     }
 
-    fun getNonceBytes(): ByteArray = Base64.getDecoder().decode(nonce)
+    /**
+     * The 32-byte challenge, refusing any other length.
+     *
+     * A short nonce is a weak challenge, and the transcript layout is fixed
+     * width — accepting one would produce a signature over bytes the desktop
+     * cannot reconstruct.
+     */
+    fun getNonceBytes(): ByteArray {
+        val bytes = Base64.getDecoder().decode(nonce)
+        if (bytes.size != AttestTranscript.BINDING_SIZE) {
+            throw ProtocolException(
+                "'nonce' must be ${AttestTranscript.BINDING_SIZE} bytes, got ${bytes.size}",
+                errorCode = ErrorCodes.INVALID_PARAMS
+            )
+        }
+        return bytes
+    }
 
     fun toJson(): JSONObject {
         return JSONObject().apply {
+            put("protocolVersion", protocolVersion)
             put("nonce", nonce)
+            put("purpose", purpose)
         }
     }
 }
 
 /**
- * Result of local.attestDevice - device-level attestation with RootOfTrust.
+ * Result of `local.attestDevice` — device attestation protocol **version 2**
+ * (go-xkms#129).
  *
+ * Three things travel together and all three are required for the desktop to
+ * accept: [certificateChain] proves the Device Attestation Key lives in hardware
+ * on a verified-boot device, [signature] proves the exchange is live, and the
+ * fingerprint the desktop derives from `certificateChain[0]` says which device
+ * this is.
+ *
+ * The desktop reads every security claim out of the **signed attestation
+ * extension** in the leaf, never from the sibling JSON. [securityLevel],
+ * [bootState], [deviceLocked] and the `verifiedBoot*` fields are carried for
+ * display, and the echoed [nonce] and [purpose] are advisory — the verifier
+ * rebuilds the transcript from what it asked for, so nothing here is trusted on
+ * this device's word.
+ *
+ * @property protocolVersion Always [AttestTranscript.PROTOCOL_VERSION].
  * @property format Attestation format, always "android-keystore".
- * @property certificateChain Base64-encoded X.509 certificate chain.
+ * @property certificateChain Base64-encoded X.509 chain, leaf first; `[0]` is the
+ *   Device Attestation Key.
  * @property securityLevel Security level: "software", "tee", or "strongbox".
  * @property nonce Echoed challenge nonce.
+ * @property purpose Echoed purpose, "pair" or "reattest".
+ * @property signature Base64 ASN.1 DER ECDSA over the [AttestTranscript.build]
+ *   transcript.
+ * @property signatureAlgorithm Always "ES256".
  * @property bootState Boot state: 0=VERIFIED, 1=SELF_SIGNED, 2=UNVERIFIED, 3=FAILED.
  * @property deviceLocked Whether bootloader is locked.
  * @property verifiedBootKey Base64-encoded public key hash.
  * @property verifiedBootHash Base64-encoded boot partition hash.
  */
 data class LocalAttestDeviceResult(
+    val protocolVersion: Int,
     val format: String,
     val certificateChain: List<String>,
     val securityLevel: String,
     val nonce: String,
+    val purpose: String,
+    val signature: String,
+    val signatureAlgorithm: String,
     val bootState: Int,
     val deviceLocked: Boolean,
     val verifiedBootKey: String,
@@ -1554,10 +1655,14 @@ data class LocalAttestDeviceResult(
             chainArray.put(cert)
         }
         return JSONObject().apply {
+            put("protocolVersion", protocolVersion)
             put("format", format)
             put("certificateChain", chainArray)
             put("securityLevel", securityLevel)
             put("nonce", nonce)
+            put("purpose", purpose)
+            put("signature", signature)
+            put("signatureAlgorithm", signatureAlgorithm)
             put("bootState", bootState)
             put("deviceLocked", deviceLocked)
             put("verifiedBootKey", verifiedBootKey)

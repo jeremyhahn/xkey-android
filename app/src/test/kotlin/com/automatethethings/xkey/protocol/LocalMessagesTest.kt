@@ -883,36 +883,121 @@ class LocalMessagesTest {
     // LocalAttestDeviceParams / LocalAttestDeviceResult
     // -------------------------------------------------------------------------
 
-    @Test
-    fun `LocalAttestDeviceParams fromJson reads the nonce`() {
-        val params = LocalAttestDeviceParams.fromJson(JSONObject("""{"nonce":"$helloB64"}"""))
+    /** A 32-byte challenge — the only length protocol v2 accepts. */
+    private val nonceB64 = Base64.getEncoder().encodeToString(ByteArray(32) { it.toByte() })
 
-        assertArrayEquals("hello".toByteArray(), params.getNonceBytes())
+    @Test
+    fun `LocalAttestDeviceParams fromJson reads a version 2 request`() {
+        val params = LocalAttestDeviceParams.fromJson(
+            JSONObject("""{"protocolVersion":2,"nonce":"$nonceB64","purpose":"reattest"}""")
+        )
+
+        assertEquals(2, params.protocolVersion)
+        assertEquals("reattest", params.purpose)
+        assertArrayEquals(ByteArray(32) { it.toByte() }, params.getNonceBytes())
     }
 
     @Test
     fun `LocalAttestDeviceParams fromJson rejects a missing nonce with INVALID_PARAMS`() {
         assertEquals(
             ErrorCodes.INVALID_PARAMS,
-            assertProtocolException { LocalAttestDeviceParams.fromJson(JSONObject("{}")) }.errorCode
+            assertProtocolException {
+                LocalAttestDeviceParams.fromJson(JSONObject("""{"protocolVersion":2,"purpose":"pair"}"""))
+            }.errorCode
+        )
+    }
+
+    /**
+     * Version 1 embedded the pairing nonce in the attested key's certificate and
+     * could not carry a stable device identity (go-xkms#129). This prover never
+     * answers it: a peer asking for the weaker exchange must not simply get it.
+     */
+    @Test
+    fun `LocalAttestDeviceParams fromJson refuses a version 1 request`() {
+        assertEquals(
+            ErrorCodes.ATTEST_PROTOCOL_DOWNGRADE,
+            assertProtocolException {
+                LocalAttestDeviceParams.fromJson(
+                    JSONObject("""{"protocolVersion":1,"nonce":"$nonceB64","purpose":"pair"}""")
+                )
+            }.errorCode
         )
     }
 
     @Test
-    fun `LocalAttestDeviceParams round-trips through toJson and fromJson`() {
-        val original = LocalAttestDeviceParams(helloB64)
+    fun `LocalAttestDeviceParams fromJson refuses a request carrying no version at all`() {
+        assertEquals(
+            ErrorCodes.ATTEST_PROTOCOL_DOWNGRADE,
+            assertProtocolException {
+                LocalAttestDeviceParams.fromJson(JSONObject("""{"nonce":"$nonceB64","purpose":"pair"}"""))
+            }.errorCode
+        )
+    }
 
-        assertEquals(setOf("nonce"), original.toJson().keySet())
+    @Test
+    fun `LocalAttestDeviceParams fromJson refuses an unknown purpose`() {
+        assertEquals(
+            ErrorCodes.INVALID_PARAMS,
+            assertProtocolException {
+                LocalAttestDeviceParams.fromJson(
+                    JSONObject("""{"protocolVersion":2,"nonce":"$nonceB64","purpose":"enroll"}""")
+                )
+            }.errorCode
+        )
+    }
+
+    /**
+     * The transcript is fixed width, so a short challenge would produce a
+     * signature over bytes the desktop cannot rebuild — and a weaker challenge
+     * besides.
+     */
+    @Test
+    fun `LocalAttestDeviceParams getNonceBytes refuses a nonce that is not 32 bytes`() {
+        val params = LocalAttestDeviceParams.fromJson(
+            JSONObject("""{"protocolVersion":2,"nonce":"$helloB64","purpose":"pair"}""")
+        )
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, assertProtocolException { params.getNonceBytes() }.errorCode)
+    }
+
+    /**
+     * The wire removal has to be real: a desktop that still sends the old
+     * `channelBinding` must be parsed as though it had not, so there is nothing
+     * for a future regression to reach for.
+     */
+    @Test
+    fun `LocalAttestDeviceParams ignores a channelBinding a stale peer still sends`() {
+        val params = LocalAttestDeviceParams.fromJson(
+            JSONObject("""{"protocolVersion":2,"nonce":"$nonceB64","purpose":"pair","channelBinding":"$nonceB64"}""")
+        )
+
+        assertEquals(setOf("protocolVersion", "nonce", "purpose"), params.toJson().keySet())
+        assertEquals(LocalAttestDeviceParams(2, nonceB64, "pair"), params)
+    }
+
+    @Test
+    fun `LocalAttestDeviceParams round-trips through toJson and fromJson`() {
+        val original = LocalAttestDeviceParams(2, nonceB64, "pair")
+
+        assertEquals(
+            "the v2 request carries no channelBinding; see LocalAttestDeviceParams",
+            setOf("protocolVersion", "nonce", "purpose"),
+            original.toJson().keySet()
+        )
         assertEquals(original, LocalAttestDeviceParams.fromJson(original.toJson()))
     }
 
     @Test
-    fun `LocalAttestDeviceResult toJson emits the RootOfTrust fields go-xkms expects`() {
+    fun `LocalAttestDeviceResult toJson emits the version 2 fields go-xkms expects`() {
         val json = LocalAttestDeviceResult(
+            protocolVersion = 2,
             format = "android-keystore",
             certificateChain = listOf("bGVhZg"),
             securityLevel = "strongbox",
-            nonce = helloB64,
+            nonce = nonceB64,
+            purpose = "pair",
+            signature = "c2ln",
+            signatureAlgorithm = "ES256",
             bootState = 0,
             deviceLocked = true,
             verifiedBootKey = "a2V5",
@@ -921,12 +1006,17 @@ class LocalMessagesTest {
 
         assertEquals(
             setOf(
-                "format", "certificateChain", "securityLevel", "nonce",
+                "protocolVersion", "format", "certificateChain", "securityLevel",
+                "nonce", "purpose", "signature", "signatureAlgorithm",
                 "bootState", "deviceLocked", "verifiedBootKey", "verifiedBootHash"
             ),
             json.keySet()
         )
+        assertEquals(2, json.getInt("protocolVersion"))
         assertEquals("android-keystore", json.getString("format"))
+        assertEquals("pair", json.getString("purpose"))
+        assertEquals("c2ln", json.getString("signature"))
+        assertEquals("ES256", json.getString("signatureAlgorithm"))
         assertEquals(0, json.getInt("bootState"))
         assertTrue(json.getBoolean("deviceLocked"))
         assertEquals("a2V5", json.getString("verifiedBootKey"))

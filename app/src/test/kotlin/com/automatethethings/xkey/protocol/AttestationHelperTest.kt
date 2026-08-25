@@ -18,6 +18,7 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.automatethethings.xkey.ble.BleClient
+import com.automatethethings.xkey.truststore.TestCertificates
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -158,9 +159,12 @@ class AttestationHelperTest {
     }
 
     @Test
-    fun `the device fingerprint is the SHA-256 of the root certificate`() = runTest {
-        val leaf = "leaf-certificate".toByteArray()
-        val root = "root-certificate".toByteArray()
+    fun `the device fingerprint is the SHA-256 of the LEAF SPKI, not the root`() = runTest {
+        // The chain is [leaf, ..., root]; the per-device attested key is the
+        // LEAF (index 0), and its SubjectPublicKeyInfo — not the whole DER and
+        // not the shared attestation root — is what binds the device (#93).
+        val leaf = TestCertificates.der(TestCertificates.LEAF_C_PEM)
+        val root = TestCertificates.der(TestCertificates.ROOT_CA_C_STRONGBOX_PEM)
         respondWith { nonce ->
             successResult(nonce).put("certificateChain", chainOf(leaf, root))
         }
@@ -168,20 +172,20 @@ class AttestationHelperTest {
         val result = helper.requestLaptopAttestation(client)
             as AttestationHelper.AttestationResult.Success
 
-        // The root is the LAST element of the chain, not the first.
-        assertEquals(sha256Hex(root), result.deviceFingerprint)
-        assertNotEquals(sha256Hex(leaf), result.deviceFingerprint)
+        assertEquals(AttestedKeyFingerprint.hexOf(leaf), result.deviceFingerprint)
+        assertNotEquals(sha256Hex(root), result.deviceFingerprint)
+        assertNotEquals("must not hash the whole leaf DER", sha256Hex(leaf), result.deviceFingerprint)
     }
 
     @Test
-    fun `a single-certificate chain fingerprints that certificate`() = runTest {
-        val only = "self-signed".toByteArray()
+    fun `a single-certificate chain fingerprints that certificate's SPKI`() = runTest {
+        val only = TestCertificates.der(TestCertificates.LEAF_A_PEM)
         respondWith { nonce -> successResult(nonce).put("certificateChain", chainOf(only)) }
 
         val result = helper.requestLaptopAttestation(client)
             as AttestationHelper.AttestationResult.Success
 
-        assertEquals(sha256Hex(only), result.deviceFingerprint)
+        assertEquals(AttestedKeyFingerprint.hexOf(only), result.deviceFingerprint)
     }
 
     @Test

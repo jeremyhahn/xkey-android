@@ -20,7 +20,6 @@ import android.util.Log
 import com.automatethethings.xkey.ble.BleClient
 import com.automatethethings.xkey.util.getStringOrNull
 import org.json.JSONObject
-import java.security.MessageDigest
 import java.security.SecureRandom
 
 /**
@@ -104,14 +103,17 @@ class AttestationHelper(private val context: Context) {
             var deviceFingerprint: String? = null
 
             if (certChainArray != null && certChainArray.length() > 0) {
-                // Compute device fingerprint from root cert (last in chain)
-                val rootCertB64 = certChainArray.getString(certChainArray.length() - 1)
-                val rootCertBytes = Base64.decode(rootCertB64, BASE64_FLAGS)
-                deviceFingerprint = MessageDigest.getInstance("SHA-256")
-                    .digest(rootCertBytes)
-                    .joinToString("") { "%02x".format(it) }
+                // The device identity is the per-device ATTESTED KEY (#93), not
+                // the attestation ROOT — the old SHA-256-of-the-last-cert value,
+                // which was a Google Hardware Attestation Root shared by every
+                // handset under it (a vendor identity, not a device one). Hash
+                // the leaf (index 0) SubjectPublicKeyInfo, matching go-xkms
+                // sha256(cert.RawSubjectPublicKeyInfo). See docs/12 and #93.
+                val leafCertB64 = certChainArray.getString(0)
+                val leafCertBytes = Base64.decode(leafCertB64, BASE64_FLAGS)
+                deviceFingerprint = AttestedKeyFingerprint.hexOf(leafCertBytes)
 
-                Log.d(TAG, "Laptop device fingerprint: ${deviceFingerprint.take(16)}...")
+                Log.d(TAG, "Attested-key fingerprint: ${deviceFingerprint.take(16)}...")
             }
 
             Log.i(TAG, "Laptop attestation verified: format=$format, securityLevel=$securityLevel")

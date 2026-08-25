@@ -1419,12 +1419,16 @@ class DeviceDetailActivity : AppCompatActivity() {
 
                 when (attestResult) {
                     is AttestationHelper.AttestationResult.Success -> {
+                        // Re-attesting the PEER (`remote.attestDevice`) records its
+                        // boot state, but must NOT touch deviceFingerprint — that
+                        // field is the phone's own attested-key SPKI bound at
+                        // pairing and echoed on reconnect (#93). Omitting it
+                        // preserves the reconnect binding.
                         repository.updateDeviceAttestation(
                             publicKeyHex = publicKeyHex,
                             bootHashHex = attestResult.bootHashHex ?: "",
                             securityLevel = attestResult.securityLevel,
-                            bootStateVerified = attestResult.bootStateVerified,
-                            deviceFingerprint = attestResult.deviceFingerprint ?: ""
+                            bootStateVerified = attestResult.bootStateVerified
                         )
 
                         Snackbar.make(

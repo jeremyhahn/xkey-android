@@ -16,6 +16,7 @@
 package com.automatethethings.xkey.e2e
 
 import com.automatethethings.xkey.ble.NoiseInitiatorSession
+import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.transport.StreamMessageFraming
 import org.json.JSONObject
 import java.io.IOException
@@ -106,6 +107,23 @@ class ProtocolTestClient(
         noise.finalizeHandshake()
         check(noise.isHandshakeComplete()) { "Noise handshake did not complete" }
     }
+
+    /**
+     * The channel binding for this session as the **desktop** derives it
+     * (go-xkms#129 §5) — this client is the Noise initiator, the phone the
+     * responder.
+     *
+     * A verifier rebuilds the binding from its own session rather than trusting
+     * anything the phone sends, so computing it here is what lets a test check
+     * the phone's signature the way go-xkms will.
+     */
+    fun channelBinding(): ByteArray = AttestTranscript.channelBinding(
+        initiatorStaticPublicKey = noise.getLocalStaticPublicKey(),
+        responderStaticPublicKey = checkNotNull(noise.getRemoteStaticKey()) {
+            "the handshake did not authenticate a responder static key"
+        },
+        prologue = noise.getPrologue()
+    )
 
     /**
      * Sends `pairing.confirm` as the desktop does immediately after the

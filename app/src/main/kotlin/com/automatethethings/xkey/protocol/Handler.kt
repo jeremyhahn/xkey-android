@@ -22,6 +22,7 @@ import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.DecryptionException
+import com.automatethethings.xkey.crypto.DeviceAttestationKey
 import com.automatethethings.xkey.crypto.ECDHException
 import com.automatethethings.xkey.crypto.EncryptionException
 import com.automatethethings.xkey.crypto.HMACException
@@ -32,6 +33,7 @@ import com.automatethethings.xkey.crypto.SigningException
 import com.automatethethings.xkey.crypto.StrongBoxUnavailableException
 import com.automatethethings.xkey.crypto.UnsupportedAlgorithmException
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.crypto.XKeyCryptoException
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -187,6 +189,26 @@ class RequestHandler(
     private var connectedDevicePublicKeyHex: String? = null
 
     /**
+     * Supplies the live Noise session's static keys and prologue, from which
+     * `local.attestDevice` derives the anti-relay channel binding.
+     *
+     * Updated via [setSessionBindingProvider] by whichever transport owns the
+     * session.
+     */
+    @Volatile
+    private var sessionBindingProvider: SessionBindingProvider? = null
+
+    /**
+     * This device's persistent attested identity (go-xkms#129).
+     *
+     * Built from nothing but the Keystore, so it is created here rather than
+     * threaded through every construction site — the same reasoning as
+     * [deviceIdentity]. Lazy because minting the key is a hardware operation
+     * that must not run until an attestation is actually asked for.
+     */
+    private val deviceAttestationKey by lazy { DeviceAttestationKey() }
+
+    /**
      * Message sender for sending notifications to the connected laptop.
      *
      * Updated via [setMessageSender] when BLE connection state changes.
@@ -322,6 +344,21 @@ class RequestHandler(
      * Returns the currently connected device's Noise public key, or null if not connected.
      */
     fun getConnectedDevicePublicKeyHex(): String? = connectedDevicePublicKeyHex
+
+    /**
+     * Supplies the live Noise session facts that `local.attestDevice` derives its
+     * channel binding from.
+     *
+     * Set by the transport when a session is established and cleared to null when
+     * it ends, alongside [setConnectedDevicePublicKeyHex]. Without it this device
+     * cannot bind an attestation to a channel and refuses to attest at all,
+     * rather than signing a transcript that would let a relayed signature pass.
+     *
+     * @param provider the provider, or null on disconnect.
+     */
+    fun setSessionBindingProvider(provider: SessionBindingProvider?) {
+        sessionBindingProvider = provider
+    }
 
     /**
      * Sets the message sender for sending notifications to the connected laptop.
@@ -2044,11 +2081,21 @@ class RequestHandler(
         )
 
     /**
-     * Handles local.attestDevice - device-level attestation with RootOfTrust.
+     * Handles `local.attestDevice` — the prover half of device attestation
+     * protocol version 2 (go-xkms#129).
      *
-     * Generates an ephemeral attestation key with the provided nonce challenge,
-     * retrieves the certificate chain from Android Keystore, and parses the
-     * RootOfTrust fields from the attestation extension.
+     * Answers with three separable things, all of which the desktop requires:
+     *
+     * 1. the persistent [DeviceAttestationKey]'s chain, which proves *once* that
+     *    the key lives in hardware on a verified-boot device;
+     * 2. a live ECDSA signature over the [AttestTranscript] for this exchange,
+     *    which proves the device is here *now*;
+     * 3. the RootOfTrust fields read out of the leaf, for display.
+     *
+     * Version 1 folded (1) and (2) together by minting a key whose attestation
+     * challenge was the pairing nonce. Keystore seals that challenge at key
+     * generation, so identity and freshness could not both be had; splitting them
+     * is what makes a stable device fingerprint possible at all.
      *
      * Uses [Dispatchers.Main] because biometric prompts require the main thread.
      */
@@ -2057,6 +2104,12 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val attestParams = LocalAttestDeviceParams.fromJson(params)
+        val nonce = attestParams.getNonceBytes()
+
+        // Derived from THIS device's own session. The request carries no channel
+        // binding to copy, by design -- a session we cannot bind to is a refusal,
+        // not an unbound signature.
+        val channelBinding = deriveChannelBinding()
 
         requireUserPresenceForAttestation(
             request = request,
@@ -2065,54 +2118,114 @@ class RequestHandler(
             subtitle = "Verify your identity to prove device integrity"
         )
 
-        // Generate ephemeral attestation key with the nonce challenge
-        val ephemeralKeyAlias = "_device_attest_${System.currentTimeMillis()}"
-        try {
-            val certChain = keystoreManager.generateKeyWithAttestationChallenge(
-                keyId = ephemeralKeyAlias,
-                challenge = attestParams.getNonceBytes()
-            ) ?: throw ProtocolException(
-                "Device attestation not supported",
+        val certChain = try {
+            deviceAttestationKey.chain()
+        } catch (e: XKeyCryptoException) {
+            throw ProtocolException(
+                e.message ?: "Device attestation not supported",
+                errorCode = ErrorCodes.ATTESTATION_FAILED
+            )
+        }
+        val leafCert = certChain.first()
+        val fingerprint = AttestedKeyFingerprint.of(leafCert.encoded)
+
+        val signature = try {
+            deviceAttestationKey.sign(
+                AttestTranscript.build(
+                    purpose = attestParams.purpose,
+                    nonce = nonce,
+                    channelBinding = channelBinding,
+                    deviceFingerprint = fingerprint
+                )
+            )
+        } catch (e: XKeyCryptoException) {
+            throw ProtocolException(
+                e.message ?: "Device attestation signature failed",
+                errorCode = ErrorCodes.ATTESTATION_FAILED
+            )
+        }
+
+        val (securityLevel, rootOfTrust) = parseAttestationExtension(leafCert)
+
+        bindFingerprintAtPairing(attestParams.purpose, fingerprint)
+
+        val result = LocalAttestDeviceResult(
+            protocolVersion = AttestTranscript.PROTOCOL_VERSION,
+            format = "android-keystore",
+            certificateChain = certChain.map { Base64.getEncoder().encodeToString(it.encoded) },
+            securityLevel = securityLevel,
+            nonce = attestParams.nonce,
+            purpose = attestParams.purpose,
+            signature = Base64.getEncoder().encodeToString(signature),
+            signatureAlgorithm = DeviceAttestationKey.WIRE_SIGNATURE_ALGORITHM,
+            bootState = rootOfTrust.bootState,
+            deviceLocked = rootOfTrust.deviceLocked,
+            verifiedBootKey = Base64.getEncoder().encodeToString(rootOfTrust.verifiedBootKey),
+            verifiedBootHash = Base64.getEncoder().encodeToString(rootOfTrust.verifiedBootHash)
+        )
+
+        Log.i(TAG, "Device attestation completed: purpose=${attestParams.purpose}, " +
+            "securityLevel=$securityLevel, bootState=${rootOfTrust.bootState}, " +
+            "deviceLocked=${rootOfTrust.deviceLocked}")
+
+        // The phone stores no record of the LAPTOP here: this handler is the
+        // phone attesting itself, and the laptop keeps the result. What it does
+        // store is its OWN fingerprint, above, so it can echo it on reconnect.
+        Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The 32-byte channel binding for the session this request arrived on,
+     * derived entirely from local state — the request carries no such field.
+     *
+     * The derived value is logged at debug level, and the desktop logs its own.
+     * Should the two ends ever disagree, diffing the two logs says *which* side
+     * derived what; the discarded request field could only ever have said that
+     * they differed. The divergence still surfaces regardless, because the
+     * desktop's signature check fails closed on it.
+     *
+     * @throws ProtocolException when no session binding is available. Signing
+     *   without one would produce a transcript that commits to no channel, and
+     *   the desktop -- which rebuilds the transcript from its own session -- can
+     *   only reject it. Refusing here says why, rather than returning a signature
+     *   that looks well-formed and fails verification for reasons neither side
+     *   can see.
+     */
+    private fun deriveChannelBinding(): ByteArray {
+        val binding = sessionBindingProvider?.binding()
+            ?: throw ProtocolException(
+                "Device attestation requires an established Noise session to bind to",
                 errorCode = ErrorCodes.ATTESTATION_FAILED
             )
 
-            val certsBase64 = certChain.map { cert ->
-                Base64.getEncoder().encodeToString(cert.encoded)
-            }
+        val derived = AttestTranscript.channelBinding(
+            initiatorStaticPublicKey = binding.initiatorStaticPublicKey,
+            responderStaticPublicKey = binding.responderStaticPublicKey,
+            prologue = binding.prologue
+        )
+        Log.d(TAG, "Derived attestation channel binding: ${derived.joinToString("") { "%02x".format(it) }}")
+        return derived
+    }
 
-            // Parse attestation extension from leaf certificate
-            val leafCert = certChain[0] as java.security.cert.X509Certificate
-            val (securityLevel, rootOfTrust) = parseAttestationExtension(leafCert)
+    /**
+     * Records this device's own fingerprint against the peer being paired, so the
+     * identity ack can echo it on every later reconnect.
+     *
+     * Only on `purpose == "pair"`. On a reconnect the desktop is checking that
+     * the attested key is still the one it recorded; overwriting the stored value
+     * then would be a silent rebind to whatever key answered, which is exactly
+     * the fail-closed case `ErrDeviceIdentityChanged` exists to catch. A rotated
+     * key is meant to cost a re-pair.
+     */
+    private fun bindFingerprintAtPairing(purpose: String, fingerprint: ByteArray) {
+        if (purpose != AttestTranscript.PURPOSE_PAIR) return
+        val peerKeyHex = connectedDevicePublicKeyHex ?: return
+        val repo = pairedDeviceRepository ?: return
+        if (!repo.isDeviceKnown(peerKeyHex)) return
 
-            val result = LocalAttestDeviceResult(
-                format = "android-keystore",
-                certificateChain = certsBase64,
-                securityLevel = securityLevel,
-                nonce = attestParams.nonce,
-                bootState = rootOfTrust.bootState,
-                deviceLocked = rootOfTrust.deviceLocked,
-                verifiedBootKey = Base64.getEncoder().encodeToString(rootOfTrust.verifiedBootKey),
-                verifiedBootHash = Base64.getEncoder().encodeToString(rootOfTrust.verifiedBootHash)
-            )
-
-            Log.i(TAG, "Device attestation completed: securityLevel=$securityLevel, " +
-                    "bootState=${rootOfTrust.bootState}, deviceLocked=${rootOfTrust.deviceLocked}")
-
-            // NOTE: We do NOT store attestation data here. This handler responds to
-            // a laptop request for the phone to attest itself. The laptop receives
-            // our attestation response and stores it on its side.
-            // The phone stores the LAPTOP's attestation when handling remote.attestDevice
-            // responses (laptop attesting to phone).
-
-            Response.success(request.id, result.toJson())
-        } finally {
-            // Clean up ephemeral key
-            try {
-                keystoreManager.deleteGeneralKey(ephemeralKeyAlias)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to delete ephemeral attestation key", e)
-            }
-        }
+        val hex = fingerprint.joinToString("") { "%02x".format(it) }
+        repo.updateDeviceFingerprint(peerKeyHex, hex)
+        Log.i(TAG, "Bound attested-key fingerprint for peer ${peerKeyHex.take(16)}: ${hex.take(16)}...")
     }
 
     /**

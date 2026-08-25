@@ -784,13 +784,15 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             Log.d(TAG, "Requesting device attestation for $publicKeyHex")
             val result = remoteClient.attestDevice(nonceB64)
 
-            // Store the attestation result
+            // Store the PEER's boot state. deviceFingerprint is intentionally
+            // omitted: it is the phone's own attested-key SPKI bound at pairing
+            // and echoed on reconnect (#93), not the peer's boot hash. Passing
+            // the boot hash here previously corrupted the reconnect binding.
             pairedDeviceRepository?.updateDeviceAttestation(
                 publicKeyHex = publicKeyHex,
                 bootHashHex = result.bootHashHex ?: "",
                 securityLevel = result.securityLevel,
-                bootStateVerified = result.bootStateVerified,
-                deviceFingerprint = result.bootHashHex ?: "" // Use boot hash as fingerprint for now
+                bootStateVerified = result.bootStateVerified
             )
 
             Log.i(TAG, "Device attestation succeeded: format=${result.format}, " +

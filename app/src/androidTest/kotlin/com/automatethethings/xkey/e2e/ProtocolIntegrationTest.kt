@@ -24,6 +24,8 @@ import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.pin.PinManager
 import com.automatethethings.xkey.piv.PivKeyManager
+import com.automatethethings.xkey.protocol.AttestTranscript
+import com.automatethethings.xkey.protocol.AttestedKeyFingerprint
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
@@ -49,10 +51,13 @@ import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayInputStream
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.Signature
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.Base64
 import javax.crypto.KeyAgreement
@@ -759,10 +764,72 @@ class ProtocolIntegrationTest {
 
         val deviceAttestation = client.call(
             "local.attestDevice",
-            JSONObject().put("nonce", nonce)
+            JSONObject()
+                .put("protocolVersion", AttestTranscript.PROTOCOL_VERSION)
+                .put("nonce", nonce)
+                .put("purpose", AttestTranscript.PURPOSE_PAIR)
         )
         assertTrue(deviceAttestation.length() > 0)
         client.call("local.deleteKey", JSONObject().put("keyId", keyId))
+    }
+
+    /**
+     * The real-path prover check for go-xkms#129: a live Noise session, the
+     * phone's real `local.attestDevice` handler, and this client verifying the
+     * answer exactly as `verifyPairingAttestation` will.
+     *
+     * The distinguishing property is that **nothing in the transcript comes from
+     * the response**. The nonce is the one this client drew, the channel binding
+     * is derived from this client's own session, and the fingerprint is derived
+     * from the certificate chain rather than read out of a JSON field — which is
+     * what makes a passing signature mean the two implementations agree on the
+     * bytes rather than merely agreeing to echo each other.
+     *
+     * Scope, stated precisely so the next reader does not over-read it: this
+     * catches a **wrong derivation** on the phone, because `client.channelBinding()`
+     * is computed here from this end's own session and the signature has to verify
+     * against it.
+     *
+     * It no longer catches an *echoing* phone, and cannot: the go-xkms#129
+     * addendum removed `channelBinding` from the request, so there is no field to
+     * echo. An earlier version of this test sent a deliberately wrong binding for
+     * exactly that purpose — measured, it was the only reason the echo mutant went
+     * red here. That mutant is now unrepresentable rather than uncaught.
+     */
+    @Test
+    fun deviceAttestationSignsALiveTranscriptTheDesktopCanVerify() {
+        val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
+
+        val result = client.call(
+            "local.attestDevice",
+            JSONObject()
+                .put("protocolVersion", AttestTranscript.PROTOCOL_VERSION)
+                .put("nonce", b64(nonce))
+                .put("purpose", AttestTranscript.PURPOSE_REATTEST)
+        )
+
+        assertEquals(2, result.getInt("protocolVersion"))
+        assertEquals("ES256", result.getString("signatureAlgorithm"))
+        assertEquals(AttestTranscript.PURPOSE_REATTEST, result.getString("purpose"))
+
+        val chain = result.getJSONArray("certificateChain")
+        assertTrue("a device attestation must carry a chain", chain.length() > 0)
+        val leaf = CertificateFactory.getInstance("X.509").generateCertificate(
+            ByteArrayInputStream(Base64.getDecoder().decode(chain.getString(0)))
+        ) as X509Certificate
+
+        val transcript = AttestTranscript.build(
+            purpose = AttestTranscript.PURPOSE_REATTEST,
+            nonce = nonce,
+            channelBinding = client.channelBinding(),
+            deviceFingerprint = AttestedKeyFingerprint.of(leaf.encoded)
+        )
+        val verified = Signature.getInstance("SHA256withECDSA").run {
+            initVerify(leaf.publicKey)
+            update(transcript)
+            verify(Base64.getDecoder().decode(result.getString("signature")))
+        }
+        assertTrue("the phone's signature must verify over the desktop's transcript", verified)
     }
 
     // ------------------------------------------------------------------

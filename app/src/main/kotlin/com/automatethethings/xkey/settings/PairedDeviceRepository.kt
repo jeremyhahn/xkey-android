@@ -38,7 +38,7 @@ data class PairedDeviceData(
     val bootHashHex: String? = null,           // verifiedBootHash from RootOfTrust
     val bootStateVerified: Boolean = false,
     val securityLevel: String? = null,         // "software", "tee", "strongbox"
-    val deviceFingerprint: String? = null,     // SHA256 of attestation root cert
+    val deviceFingerprint: String? = null,     // SHA256 of the phone's OWN attested leaf SPKI, captured at pairing; echoed on reconnect (#93)
     // Per-device settings
     val requireAttestationForKeyUse: Boolean = false,
     val requireAttestationForKeyAttestation: Boolean = true,
@@ -326,7 +326,7 @@ class PairedDeviceRepository(context: Context) {
         bootHashHex: String,
         securityLevel: String,
         bootStateVerified: Boolean,
-        deviceFingerprint: String
+        deviceFingerprint: String? = null
     ) {
         val devices = getAllDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
@@ -336,8 +336,30 @@ class PairedDeviceRepository(context: Context) {
                 bootHashHex = bootHashHex,
                 securityLevel = securityLevel,
                 bootStateVerified = bootStateVerified,
-                deviceFingerprint = deviceFingerprint
+                // The reconnect binding is the phone's OWN attested-key SPKI,
+                // captured at pairing (see updateDeviceFingerprint). A null here
+                // preserves it: verifying the PEER's attestation (`remote.attestDevice`)
+                // must not overwrite the phone's own reconnect fingerprint.
+                deviceFingerprint = deviceFingerprint ?: devices[idx].deviceFingerprint
             )
+            saveDevices(devices)
+        }
+    }
+
+    /**
+     * Records the phone's OWN attested-key fingerprint against a paired peer —
+     * the value the peer stored at pairing and byte-compares on reconnect,
+     * mixing it into the Noise prologue (#93, docs/12). It is
+     * `AttestedKeyFingerprint.hexOf(leaf)` over the leaf the phone returned to
+     * the desktop's `local.attestDevice` at pairing time, so the phone echoes
+     * exactly what the desktop verified. No-op for an unknown peer.
+     */
+    @Synchronized
+    fun updateDeviceFingerprint(publicKeyHex: String, deviceFingerprint: String) {
+        val devices = getAllDevices().toMutableList()
+        val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
+        if (idx >= 0) {
+            devices[idx] = devices[idx].copy(deviceFingerprint = deviceFingerprint)
             saveDevices(devices)
         }
     }
