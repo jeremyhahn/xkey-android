@@ -1,11 +1,18 @@
 # xKey Android Makefile
 
-.PHONY: help build clean test integration-test install
+.PHONY: help build clean test integration-test install \
+	lint android-lint actionlint security trivy-fs ci ci-fast install-tools
 
 .DEFAULT_GOAL := help
 
 DEBUG_APK := app/build/outputs/apk/debug/app-debug.apk
 ADB := $(HOME)/Android/Sdk/platform-tools/adb
+
+# CI calls these same targets (handbook devops.md section 4: the Makefile is the
+# contract), so a red CI job reproduces locally with the same command.
+GRADLEW ?= ./gradlew
+TRIVY ?= trivy
+TOOLS_BIN ?= $(HOME)/.local/bin
 
 help: ## Show this help
 	@echo "xKey Android Build Targets"
@@ -18,7 +25,7 @@ help: ## Show this help
 	@echo "  Debug APK: $(DEBUG_APK)"
 
 build: ## Build debug APK
-	./gradlew assembleDebug
+	$(GRADLEW) assembleDebug
 	@echo ""
 	@echo "APK: $(DEBUG_APK)"
 
@@ -27,10 +34,41 @@ clean: ## Clean all build artifacts and .class files
 	find . -name "*.class" -type f -delete
 	rm -rf app/build build .gradle/build-cache
 
-test: ## Run unit tests
-	./gradlew testDebugUnitTest
+test: ## Run unit tests (JVM, no device)
+	$(GRADLEW) testDebugUnitTest
 	@echo ""
 	@echo "Reports: app/build/reports/tests/testDebugUnitTest/"
+
+lint: android-lint actionlint ## Android lint + actionlint over .github/workflows
+
+android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
+	$(GRADLEW) lintDebug
+	@echo ""
+	@echo "Report: app/build/reports/lint-results-debug.html"
+
+# actionlint delegates every SC* rule to shellcheck and, when shellcheck is not
+# on PATH, silently disables those rules and still exits 0. Refuse to run in
+# that state rather than report a gate that checked nothing.
+actionlint: ## Lint the workflow files (requires actionlint + shellcheck on PATH)
+	@command -v actionlint > /dev/null || { echo "actionlint not found on PATH"; exit 1; }
+	@command -v shellcheck > /dev/null || { echo "shellcheck not found on PATH: actionlint would skip every SC rule"; exit 1; }
+	actionlint
+
+security: trivy-fs ## Security suite: trivy fs (vuln + secret, CRITICAL/HIGH blocking)
+
+# Version pinned in .trivy-version; install with `make install-tools`.
+# Build output and the Gradle cache are skipped: they are generated, not source.
+trivy-fs: ## Trivy filesystem scan for dependency CVEs and leaked secrets
+	$(TRIVY) fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 \
+		--format table --no-progress --ignorefile .trivyignore \
+		--skip-dirs build --skip-dirs app/build --skip-dirs .gradle --skip-dirs .kotlin .
+
+install-tools: ## Install the pinned, checksum-verified trivy into $(TOOLS_BIN)
+	./scripts/install-trivy.sh $(TOOLS_BIN)
+
+ci-fast: lint build test ## Everything CI runs except the security scan
+
+ci: ci-fast security ## Everything a PR must pass
 
 install: build ## Build and install debug APK via ADB
 	$(ADB) install -r $(DEBUG_APK)

@@ -1,0 +1,217 @@
+# ci-template: v1.13 (adapted: Kotlin/Gradle Android app, not a Go module)
+#
+# The canonical CI workflow (automatethethings software/templates/github-actions/
+# ci.yml) adapted to this repository's stack. The template's structure is kept:
+# one workflow for both hosts (handbook devops.md section 1), every job runs a
+# `make` target (section 4), a staged fail-fast pipeline, and ONE aggregate
+# `CI Gate` job that branch protection requires.
+#
+# What the Go template has that this repo deliberately does NOT:
+#   - gofmt / go vet / golangci-lint / gosec / govulncheck / go mod verify:
+#     there is no Go code here. Their Android-side counterparts are Android
+#     lint (Lint job) and trivy fs (Security job).
+#   - coverage threshold: the JaCoCo report exists (`./gradlew coverageReport`)
+#     but no threshold has been ratified for this app; adding one is a product
+#     decision, not CI wiring.
+#   - instrumented tests (`make integration-test`, connectedDebugAndroidTest):
+#     they need a booted emulator or device. The Gitea job containers have no
+#     KVM, and the Keystore/StrongBox/attestation suites depend on real
+#     device Keystore behaviour, so they stay local (#7 Tier 3).
+#
+# Gitea constraints honoured (devops.md section 1): no `join(needs.*.result)`
+# in the gate, single-quoted expression strings, `runs-on: ubuntu-latest` only,
+# upload-artifact guarded to github.com, no `concurrency:` block (section 9b).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The Gradle daemon toolchain this project pins in
+  # gradle/gradle-daemon-jvm.properties (toolchainVendor=JETBRAINS,
+  # toolchainVersion=21). Running the launcher on that same JDK means Gradle
+  # does not provision a second JDK through foojay on every run. The app
+  # itself compiles to Java/Kotlin target 17 (app/build.gradle.kts).
+  JAVA_DISTRIBUTION: jetbrains
+  JAVA_VERSION: '21'
+  # compileSdk 34 (app/build.gradle.kts); build-tools 36.0.0 is AGP 9.0's
+  # default. The repo's Dockerfile pins JDK 17 + build-tools 34, which no
+  # longer matches the Gradle 9.1 / AGP 9.0 toolchain, so CI provisions the
+  # SDK directly instead of building that image.
+  ANDROID_PACKAGES: 'platform-tools platforms;android-34 build-tools;36.0.0'
+  # Read by the Makefile (`GRADLEW ?= ./gradlew`), so CI and a developer run
+  # the same targets; CI only makes the output log-friendly.
+  GRADLEW: ./gradlew --no-daemon --console=plain --stacktrace
+  # Gradle dependency cache via setup-java, on github.com only. On Gitea the
+  # Actions cache service is unreachable from job containers (infra/gitea
+  # docs/lessons.md, "Workflow differences"): the restore fails with
+  # ECONNREFUSED and the save step retries it, so it costs time and buys
+  # nothing. An empty `cache:` disables it.
+  GRADLE_CACHE: ${{ github.server_url == 'https://github.com' && 'gradle' || '' }}
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: ${{ env.GRADLE_CACHE }}
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ${{ env.ANDROID_PACKAGES }}
+          log-accepted-android-sdk-licenses: false
+
+      # actionlint and shellcheck are baked into the Gitea ci-runner image
+      # (infra/gitea/ci-runner). The fallback install only runs where the image
+      # is absent (the GitHub mirror) and is pinned to the image's version.
+      # `make actionlint` refuses to run without shellcheck, because actionlint
+      # silently disables every SC rule and exits 0 when it is missing.
+      - name: Provide actionlint
+        env:
+          ACTIONLINT_VERSION: '1.7.7'   # keep in step with ci-runner versions.conf
+        run: |
+          set -eu
+          if command -v actionlint > /dev/null 2>&1; then
+            echo "using the image's actionlint: $(command -v actionlint)"
+          else
+            echo "actionlint absent (expected on the GitHub mirror, NOT on ci-runner)"
+            ok=0
+            for i in 1 2 3; do
+              if go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; then ok=1; break; fi
+              echo "install attempt $i failed; retrying"; sleep 10
+            done
+            [ "$ok" = 1 ] || { echo "actionlint install failed after 3 attempts"; exit 1; }
+            echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          fi
+
+      # Android lint (lintDebug, abortOnError) + actionlint over .github/workflows.
+      - name: Lint
+        run: make lint
+
+      - name: Upload lint report
+        if: always() && github.server_url == 'https://github.com'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: ${{ env.GRADLE_CACHE }}
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ${{ env.ANDROID_PACKAGES }}
+          log-accepted-android-sdk-licenses: false
+
+      # Debug APK only. Release builds need signing credentials, which CI is
+      # deliberately not given (assembleRelease refuses to emit an unsigned APK).
+      - name: Build debug APK
+        run: make build
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    # STAGED FAIL-FAST (template v1.9): a tree that cannot lint or build does
+    # not spend a unit-test run.
+    needs: [lint, build]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: ${{ env.GRADLE_CACHE }}
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ${{ env.ANDROID_PACKAGES }}
+          log-accepted-android-sdk-licenses: false
+
+      # JVM unit tests (testDebugUnitTest), including the wire-compatibility
+      # vector suites. No device needed.
+      - name: Unit tests
+        run: make test
+
+      - name: Upload test report
+        if: always() && github.server_url == 'https://github.com'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    needs: [lint, build]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pinned (.trivy-version), checksum-verified trivy from the release
+      # tarball: the same installer `make install-tools` uses, on both hosts,
+      # so the CI scanner and a developer's scanner are the same binary.
+      - name: Install trivy
+        run: |
+          ./scripts/install-trivy.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # trivy fs, vuln + secret, blocking on CRITICAL/HIGH (devops.md
+      # section 8; kept blocking in alpha as section 8a allows while green).
+      # Note: trivy's Gradle analyzer reads gradle.lockfile only, and this
+      # repo does not use dependency locking, so today the vuln scanner finds
+      # no manifest and this job is effectively the secret scan.
+      - name: Security scan
+        run: make security
+
+  # THE required check. Reads every job result BY NAME and fails closed:
+  # `join(needs.*.result)` is the empty string on Gitea (devops.md section 1),
+  # so a gate built on it passes while jobs fail. Adding a job means adding it
+  # to `needs` AND to the check lines below.
+  gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [lint, build, test, security]
+    steps:
+      - name: Fail closed on any non-success
+        run: |
+          check() { case "$2" in
+            success) echo "OK   $1";;
+            skipped) echo "SKIP $1 (upstream stage failed — see its job)"; BAD=1;;
+            *)       echo "FAIL $1 ($2)"; BAD=1;;
+          esac; }
+          BAD=0
+          check lint     "${{ needs.lint.result }}"
+          check build    "${{ needs.build.result }}"
+          check test     "${{ needs.test.result }}"
+          check security "${{ needs.security.result }}"
+          exit $BAD

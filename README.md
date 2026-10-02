@@ -42,6 +42,9 @@ make install
 make help             # Show all available targets
 make build            # Build debug APK
 make test             # Run unit tests
+make lint             # Android lint + actionlint
+make security         # trivy fs (vuln + secret); `make install-tools` installs the pinned trivy
+make ci               # Everything CI runs: lint, build, test, security
 make integration-test # Run all instrumented (on-device) tests
 make protocol-test    # Run the wire-protocol integration suite only
 make e2e-setup        # Prepare a device for the go-xkms conformance probe
@@ -60,6 +63,14 @@ Three layers, from fastest to most realistic:
 | Instrumented | `make integration-test` | Activities, Room, Keystore, and the wire protocol on a real device |
 | Live E2E | `make e2e-setup` + `go run ./cmd/e2eprobe` | Real interop with the go-xkms desktop initiator |
 | WebAuthn E2E | `make webauthn-test` | Real passkey ceremonies verified by the go-xkms relying party |
+
+### CI
+
+`.github/workflows/ci.yml` runs Lint, Build, Test and Security (each a `make`
+target above) and ends in the `CI Gate` job that branch protection requires.
+Only the unit layer runs in CI: instrumented and E2E suites need a device or
+emulator, which the CI runners do not provide, so run them locally before
+merging changes that touch the Keystore, Room or the wire protocol.
 
 ### Wire-protocol integration suite
 
