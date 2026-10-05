@@ -1,10 +1,11 @@
-# ci-template: v1.13 (adapted: Kotlin/Gradle Android app, not a Go module)
+# ci-template: v1.15 (adapted: Kotlin/Gradle Android app, not a Go module)
 #
 # The canonical CI workflow (automatethethings software/templates/github-actions/
 # ci.yml) adapted to this repository's stack. The template's structure is kept:
 # one workflow for both hosts (handbook devops.md section 1), every job runs a
-# `make` target (section 4), a staged fail-fast pipeline, and ONE aggregate
-# `CI Gate` job that branch protection requires.
+# `make` target (section 4), every job starting at once (v1.14: no job waits
+# on lint + build), and ONE aggregate `CI Gate` job that branch protection
+# requires. `push` runs on main only (v1.15).
 #
 # What the Go template has that this repo deliberately does NOT:
 #   - gofmt / go vet / golangci-lint / gosec / govulncheck / go mod verify:
@@ -137,9 +138,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    # STAGED FAIL-FAST (template v1.9): a tree that cannot lint or build does
-    # not spend a unit-test run.
-    needs: [lint, build]
+    # No `needs` (v1.14): every job starts at once; CI Gate fails closed on
+    # any of them.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -171,7 +171,7 @@ jobs:
   security:
     name: Security
     runs-on: ubuntu-latest
-    needs: [lint, build]
+    # No `needs` (v1.14): starts with lint and build, not after them.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -206,7 +206,7 @@ jobs:
         run: |
           check() { case "$2" in
             success) echo "OK   $1";;
-            skipped) echo "SKIP $1 (upstream stage failed — see its job)"; BAD=1;;
+            skipped) echo "SKIP $1 (did not run — see its job)"; BAD=1;;
             *)       echo "FAIL $1 ($2)"; BAD=1;;
           esac; }
           BAD=0
