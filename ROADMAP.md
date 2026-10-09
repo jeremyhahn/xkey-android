@@ -15,19 +15,19 @@ None. Unscheduled until P1 ships; target kind RC.
 
 ## Now
 
-- [#7](http://git.example.internal/jeremyhahn/xkey-android/issues/7) merge gate with CI and review engine on this repo — open
-- [#10](http://git.example.internal/jeremyhahn/xkey-android/issues/10) pairing responses echo per-request generation (go-xkms#128) — open
-- [#11](http://git.example.internal/jeremyhahn/xkey-android/issues/11) password sent on remote backup create and restore (go-xkms#690) — open
-- [#12](http://git.example.internal/jeremyhahn/xkey-android/issues/12) password store and seal store RPCs handled — open
-- [#13](http://git.example.internal/jeremyhahn/xkey-android/issues/13) biometric-gated verify-user RPC for FIDO2 built-in UV — open
-- [#14](http://git.example.internal/jeremyhahn/xkey-android/issues/14) phone-initiated attestation and pairing SAS display (go-xkms#1306) — open
-- [#15](http://git.example.internal/jeremyhahn/xkey-android/issues/15) USB transport supports the per-user password vault — open
+- [#7](../../issues/7) merge gate with CI and review engine on this repo — open
+- [#10](../../issues/10) pairing responses echo per-request generation (go-xkms#128) — open
+- [#11](../../issues/11) password sent on remote backup create and restore (go-xkms#690) — open
+- [#12](../../issues/12) password store and seal store RPCs handled — open
+- [#13](../../issues/13) biometric-gated verify-user RPC for FIDO2 built-in UV — open
+- [#14](../../issues/14) phone-initiated attestation and pairing SAS display (go-xkms#1306) — open
+- [#15](../../issues/15) USB transport supports the per-user password vault — open
 
 ## Next
 
-- [#6](http://git.example.internal/jeremyhahn/xkey-android/issues/6) Noise static and session keys zeroized under an Android protected-memory clause — open
-- [#20](http://git.example.internal/jeremyhahn/xkey-android/issues/20) docs index, banners and stamps conform — open
-- [#5](http://git.example.internal/jeremyhahn/xkey-android/issues/5) attestation-challenge key generation wired or removed — open
+- [#6](../../issues/6) Noise static and session keys zeroized under an Android protected-memory clause — open
+- [#20](../../issues/20) docs index, banners and stamps conform — open
+- [#5](../../issues/5) attestation-challenge key generation wired or removed — open
 
 ## Later
 
