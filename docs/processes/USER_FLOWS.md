@@ -1,5 +1,8 @@
 # User Flows
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built end-to-end user flows in xKey.
+
 This document provides end-to-end user flow diagrams for the major operations
 in xKey, from user intent through system interaction to final result.
 

@@ -1,5 +1,8 @@
 # Cryptography Architecture
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built description of xKey's hardware-backed key hierarchy, signing flows and file encryption.
+
 This document describes the hardware-backed cryptography system in xKey, including
 the key hierarchy, supported algorithms, key lifecycle, signing flows, and the
 ECIES file encryption scheme.

@@ -1,5 +1,8 @@
 # Component Communication
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built map of how xKey components communicate.
+
 This document maps how all components in xKey communicate with each other,
 including activity-to-service bindings, service-to-crypto calls, database
 access patterns, and inter-process communication.

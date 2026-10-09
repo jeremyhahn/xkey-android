@@ -1,5 +1,8 @@
 # BLE Protocol
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built description of the BLE transport in xKey. The wire contract is `go-xkms/xkey/pkg/pairing`.
+
 This document describes the BLE communication protocol used between xKey
 (Android authenticator) and desktop clients (go-xkms). The protocol
 provides authenticated, encrypted, bidirectional communication for

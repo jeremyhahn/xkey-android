@@ -1,5 +1,8 @@
 # Media Auto-Signing
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built description of `MediaSigningService`.
+
 This document describes the `MediaSigningService`, which automatically signs
 photos and videos as they are captured, embedding cryptographic signatures in
 the file metadata for later verification.

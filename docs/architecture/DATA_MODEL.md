@@ -1,5 +1,8 @@
 # Data Model
 
+> **Status: REFERENCE** · Last verified: 2026-08-10
+> As-built description of the xKey Room schema. STALE: the migration table stops at v7; `XKeyDatabase.kt` is at version 11. Read the code for v8-v11.
+
 This document describes the Room database schema, migration history, DataStore
 repositories, and indexing strategy used by the xKey Android application.
 

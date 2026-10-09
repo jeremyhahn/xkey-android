@@ -1,5 +1,8 @@
 # File Operations
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built description of file sign, verify, encrypt and decrypt via `FileOperationActivity`.
+
 This document describes the file sign, verify, encrypt, and decrypt features
 exposed through the Android Share sheet via `FileOperationActivity`.
 

@@ -1,5 +1,8 @@
 # Multi-Party Co-Signing Protocol
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built description of xKey's multi-party attestation of media.
+
 This document describes the multi-party attestation system in xKey, which allows
 multiple people to cryptographically attest to a photo or video. This serves as
 an anti-deepfake and anti-forgery mechanism: if a photo has signatures from

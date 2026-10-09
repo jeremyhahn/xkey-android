@@ -1,5 +1,8 @@
 # Contact Management
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built description of xKey's contact/recipient key management.
+
 This document describes the contact/recipient key management system used by
 xKey for file encryption and signature verification.
 

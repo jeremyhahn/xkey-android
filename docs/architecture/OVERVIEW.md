@@ -1,5 +1,8 @@
 # xKey System Architecture Overview
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built description of the xKey Android application architecture.
+
 This document describes the high-level architecture of the xKey Android application,
 a hardware-backed security key that provides FIDO2/WebAuthn authentication, file
 cryptography, media signing, and multi-party attestation over BLE and USB transports.

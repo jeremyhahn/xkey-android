@@ -1,5 +1,8 @@
 # Verified Media Viewer
 
+> **Status: REFERENCE** · Last verified: 2026-10-09
+> As-built description of `VerifiedMediaViewerActivity`.
+
 This document describes the `VerifiedMediaViewerActivity`, which displays
 images and videos with cryptographic signature verification badges, allowing
 users to confirm the authenticity and provenance of media files.
