@@ -20,7 +20,7 @@
 #     device Keystore behaviour, so they stay local (#7 Tier 3).
 #
 # Gitea constraints honoured (devops.md section 1): no `join(needs.*.result)`
-# in the gate, single-quoted expression strings, `runs-on: ubuntu-latest` only,
+# in the gate, single-quoted expression strings, `runs-on: ubuntu-latest` only (gate: `ci-gate` on Gitea, `ubuntu-latest` on the GitHub mirror, #36),
 # upload-artifact guarded to github.com, no `concurrency:` block (section 9b).
 
 name: CI
@@ -198,7 +198,7 @@ jobs:
   # to `needs` AND to the check lines below.
   gate:
     name: CI Gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ci-gate' }}
     if: always()
     needs: [lint, build, test, security]
     steps:

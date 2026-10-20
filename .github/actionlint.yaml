@@ -40,3 +40,4 @@ self-hosted-runner:
     - codex-task
     - claude
     - code-review
+    - ci-gate
