@@ -435,17 +435,6 @@ class KeystoreManagerAliasTest {
     }
 
     @Test
-    fun generatesAnAttestedKeyTheCallerOwnsTheCleanupFor() {
-        val keyId = newGeneralKeyId("attested")
-
-        val chain = keystoreManager.generateKeyWithAttestationChallenge(keyId, ByteArray(16) { 7 })
-
-        assertNotNull(chain)
-        assertTrue(chain!!.isNotEmpty())
-        assertTrue("the key is deliberately left for the caller", keystoreManager.generalKeyExists(keyId))
-    }
-
-    @Test
     fun reportsStrongBoxBackingConsistentlyWithHardwareAvailability() {
         val credentialId = credentialKey("strongbox")
 

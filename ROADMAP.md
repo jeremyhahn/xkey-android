@@ -21,6 +21,7 @@ Wire-coupled to go-xkms through the pairing contract (Noise-XX + JSON-RPC), not 
 - **tcp-pairing** — loopback `:8444` server behind the Settings toggle — as built, no closing issue — done
 - **device-attestation** — pairing fingerprint bound to the attested key's SPKI — [#2](../../issues/2) — done
 - **device-attestation** — DAK rotation surface decided — [#4](../../issues/4) — done
+- **device-attestation** — unused `generateKeyWithAttestationChallenge` removed — [#5](../../issues/5) — done
 - **hardware-backed-keys** — `local.*` crypto in Keystore, StrongBox preferred — as built, no closing issue — done
 - **exportable-symmetric-keys** — software-backed shareable symmetric keys — as built, no closing issue — done
 - **key-sharing** — per-key, per-peer sharing policies — as built, no closing issue — done
@@ -68,7 +69,6 @@ None.
 - **request-generation-echo** — pairing responses echo per-request generation — [#10](../../issues/10) — blocked: [go-xkms#128](../../../go-xkms/issues/128)
 - **fido2-built-in-uv** — biometric-gated verify-user RPC for FIDO2 built-in UV — [#13](../../issues/13) — blocked: `verifyUser` undefined in go-xkms
 - **protected-memory** — Noise static and session keys under an Android protected-memory clause — [#6](../../issues/6) — blocked: needs the #35 devcontainer image
-- **attestation-challenge-keys** — attestation-challenge key generation wired or its removal ruled — [#5](../../issues/5) — blocked: needs the #35 devcontainer image
 
 ## Future
 
@@ -79,5 +79,5 @@ None.
 - Up: none pinned (not a Go module); wire contract with go-xkms per the handbook's xkey-android wire contract (software docs/12).
 - Up: [go-xkms#128](../../../go-xkms/issues/128) per-request generation, needed by #10.
 - Up: go-xkms defines the `verifyUser` RPC, needed by #13.
-- Up: the [#35](../../issues/35) devcontainer image (JetBrains JDK 21, platforms;android-34, build-tools;36.0.0), needed by #5, #6, #11, #12, #14 and #15.
+- Up: the [#35](../../issues/35) devcontainer image (JetBrains JDK 21, platforms;android-34, build-tools;36.0.0), needed by #6, #11, #12, #14 and #15.
 - Down: go-xkms xkmsd `phone` key backend, `xkey device *` pairing and `xkey fido2 --backend phone`.
