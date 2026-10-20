@@ -302,9 +302,9 @@ adb devices
 
 ## Documentation
 
-- [BLE Protocol Specification](docs/architecture/BLE_PROTOCOL.md)
-- [Architecture Overview](docs/architecture/OVERVIEW.md)
-- [Data Model](docs/architecture/DATA_MODEL.md)
+- [Specification](docs/SPEC.md): every feature, with its detail folder
+- [BLE Transport](docs/ble-transport/architecture.md) and [Noise Pairing](docs/noise-pairing/architecture.md)
+- [Architecture Overview and Data Model](docs/hardware-backed-keys/architecture.md)
 
 ## License
 

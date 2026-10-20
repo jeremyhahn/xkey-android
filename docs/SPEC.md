@@ -31,32 +31,32 @@ Never does:
 
 | Feature | Status | Requirements | Detail |
 |---|---|---|---|
-| noise-pairing | shipped | Noise responder for `Noise_XX_25519_ChaChaPoly_SHA256` after the pre-handshake identity exchange, with the docs/12 prologue and counter nonces; static key in `EncryptedSharedPreferences`; JSON-RPC 2.0 base methods `ping`, `getInfo`, `generateKey`, `sign`, `loadKey`, `deleteKey`, `pairing.confirm`; the user approves each pairing; paired-device list and detail screens | `docs/architecture/BLE_PROTOCOL.md` |
-| ble-transport | shipped | GATT peripheral advertising the xkey service; 7-byte fragment header (flags, sequence, total, length), MTU-aware; a foreground service keeps it advertising | `docs/architecture/BLE_PROTOCOL.md` |
+| noise-pairing | shipped | Noise responder for `Noise_XX_25519_ChaChaPoly_SHA256` after the pre-handshake identity exchange, with the docs/12 prologue and counter nonces; static key in `EncryptedSharedPreferences`; JSON-RPC 2.0 base methods `ping`, `getInfo`, `generateKey`, `sign`, `loadKey`, `deleteKey`, `pairing.confirm`; the user approves each pairing; paired-device list and detail screens | `docs/noise-pairing/` |
+| ble-transport | shipped | GATT peripheral advertising the xkey service; 7-byte fragment header (flags, sequence, total, length), MTU-aware; a foreground service keeps it advertising | `docs/ble-transport/` |
 | usb-transport | shipped | USB accessory (AOA) with a 2-byte big-endian length prefix; shares the `StreamPairingSession` responder with TCP | none |
 | tcp-pairing | shipped | Loopback server on `:8444` behind the Settings toggle "TCP Pairing (ADB)", same framing as USB; enables the emulator and ADB end-to-end suites | none |
 | device-attestation | shipped | Protocol version 2 of docs/12 (NORMATIVE there): a persistent Device Attestation Key attested once to an Android hardware root, a live ECDSA-P256 signature over the transcript, and a `DeviceFingerprint` that hashes the DAK's SPKI | none |
-| hardware-backed-keys | shipped | `local.*` crypto: generate, sign, decrypt, symmetric encrypt and decrypt, ECDH, HMAC, public key, list, info, delete, key policy, key attestation, capabilities; StrongBox preferred, TEE fallback; `generateKey` returns `publicKeyDer` and `securityLevel`; EC keys carry `PURPOSE_AGREE_KEY` | `docs/architecture/CRYPTO.md` |
-| exportable-symmetric-keys | shipped | `local.generateKey` with `exportable` makes a software-backed symmetric key whose material may be shared or synced; exportable asymmetric keys are refused | handbook `software/docs/12-xkey-android-wire-contract.md` |
-| key-sharing | shipped | `local.sharePublicKey`, `local.shareSymmetric`, `local.importSharedKey`; per-key, per-peer sharing policies managed from the key detail screen | `docs/architecture/DATA_MODEL.md` |
-| user-verification | shipped | Biometric auth mode, UV policy and session duration in Settings; a disabled mode for devices with no enrolled biometric, which auth-bound keys require; the user confirms the biometric prompt on the phone | none |
+| hardware-backed-keys | shipped | `local.*` crypto: generate, sign, decrypt, symmetric encrypt and decrypt, ECDH, HMAC, public key, list, info, delete, key policy, key attestation, capabilities; StrongBox preferred, TEE fallback; `generateKey` returns `publicKeyDer` and `securityLevel`; EC keys carry `PURPOSE_AGREE_KEY` | `docs/hardware-backed-keys/` |
+| exportable-symmetric-keys | shipped | `local.generateKey` with `exportable` makes a software-backed symmetric key whose material may be shared or synced; exportable asymmetric keys are refused; the contract is handbook `software/docs/12-xkey-android-wire-contract.md` | none |
+| key-sharing | shipped | `local.sharePublicKey`, `local.shareSymmetric`, `local.importSharedKey`; per-key, per-peer sharing policies managed from the key detail screen | `docs/key-sharing/` |
+| user-verification | shipped | Biometric auth mode, UV policy and session duration in Settings; a disabled mode for devices with no enrolled biometric, which auth-bound keys require; the user confirms the biometric prompt on the phone | `docs/user-verification/` |
 | pin | shipped | The `local.pin*` family (set, verify, change, status, reset lockout), served over every transport | none |
 | piv | shipped | The `local.piv*` family (list slots, generate key, sign, import and get certificate), served over every transport; `remote.piv*` to the desktop | none |
 | oath | shipped | `local.oathAdd`, `oathGenerate`, `oathList`, `oathRemove`; TOTP codes match the desktop's | none |
-| passkey-provider | shipped | Android Credential Provider service handling create and get credential requests from the system credential manager, with an enable setting; real ceremonies pass against the go-xkms relying party | none |
+| passkey-provider | shipped | Android Credential Provider service handling create and get credential requests from the system credential manager, with an enable setting; real ceremonies pass against the go-xkms relying party | `docs/passkey-provider/` |
 | fido2-phone-backend | shipped | CTAP2 over BLE so `xkey fido2 --backend phone` authenticates with keys on the phone after a biometric prompt there | none |
 | store-sync | shipped | One `SyncEngine` gathers and merges the trust store, OATH and passwords, inbound through `local.sync*` and outbound through `remote.sync*` and `RemoteSyncClient` | none |
 | desktop-backup-store | shipped | `local.createBackup` and `local.restoreBackup` hold a paired desktop's backups; backups round-trip | none |
-| remote-key-access | shipped | `remote.*` from phone to desktop reaches xkmsd backends through the desktop `Bridge`: key operations, sync and PIV; a router sends `remote.*` to the desktop and `local.*` to the phone | `docs/processes/COMPONENT_COMMUNICATION.md` |
+| remote-key-access | shipped | `remote.*` from phone to desktop reaches xkmsd backends through the desktop `Bridge`: key operations, sync and PIV; a router sends `remote.*` to the desktop and `local.*` to the phone | `docs/remote-key-access/` |
 | trust-store-bootstrap | shipped | Fetches the platform CA bundle by the configured bootstrap methods from `/v1/ca/bootstrap` or `/acme/ca-bundle`; verifies IDevID certificates; trusted-CA screen | none |
-| certificate-authority | shipped | A local CA issues X.509 certificates by profile and tracks their lifecycle; certificate management screens | `docs/architecture/DATA_MODEL.md` |
+| certificate-authority | shipped | A local CA issues X.509 certificates by profile and tracks their lifecycle; certificate management screens | `docs/certificate-authority/` |
 | password-vault | shipped | The phone's password store, synced with the desktop through `syncPasswords` | none |
-| contacts | shipped | Recipient public keys for encryption and signature verification, with import and export | `docs/engineering/CONTACTS.md` |
-| file-operations | shipped | Sign, verify, encrypt and decrypt files received through the Android Share sheet | `docs/engineering/FILE_OPERATIONS.md` |
-| media-signing | shipped | A foreground service watches MediaStore, hashes new photos and videos, signs them and embeds the signature in EXIF or XMP; auto-sign toggle and key choice | `docs/engineering/MEDIA_SIGNING.md` |
-| co-signing | shipped | Multi-party signing of media by QR or BLE exchange (`cosign.request`, `cosign.response`); Android-only, not part of the desktop contract | `docs/engineering/COSIGN_PROTOCOL.md` |
-| verified-media-viewer | shipped | Shows media with signature verification badges | `docs/engineering/VERIFIED_VIEWER.md` |
-| audit-log | shipped | Records security events in Room; audit screen and recent activity on the home screen | `docs/architecture/DATA_MODEL.md` |
+| contacts | shipped | Recipient public keys for encryption and signature verification, with import and export | `docs/contacts/` |
+| file-operations | shipped | Sign, verify, encrypt and decrypt files received through the Android Share sheet | `docs/file-operations/` |
+| media-signing | shipped | A foreground service watches MediaStore, hashes new photos and videos, signs them and embeds the signature in EXIF or XMP; auto-sign toggle and key choice | `docs/media-signing/` |
+| co-signing | shipped | Multi-party signing of media by QR or BLE exchange (`cosign.request`, `cosign.response`); Android-only, not part of the desktop contract | `docs/co-signing/` |
+| verified-media-viewer | shipped | Shows media with signature verification badges | `docs/verified-media-viewer/` |
+| audit-log | shipped | Records security events in Room; audit screen and recent activity on the home screen | `docs/audit-log/` |
 | release-signing | shipped | `assembleRelease` and `bundleRelease` sign with credentials outside version control and fail with a message when they are missing | none |
 | remote-backup-password | planned | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690) | none |
 | password-vault-rpcs | planned | Answer the `Password*` and `SealStore*` methods the desktop sends over USB (go-xkms#692), including the per-user vault's new unlock body | none |
