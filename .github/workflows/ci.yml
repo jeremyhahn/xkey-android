@@ -19,9 +19,18 @@
 #     KVM, and the Keystore/StrongBox/attestation suites depend on real
 #     device Keystore behaviour, so they stay local (#7 Tier 3).
 #
+# Taken ahead of the rest of the template (#35, Company Agent m967 (2)):
+#   - the v1.25 `concurrency:` block (devops.md section 9b): a newer push to a
+#     PR cancels that PR's older run, and on main one group per event, so a
+#     newer push to main cancels the older main push run;
+#   - the v1.24 docs-only filter (ci-standard.md section 10 (a)): the
+#     `changes` job, and a PR whose every changed file matches
+#     DOCS_ONLY_PATTERN runs Lint alone, Build, Test and Security skip.
+#
 # Gitea constraints honoured (devops.md section 1): no `join(needs.*.result)`
 # in the gate, single-quoted expression strings, `runs-on: ubuntu-latest` only (gate: `ci-gate` on Gitea, `ubuntu-latest` on the GitHub mirror, #36),
-# upload-artifact guarded to github.com, no `concurrency:` block (section 9b).
+# upload-artifact guarded to github.com, a literal `cancel-in-progress: true`
+# (section 9b).
 
 name: CI
 
@@ -30,10 +39,36 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # CUSTOMIZE (xkey-android): no `labeled` (DS-3134, gtp #853). Gitea 1.27.1
+    # sends every label add AND remove as `label_updated`, and its matcher
+    # maps that to `labeled` whichever label moved, with no
+    # `github.event.label` in the payload. Each `task:*` or `code-review`
+    # change then started a run that the `concurrency` block let cancel the
+    # PR's run in progress, and a run whose jobs an `if:` skips would post
+    # `skipped` over the real run's `CI / *` contexts, CI Gate included. An
+    # action outside `types` matches nothing: no run, no status. The cost:
+    # adding `ci:full` waits for the PR's next push, or takes effect through
+    # `workflow_dispatch`.
+    # (#35, Codex 6491) Until then a docs-only PR keeps its last run's green
+    # CI Gate, with Build, Test and Security skipped. To validate it in full
+    # before merge, push to the PR or dispatch this workflow on its branch:
+    # a workflow_dispatch run is never docs-only.
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# CUSTOMIZE (xkey-android): ci-template v1.25's block, ahead of the template
+# (#35, Company Agent m967 (2)). On main the group is the workflow and the
+# event, so a push to main cancels the in-progress main push run of an older
+# commit, and a workflow_dispatch run cancels only an older dispatch run.
+# Every other ref is one group, so a PR's newer run cancels the older. No
+# expression reaches cancel-in-progress (devops.md section 9b): Gitea 1.27.1
+# never released a run once it was set to an expression.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  cancel-in-progress: true
 
 env:
   # The Gradle daemon toolchain this project pins in
@@ -57,8 +92,51 @@ env:
   # ECONNREFUSED and the save step retries it, so it costs time and buys
   # nothing. An empty `cache:` disables it.
   GRADLE_CACHE: ${{ github.server_url == 'https://github.com' && 'gradle' || '' }}
+  # CUSTOMIZE (xkey-android): ci-template v1.24's docs-only filter, ahead of
+  # the template (#35). The files a docs-only PR may touch.
+  DOCS_ONLY_PATTERN: '(\.md$|^docs/)'
 
 jobs:
+  # CUSTOMIZE (xkey-android): ci-template v1.24's `changes` job (ci-standard.md
+  # section 10 (a)). A PR whose every changed file matches DOCS_ONLY_PATTERN
+  # runs Lint only; Build, Test and Security skip and CI Gate reads them as
+  # passed. Off pull_request, or on a PR labelled ci:full, docs_only is always
+  # false. CI_FULL reads the labels the PR carried when its run started, and
+  # no label change starts a run (see `pull_request:` above): ci:full takes
+  # effect at the PR's next push, or at a workflow_dispatch on the PR's
+  # branch, and until then the last run's result stands. Any doubt (a failed diff, an empty list) reads as false, so the
+  # filter fails toward running the tests. Lint does not wait on this job.
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.diff.outputs.docs_only }}
+    env:
+      CI_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+    steps:
+      - uses: actions/checkout@v6
+        if: ${{ github.event_name == 'pull_request' && env.CI_FULL != 'true' }}
+        with:
+          fetch-depth: 0
+      - name: Is every changed file docs or markdown?
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          docs_only=false
+          if [ "$EVENT" = pull_request ] && [ "$CI_FULL" != true ]; then
+            if files=$(git diff --name-only --no-renames "$BASE...$HEAD") && [ -n "$files" ]; then
+              if ! printf '%s\n' "$files" | grep -qvE "$DOCS_ONLY_PATTERN"; then
+                docs_only=true
+              fi
+              printf '%s\n' "$files"
+            fi
+          fi
+          echo "docs only: $docs_only"
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -115,6 +193,8 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: changes             # v1.24: skips on a docs-only PR
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -138,8 +218,10 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    # No `needs` (v1.14): every job starts at once; CI Gate fails closed on
-    # any of them.
+    # v1.14: no job waits on lint + build; CI Gate fails closed on any of
+    # them. v1.24: it waits on `changes` alone and skips on a docs-only PR.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -171,7 +253,10 @@ jobs:
   security:
     name: Security
     runs-on: ubuntu-latest
-    # No `needs` (v1.14): starts with lint and build, not after them.
+    # v1.14: starts with lint and build, not after them. v1.24: it waits on
+    # `changes` alone and skips on a docs-only PR.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -200,18 +285,33 @@ jobs:
     name: CI Gate
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ci-gate' }}
     if: always()
-    needs: [lint, build, test, security]
+    needs: [changes, lint, build, test, security]
     steps:
       - name: Fail closed on any non-success
+        env:
+          # CUSTOMIZE (xkey-android): v1.24's docs-only skip. A job marked
+          # `code` may be skipped only when `changes` succeeded and said
+          # docs_only; a `pr` job may never be skipped, and a failed
+          # `changes` fails the gate.
+          DOCS_ONLY: ${{ needs.changes.result == 'success' && needs.changes.outputs.docs_only == 'true' }}
         run: |
-          check() { case "$2" in
-            success) echo "OK   $1";;
-            skipped) echo "SKIP $1 (did not run — see its job)"; BAD=1;;
-            *)       echo "FAIL $1 ($2)"; BAD=1;;
-          esac; }
           BAD=0
-          check lint     "${{ needs.lint.result }}"
-          check build    "${{ needs.build.result }}"
-          check test     "${{ needs.test.result }}"
-          check security "${{ needs.security.result }}"
+          echo "docs-only PR: ${DOCS_ONLY}"
+          check() { # <job> <result> <pr|code>
+            case "$2" in
+              success) echo "OK   $1";;
+              skipped)
+                if [ "$3" = code ] && [ "${DOCS_ONLY}" = true ]; then
+                  echo "SKIP $1 (docs-only PR)"
+                else
+                  echo "FAIL $1 (skipped)"; BAD=1
+                fi;;
+              *) echo "FAIL $1 ($2)"; BAD=1;;
+            esac
+          }
+          check changes  "${{ needs.changes.result }}" pr
+          check lint     "${{ needs.lint.result }}" pr
+          check build    "${{ needs.build.result }}" code
+          check test     "${{ needs.test.result }}" code
+          check security "${{ needs.security.result }}" code
           exit $BAD
