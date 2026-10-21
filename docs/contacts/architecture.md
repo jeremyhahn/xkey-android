@@ -22,7 +22,7 @@ sequenceDiagram
     OApp->>OApp: Select key to export
     OApp->>OApp: Get public key DER from KeystoreManager
     OApp->>QR: Display QR code
-    Note over QR: {"v":1,"type":"xkey-pubkey",<br/>"name":"Other's Key",<br/>"alg":"ES256",<br/>"key":"MFkwEwYH..."}
+    Note over QR: type=xkey-contact, v=1,<br/>label=Other's Key, algorithm=ES256,<br/>key_id=key-1234, public_key_pem=PEM public key
 
     User->>CMA: Open Contact Management, tap FAB
     CMA-->>User: Import options bottom sheet
@@ -33,7 +33,7 @@ sequenceDiagram
     Cam->>CMA: Decoded JSON string
 
     CMA->>CMA: Parse QR payload
-    CMA->>CMA: Base64-decode public key
+    CMA->>CMA: Parse public key PEM
     CMA->>CMA: Compute SHA-256 fingerprint
     CMA-->>User: "Import 'Other's Key' (ES256)?"
     User->>CMA: Confirm import

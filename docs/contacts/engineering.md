@@ -94,30 +94,37 @@ fun hashBytes(data: ByteArray): String {
 
 1. User selects "Scan QR Code" from the import bottom sheet
 2. `QrCodeScannerHelper` opens CameraX preview with ML Kit barcode scanner
-3. Decoded QR string is parsed as JSON
+3. A decoded string that starts with `{` is read as a JSON contact envelope;
+   any other text is treated as the key material itself
 
 **QR Payload Format**:
 
 ```json
 {
+    "type": "xkey-contact",
     "v": 1,
-    "type": "xkey-pubkey",
-    "name": "Alice's Key",
-    "alg": "ES256",
-    "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..."
+    "label": "Alice's Key",
+    "algorithm": "ES256",
+    "key_id": "key-1234",
+    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQ...\n-----END PUBLIC KEY-----\n"
 }
 ```
 
+The field names mirror the `local.sharePublicKey` wire parameters.
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `v` | int | Payload version (currently `1`) |
-| `type` | string | Always `"xkey-pubkey"` |
-| `name` | string | Suggested contact name |
-| `alg` | string | Algorithm identifier |
-| `key` | string | Base64-encoded DER public key |
+| `type` | string | Always `"xkey-contact"` |
+| `v` | int | Payload version (`1` in this build; other values are still read) |
+| `label` | string | Suggested contact name |
+| `algorithm` | string | Algorithm hint |
+| `key_id` | string | Key identifier on the exporting device |
+| `public_key_pem` | string | PEM-encoded public key; the only field an importer needs |
 
-4. Base64-decode the `key` field to get DER bytes
-5. Prompt for name (pre-filled from QR `name` field)
+4. Parse `public_key_pem` with `parsePEM`; a scan that is not an envelope is
+   parsed as PEM directly. An unparseable key shows
+   `R.string.contact_qr_invalid`
+5. Prompt for name (pre-filled from `label`)
 6. Compute fingerprint, insert into Room
 
 ### Manual Paste (PEM)
