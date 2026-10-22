@@ -2,6 +2,10 @@
 .gradle/
 .kotlin/
 build/
+# ...except the devcontainer image (handbook devcontainer.md section 1).
+!/build/
+/build/*
+!/build/docker/
 app/build/
 
 # IDE

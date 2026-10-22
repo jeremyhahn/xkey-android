@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install a PINNED, checksum-verified trivy.
 #
-#   usage: scripts/install-trivy.sh <install-dir> [version]
+#   usage: scripts/install-trivy.sh <install-dir>
 #
 # The ONE installer for trivy in this repo. Both `make install-tools` and the
 # Gitea path of .github/workflows/nightly.yml call it, so the scanner on a
@@ -25,47 +25,30 @@
 # anything is executed, and nothing from the download is ever run as a script.
 # A corrupted or tampered-in-transit tarball is refused.
 #
-# Does NOT guarantee: the checksums file is fetched from the same origin as the
-# tarball, so this is not a signature check and does not defend against a
-# compromised release where an attacker rewrites both. Upstream publishes a
-# sigstore bundle next to each artifact (trivy_<ver>_checksums.txt.sigstore.json);
-# verifying that with cosign is the next hardening step and needs cosign on the
-# runners first. Stated here rather than implied, so nobody reads "verified" as
-# more than it is.
+# The SHA-256 is pinned in scripts/tool-pins.sh, not fetched beside the
+# tarball, so a release rewritten upstream after the pin is refused too.
 #
-# To bump trivy: edit .trivy-version, run this, and re-run `make security`. The
-# same file feeds the trivy-action `version:` input in nightly.yml, so the
-# GitHub and Gitea paths move together.
+# To bump trivy: edit TRIVY_VERSION and both TRIVY_SHA256_* in
+# scripts/tool-pins.sh (from the release's trivy_<v>_checksums.txt), run
+# this, and re-run `make security`. The devcontainer image reads the same pins.
 
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd)
 
 INSTALL_DIR=${1:-}
 if [ -z "${INSTALL_DIR}" ]; then
-	echo "usage: $0 <install-dir> [version]" >&2
+	echo "usage: $0 <install-dir>" >&2
 	exit 2
 fi
 
-VERSION=${2:-}
+# Version and SHA-256 come from the one pin file (handbook devcontainer.md
+# section 2), the same pins the devcontainer image installs.
+# shellcheck source-path=SCRIPTDIR source=tool-pins.sh
+. "${SCRIPT_DIR}/tool-pins.sh"
+VERSION=${TRIVY_VERSION:-}
 if [ -z "${VERSION}" ]; then
-	if [ ! -f "${REPO_ROOT}/.trivy-version" ]; then
-		echo "error: no version given and ${REPO_ROOT}/.trivy-version is missing" >&2
-		exit 1
-	fi
-	# Read as ONE bare token, not scrubbed. `tr -d ' \t\n\r'` DELETED all
-	# whitespace, so a malformed `0.74 .0` (or a stray second line) was silently
-	# normalised to a plausible-looking version and then passed the semver check
-	# below — verify-not-normalise, at the source. awk emits the value only when
-	# the file holds exactly one whitespace-delimited token; anything else yields
-	# empty, caught by the "resolved to empty" guard immediately after. This keeps
-	# EVERY call site strict (Makefile, nightly.yml, a bare direct invocation),
-	# not just the one that passes $2.
-	VERSION=$(awk '{for(i=1;i<=NF;i++){n++;v=$i}} END{if(n==1)print v}' "${REPO_ROOT}/.trivy-version")
-fi
-if [ -z "${VERSION}" ]; then
-	echo "error: trivy version resolved to empty (missing, whitespace-only, or malformed .trivy-version)" >&2
+	echo "error: TRIVY_VERSION is missing from scripts/tool-pins.sh" >&2
 	exit 1
 fi
 
@@ -87,8 +70,8 @@ done
 OS=$(uname -s)
 ARCH=$(uname -m)
 case "${OS}:${ARCH}" in
-	Linux:x86_64)          ARTIFACT="trivy_${VERSION}_Linux-64bit.tar.gz" ;;
-	Linux:aarch64|Linux:arm64) ARTIFACT="trivy_${VERSION}_Linux-ARM64.tar.gz" ;;
+	Linux:x86_64)          ARTIFACT="trivy_${VERSION}_Linux-64bit.tar.gz" SHA256=${TRIVY_SHA256_X64} ;;
+	Linux:aarch64|Linux:arm64) ARTIFACT="trivy_${VERSION}_Linux-ARM64.tar.gz" SHA256=${TRIVY_SHA256_ARM64} ;;
 	*)
 		# Deliberately not guessing. A wrong artifact name would fail the
 		# checksum step anyway, but failing here says why.
@@ -107,11 +90,7 @@ esac
 #
 # A trustworthy skip would hash the on-disk binary against the pinned EXTRACTED
 # binary's SHA-256 (as scripts/install-shellcheck.sh now does). trivy cannot pin
-# that in-repo the same way: its checksums are FETCHED from the release origin,
-# not committed here, and its version is data-driven from .trivy-version — so a
-# per-version binary hash in this script would break the single-source
-# "bump = edit .trivy-version only" workflow and would not scale across the many
-# versions the fleet pins. The honest fix is therefore to ALWAYS run the
+# that in-repo: scripts/tool-pins.sh pins the tarball, not the binary. The honest fix is therefore to ALWAYS run the
 # verified path below: download, check the tarball against the published SHA-256,
 # extract, install. The cost is one download per explicit invocation (this is an
 # explicitly-invoked install step, not a per-build hook), and correctness is
@@ -124,21 +103,9 @@ trap "rm -rf '${TMP}'" EXIT INT TERM
 
 echo "→ downloading trivy ${VERSION} (${ARTIFACT})"
 curl -sSfL --proto '=https' --tlsv1.2 -o "${TMP}/${ARTIFACT}" "${BASE_URL}/${ARTIFACT}"
-curl -sSfL --proto '=https' --tlsv1.2 -o "${TMP}/checksums.txt" "${BASE_URL}/trivy_${VERSION}_checksums.txt"
 
-echo "→ verifying SHA-256"
-# Reduce the published list to the ONE line for our artifact and check that.
-# Feeding the whole file to `sha256sum -c` would report every other artifact as
-# missing and exit non-zero even on a good download.
-if ! grep -F " ${ARTIFACT}" "${TMP}/checksums.txt" > "${TMP}/expected.sha256"; then
-	echo "error: ${ARTIFACT} is not listed in the published checksums file" >&2
-	exit 1
-fi
-# One line, exactly. More than one means the grep matched something unexpected.
-if [ "$(wc -l < "${TMP}/expected.sha256")" -ne 1 ]; then
-	echo "error: expected exactly one checksum line for ${ARTIFACT}" >&2
-	exit 1
-fi
+echo "→ verifying SHA-256 against scripts/tool-pins.sh"
+echo "${SHA256}  ${ARTIFACT}" > "${TMP}/expected.sha256"
 if ! (cd "${TMP}" && sha256sum -c expected.sha256); then
 	echo "error: CHECKSUM MISMATCH for ${ARTIFACT} — refusing to install" >&2
 	echo "       The download does not match the checksum published for v${VERSION}." >&2

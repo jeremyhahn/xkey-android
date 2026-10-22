@@ -223,11 +223,27 @@ val coverageExclusions = listOf(
     "**/*Kt\$*.*", "**/*\$WhenMappings*.*"
 )
 
+// Every coverage input names the exact file or directory its producer writes.
+// A tree rooted at the whole build directory would make every task that writes
+// under it an undeclared producer, which Gradle 9 rejects when the report runs
+// in the same invocation as assembleDebug or lintDebug.
+
+/** Where AGP writes the JVM unit-test execution data (UNIT_TEST_CODE_COVERAGE). */
+val unitTestExecutionData = layout.buildDirectory.file(
+    "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec"
+)
+
+/** Where AGP writes the connected-test execution data (CODE_COVERAGE), one .ec per device. */
+val instrumentedExecutionData = layout.buildDirectory.dir("outputs/code_coverage/debugAndroidTest")
+
 fun JacocoReportBase.configureCoverageSources() {
-    val kotlinClasses = fileTree("${layout.buildDirectory.get()}/tmp/kotlin-classes/debug") {
+    // The class trees are the compile tasks' outputs; order the report after
+    // them. The test-running reports already depend on them through their tests.
+    mustRunAfter("compileDebugKotlin", "compileDebugJavaWithJavac")
+    val kotlinClasses = fileTree(layout.buildDirectory.dir("tmp/kotlin-classes/debug")) {
         exclude(coverageExclusions)
     }
-    val javaClasses = fileTree("${layout.buildDirectory.get()}/intermediates/javac/debug") {
+    val javaClasses = fileTree(layout.buildDirectory.dir("intermediates/javac/debug")) {
         exclude(coverageExclusions)
     }
     classDirectories.setFrom(files(kotlinClasses, javaClasses))
@@ -240,9 +256,7 @@ tasks.register<JacocoReport>("coverageReport") {
     dependsOn("testDebugUnitTest")
 
     configureCoverageSources()
-    executionData.setFrom(
-        fileTree(layout.buildDirectory) { include("**/testDebugUnitTest.exec") }
-    )
+    executionData.setFrom(unitTestExecutionData)
     reports {
         html.required.set(true)
         xml.required.set(true)
@@ -260,10 +274,8 @@ tasks.register<JacocoReport>("coverageReportFromExisting") {
 
     configureCoverageSources()
     executionData.setFrom(
-        fileTree(layout.buildDirectory) {
-            include("**/testDebugUnitTest.exec")
-            include("**/outputs/code_coverage/**/*.ec")
-        }
+        unitTestExecutionData,
+        fileTree(instrumentedExecutionData) { include("**/*.ec") }
     )
     reports {
         html.required.set(true)
@@ -280,10 +292,8 @@ tasks.register<JacocoReport>("coverageReportWithDevice") {
     // Instrumented coverage lands under outputs/code_coverage as .ec files;
     // unit coverage is a .exec. Both feed the same report.
     executionData.setFrom(
-        fileTree(layout.buildDirectory) {
-            include("**/testDebugUnitTest.exec")
-            include("**/outputs/code_coverage/**/*.ec")
-        }
+        unitTestExecutionData,
+        fileTree(instrumentedExecutionData) { include("**/*.ec") }
     )
     reports {
         html.required.set(true)

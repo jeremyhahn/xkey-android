@@ -240,9 +240,9 @@ xkey-android/
 │   └── libs.versions.toml               # Version catalog
 ├── build.gradle.kts                     # Root build file
 ├── settings.gradle.kts
-├── Makefile                             # Build targets
-├── Dockerfile                           # Android build environment
-└── docker-compose.yml                   # Docker services
+├── build/docker/devcontainer/           # The devcontainer image: Dockerfile, compose.yaml
+├── scripts/tool-pins.sh                 # Every tool version and SHA-256
+└── Makefile                             # Build targets
 ```
 
 ## Permissions

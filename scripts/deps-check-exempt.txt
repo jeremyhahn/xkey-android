@@ -1,0 +1,6 @@
+# Libraries `make deps-check` lets stay behind a release older than 7 days
+# (handbook devops.md section 9). One line each, read by scripts/deps-check.sh:
+#
+#   group:name  reason, who decided, YYYY-MM-DD
+#
+# A line without a reason fails the check. Remove the line with the bump.

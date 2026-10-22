@@ -1,0 +1,34 @@
+// Init script for `make deps-check` (scripts/deps-check.sh): applies the
+// gradle-versions-plugin to the root project without touching the build
+// files. deps-check.sh downloads the plugin jar and checks it against
+// DEPS_CHECK_PLUGIN_SHA256 in scripts/tool-pins.sh before Gradle reads this.
+initscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath files(System.getenv('DEPS_CHECK_PLUGIN_JAR'))
+        // The plugin POM's runtime dependencies (gradle-versions-plugin 0.54.0).
+        classpath 'org.jetbrains.kotlin:kotlin-stdlib:2.0.21'
+        classpath 'com.squareup.okhttp3:okhttp:4.12.0'
+        classpath 'com.squareup.moshi:moshi-kotlin:1.12.0'
+    }
+}
+
+static boolean isNonStable(String version) {
+    version ==~ /(?i).*[.-](alpha|beta|rc|cr|m|eap|dev|snapshot|preview)[.\d-]*$/
+}
+
+rootProject {
+    apply plugin: com.github.benmanes.gradle.versions.VersionsPlugin
+    tasks.named('dependencyUpdates').configure {
+        // A stable dependency is compared with stable releases only; one
+        // already on a pre-release is compared with every release.
+        rejectVersionIf { selection ->
+            isNonStable(selection.candidate.version) && !isNonStable(selection.currentVersion)
+        }
+        outputFormatter = 'json'
+        outputDir = System.getenv('DEPS_CHECK_OUT')
+        reportfileName = 'report'
+    }
+}

@@ -1,0 +1,60 @@
+# One service per devcontainer image (handbook devcontainer.md sections 3 and 6).
+# The Makefile sets both image tags (TOOLCHAIN_IMAGE, IT_IMAGE) on every call,
+# since Compose interpolates every service, and the user. TOOLCHAIN_IMAGE has a
+# placeholder default so that CI's tear down (`IT_IMAGE=... docker compose down`,
+# ci-template) interpolates; `make docker-run` always sets the real tag.
+x-limits: &limits
+  ulimits:
+    memlock:
+      soft: 67108864
+      hard: 67108864
+    core:
+      soft: 0
+      hard: 0
+
+services:
+  # `make docker-run CMD=...`: the source bind-mounted, Gradle's writable
+  # user home on a named volume, HOME=/tmp as in lane-verify.
+  toolchain:
+    image: ${TOOLCHAIN_IMAGE:-xkey-android-toolchain:set-by-make-docker-run}
+    user: ${DOCKER_UID:-1000}:${DOCKER_GID:-1000}
+    working_dir: /src
+    environment:
+      HOME: /tmp
+      GRADLE_USER_HOME: /gradle-home
+      # Java's user.home comes from passwd, not HOME: /home/builder, or "?"
+      # for a caller's uid the image does not know. AGP generates its per-run
+      # debug keystore under ANDROID_USER_HOME; the JVMs (Gradle, the Kotlin
+      # daemon, sdkmanager) get user.home explicitly. Both under writable /tmp.
+      ANDROID_USER_HOME: /tmp/.android
+      JAVA_TOOL_OPTIONS: -Duser.home=/tmp
+    volumes:
+      - ../../..:/src
+      - gradle-home:/gradle-home
+    <<: *limits
+
+  # Hardened (section 3): read-only root, no network, no capabilities.
+  integration:
+    image: ${IT_IMAGE:?set by make it-image}
+    user: "1000:1000"
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      HOME: /tmp
+      GRADLE_USER_HOME: /tmp/gradle-home
+      # As for toolchain: /home/builder is read-only here, so the debug
+      # keystore and every JVM's user.home go to the /tmp tmpfs.
+      ANDROID_USER_HOME: /tmp/.android
+      JAVA_TOOL_OPTIONS: -Duser.home=/tmp
+    tmpfs:
+      - /tmp:exec,mode=1777
+      - /src/build
+      - /src/app/build
+      - /src/.gradle
+      - /src/.kotlin
+    <<: *limits
+
+volumes:
+  gradle-home:

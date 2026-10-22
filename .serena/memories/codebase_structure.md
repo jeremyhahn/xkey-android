@@ -25,12 +25,11 @@ xkey-android/
 │   │   ├── test/                  # Unit tests
 │   │   └── androidTest/           # Instrumented tests
 │   └── build.gradle.kts
-├── scripts/
+├── build/docker/devcontainer/     # The devcontainer image (Dockerfile, compose.yaml)
+├── scripts/                       # tool-pins.sh holds every tool pin
 ├── docs/
 ├── gradle/
 ├── build.gradle.kts               # Root build config
 ├── settings.gradle.kts
-├── Makefile
-├── Dockerfile
-└── docker-compose.yml
+└── Makefile
 ```

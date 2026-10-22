@@ -1,0 +1,19 @@
+# Build context for build/docker/devcontainer/Dockerfile: the source, nothing
+# generated, local or secret.
+.git
+.gradle
+.kotlin
+.idea
+.serena
+.claude
+build
+app/build
+# Credentials, at any depth: every one .gitignore names (keystore.properties
+# holds storePassword and keyPassword). The integration stage copies the
+# context into /src, so nothing here may reach it.
+**/local.properties
+**/keystore.properties
+**/*.keystore
+**/*.jks
+**/.env
+**/*.env
