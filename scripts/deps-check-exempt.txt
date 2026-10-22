@@ -4,3 +4,55 @@
 #   group:name  reason, who decided, YYYY-MM-DD
 #
 # A line without a reason fails the check. Remove the line with the bump.
+
+androidx.activity:activity-ktx  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.appcompat:appcompat  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.biometric:biometric  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.camera:camera-camera2  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.camera:camera-core  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.camera:camera-lifecycle  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.camera:camera-view  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.core:core-ktx  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.credentials:credentials  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.databinding:viewbinding  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.datastore:datastore-preferences  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.exifinterface:exifinterface  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.fragment:fragment-ktx  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.lifecycle:lifecycle-runtime-ktx  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.lifecycle:lifecycle-service  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.lifecycle:lifecycle-viewmodel-ktx  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.media3:media3-exoplayer  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.media3:media3-ui  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.room:room-compiler  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.room:room-ktx  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.room:room-runtime  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.security:security-crypto  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+androidx.test.uiautomator:uiautomator  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.application:com.android.application.gradle.plugin  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:android-device-provider-ddmlib  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:android-test-plugin-host-additional-test-output  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:android-test-plugin-host-apk-installer  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:android-test-plugin-host-coverage  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:android-test-plugin-host-device-info  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:android-test-plugin-host-emulator-control  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:android-test-plugin-host-logcat  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:android-test-plugin-result-listener-gradle  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.android.tools.utp:gradle-work-action  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.google.android.material:material  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.google.testing.platform:android-driver-instrumentation  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.google.testing.platform:android-test-plugin  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.google.testing.platform:core  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.google.testing.platform:launcher  follows AGP 9.0.0; held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.google.zxing:core  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+com.squareup.okhttp3:okhttp  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+io.mockk:mockk  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+io.mockk:mockk-android  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.jacoco:org.jacoco.agent  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.jacoco:org.jacoco.ant  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.jetbrains.kotlin.android:org.jetbrains.kotlin.android.gradle.plugin  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.jetbrains.kotlin:kotlin-annotation-processing-gradle  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.jetbrains.kotlin:kotlin-stdlib  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.jetbrains.kotlinx:kotlinx-coroutines-android  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.jetbrains.kotlinx:kotlinx-coroutines-core  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.jetbrains.kotlinx:kotlinx-coroutines-test  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22
+org.json:json  held for its own review in PR #47 (split of #47); remove with that bump, DS-3254 agent-software, 2026-10-22

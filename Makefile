@@ -241,8 +241,14 @@ it-image-id: ## Print the integration image's ID (IMAGE_FRESH=true: the one its 
 IT_PROJECT ?= xkey-android-it
 # CUSTOMIZE (xkey-android): an IT_IMAGE that is an image ID (`make -s
 # it-image-id`, as CI passes) is run as it is, with no build and no tag lookup.
+# CUSTOMIZE (xkey-android): the suite runs on a copy of the image's /src in the
+# /tmp tmpfs. The service's root is read-only, and Gradle 9 refuses a project
+# directory it cannot write ("Configuring project ':app' without an existing
+# directory is not allowed"); kapt also writes Room's schemas into app/schemas.
+# The copy is exactly the image's source, and nothing the image holds is written.
 it-jvm-test: $(if $(filter sha256:%,$(IT_IMAGE)),,docker-build-it) ## Run the JVM unit suite in the hardened integration image (no device)
-	$(COMPOSE) -p $(IT_PROJECT) run --rm integration make test
+	$(COMPOSE) -p $(IT_PROJECT) run --rm integration \
+		sh -c 'cp -R /src /tmp/src && cd /tmp/src && exec make test'
 
 ci-fast: lint build test ## Everything CI runs except the security scan
 

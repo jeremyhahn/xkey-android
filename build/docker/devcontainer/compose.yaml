@@ -33,7 +33,10 @@ services:
       - gradle-home:/gradle-home
     <<: *limits
 
-  # Hardened (section 3): read-only root, no network, no capabilities.
+  # Hardened (section 3): read-only root, no network, no capabilities. /src,
+  # the image's source, stays read-only. Gradle 9 refuses a project directory
+  # it cannot write, so `make it-jvm-test` copies /src to the /tmp tmpfs, the
+  # only writable path, and runs Gradle there.
   integration:
     image: ${IT_IMAGE:?set by make it-image}
     user: "1000:1000"
@@ -50,10 +53,6 @@ services:
       JAVA_TOOL_OPTIONS: -Duser.home=/tmp
     tmpfs:
       - /tmp:exec,mode=1777
-      - /src/build
-      - /src/app/build
-      - /src/.gradle
-      - /src/.kotlin
     <<: *limits
 
 volumes:

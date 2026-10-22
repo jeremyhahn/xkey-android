@@ -33,9 +33,11 @@ ANDROID_BUILD_TOOLS_ARCHIVE=build-tools_r36_linux.zip
 ANDROID_BUILD_TOOLS_SHA256=5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b
 
 # Gradle: the distribution gradle/wrapper/gradle-wrapper.properties names
-# (https://services.gradle.org/distributions/gradle-9.1.0-bin.zip.sha256).
-GRADLE_VERSION=9.1.0
-GRADLE_SHA256=a17ddd85a26b6a7f5ddb71ff8b05fc5104c0202c6e64782429790c933686c806
+# (https://services.gradle.org/distributions/gradle-9.8.1-bin.zip.sha256).
+# AGP 9.0 needs Gradle 9.1.0 or newer. 9.8.1 bundles jackson 2.22.3 and
+# bcprov 1.85 and drops jsoup, which clears the trivy findings in /opt/gradle/lib.
+GRADLE_VERSION=9.8.1
+GRADLE_SHA256=dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f
 
 # trivy (https://github.com/aquasecurity/trivy/releases, trivy_<v>_checksums.txt).
 TRIVY_VERSION=0.74.0

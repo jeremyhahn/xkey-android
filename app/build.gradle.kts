@@ -1,4 +1,5 @@
 import java.util.Properties
+import javax.inject.Inject
 
 plugins {
     alias(libs.plugins.android.application)
@@ -196,6 +197,33 @@ dependencies {
     // Android Instrumented Testing
     androidTestImplementation(libs.bundles.androidTesting)
     androidTestImplementation(libs.androidx.test.uiautomator)
+
+    // Lint's classpath (lint-gradle 32.0.0): bcprov and bcpkix-jdk18on 1.79,
+    // from sdk-common 32.0.0. AGP 9.0.0 resolves lint in a detached
+    // configuration, which no named-configuration constraint reaches, so a
+    // metadata rule raises sdk-common's Bouncy Castle dependencies instead.
+    components {
+        withModule("com.android.tools:sdk-common", BouncyCastleVersionRule::class.java) {
+            params(libs.versions.bouncycastle.get())
+        }
+    }
+}
+
+// Requires every Bouncy Castle module a component depends on at the catalog's
+// version (bcutil follows bcpkix).
+@CacheableRule
+abstract class BouncyCastleVersionRule @Inject constructor(
+    private val bouncyCastleVersion: String,
+) : ComponentMetadataRule {
+    override fun execute(context: ComponentMetadataContext) {
+        context.details.allVariants {
+            withDependencies {
+                filter { it.group == "org.bouncycastle" }.forEach { dependency ->
+                    dependency.version { require(bouncyCastleVersion) }
+                }
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

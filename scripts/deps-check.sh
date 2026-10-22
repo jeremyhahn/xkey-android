@@ -302,8 +302,13 @@ echo "${DEPS_CHECK_PLUGIN_SHA256}  ${JAR}" | sha256sum -c --quiet - \
 	|| { echo "deps-check: CHECKSUM MISMATCH for the gradle-versions-plugin jar" >&2; rm -f "${JAR}"; exit 1; }
 rm -f "${OUT}/report.json"
 # GRADLEW is a command line (e.g. "gradle --no-daemon"): split on purpose.
+# gradle.properties turns on parallel execution and the configuration cache
+# for every other build; dependencyUpdates supports neither. It fails under
+# parallel execution ("run this task with --no-parallel"), and it reads
+# Task.project at execution time, so Gradle discards its cache entry anyway.
 # shellcheck disable=SC2086
 DEPS_CHECK_PLUGIN_JAR="${JAR}" DEPS_CHECK_OUT="${OUT}" \
-	${GRADLEW:-./gradlew} --init-script "${SCRIPT_DIR}/deps-check.init.gradle" dependencyUpdates > "${OUT}/gradle.log" 2>&1 \
+	${GRADLEW:-./gradlew} --no-parallel --no-configuration-cache \
+	--init-script "${SCRIPT_DIR}/deps-check.init.gradle" dependencyUpdates > "${OUT}/gradle.log" 2>&1 \
 	|| { tail -n 40 "${OUT}/gradle.log"; exit 1; }
 evaluate "${OUT}/report.json"
