@@ -287,7 +287,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         // Gradient background
         val primaryColor = UIHelpers.resolveThemeColor(
             this,
-            com.google.android.material.R.attr.colorPrimary
+            androidx.appcompat.R.attr.colorPrimary
         )
         val primaryContainerColor = UIHelpers.resolveThemeColor(
             this,
@@ -635,7 +635,7 @@ class DeviceDetailActivity : AppCompatActivity() {
             }
             setImageResource(android.R.drawable.ic_menu_save)
             imageTintList = android.content.res.ColorStateList.valueOf(
-                UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorPrimary)
+                UIHelpers.resolveThemeColor(context, androidx.appcompat.R.attr.colorPrimary)
             )
             setOnClickListener { copyFingerprintToClipboard() }
         }
@@ -738,7 +738,7 @@ class DeviceDetailActivity : AppCompatActivity() {
             }
             text = getString(R.string.device_reattest_button)
             setBackgroundColor(
-                UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorPrimary)
+                UIHelpers.resolveThemeColor(context, androidx.appcompat.R.attr.colorPrimary)
             )
             setTextColor(
                 UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorOnPrimary)
@@ -919,7 +919,7 @@ class DeviceDetailActivity : AppCompatActivity() {
             )
             text = getString(R.string.device_unpair_button)
             setBackgroundColor(
-                UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorError)
+                UIHelpers.resolveThemeColor(context, androidx.appcompat.R.attr.colorError)
             )
             setTextColor(
                 UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorOnError)
@@ -1173,7 +1173,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                 idevidExpiresText.text = formattedDate
                 idevidExpiresText.setTextColor(
                     if (isExpired) {
-                        UIHelpers.resolveThemeColor(this, com.google.android.material.R.attr.colorError)
+                        UIHelpers.resolveThemeColor(this, androidx.appcompat.R.attr.colorError)
                     } else {
                         UIHelpers.resolveThemeColor(this, com.google.android.material.R.attr.colorOnSurface)
                     }
@@ -1264,7 +1264,7 @@ class DeviceDetailActivity : AppCompatActivity() {
 
         enrollmentRefusedCaseText.text = refusalCaseLabel(record.refusal)
         enrollmentRefusedCaseText.setTextColor(
-            UIHelpers.resolveThemeColor(this, com.google.android.material.R.attr.colorError)
+            UIHelpers.resolveThemeColor(this, androidx.appcompat.R.attr.colorError)
         )
         enrollmentRefusedDetailText.text = record.refusal.detail
         enrollmentRefusedWhenText.text = formatRelativeTime(record.refusedAt)

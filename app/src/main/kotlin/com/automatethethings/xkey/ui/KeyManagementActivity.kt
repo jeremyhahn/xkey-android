@@ -1569,7 +1569,7 @@ class KeyManagementActivity : AppCompatActivity() {
                 setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelMedium)
                 setTextColor(UIHelpers.resolveThemeColor(
                     context,
-                    com.google.android.material.R.attr.colorPrimary
+                    androidx.appcompat.R.attr.colorPrimary
                 ))
                 typeface = Typeface.DEFAULT_BOLD
                 tag = "algorithm"

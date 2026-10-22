@@ -709,12 +709,12 @@ class TrustStoreActivity : AppCompatActivity() {
         val clearAllButton = MaterialButton(
             this,
             null,
-            com.google.android.material.R.attr.borderlessButtonStyle
+            androidx.appcompat.R.attr.borderlessButtonStyle
         ).apply {
             text = getString(R.string.trust_store_clear_all)
             setTextColor(UIHelpers.resolveThemeColor(
                 this@TrustStoreActivity,
-                com.google.android.material.R.attr.colorError
+                androidx.appcompat.R.attr.colorError
             ))
             setOnClickListener { confirmClearAll() }
         }
@@ -1663,7 +1663,7 @@ class TrustStoreActivity : AppCompatActivity() {
             text = getString(R.string.trust_store_delete)
             setTextColor(UIHelpers.resolveThemeColor(
                 this@TrustStoreActivity,
-                com.google.android.material.R.attr.colorError
+                androidx.appcompat.R.attr.colorError
             ))
             strokeColor = ContextCompat.getColorStateList(
                 this@TrustStoreActivity,
@@ -1965,7 +1965,7 @@ private class TrustedCertificateAdapter(
                 }
                 textSize = 11f
                 val badgeBg = if (cert.source == "internal-ca") {
-                    UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorPrimary)
+                    UIHelpers.resolveThemeColor(context, androidx.appcompat.R.attr.colorPrimary)
                 } else {
                     ContextCompat.getColor(context, R.color.primary_container)
                 }
