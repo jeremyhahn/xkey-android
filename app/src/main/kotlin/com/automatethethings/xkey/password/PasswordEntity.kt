@@ -39,6 +39,13 @@ import androidx.room.PrimaryKey
  * @property source Origin: "local" or "remote".
  * @property createdAt Creation timestamp (Unix millis).
  * @property updatedAt Last-modified timestamp (Unix millis).
+ * @property expiresAt When the entry expires, as an RFC 3339 UTC time
+ *   (`PasswordAddRequest.expires_at`), or null for never.
+ * @property shared Whether the entry is shared rather than personal
+ *   (`PasswordAddRequest.shared`); `PasswordList`'s scope filters on it.
+ * @property tenantId The go-xkms tenant the entry belongs to
+ *   (`PasswordAddRequest.tenant_id`); [DEFAULT_TENANT] for the default one.
+ *   The desktop's get, list, update and delete see only their tenant's entries.
  */
 @Entity(
     tableName = "passwords",
@@ -83,8 +90,22 @@ data class PasswordEntity(
     val createdAt: Long,
 
     @ColumnInfo(name = "updated_at")
-    val updatedAt: Long
+    val updatedAt: Long,
+
+    @ColumnInfo(name = "expires_at")
+    val expiresAt: String? = null,
+
+    @ColumnInfo(name = "shared")
+    val shared: Boolean = false,
+
+    @ColumnInfo(name = "tenant_id")
+    val tenantId: String = DEFAULT_TENANT
 ) {
+    companion object {
+        /** go-xkms's default tenant, which a request without a `tenant_id` names. */
+        const val DEFAULT_TENANT = ""
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is PasswordEntity) return false
@@ -99,7 +120,10 @@ data class PasswordEntity(
             folderPath == other.folderPath &&
             source == other.source &&
             createdAt == other.createdAt &&
-            updatedAt == other.updatedAt
+            updatedAt == other.updatedAt &&
+            expiresAt == other.expiresAt &&
+            shared == other.shared &&
+            tenantId == other.tenantId
     }
 
     override fun hashCode(): Int {
@@ -115,6 +139,9 @@ data class PasswordEntity(
         result = 31 * result + source.hashCode()
         result = 31 * result + createdAt.hashCode()
         result = 31 * result + updatedAt.hashCode()
+        result = 31 * result + (expiresAt?.hashCode() ?: 0)
+        result = 31 * result + shared.hashCode()
+        result = 31 * result + tenantId.hashCode()
         return result
     }
 }

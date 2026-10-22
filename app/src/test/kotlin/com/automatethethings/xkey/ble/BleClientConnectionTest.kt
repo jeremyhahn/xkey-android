@@ -498,6 +498,9 @@ class BleClientConnectionTest {
         assertConnectFails(h)
 
         h.serviceIsPresent = true
+        // A retry dials a new GATT object, as connectGatt does: the client
+        // treats the failed one's callbacks as stale from here on.
+        h.nextConnection()
         assertTrue(h.client.connect(h.address, randomKey()))
         assertTrue(h.client.isConnected())
     }

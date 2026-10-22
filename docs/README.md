@@ -21,3 +21,4 @@
 - [co-signing](co-signing/): [architecture](co-signing/architecture.md) (co-sign messages and flows), [engineering](co-signing/engineering.md) (multi-party attestation protocol).
 - [verified-media-viewer](verified-media-viewer/): [architecture](verified-media-viewer/architecture.md) (viewing flow), [engineering](verified-media-viewer/engineering.md) (`VerifiedMediaViewerActivity`).
 - [audit-log](audit-log/architecture.md): audit log table.
+- [password-vault-rpcs](password-vault-rpcs/engineering.md): USB `Password*` methods, tenant, scope, sharing and expiry.

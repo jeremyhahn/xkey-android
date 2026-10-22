@@ -33,6 +33,8 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -352,8 +354,9 @@ class BleClientCallbackTest {
 
     /** An empty notification carries no fragment header and must be dropped. */
     @Test
-    fun anEmptyNotificationIsIgnored() {
+    fun anEmptyNotificationIsIgnored(): Unit = runBlocking {
         val h = harness()
+        h.client.connect(h.address, ByteArray(32) { it.toByte() })
 
         h.probe.gattCallback.onCharacteristicChanged(h.gatt, h.responseCharacteristic, ByteArray(0))
 
@@ -367,8 +370,9 @@ class BleClientCallbackTest {
      * down with no way to report it.
      */
     @Test
-    fun aMalformedFragmentIsDroppedAndTheClientKeepsWorking() {
+    fun aMalformedFragmentIsDroppedAndTheClientKeepsWorking(): Unit = runBlocking {
         val h = harness()
+        h.client.connect(h.address, ByteArray(32) { it.toByte() })
 
         h.probe.gattCallback.onCharacteristicChanged(
             h.gatt, h.responseCharacteristic, byteArrayOf(0x01, 0x02, 0x03)
@@ -392,8 +396,9 @@ class BleClientCallbackTest {
      */
     @Suppress("DEPRECATION")
     @Test
-    fun theDeprecatedNotificationOverloadIsHandled() {
+    fun theDeprecatedNotificationOverloadIsHandled(): Unit = runBlocking {
         val h = harness()
+        h.client.connect(h.address, ByteArray(32) { it.toByte() })
         every { h.responseCharacteristic.value } returns firstOfTwoFragments()
 
         h.probe.gattCallback.onCharacteristicChanged(h.gatt, h.responseCharacteristic)
@@ -403,10 +408,19 @@ class BleClientCallbackTest {
         }
     }
 
-    /** Before the session exists, a whole message belongs to the handshake. */
+    /**
+     * Until the handshake completes, a whole message belongs to it. The
+     * identity frame is held unacknowledged, so the connection is up and its
+     * handshake has not finished.
+     */
     @Test
-    fun aCompleteMessageBeforeTheHandshakeIsNotDeliveredAsAResponse() {
+    fun aCompleteMessageBeforeTheHandshakeIsNotDeliveredAsAResponse(): Unit = runBlocking {
         val h = harness()
+        h.holdWrites = true
+        val connecting = async(Dispatchers.Default) {
+            runCatching { h.client.connect(h.address, ByteArray(32) { it.toByte() }) }
+        }
+        awaitUntil("the identity frame's write") { h.heldWrites == 1 }
         val pending = CompletableDeferred<ByteArray>()
         h.probe.pendingResponse = pending
 
@@ -417,9 +431,16 @@ class BleClientCallbackTest {
             "handshake traffic must never be handed to a request waiter",
             pending.isCompleted
         )
+        // Fails the held write, so the connect gives up now, not at its timeout.
+        h.close()
+        connecting.await()
     }
 
-    /** Once the session is live, a whole message is the pending response. */
+    /**
+     * Once the session is live, a whole message is the pending response —
+     * decrypted, since the client decrypts everything to tell a reply from a
+     * request the desktop sent.
+     */
     @Test
     fun aCompleteMessageAfterTheHandshakeIsDeliveredAsTheResponse(): Unit = runBlocking {
         val h = harness()
@@ -428,7 +449,7 @@ class BleClientCallbackTest {
         h.probe.pendingResponse = pending
         val payload = "response".toByteArray()
 
-        h.probe.handleCompleteMessage(payload)
+        h.probe.handleCompleteMessage(h.responder.encrypt(payload))
 
         assertArrayEquals(payload, pending.await())
     }
@@ -479,19 +500,30 @@ class BleClientCallbackTest {
         assertFalse(h.probe.hasWriteInFlight)
     }
 
-    /** A teardown must not leave half a message for the next connection. */
+    /**
+     * A teardown must not leave half a message for the next connection: the
+     * half message is in the ended connection's own buffer, which the next
+     * connection never reads.
+     */
     @Test
-    fun disconnectingCancelsThePendingRequestAndResetsReassembly() {
+    fun disconnectingCancelsThePendingRequestAndResetsReassembly(): Unit = runBlocking {
         val h = harness()
+        h.client.connect(h.address, ByteArray(32) { it.toByte() })
         val pending = CompletableDeferred<ByteArray>()
         h.probe.pendingResponse = pending
-        h.probe.fragmentReassembler.addFragment(firstOfTwoFragments())
-        assertEquals(1, h.probe.fragmentReassembler.getFragmentCount())
+        h.probe.gattCallback.onCharacteristicChanged(h.gatt, h.responseCharacteristic, firstOfTwoFragments())
+        awaitUntil("the client to buffer the first fragment") {
+            h.probe.fragmentReassembler.getFragmentCount() == 1
+        }
 
         h.probe.disconnectInternal()
 
         assertTrue("a waiter must not be stranded", pending.isCancelled)
         assertNull(h.probe.pendingResponse)
+        assertNull("the half message must end with its connection", h.probe.connection)
+
+        h.nextConnection()
+        h.client.connect(h.address, ByteArray(32) { it.toByte() })
         assertEquals(0, h.probe.fragmentReassembler.getFragmentCount())
         assertFalse(h.probe.fragmentReassembler.isInProgress())
     }
@@ -501,7 +533,7 @@ class BleClientCallbackTest {
         val h = harness()
 
         try {
-            h.probe.sendFragmentedMessage(h.controlPoint, "ping".toByteArray())
+            h.client.sendRequest("ping".toByteArray())
             fail("sending without a GATT connection must be refused")
         } catch (expected: BleClientException) {
             assertTrue(expected.message!!.contains("Not connected"))

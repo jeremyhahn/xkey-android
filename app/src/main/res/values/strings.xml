@@ -299,6 +299,7 @@
     <!-- Pairing Confirmation -->
     <string name="pairing_dialog_title">Pairing Request</string>
     <string name="pairing_dialog_message">"%1$s" wants to pair with this phone.\n\nFingerprint: %2$s\n\nAllow this device to connect?</string>
+    <string name="pairing_dialog_message_sas">"%1$s" wants to pair with this phone.\n\nCode: %3$s\n\nCheck this code matches the one the desktop shows. Allow only if they are the same.\n\nFingerprint: %2$s</string>
     <string name="pairing_dialog_allow">Allow</string>
     <string name="pairing_dialog_deny">Deny</string>
 
@@ -1238,6 +1239,7 @@
     <string name="password_field_url">URL</string>
     <string name="password_field_notes">Notes</string>
     <string name="password_required">Name and password are required</string>
+    <string name="password_too_large">This entry is too large to save. Shorten its notes or other fields.</string>
     <string name="password_detail_name">Name: %1$s</string>
     <string name="password_detail_username">Username: %1$s</string>
     <string name="password_detail_password">Password: %1$s</string>

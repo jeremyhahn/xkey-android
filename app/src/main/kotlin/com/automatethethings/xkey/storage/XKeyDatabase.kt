@@ -65,6 +65,7 @@ import java.util.concurrent.atomic.AtomicReference
  * - v9: Added `piv_slots` table for PIV smart card key slot management.
  * - v10: Added `passwords` table for the encrypted password manager.
  * - v11: Migrated key source token "keychaind" -> "xkmsd" (go-xkms daemon rename).
+ * - v12: Added expires_at, shared and tenant_id columns to passwords table.
  *
  * Usage:
  * ```kotlin
@@ -95,7 +96,7 @@ import java.util.concurrent.atomic.AtomicReference
         PivSlotEntity::class,
         PasswordEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = true
 )
 @TypeConverters(AuditOperationTypeConverter::class)
@@ -564,6 +565,20 @@ abstract class XKeyDatabase : RoomDatabase() {
         }
 
         /**
+         * Migration from v11 to v12: store a password entry's go-xkms policy
+         * fields. `expires_at` is nullable (no expiry); every existing entry is
+         * personal (`shared` 0) and belongs to the default tenant (`tenant_id`
+         * ''), which is what go-xkms assumes of a request that names none.
+         */
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `passwords` ADD COLUMN `expires_at` TEXT")
+                db.execSQL("ALTER TABLE `passwords` ADD COLUMN `shared` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `passwords` ADD COLUMN `tenant_id` TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
          * Get the singleton database instance.
          *
          * Uses double-checked locking with AtomicReference for thread-safe
@@ -589,7 +604,7 @@ abstract class XKeyDatabase : RoomDatabase() {
                 XKeyDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
                 .build()
         }
 

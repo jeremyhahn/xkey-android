@@ -27,6 +27,7 @@ import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -40,7 +41,7 @@ import org.junit.runner.RunWith
  * Each test materialises a database exactly as an older app version left it —
  * historical DDL from [LegacySchemas] plus real rows — then opens it through
  * the production Room builder configuration. Room runs the migration path and
- * validates the resulting schema against the compiled v11 entities on open, so
+ * validates the resulting schema against the compiled v12 entities on open, so
  * a migration that forgets a column or an index fails here rather than on a
  * user's phone. The seeded rows then prove the data survived the trip.
  *
@@ -101,6 +102,9 @@ class XKeyDatabaseMigrationTest {
     @Test
     fun migratesFromVersion10() = assertMigratesAndPreservesData(10)
 
+    @Test
+    fun migratesFromVersion11() = assertMigratesAndPreservesData(11)
+
     /**
      * Guards the fixture itself: if a new schema is exported without a matching
      * test above, the coverage claim made by this suite quietly stops being
@@ -147,6 +151,55 @@ class XKeyDatabaseMigrationTest {
                 "unrelated sources must not be touched",
                 "remote_ble",
                 db.keyDao().getByKeyId("remote-ble-key")?.source
+            )
+        }
+    }
+
+    /**
+     * MIGRATION_11_12 adds a password entry's go-xkms policy columns. Every
+     * entry written at 11 comes out with no expiry, personal, in the default
+     * tenant, and with every column it had kept.
+     */
+    @Test
+    fun migration11To12GivesExistingPasswordsTheDefaultPolicy() {
+        createLegacyDatabase(11) { db ->
+            insertRow(
+                db,
+                "passwords",
+                mapOf(
+                    "password_id" to "pw-legacy",
+                    "name" to "Legacy",
+                    "username" to "user@example.com",
+                    "password_encrypted" to byteArrayOf(1, 2, 3),
+                    "folder_path" to "/work",
+                    "source" to "remote",
+                    "created_at" to 1_000L,
+                    "updated_at" to 2_000L
+                )
+            )
+        }
+
+        withMigratedDatabase { db ->
+            val migrated = requireNotNull(db.passwordDao().getByPasswordId("pw-legacy"))
+            assertNull("an entry written at 11 has no expiry", migrated.expiresAt)
+            assertFalse("an entry written at 11 is personal", migrated.shared)
+            assertEquals("an entry written at 11 is in the default tenant", "", migrated.tenantId)
+            assertEquals("Legacy", migrated.name)
+            assertEquals("user@example.com", migrated.username)
+            assertEquals("/work", migrated.folderPath)
+            assertEquals("remote", migrated.source)
+            assertEquals(1_000L, migrated.createdAt)
+            assertEquals(2_000L, migrated.updatedAt)
+            assertTrue(migrated.passwordEncrypted.contentEquals(byteArrayOf(1, 2, 3)))
+            assertEquals(
+                "a migrated entry is found in the default tenant",
+                "pw-legacy",
+                db.passwordDao().getByPasswordIdInTenant("pw-legacy", "")?.passwordId
+            )
+            assertEquals(
+                "a migrated entry lists as personal",
+                listOf("pw-legacy"),
+                db.passwordDao().getForListing("", shared = false, folderPath = null).map { it.passwordId }
             )
         }
     }
@@ -291,7 +344,8 @@ class XKeyDatabaseMigrationTest {
                 XKeyDatabase.MIGRATION_7_8,
                 XKeyDatabase.MIGRATION_8_9,
                 XKeyDatabase.MIGRATION_9_10,
-                XKeyDatabase.MIGRATION_10_11
+                XKeyDatabase.MIGRATION_10_11,
+                XKeyDatabase.MIGRATION_11_12
             )
             .build()
         try {

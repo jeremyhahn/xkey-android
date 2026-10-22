@@ -45,16 +45,20 @@ import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.settings.UserVerificationPolicy
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.lang.ref.WeakReference
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import java.util.Base64
 import com.automatethethings.xkey.pin.PinManager
 import com.automatethethings.xkey.pin.PinType
 import com.automatethethings.xkey.pin.PinException
 import com.automatethethings.xkey.pin.PinLockedException
+import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivAlgorithm
@@ -385,22 +389,63 @@ class RequestHandler(
     }
 
     /**
+     * Handles a raw request that arrived on a session this phone *opened* — the
+     * phone-initiated direction, where the desktop sends `local.attestDevice`
+     * right after the handshake and refuses the session without a verified answer.
+     *
+     * The same dispatch as [handleRawRequest]; only the session differs. The
+     * transport-installed provider and peer key describe whichever session this
+     * phone is *serving*, which may be a different desktop, so for the duration
+     * of this call [binding] and [peerPublicKeyHex] stand in for them. Nothing
+     * global changes, so a concurrent responder session keeps its own.
+     *
+     * @param binding the channel binding of the session [data] arrived on
+     * @param peerPublicKeyHex that session's authenticated peer static key
+     */
+    suspend fun handleRawRequest(
+        data: ByteArray,
+        binding: SessionBindingProvider,
+        peerPublicKeyHex: String?,
+    ): ByteArray = withContext(CallerSession(binding, peerPublicKeyHex)) {
+        handleRawRequest(data)
+    }
+
+    /**
+     * The session a [handleRawRequest] call was made for, carried in the
+     * coroutine context so it reaches the handler without a second, forked
+     * dispatch path.
+     */
+    private class CallerSession(
+        val binding: SessionBindingProvider,
+        val peerPublicKeyHex: String?,
+    ) : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<CallerSession>
+    }
+
+    /**
      * Handles a raw request (JSON bytes).
      *
      * @param data Raw JSON request data
      * @return Raw JSON response data
      */
     suspend fun handleRawRequest(data: ByteArray): ByteArray {
+        val json = String(data, Charsets.UTF_8)
         return try {
-            val request = Request.fromJson(data)
+            val request = Request.fromJson(json)
             val response = handleRequest(request)
             response.toJson()
         } catch (e: ProtocolException) {
+            // A request that does not parse still echoes its generation when
+            // the text carries one where it can be read.
             Log.e(TAG, "Protocol error: ${e.message}")
-            Response.error(0, e.errorCode, e.message ?: "Protocol error").toJson()
+            Response.error(
+                0, e.errorCode, e.message ?: "Protocol error", generation = readGeneration(json)
+            ).toJson()
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error", e)
-            Response.error(0, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}").toJson()
+            Response.error(
+                0, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}", generation = readGeneration(json)
+            ).toJson()
         }
     }
 
@@ -414,10 +459,16 @@ class RequestHandler(
     /**
      * Handles a parsed request.
      *
+     * Every answer carries the request's `generation` (go-xkms#128), copied
+     * here rather than by each handler, so no method can drop it.
+     *
      * @param request The parsed request
      * @return Response to the request
      */
-    suspend fun handleRequest(request: Request): Response {
+    suspend fun handleRequest(request: Request): Response =
+        dispatch(request).copy(generation = request.generation)
+
+    private suspend fun dispatch(request: Request): Response {
         Log.d(TAG, "Handling request: id=${request.id}, method=${request.method}")
 
         val handler = handlers[request.method]
@@ -821,12 +872,15 @@ class RequestHandler(
      * @param rpName The relying party name for context, or null if unavailable
      * @param requestId A unique identifier for this biometric request
      * @param onTimeout Callback invoked if the notification times out without user action
+     * @param notifyLaptop Whether the installed [messageSender]'s laptop is the
+     *   one waiting on this prompt, and so should hear that it is pending
      */
     private fun showBiometricNotificationIfLocked(
         operationType: String,
         rpName: String?,
         requestId: String,
-        onTimeout: () -> Unit = {}
+        onTimeout: () -> Unit = {},
+        notifyLaptop: Boolean = true
     ) {
         if (keyguardManager.isKeyguardLocked) {
             Log.d(TAG, "Screen is locked, showing biometric notification")
@@ -837,7 +891,9 @@ class RequestHandler(
                 onTimeout = onTimeout
             )
             // Also notify the laptop that biometric is pending
-            sendBiometricPendingNotification(operationType, rpName)
+            if (notifyLaptop) {
+                sendBiometricPendingNotification(operationType, rpName)
+            }
         }
     }
 
@@ -917,13 +973,14 @@ class RequestHandler(
 
     /**
      * Checks if device attestation is current for this operation based on
-     * the connected device's settings.
+     * the requesting device's settings -- the caller session's peer when there
+     * is one, see [attestingPeerPublicKeyHex].
      *
      * @param forKeyUse True if checking for key use, false for key attestation.
      * @return True if attestation is current or not required, false if attestation is required but expired.
      */
-    private fun isDeviceAttestationCurrent(forKeyUse: Boolean): Boolean {
-        val publicKeyHex = connectedDevicePublicKeyHex ?: return true  // Unknown device, allow
+    private suspend fun isDeviceAttestationCurrent(forKeyUse: Boolean): Boolean {
+        val publicKeyHex = attestingPeerPublicKeyHex() ?: return true  // Unknown device, allow
         val device = pairedDeviceRepository?.getDevice(publicKeyHex) ?: return true  // Not in repo, allow
 
         val requiresAttestation = if (forKeyUse) {
@@ -1891,11 +1948,14 @@ class RequestHandler(
         title: String,
         subtitle: String
     ) {
+        // Resolved before the policy is read, so a caller session with no
+        // authenticated peer is refused under every policy, not only the one
+        // that consults it.
+        val publicKeyHex = attestingPeerPublicKeyHex()
         val requireBiometric = when (currentSettings.attestationBiometricPolicy) {
             AttestationBiometricPolicy.ALWAYS -> true
             AttestationBiometricPolicy.NEVER -> false
             AttestationBiometricPolicy.PAIRED_DEVICES_SKIP -> {
-                val publicKeyHex = connectedDevicePublicKeyHex
                 if (publicKeyHex != null && pairedDeviceRepository != null) {
                     !pairedDeviceRepository.isDeviceKnown(publicKeyHex)
                 } else {
@@ -1914,7 +1974,10 @@ class RequestHandler(
         showBiometricNotificationIfLocked(
             operationType = operationType,
             rpName = null,
-            requestId = "$operationType-${request.id}"
+            requestId = "$operationType-${request.id}",
+            // The installed sender reaches the desktop this phone is serving,
+            // which is not the one waiting on a caller session's request.
+            notifyLaptop = currentCoroutineContext()[CallerSession] == null
         )
 
         try {
@@ -2191,8 +2254,12 @@ class RequestHandler(
      *   that looks well-formed and fails verification for reasons neither side
      *   can see.
      */
-    private fun deriveChannelBinding(): ByteArray {
-        val binding = sessionBindingProvider?.binding()
+    private suspend fun deriveChannelBinding(): ByteArray {
+        // The caller's session when there is one, and then only that: a
+        // phone-initiated session that cannot bind must refuse, not fall back to
+        // whichever session this phone happens to be serving.
+        val provider = currentCoroutineContext()[CallerSession]?.binding ?: sessionBindingProvider
+        val binding = provider?.binding()
             ?: throw ProtocolException(
                 "Device attestation requires an established Noise session to bind to",
                 errorCode = ErrorCodes.ATTESTATION_FAILED
@@ -2217,15 +2284,41 @@ class RequestHandler(
      * the fail-closed case `ErrDeviceIdentityChanged` exists to catch. A rotated
      * key is meant to cost a re-pair.
      */
-    private fun bindFingerprintAtPairing(purpose: String, fingerprint: ByteArray) {
+    private suspend fun bindFingerprintAtPairing(purpose: String, fingerprint: ByteArray) {
         if (purpose != AttestTranscript.PURPOSE_PAIR) return
-        val peerKeyHex = connectedDevicePublicKeyHex ?: return
+        val peerKeyHex = attestingPeerPublicKeyHex() ?: return
         val repo = pairedDeviceRepository ?: return
         if (!repo.isDeviceKnown(peerKeyHex)) return
 
         val hex = fingerprint.joinToString("") { "%02x".format(it) }
         repo.updateDeviceFingerprint(peerKeyHex, hex)
         Log.i(TAG, "Bound attested-key fingerprint for peer ${peerKeyHex.take(16)}: ${hex.take(16)}...")
+    }
+
+    /**
+     * The authenticated peer whose per-device policy governs this request --
+     * the attestation prompt, attestation freshness, the pairing fingerprint
+     * binding. That is the caller session's peer when the request arrived on
+     * one, and the served session's otherwise.
+     *
+     * A caller session is never backfilled from the global peer. That one
+     * belongs to whichever desktop this phone is serving, so its trust would
+     * decide a prompt -- or bind a fingerprint -- for a different machine.
+     *
+     * @return the peer's static key hex, or null when there is no caller
+     *   session and no served peer either
+     * @throws ProtocolException when a caller session carries no peer key
+     */
+    private suspend fun attestingPeerPublicKeyHex(): String? {
+        val caller = currentCoroutineContext()[CallerSession] ?: return connectedDevicePublicKeyHex
+        val peer = caller.peerPublicKeyHex
+        if (peer.isNullOrEmpty()) {
+            throw ProtocolException(
+                "Request arrived on a session with no authenticated peer key",
+                errorCode = ErrorCodes.ATTESTATION_FAILED
+            )
+        }
+        return peer
     }
 
     /**
@@ -2965,6 +3058,10 @@ class RequestHandler(
                 put("skipped", counts.skipped)
                 put("remote", remote)
             })
+        } catch (e: PasswordStoreLockedException) {
+            // Merge runs first and is refused before it writes, so a locked
+            // vault leaves the store untouched and exports nothing.
+            Response.error(request.id, ErrorCodes.PASSWORD_STORE_LOCKED, e.message ?: "password store is locked")
         } catch (e: Exception) {
             Log.e(TAG, "syncPasswords failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncPasswords failed: ${e.message}")

@@ -39,7 +39,8 @@ import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.PairingConfirmParams
 import com.automatethethings.xkey.protocol.PairingConfirmResult
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
-import com.automatethethings.xkey.protocol.SessionBinding
+import com.automatethethings.xkey.protocol.readGeneration
+import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.CertificateAuthoritySource
 import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
@@ -901,21 +902,6 @@ class GattServer(
     }
 
     /**
-     * The static keys and prologue `local.attestDevice` binds its attestation to
-     * (go-xkms#129 §5).
-     *
-     * This end is always the Noise **responder** over GATT — the desktop opens
-     * the handshake — so the peer's static key is the initiator's. Null before
-     * the handshake authenticates a peer, which the handler treats as "cannot
-     * bind" and refuses rather than attesting to no channel.
-     */
-    private fun sessionBinding(session: NoiseSession): SessionBinding? {
-        val initiator = session.getRemoteStaticKey() ?: return null
-        val responder = session.getStaticPublicKey() ?: return null
-        return SessionBinding(initiator, responder, session.getPrologue())
-    }
-
-    /**
      * Converts a hex string to byte array.
      */
     private fun String.hexStringToByteArray(): ByteArray {
@@ -946,7 +932,7 @@ class GattServer(
             if (session.isHandshakeComplete()) {
                 val deviceName = device.name ?: "Unknown"
                 authenticatedPeerKeyHex = session.getRemoteStaticKey()?.toHexString()
-                requestHandler.setSessionBindingProvider { sessionBinding(session) }
+                requestHandler.setSessionBindingProvider { session.sessionBinding() }
                 _connectionState.value = ConnectionState.Connected(deviceName, device.address)
                 Log.i(TAG, "Noise handshake complete with ${device.address}")
 
@@ -1083,8 +1069,9 @@ class GattServer(
      * belong to the router.
      */
     private fun rejectUnpaired(plaintext: ByteArray): ByteArray? {
+        val text = String(plaintext, Charsets.UTF_8)
         val json = try {
-            JSONObject(String(plaintext, Charsets.UTF_8))
+            JSONObject(text)
         } catch (e: Exception) {
             Log.w(TAG, "Dropping unparseable pre-pairing message")
             return null
@@ -1095,7 +1082,8 @@ class GattServer(
         return ProtocolResponse.error(
             json.optLong("id", -1),
             ErrorCodes.PAIRING_REQUIRED,
-            "Device is not paired; send pairing.confirm first"
+            "Device is not paired; send pairing.confirm first",
+            generation = readGeneration(text)
         ).toJson()
     }
 
@@ -1105,8 +1093,9 @@ class GattServer(
      * @return The response bytes if this was a pairing.confirm message, null otherwise.
      */
     private suspend fun handlePairingConfirmIfNeeded(plaintext: ByteArray): ByteArray? {
+        val text = String(plaintext, Charsets.UTF_8)
         val json = try {
-            JSONObject(String(plaintext, Charsets.UTF_8))
+            JSONObject(text)
         } catch (e: Exception) {
             return null
         }
@@ -1115,6 +1104,7 @@ class GattServer(
         if (method != MethodNames.PAIRING_CONFIRM) return null
 
         val id = json.optLong("id", -1)
+        val generation = readGeneration(text)
         val params = json.optJSONObject("params") ?: return null
         val pairingParams = try {
             PairingConfirmParams.fromJson(params)
@@ -1135,7 +1125,7 @@ class GattServer(
         if (peerKeyHex == null) {
             Log.e(TAG, "No authenticated peer key; refusing pairing")
             return ProtocolResponse.error(
-                id, ErrorCodes.PAIRING_REJECTED, "No authenticated peer identity"
+                id, ErrorCodes.PAIRING_REJECTED, "No authenticated peer identity", generation = generation
             ).toJson()
         }
         if (!pairingParams.publicKeyHex.equals(peerKeyHex, ignoreCase = true)) {
@@ -1150,7 +1140,10 @@ class GattServer(
                 reason = "public_key_mismatch"
             )
             return ProtocolResponse.error(
-                id, ErrorCodes.PAIRING_REJECTED, "Claimed public key does not match the authenticated peer"
+                id,
+                ErrorCodes.PAIRING_REJECTED,
+                "Claimed public key does not match the authenticated peer",
+                generation = generation
             ).toJson()
         }
 
@@ -1158,11 +1151,21 @@ class GattServer(
             Log.i(TAG, "Device is known, auto-accepting pairing")
             true
         } else {
-            // No approval UI available means nothing can grant trust.
-            callback?.onPairingConfirmationRequired(
-                pairingParams.deviceName,
-                peerKeyHex.take(16)
-            ) ?: false
+            // The SAS the desktop prints during `xkey device pair`; the user
+            // compares the two before trusting the peer. No session to derive
+            // it from means nothing to compare, so nothing can grant trust.
+            val sas = noiseSession?.sessionBinding()?.let { AttestTranscript.shortAuthString(it) }
+            if (sas == null) {
+                Log.e(TAG, "No completed Noise session to derive the SAS; refusing pairing")
+                false
+            } else {
+                // No approval UI available means nothing can grant trust.
+                callback?.onPairingConfirmationRequired(
+                    pairingParams.deviceName,
+                    peerKeyHex.take(16),
+                    sas
+                ) ?: false
+            }
         }
 
         if (confirmed) {
@@ -1184,7 +1187,7 @@ class GattServer(
 
             val deviceName = android.os.Build.MODEL
             val result = PairingConfirmResult(confirmed = true, deviceName = deviceName)
-            val response = ProtocolResponse.success(id, result.toJson())
+            val response = ProtocolResponse.success(id, result.toJson(), generation = generation)
             val responseBytes = response.toJson()
 
             // Initiate post-pairing enrollment if trusted computing is enabled
@@ -1210,7 +1213,7 @@ class GattServer(
             )
 
             val response = ProtocolResponse.error(
-                id, ErrorCodes.PAIRING_REJECTED, "Pairing rejected by user"
+                id, ErrorCodes.PAIRING_REJECTED, "Pairing rejected by user", generation = generation
             )
             val responseBytes = response.toJson()
 

@@ -12,13 +12,15 @@ import com.automatethethings.xkey.crypto.Base32
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
-import com.automatethethings.xkey.password.PasswordRecord
+import com.automatethethings.xkey.password.FilePasswordVaultFactorStore
 import com.automatethethings.xkey.password.PasswordRepository
+import com.automatethethings.xkey.password.PasswordVault
 import com.automatethethings.xkey.settings.SyncStateRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.truststore.TrustStoreRepository
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Single source of truth for bidirectional store synchronization. Owns the
@@ -35,8 +37,16 @@ import org.json.JSONObject
  * DTO field names match the go-xkms pairing contract
  * (`pkg/pairing/protocol_sync.go`: SyncCertificate / SyncOATHCredential /
  * SyncPassword).
+ *
+ * [passwordRepository] opens the password store; the default is the app
+ * database's, under the Keystore cipher.
  */
-class SyncEngine(private val context: Context) {
+class SyncEngine(
+    private val context: Context,
+    private val passwordRepository: () -> PasswordRepository = {
+        PasswordRepository(XKeyDatabase.getInstance(context).passwordDao())
+    }
+) {
 
     /** Result of merging incoming certificates. */
     data class CertCounts(val added: Int, val skipped: Int)
@@ -148,59 +158,26 @@ class SyncEngine(private val context: Context) {
 
     // --- Passwords ---
 
-    /** Exports the phone's password entries as [SyncPassword] JSON. */
-    suspend fun gatherPasswords(): JSONArray {
-        val passwordRepo = PasswordRepository(db.passwordDao())
-        val out = JSONArray()
-        for (rec in passwordRepo.list()) {
-            out.put(JSONObject().apply {
-                put("id", rec.passwordId)
-                put("name", rec.name)
-                put("title", rec.title ?: JSONObject.NULL)
-                put("username", rec.username ?: JSONObject.NULL)
-                put("password", rec.password)
-                put("url", rec.url ?: JSONObject.NULL)
-                put("notes", rec.notes ?: JSONObject.NULL)
-                put("folder_path", rec.folderPath ?: JSONObject.NULL)
-                put("updated_at", SyncCodec.toRfc3339(rec.updatedAt))
-            })
-        }
-        return out
-    }
+    /**
+     * Exports the phone's password entries as [SyncPassword] JSON.
+     *
+     * @throws com.automatethethings.xkey.password.PasswordStoreLockedException
+     *   if the password vault is locked.
+     */
+    suspend fun gatherPasswords(): JSONArray = passwordSync().gather()
 
-    /** Imports/updates incoming password entries. */
-    suspend fun mergePasswords(incoming: JSONArray): ItemCounts {
-        val passwordRepo = PasswordRepository(db.passwordDao())
-        var added = 0
-        var updated = 0
-        var skipped = 0
-        for (i in 0 until incoming.length()) {
-            val obj = incoming.optJSONObject(i) ?: continue
-            val id = obj.optString("id", "")
-            val password = obj.optString("password", "")
-            if (id.isEmpty() || password.isEmpty()) {
-                skipped++
-                continue
-            }
-            val existed = passwordRepo.get(id) != null
-            passwordRepo.upsert(
-                PasswordRecord(
-                    passwordId = id,
-                    name = obj.optString("name", "").ifBlank { id },
-                    title = obj.optString("title", "").ifBlank { null },
-                    username = obj.optString("username", "").ifBlank { null },
-                    password = password,
-                    url = obj.optString("url", "").ifBlank { null },
-                    notes = obj.optString("notes", "").ifBlank { null },
-                    folderPath = obj.optString("folder_path", "").ifBlank { null },
-                    source = "remote",
-                    updatedAt = SyncCodec.parseRfc3339(obj.optString("updated_at", ""))
-                )
-            )
-            if (existed) updated++ else added++
-        }
-        return ItemCounts(added, updated, skipped)
-    }
+    /**
+     * Imports/updates incoming password entries.
+     *
+     * @throws com.automatethethings.xkey.password.PasswordStoreLockedException
+     *   if the password vault is locked; nothing is written.
+     */
+    suspend fun mergePasswords(incoming: JSONArray): ItemCounts = passwordSync().merge(incoming)
+
+    private fun passwordSync() = PasswordSync(
+        passwordRepository(),
+        FilePasswordVaultFactorStore(File(context.filesDir, PasswordVault.FACTOR_DIR))
+    )
 
     // --- Status ---
 
@@ -211,13 +188,19 @@ class SyncEngine(private val context: Context) {
             context.contentResolver, android.provider.Settings.Secure.ANDROID_ID
         ) ?: "unknown"
 
-    /** Per-store SHA-256 checksums so a peer can detect changes cheaply. */
+    /**
+     * Per-store SHA-256 checksums so a peer can detect changes cheaply.
+     *
+     * Not behind the password vault's lock: the password checksum covers only
+     * entry IDs and update times, read without decrypting any password, and
+     * yields one digest.
+     */
     suspend fun storeChecksums(): JSONObject {
-        val passwordRepo = PasswordRepository(db.passwordDao())
+        val passwords = passwordRepository().listWithoutSecrets()
         val trustRepo = TrustStoreRepository(context)
         return JSONObject().apply {
             put("oath", SyncCodec.storeChecksum(db.oathCredentialDao().getAll().map { "${it.oathId}:${it.counter}" }))
-            put("passwords", SyncCodec.storeChecksum(passwordRepo.list().map { "${it.passwordId}:${it.updatedAt}" }))
+            put("passwords", SyncCodec.storeChecksum(passwords.map { "${it.passwordId}:${it.updatedAt}" }))
             put("trust_store", SyncCodec.storeChecksum(trustRepo.getAllCertificates().map { it.fingerprint }))
         }
     }

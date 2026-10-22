@@ -4,6 +4,8 @@ import com.automatethethings.xkey.util.getStringOrNull
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import org.json.JSONTokener
+import java.math.BigInteger
 import java.util.Base64
 
 /**
@@ -21,11 +23,14 @@ import java.util.Base64
  * @property id Unique request identifier
  * @property method Method name to invoke
  * @property params Optional method parameters
+ * @property generation The initiator's request generation (go-xkms#128), a
+ *   uint64 the response echoes verbatim; null when the request carried none
  */
 data class Request(
     val id: Long,
     val method: String,
-    val params: JSONObject? = null
+    val params: JSONObject? = null,
+    val generation: ULong? = null
 ) {
     companion object {
         /**
@@ -60,7 +65,7 @@ data class Request(
                     null
                 }
 
-                return Request(id, method, params)
+                return Request(id, method, params, readGeneration(json))
             } catch (e: JSONException) {
                 throw ProtocolException("Invalid JSON: ${e.message}", e)
             }
@@ -80,6 +85,9 @@ data class Request(
     fun toJsonString(): String {
         val obj = JSONObject()
         obj.put("id", id)
+        if (generation != null) {
+            obj.put(GENERATION_KEY, generation.toJsonNumber())
+        }
         obj.put("method", method)
         if (params != null) {
             obj.put("params", params)
@@ -88,17 +96,80 @@ data class Request(
     }
 }
 
+/** The envelope member carrying a request's generation (go-xkms#128). */
+const val GENERATION_KEY = "generation"
+
+/** A JSON integer as a uint64 is written: no sign, no leading zero, no fraction or exponent. */
+private val UINT64_LITERAL = Regex("0|[1-9][0-9]*")
+
+/**
+ * The top-level `generation` of the JSON message [json], or null when it has
+ * none or it is not a uint64.
+ *
+ * The phone copies the value into its response and never computes with it,
+ * so it is read from the message text, not from a parsed [JSONObject]: the
+ * Android platform org.json parses an integer literal above [Long.MAX_VALUE]
+ * into a Double, which rounds it. The members before it are walked with the
+ * same tokener, so a generation is still read from a message that is
+ * malformed only after it.
+ */
+fun readGeneration(json: String): ULong? {
+    val literal = try {
+        topLevelLiteral(json, GENERATION_KEY)
+    } catch (e: JSONException) {
+        null
+    } ?: return null
+    if (!UINT64_LITERAL.matches(literal)) return null
+    return literal.toULongOrNull()
+}
+
+/**
+ * The raw text of the value of the top-level member [key] of the JSON object
+ * [json], up to the next `,` or `}`; null when the object has no such member.
+ * Every org.json the app runs on, the bundled one and Android's, has these
+ * [JSONTokener] calls.
+ */
+private fun topLevelLiteral(json: String, key: String): String? {
+    val tokener = JSONTokener(json)
+    if (tokener.nextClean() != '{') return null
+    while (true) {
+        val next = tokener.nextClean()
+        if (next == '}' || next == '\u0000') return null
+        tokener.back()
+        val name = tokener.nextValue() as? String ?: return null
+        if (tokener.nextClean() != ':') return null
+        if (name == key) {
+            if (tokener.nextClean() == '\u0000') return null
+            tokener.back()
+            return tokener.nextTo(",}")
+        }
+        tokener.nextValue()
+        if (tokener.nextClean() != ',') return null
+    }
+}
+
+/**
+ * This uint64 as the value org.json writes digit for digit: a [Long] when it
+ * fits, otherwise a [BigInteger]. A boxed [ULong] is not a [Number], so
+ * org.json would quote it.
+ */
+private fun ULong.toJsonNumber(): Number =
+    if (this <= Long.MAX_VALUE.toULong()) toLong() else BigInteger(toString())
+
 /**
  * Represents a protocol response message.
  *
  * @property id Request identifier this response corresponds to
  * @property result Successful result data
  * @property error Error information if request failed
+ * @property generation The generation of the request this answers, copied
+ *   verbatim; null when the request carried none
  */
 data class Response(
     val id: Long,
     val result: JSONObject? = null,
-    val error: ErrorObject? = null
+    val error: ErrorObject? = null,
+    val generation: ULong? = null
 ) {
     init {
         require(result != null || error != null) {
@@ -113,22 +184,28 @@ data class Response(
         /**
          * Creates a successful response.
          */
-        fun success(id: Long, result: JSONObject): Response {
-            return Response(id, result = result, error = null)
+        fun success(id: Long, result: JSONObject, generation: ULong? = null): Response {
+            return Response(id, result = result, error = null, generation = generation)
         }
 
         /**
          * Creates an error response.
          */
-        fun error(id: Long, code: Int, message: String, data: JSONObject? = null): Response {
-            return Response(id, result = null, error = ErrorObject(code, message, data))
+        fun error(
+            id: Long,
+            code: Int,
+            message: String,
+            data: JSONObject? = null,
+            generation: ULong? = null
+        ): Response {
+            return Response(id, result = null, error = ErrorObject(code, message, data), generation = generation)
         }
 
         /**
          * Creates an error response from an ErrorObject.
          */
-        fun error(id: Long, error: ErrorObject): Response {
-            return Response(id, result = null, error = error)
+        fun error(id: Long, error: ErrorObject, generation: ULong? = null): Response {
+            return Response(id, result = null, error = error, generation = generation)
         }
 
         /**
@@ -160,7 +237,7 @@ data class Response(
                 val result = if (hasResult) obj.getJSONObject("result") else null
                 val error = if (hasError) ErrorObject.fromJson(obj.getJSONObject("error")) else null
 
-                return Response(id, result, error)
+                return Response(id, result, error, readGeneration(json))
             } catch (e: JSONException) {
                 throw ProtocolException("Invalid JSON: ${e.message}", e)
             }
@@ -180,6 +257,9 @@ data class Response(
     fun toJsonString(): String {
         val obj = JSONObject()
         obj.put("id", id)
+        if (generation != null) {
+            obj.put(GENERATION_KEY, generation.toJsonNumber())
+        }
         if (result != null) {
             obj.put("result", result)
         }
@@ -327,6 +407,21 @@ object ErrorCodes {
      * `ErrAttestProtocolDowngrade`.
      */
     const val ATTEST_PROTOCOL_DOWNGRADE = -32037
+
+    // Password vault errors (go-xkms docs/password-vault/api.md). A malformed
+    // credential is INVALID_PARAMS and an unknown ID is KEY_NOT_FOUND.
+
+    /** PasswordStoreUnlock arrived before any vault factor was enrolled. */
+    const val VAULT_NOT_INITIALIZED = -32038
+
+    /**
+     * The credential unwrapped no enrolled factor. The message never says which
+     * part was wrong, so a guesser learns nothing from the refusal.
+     */
+    const val VAULT_CREDENTIAL_REJECTED = -32039
+
+    /** The vault is initialized and locked; unlock it before using the store. */
+    const val PASSWORD_STORE_LOCKED = -32040
 
     // PIV errors
     const val PIV_SLOT_NOT_FOUND = -32026

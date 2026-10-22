@@ -1391,7 +1391,12 @@ class DeviceDetailActivity : AppCompatActivity() {
                     null
                 }
 
-                val client = BleClient(this@DeviceDetailActivity)
+                // The desktop asks local.attestDevice the moment the handshake
+                // completes and drops a session that cannot answer it.
+                val client = BleClient(
+                    this@DeviceDetailActivity,
+                    gattService?.phoneInitiatedRequestHandler()
+                )
                 val connected = client.connect(
                     address = bleAddress,
                     localStaticKey = keyPair.privateKey,

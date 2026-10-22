@@ -30,7 +30,13 @@ import io.mockk.every
 import io.mockk.mockk
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
+import org.json.JSONException
+import org.json.JSONObject
 
 /**
  * A whole xKey desktop, in-process, behind a mocked Bluetooth stack.
@@ -64,7 +70,9 @@ class BleClientHarness(
     /** The MTU the stack reports back from `requestMtu`. */
     val mtu: Int = 247,
     val address: String = "AA:BB:CC:DD:EE:F0",
-    val deviceName: String = "xKey Desktop"
+    val deviceName: String = "xKey Desktop",
+    /** What the client answers the desktop's own requests with. */
+    inboundRequests: PhoneInitiatedRequestHandler? = null
 ) {
 
     // -----------------------------------------------------------------
@@ -82,6 +90,14 @@ class BleClientHarness(
 
     /** The status paired with [connectionNewState]. */
     var connectionStatus: Int = BluetoothGatt.GATT_SUCCESS
+
+    /**
+     * Runs inside `connectGatt`, before the stack reports the dialled
+     * connection's state: while the client is dialling and has no GATT
+     * object for the connection yet.
+     */
+    @Volatile
+    var whileDialling: (() -> Unit)? = null
 
     var discoveryStarts: Boolean = true
     var discoveryStatus: Int = BluetoothGatt.GATT_SUCCESS
@@ -115,6 +131,49 @@ class BleClientHarness(
      */
     var pinnedFingerprint: ByteArray? = null
 
+    /**
+     * When set, the desktop sends this request in reply to handshake message
+     * 3 — before the client has even finished the write that carried it — as
+     * go-xkms does with `local.attestDevice` on a phone-initiated session.
+     */
+    var requestOnHandshake: ByteArray? = null
+
+    /**
+     * When true, a desktop message sent in reply to a post-handshake write —
+     * [requestOnHandshake] among them — is notified *before* the stack reports
+     * that write complete. Notifications and write callbacks travel separately,
+     * so a real stack can deliver them in that order. The write is then held
+     * open for [writeAckHoldMs], as a slow acknowledgement would hold it, and
+     * any write the client starts meanwhile is refused, as a busy GATT stack
+     * refuses it, and counted in [overlappingWrites].
+     */
+    var replyBeforeWriteAck: Boolean = false
+
+    /** How long [replyBeforeWriteAck] holds a write open, absent an overlap. */
+    var writeAckHoldMs: Long = 500
+
+    /**
+     * When true, every write is acknowledged from a separate stack thread, one
+     * ack at a time, and the completion the client installed does not *return*
+     * until the client has started its next write — or [nextWriteWaitMs] has
+     * passed, for the last write of a message. Resuming the writer is what lets
+     * the next write begin, so a real stack can be inside the first callback
+     * while the second writer installs its own. Each ack that returned only
+     * after the next write began is counted in [acksOutlivedByTheNextWrite].
+     */
+    var ackAfterTheNextWriteStarts: Boolean = false
+
+    /** How long [ackAfterTheNextWriteStarts] keeps a callback open for the next write. */
+    var nextWriteWaitMs: Long = 1_000
+
+    /**
+     * When true, a write the stack takes is not acknowledged until
+     * [releaseHeldWrites]: the client is left with a write outstanding, and
+     * its completion installed, for as long as the test needs.
+     */
+    @Volatile
+    var holdWrites: Boolean = false
+
     /** The desktop's reply to a decrypted request. */
     var responseFor: (ByteArray) -> ByteArray = {
         """{"jsonrpc":"2.0","id":1,"result":{"ok":true}}""".toByteArray()
@@ -127,6 +186,12 @@ class BleClientHarness(
     /** Every plaintext request the desktop decrypted, in order. */
     val receivedRequests = mutableListOf<ByteArray>()
 
+    /**
+     * Every plaintext *response* the desktop decrypted — the client's answers
+     * to [desktopSends]. Written from the client's scope, read by the test.
+     */
+    val receivedResponses = CopyOnWriteArrayList<ByteArray>()
+
     /** The raw 33-byte identity frame the client opened with. */
     var receivedIdentity: ByteArray? = null
         private set
@@ -134,6 +199,23 @@ class BleClientHarness(
     /** How many characteristic writes the client issued, fragments included. */
     var writeCount: Int = 0
         private set
+
+    /** Writes the client started while an earlier one was still unacknowledged. */
+    val overlappingWrites = AtomicInteger(0)
+
+    /** Under [ackAfterTheNextWriteStarts], callbacks the next write began inside. */
+    val acksOutlivedByTheNextWrite = AtomicInteger(0)
+
+    /** Writes [holdWrites] is holding unacknowledged. */
+    val heldWrites: Int
+        get() = held.size
+
+    /** The desktop's replies to the writes [holdWrites] holds, in write order; null where it stays silent. */
+    val heldReplies: List<ByteArray?>
+        get() = held.map { it.second }
+
+    /** How many characteristic writes the client tried on [gatt], refused ones included. */
+    fun writesOn(gatt: BluetoothGatt): Int = writes[gatt]?.get() ?: 0
 
     // -----------------------------------------------------------------
     // The mocked stack
@@ -144,14 +226,20 @@ class BleClientHarness(
     val adapter: BluetoothAdapter = mockk(relaxed = true)
     val scanner: BluetoothLeScanner = mockk(relaxed = true)
     val device: BluetoothDevice = mockk(relaxed = true)
+    /** The first connection's GATT object; [nextConnection] dials others. */
     val gatt: BluetoothGatt = mockk(relaxed = true)
+
+    /** The GATT object `connectGatt` hands out, and the only one the stack writes on. */
+    @Volatile
+    var dialledGatt: BluetoothGatt = gatt
+        private set
     val service: BluetoothGattService = mockk(relaxed = true)
     val controlPoint: BluetoothGattCharacteristic = mockk(relaxed = true)
     val responseCharacteristic: BluetoothGattCharacteristic = mockk(relaxed = true)
     val statusCharacteristic: BluetoothGattCharacteristic = mockk(relaxed = true)
     val cccd: BluetoothGattDescriptor = mockk(relaxed = true)
 
-    val client = BleClient(context)
+    val client = BleClient(context, inboundRequests)
     val probe = BleClientProbe(client)
 
     /** The desktop's Noise responder, so tests can assert on its identity. */
@@ -160,6 +248,26 @@ class BleClientHarness(
     private val inbound = FragmentReassembler()
     private var lastControlPointWrite: ByteArray? = null
     private var identityDone = false
+
+    /** Set while [replyBeforeWriteAck] holds a write open; read from the client's threads. */
+    @Volatile
+    private var writeInFlight = false
+
+    /** The stack thread [ackAfterTheNextWriteStarts] acknowledges on, in write order. */
+    private val ackThread by lazy {
+        Executors.newSingleThreadExecutor { task ->
+            Thread(task, "gatt-write-ack").apply { isDaemon = true }
+        }
+    }
+
+    /** Writes handed to [ackThread] so far. */
+    private val writesAcked = AtomicInteger(0)
+
+    /** Every characteristic write tried, by the GATT object it was tried on. */
+    private val writes = ConcurrentHashMap<BluetoothGatt, AtomicInteger>()
+
+    /** What [holdWrites] holds: the GATT object written on, and the desktop's reply. */
+    private val held = CopyOnWriteArrayList<Pair<BluetoothGatt, ByteArray?>>()
 
     init {
         runBlocking { responder.loadStaticKey(context) }
@@ -179,10 +287,39 @@ class BleClientHarness(
             device.connectGatt(any(), any(), any<BluetoothGattCallback>())
         } answers {
             if (!connectStarts) return@answers null
-            probe.gattCallback.onConnectionStateChange(gatt, connectionStatus, connectionNewState)
-            gatt
+            val dialled = dialledGatt
+            whileDialling?.invoke()
+            probe.gattCallback.onConnectionStateChange(dialled, connectionStatus, connectionNewState)
+            dialled
         }
 
+        every { service.getCharacteristic(any<UUID>()) } answers {
+            when (firstArg<UUID>()) {
+                GattServer.CONTROL_POINT_UUID -> if (controlPointIsPresent) controlPoint else null
+                GattServer.RESPONSE_UUID -> if (responseIsPresent) responseCharacteristic else null
+                GattServer.STATUS_UUID -> statusCharacteristic
+                else -> null
+            }
+        }
+        every { responseCharacteristic.getDescriptor(GattServer.CCCD_UUID) } answers {
+            if (cccdIsPresent) cccd else null
+        }
+        every { cccd.uuid } returns GattServer.CCCD_UUID
+        every { controlPoint.setValue(any<ByteArray>()) } answers {
+            lastControlPointWrite = firstArg()
+            true
+        }
+
+        stubGatt(gatt)
+    }
+
+    /**
+     * Answers [gatt]'s calls as the stack answers them, with every callback
+     * carrying [gatt]. A write on a GATT object other than [dialledGatt] is
+     * one the client has moved on from: the stack refuses it, and it is
+     * counted in [writesOn].
+     */
+    private fun stubGatt(gatt: BluetoothGatt) {
         every { gatt.device } returns device
         every { gatt.discoverServices() } answers {
             if (!discoveryStarts) return@answers false
@@ -192,14 +329,6 @@ class BleClientHarness(
         every { gatt.getService(GattServer.XKEY_SERVICE_UUID) } answers {
             if (serviceIsPresent) service else null
         }
-        every { service.getCharacteristic(any<UUID>()) } answers {
-            when (firstArg<UUID>()) {
-                GattServer.CONTROL_POINT_UUID -> if (controlPointIsPresent) controlPoint else null
-                GattServer.RESPONSE_UUID -> if (responseIsPresent) responseCharacteristic else null
-                GattServer.STATUS_UUID -> statusCharacteristic
-                else -> null
-            }
-        }
 
         every { gatt.requestMtu(any()) } answers {
             if (!mtuRequestStarts) return@answers false
@@ -208,28 +337,42 @@ class BleClientHarness(
         }
 
         every { gatt.setCharacteristicNotification(any(), any()) } answers { notificationsEnable }
-        every { responseCharacteristic.getDescriptor(GattServer.CCCD_UUID) } answers {
-            if (cccdIsPresent) cccd else null
-        }
-        every { cccd.uuid } returns GattServer.CCCD_UUID
         every { gatt.writeDescriptor(any<BluetoothGattDescriptor>()) } answers {
             if (!descriptorWriteStarts) return@answers false
             probe.gattCallback.onDescriptorWrite(gatt, cccd, descriptorWriteStatus)
             true
         }
 
-        every { controlPoint.setValue(any<ByteArray>()) } answers {
-            lastControlPointWrite = firstArg()
-            true
-        }
         every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            writes.getOrPut(gatt) { AtomicInteger(0) }.incrementAndGet()
+            if (gatt !== dialledGatt) return@answers false
             if (!writeStarts) return@answers false
+            if (writeInFlight) {
+                // One outstanding write per connection: a busy stack says no.
+                overlappingWrites.incrementAndGet()
+                return@answers false
+            }
             writeCount++
             val fragment = lastControlPointWrite
                 ?: throw AssertionError("the client wrote without setting a value")
             val reply = if (writeStatus == BluetoothGatt.GATT_SUCCESS) consume(fragment) else null
-            probe.gattCallback.onCharacteristicWrite(gatt, controlPoint, writeStatus)
-            reply?.let { deliver(it) }
+            if (holdWrites) {
+                held += gatt to reply
+            } else if (ackAfterTheNextWriteStarts) {
+                ackOnceTheNextWriteStarts(gatt, reply)
+            } else if (reply != null && replyBeforeWriteAck && responder.isHandshakeComplete()) {
+                writeInFlight = true
+                try {
+                    deliver(reply)
+                    holdWriteOpen()
+                } finally {
+                    writeInFlight = false
+                }
+                probe.gattCallback.onCharacteristicWrite(gatt, controlPoint, writeStatus)
+            } else {
+                probe.gattCallback.onCharacteristicWrite(gatt, controlPoint, writeStatus)
+                reply?.let { deliver(it) }
+            }
             true
         }
     }
@@ -266,13 +409,55 @@ class BleClientHarness(
             }
         }
 
-        !responder.isHandshakeComplete() -> responder.processHandshakeMessage(message)
+        !responder.isHandshakeComplete() -> {
+            val reply = responder.processHandshakeMessage(message)
+            val opener = requestOnHandshake
+            if (reply == null && opener != null && responder.isHandshakeComplete()) {
+                // go-xkms: local.attestDevice the moment message 3 is read.
+                responder.encrypt(opener)
+            } else {
+                reply
+            }
+        }
 
         else -> {
             val plaintext = responder.decrypt(message)
-            receivedRequests += plaintext
-            responder.encrypt(responseFor(plaintext))
+            if (isResponse(plaintext)) {
+                // The client answering a request the desktop sent: nothing
+                // goes back.
+                receivedResponses += plaintext
+                null
+            } else {
+                receivedRequests += plaintext
+                responder.encrypt(responseFor(plaintext))
+            }
         }
+    }
+
+    /** A JSON-RPC response: JSON with a result or an error and no method. */
+    private fun isResponse(plaintext: ByteArray): Boolean = try {
+        val json = JSONObject(String(plaintext, Charsets.UTF_8))
+        !json.has("method") && (json.has("result") || json.has("error"))
+    } catch (e: JSONException) {
+        false
+    }
+
+    /**
+     * The desktop sends [request] over the established session, as go-xkms
+     * does with `local.attestDevice` right after the handshake.
+     */
+    fun desktopSends(request: ByteArray) {
+        deliver(responder.encrypt(request))
+    }
+
+    /** Waits for the client's [count]th answer to a [desktopSends]. */
+    fun awaitResponses(count: Int): List<ByteArray> {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            if (receivedResponses.size >= count) return receivedResponses.toList()
+            Thread.sleep(5)
+        }
+        throw AssertionError("the client sent ${receivedResponses.size} of $count answers")
     }
 
     /**
@@ -290,9 +475,66 @@ class BleClientHarness(
         )
         val fragments = Fragmenter(payloadSize).fragment(message)
         for ((index, fragment) in fragments.withIndex()) {
-            probe.gattCallback.onCharacteristicChanged(gatt, responseCharacteristic, fragment)
+            probe.gattCallback.onCharacteristicChanged(dialledGatt, responseCharacteristic, fragment)
             if (index < fragments.size - 1) awaitBufferedFragments(index + 1)
         }
+    }
+
+    /**
+     * Keeps the write open for [writeAckHoldMs], or until the client has
+     * tried to write over it, whichever comes first.
+     */
+    private fun holdWriteOpen() {
+        val deadline = System.currentTimeMillis() + writeAckHoldMs
+        while (System.currentTimeMillis() < deadline && overlappingWrites.get() == 0) {
+            Thread.sleep(2)
+        }
+    }
+
+    /**
+     * Queues the ack for the write the client just started, behind any ack
+     * still running. The completion the client installed is wrapped so that,
+     * once it has resumed its writer, it waits for the next write to be handed
+     * over before it returns, as [ackAfterTheNextWriteStarts] describes.
+     */
+    private fun ackOnceTheNextWriteStarts(gatt: BluetoothGatt, reply: ByteArray?) {
+        val completion = probe.writeCompletion.get()
+            ?: throw AssertionError("the client wrote with no completion installed")
+        val thisWrite = writesAcked.get() + 1
+        val wrapped: (Int) -> Unit = { status ->
+            completion(status)
+            if (awaitWritesAcked(thisWrite + 1)) acksOutlivedByTheNextWrite.incrementAndGet()
+        }
+        probe.writeCompletion.set(wrapped)
+        writesAcked.set(thisWrite)
+        ackThread.execute {
+            probe.gattCallback.onCharacteristicWrite(gatt, controlPoint, writeStatus)
+            reply?.let { deliver(it) }
+        }
+    }
+
+    /**
+     * Acknowledges the writes [holdWrites] held, on the GATT object each was
+     * written on, and stops holding.
+     */
+    fun releaseHeldWrites() {
+        holdWrites = false
+        val released = held.toList()
+        held.clear()
+        for ((gatt, reply) in released) {
+            probe.gattCallback.onCharacteristicWrite(gatt, controlPoint, writeStatus)
+            reply?.let { deliver(it) }
+        }
+    }
+
+    /** True once [expected] writes have been handed over, false after [nextWriteWaitMs]. */
+    private fun awaitWritesAcked(expected: Int): Boolean {
+        val deadline = System.currentTimeMillis() + nextWriteWaitMs
+        while (System.currentTimeMillis() < deadline) {
+            if (writesAcked.get() >= expected) return true
+            Thread.sleep(2)
+        }
+        return false
     }
 
     private fun awaitBufferedFragments(expected: Int) {
@@ -315,9 +557,26 @@ class BleClientHarness(
         return staticKey
     }
 
+    /**
+     * Readies the next connection, as a desktop the client reconnects to: a
+     * new GATT object for `connectGatt` to hand out, and a desktop waiting
+     * for a new identity frame and handshake. Writes on the previous GATT
+     * object are refused from here on. Call after the client disconnected.
+     */
+    fun nextConnection(): BluetoothGatt {
+        val next = mockk<BluetoothGatt>(relaxed = true)
+        stubGatt(next)
+        identityDone = false
+        inbound.reset()
+        responder.reset()
+        dialledGatt = next
+        return next
+    }
+
     /** Releases the client. Safe to call more than once. */
     fun close() {
         runCatching { runBlocking { client.destroy() } }
+        if (ackAfterTheNextWriteStarts) ackThread.shutdownNow()
     }
 
     companion object {

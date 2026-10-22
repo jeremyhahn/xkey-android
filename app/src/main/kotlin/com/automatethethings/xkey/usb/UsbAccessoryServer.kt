@@ -21,6 +21,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.transport.StreamPairingSession
@@ -61,12 +62,15 @@ import java.io.IOException
  * @param messageRouter Optional bidirectional message router for remote.* requests.
  * @param pairingCallback Optional callback for pairing confirmation UI.
  * @param pairedDeviceRepository Optional repository for paired device management.
+ * @param storeMethods Method families served on USB only (the password and seal
+ *   stores go-xkms proxies over this transport), ahead of [requestHandler].
  */
 class UsbAccessoryServer(
     requestHandler: RequestHandler,
     messageRouter: BidirectionalMessageRouter? = null,
     pairingCallback: com.automatethethings.xkey.ble.PairingConfirmationCallback? = null,
-    pairedDeviceRepository: com.automatethethings.xkey.settings.PairedDeviceRepository? = null
+    pairedDeviceRepository: com.automatethethings.xkey.settings.PairedDeviceRepository? = null,
+    storeMethods: List<TransportMethods> = emptyList()
 ) : MessageSender {
     companion object {
         private const val TAG = "UsbAccessoryServer"
@@ -78,6 +82,7 @@ class UsbAccessoryServer(
         pairingCallback = pairingCallback,
         pairedDeviceRepository = pairedDeviceRepository,
         transportLabel = "USB",
+        transportMethods = storeMethods,
     )
 
     private val _state = MutableStateFlow<UsbAccessoryState>(UsbAccessoryState.Disconnected)
@@ -166,6 +171,14 @@ class UsbAccessoryServer(
             _state.value = UsbAccessoryState.Disconnected
         }
     }
+
+    /**
+     * Answers one decrypted request [plaintext] exactly as the USB message loop
+     * does, or returns null for a message that needs no answer. The wire-contract
+     * tests use it to reach the USB dispatch without a Noise session.
+     */
+    internal suspend fun handlePlaintext(plaintext: ByteArray): ByteArray? =
+        pairingSession.interceptOrRoute(plaintext)
 
     /**
      * Sends an encrypted message to the connected USB host (outbound remote.*).

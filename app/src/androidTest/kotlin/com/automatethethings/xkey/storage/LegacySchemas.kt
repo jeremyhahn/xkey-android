@@ -27,7 +27,7 @@ package com.automatethethings.xkey.storage
  * shape a user of that app version would have, including the
  * `room_master_table` identity hash Room checks when it opens the file.
  *
- * Only versions 3..10 are present because only those schema JSONs were ever
+ * Only versions 3..11 are present because only those schema JSONs were ever
  * exported; schemas 1 and 2 predate `exportSchema`, so migrations 1->2 and 2->3
  * cannot be reproduced faithfully and are not covered.
  */
@@ -37,7 +37,7 @@ object LegacySchemas {
     const val OLDEST = 3
 
     /** The schema version the app currently ships. */
-    const val CURRENT = 11
+    const val CURRENT = 12
 
     /** Every version that can serve as a migration starting point. */
     val TESTABLE_VERSIONS: List<Int> get() = SCHEMAS.keys.sorted()
@@ -304,5 +304,9 @@ object LegacySchemas {
             "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
             "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '14aec21fe86e3f39f29d271ea3c80b4d')"
         )
-    )
+    ).let {
+        // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim
+        // (11.json differs from 10.json in its version number alone).
+        it + (11 to it.getValue(10))
+    }
 }

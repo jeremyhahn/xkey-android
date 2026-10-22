@@ -69,6 +69,19 @@ public data class PinSettingsData(
 )
 
 /**
+ * The password vault's failed-unlock counter, persisted beside the PIN
+ * counters and held to the same lockout rule
+ * ([com.automatethethings.xkey.pin.PinLockout]).
+ *
+ * @property failedAttempts Number of consecutive failed vault unlocks.
+ * @property lockedUntil Epoch milliseconds until which vault unlocks are refused (0 = not locked).
+ */
+public data class VaultUnlockAttempts(
+    val failedAttempts: Int = 0,
+    val lockedUntil: Long = 0
+)
+
+/**
  * Extension property to create a DataStore instance for PIN settings.
  */
 private val Context.pinSettingsDataStore: DataStore<Preferences> by preferencesDataStore(
@@ -97,12 +110,15 @@ private val Context.pinSettingsDataStore: DataStore<Preferences> by preferencesD
  * )
  * ```
  *
- * @param context The Android context used to access DataStore.
+ * @param dataStore The DataStore the settings are persisted in.
  */
-public class PinSettingsRepository(
-    private val context: Context
+public class PinSettingsRepository internal constructor(
+    private val dataStore: DataStore<Preferences>
 ) {
-    private val dataStore: DataStore<Preferences> = context.pinSettingsDataStore
+    /**
+     * @param context The Android context used to access DataStore.
+     */
+    public constructor(context: Context) : this(context.pinSettingsDataStore)
 
     /**
      * Flow of PIN settings that emits whenever settings change.
@@ -301,6 +317,34 @@ public class PinSettingsRepository(
     }
 
     /**
+     * Get the password vault's failed-unlock counter.
+     *
+     * Kept on keys of its own, outside [PinSettingsData], so the blind
+     * overwrite in [updateSettings] can never roll it back.
+     *
+     * @return The current [VaultUnlockAttempts].
+     */
+    public suspend fun getVaultUnlockAttempts(): VaultUnlockAttempts {
+        val preferences = dataStore.data.first()
+        return VaultUnlockAttempts(
+            failedAttempts = preferences[KEY_FAILED_VAULT_UNLOCK_ATTEMPTS] ?: 0,
+            lockedUntil = preferences[KEY_VAULT_UNLOCK_LOCKED_UNTIL] ?: 0
+        )
+    }
+
+    /**
+     * Update the password vault's failed-unlock counter.
+     *
+     * @param attempts The counter to persist.
+     */
+    public suspend fun updateVaultUnlockAttempts(attempts: VaultUnlockAttempts) {
+        dataStore.edit { preferences ->
+            preferences[KEY_FAILED_VAULT_UNLOCK_ATTEMPTS] = attempts.failedAttempts
+            preferences[KEY_VAULT_UNLOCK_LOCKED_UNTIL] = attempts.lockedUntil
+        }
+    }
+
+    /**
      * Reset all settings to their default values.
      */
     public suspend fun resetToDefaults() {
@@ -354,5 +398,7 @@ public class PinSettingsRepository(
         val KEY_BACKOFF_ENABLED = booleanPreferencesKey("backoff_enabled")
         val KEY_SO_PIN_LOCKED_UNTIL = longPreferencesKey("so_pin_locked_until")
         val KEY_USER_PIN_LOCKED_UNTIL = longPreferencesKey("user_pin_locked_until")
+        val KEY_FAILED_VAULT_UNLOCK_ATTEMPTS = intPreferencesKey("failed_vault_unlock_attempts")
+        val KEY_VAULT_UNLOCK_LOCKED_UNTIL = longPreferencesKey("vault_unlock_locked_until")
     }
 }

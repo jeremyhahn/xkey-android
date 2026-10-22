@@ -861,4 +861,62 @@ class ProtocolIntegrationTest {
         assertNotNull(err)
         assertEquals(ErrorCodes.INVALID_PARAMS, err!!.code)
     }
+
+    // ------------------------------------------------------------------
+    // Request generation echo (#10, go-xkms#128)
+    //
+    // Checked on the raw response text: this runs on the platform org.json,
+    // which reads an integer above Long as a Double, so only the text shows
+    // whether a uint64 came back digit for digit.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun everyMethodFamilyEchoesTheGeneration() {
+        val families = listOf(
+            "ping", "getInfo", "local.listKeys", "local.pinStatus",
+            "local.oathList", "local.pivListSlots", "local.syncStatus"
+        )
+        families.forEachIndexed { i, method ->
+            val generation = (100 + i).toString()
+            val response = client.callRaw(method, generation)
+            assertEquals("$method must echo the generation: $response", generation, rawGeneration(response))
+        }
+    }
+
+    @Test
+    fun everyErrorKindEchoesTheGeneration() {
+        val unknown = client.callRaw("local.definitelyNotAMethod", "201")
+        assertEquals(ErrorCodes.METHOD_NOT_FOUND, errorCode(unknown))
+        assertEquals("201", rawGeneration(unknown))
+
+        val invalid = client.callRaw("local.sign", "202")
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(invalid))
+        assertEquals("202", rawGeneration(invalid))
+
+        val handlerError = client.callRaw(
+            "local.getPublicKey", "203", JSONObject().put("keyId", "generation-echo-no-such-key")
+        )
+        assertEquals(ErrorCodes.KEY_NOT_FOUND, errorCode(handlerError))
+        assertEquals("203", rawGeneration(handlerError))
+    }
+
+    @Test
+    fun theGenerationRoundTripsAcrossTheUint64Range() {
+        for (generation in listOf("0", Long.MAX_VALUE.toString(), "18446744073709551615")) {
+            assertEquals(generation, rawGeneration(client.callRaw("ping", generation)))
+        }
+    }
+
+    @Test
+    fun aRequestWithoutAGenerationGetsAResponseWithoutOne() {
+        assertFalse(client.callRaw("ping", null).contains("\"generation\""))
+        assertFalse(client.callRaw("local.definitelyNotAMethod", null).contains("\"generation\""))
+    }
+
+    private fun errorCode(response: String): Int =
+        JSONObject(response).getJSONObject("error").getInt("code")
+
+    /** The `generation` member's number exactly as written, or null when absent. */
+    private fun rawGeneration(response: String): String? =
+        Regex(""""generation":(\d+)[,}]""").find(response)?.groupValues?.get(1)
 }

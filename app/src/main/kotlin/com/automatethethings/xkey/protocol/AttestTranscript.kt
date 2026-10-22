@@ -16,6 +16,7 @@ package com.automatethethings.xkey.protocol
 
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import java.util.Locale
 
 /**
  * The byte layouts of device attestation protocol **version 2** — the
@@ -199,4 +200,49 @@ object AttestTranscript {
         digest.update(prologue)
         return digest.digest()
     }
+
+    /**
+     * The short authentication string both ends show while pairing — go-xkms
+     * `formatShortAuthString`, verbatim.
+     *
+     * Derived from the same [channelBinding] the attestation signs, so a person
+     * comparing the phone's screen with the desktop's terminal is comparing the
+     * two sessions' static keys and prologue: an attacker in the middle runs two
+     * different handshakes and the codes disagree.
+     *
+     * @throws IllegalStateException if [binding] is null — the Noise handshake
+     *   has not completed, so there is nothing to authenticate yet.
+     */
+    fun shortAuthString(binding: SessionBinding?): String {
+        checkNotNull(binding) { "short authentication string requires a completed Noise handshake" }
+        return formatShortAuthString(
+            channelBinding(
+                binding.initiatorStaticPublicKey,
+                binding.responderStaticPublicKey,
+                binding.prologue,
+            )
+        )
+    }
+
+    /**
+     * Formats a channel binding as `NNNN-NNNN-NNNN`: bytes `[0:2]`, `[2:4]` and
+     * `[4:6]` read as big-endian uint16, each reduced mod 10000 and zero-padded
+     * to four digits.
+     *
+     * @throws IllegalArgumentException if [channelBinding] is not
+     *   [BINDING_SIZE] bytes.
+     */
+    fun formatShortAuthString(channelBinding: ByteArray): String {
+        require(channelBinding.size == BINDING_SIZE) {
+            "channel binding must be $BINDING_SIZE bytes, got ${channelBinding.size}"
+        }
+        return (0 until SAS_GROUPS).joinToString("-") { group ->
+            val hi = channelBinding[group * 2].toInt() and 0xff
+            val lo = channelBinding[group * 2 + 1].toInt() and 0xff
+            String.format(Locale.ROOT, "%04d", ((hi shl 8) or lo) % SAS_MODULUS)
+        }
+    }
+
+    private const val SAS_GROUPS = 3
+    private const val SAS_MODULUS = 10000
 }

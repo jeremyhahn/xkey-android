@@ -8,6 +8,7 @@ package com.automatethethings.xkey.remote
 
 import android.content.Context
 import android.util.Log
+import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.ProtocolException
@@ -62,7 +63,15 @@ class RemoteSyncClient(
     suspend fun syncAll(): SyncResult {
         val certs = syncTrustStore()
         val oath = syncOath()
-        val passwords = syncPasswords()
+        // A phone-initiated sync carries no unlocked vault, so with a factor
+        // enrolled the password leg is refused before anything is sent; the
+        // other stores still sync.
+        val passwords = try {
+            syncPasswords()
+        } catch (e: PasswordStoreLockedException) {
+            Log.i(TAG, "password vault is locked; passwords not synced")
+            0 to 0
+        }
         engine.markSynced()
         Log.i(TAG, "sync complete: pushed=${certs.first + oath.first + passwords.first} pulled=${certs.second + oath.second + passwords.second}")
         return SyncResult(

@@ -17,13 +17,18 @@ package com.automatethethings.xkey.transport
 import android.util.Log
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
+import com.automatethethings.xkey.ble.sessionBinding
+import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.PairingConfirmParams
 import com.automatethethings.xkey.protocol.PairingConfirmResult
+import com.automatethethings.xkey.protocol.ProtocolException
+import com.automatethethings.xkey.protocol.Request as ProtocolRequest
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
-import com.automatethethings.xkey.protocol.SessionBinding
+import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -37,6 +42,8 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 
 /**
  * Responder-side pairing protocol shared by the stream transports (USB Accessory
@@ -59,6 +66,7 @@ class StreamPairingSession(
     private val pairingCallback: PairingConfirmationCallback?,
     private val pairedDeviceRepository: PairedDeviceRepository?,
     private val transportLabel: String,
+    private val transportMethods: List<TransportMethods> = emptyList(),
 ) : MessageSender {
 
     companion object {
@@ -76,6 +84,12 @@ class StreamPairingSession(
 
     /** Serializes encrypt+write so outbound requests and inline responses never interleave. */
     private val sendMutex = Mutex()
+
+    /** What [transportMethods] add to each request routed to the shared handler. */
+    private val routingContext: CoroutineContext =
+        transportMethods.fold<TransportMethods, CoroutineContext>(EmptyCoroutineContext) { context, family ->
+            context + family.routingContext()
+        }
 
     @Volatile private var activeOutput: OutputStream? = null
     @Volatile private var activeSession: NoiseSession? = null
@@ -113,7 +127,7 @@ class StreamPairingSession(
             activeOutput = output
             activeSession = noiseSession
             authenticatedPeerKeyHex = noiseSession.getRemoteStaticKey()?.toHex()
-            requestHandler.setSessionBindingProvider { sessionBinding(noiseSession) }
+            requestHandler.setSessionBindingProvider { noiseSession.sessionBinding() }
 
             // A device the user already approved does not have to re-confirm on
             // every reconnect: the Noise handshake cryptographically proves it
@@ -134,21 +148,6 @@ class StreamPairingSession(
             requestHandler.setConnectedDevicePublicKeyHex(null)
             requestHandler.setSessionBindingProvider(null)
         }
-    }
-
-    /**
-     * The static keys and prologue `local.attestDevice` binds its attestation to
-     * (go-xkms#129 §5).
-     *
-     * This end is always the Noise **responder** on this transport — the desktop
-     * opens the handshake — so the peer's static key is the initiator's. Null
-     * before the handshake authenticates a peer, which the handler treats as
-     * "cannot bind" and refuses rather than attesting to no channel.
-     */
-    private fun sessionBinding(session: NoiseSession): SessionBinding? {
-        val initiator = session.getRemoteStaticKey() ?: return null
-        val responder = session.getStaticPublicKey() ?: return null
-        return SessionBinding(initiator, responder, session.getPrologue())
     }
 
     private suspend fun performHandshake(input: InputStream, output: OutputStream, session: NoiseSession) {
@@ -245,8 +244,11 @@ class StreamPairingSession(
     /**
      * Intercepts pairing.confirm before normal routing, otherwise routes via the
      * message router (bidirectional) or directly to the request handler.
+     *
+     * Internal so that the USB wire-contract tests can drive a decrypted
+     * request through the same dispatch the message loop uses.
      */
-    private suspend fun interceptOrRoute(plaintext: ByteArray): ByteArray? {
+    internal suspend fun interceptOrRoute(plaintext: ByteArray): ByteArray? {
         // A completed Noise XX handshake proves only that the peer holds *a*
         // key, not that the user approved it. Until pairing is confirmed, the
         // only request that may run is pairing.confirm itself; everything else
@@ -267,9 +269,36 @@ class StreamPairingSession(
             confirmAlreadyPaired(plaintext)?.let { return it }
         }
 
+        routeTransportMethod(plaintext)?.let { return it }
+
+        // The router calls the handler in this coroutine, so the elements
+        // reach it per request and never outlive it.
         val router = messageRouter
-        return if (router != null) router.processMessage(plaintext)
-        else requestHandler.handleRawRequest(plaintext)
+        return withContext(routingContext) {
+            if (router != null) router.processMessage(plaintext)
+            else requestHandler.handleRawRequest(plaintext)
+        }
+    }
+
+    /**
+     * Serves a request whose method belongs to one of this transport's own
+     * [transportMethods] families, or returns null so normal routing runs.
+     *
+     * A message that does not parse as a request (a response to an outbound
+     * remote.* call, or garbage) is left to the normal path, which owns those
+     * answers.
+     */
+    private suspend fun routeTransportMethod(plaintext: ByteArray): ByteArray? {
+        if (transportMethods.isEmpty()) return null
+        val request = try {
+            ProtocolRequest.fromJson(plaintext)
+        } catch (e: ProtocolException) {
+            return null
+        }
+        val family = transportMethods.firstOrNull { it.handles(request.method) } ?: return null
+        return withContext(Dispatchers.IO) { family.handle(request) }
+            .copy(generation = request.generation)
+            .toJson()
     }
 
     /**
@@ -279,8 +308,9 @@ class StreamPairingSession(
      * normal routing.
      */
     private fun confirmAlreadyPaired(plaintext: ByteArray): ByteArray? {
+        val text = String(plaintext, Charsets.UTF_8)
         val json = try {
-            JSONObject(String(plaintext, Charsets.UTF_8))
+            JSONObject(text)
         } catch (e: Exception) {
             return null
         }
@@ -288,7 +318,7 @@ class StreamPairingSession(
 
         val id = json.optLong("id", -1)
         val result = PairingConfirmResult(confirmed = true, deviceName = android.os.Build.MODEL)
-        return ProtocolResponse.success(id, result.toJson()).toJson()
+        return ProtocolResponse.success(id, result.toJson(), generation = readGeneration(text)).toJson()
     }
 
     /**
@@ -321,8 +351,9 @@ class StreamPairingSession(
      * belong to the router.
      */
     private fun rejectUnpaired(plaintext: ByteArray): ByteArray? {
+        val text = String(plaintext, Charsets.UTF_8)
         val json = try {
-            JSONObject(String(plaintext, Charsets.UTF_8))
+            JSONObject(text)
         } catch (e: Exception) {
             Log.w(TAG, "[$transportLabel] dropping unparseable pre-pairing message")
             return null
@@ -333,19 +364,22 @@ class StreamPairingSession(
         return ProtocolResponse.error(
             json.optLong("id", -1),
             ErrorCodes.PAIRING_REQUIRED,
-            "Device is not paired; send pairing.confirm first"
+            "Device is not paired; send pairing.confirm first",
+            generation = readGeneration(text)
         ).toJson()
     }
 
     private suspend fun handlePairingConfirm(plaintext: ByteArray): ByteArray? {
+        val text = String(plaintext, Charsets.UTF_8)
         val json = try {
-            JSONObject(String(plaintext, Charsets.UTF_8))
+            JSONObject(text)
         } catch (e: Exception) {
             return null
         }
         if (json.getStringOrNull("method") != MethodNames.PAIRING_CONFIRM) return null
 
         val id = json.optLong("id", -1)
+        val generation = readGeneration(text)
         val params = json.optJSONObject("params") ?: return null
         val pairingParams = try {
             PairingConfirmParams.fromJson(params)
@@ -365,7 +399,7 @@ class StreamPairingSession(
         if (peerKeyHex == null) {
             Log.e(TAG, "[$transportLabel] no authenticated peer key; refusing pairing")
             return ProtocolResponse.error(
-                id, ErrorCodes.PAIRING_REJECTED, "No authenticated peer identity"
+                id, ErrorCodes.PAIRING_REJECTED, "No authenticated peer identity", generation = generation
             ).toJson()
         }
         if (!pairingParams.publicKeyHex.equals(peerKeyHex, ignoreCase = true)) {
@@ -375,18 +409,31 @@ class StreamPairingSession(
                     "authenticated by the handshake; refusing"
             )
             return ProtocolResponse.error(
-                id, ErrorCodes.PAIRING_REJECTED, "Claimed public key does not match the authenticated peer"
+                id,
+                ErrorCodes.PAIRING_REJECTED,
+                "Claimed public key does not match the authenticated peer",
+                generation = generation
             ).toJson()
         }
 
         val confirmed = if (repo.isDeviceKnown(peerKeyHex)) {
             true
         } else {
-            // No approval UI available means nothing can grant trust.
-            callback?.onPairingConfirmationRequired(
-                pairingParams.deviceName,
-                peerKeyHex.take(16),
-            ) ?: false
+            // The SAS the desktop prints during `xkey device pair`; the user
+            // compares the two before trusting the peer. No session to derive
+            // it from means nothing to compare, so nothing can grant trust.
+            val sas = activeSession?.sessionBinding()?.let { AttestTranscript.shortAuthString(it) }
+            if (sas == null) {
+                Log.e(TAG, "[$transportLabel] no completed Noise session to derive the SAS; refusing pairing")
+                false
+            } else {
+                // No approval UI available means nothing can grant trust.
+                callback?.onPairingConfirmationRequired(
+                    pairingParams.deviceName,
+                    peerKeyHex.take(16),
+                    sas,
+                ) ?: false
+            }
         }
 
         return if (confirmed) {
@@ -395,10 +442,12 @@ class StreamPairingSession(
             pairingConfirmed = true
             requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex)
             val result = PairingConfirmResult(confirmed = true, deviceName = android.os.Build.MODEL)
-            ProtocolResponse.success(id, result.toJson()).toJson()
+            ProtocolResponse.success(id, result.toJson(), generation = generation).toJson()
         } else {
             Log.w(TAG, "[$transportLabel] user rejected pairing from \"${pairingParams.deviceName}\"")
-            ProtocolResponse.error(id, ErrorCodes.PAIRING_REJECTED, "Pairing rejected by user").toJson()
+            ProtocolResponse.error(
+                id, ErrorCodes.PAIRING_REJECTED, "Pairing rejected by user", generation = generation
+            ).toJson()
         }
     }
 

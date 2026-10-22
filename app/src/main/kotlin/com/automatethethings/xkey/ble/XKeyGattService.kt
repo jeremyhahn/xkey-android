@@ -21,13 +21,21 @@ import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.BiometricSettingsRepository
 import com.automatethethings.xkey.ui.MainActivity
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.remote.RemoteKeyClient
+import com.automatethethings.xkey.usb.PasswordStoreMethods
+import com.automatethethings.xkey.usb.SealStoreMethods
+import com.automatethethings.xkey.storage.SealStore
 import com.automatethethings.xkey.usb.UsbAccessoryServer
+import com.automatethethings.xkey.password.FilePasswordVaultFactorStore
+import com.automatethethings.xkey.password.PasswordRepository
+import com.automatethethings.xkey.password.PasswordVault
+import com.automatethethings.xkey.password.PinSettingsVaultUnlockAttemptStore
 import com.automatethethings.xkey.usb.UsbHsmSettingsRepository
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.pin.PinManager
@@ -72,6 +80,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     companion object {
         private const val TAG = "XKeyGattService"
         private const val NOTIFICATION_ID = 1001
+        private const val PASSWORD_VAULT_DIR = "password_vault"
+        private const val SEAL_STORE_DIR = "seal_store"
 
         // Intent actions
         const val ACTION_START_ADVERTISING = "com.automatethethings.xkey.action.START_ADVERTISING"
@@ -637,6 +647,23 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     fun getConnectedDevicePublicKeyHex(): String? = requestHandler?.getConnectedDevicePublicKeyHex()
 
     /**
+     * Answers the requests a desktop sends over a session this phone opens with
+     * [BleClient], through the same [RequestHandler] that serves every other
+     * transport. Null until the handler exists, which [BleClient] treats as
+     * "refuse".
+     */
+    fun phoneInitiatedRequestHandler(): PhoneInitiatedRequestHandler? {
+        val handler = requestHandler ?: return null
+        return object : PhoneInitiatedRequestHandler {
+            override suspend fun handle(
+                request: ByteArray,
+                binding: SessionBindingProvider,
+                peerPublicKeyHex: String?
+            ): ByteArray = handler.handleRawRequest(request, binding, peerPublicKeyHex)
+        }
+    }
+
+    /**
      * Called when a USB accessory is attached and native USB mode is enabled.
      *
      * Creates and starts a [UsbAccessoryServer] with the same [RequestHandler]
@@ -664,7 +691,28 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
 
             val usbRouter = BidirectionalMessageRouter(handler)
             usbMessageRouter = usbRouter
-            usbAccessoryServer = UsbAccessoryServer(handler, usbRouter, this@XKeyGattService, pairedDeviceRepository).also { server ->
+            // The password and seal stores are served over USB only, so their
+            // methods go to this session rather than the RequestHandler BLE and
+            // TCP share. A vault per session: every new USB connection starts
+            // locked, while its failed-unlock counter persists with the PINs'.
+            val passwordVault = PasswordVault(
+                FilePasswordVaultFactorStore(java.io.File(filesDir, PASSWORD_VAULT_DIR)),
+                PinSettingsVaultUnlockAttemptStore(PinSettingsRepository(this@XKeyGattService))
+            )
+            val storeMethods = listOf(
+                PasswordStoreMethods(
+                    PasswordRepository(XKeyDatabase.getInstance(this@XKeyGattService).passwordDao()),
+                    passwordVault
+                ),
+                SealStoreMethods(SealStore(java.io.File(filesDir, SEAL_STORE_DIR)))
+            )
+            usbAccessoryServer = UsbAccessoryServer(
+                handler,
+                usbRouter,
+                this@XKeyGattService,
+                pairedDeviceRepository,
+                storeMethods
+            ).also { server ->
                 server.connect(this@XKeyGattService, accessory)
             }
             Log.i(TAG, "USB accessory server started")
@@ -812,7 +860,23 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     override suspend fun onPairingConfirmationRequired(
         deviceName: String,
         publicKeyFingerprint: String
-    ): Boolean {
+    ): Boolean = showPairingDialog(
+        getString(R.string.pairing_dialog_message, deviceName, publicKeyFingerprint)
+    )
+
+    /**
+     * Shows the pairing dialog with the SAS, so the user can check it against
+     * the code `xkey device pair` printed on the desktop before allowing.
+     */
+    override suspend fun onPairingConfirmationRequired(
+        deviceName: String,
+        publicKeyFingerprint: String,
+        shortAuthString: String
+    ): Boolean = showPairingDialog(
+        getString(R.string.pairing_dialog_message_sas, deviceName, publicKeyFingerprint, shortAuthString)
+    )
+
+    private suspend fun showPairingDialog(message: String): Boolean {
         val activity = activityRef?.get() ?: run {
             Log.w(TAG, "No activity available for pairing dialog, rejecting")
             return false
@@ -822,7 +886,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             suspendCancellableCoroutine { continuation ->
                 MaterialAlertDialogBuilder(activity)
                     .setTitle(getString(R.string.pairing_dialog_title))
-                    .setMessage(getString(R.string.pairing_dialog_message, deviceName, publicKeyFingerprint))
+                    .setMessage(message)
                     .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ ->
                         if (continuation.isActive) continuation.resume(true)
                     }

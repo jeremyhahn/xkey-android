@@ -179,6 +179,32 @@ class ProtocolTestClient(
         }
     }
 
+    /**
+     * Sends a request carrying [generation] written as the raw JSON number
+     * given (null omits it) and returns the response's plaintext unparsed,
+     * success or error, so a test can check the echoed `generation` digit for
+     * digit (#10): a parsed JSONObject would round a uint64 above Long.
+     */
+    fun callRaw(method: String, generation: String?, params: JSONObject? = null): String {
+        val id = nextId.getAndIncrement()
+        val request = buildString {
+            append("{\"id\":").append(id)
+            if (generation != null) append(",\"generation\":").append(generation)
+            append(",\"method\":").append(JSONObject.quote(method))
+            if (params != null) append(",\"params\":").append(params.toString())
+            append('}')
+        }
+        StreamMessageFraming.writeMessage(output, noise.encrypt(request.toByteArray(Charsets.UTF_8)))
+
+        while (true) {
+            val text = String(noise.decrypt(StreamMessageFraming.readMessage(input)), Charsets.UTF_8)
+            val json = JSONObject(text)
+            if (json.has("method")) continue
+            if (json.optLong("id", -1) != id) continue
+            return text
+        }
+    }
+
     fun close() {
         try {
             socket.close()

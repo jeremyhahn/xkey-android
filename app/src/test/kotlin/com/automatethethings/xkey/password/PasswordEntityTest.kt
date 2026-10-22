@@ -70,6 +70,9 @@ class PasswordEntityTest {
         assertNull(entity.notes)
         assertNull(entity.folderPath)
         assertEquals("local", entity.source)
+        assertNull(entity.expiresAt)
+        assertFalse(entity.shared)
+        assertEquals(PasswordEntity.DEFAULT_TENANT, entity.tenantId)
     }
 
     @Test
@@ -147,6 +150,9 @@ class PasswordEntityTest {
         assertNotEquals(base, base.copy(source = "remote"))
         assertNotEquals(base, base.copy(createdAt = 1L))
         assertNotEquals(base, base.copy(updatedAt = 2L))
+        assertNotEquals(base, base.copy(expiresAt = "2027-01-02T03:04:05Z"))
+        assertNotEquals(base, base.copy(shared = true))
+        assertNotEquals(base, base.copy(tenantId = "acme"))
     }
 
     @Test

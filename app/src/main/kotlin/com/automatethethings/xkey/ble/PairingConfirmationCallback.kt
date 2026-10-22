@@ -32,4 +32,21 @@ interface PairingConfirmationCallback {
         deviceName: String,
         publicKeyFingerprint: String
     ): Boolean
+
+    /**
+     * Called instead when the session can show the pairing SAS — the
+     * `NNNN-NNNN-NNNN` code the desktop prints during `xkey device pair`
+     * (`AttestTranscript.shortAuthString`). The user should approve only if the
+     * two match.
+     *
+     * Defaults to the two-argument form, so an implementation that cannot show
+     * the code still decides; the UI overrides this one.
+     *
+     * @param shortAuthString The SAS derived from this session's channel binding
+     */
+    suspend fun onPairingConfirmationRequired(
+        deviceName: String,
+        publicKeyFingerprint: String,
+        shortAuthString: String
+    ): Boolean = onPairingConfirmationRequired(deviceName, publicKeyFingerprint)
 }

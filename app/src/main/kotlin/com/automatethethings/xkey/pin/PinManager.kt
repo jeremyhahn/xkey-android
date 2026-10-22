@@ -475,11 +475,10 @@ class PinManager(
         when (pinType) {
             PinType.SO_PIN -> {
                 newFailedAttempts = settings.failedSoPinAttempts + 1
-                val lockedUntil = if (newFailedAttempts >= settings.maxPinAttempts) {
-                    System.currentTimeMillis() + (settings.lockoutDurationSeconds * 1000L)
-                } else {
-                    0L
-                }
+                val lockedUntil = PinLockout.lockedUntil(
+                    newFailedAttempts, settings.maxPinAttempts, settings.lockoutDurationSeconds,
+                    System.currentTimeMillis()
+                )
                 pinSettingsRepository.updateSettings(
                     settings.copy(
                         failedSoPinAttempts = newFailedAttempts,
@@ -489,11 +488,10 @@ class PinManager(
             }
             PinType.USER_PIN -> {
                 newFailedAttempts = settings.failedUserPinAttempts + 1
-                val lockedUntil = if (newFailedAttempts >= settings.maxPinAttempts) {
-                    System.currentTimeMillis() + (settings.lockoutDurationSeconds * 1000L)
-                } else {
-                    0L
-                }
+                val lockedUntil = PinLockout.lockedUntil(
+                    newFailedAttempts, settings.maxPinAttempts, settings.lockoutDurationSeconds,
+                    System.currentTimeMillis()
+                )
                 pinSettingsRepository.updateSettings(
                     settings.copy(
                         failedUserPinAttempts = newFailedAttempts,
@@ -542,7 +540,7 @@ class PinManager(
         }
 
         val now = System.currentTimeMillis()
-        val isLocked = lockedUntil > now
+        val isLocked = PinLockout.isLocked(lockedUntil, now)
         val recoverySeconds = if (isLocked) {
             ((lockedUntil - now) / 1000).toInt().coerceAtLeast(0)
         } else {

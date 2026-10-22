@@ -25,6 +25,7 @@ import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.CompletableDeferred
@@ -92,16 +93,38 @@ class BleClientProbe(val client: BleClient) {
     val statusCharacteristic: BluetoothGattCharacteristic?
         get() = read("statusCharacteristic") as BluetoothGattCharacteristic?
 
-    var noiseSession: NoiseInitiatorSession?
-        get() = read("noiseSession") as NoiseInitiatorSession?
-        set(value) = write("noiseSession", value)
+    /** The session of the established connection, or null between connections. */
+    val noiseSession: NoiseInitiatorSession?
+        get() = read("connection")?.let { connection ->
+            try {
+                connection.javaClass.getDeclaredField("session").apply { isAccessible = true }
+                    .get(connection) as NoiseInitiatorSession
+            } catch (e: NoSuchFieldException) {
+                throw AssertionError("BleClient.Connection.session is a seam these BLE tests drive", e)
+            }
+        }
 
     var negotiatedMtu: Int
         get() = read("negotiatedMtu") as Int
         set(value) = write("negotiatedMtu", value)
 
+    /** The established connection, or null between connections; compared by identity. */
+    val connection: Any?
+        get() = read("connection")
+
+    /**
+     * The current connection's reassembler; an empty one between
+     * connections, whose half messages ended with them.
+     */
     val fragmentReassembler: FragmentReassembler
-        get() = read("fragmentReassembler") as FragmentReassembler
+        get() = read("connection")?.let { connection ->
+            try {
+                connection.javaClass.getDeclaredField("reassembler").apply { isAccessible = true }
+                    .get(connection) as FragmentReassembler
+            } catch (e: NoSuchFieldException) {
+                throw AssertionError("BleClient.Connection.reassembler is a seam these BLE tests drive", e)
+            }
+        } ?: FragmentReassembler()
 
     @Suppress("UNCHECKED_CAST")
     val connectionStateFlow: MutableStateFlow<ClientConnectionState>
@@ -152,9 +175,24 @@ class BleClientProbe(val client: BleClient) {
         get() = read("pendingResponse") as CompletableDeferred<ByteArray>?
         set(value) = write("pendingResponse", value)
 
+    /**
+     * The slot holding the completion of the write the stack has outstanding
+     * on the current connection; an empty one between connections.
+     */
+    @Suppress("UNCHECKED_CAST")
+    val writeCompletion: AtomicReference<((Int) -> Unit)?>
+        get() = read("connection")?.let { connection ->
+            try {
+                connection.javaClass.getDeclaredField("pendingWrite").apply { isAccessible = true }
+                    .get(connection) as AtomicReference<((Int) -> Unit)?>
+            } catch (e: NoSuchFieldException) {
+                throw AssertionError("BleClient.Connection.pendingWrite is a seam these BLE tests drive", e)
+            }
+        } ?: AtomicReference(null)
+
     /** True while a `sendCharacteristicWrite` is parked waiting for the stack. */
     val hasWriteInFlight: Boolean
-        get() = read("writeCompletionCallback") != null
+        get() = writeCompletion.get() != null
 
     // -----------------------------------------------------------------
     // Private methods under test
@@ -172,15 +210,24 @@ class BleClientProbe(val client: BleClient) {
         invoke(disconnectInternalMethod)
     }
 
+    /** Hands [message] to the client as a whole message the current connection received. */
     fun handleCompleteMessage(message: ByteArray) {
-        invoke(handleCompleteMessageMethod, message)
+        val source = connection
+            ?: throw AssertionError("a complete message arrives on a connection; there is none")
+        handleCompleteMessage(source, message)
     }
 
-    suspend fun sendFragmentedMessage(
-        characteristic: BluetoothGattCharacteristic,
-        message: ByteArray
-    ) {
-        callSuspend(sendFragmentedMessageMethod, characteristic, message)
+    /** Hands [message] to the client as received on [source], a [connection] read earlier. */
+    fun handleCompleteMessage(source: Any, message: ByteArray) {
+        invoke(handleCompleteMessageMethod, source, message)
+    }
+
+    /**
+     * Encrypts and sends [plaintext] as [session]'s, on the caller's
+     * coroutine: unlike a request worker, nothing a disconnect cancels.
+     */
+    suspend fun sendEncrypted(session: NoiseInitiatorSession, plaintext: ByteArray) {
+        callSuspend(sendEncryptedMethod, session, plaintext)
     }
 
     // -----------------------------------------------------------------
@@ -217,13 +264,17 @@ class BleClientProbe(val client: BleClient) {
         private val stopScanMethod = declaredMethod("stopScan")
         private val disconnectInternalMethod = declaredMethod("disconnectInternal")
         private val handleCompleteMessageMethod =
-            declaredMethod("handleCompleteMessage", ByteArray::class.java)
-        private val sendFragmentedMessageMethod = declaredMethod(
-            "sendFragmentedMessage",
-            BluetoothGattCharacteristic::class.java,
+            declaredMethod("handleCompleteMessage", connectionClass(), ByteArray::class.java)
+        private val sendEncryptedMethod = declaredMethod(
+            "sendEncrypted",
+            NoiseInitiatorSession::class.java,
             ByteArray::class.java,
             Continuation::class.java
         )
+
+        private fun connectionClass(): Class<*> =
+            BleClient::class.java.declaredClasses.singleOrNull { it.simpleName == "Connection" }
+                ?: throw AssertionError("BleClient.Connection is a seam these BLE tests drive")
 
         private fun declaredMethod(name: String, vararg types: Class<*>): Method = try {
             BleClient::class.java.getDeclaredMethod(name, *types).apply { isAccessible = true }

@@ -38,6 +38,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.password.PasswordEntryTooLargeException
 import com.automatethethings.xkey.password.PasswordRecord
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -258,18 +259,26 @@ class PasswordManagementActivity : AppCompatActivity() {
                     return@setPositiveButton
                 }
                 lifecycleScope.launch {
-                    repository.upsert(
-                        PasswordRecord(
-                            passwordId = "pwd-${UUID.randomUUID()}",
-                            name = name,
-                            title = name,
-                            username = userEt.text.toString().trim().ifBlank { null },
-                            password = password,
-                            url = urlEt.text.toString().trim().ifBlank { null },
-                            notes = notesEt.text.toString().trim().ifBlank { null },
-                            source = "local"
-                        )
+                    val record = PasswordRecord(
+                        passwordId = "pwd-${UUID.randomUUID()}",
+                        name = name,
+                        title = name,
+                        username = userEt.text.toString().trim().ifBlank { null },
+                        password = password,
+                        url = urlEt.text.toString().trim().ifBlank { null },
+                        notes = notesEt.text.toString().trim().ifBlank { null },
+                        source = "local"
                     )
+                    try {
+                        repository.upsert(record)
+                    } catch (e: PasswordEntryTooLargeException) {
+                        Toast.makeText(
+                            this@PasswordManagementActivity,
+                            R.string.password_too_large,
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        return@launch
+                    }
                     reload()
                 }
             }

@@ -72,10 +72,14 @@ All application messages use a JSON-RPC style format:
 ```json
 {
     "id": 1,
+    "generation": 7,
     "method": "local.sign",
     "params": { ... }
 }
 ```
+
+`generation` is the initiator's uint64 request generation (go-xkms#128). The
+phone never computes or checks it; it copies it verbatim into the response.
 
 ### Local Methods (handled by xKey)
 
@@ -112,6 +116,7 @@ software keys), optional `publicKeyCose`, `algorithm`, `keySizeBits`, and a
 ```json
 {
     "id": 1,
+    "generation": 7,
     "result": { ... }
 }
 ```
@@ -121,12 +126,20 @@ Error response:
 ```json
 {
     "id": 1,
+    "generation": 7,
     "error": {
         "code": -32000,
         "message": "Key not found"
     }
 }
 ```
+
+Every response to a request, success or error, carries that request's
+`generation` beside `id`, written as the same JSON number digit for digit,
+including values above 2^63 − 1. A request without `generation` gets a
+response without it. A request that does not parse is answered with `id` 0
+and still echoes its `generation` when the top-level member can be read
+before the parse fails.
 
 ## Pairing Flow
 

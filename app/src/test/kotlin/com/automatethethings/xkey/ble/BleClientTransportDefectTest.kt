@@ -151,12 +151,16 @@ class BleClientTransportDefectTest {
         h.client.connect(h.address, randomKey())
 
         repeat(MESSAGE_ROUNDS) { round ->
-            val payload = ByteArray(FRAGMENTS_PER_MESSAGE * Fragmenter.MIN_PAYLOAD_SIZE) {
+            // Sized so its ciphertext fills exactly FRAGMENTS_PER_MESSAGE
+            // fragments. The client authenticates every message once the
+            // handshake is done, so the burst is what the desktop really
+            // sends: the responder's ciphertext, in nonce order.
+            val payload = ByteArray(FRAGMENTS_PER_MESSAGE * Fragmenter.MIN_PAYLOAD_SIZE - NOISE_TAG_SIZE) {
                 (round + it).toByte()
             }
             val pending = CompletableDeferred<ByteArray>()
             h.probe.pendingResponse = pending
-            val fragments = Fragmenter(Fragmenter.MIN_PAYLOAD_SIZE).fragment(payload)
+            val fragments = Fragmenter(Fragmenter.MIN_PAYLOAD_SIZE).fragment(h.responder.encrypt(payload))
             assertEquals(FRAGMENTS_PER_MESSAGE, fragments.size)
 
             // Delivered as fast as the stack delivers them: no pause, no
@@ -207,7 +211,7 @@ class BleClientTransportDefectTest {
         h.probe.pendingResponse = waiter
         val payload = "the-response".toByteArray()
 
-        h.probe.handleCompleteMessage(payload)
+        h.probe.handleCompleteMessage(h.responder.encrypt(payload))
 
         assertArrayEquals(payload, withTimeout(REASSEMBLY_TIMEOUT_MS) { waiter.await() })
         assertNull("a satisfied waiter must not stay installed", h.probe.pendingResponse)
@@ -258,6 +262,46 @@ class BleClientTransportDefectTest {
     }
 
     // -----------------------------------------------------------------
+    // Which write an acknowledgement belongs to
+    // -----------------------------------------------------------------
+
+    /**
+     * PR #42, Codex review 6185, P1: the ack invoked the write's completion and
+     * only then cleared the slot. Invoking it resumes the writer, and the
+     * writer's next fragment installs its own completion — so a callback still
+     * running when that happened cleared the *next* write's completion, and the
+     * next ack found nothing to resume. The request then hung with `writeMutex`
+     * and `stateMutex` held.
+     *
+     * The harness keeps each callback open until the next write has started,
+     * across a request of [MULTI_FRAGMENT_WRITES] fragments, and the timeout
+     * turns that hang into a failure.
+     */
+    @Test
+    fun aWriteStartedInsideThePreviousAckIsAcknowledgedToItsOwnWriter(): Unit = runBlocking {
+        val h = harness()
+        h.client.connect(h.address, randomKey())
+        h.ackAfterTheNextWriteStarts = true
+        val writesBefore = h.writeCount
+        val request = (
+            """{"jsonrpc":"2.0","id":2,"method":"local.getCapabilities","pad":"""" +
+                "x".repeat(MULTI_FRAGMENT_PAD) + "\"}"
+            ).toByteArray()
+
+        val response = withTimeout(REASSEMBLY_TIMEOUT_MS) { h.client.sendRequest(request) }
+
+        assertArrayEquals(h.responseFor(request), response)
+        assertArrayEquals(request, h.receivedRequests.last())
+        assertEquals(MULTI_FRAGMENT_WRITES, h.writeCount - writesBefore)
+        assertEquals(
+            "every write but the last must start inside the previous ack, or nothing raced",
+            MULTI_FRAGMENT_WRITES - 1,
+            h.acksOutlivedByTheNextWrite.get()
+        )
+        assertFalse("no completion may outlive its write", h.probe.hasWriteInFlight)
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
@@ -302,5 +346,16 @@ class BleClientTransportDefectTest {
         const val MESSAGE_ROUNDS = 40
         const val FRAGMENTS_PER_MESSAGE = 8
         const val REASSEMBLY_TIMEOUT_MS = 5_000L
+
+        /** ChaChaPoly's tag, which every transport message carries. */
+        const val NOISE_TAG_SIZE = 16
+
+        /**
+         * Padding that puts the request's ciphertext — 681 bytes — into
+         * [MULTI_FRAGMENT_WRITES] fragments of the 237 bytes an MTU of 247
+         * carries.
+         */
+        const val MULTI_FRAGMENT_PAD = 600
+        const val MULTI_FRAGMENT_WRITES = 3
     }
 }
