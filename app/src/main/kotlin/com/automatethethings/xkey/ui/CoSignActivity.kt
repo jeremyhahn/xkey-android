@@ -211,7 +211,7 @@ class CoSignActivity : AppCompatActivity() {
             text = getString(R.string.cosign_current_signatures)
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
         }
         signaturesContainer.addView(sigTitle)
         val noSigText = TextView(this).apply {
@@ -308,7 +308,7 @@ class CoSignActivity : AppCompatActivity() {
             text = getString(R.string.cosign_initiator_title)
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
         })
 
         val generateQrButton = Button(this).apply {
@@ -358,7 +358,7 @@ class CoSignActivity : AppCompatActivity() {
             text = getString(R.string.cosign_witness_title)
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
         })
 
         section.addView(TextView(this).apply {

@@ -765,7 +765,7 @@ class SettingsActivity : AppCompatActivity() {
         // Reset CA button
         val resetButton = Button(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             text = getString(R.string.ca_reset)
-            setTextColor(UIHelpers.resolveThemeColor(this@SettingsActivity, com.google.android.material.R.attr.colorError))
+            setTextColor(UIHelpers.resolveThemeColor(this@SettingsActivity, androidx.appcompat.R.attr.colorError))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1731,7 +1731,7 @@ class SettingsActivity : AppCompatActivity() {
             setPadding(dp(16), dp(14), dp(16), dp(14))
 
             // Apply gradient background
-            val primaryColor = UIHelpers.resolveThemeColor(this@SettingsActivity, com.google.android.material.R.attr.colorPrimary)
+            val primaryColor = UIHelpers.resolveThemeColor(this@SettingsActivity, androidx.appcompat.R.attr.colorPrimary)
             val primaryContainerColor = UIHelpers.resolveThemeColor(this@SettingsActivity, com.google.android.material.R.attr.colorPrimaryContainer)
             background = GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
@@ -1748,7 +1748,7 @@ class SettingsActivity : AppCompatActivity() {
                 marginEnd = dp(16)
             }
             imageTintList = android.content.res.ColorStateList.valueOf(
-                UIHelpers.resolveThemeColor(this@SettingsActivity, com.google.android.material.R.attr.colorPrimary)
+                UIHelpers.resolveThemeColor(this@SettingsActivity, androidx.appcompat.R.attr.colorPrimary)
             )
         }
         headerContainer.addView(icon)
@@ -1850,7 +1850,7 @@ class SettingsActivity : AppCompatActivity() {
             setTextColor(
                 UIHelpers.resolveThemeColor(
                     this@SettingsActivity,
-                    com.google.android.material.R.attr.colorPrimary
+                    androidx.appcompat.R.attr.colorPrimary
                 )
             )
         })
@@ -1902,7 +1902,7 @@ class SettingsActivity : AppCompatActivity() {
         return TextView(this).apply {
             this.text = text
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge)
-            setTextColor(UIHelpers.resolveThemeColor(this@SettingsActivity, com.google.android.material.R.attr.colorPrimary))
+            setTextColor(UIHelpers.resolveThemeColor(this@SettingsActivity, androidx.appcompat.R.attr.colorPrimary))
             setPadding(0, dp(8), 0, dp(4))
         }
     }

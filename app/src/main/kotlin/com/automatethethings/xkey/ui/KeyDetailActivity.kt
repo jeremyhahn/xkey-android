@@ -994,7 +994,7 @@ class KeyDetailActivity : AppCompatActivity() {
         val titleView = TextView(this).apply {
             text = title
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
             letterSpacing = 0.02f
         }
         headerRow.addView(titleView)
@@ -1086,29 +1086,29 @@ class KeyDetailActivity : AppCompatActivity() {
             when {
                 isDanger -> {
                     strokeColor = ColorStateList.valueOf(
-                        resolveThemeColor(com.google.android.material.R.attr.colorError)
+                        resolveThemeColor(androidx.appcompat.R.attr.colorError)
                     )
                     strokeWidth = dpToPxInt(1)
                     setBackgroundColor(Color.TRANSPARENT)
-                    setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorError))
+                    setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorError))
                     rippleColor = ColorStateList.valueOf(
                         UIHelpers.applyAlpha(
-                            resolveThemeColor(com.google.android.material.R.attr.colorError),
+                            resolveThemeColor(androidx.appcompat.R.attr.colorError),
                             0.12f
                         )
                     )
                 }
                 isPrimary -> {
-                    setBackgroundColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+                    setBackgroundColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
                     setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnPrimary))
                 }
                 else -> {
                     strokeColor = ColorStateList.valueOf(
-                        resolveThemeColor(com.google.android.material.R.attr.colorPrimary)
+                        resolveThemeColor(androidx.appcompat.R.attr.colorPrimary)
                     )
                     strokeWidth = dpToPxInt(1)
                     setBackgroundColor(Color.TRANSPARENT)
-                    setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+                    setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
                 }
             }
 
@@ -1139,7 +1139,7 @@ class KeyDetailActivity : AppCompatActivity() {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(UIHelpers.applyAlpha(
-                    resolveThemeColor(com.google.android.material.R.attr.colorError),
+                    resolveThemeColor(androidx.appcompat.R.attr.colorError),
                     0.15f
                 ))
             }
@@ -1217,7 +1217,7 @@ class KeyDetailActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = dpToPxInt(8)
             }
-            setBackgroundColor(resolveThemeColor(com.google.android.material.R.attr.colorError))
+            setBackgroundColor(resolveThemeColor(androidx.appcompat.R.attr.colorError))
             setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnError))
             cornerRadius = dpToPxInt(12)
             setOnClickListener {
@@ -1484,7 +1484,7 @@ class KeyDetailActivity : AppCompatActivity() {
             text = title
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
             letterSpacing = 0.05f
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1509,7 +1509,7 @@ class KeyDetailActivity : AppCompatActivity() {
 
         val errorBadge = createInlineBadge(
             getString(R.string.attest_failed),
-            resolveThemeColor(com.google.android.material.R.attr.colorError)
+            resolveThemeColor(androidx.appcompat.R.attr.colorError)
         ).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1524,7 +1524,7 @@ class KeyDetailActivity : AppCompatActivity() {
         val errorView = TextView(this).apply {
             text = message
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorError))
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorError))
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
