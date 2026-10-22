@@ -26,6 +26,38 @@ import javax.crypto.spec.SecretKeySpec
  * -> s, se
  *
  * Thread safety: This class is NOT thread-safe. Synchronize externally.
+ *
+ * ## Key material on the heap (#6)
+ *
+ * Per the handbook's "Protected memory on Android/JVM" rule, the secret arrays
+ * this class owns are overwritten with zeros (`fill(0)`) before their reference
+ * is dropped or replaced:
+ *
+ *  - the static private key, when [loadStaticKey] or a regeneration replaces it;
+ *  - the ephemeral private key, the chaining key, the handshake encryption key
+ *    and the handshake hash, when the next handshake state replaces them, when
+ *    [reset] drops them, and (all but the hash) as soon as the handshake splits
+ *    into transport keys;
+ *  - the send and receive transport keys, on [reset] and on replacement;
+ *  - the intermediates: every DH output once mixed in, the HKDF pseudorandom
+ *    key, the PKCS#8 wrapping of a private scalar, the clamped scalar copy, and
+ *    a PKCS#8-encoded private key read from storage once its raw key is cut out.
+ *
+ * Public keys (ours, the peer's, both ephemerals) and the prologue are not
+ * secret and are not zeroized; getters hand out copies.
+ *
+ * This is **best effort**. A generational collector may already have copied an
+ * array before it is zeroed, and several copies are out of reach: the
+ * `SecretKeySpec`, `PKCS8EncodedKeySpec`, `PrivateKey`, `Mac` and `Cipher`
+ * objects the JCA builds keep their own clones; the Base64 `String` the static
+ * key is stored as is immutable; and the pure-Kotlin X25519 fallback
+ * ([x25519ScalarMultPure]) carries the scalar and the ladder state in
+ * `BigInteger`, which is immutable and cannot be overwritten at all. The static
+ * private key also lives for as long as the session object does: nothing
+ * releases it before the collector does.
+ *
+ * Zeroization here is hygiene, not a compliance claim: no mandate is met on
+ * its basis alone.
  */
 class NoiseSession {
     companion object {
@@ -83,7 +115,9 @@ class NoiseSession {
                     // Handle PKCS#8 encoded private key (48 bytes)
                     if (decodedPrivKey.size == 48 &&
                         decodedPrivKey[0] == 0x30.toByte() && decodedPrivKey[1] == 0x2e.toByte()) {
-                        decodedPrivKey = decodedPrivKey.copyOfRange(16, 48)
+                        val encoded = decodedPrivKey
+                        decodedPrivKey = encoded.copyOfRange(16, 48)
+                        encoded.fill(0)
                     }
 
                     // Handle X.509 encoded public key (44 bytes)
@@ -191,14 +225,16 @@ class NoiseSession {
 
                 // Check if the private key is PKCS#8 encoded (48 bytes) vs raw (32 bytes)
                 // PKCS#8 header for X25519: 302e020100300506032b656e04220420 (16 bytes)
-                staticPrivateKey = if (decodedPrivKey.size == 48 &&
+                val rawPrivKey = if (decodedPrivKey.size == 48 &&
                     decodedPrivKey[0] == 0x30.toByte() && decodedPrivKey[1] == 0x2e.toByte()) {
                     Log.w(TAG, "Converting PKCS#8 encoded private key to raw format")
                     // Extract raw 32-byte key from PKCS#8 encoding (skip 16-byte header)
-                    decodedPrivKey.copyOfRange(16, 48)
+                    decodedPrivKey.copyOfRange(16, 48).also { decodedPrivKey.fill(0) }
                 } else {
                     decodedPrivKey
                 }
+                if (staticPrivateKey !== rawPrivKey) staticPrivateKey?.fill(0)
+                staticPrivateKey = rawPrivKey
 
                 // Check if the public key is X.509 encoded (44 bytes) vs raw (32 bytes)
                 // X.509 header for X25519: 302a300506032b656e032100 (12 bytes)
@@ -264,28 +300,29 @@ class NoiseSession {
         }
     }
 
-    /**
-     * Generates a new X25519 static keypair using raw 32-byte format.
-     */
     private fun generateStaticKey() {
-        staticPrivateKey = ByteArray(KEY_SIZE).also { secureRandom.nextBytes(it) }
-        // Clamp the private key per X25519 spec
-        staticPrivateKey!![0] = (staticPrivateKey!![0].toInt() and 248).toByte()
-        staticPrivateKey!![31] = (staticPrivateKey!![31].toInt() and 127).toByte()
-        staticPrivateKey!![31] = (staticPrivateKey!![31].toInt() or 64).toByte()
-        staticPublicKey = x25519ScalarMultBase(staticPrivateKey!!)
+        val privateKey = newClampedScalar()
+        staticPrivateKey?.fill(0)
+        staticPrivateKey = privateKey
+        staticPublicKey = x25519ScalarMultBase(privateKey)
+    }
+
+    private fun generateEphemeralKey() {
+        val privateKey = newClampedScalar()
+        ephemeralPrivateKey?.fill(0)
+        ephemeralPrivateKey = privateKey
+        ephemeralPublicKey = x25519ScalarMultBase(privateKey)
     }
 
     /**
-     * Generates a new ephemeral X25519 keypair.
+     * A fresh random X25519 private scalar, clamped per RFC 7748.
      */
-    private fun generateEphemeralKey() {
-        ephemeralPrivateKey = ByteArray(KEY_SIZE).also { secureRandom.nextBytes(it) }
-        // Clamp the private key per X25519 spec
-        ephemeralPrivateKey!![0] = (ephemeralPrivateKey!![0].toInt() and 248).toByte()
-        ephemeralPrivateKey!![31] = (ephemeralPrivateKey!![31].toInt() and 127).toByte()
-        ephemeralPrivateKey!![31] = (ephemeralPrivateKey!![31].toInt() or 64).toByte()
-        ephemeralPublicKey = x25519ScalarMultBase(ephemeralPrivateKey!!)
+    private fun newClampedScalar(): ByteArray {
+        val scalar = ByteArray(KEY_SIZE).also { secureRandom.nextBytes(it) }
+        scalar[0] = (scalar[0].toInt() and 248).toByte()
+        scalar[31] = (scalar[31].toInt() and 127).toByte()
+        scalar[31] = (scalar[31].toInt() or 64).toByte()
+        return scalar
     }
 
     /**
@@ -294,14 +331,16 @@ class NoiseSession {
     private fun initializeHandshakeState() {
         // h = SHA256(protocol_name) padded/truncated to 32 bytes
         val protocolBytes = PROTOCOL_NAME.toByteArray()
-        if (protocolBytes.size <= KEY_SIZE) {
-            handshakeHash = ByteArray(KEY_SIZE)
-            System.arraycopy(protocolBytes, 0, handshakeHash, 0, protocolBytes.size)
+        val initialHash = if (protocolBytes.size <= KEY_SIZE) {
+            ByteArray(KEY_SIZE).also { System.arraycopy(protocolBytes, 0, it, 0, protocolBytes.size) }
         } else {
-            handshakeHash = sha256(protocolBytes)
+            sha256(protocolBytes)
         }
+        handshakeHash.fill(0)
+        handshakeHash = initialHash
 
         // ck = h
+        chainingKey.fill(0)
         chainingKey = handshakeHash.copyOf()
 
         // MixHash(prologue) - Noise spec requires this even for empty prologue!
@@ -313,6 +352,7 @@ class NoiseSession {
         generateEphemeralKey()
 
         // Reset encryption key and nonce
+        encryptionKey?.fill(0)
         encryptionKey = ByteArray(KEY_SIZE)
         handshakeNonce = 0
 
@@ -362,17 +402,14 @@ class NoiseSession {
         mixHash(ephemeralPublicKey!!)
 
         // ee - DH(e, re)
-        val eeSecret = x25519(ephemeralPrivateKey!!, remoteEphemeralKey!!)
-        mixKey(eeSecret)
+        mixDh(ephemeralPrivateKey!!, remoteEphemeralKey!!)
 
         // s - our static public key (encrypted)
         val encryptedS = encryptAndHash(staticPublicKey!!)
         Log.d(TAG, "NOISE STATE: encrypted_s (${encryptedS.size} bytes)")
 
         // es - DH(s, re)
-        val esSecret = x25519(staticPrivateKey!!, remoteEphemeralKey!!)
-        Log.i(TAG, "es DH secret: ${esSecret.size} bytes")
-        mixKey(esSecret)
+        mixDh(staticPrivateKey!!, remoteEphemeralKey!!)
 
         handshakeState = HandshakeState.AWAITING_FINAL
 
@@ -415,8 +452,7 @@ class NoiseSession {
 
             // se - DH(e, rs)
             Log.d(TAG, "Computing se DH...")
-            val seSecret = x25519(ephemeralPrivateKey!!, remoteStaticKey!!)
-            mixKey(seSecret)
+            mixDh(ephemeralPrivateKey!!, remoteStaticKey!!)
             Log.d(TAG, "Computed se DH and mixKey complete")
 
             // Decrypt empty payload if present (flynn/noise includes this)
@@ -432,6 +468,10 @@ class NoiseSession {
             Log.d(TAG, "Splitting symmetric state...")
             splitSymmetricState()
             Log.d(TAG, "Split complete")
+
+            // The ephemeral private key has no use after the last DH
+            ephemeralPrivateKey?.fill(0)
+            ephemeralPrivateKey = null
 
             handshakeState = HandshakeState.COMPLETE
             handshakeComplete = true
@@ -469,7 +509,13 @@ class NoiseSession {
     private fun x25519ScalarMult(scalar: ByteArray, point: ByteArray): ByteArray {
         return try {
             // Try Java crypto API first
-            val privKeySpec = java.security.spec.PKCS8EncodedKeySpec(wrapX25519PrivateKey(scalar))
+            // The key spec keeps its own copy of the encoding
+            val encodedPrivKey = wrapX25519PrivateKey(scalar)
+            val privKeySpec = try {
+                java.security.spec.PKCS8EncodedKeySpec(encodedPrivKey)
+            } finally {
+                encodedPrivKey.fill(0)
+            }
             val pubKeySpec = java.security.spec.X509EncodedKeySpec(wrapX25519PublicKey(point))
 
             val keyFactory = java.security.KeyFactory.getInstance("X25519")
@@ -489,13 +535,30 @@ class NoiseSession {
     /**
      * Pure Kotlin X25519 scalar multiplication (fallback).
      * Implements the Montgomery ladder from RFC 7748 using BigInteger.
+     *
+     * Zeroization limit (#6): the clamped scalar copy is overwritten, but the
+     * ladder state derived from it (`x2`, `z2`, `x3`, `z3`, the result) lives in
+     * immutable `BigInteger`s, which cannot be overwritten and stay on the heap
+     * until the collector reclaims them.
      */
     private fun x25519ScalarMultPure(k: ByteArray, u: ByteArray): ByteArray {
         // Field arithmetic in GF(2^255 - 19)
         val p = java.math.BigInteger.ONE.shiftLeft(255).subtract(java.math.BigInteger.valueOf(19))
 
-        // Decode scalar (clamp it)
+        // Copy the scalar: the ladder clamps the copy in place
         val kClamped = k.copyOf()
+        try {
+            return montgomeryLadder(kClamped, u, p)
+        } finally {
+            kClamped.fill(0)
+        }
+    }
+
+    /**
+     * The RFC 7748 ladder over an already-copied scalar, which it clamps in
+     * place. See [x25519ScalarMultPure] for what it cannot zeroize.
+     */
+    private fun montgomeryLadder(kClamped: ByteArray, u: ByteArray, p: java.math.BigInteger): ByteArray {
         kClamped[0] = (kClamped[0].toInt() and 248).toByte()
         kClamped[31] = (kClamped[31].toInt() and 127).toByte()
         kClamped[31] = (kClamped[31].toInt() or 64).toByte()
@@ -554,7 +617,8 @@ class NoiseSession {
     }
 
     private fun encodeLittleEndian(n: java.math.BigInteger): ByteArray {
-        var bytes = n.toByteArray()
+        val raw = n.toByteArray()
+        var bytes = raw
         // Remove leading zero if present
         if (bytes.size > 32 && bytes[0] == 0.toByte()) {
             bytes = bytes.copyOfRange(1, bytes.size)
@@ -563,8 +627,11 @@ class NoiseSession {
         val result = ByteArray(32)
         val offset = 32 - bytes.size
         System.arraycopy(bytes, 0, result, offset, bytes.size)
+        // The output may be a DH secret: overwrite the intermediates
+        raw.fill(0)
+        bytes.fill(0)
         // Reverse for little-endian
-        return result.reversedArray()
+        return result.reversedArray().also { result.fill(0) }
     }
 
     private fun cswap(swap: java.math.BigInteger, a: java.math.BigInteger, b: java.math.BigInteger): Pair<java.math.BigInteger, java.math.BigInteger> {
@@ -630,48 +697,59 @@ class NoiseSession {
         return MessageDigest.getInstance("SHA-256").digest(data)
     }
 
-    /**
-     * MixHash: h = SHA256(h || data)
-     */
     private fun mixHash(data: ByteArray) {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(handshakeHash)
         digest.update(data)
+        val previous = handshakeHash
         handshakeHash = digest.digest()
+        previous.fill(0)
     }
 
-    /**
-     * MixKey: Derives new chaining key and encryption key.
-     * Also resets the handshake nonce to 0 per Noise spec.
-     */
     private fun mixKey(inputKeyMaterial: ByteArray) {
         val (ck, k) = hkdf2(chainingKey, inputKeyMaterial)
+        chainingKey.fill(0)
         chainingKey = ck
+        encryptionKey?.fill(0)
         encryptionKey = k
         handshakeNonce = 0  // Reset nonce when key changes
     }
 
     /**
-     * HKDF-SHA256 with 2 outputs.
+     * MixKey(DH(privateKey, publicKey)). The DH output is overwritten once it
+     * has been mixed in, or once mixing it in has failed.
      */
+    private fun mixDh(privateKey: ByteArray, publicKey: ByteArray) {
+        val secret = x25519(privateKey, publicKey)
+        try {
+            mixKey(secret)
+        } finally {
+            secret.fill(0)
+        }
+    }
+
     private fun hkdf2(salt: ByteArray, ikm: ByteArray): Pair<ByteArray, ByteArray> {
         // Extract
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(salt, "HmacSHA256"))
         val prk = mac.doFinal(ikm)
 
-        // Expand - output 1
-        mac.init(SecretKeySpec(prk, "HmacSHA256"))
-        mac.update(byteArrayOf(0x01))
-        val t1 = mac.doFinal()
+        try {
+            // Expand - output 1
+            mac.init(SecretKeySpec(prk, "HmacSHA256"))
+            mac.update(byteArrayOf(0x01))
+            val t1 = mac.doFinal()
 
-        // Expand - output 2
-        mac.init(SecretKeySpec(prk, "HmacSHA256"))
-        mac.update(t1)
-        mac.update(byteArrayOf(0x02))
-        val t2 = mac.doFinal()
+            // Expand - output 2
+            mac.init(SecretKeySpec(prk, "HmacSHA256"))
+            mac.update(t1)
+            mac.update(byteArrayOf(0x02))
+            val t2 = mac.doFinal()
 
-        return Pair(t1, t2)
+            return Pair(t1, t2)
+        } finally {
+            prk.fill(0)
+        }
     }
 
     /**
@@ -732,17 +810,23 @@ class NoiseSession {
         return plaintext
     }
 
-    /**
-     * Splits the symmetric state into send and receive keys.
-     */
     private fun splitSymmetricState() {
         val (k1, k2) = hkdf2(chainingKey, ByteArray(0))
 
         // Responder: k1 for receiving, k2 for sending
+        recvKey?.fill(0)
         recvKey = k1
+        sendKey?.fill(0)
         sendKey = k2
         sendNonce = 0
         recvNonce = 0
+
+        // Split ends the symmetric state: the chaining key and the handshake
+        // key are never used again. The handshake hash stays until [reset]:
+        // it is the transcript value, not a key.
+        chainingKey.fill(0)
+        encryptionKey?.fill(0)
+        encryptionKey = null
     }
 
     /**
@@ -795,31 +879,55 @@ class NoiseSession {
     fun isHandshakeComplete(): Boolean = handshakeComplete
 
     /**
-     * Returns the remote static public key after handshake.
+     * Returns the remote static public key after handshake, as a copy the
+     * caller owns: a later [reset] cannot touch it.
      */
-    fun getRemoteStaticKey(): ByteArray? = remoteStaticKey
+    fun getRemoteStaticKey(): ByteArray? = remoteStaticKey?.copyOf()
 
     /**
-     * Returns our static public key.
+     * Returns our static public key, as a copy the caller owns.
      */
-    fun getStaticPublicKey(): ByteArray? = staticPublicKey
+    fun getStaticPublicKey(): ByteArray? = staticPublicKey?.copyOf()
+
+    /**
+     * Test seam (#6): the secret arrays this session holds right now, by field
+     * name. These are the live arrays, not copies, so that a test can watch
+     * them being overwritten; production code must not call this.
+     */
+    internal fun secretArraysForTest(): Map<String, ByteArray> = buildMap {
+        staticPrivateKey?.let { put("staticPrivateKey", it) }
+        ephemeralPrivateKey?.let { put("ephemeralPrivateKey", it) }
+        put("chainingKey", chainingKey)
+        put("handshakeHash", handshakeHash)
+        encryptionKey?.let { put("encryptionKey", it) }
+        sendKey?.let { put("sendKey", it) }
+        recvKey?.let { put("recvKey", it) }
+    }
 
     /**
      * Resets the session state for a new handshake.
      *
      * Call this when reconnecting to the same or different device.
      * The prologue is preserved unless explicitly changed via [setPrologue].
+     * Every transient secret of the old session is overwritten with zeros
+     * before it is dropped; the static key pair is kept.
      */
     fun reset() {
+        ephemeralPrivateKey?.fill(0)
         ephemeralPrivateKey = null
         ephemeralPublicKey = null
         remoteEphemeralKey = null
         remoteStaticKey = null
+        chainingKey.fill(0)
         chainingKey = ByteArray(KEY_SIZE)
+        handshakeHash.fill(0)
         handshakeHash = ByteArray(KEY_SIZE)
+        encryptionKey?.fill(0)
         encryptionKey = null
         handshakeNonce = 0
+        sendKey?.fill(0)
         sendKey = null
+        recvKey?.fill(0)
         recvKey = null
         sendNonce = 0
         recvNonce = 0
