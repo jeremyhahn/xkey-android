@@ -767,7 +767,7 @@ class ContactManagementActivity : AppCompatActivity() {
                 imageTintList = ColorStateList.valueOf(
                     UIHelpers.resolveThemeColor(
                         this@ContactManagementActivity,
-                        com.google.android.material.R.attr.colorPrimary
+                        androidx.appcompat.R.attr.colorPrimary
                     )
                 )
                 layoutParams = LinearLayout.LayoutParams(
@@ -1759,7 +1759,7 @@ class ContactManagementActivity : AppCompatActivity() {
                 )
                 setTextColor(UIHelpers.resolveThemeColor(
                     context,
-                    com.google.android.material.R.attr.colorPrimary
+                    androidx.appcompat.R.attr.colorPrimary
                 ))
                 typeface = Typeface.DEFAULT_BOLD
                 tag = "algorithm"

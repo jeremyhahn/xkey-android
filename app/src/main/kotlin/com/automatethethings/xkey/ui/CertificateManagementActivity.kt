@@ -1580,7 +1580,7 @@ class CertificateManagementActivity : AppCompatActivity() {
                 )
                 setTextColor(UIHelpers.resolveThemeColor(
                     context,
-                    com.google.android.material.R.attr.colorPrimary
+                    androidx.appcompat.R.attr.colorPrimary
                 ))
                 typeface = Typeface.DEFAULT_BOLD
                 tag = "profile"

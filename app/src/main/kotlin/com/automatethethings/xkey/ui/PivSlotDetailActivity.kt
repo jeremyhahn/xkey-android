@@ -598,7 +598,7 @@ class PivSlotDetailActivity : AppCompatActivity() {
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
             setTextColor(UIHelpers.resolveThemeColor(
                 this@PivSlotDetailActivity,
-                com.google.android.material.R.attr.colorPrimary
+                androidx.appcompat.R.attr.colorPrimary
             ))
             letterSpacing = 0.02f
             layoutParams = LinearLayout.LayoutParams(

@@ -750,7 +750,7 @@ class CertificateDetailActivity : AppCompatActivity() {
         val titleView = TextView(this).apply {
             text = title
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
             letterSpacing = 0.02f
         }
         headerRow.addView(titleView)
@@ -832,29 +832,29 @@ class CertificateDetailActivity : AppCompatActivity() {
             when {
                 isDanger -> {
                     strokeColor = ColorStateList.valueOf(
-                        resolveThemeColor(com.google.android.material.R.attr.colorError)
+                        resolveThemeColor(androidx.appcompat.R.attr.colorError)
                     )
                     strokeWidth = dpToPxInt(1)
                     setBackgroundColor(Color.TRANSPARENT)
-                    setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorError))
+                    setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorError))
                     rippleColor = ColorStateList.valueOf(
                         UIHelpers.applyAlpha(
-                            resolveThemeColor(com.google.android.material.R.attr.colorError),
+                            resolveThemeColor(androidx.appcompat.R.attr.colorError),
                             0.12f
                         )
                     )
                 }
                 isPrimary -> {
-                    setBackgroundColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+                    setBackgroundColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
                     setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnPrimary))
                 }
                 else -> {
                     strokeColor = ColorStateList.valueOf(
-                        resolveThemeColor(com.google.android.material.R.attr.colorPrimary)
+                        resolveThemeColor(androidx.appcompat.R.attr.colorPrimary)
                     )
                     strokeWidth = dpToPxInt(1)
                     setBackgroundColor(Color.TRANSPARENT)
-                    setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+                    setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
                 }
             }
 
