@@ -462,7 +462,7 @@ class AuditLogActivity : AppCompatActivity() {
             imageTintList = ColorStateList.valueOf(
                 UIHelpers.resolveThemeColor(
                     this@AuditLogActivity,
-                    com.google.android.material.R.attr.colorPrimary
+                    androidx.appcompat.R.attr.colorPrimary
                 )
             )
             layoutParams = LinearLayout.LayoutParams(

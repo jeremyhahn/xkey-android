@@ -485,7 +485,7 @@ class PremiumCardFactoryTest {
             val card = PremiumCardFactory.createOutlinedCard(activity)
             val primary = UIHelpers.resolveThemeColor(
                 activity,
-                com.google.android.material.R.attr.colorPrimary
+                androidx.appcompat.R.attr.colorPrimary
             )
 
             PremiumCardFactory.setSelectedState(card, activity, true)
@@ -536,7 +536,7 @@ class PremiumCardFactoryTest {
             assertEquals(
                 UIHelpers.resolveThemeColor(
                     activity,
-                    com.google.android.material.R.attr.colorError
+                    androidx.appcompat.R.attr.colorError
                 ),
                 card.strokeColor
             )
@@ -603,7 +603,7 @@ class PremiumCardFactoryTest {
             assertEquals(
                 UIHelpers.resolveThemeColor(
                     activity,
-                    com.google.android.material.R.attr.colorPrimary
+                    androidx.appcompat.R.attr.colorPrimary
                 ),
                 card.cardBackgroundColor.defaultColor
             )
@@ -633,7 +633,7 @@ class PremiumCardFactoryTest {
         assertPreset(
             preset = { PremiumCardFactory.createErrorCard(it) },
             fillAttr = com.google.android.material.R.attr.colorErrorContainer,
-            strokeAttr = com.google.android.material.R.attr.colorError
+            strokeAttr = androidx.appcompat.R.attr.colorError
         )
     }
 

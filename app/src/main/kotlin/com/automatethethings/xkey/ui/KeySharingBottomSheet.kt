@@ -197,7 +197,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             }
             setImageDrawable(ContextCompat.getDrawable(requireContext(), R.drawable.ic_share_key))
             imageTintList = android.content.res.ColorStateList.valueOf(
-                resolveThemeColor(com.google.android.material.R.attr.colorPrimary)
+                resolveThemeColor(androidx.appcompat.R.attr.colorPrimary)
             )
         }
         titleRow.addView(icon)
@@ -368,7 +368,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         val headerText = TextView(requireContext()).apply {
             text = getString(R.string.sharing_select_devices)
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorPrimary))
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT

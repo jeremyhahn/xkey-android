@@ -678,7 +678,7 @@ class PairedDeviceAdapter(
             )
             val primaryColor = UIHelpers.resolveThemeColor(
                 context,
-                com.google.android.material.R.attr.colorPrimary
+                androidx.appcompat.R.attr.colorPrimary
             )
             val primaryContainerColor = UIHelpers.resolveThemeColor(
                 context,

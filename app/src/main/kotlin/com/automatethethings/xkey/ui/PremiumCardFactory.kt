@@ -543,11 +543,11 @@ object PremiumCardFactory {
             card.strokeWidth = dpToPxInt(context, 2)
             card.strokeColor = resolveThemeColor(
                 context,
-                com.google.android.material.R.attr.colorPrimary
+                androidx.appcompat.R.attr.colorPrimary
             )
             card.setCardBackgroundColor(
                 applyAlpha(
-                    resolveThemeColor(context, com.google.android.material.R.attr.colorPrimary),
+                    resolveThemeColor(context, androidx.appcompat.R.attr.colorPrimary),
                     0.08f
                 )
             )
@@ -577,7 +577,7 @@ object PremiumCardFactory {
             card.strokeWidth = dpToPxInt(context, 2)
             card.strokeColor = resolveThemeColor(
                 context,
-                com.google.android.material.R.attr.colorError
+                androidx.appcompat.R.attr.colorError
             )
         } else {
             card.strokeWidth = dpToPxInt(context, STROKE_WIDTH_DP)
@@ -625,7 +625,7 @@ object PremiumCardFactory {
     fun createActionCard(context: Context): MaterialCardView {
         return createElevatedCard(context).apply {
             setCardBackgroundColor(
-                resolveThemeColor(context, com.google.android.material.R.attr.colorPrimary)
+                resolveThemeColor(context, androidx.appcompat.R.attr.colorPrimary)
             )
             // Note: Content text should use colorOnPrimary
         }
@@ -686,7 +686,7 @@ object PremiumCardFactory {
             )
             strokeColor = resolveThemeColor(
                 context,
-                com.google.android.material.R.attr.colorError
+                androidx.appcompat.R.attr.colorError
             )
         }
     }

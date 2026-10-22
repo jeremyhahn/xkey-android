@@ -141,11 +141,11 @@ class UIHelpersTest {
         onHost { activity ->
             val first = UIHelpers.resolveThemeColor(
                 activity,
-                com.google.android.material.R.attr.colorPrimary
+                androidx.appcompat.R.attr.colorPrimary
             )
             val second = UIHelpers.resolveThemeColor(
                 activity,
-                com.google.android.material.R.attr.colorPrimary
+                androidx.appcompat.R.attr.colorPrimary
             )
             assertEquals("Resolution should be stable", first, second)
             assertEquals("Theme colours are opaque", 0xFF, Color.alpha(first))
@@ -157,7 +157,7 @@ class UIHelpersTest {
         onHost { activity ->
             val primary = UIHelpers.resolveThemeColor(
                 activity,
-                com.google.android.material.R.attr.colorPrimary
+                androidx.appcompat.R.attr.colorPrimary
             )
             val surface = UIHelpers.resolveThemeColor(
                 activity,

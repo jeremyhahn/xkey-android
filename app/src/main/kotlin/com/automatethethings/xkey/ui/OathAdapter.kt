@@ -178,7 +178,7 @@ class OathAdapter(
             typeface = Typeface.MONOSPACE
             setTextColor(UIHelpers.resolveThemeColor(
                 context,
-                com.google.android.material.R.attr.colorPrimary
+                androidx.appcompat.R.attr.colorPrimary
             ))
             letterSpacing = 0.1f
             tag = "code"
@@ -210,7 +210,7 @@ class OathAdapter(
                 topMargin = UIHelpers.dpToPxInt(context, 4)
             }
             progressTintList = ColorStateList.valueOf(
-                UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorPrimary)
+                UIHelpers.resolveThemeColor(context, androidx.appcompat.R.attr.colorPrimary)
             )
             progressBackgroundTintList = ColorStateList.valueOf(
                 UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorSurfaceVariant)
