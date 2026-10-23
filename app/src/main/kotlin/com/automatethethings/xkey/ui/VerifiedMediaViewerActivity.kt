@@ -250,11 +250,15 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
             try {
                 // Attempt to read signature directly from stream first (JPEG EXIF)
                 var sigData = XmpMetadataHelper.readSignatureFromUri(contentResolver, uri, mimeType)
+                // Only the sidecar beside the real file counts as a sidecar; the
+                // temp-copy read below keeps the in-band (canonical-only) rule.
+                var source = MediaHasher.SignatureSource.IN_BAND
 
                 // A sidecar written beside the real file, then the in-band read
                 // via a temp copy for formats that carry the signature inside.
                 if (sigData == null) {
                     sigData = readSidecarBesideMedia(uri)
+                    if (sigData != null) source = MediaHasher.SignatureSource.SIDECAR
                 }
                 if (sigData == null) {
                     sigData = readSignatureViaTempFile(uri, mimeType)
@@ -265,11 +269,14 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                // Compute the content hash for cryptographic verification
-                val contentHashHex = MediaHasher.hashCanonicalUri(contentResolver, uri)
+                // The stored content hash must match the file before any
+                // signature over it is checked.
+                val contentHashMatches = MediaHasher.contentHashMatchesUri(
+                    contentResolver, uri, sigData.contentHash, source
+                )
 
                 val results = sigData.signatures.map { entry ->
-                    verifyEntry(entry, contentHashHex, sigData.contentHash)
+                    verifyEntry(entry, contentHashMatches, sigData.contentHash)
                 }
 
                 val allVerified = results.all { it.status == VerificationStatus.VERIFIED }
@@ -361,7 +368,7 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
      */
     private suspend fun verifyEntry(
         entry: SignatureEntry,
-        computedHashHex: String,
+        contentHashMatches: Boolean,
         storedContentHash: String
     ): VerificationResult {
         try {
@@ -369,7 +376,7 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
             val contact = contactDao.getByFingerprint(entry.keyFingerprint)
             if (contact != null) {
                 val verified = verifyCryptographic(
-                    contact.publicKeyDer, entry, computedHashHex, storedContentHash
+                    contact.publicKeyDer, entry, contentHashMatches, storedContentHash
                 )
                 return VerificationResult(
                     signerName = entry.signerName ?: contact.name,
@@ -393,7 +400,7 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
             if (matchedKey != null) {
                 val pubDer = matchedKey.publicKeyDer
                 val verified = if (pubDer != null) {
-                    verifyCryptographic(pubDer, entry, computedHashHex, storedContentHash)
+                    verifyCryptographic(pubDer, entry, contentHashMatches, storedContentHash)
                 } else {
                     // Cannot verify without public key material; trust by association
                     true
@@ -428,18 +435,18 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
      * Perform cryptographic signature verification using the signer's public key.
      *
      * Checks whether the signature in the entry is valid for the content hash.
-     * The stored content hash must also match the freshly computed hash for
-     * integrity assurance.
+     * The stored content hash must also match the file, by
+     * [MediaHasher.contentHashMatches], for integrity assurance.
      */
     private fun verifyCryptographic(
         publicKeyDer: ByteArray,
         entry: SignatureEntry,
-        computedHashHex: String,
+        contentHashMatches: Boolean,
         storedContentHash: String
     ): Boolean {
         // Content hash mismatch means the file has been tampered with
-        if (computedHashHex != storedContentHash) {
-            Log.w(TAG, "Content hash mismatch: stored=$storedContentHash computed=$computedHashHex")
+        if (!contentHashMatches) {
+            Log.w(TAG, "Content hash mismatch: stored=$storedContentHash")
             return false
         }
 

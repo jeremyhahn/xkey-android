@@ -284,7 +284,7 @@ class BleClientHarness(
         every { device.name } returns deviceName
         every { device.address } returns address
         every {
-            device.connectGatt(any(), any(), any<BluetoothGattCallback>())
+            device.connectGatt(any<Context>(), any<Boolean>(), any<BluetoothGattCallback>())
         } answers {
             if (!connectStarts) return@answers null
             val dialled = dialledGatt

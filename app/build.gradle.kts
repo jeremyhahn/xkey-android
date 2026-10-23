@@ -1,5 +1,5 @@
 import java.util.Properties
-import javax.inject.Inject
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
@@ -44,7 +44,7 @@ val releaseSigningCredentials: Map<String, String>? = run {
 
 android {
     namespace = "com.automatethethings.xkey"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.automatethethings.xkey"
@@ -96,14 +96,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-        freeCompilerArgs += listOf(
-            "-opt-in=kotlin.RequiresOptIn",
-            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi"
-        )
-    }
-
     buildFeatures {
         viewBinding = true
         buildConfig = true
@@ -117,10 +109,28 @@ android {
         }
     }
 
+    // AGP instruments the debug variant with this JaCoCo (its own default is
+    // 0.8.14); the report tasks below read the data with jacoco.toolVersion.
+    testCoverage {
+        jacocoVersion = libs.versions.jacoco.get()
+    }
+
     lint {
         abortOnError = true
         warningsAsErrors = false
         checkDependencies = true
+    }
+}
+
+// Kotlin 2.4 makes the android { kotlinOptions } DSL an error; compilerOptions
+// is its replacement.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+        freeCompilerArgs.addAll(
+            "-opt-in=kotlin.RequiresOptIn",
+            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi"
+        )
     }
 }
 
@@ -152,6 +162,7 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     kapt(libs.androidx.room.compiler)
+    kapt(libs.kotlin.metadata.jvm)
 
     // Credentials (Android 14+ CredentialProvider)
     implementation(libs.androidx.credentials)
@@ -198,30 +209,27 @@ dependencies {
     androidTestImplementation(libs.bundles.androidTesting)
     androidTestImplementation(libs.androidx.test.uiautomator)
 
-    // Lint's classpath (lint-gradle 32.0.0): bcprov and bcpkix-jdk18on 1.79,
-    // from sdk-common 32.0.0. AGP 9.0.0 resolves lint in a detached
-    // configuration, which no named-configuration constraint reaches, so a
-    // metadata rule raises sdk-common's Bouncy Castle dependencies instead.
-    components {
-        withModule("com.android.tools:sdk-common", BouncyCastleVersionRule::class.java) {
-            params(libs.versions.bouncycastle.get())
-        }
+    // Lint's classpath (androidLintTool, lint-gradle 32.4.1): bcprov-jdk18on
+    // 1.80.2 (CVE-2026-8763, CVE-2026-13506), from sdk-common, raised with
+    // bcpkix and bcutil 1.80.2, which Bouncy Castle releases with it. AGP adds
+    // lint-gradle only when the configuration has no dependencies; constraints
+    // are not dependencies.
+    constraints {
+        add("androidLintTool", libs.bouncycastle.bcprov)
+        add("androidLintTool", libs.bouncycastle.bcpkix)
+        add("androidLintTool", libs.bouncycastle.bcutil)
     }
 }
 
-// Requires every Bouncy Castle module a component depends on at the catalog's
-// version (bcutil follows bcpkix).
-@CacheableRule
-abstract class BouncyCastleVersionRule @Inject constructor(
-    private val bouncyCastleVersion: String,
-) : ComponentMetadataRule {
-    override fun execute(context: ComponentMetadataContext) {
-        context.details.allVariants {
-            withDependencies {
-                filter { it.group == "org.bouncycastle" }.forEach { dependency ->
-                    dependency.version { require(bouncyCastleVersion) }
-                }
-            }
+// KGP 2.4.21 adds kotlin-build-tools-impl to its ABI-validation classpath as
+// strictly 2.4.0, which neither compilerVersion nor any property reaches
+// (KotlinPluginWrapper.addKotlinCompilerConfiguration), so take the catalog's
+// Kotlin there with a resolution override; useVersion replaces the strict pin.
+configurations.named("kotlinAbiValidationCompatClasspath") {
+    resolutionStrategy.eachDependency {
+        if (requested.group == "org.jetbrains.kotlin" && requested.name == "kotlin-build-tools-impl") {
+            useVersion(libs.versions.kotlin.get())
+            because("KGP pins the ABI-validation build tools to 2.4.0")
         }
     }
 }
@@ -238,8 +246,14 @@ abstract class BouncyCastleVersionRule @Inject constructor(
 //   ./gradlew coverageReportWithDevice    (unit + instrumented; needs a device)
 // -----------------------------------------------------------------------------
 
-jacoco {
-    toolVersion = "0.8.12"
+// AGP 9.4.1 resets jacoco.toolVersion to its own default (0.8.14) in its
+// afterEvaluate (DependencyConfigurator.configureJacocoTransforms), so set it
+// in an afterEvaluate registered after AGP's; jacocoAgent and jacocoAnt read
+// it when they resolve.
+afterEvaluate {
+    jacoco {
+        toolVersion = libs.versions.jacoco.get()
+    }
 }
 
 /** Generated, framework, and DI classes carry no logic worth measuring. */

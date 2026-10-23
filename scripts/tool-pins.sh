@@ -22,19 +22,19 @@ JBR_SHA256_AARCH64=21ff925581865d97da97df5c8bdb2ab320dbf6aa609a6556efe3c9a7a7c62
 CMDLINE_TOOLS_BUILD=16111833
 CMDLINE_TOOLS_SHA256=0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8
 
-# SDK packages: compileSdk 34 (app/build.gradle.kts) and AGP 9.0's default
-# build-tools. sdkmanager installs them; the build-only stage checks the result
-# against these archives.
-ANDROID_PLATFORM=android-34
-ANDROID_PLATFORM_ARCHIVE=platform-34-ext7_r03.zip
-ANDROID_PLATFORM_SHA256=16fdb74c55e59ae3ef52def135aec713508467bd56d7dabcd8c9be31fa8b20f3
+# SDK packages: compileSdk 37 (app/build.gradle.kts; androidx.core 1.19 sets
+# minCompileSdk 37) and AGP 9.4's default build-tools (still 36.0.0). sdkmanager
+# installs them; the build-only stage checks the result against these archives.
+ANDROID_PLATFORM=android-37.0
+ANDROID_PLATFORM_ARCHIVE=platform-37.0_r02.zip
+ANDROID_PLATFORM_SHA256=840b23e827f96e64aea4c89a1194aac3dc5f6bad37edb231c5c795d890330e8d
 ANDROID_BUILD_TOOLS=36.0.0
 ANDROID_BUILD_TOOLS_ARCHIVE=build-tools_r36_linux.zip
 ANDROID_BUILD_TOOLS_SHA256=5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b
 
 # Gradle: the distribution gradle/wrapper/gradle-wrapper.properties names
 # (https://services.gradle.org/distributions/gradle-9.8.1-bin.zip.sha256).
-# AGP 9.0 needs Gradle 9.1.0 or newer. 9.8.1 bundles jackson 2.22.3 and
+# AGP 9.4 needs Gradle 9.6.0 or newer. 9.8.1 bundles jackson 2.22.3 and
 # bcprov 1.85 and drops jsoup, which clears the trivy findings in /opt/gradle/lib.
 GRADLE_VERSION=9.8.1
 GRADLE_SHA256=dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f

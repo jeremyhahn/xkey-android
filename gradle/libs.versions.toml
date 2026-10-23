@@ -1,30 +1,30 @@
 [versions]
 # Android Gradle Plugin
-agp = "9.0.0"
+agp = "9.4.1"
 
 # Kotlin
-kotlin = "2.2.10"
+kotlin = "2.4.21"
 
 # AndroidX
-coreKtx = "1.13.1"
-appcompat = "1.7.0"
-activity = "1.9.2"
-fragment = "1.8.3"
-lifecycle = "2.8.5"
-securityCrypto = "1.1.0-alpha06"
-biometric = "1.2.0-alpha05"
-datastore = "1.1.1"
-room = "2.7.0"
-credentials = "1.3.0"
+coreKtx = "1.19.1"
+appcompat = "1.8.0"
+activity = "1.13.0"
+fragment = "1.9.1"
+lifecycle = "2.11.0"
+securityCrypto = "1.1.0"
+biometric = "1.4.0-alpha07"
+datastore = "1.3.0"
+room = "2.8.5"
+credentials = "1.6.0"
 
 # Material Design
-material = "1.12.0"
+material = "1.14.0"
 
 # Networking
-okhttp = "4.12.0"
+okhttp = "5.5.1"
 
 # Coroutines
-coroutines = "1.8.1"
+coroutines = "1.11.0"
 
 # BouncyCastle
 bouncycastle = "1.86"
@@ -33,26 +33,29 @@ bouncycastle = "1.86"
 argon2 = "13.1"
 
 # QR Code
-zxingCore = "3.5.3"
+zxingCore = "3.5.4"
 
 # ML Kit & CameraX
 mlkitBarcode = "17.3.0"
-camerax = "1.4.0"
+camerax = "1.6.2"
 
 # Media3
-media3 = "1.3.1"
+media3 = "1.11.1"
 
 # ExifInterface
-exifinterface = "1.3.7"
+exifinterface = "1.4.2"
 
 # Testing
-json = "20231013"
+json = "20260814"
 junit = "4.13.2"
 junitExt = "1.3.0"
 espresso = "3.7.0"
 testRules = "1.7.0"
-mockk = "1.13.12"
-uiautomator = "2.3.0"
+mockk = "1.14.11"
+uiautomator = "2.4.0"
+
+# Coverage: the JaCoCo plugin's tool and AGP's coverage instrumentation
+jacoco = "0.8.15"
 
 # Build tooling: fixed releases of jars the Android Gradle plugin pulls in
 # (constraints in build.gradle.kts; Bouncy Castle uses bouncycastle above)
@@ -80,6 +83,9 @@ androidx-datastore-preferences = { group = "androidx.datastore", name = "datasto
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+# Room's processor reads Kotlin metadata with kotlin-metadata-jvm, which only
+# reads metadata up to one minor past its own version; kapt gets the compiler's.
+kotlin-metadata-jvm = { group = "org.jetbrains.kotlin", name = "kotlin-metadata-jvm", version.ref = "kotlin" }
 
 # Credentials (Android 14+ CredentialProvider)
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }

@@ -81,12 +81,68 @@ object MediaHasher {
         return if (isJpeg) jpegWithoutMetadata(data) else data
     }
 
+    /** Where a signature was read from, which decides the hashes it may cover. */
+    enum class SignatureSource {
+        /** Embedded in the file itself (EXIF/XMP). */
+        IN_BAND,
+
+        /** A `.xkeysig` file beside the media. */
+        SIDECAR
+    }
+
+    /**
+     * Whether a signature's stored `contentHash` vouches for [data]. **Both
+     * verify screens must use this**, so the rule cannot drift between them.
+     *
+     * The canonical hash ([hashCanonical]) always matches. A sidecar may also
+     * carry the SHA-256 of the whole file: that is the documented `.xkeysig`
+     * format ("Hex-encoded SHA-256 of the original file content"), and a
+     * sidecar never changes the file it signs, so the whole-file hash is as
+     * stable as the canonical one. An in-band signature never accepts it:
+     * embedding the signature changes the file, so an in-band signature can
+     * never cover the file's own whole-file hash, and accepting one would only
+     * widen what verifies.
+     *
+     * This checks the content hash only. The caller still verifies the
+     * signature over the stored hash.
+     */
+    fun contentHashMatches(
+        storedContentHash: String,
+        data: ByteArray,
+        mimeType: String?,
+        source: SignatureSource
+    ): Boolean {
+        if (storedContentHash == hashCanonical(data, mimeType)) return true
+        return source == SignatureSource.SIDECAR && storedContentHash == hashBytes(data)
+    }
+
+    /** [contentHashMatches] over the content at [uri], typed by the resolver. */
+    fun contentHashMatchesUri(
+        contentResolver: ContentResolver,
+        uri: Uri,
+        storedContentHash: String,
+        source: SignatureSource
+    ): Boolean {
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw IllegalArgumentException("Cannot open URI: $uri")
+        return contentHashMatches(storedContentHash, bytes, contentResolver.getType(uri), source)
+    }
+
     /**
      * Strips `APPn` (0xE0-0xEF) and `COM` (0xFE) segments from a JPEG, keeping
      * SOI, the quantisation/frame/Huffman tables, the scan header and all
      * entropy-coded data. Returns [data] unchanged if it is not a JPEG or is
      * malformed — a hash over slightly more than intended is safe, whereas
      * throwing here would break signing on an unexpected encoder.
+     *
+     * A marker may be preceded by any number of `0xFF` fill bytes (ITU T.81
+     * B.1.1.2). They are skipped and left out of the output: they carry no
+     * image data, and a writer may add or drop them when it rewrites the
+     * metadata (`ExifInterface.saveAttributes` reserialises every segment), so
+     * keeping them would let a metadata-only edit change the hash. Without the
+     * skip, a fill byte also reads as a marker with a bogus length and the whole
+     * file falls back to being hashed raw. A file without fill bytes gives the
+     * same output as before.
      */
     private fun jpegWithoutMetadata(data: ByteArray): ByteArray {
         if (data.size < 4 || byteAt(data, 0) != 0xFF || byteAt(data, 1) != 0xD8) return data
@@ -97,6 +153,9 @@ object MediaHasher {
 
         while (i + 1 < data.size) {
             if (byteAt(data, i) != 0xFF) return data // not marker-aligned; bail out safely
+            // Fill bytes: advance to the last 0xFF before the marker code.
+            while (i + 1 < data.size && byteAt(data, i + 1) == 0xFF) i++
+            if (i + 1 >= data.size) return data // fill runs to the end; no marker
             val marker = byteAt(data, i + 1)
 
             // Standalone markers carry no length field.

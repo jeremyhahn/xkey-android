@@ -36,6 +36,7 @@ import com.automatethethings.xkey.audit.AuditOperationType
 import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
+import com.automatethethings.xkey.media.JpegFillBytes
 import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignatureVerifier
@@ -227,6 +228,40 @@ class FileOperationFlowTest {
      */
     @Test
     fun signOperation_producesASignatureThatVerifiesAgainstThePublicKey() {
+        assertSignOperationVerifies()
+    }
+
+    /**
+     * #47, Codex review 6661: the same flow on [jpegFile] given `0xFF` fill
+     * bytes before an added EXIF APP1 (or before the encoder's first marker)
+     * and before a kept table. The written file must still hash to what was
+     * signed and the signature must verify. Device only: CI runs no
+     * androidTest stage; `XmpMetadataHelperExifFillByteTest` runs the same
+     * fixtures through the real ExifInterface 1.4.2 writer in the JVM.
+     */
+    @Test
+    fun signOperation_onAJpegWithFillBytesBeforeApp1AndDqt_verifies() {
+        jpegFile.writeBytes(
+            JpegFillBytes.fixture(
+                JpegFillBytes.withExifApp1(jpegFile.readBytes()), JpegFillBytes.APP1, JpegFillBytes.DQT
+            )
+        )
+
+        assertSignOperationVerifies()
+        JpegFillBytes.assertWellFormed(jpegFile.readBytes())
+    }
+
+    /** As above, for a JPEG with no APP1: fill bytes before its first marker and before DHT. */
+    @Test
+    fun signOperation_onAJpegWithFillBytesBeforeFirstMarkerAndDht_verifies() {
+        jpegFile.writeBytes(JpegFillBytes.fixture(jpegFile.readBytes(), null, JpegFillBytes.DHT))
+
+        assertSignOperationVerifies()
+        JpegFillBytes.assertWellFormed(jpegFile.readBytes())
+    }
+
+    /** Signs [jpegFile] through the screen and checks the result against the public key. */
+    private fun assertSignOperationVerifies() {
         // Canonical, not whole-file: signing embeds the signature into the JPEG,
         // so a hash over every byte could never match afterwards. The canonical
         // form excludes the APPn/COM segments that carry the signature.
@@ -242,6 +277,14 @@ class FileOperationFlowTest {
             "the signature must cover the hash of the file as it was shared",
             originalHash,
             XmpMetadataHelper.readSignature(jpegFile.path)!!.contentHash
+        )
+        // #47: the file as written must still hash to what was signed, or the
+        // verify screens reject their own signature. Device only: CI runs no
+        // androidTest stage; MediaHasherCanonicalTest carries the JVM proof.
+        assertEquals(
+            "embedding the signature must not change the canonical hash",
+            originalHash,
+            MediaHasher.hashCanonical(jpegFile.readBytes(), "image/jpeg")
         )
         val verifier = Signature.getInstance("SHA256withECDSA").apply {
             initVerify(

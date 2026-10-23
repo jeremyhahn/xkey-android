@@ -1048,17 +1048,18 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val hashHex = MediaHasher.hashCanonicalUri(contentResolver, fileUri)
-
                 val sidecarJson = contentResolver.openInputStream(sidecarUri)?.use { input ->
                     input.bufferedReader().readText()
                 } ?: throw IllegalStateException("Cannot read sidecar file")
 
                 val cad = ContentAuthenticityData.fromJsonString(sidecarJson)
 
-                // Verify content hash matches
-                val results = if (cad.contentHash == hashHex) {
-                    verifySignatures(cad, hashHex)
+                // A sidecar may cover the canonical or the whole-file hash.
+                val hashMatches = MediaHasher.contentHashMatchesUri(
+                    contentResolver, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
+                )
+                val results = if (hashMatches) {
+                    verifySignatures(cad, cad.contentHash)
                 } else {
                     listOf("Content hash mismatch" to "failed")
                 }

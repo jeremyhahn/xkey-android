@@ -1,10 +1,10 @@
-// The plugins' classpath: raise jars AGP 9.0.0 pulls in that trivy flags to
+// The plugins' classpath: raise jars AGP 9.4.1 pulls in that trivy flags to
 // their fixed releases. A constraint only lifts a module already in the graph.
 buildscript {
     dependencies {
         constraints {
-            // bcprov-jdk18on 1.79, from AGP's builder 9.0.0 and sdk-common 32.0.0;
-            // bcpkix 1.79 comes with it and bcutil 1.79 through bcpkix, and
+            // bcprov-jdk18on 1.80.2 (CVE-2026-8763, CVE-2026-13506), from AGP's
+            // builder and sdk-common; bcpkix and bcutil 1.80.2 come with it, and
             // Bouncy Castle releases the three as one set.
             classpath(libs.bouncycastle.bcprov)
             classpath(libs.bouncycastle.bcpkix)

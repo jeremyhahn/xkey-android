@@ -16,6 +16,7 @@ package com.automatethethings.xkey.media
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
@@ -160,6 +161,83 @@ class XmpMetadataHelperInstrumentedTest {
 
         assertNotNull(read)
         assertEquals(data.contentHash, read!!.contentHash)
+    }
+
+    /**
+     * #47 regression under ExifInterface 1.4.2: embedding a signature rewrites
+     * the file through `saveAttributes`, and the canonical hash the signature
+     * covers must survive that rewrite, or every in-band signature fails. A
+     * writer that adds `0xFF` fill bytes before a marker must not move it.
+     *
+     * CI runs no androidTest stage, so this only runs on a device. The proof CI
+     * carries is the JVM vectors in `MediaHasherCanonicalTest`.
+     */
+    @Test
+    fun exifWrite_keepsTheCanonicalHash() {
+        val file = jpeg()
+        val before = file.readBytes()
+
+        XmpMetadataHelper.writeSignature(file.path, sampleData())
+
+        val after = file.readBytes()
+        assertFalse("the write must change the file", before.contentEquals(after))
+        assertEquals(
+            MediaHasher.hashCanonical(before, "image/jpeg"),
+            MediaHasher.hashCanonical(after, "image/jpeg")
+        )
+    }
+
+    /**
+     * #47, Codex review 6661: an encoder JPEG given `0xFF` fill bytes before
+     * [first] (null: the first marker after SOI) and before the kept table
+     * [retained], with an EXIF APP1 added first when [withApp1], signed through
+     * the real `writeSignature` under ExifInterface 1.4.2. The signature must
+     * read back unchanged, its hash must equal the canonical hash of the file as
+     * written, and the file must keep its structure and still decode.
+     *
+     * CI runs no androidTest stage, so these only run on a device. CI runs the
+     * same fixtures through the real 1.4.2 reader and writer in the JVM, in
+     * `XmpMetadataHelperExifFillByteTest`.
+     */
+    private fun assertFillByteJpegSignsAndVerifies(withApp1: Boolean, first: Int?, retained: Int) {
+        val file = jpeg()
+        val encoded = file.readBytes()
+        val fixture = JpegFillBytes.fixture(
+            if (withApp1) JpegFillBytes.withExifApp1(encoded) else encoded, first, retained
+        )
+        file.writeBytes(fixture)
+        val data = sampleData(MediaHasher.hashCanonical(fixture, "image/jpeg"))
+
+        XmpMetadataHelper.writeSignature(file.path, data)
+
+        val after = file.readBytes()
+        assertFalse("the write must change the file", fixture.contentEquals(after))
+        assertEquals("the signature must read back unchanged", data, XmpMetadataHelper.readSignature(file.path))
+        assertEquals(
+            "the stored hash must equal the canonical hash of the file as written",
+            data.contentHash,
+            MediaHasher.hashCanonical(after, "image/jpeg")
+        )
+        JpegFillBytes.assertWellFormed(after)
+        val bitmap = BitmapFactory.decodeByteArray(after, 0, after.size)
+        assertNotNull("the written file must still decode", bitmap)
+        assertEquals(16, bitmap!!.width)
+        bitmap.recycle()
+    }
+
+    @Test
+    fun exifWrite_fillBytesBeforeApp1AndDqt_signsAndVerifies() {
+        assertFillByteJpegSignsAndVerifies(withApp1 = true, first = JpegFillBytes.APP1, retained = JpegFillBytes.DQT)
+    }
+
+    @Test
+    fun exifWrite_fillBytesBeforeApp1AndSof0_signsAndVerifies() {
+        assertFillByteJpegSignsAndVerifies(withApp1 = true, first = JpegFillBytes.APP1, retained = JpegFillBytes.SOF0)
+    }
+
+    @Test
+    fun exifWrite_fillBytesBeforeFirstMarkerWithoutApp1AndDht_signsAndVerifies() {
+        assertFillByteJpegSignsAndVerifies(withApp1 = false, first = null, retained = JpegFillBytes.DHT)
     }
 
     @Test
