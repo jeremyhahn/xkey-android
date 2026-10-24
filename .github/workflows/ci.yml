@@ -342,8 +342,13 @@ on:
 # run cancels the older. No expression reaches cancel-in-progress: Gitea
 # 1.27.1 never released go-qrdb main run 57063, the first run after v1.22.1
 # set it to an expression (Company Agent m695).
+# CUSTOMIZE (xkey-android, DS-3465, Software m1092 (3), 2026-10-24): main has
+# one group per event and commit with a literal true, so a newer main push never
+# cancels an older main run; a PR ref still cancels its older run. This
+# overrides v1.25's main-{event} group for this repository: the v1.23 (m695)
+# shape, no expression in cancel-in-progress (Codex 6977).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: true
 
 permissions:
