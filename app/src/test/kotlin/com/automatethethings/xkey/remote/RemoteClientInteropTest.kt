@@ -138,6 +138,46 @@ class RemoteClientInteropTest {
     }
 
     @Test
+    fun `the backup client's ids never collide with the key and sync clients'`() = runTest {
+        scriptByMethod(
+            mapOf(
+                "remote.listBackends" to """{"backends":[]}""",
+                "remote.syncTrustStore" to """{"local":[]}""",
+                "remote.restoreBackup" to """{"success":true,"restored":[]}"""
+            )
+        )
+        val backupClient = RemoteBackupClient(sender, router, requestTimeoutMs = 5_000L)
+
+        keyClient.listBackends()
+        backupClient.restoreBackup(bytes("{}"), "pw".toCharArray())
+        syncClient.syncTrustStore()
+        backupClient.restoreBackup(bytes("{}"), "pw".toCharArray())
+
+        val ids = sender.sent.map { it.id }
+        assertEquals("every id on the shared router is unique", ids.size, ids.toSet().size)
+        val backupIds = sender.sent.filter { it.method == "remote.restoreBackup" }.map { it.id }
+        assertTrue(backupIds.all { it >= RemoteBackupClient.BASE_REQUEST_ID })
+    }
+
+    @Test
+    fun `a backup reply resolves only the backup request in flight beside a sync`() = runTest {
+        val holding = HoldingMessageSender()
+        val backupClient = RemoteBackupClient(holding, router, requestTimeoutMs = 5_000L)
+        val sync = RemoteSyncClient(context, holding, router, requestTimeoutMs = 5_000L)
+
+        val restore = async { backupClient.restoreBackup(bytes("{}"), "pw".toCharArray()) }
+        val certs = async { sync.syncTrustStore() }
+        runCurrent()
+        assertEquals(2, holding.sent.size)
+
+        router.processMessage(holding.replyFor(1, """{"added":1,"local":[]}"""))
+        router.processMessage(holding.replyFor(0, """{"success":true,"restored":["oath"]}"""))
+
+        assertEquals(listOf("oath"), restore.await().restored)
+        assertEquals(1, certs.await().first)
+    }
+
+    @Test
     fun `each client keeps its own counter after the other has been busy`() = runTest {
         scriptByMethod(
             mapOf(

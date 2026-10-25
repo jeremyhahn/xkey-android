@@ -28,6 +28,8 @@ import com.automatethethings.xkey.ui.MainActivity
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.remote.RemoteKeyClient
+import com.automatethethings.xkey.remote.RemoteBackupClient
+import com.automatethethings.xkey.backup.BackupStore
 import com.automatethethings.xkey.usb.PasswordStoreMethods
 import com.automatethethings.xkey.usb.SealStoreMethods
 import com.automatethethings.xkey.storage.SealStore
@@ -796,6 +798,74 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         val client = com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, sender, router)
         Log.i(TAG, "Starting phone-initiated sync")
         return client.syncAll()
+    }
+
+    /**
+     * Asks the connected desktop for an encrypted backup of the stores in
+     * [include] under [password] (`remote.createBackup`) over the active
+     * transport, and keeps the returned envelope in [BackupStore] under the
+     * desktop's backup id.
+     *
+     * [password] is zeroed before this returns, whatever the outcome.
+     *
+     * @throws IllegalStateException if no desktop is currently connected.
+     * @throws com.automatethethings.xkey.remote.RemoteBackupException if the
+     *   desktop refuses or fails the backup.
+     * @throws java.io.IOException if the send fails or the envelope cannot be
+     *   stored.
+     */
+    suspend fun createDesktopBackup(
+        password: CharArray,
+        include: RemoteBackupClient.Include
+    ): RemoteBackupClient.CreateResult {
+        try {
+            val (sender, router) = activeTransport()
+                ?: throw IllegalStateException("No desktop connected; pair and connect before a backup")
+            Log.i(TAG, "Starting phone-initiated backup")
+            val result = RemoteBackupClient(sender, router)
+                .createBackup(password, include, "phone-${System.currentTimeMillis()}")
+            withContext(Dispatchers.IO) {
+                BackupStore(applicationContext).store(result.backupId, result.backupData)
+            }
+            return result
+        } finally {
+            password.fill('\u0000')
+        }
+    }
+
+    /**
+     * Id of the most recently stored backup envelope, or null if none.
+     *
+     * @throws java.io.IOException if the stored backups cannot be read, or a
+     *   legacy record cannot be migrated (for example, the disk is full).
+     */
+    suspend fun latestStoredBackupId(): String? =
+        withContext(Dispatchers.IO) { BackupStore(applicationContext).latestId() }
+
+    /**
+     * Asks the connected desktop to restore the stored backup [backupId] under
+     * [password] (`remote.restoreBackup`) over the active transport.
+     *
+     * [password] is zeroed before this returns, whatever the outcome.
+     *
+     * @throws IllegalStateException if no desktop is connected or no backup
+     *   is stored under [backupId].
+     * @throws com.automatethethings.xkey.remote.RemoteBackupException if the
+     *   desktop refuses or fails the restore.
+     * @throws java.io.IOException if the stored backup cannot be read or the
+     *   send fails.
+     */
+    suspend fun restoreDesktopBackup(backupId: String, password: CharArray): RemoteBackupClient.RestoreResult {
+        try {
+            val (sender, router) = activeTransport()
+                ?: throw IllegalStateException("No desktop connected; pair and connect before a restore")
+            val envelope = withContext(Dispatchers.IO) { BackupStore(applicationContext).load(backupId) }
+                ?: throw IllegalStateException("No stored backup $backupId")
+            Log.i(TAG, "Starting phone-initiated restore")
+            return RemoteBackupClient(sender, router).restoreBackup(envelope, password)
+        } finally {
+            password.fill('\u0000')
+        }
     }
 
     /**

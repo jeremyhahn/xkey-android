@@ -46,3 +46,11 @@ fun NoiseInitiatorSession.sessionBinding(): SessionBinding? {
     val responder = getRemoteStaticKey() ?: return null
     return SessionBinding(getLocalStaticPublicKey(), responder, getPrologue())
 }
+
+/**
+ * A copy whose arrays the caller owns. A transport reads its binding once,
+ * under the lock that guards its Noise session, and hands out copies of it, so
+ * the provider never touches the session itself (#59).
+ */
+internal fun SessionBinding.copyOf(): SessionBinding =
+    SessionBinding(initiatorStaticPublicKey.copyOf(), responderStaticPublicKey.copyOf(), prologue.copyOf())

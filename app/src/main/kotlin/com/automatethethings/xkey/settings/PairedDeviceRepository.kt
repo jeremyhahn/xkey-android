@@ -17,10 +17,13 @@ package com.automatethethings.xkey.settings
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.util.getStringOrNull
+import java.io.IOException
+import java.util.concurrent.CopyOnWriteArraySet
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -213,23 +216,9 @@ data class PairedDeviceData(
     }
 }
 
-class PairedDeviceRepository(context: Context) {
+class PairedDeviceRepository internal constructor(private val prefs: SharedPreferences) {
 
-    private val prefs: SharedPreferences
-
-    init {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-
-        prefs = EncryptedSharedPreferences.create(
-            context,
-            PREFS_NAME,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-    }
+    constructor(context: Context) : this(openPrefs(context))
 
     fun isDeviceKnown(publicKeyHex: String): Boolean {
         return getAllDevices().any { it.publicKeyHex == publicKeyHex }
@@ -239,24 +228,32 @@ class PairedDeviceRepository(context: Context) {
         return getAllDevices().find { it.publicKeyHex == publicKeyHex }
     }
 
-    @Synchronized
     fun addDevice(publicKeyHex: String, deviceName: String, bleAddress: String? = null) {
-        val devices = getAllDevices().toMutableList()
-        // Remove stale entries for this device. A re-pairing device will have a new Noise
-        // static key, so we match by publicKeyHex, BLE address, OR device name to ensure
-        // the old entry is replaced rather than duplicated.
-        devices.removeAll {
-            it.publicKeyHex == publicKeyHex ||
-                (bleAddress != null && it.bleAddress == bleAddress) ||
-                it.deviceName == deviceName
+        val evicted = synchronized(this) {
+            val devices = getAllDevices().toMutableList()
+            // Remove stale entries for this device. A re-pairing device will have a new Noise
+            // static key, so we match by publicKeyHex, BLE address, OR device name to ensure
+            // the old entry is replaced rather than duplicated.
+            val evicted = devices.filter {
+                it.publicKeyHex == publicKeyHex ||
+                    (bleAddress != null && it.bleAddress == bleAddress) ||
+                    it.deviceName == deviceName
+            }
+            devices.removeAll(evicted)
+            devices.add(PairedDeviceData(
+                publicKeyHex = publicKeyHex,
+                deviceName = deviceName,
+                pairedAt = System.currentTimeMillis(),
+                bleAddress = bleAddress
+            ))
+            saveDevices(devices)
+            evicted
         }
-        devices.add(PairedDeviceData(
-            publicKeyHex = publicKeyHex,
-            deviceName = deviceName,
-            pairedAt = System.currentTimeMillis(),
-            bleAddress = bleAddress
-        ))
-        saveDevices(devices)
+        // A stale entry replaced under a different key is no longer paired:
+        // a live session with it must not outlive the record. Listeners run
+        // outside the store's lock, so one that takes a transport lock can
+        // never deadlock against a send that reads the store.
+        notifyRemoved(evicted.map { it.publicKeyHex }.filter { it != publicKeyHex })
     }
 
     @Synchronized
@@ -269,20 +266,29 @@ class PairedDeviceRepository(context: Context) {
         }
     }
 
-    @Synchronized
+    /**
+     * Removes the device paired under [publicKeyHex] and tells every
+     * [PairedDeviceRemovalListener] about it, so a transport tears down a live
+     * session with that peer (#59). Listeners are told even when no record
+     * matched: the record may already be gone while a session still runs.
+     * They are told after the record is gone and outside the store's lock.
+     */
     fun removeDevice(publicKeyHex: String) {
-        val devices = getAllDevices().toMutableList()
-        val deviceToRemove = devices.find { it.publicKeyHex == publicKeyHex }
-        devices.removeAll { it.publicKeyHex == publicKeyHex }
-        saveDevices(devices)
+        synchronized(this) {
+            val devices = getAllDevices().toMutableList()
+            val deviceToRemove = devices.find { it.publicKeyHex == publicKeyHex }
+            devices.removeAll { it.publicKeyHex == publicKeyHex }
+            saveDevices(devices)
 
-        // Log device unpairing
-        if (deviceToRemove != null) {
-            AuditLogger.logDeviceUnpaired(
-                deviceId = publicKeyHex,
-                deviceName = deviceToRemove.deviceName
-            )
+            // Log device unpairing
+            if (deviceToRemove != null) {
+                AuditLogger.logDeviceUnpaired(
+                    deviceId = publicKeyHex,
+                    deviceName = deviceToRemove.deviceName
+                )
+            }
         }
+        notifyRemoved(listOf(publicKeyHex))
     }
 
     @Synchronized
@@ -296,9 +302,25 @@ class PairedDeviceRepository(context: Context) {
         }
     }
 
-    @Synchronized
     fun clear() {
-        prefs.edit().remove(KEY_DEVICES).apply()
+        val removed = synchronized(this) {
+            val removed = getAllDevices().map { it.publicKeyHex }
+            prefs.edit().remove(KEY_DEVICES).apply()
+            removed
+        }
+        notifyRemoved(removed)
+    }
+
+    /**
+     * Send-time revalidation (#59): throws [PeerNotPairedException] unless
+     * [publicKeyHex], a session's authenticated remote static key, is still
+     * paired. A transport calls it before it encrypts a phone-initiated
+     * request, so a refused send consumes no nonce and writes nothing.
+     */
+    fun requirePaired(publicKeyHex: String?) {
+        if (publicKeyHex == null || !isDeviceKnown(publicKeyHex)) {
+            throw PeerNotPairedException(publicKeyHex)
+        }
     }
 
     @Synchronized
@@ -419,8 +441,67 @@ class PairedDeviceRepository(context: Context) {
         prefs.edit().putString(KEY_DEVICES, arr.toString()).apply()
     }
 
+    private fun notifyRemoved(publicKeysHex: List<String>) {
+        for (publicKeyHex in publicKeysHex) {
+            for (listener in removalListeners) {
+                try {
+                    listener.onDeviceRemoved(publicKeyHex)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Removal listener failed", e)
+                }
+            }
+        }
+    }
+
     companion object {
+        private const val TAG = "PairedDeviceRepository"
         private const val PREFS_NAME = "xkey_paired_devices"
         private const val KEY_DEVICES = "paired_devices"
+
+        /**
+         * Process-wide: the Activity that unpairs a device and the service
+         * that holds its session each build their own repository.
+         */
+        private val removalListeners = CopyOnWriteArraySet<PairedDeviceRemovalListener>()
+
+        fun addRemovalListener(listener: PairedDeviceRemovalListener) {
+            removalListeners.add(listener)
+        }
+
+        fun removeRemovalListener(listener: PairedDeviceRemovalListener) {
+            removalListeners.remove(listener)
+        }
+
+        private fun openPrefs(context: Context): SharedPreferences {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+
+            return EncryptedSharedPreferences.create(
+                context,
+                PREFS_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        }
     }
 }
+
+/**
+ * Told the public key of every device that stops being paired: unpaired,
+ * cleared, or replaced by a re-pairing under a new key. Called on the thread
+ * that changed the store, often the main thread, after the record is gone and
+ * outside the store's lock, so it must not block.
+ */
+fun interface PairedDeviceRemovalListener {
+    fun onDeviceRemoved(publicKeyHex: String)
+}
+
+/**
+ * A phone-initiated send was refused because the session's peer is no longer
+ * paired (#59). Nothing was encrypted or written. An [IOException], so
+ * [com.automatethethings.xkey.remote.MessageSender] callers keep their contract.
+ */
+class PeerNotPairedException(val publicKeyHex: String?) :
+    IOException("Peer ${publicKeyHex?.take(16) ?: "(unknown)"} is not paired")

@@ -869,6 +869,47 @@
     <string name="sync_complete">Sync complete: %1$d sent, %2$d received</string>
     <string name="sync_failed">Sync failed: %1$s</string>
 
+    <!-- Phone-initiated desktop backup and restore (remote.createBackup / remote.restoreBackup) -->
+    <string name="desktop_backup_title">Desktop Backup</string>
+    <string name="desktop_backup_desc">Back up to, or restore from, an encrypted backup made by the desktop</string>
+    <string name="desktop_backup_action_create">Create backup</string>
+    <string name="desktop_backup_action_restore">Restore latest backup</string>
+    <string name="desktop_backup_create_title">Create desktop backup</string>
+    <string name="desktop_backup_restore_title">Restore desktop backup</string>
+    <string name="desktop_backup_restore_message">Restore backup %1$s. Enter the password it was created with.</string>
+    <string name="desktop_backup_password">Backup password</string>
+    <string name="desktop_backup_password_confirm">Confirm backup password</string>
+    <string name="desktop_backup_include_trust_store">Trust store</string>
+    <string name="desktop_backup_include_oath">Authenticator (OATH)</string>
+    <string name="desktop_backup_include_passwords">Passwords</string>
+    <string name="desktop_backup_create_button">Back up</string>
+    <string name="desktop_backup_restore_button">Restore</string>
+    <string name="desktop_backup_retry">Retry</string>
+    <string name="desktop_backup_in_progress">Creating backup on the desktop…</string>
+    <string name="desktop_backup_restore_in_progress">Restoring backup on the desktop…</string>
+    <string name="desktop_backup_complete">Backup %1$s stored (%2$d items)</string>
+    <string name="desktop_backup_none_stored">No backup is stored on this phone</string>
+    <string name="desktop_backup_error_read_stored">Could not read the backups stored on this phone. Check free storage and try again.</string>
+    <string name="desktop_backup_restore_complete">Restore complete</string>
+    <string name="desktop_backup_restore_partial">Restore finished with skipped items</string>
+    <string name="desktop_backup_restore_item">%1$s: %2$d restored, %3$d pending desktop review, %4$d skipped</string>
+    <string name="desktop_backup_restore_item_error">  • %1$s</string>
+    <string name="desktop_backup_restored_list">Restored: %1$s</string>
+    <string name="desktop_backup_item_trust_store">Trust store</string>
+    <string name="desktop_backup_item_oath">Authenticator</string>
+    <string name="desktop_backup_item_passwords">Passwords</string>
+    <string name="desktop_backup_item_ca">Certificate authority</string>
+    <string name="desktop_backup_error_password_empty">Enter a backup password</string>
+    <string name="desktop_backup_error_password_mismatch">The passwords do not match</string>
+    <string name="desktop_backup_error_nothing_selected">Choose at least one item to back up</string>
+    <string name="desktop_backup_error_bad_request">The desktop refused the request: password required or bad request</string>
+    <string name="desktop_backup_error_create_failed">The desktop could not create the backup</string>
+    <string name="desktop_backup_error_wrong_password">Wrong password or damaged backup</string>
+    <string name="desktop_backup_error_not_configured">Backup is not set up on this desktop</string>
+    <string name="desktop_backup_error_approval_required">Approve the export on the desktop, then try again</string>
+    <string name="desktop_backup_error_timed_out">The desktop did not answer in time</string>
+    <string name="desktop_backup_failed">Backup failed: %1$s</string>
+
     <!-- OATH/TOTP Authenticator -->
     <string name="oath_title">Authenticator</string>
     <string name="oath_card_description">TOTP/HOTP one-time passwords</string>

@@ -274,6 +274,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Desktop Backup card (phone-initiated remote.createBackup / remote.restoreBackup)
+        val desktopBackup = DesktopBackupDialogs(this, binding.root) {
+            gattService?.takeIf { serviceBound }
+        }
+        binding.cardDesktopBackup.setOnClickListener {
+            animateCardPress(it)
+            desktopBackup.show()
+        }
+
         // Audit Log card
         binding.cardAuditLog.setOnClickListener {
             animateCardPress(it)

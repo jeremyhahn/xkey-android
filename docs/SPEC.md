@@ -1,6 +1,6 @@
 # xkey-android specification
 
-> **Status: NORMATIVE** · Owner: xkey-android (maintained by the Software Department) · Last verified: 2026-10-20
+> **Status: NORMATIVE** · Owner: xkey-android (maintained by the Software Department) · Last verified: 2026-10-24
 > The requirements contract for this project: what it is and every feature, with its requirements and status. [ROADMAP.md](../ROADMAP.md) agrees with the feature table below.
 
 A feature listed here, in any status, is never deleted (not its docs, code or issues); removing or re-scoping one needs the owner's change to this file.
@@ -58,9 +58,9 @@ Never does:
 | verified-media-viewer | shipped | Shows media with signature verification badges | `docs/verified-media-viewer/` |
 | audit-log | shipped | Records security events in Room; audit screen and recent activity on the home screen | `docs/audit-log/` |
 | release-signing | shipped | `assembleRelease` and `bundleRelease` sign with credentials outside version control and fail with a message when they are missing | none |
-| remote-backup-password | planned | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690) | none |
+| remote-backup-password | shipped | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690) | none |
 | password-vault-rpcs | planned | Answer the `Password*` and `SealStore*` methods the desktop sends over USB (go-xkms#692), including the per-user vault's new unlock body | none |
-| phone-initiated-pairing | planned | Answer `local.attestDevice` on sessions the phone opens and display the pairing SAS (go-xkms#1306) | none |
+| phone-initiated-pairing | shipped | Answer `local.attestDevice` on sessions the phone opens and display the pairing SAS (go-xkms#1306) | none |
 | request-generation-echo | shipped | Echo a per-request `generation` in every pairing response, the phone half of the go-xkms#128 flag day | none |
 | fido2-built-in-uv | planned | A biometric-gated, verifiable "verify user" RPC so the desktop authenticator can issue a pinUvAuthToken through UV | none |
 | protected-memory | planned | An owner ruling on the protected-memory mandate for Android, applied to the Noise static and session keys | none |

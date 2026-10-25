@@ -468,6 +468,7 @@ class NoiseSession {
             Log.d(TAG, "Splitting symmetric state...")
             splitSymmetricState()
             Log.d(TAG, "Split complete")
+            afterSplitForTest?.invoke()
 
             // The ephemeral private key has no use after the last DH
             ephemeralPrivateKey?.fill(0)
@@ -903,6 +904,20 @@ class NoiseSession {
         sendKey?.let { put("sendKey", it) }
         recvKey?.let { put("recvKey", it) }
     }
+
+    /**
+     * Test seam (#59): the next transport send nonce, so a test can prove a
+     * refused send consumed none. Production code must not call this.
+     */
+    internal fun sendNonceForTest(): Long = sendNonce
+
+    /**
+     * Test seam (#59): runs inside msg3 processing, after the transport keys
+     * are split and before the handshake is marked complete, so a test can
+     * land a revocation in that window. Production code must not set this.
+     */
+    @Volatile
+    internal var afterSplitForTest: (() -> Unit)? = null
 
     /**
      * Resets the session state for a new handshake.

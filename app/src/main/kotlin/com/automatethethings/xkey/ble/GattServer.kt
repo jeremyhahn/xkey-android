@@ -18,19 +18,27 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.MessageSender
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import com.automatethethings.xkey.protocol.ErrorCodes
@@ -40,8 +48,12 @@ import com.automatethethings.xkey.protocol.PairingConfirmParams
 import com.automatethethings.xkey.protocol.PairingConfirmResult
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
 import com.automatethethings.xkey.protocol.readGeneration
+import com.automatethethings.xkey.transport.confirmAlreadyPaired
 import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.settings.PairedDeviceData
+import com.automatethethings.xkey.settings.PairedDeviceRemovalListener
+import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.settings.PeerNotPairedException
 import com.automatethethings.xkey.settings.CertificateAuthoritySource
 import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
 import com.automatethethings.xkey.ca.AndroidCA
@@ -178,7 +190,9 @@ class GattServer(
     private var statusCharacteristic: BluetoothGattCharacteristic? = null
 
     // Connected device state
+    @Volatile
     private var connectedDevice: BluetoothDevice? = null
+    @Volatile
     private var noiseSession: NoiseSession? = null
 
     // MTU negotiated per device
@@ -227,6 +241,59 @@ class GattServer(
      * `StreamPairingSession.sendMutex`.
      */
     private val sendMutex = Mutex()
+
+    /**
+     * Serialises every step that touches the Noise state: the identity
+     * prologue, the handshake, decryption, encryption, the binding read and
+     * the reset that zeroes the keys. A teardown therefore never interleaves
+     * with a handshake that is splitting or installing its transport keys
+     * (#59). Taken after [stateMutex] and [sendMutex], never before.
+     */
+    private val noiseMutex = Mutex()
+
+    /**
+     * Guards revocation and send admission. A removal marks the session
+     * revoked under it, and a send is admitted and encrypted under it, so no
+     * frame is encrypted for a peer once its removal has been seen. The
+     * removal listener takes only this monitor: it can run on a thread that
+     * is already inside [noiseMutex], when the removal lands mid-handshake.
+     */
+    private val revocationLock = Any()
+
+    /** The session a removal revoked: nothing more is decrypted, encrypted or confirmed on it. */
+    @Volatile
+    private var revokedSession: NoiseSession? = null
+
+    /** The session abandoned after a frame it encrypted could not be delivered. */
+    @Volatile
+    private var endedSession: NoiseSession? = null
+
+    /** The session whose completed handshake was published while it was current. */
+    @Volatile
+    private var establishedSession: NoiseSession? = null
+
+    /** The session whose keys were last zeroed, so each is zeroed once. Guarded by [noiseMutex]. */
+    private var zeroedSession: NoiseSession? = null
+
+    /** Request coroutines and the session each runs for; a revocation cancels its own. */
+    private val requestJobs = ConcurrentHashMap<Job, NoiseSession>()
+
+    /** Test seam: runs inside the send's critical section, before admission. */
+    @Volatile
+    internal var beforeAdmissionForTest: (suspend () -> Unit)? = null
+
+    /** Test seam: runs after the frame is encrypted and before it is delivered. */
+    @Volatile
+    internal var afterAdmissionForTest: (suspend () -> Unit)? = null
+
+    /** Revokes the live session when its desktop is unpaired (#59). */
+    private val removalListener = PairedDeviceRemovalListener { revoke(it) }
+
+    init {
+        if (pairedDeviceRepository != null) {
+            PairedDeviceRepository.addRemovalListener(removalListener)
+        }
+    }
 
     // Server running state
     @Volatile
@@ -382,6 +449,7 @@ class GattServer(
      * Releases all resources.
      */
     fun destroy() {
+        PairedDeviceRepository.removeRemovalListener(removalListener)
         stop()
         scope.cancel()
     }
@@ -758,22 +826,102 @@ class GattServer(
         // Cancel any pending outbound requests
         messageRouter?.cancelAllPending()
 
-        // Clear connected device public key from request handler
-        requestHandler.setConnectedDevicePublicKeyHex(null)
-        requestHandler.setSessionBindingProvider(null)
+        // Cleared under the Noise lock, so a handshake completing on another
+        // coroutine either publishes before this or sees its session gone.
+        noiseMutex.withLock {
+            // Clear connected device public key from request handler
+            requestHandler.setConnectedDevicePublicKeyHex(null)
+            requestHandler.setSessionBindingProvider(null)
 
-        connectedDevice = null
-        noiseSession = null
-        deviceMtu.remove(device.address)
-        fragmentBuffer.remove(device.address)
-        notificationEnabled.remove(device.address)
-        notificationReady.remove(device.address)?.cancel()
-        pairingConfirmed = false
-        identityExchangeComplete = false
-        remotePublicKeyHex = null
-        authenticatedPeerKeyHex = null
+            connectedDevice = null
+            noiseSession = null
+            establishedSession = null
+            deviceMtu.remove(device.address)
+            fragmentBuffer.remove(device.address)
+            notificationEnabled.remove(device.address)
+            notificationReady.remove(device.address)?.cancel()
+            pairingConfirmed = false
+            identityExchangeComplete = false
+            remotePublicKeyHex = null
+            authenticatedPeerKeyHex = null
 
-        _connectionState.value = ConnectionState.Disconnected
+            _connectionState.value = ConnectionState.Disconnected
+        }
+    }
+
+    /**
+     * Revokes the live session if [publicKeyHex] is its desktop, by the key
+     * the handshake authenticated or, before that, the key it claimed.
+     *
+     * Runs on the thread that removed the record, which can be inside a
+     * handshake, so it takes only [revocationLock]: the session is marked
+     * revoked and unconfirmed there, its request coroutines are cancelled,
+     * and the rest of the teardown runs off this thread.
+     */
+    private fun revoke(publicKeyHex: String) {
+        val session = synchronized(revocationLock) {
+            val session = noiseSession ?: return
+            val peers = listOfNotNull(authenticatedPeerKeyHex, remotePublicKeyHex)
+            if (peers.none { it.equals(publicKeyHex, ignoreCase = true) }) return
+            if (revokedSession === session) return
+            revokedSession = session
+            pairingConfirmed = false
+            session
+        }
+        Log.i(TAG, "Paired device removed; revoking its live session")
+        requestJobs.forEach { (job, owner) -> if (owner === session) job.cancel() }
+        scope.launch { tearDown(session) }
+    }
+
+    /**
+     * Tears [session] down: the connection is dropped and its state cleared
+     * first, so nothing waits on a send that is still delivering, then the
+     * keys are zeroed once that send has let go of [sendMutex].
+     */
+    @SuppressLint("MissingPermission")
+    private suspend fun tearDown(session: NoiseSession) = withContext(NonCancellable) {
+        stateMutex.withLock {
+            val device = connectedDevice
+            if (device != null && noiseSession === session) {
+                handleDeviceDisconnected(device)
+                try { gattServer?.cancelConnection(device) } catch (_: Exception) {}
+            }
+        }
+        sendMutex.withLock { noiseMutex.withLock { zeroOnce(session) } }
+    }
+
+    /** Zeroes [session]'s keys unless they already were. Call under [noiseMutex]. */
+    private fun zeroOnce(session: NoiseSession) {
+        if (zeroedSession === session) return
+        zeroedSession = session
+        session.reset()
+    }
+
+    /** Whether [session] is the live one and was neither revoked nor abandoned. */
+    private fun isCurrent(session: NoiseSession?): Boolean =
+        session != null && noiseSession === session &&
+            session !== revokedSession && session !== endedSession
+
+    /**
+     * Runs [block] as a request of [session], so a revocation cancels it
+     * wherever it is suspended, typically waiting on the user's approval.
+     *
+     * @return the block's result, or null when the session was revoked first
+     */
+    private suspend fun <T> runForSession(session: NoiseSession, block: suspend () -> T): T? = coroutineScope {
+        val job = async { block() }
+        requestJobs[job] = session
+        try {
+            // A revocation before the job was registered did not see it.
+            if (!isCurrent(session)) job.cancel()
+            job.await()
+        } catch (e: CancellationException) {
+            // Only the request was cancelled unless the caller was too.
+            ensureActive()
+            null
+        } finally {
+            requestJobs.remove(job)
+        }
     }
 
     /**
@@ -871,8 +1019,12 @@ class GattServer(
 
                 // Compute and set prologue: SHA256(go_public_key || android_fingerprint || "xkey-v1")
                 val prologue = computePrologueFromIdentity(publicKey, fingerprintBytes)
-                session.setPrologue(prologue)
-                session.reset()  // Re-initialize handshake state with new prologue
+                noiseMutex.withLock {
+                    // A session revoked or replaced meanwhile is left as it is.
+                    if (!isCurrent(session)) return
+                    session.setPrologue(prologue)
+                    session.reset()  // Re-initialize handshake state with new prologue
+                }
                 Log.d(TAG, "Identity exchange: prologue set (${prologue.size} bytes)")
             } else {
                 // Known device but no fingerprint stored - treat as new
@@ -923,17 +1075,45 @@ class GattServer(
         val session = noiseSession ?: return
 
         try {
-            val response = session.processHandshakeMessage(message)
+            // The message is processed and its outcome published under one
+            // hold of the Noise lock. A removal landing inside processing,
+            // even after the transport keys are split, is seen here before
+            // the keys are installed or the connection is reported.
+            val (response, established) = noiseMutex.withLock {
+                if (!isCurrent(session)) return
+                val response = session.processHandshakeMessage(message)
+                val complete = session.isHandshakeComplete()
+                val current = synchronized(revocationLock) {
+                    isCurrent(session).also { current ->
+                        if (current && complete) {
+                            authenticatedPeerKeyHex = session.getRemoteStaticKey()?.toHexString()
+                            establishedSession = session
+                            // A reconnecting desktop that is already paired is
+                            // confirmed here, under the lock a removal takes,
+                            // so its replies reach the router like its sends.
+                            adoptExistingPairing()
+                        }
+                    }
+                }
+                if (!current) {
+                    zeroOnce(session)
+                    return
+                }
+                if (complete) {
+                    val binding = session.sessionBinding()
+                    requestHandler.setSessionBindingProvider {
+                        binding?.takeIf { isCurrent(session) }?.copyOf()
+                    }
+                    _connectionState.value = ConnectionState.Connected(device.name ?: "Unknown", device.address)
+                }
+                response to complete
+            }
 
-            if (response != null) {
+            if (response != null && isCurrent(session)) {
                 sendResponse(device, response)
             }
 
-            if (session.isHandshakeComplete()) {
-                val deviceName = device.name ?: "Unknown"
-                authenticatedPeerKeyHex = session.getRemoteStaticKey()?.toHexString()
-                requestHandler.setSessionBindingProvider { session.sessionBinding() }
-                _connectionState.value = ConnectionState.Connected(deviceName, device.address)
+            if (established && isCurrent(session)) {
                 Log.i(TAG, "Noise handshake complete with ${device.address}")
 
                 // Send status notification
@@ -942,7 +1122,7 @@ class GattServer(
         } catch (e: Exception) {
             Log.e(TAG, "Handshake processing failed", e)
             stateMutex.withLock {
-                handleDeviceDisconnected(device)
+                if (noiseSession === session) handleDeviceDisconnected(device)
             }
         }
     }
@@ -964,55 +1144,55 @@ class GattServer(
         // frame on this session would fail too. Answering with an error and
         // keeping the session alive leaves a connection that can never recover.
         val plaintext = try {
-            session.decrypt(encryptedMessage)
+            noiseMutex.withLock {
+                // A frame for a revoked or replaced session is dropped unread.
+                if (!isCurrent(session)) return
+                session.decrypt(encryptedMessage)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Decryption failed; tearing down the session", e)
-            handleDeviceDisconnected(device)
-            try { gattServer?.cancelConnection(device) } catch (_: Exception) {}
+            if (noiseSession === session) {
+                handleDeviceDisconnected(device)
+                try { gattServer?.cancelConnection(device) } catch (_: Exception) {}
+            }
             return
         }
 
-        try {
-            // The plaintext is a full JSON-RPC request and can carry key
-            // material, passwords and OATH secrets, so it is never logged.
-            Log.d(TAG, "Decrypted message: ${plaintext.size} bytes")
+        // The plaintext is a full JSON-RPC request and can carry key
+        // material, passwords and OATH secrets, so it is never logged.
+        Log.d(TAG, "Decrypted message: ${plaintext.size} bytes")
 
-            val response: ByteArray? = interceptOrRoute(plaintext)
-            if (response == null) {
-                // This was a response to our outbound request, no reply needed
-                Log.d(TAG, "Incoming message was a response to outbound request")
+        // The request runs as a job of this session, so unpairing the desktop
+        // cancels it even while it waits on the user's approval.
+        val response: ByteArray = try {
+            runForSession(session) { interceptOrRoute(plaintext, session) } ?: run {
+                // A response to our outbound request, or a request revoked
+                // before it answered: nothing is sent.
+                Log.d(TAG, "Nothing to answer for the incoming message")
                 return
             }
-            Log.d(TAG, "Got response: ${response.size} bytes")
-
-            // Encrypt and send response
-            Log.d(TAG, "Encrypting response...")
-            sendMutex.withLock {
-                val encryptedResponse = session.encrypt(response)
-                Log.d(TAG, "Sending encrypted response: ${encryptedResponse.size} bytes")
-                sendResponse(device, encryptedResponse)
-            }
-            Log.i(TAG, "handleApplicationMessage: response sent successfully")
-
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to process application message", e)
-            // Send error response if possible
             try {
-                val errorResponse = requestHandler.createErrorResponse(
+                requestHandler.createErrorResponse(
                     id = 0,
                     code = -32603,
                     message = "Internal error: ${e.message}"
                 )
-                val session2 = noiseSession
-                if (session2 != null) {
-                    sendMutex.withLock {
-                        val encrypted = session2.encrypt(errorResponse)
-                        sendResponse(device, encrypted)
-                    }
-                }
             } catch (e2: Exception) {
-                Log.e(TAG, "Failed to send error response", e2)
+                Log.e(TAG, "Failed to build the error response", e2)
+                return
             }
+        }
+        Log.d(TAG, "Got response: ${response.size} bytes")
+
+        try {
+            sendOnSession(session, device, response, revalidatePeer = false)
+            Log.i(TAG, "handleApplicationMessage: response sent successfully")
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "Response not sent: ${e.message}")
         }
     }
 
@@ -1022,15 +1202,41 @@ class GattServer(
      *
      * @return The response bytes to send back, or null if nothing should be sent.
      */
-    private suspend fun interceptOrRoute(plaintext: ByteArray): ByteArray? {
+    private suspend fun interceptOrRoute(plaintext: ByteArray): ByteArray? =
+        interceptOrRoute(plaintext, noiseSession)
+
+    /**
+     * [interceptOrRoute] for the request that arrived on [session]. Approval
+     * suspends on the user, so the session is checked again after it: an
+     * answer for a session revoked or replaced meanwhile changes nothing and
+     * answers nothing.
+     */
+    private suspend fun interceptOrRoute(plaintext: ByteArray, session: NoiseSession?): ByteArray? {
+        // Nothing runs for a request whose session was revoked or replaced.
+        if (!isCurrent(session)) return null
+
         // A completed Noise XX handshake proves only that the peer holds *a*
         // key, not that the user approved it. Until pairing is confirmed, the
         // only request that may run is pairing.confirm itself; everything else
         // is refused. Without this, any peer that can reach the transport
         // could sign, list keys, or export shared material unapproved.
         if (pairingEnforced && !pairingConfirmed) {
-            handlePairingConfirmIfNeeded(plaintext)?.let { return it }
+            handlePairingConfirmIfNeeded(plaintext, session)?.let { return it }
+            if (!isCurrent(session)) return null
             return rejectUnpaired(plaintext)
+        }
+
+        // A confirmed session (a known peer adopted at handshake completion,
+        // or one confirmed earlier) answers pairing.confirm itself, as
+        // StreamPairingSession does: RequestHandler has no handler for it, and
+        // rerunning `xkey device pair` must still succeed. No prompt, no store
+        // change; a session revoked or replaced meanwhile answers nothing.
+        if (pairingEnforced) {
+            confirmAlreadyPaired(plaintext)?.let { response ->
+                return synchronized(revocationLock) {
+                    response.takeIf { isCurrent(session) && pairingConfirmed }
+                }
+            }
         }
 
         Log.d(TAG, "Processing request...")
@@ -1044,6 +1250,10 @@ class GattServer(
      * trusted device, so a reconnect does not need another `pairing.confirm`.
      * Approval still comes from the paired-device store — an unknown peer is
      * left gated.
+     *
+     * Call under [revocationLock] once the handshake's session is checked
+     * current: a removal then either lands first, and the store no longer
+     * knows the peer, or after, and revokes the confirmed session.
      */
     private fun adoptExistingPairing() {
         val repo = pairedDeviceRepository ?: return
@@ -1090,9 +1300,13 @@ class GattServer(
     /**
      * Intercepts pairing.confirm messages and handles them before normal routing.
      *
+     * The session the request arrived on is captured by the caller and checked
+     * again once the user has answered: an approval that outlived its session
+     * neither records the peer nor confirms whichever session replaced it.
+     *
      * @return The response bytes if this was a pairing.confirm message, null otherwise.
      */
-    private suspend fun handlePairingConfirmIfNeeded(plaintext: ByteArray): ByteArray? {
+    private suspend fun handlePairingConfirmIfNeeded(plaintext: ByteArray, session: NoiseSession?): ByteArray? {
         val text = String(plaintext, Charsets.UTF_8)
         val json = try {
             JSONObject(text)
@@ -1154,7 +1368,8 @@ class GattServer(
             // The SAS the desktop prints during `xkey device pair`; the user
             // compares the two before trusting the peer. No session to derive
             // it from means nothing to compare, so nothing can grant trust.
-            val sas = noiseSession?.sessionBinding()?.let { AttestTranscript.shortAuthString(it) }
+            val binding = noiseMutex.withLock { session?.takeIf { isCurrent(it) }?.sessionBinding() }
+            val sas = binding?.let { AttestTranscript.shortAuthString(it) }
             if (sas == null) {
                 Log.e(TAG, "No completed Noise session to derive the SAS; refusing pairing")
                 false
@@ -1168,11 +1383,25 @@ class GattServer(
             }
         }
 
+        // The user may have answered after the desktop was unpaired or replaced.
+        if (session == null || !isCurrent(session)) {
+            Log.w(TAG, "pairing.confirm answered for a session that is no longer live; ignoring")
+            return null
+        }
+
         if (confirmed) {
             // Always upsert device — addDevice removes stale entries matching by key,
             // BLE address, or device name, preventing duplicates on re-pairing
             repo.addDevice(peerKeyHex, pairingParams.deviceName, connectedDevice?.address)
-            pairingConfirmed = true
+            val accepted = synchronized(revocationLock) {
+                isCurrent(session).also { if (it) pairingConfirmed = true }
+            }
+            if (!accepted) {
+                // Revoked between the check above and the record landing:
+                // the removal wins, so the record it raced is taken back.
+                if (session === revokedSession) repo.removeDevice(peerKeyHex)
+                return null
+            }
 
             // Log pairing approval
             AuditLogger.logPairingApproved(
@@ -1190,10 +1419,13 @@ class GattServer(
             val response = ProtocolResponse.success(id, result.toJson(), generation = generation)
             val responseBytes = response.toJson()
 
-            // Initiate post-pairing enrollment if trusted computing is enabled
+            // Initiate post-pairing enrollment if trusted computing is enabled.
+            // It runs as a request of this session, so unpairing cancels it.
             scope.launch {
                 try {
-                    performPostPairingEnrollment(peerKeyHex, pairingParams.deviceName)
+                    runForSession(session) {
+                        performPostPairingEnrollment(peerKeyHex, pairingParams.deviceName, session)
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Post-pairing enrollment failed", e)
                     // Don't disconnect - enrollment failure shouldn't break pairing
@@ -1217,11 +1449,13 @@ class GattServer(
             )
             val responseBytes = response.toJson()
 
-            // Schedule disconnect after sending the rejection response
+            // Schedule disconnect after sending the rejection response. Only
+            // the rejected session is dropped, never one that replaced it.
             scope.launch {
                 kotlinx.coroutines.delay(500) // Give time for response to be sent
                 stateMutex.withLock {
-                    connectedDevice?.let { handleDeviceDisconnected(it) }
+                    val device = connectedDevice
+                    if (device != null && noiseSession === session) handleDeviceDisconnected(device)
                 }
             }
 
@@ -1263,8 +1497,14 @@ class GattServer(
      *
      * @param publicKeyHex The desktop's Noise static public key (hex-encoded)
      * @param deviceName The desktop's device name
+     * @param session The session the desktop was paired on; nothing is issued or
+     *   recorded once it is revoked or replaced
      */
-    private suspend fun performPostPairingEnrollment(publicKeyHex: String, deviceName: String) {
+    private suspend fun performPostPairingEnrollment(
+        publicKeyHex: String,
+        deviceName: String,
+        session: NoiseSession
+    ) {
         val settingsRepo = trustedComputingSettingsRepository ?: return
         val settings = settingsRepo.getSettings()
 
@@ -1300,6 +1540,7 @@ class GattServer(
             // separate key-fetch round trips.
             val packageResult = RemoteGetTCGCSRIDevIDResult.fromJson(
                 sendRequestAndWaitForResponse(
+                    session,
                     MethodNames.REMOTE_GET_TCG_CSR_IDEVID,
                     RemoteGetTCGCSRIDevIDParams().toJson()
                 )
@@ -1388,6 +1629,7 @@ class GattServer(
 
             val activated = RemoteActivateCredentialResult.fromJson(
                 sendRequestAndWaitForResponse(
+                    session,
                     MethodNames.REMOTE_ACTIVATE_CREDENTIAL,
                     RemoteActivateCredentialParams(
                         credentialBlob = challenge.credentialBlob,
@@ -1423,6 +1665,7 @@ class GattServer(
                 )
             val quote = RemoteGetAttestationQuoteResult.fromJson(
                 sendRequestAndWaitForResponse(
+                    session,
                     MethodNames.REMOTE_GET_ATTESTATION_QUOTE,
                     RemoteGetAttestationQuoteParams(
                         nonce = nonce,
@@ -1502,7 +1745,9 @@ class GattServer(
             Log.i(TAG, "IDevID certification binds the signing key to the IAK for $deviceName")
 
             // Step 6: issue. Everything above has passed, so this device has
-            // proved it is the TPM its certificate names.
+            // proved it is the TPM its certificate names. A desktop unpaired
+            // during the ceremony is issued nothing.
+            if (!isCurrent(session)) throw PeerNotPairedException(publicKeyHex)
             val iakCertificate = ca.issueForPublicKey(
                 publicKey = iak.publicKey,
                 subject = enrollmentSubject(deviceName, publicKeyHex, "IAK"),
@@ -1518,6 +1763,7 @@ class GattServer(
             // Step 7: hand both back, then record what was verified.
             val stored = RemoteStoreEnrollmentCertsResult.fromJson(
                 sendRequestAndWaitForResponse(
+                    session,
                     MethodNames.REMOTE_STORE_ENROLLMENT_CERTS,
                     RemoteStoreEnrollmentCertsParams(
                         iakCert = iakCertificate.certificate,
@@ -1548,6 +1794,7 @@ class GattServer(
                 enrolledAt = System.currentTimeMillis(),
                 trustLevel = TRUST_LEVEL_FULL_ATTESTATION
             )
+            if (!isCurrent(session)) throw PeerNotPairedException(publicKeyHex)
             enrolledRepo.enroll(enrolledDevice)
 
             pairedDeviceRepository?.updateDeviceIDevID(
@@ -1748,22 +1995,36 @@ class GattServer(
      * the pending deferred when the reply for this id arrives in the message
      * loop and completes every outstanding one on disconnect.
      *
+     * @param session The session the request belongs to; it is sent only while
+     *   that session is live and its peer still paired
      * @param method The method name
      * @param params The parameters as a JSONObject
      * @return The result JSONObject from the response
      * @throws java.io.IOException if there is no session, device, or router
+     * @throws PeerNotPairedException if the desktop is no longer paired
      * @throws ProtocolException if the peer returns an error or does not reply in time
      */
-    private suspend fun sendRequestAndWaitForResponse(method: String, params: JSONObject): JSONObject {
+    private suspend fun sendRequestAndWaitForResponse(
+        session: NoiseSession,
+        method: String,
+        params: JSONObject
+    ): JSONObject {
         val router = messageRouter
             ?: throw java.io.IOException("No message router; cannot correlate responses")
+        val device = connectedDevice
+            ?: throw java.io.IOException("No connected device")
 
         val id = enrollmentRequestId.getAndIncrement()
         val deferred = CompletableDeferred<ProtocolResponse>()
         router.registerPendingResponse(id, deferred)
 
         try {
-            sendEncryptedMessage(ProtocolRequest(id = id, method = method, params = params).toJson())
+            sendOnSession(
+                session,
+                device,
+                ProtocolRequest(id = id, method = method, params = params).toJson(),
+                revalidatePeer = true
+            )
 
             val response = withTimeout(ENROLLMENT_REQUEST_TIMEOUT_MS) { deferred.await() }
 
@@ -1800,9 +2061,12 @@ class GattServer(
     /**
      * Sends an encrypted message to the connected device.
      *
-     * Used by [RemoteKeyClient] for outbound remote.* requests.
+     * Used by [RemoteKeyClient] for outbound remote.* requests. The peer is
+     * revalidated against the paired-device store before the frame is
+     * encrypted, so a desktop unpaired since the handshake receives nothing.
      *
      * @param data The plaintext message bytes to encrypt and send.
+     * @throws PeerNotPairedException if the desktop is no longer paired.
      * @throws java.io.IOException if no active session or device is connected.
      */
     override suspend fun sendEncryptedMessage(data: ByteArray) {
@@ -1810,10 +2074,75 @@ class GattServer(
             ?: throw java.io.IOException("No active Noise session")
         val device = connectedDevice
             ?: throw java.io.IOException("No connected device")
+        sendOnSession(session, device, data, revalidatePeer = true)
+    }
+
+    /**
+     * Encrypts [plaintext] on [session] and notifies it to [device].
+     *
+     * Waiting for the notification channel happens first and may be
+     * cancelled. Then admission, encryption and delivery run as one
+     * non-cancellable section under [sendMutex]: admission (the session is
+     * live and unrevoked and, when [revalidatePeer], its peer is still
+     * paired and confirmed on it) and encryption share [revocationLock] with the removal, so a
+     * refused send writes nothing and consumes no nonce, and once a nonce is
+     * consumed the frame is delivered or the session is torn down.
+     *
+     * @throws PeerNotPairedException if the session was revoked or its peer is no longer paired
+     * @throws java.io.IOException if the session is gone or the frame could not be delivered
+     */
+    private suspend fun sendOnSession(
+        session: NoiseSession,
+        device: BluetoothDevice,
+        plaintext: ByteArray,
+        revalidatePeer: Boolean
+    ) {
+        val channel = openChannel(device)
+            ?: throw java.io.IOException("No notification channel to ${device.address}")
+
         sendMutex.withLock {
-            val encrypted = session.encrypt(data)
-            sendResponse(device, encrypted)
+            currentCoroutineContext().ensureActive()
+            withContext(NonCancellable) {
+                beforeAdmissionForTest?.invoke()
+                val frame = noiseMutex.withLock {
+                    synchronized(revocationLock) {
+                        val peerKeyHex = session.getRemoteStaticKey()?.toHexString()
+                        if (session === revokedSession) throw PeerNotPairedException(peerKeyHex)
+                        if (!isCurrent(session)) throw java.io.IOException("The session is no longer live")
+                        if (revalidatePeer) {
+                            pairedDeviceRepository?.requirePaired(peerKeyHex)
+                            // Paired in the store but not confirmed on this
+                            // session: its reply would be refused as unpaired.
+                            if (pairingEnforced && !pairingConfirmed) throw PeerNotPairedException(peerKeyHex)
+                        }
+                        session.encrypt(plaintext)
+                    }
+                }
+                try {
+                    afterAdmissionForTest?.invoke()
+                    if (!deliver(channel, frame, session)) {
+                        throw java.io.IOException("The frame could not be delivered to ${device.address}")
+                    }
+                } catch (e: Throwable) {
+                    abandon(session)
+                    throw e
+                }
+            }
         }
+    }
+
+    /**
+     * Retires [session] after a frame it encrypted was not delivered: its
+     * send nonce is past a frame the peer never saw, so no later frame on it
+     * could decrypt.
+     */
+    private fun abandon(session: NoiseSession) {
+        synchronized(revocationLock) {
+            if (noiseSession !== session || endedSession === session) return
+            endedSession = session
+        }
+        requestJobs.forEach { (job, owner) -> if (owner === session) job.cancel() }
+        scope.launch { tearDown(session) }
     }
 
     /**
@@ -1824,10 +2153,28 @@ class GattServer(
      * on: the remainder would be dropped silently and the peer left waiting on
      * a message that never ends.
      */
-    @SuppressLint("MissingPermission")
     private suspend fun sendResponse(device: BluetoothDevice, response: ByteArray) {
-        val characteristic = responseCharacteristic ?: return
-        val server = gattServer ?: return
+        val channel = openChannel(device) ?: return
+        deliver(channel, response, session = null)
+    }
+
+    /** What a frame is notified on, resolved once before it is sent. */
+    private class NotificationChannel(
+        val server: BluetoothGattServer,
+        val device: BluetoothDevice,
+        val characteristic: BluetoothGattCharacteristic,
+        val fragmenter: Fragmenter
+    )
+
+    /**
+     * Waits for [device] to enable notifications and resolves the channel a
+     * frame is sent on.
+     *
+     * @return the channel, or null when there is none to send on
+     */
+    private suspend fun openChannel(device: BluetoothDevice): NotificationChannel? {
+        val characteristic = responseCharacteristic ?: return null
+        val server = gattServer ?: return null
 
         // Wait for CCCD notification to be enabled (up to 5s).
         // stop() and handleDeviceDisconnected *cancel* this deferred, and an
@@ -1842,12 +2189,12 @@ class GattServer(
         }
         if (awaited.isFailure) {
             Log.i(TAG, "Connection to ${device.address} closed while waiting to send; dropping response")
-            return
+            return null
         }
 
         if (notificationEnabled[device.address] != true) {
             Log.e(TAG, "Notifications not enabled for ${device.address} after waiting")
-            return
+            return null
         }
 
         val mtu = deviceMtu[device.address] ?: DEFAULT_MTU
@@ -1862,32 +2209,52 @@ class GattServer(
                 "MTU $mtu leaves only $maxPayloadSize bytes per fragment; the peer must " +
                     "negotiate at least ${Fragmenter.MIN_PAYLOAD_SIZE + FragmentReassembler.HEADER_SIZE + 3}"
             )
-            return
+            return null
         }
-        val fragmenter = Fragmenter(maxPayloadSize)
+        Log.d(TAG, "openChannel: mtu=$mtu")
+        return NotificationChannel(server, device, characteristic, Fragmenter(maxPayloadSize))
+    }
 
-        Log.d(TAG, "sendResponse: response_size=${response.size}, mtu=$mtu")
+    /**
+     * Notifies [response] on [channel], fragment by fragment. A frame sent
+     * for [session] stops as soon as that session is torn down.
+     *
+     * @return whether every fragment was delivered
+     */
+    @SuppressLint("MissingPermission")
+    private suspend fun deliver(
+        channel: NotificationChannel,
+        response: ByteArray,
+        session: NoiseSession?
+    ): Boolean {
+        val device = channel.device
+        Log.d(TAG, "sendResponse: response_size=${response.size}")
         if (response.size <= 64) {
             Log.d(TAG, "sendResponse: response_hex=${response.joinToString("") { "%02x".format(it) }}")
         }
 
-        val fragments = fragmenter.fragment(response)
+        val fragments = channel.fragmenter.fragment(response)
         Log.d(TAG, "Sending ${fragments.size} fragment(s) to ${device.address}")
 
         for ((index, fragment) in fragments.withIndex()) {
-            if (!sendNotification(server, device, characteristic, fragment)) {
+            if (session != null && !isCurrent(session)) {
+                Log.i(TAG, "Session to ${device.address} revoked mid-send; abandoning the frame")
+                return false
+            }
+            if (!sendNotification(channel.server, device, channel.characteristic, fragment)) {
                 Log.w(
                     TAG,
                     "Fragment ${index + 1}/${fragments.size} could not be delivered to " +
                         "${device.address}; abandoning the response"
                 )
-                return
+                return false
             }
             // Add inter-fragment delay for large responses to prevent BLE stack overflow
             if (fragments.size > 10 && index < fragments.size - 1) {
                 delay(5)
             }
         }
+        return true
     }
 
     /**
@@ -1967,9 +2334,13 @@ class GattServer(
     fun getConnectedDevice(): BluetoothDevice? = connectedDevice
 
     /**
-     * Returns whether the Noise session is established.
+     * Returns whether the Noise session is established: its handshake
+     * completed and was published, and it has not been revoked since.
      */
-    fun isSessionEstablished(): Boolean = noiseSession?.isHandshakeComplete() == true
+    fun isSessionEstablished(): Boolean {
+        val session = establishedSession ?: return false
+        return isCurrent(session) && session.isHandshakeComplete()
+    }
 }
 
 /**

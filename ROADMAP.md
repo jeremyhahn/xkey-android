@@ -1,6 +1,6 @@
 # xkey-android roadmap
 
-> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-20
+> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-24
 > Changes are proposed by docs-only PR. Every item names its feature in [docs/SPEC.md](docs/SPEC.md), and the two agree.
 
 ## Mission
@@ -44,6 +44,9 @@ Wire-coupled to go-xkms through the pairing contract (Noise-XX + JSON-RPC), not 
 - **verified-media-viewer** — media with verification badges — as built, no closing issue — done
 - **audit-log** — security events in Room with an audit screen — as built, no closing issue — done
 - **release-signing** — release builds signed from credentials outside version control — as built, no closing issue — done
+- **phone-initiated-pairing** — phone-initiated attestation and pairing SAS display ([go-xkms#1306](../../../go-xkms/issues/1306)) — [#14](../../issues/14), PR #42 — done
+- **request-generation-echo** — pairing responses echo per-request generation — [#10](../../issues/10), PR #42 — done
+- **remote-backup-password** — password sent on remote backup create and restore ([go-xkms#690](../../../go-xkms/issues/690)) — [#11](../../issues/11), PR #61 — done
 
 ## Now
 
@@ -62,13 +65,9 @@ None.
 
 ## Later
 
-- **remote-backup-password** — password sent on remote backup create and restore ([go-xkms#690](../../../go-xkms/issues/690)) — [#11](../../issues/11) — blocked: needs the #35 devcontainer image
-- **password-vault-rpcs** — password store and seal store RPCs handled — [#12](../../issues/12) — blocked: needs the #35 devcontainer image
-- **password-vault-rpcs** — USB transport supports the per-user password vault — [#15](../../issues/15) — blocked: needs the #35 devcontainer image
-- **phone-initiated-pairing** — phone-initiated attestation and pairing SAS display ([go-xkms#1306](../../../go-xkms/issues/1306)) — [#14](../../issues/14) — blocked: needs the #35 devcontainer image
-- **request-generation-echo** — pairing responses echo per-request generation — [#10](../../issues/10) — blocked: [go-xkms#128](../../../go-xkms/issues/128)
+- **password-vault-rpcs** — password store and seal store RPCs handled — [#55](../../issues/55) — blocked: go-xkms USB PasswordVault row (ruling 130); the desktop-sent `Password*`/`SealStore*` handlers shipped in PR #42 (#12)
 - **fido2-built-in-uv** — biometric-gated verify-user RPC for FIDO2 built-in UV — [#13](../../issues/13) — blocked: `verifyUser` undefined in go-xkms
-- **protected-memory** — Noise static and session keys under an Android protected-memory clause — [#6](../../issues/6) — blocked: needs the #35 devcontainer image
+- **protected-memory** — Noise static and session keys under an Android protected-memory clause — [#6](../../issues/6) — blocked: owner ruling pending; Noise key zeroize shipped in PR #46 (#6)
 
 ## Future
 
@@ -77,7 +76,5 @@ None.
 ## Dependencies
 
 - Up: none pinned (not a Go module); wire contract with go-xkms per the handbook's xkey-android wire contract (software docs/12).
-- Up: [go-xkms#128](../../../go-xkms/issues/128) per-request generation, needed by #10.
 - Up: go-xkms defines the `verifyUser` RPC, needed by #13.
-- Up: the [#35](../../issues/35) devcontainer image (JetBrains JDK 21, platforms;android-34, build-tools;36.0.0), needed by #6, #11, #12, #14 and #15.
 - Down: go-xkms xkmsd `phone` key backend, `xkey device *` pairing and `xkey fido2 --backend phone`.
