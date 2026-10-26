@@ -45,9 +45,16 @@ case ${cmd} in
       exit 0
     fi
     while read -r id _; do echo "${id}"; done < "${fix}/containers" ;;
+  create)
+    # The image lock (v5): one container of that name at a time.
+    [ -e "${fix}/lockheld" ] && exit 1
+    echo "lockid created" > "${fix}/lockheld"
+    echo lockid ;;
+  import) ;;
   inspect)
     fmt=$2
     shift 2
+    case $1 in *image-lock) [ -s "${fix}/lockheld" ] && cat "${fix}/lockheld"; exit 0 ;; esac
     for c in "$@"; do
       while read -r id name state finished created expires image; do
         [ "${id}" = "${c}" ] || continue
@@ -73,17 +80,23 @@ case ${cmd} in
     shift
     case ${sub} in
       inspect)
+        case $1 in *image-lock:base) exit 0 ;; esac
         while read -r id ref created tagged _; do
           [ "${ref}" = "$3" ] || [ "${id}" = "$3" ] || continue
-          echo "${id} ${created} ${tagged}"
+          case $2 in
+            *LastTagTime*) date -u -d "@${tagged}" '+%Y-%m-%d %H:%M:%S.25 +0000 UTC' ;;
+            *) echo "${id} ${created}" ;;
+          esac
           exit 0
         done < "${fix}/images"
         exit 1 ;;
       rm)
+        [ -e "${fix}/lockheld" ] || echo "image rm $1" >> "${fix}/nolock"
         echo "image rm $1" >> "${fix}/log"
         case $1 in sha256:*) drop images 0 "$1" ;; *) drop images 1 "$1" ;; esac ;;
     esac ;;
   rm)
+    [ "$1" = lockid ] && { rm -f "${fix}/lockheld"; exit 0; }
     [ "$1" = -v ] && shift
     echo "rm $1" >> "${fix}/log"
     drop containers 0 "$1" ;;
@@ -114,7 +127,7 @@ reap() {
 	want=$(printf '%s' "${want}" | sort)
 	[ "${got}" = "${want}" ] || fail "${name}: want removed [${want//$'\n'/, }], got [${got//$'\n'/, }]"
 }
-fixture() { mkdir -p "${tmp}/fix"; printf '%s\n' "$1" > "${tmp}/fix/containers"; printf '%s\n' "$2" > "${tmp}/fix/images"; }
+fixture() { mkdir -p "${tmp}/fix"; rm -f "${tmp}/fix/lockheld" "${tmp}/fix/nolock"; printf '%s\n' "$1" > "${tmp}/fix/containers"; printf '%s\n' "$2" > "${tmp}/fix/images"; }
 
 sha() { printf 'sha256:%064d' "$1"; }
 
@@ -158,6 +171,9 @@ image rm ${TC}:eeee
 image rm $(sha 9)
 image rm $(sha 12)
 image rm ${PREFIX}it:iiii" REAP_IMAGE_REPOS="${TC}"
+# v5: every removal ran under the image lock, and the lock is released.
+[ ! -e "${tmp}/fix/nolock" ] || fail "an image was removed outside the image lock: $(cat "${tmp}/fix/nolock")"
+[ ! -e "${tmp}/fix/lockheld" ] || fail "the reaper left the image lock held"
 
 # Without REAP_IMAGE_REPOS only the <prefix>it family is reaped (v3).
 fixture "" "\
@@ -175,6 +191,34 @@ fixture "" "$(sha 1) ${TC}:aaaa $(ago $((5 * H))) $((now - 5 * H)) ${TC}"
 rc=0
 env PATH="${tmp}/bin:${PATH}" STUB_FIXTURE="${tmp}/fix" REAP_IMAGE_REPOS='Bad;rm' "${REAPER}" "${PREFIX}" > /dev/null 2>&1 || rc=$?
 [ "${rc}" = 2 ] || fail "bad REAP_IMAGE_REPOS: want exit 2, got ${rc}"
+
+# v4: a tag is kept while a container uses its id, whatever the tag's age:
+# both tags of one id stay under a created lease, and go once it is removed.
+two_tags="$(sha 1) ${TC}:aaaa $(ago $((5 * H))) $((now - 5 * H)) ${TC}
+$(sha 1) ${TC}:pr-aaaa $(ago $((5 * H))) $((now - 5 * H)) ${TC}"
+fixture "c1 ${PREFIX}lease-1-1-aa created ${NEVER} $(ago 60) - $(sha 1)" "${two_tags}"
+reap "tags kept while leased" "" REAP_IMAGE_REPOS="${TC}"
+fixture "" "${two_tags}"
+reap "tags reaped without a lease" "image rm ${TC}:aaaa
+image rm ${TC}:pr-aaaa" REAP_IMAGE_REPOS="${TC}"
+
+# v5: a lock held by another job (created just now) is waited for, and no
+# image is removed without it; a lock older than 600 s is a dead holder's, is
+# removed and the reaper goes on.
+fixture "" "$(sha 1) ${TC}:aaaa $(ago $((5 * H))) $((now - 5 * H)) ${TC}"
+echo "lockid $(ago 10)" > "${tmp}/fix/lockheld"
+reap "image lock held" "" REAP_IMAGE_REPOS="${TC}" REAP_LOCK_WAIT=2
+grep -q '^keep  every image' "${tmp}/out" || fail "image lock held: no keep-every-image line: $(cat "${tmp}/out")"
+[ -e "${tmp}/fix/lockheld" ] || fail "image lock held: the reaper dropped a lock it did not take"
+echo "lockid $(ago 700)" > "${tmp}/fix/lockheld"
+reap "stale image lock" "image rm ${TC}:aaaa" REAP_IMAGE_REPOS="${TC}" REAP_LOCK_WAIT=5
+[ ! -e "${tmp}/fix/nolock" ] || fail "stale image lock: an image was removed outside the lock"
+
+# A bad REAP_LOCK_WAIT is refused.
+runs=$((runs + 1))
+rc=0
+env PATH="${tmp}/bin:${PATH}" STUB_FIXTURE="${tmp}/fix" REAP_LOCK_WAIT=x "${REAPER}" "${PREFIX}" > /dev/null 2>&1 || rc=$?
+[ "${rc}" = 2 ] || fail "bad REAP_LOCK_WAIT: want exit 2, got ${rc}"
 
 [ "${fails}" -eq 0 ] || { echo "reaper-test: ${fails} of ${runs} failed"; exit 1; }
 echo "reaper-test: all ${runs} passed"

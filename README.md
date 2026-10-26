@@ -42,7 +42,8 @@ make install
 make help             # Show all available targets
 make build            # Build debug APK
 make test             # Run unit tests
-make lint             # Android lint + actionlint
+make lint             # Android lint
+make lint-gates       # actionlint + the workflow and script gate tests (CI runs it beside lint)
 make security         # trivy fs (vuln + secret); `make install-tools` installs the pinned trivy
 make ci               # Everything CI runs: lint, build, test, security
 make integration-test # Run all instrumented (on-device) tests

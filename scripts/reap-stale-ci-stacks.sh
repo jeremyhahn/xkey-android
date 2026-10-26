@@ -57,6 +57,24 @@
 #     time: past it, the lease is stale even before <min-age-seconds>. ci.yml
 #     sets the job timeout plus 5 min, so a cancelled job's lease stops
 #     holding its images then, and <min-age-seconds> still caps any lease.
+# v4 (ci-template v1.25.2): a tag is kept while any container, running or
+# created, uses its image id; `docker image rm <tag>` on an image with two tags
+# only untags it, even while a lease holds the id. CUSTOMIZE (xkey-android):
+# the in_use list (above) already did this by id, for every family, so v4 is
+# already here; its log line names the lease or stage that keeps the image.
+# v5 (ci-template v1.25.3): the image loop runs under the daemon's image lock,
+# so a job cannot take its lease between the reaper's in-use check and its
+# `docker image rm`. The lock is a created, never-started container named
+# <prefix>image-lock, from <prefix>image-lock:base (an empty image this script
+# imports when it is missing); the daemon refuses a second container of that
+# name, so there is one holder at a time. The ci.yml lease steps take the same
+# lock. A lock created more than 600 s ago is a dead holder's and is removed by
+# its id. The reaper waits up to REAP_LOCK_WAIT seconds (default 60) for it,
+# and without it removes no image that run. The in-use list is read after the
+# lock is taken. v5 also reads the tag time as a string: on Docker 29
+# `{{.Metadata.LastTagTime.Unix}}` is a template error, the inspect came back
+# without an id, and v3 and v4 then removed the tag whatever its age or
+# lease. An image the inspect gives no id for is now kept.
 #
 # Stale: exited or dead and finished at least <min-age-seconds> ago, or
 # created and never started at least that long ago. A project with any
@@ -94,6 +112,11 @@ for repo in ${REAP_IMAGE_REPOS:-}; do
   esac
 done
 
+lock_wait=${REAP_LOCK_WAIT:-60}
+case $lock_wait in
+  '' | *[!0-9]*) echo "REAP_LOCK_WAIT must be a number: $lock_wait" >&2; exit 2 ;;
+esac
+
 now=$(date +%s)
 
 # run <command...>: the command, or only its echo under REAP_DRY_RUN=1.
@@ -119,6 +142,33 @@ stale() {
   esac
   [ $((now - t)) -ge "$min_age" ]
 }
+
+# image_lock: take the daemon's image lock (v5, above), waiting up to
+# REAP_LOCK_WAIT seconds; 1 when it is not taken. image_unlock drops it.
+lock="${prefix}image-lock"
+lock_id=
+image_lock() {
+  local base="$lock:base" held at t i
+  for ((i = 0; i < lock_wait; i++)); do
+    docker image inspect "$base" >/dev/null 2>&1 ||
+      head -c 1024 /dev/zero | docker import - "$base" >/dev/null 2>&1
+    lock_id=$(docker create --pull never --name "$lock" "$base" true 2>/dev/null) && return 0
+    lock_id=
+    if read -r held at < <(docker inspect -f '{{.Id}} {{.Created}}' "$lock" 2>/dev/null) &&
+      t=$(date -d "$at" +%s 2>/dev/null) && [ $(($(date +%s) - t)) -ge 600 ]; then
+      echo "lock  removing the stale $lock (created $at)"
+      docker rm "$held" >/dev/null 2>&1
+      continue
+    fi
+    sleep 1
+  done
+  return 1
+}
+image_unlock() {
+  [ -z "$lock_id" ] || docker rm "$lock_id" >/dev/null 2>&1
+  lock_id=
+}
+trap image_unlock EXIT
 
 reaped=0
 
@@ -161,21 +211,27 @@ docker ps -a --filter "name=^$prefix" \
 # Content-addressed images (v2, above). CUSTOMIZE (xkey-android): every
 # family in image_repos, their untagged images, and the in-use check (above).
 images=0
-# The image IDs a container uses (a lease, a stage, a stack), after the
-# stale leases went above.
-in_use=" $(docker ps -aq | xargs -r docker inspect -f '{{.Image}}' 2>/dev/null | tr '\n' ' ') "
+in_use=' '
 
 # reap_image <ref>: remove the image <ref> (a tag, or an untagged image's ID)
 # when no container uses it and its last use is REAP_IMAGE_MIN_AGE ago.
 reap_image() {
-  local id created tagged t
-  read -r id created tagged < <(docker image inspect -f '{{.Id}} {{.Created}} {{.Metadata.LastTagTime.Unix}}' "$1" 2>/dev/null) || return 0
+  local id='' created='' tagged t
+  read -r id created < <(docker image inspect -f '{{.Id}} {{.Created}}' "$1" 2>/dev/null)
+  if [ -z "$id" ] || [ -z "$created" ]; then
+    echo "keep  image $1 (docker image inspect gave no id)"
+    return 0
+  fi
   case $in_use in *" $id "*)
     echo "keep  image $1 (a container uses it: a lease or a live stage)"
     return 0 ;;
   esac
   t=$(date -d "$created" +%s 2>/dev/null) || return 0
-  # A never-tagged image reports the zero time, a large negative number.
+  # Go prints the tag time as "2026-10-21 00:35:47.26 +0000 UTC"; date -d
+  # takes it without the fraction and the zone name. A never-tagged image
+  # reports the zero time, a large negative number.
+  tagged=$(docker image inspect -f '{{.Metadata.LastTagTime}}' "$1" 2>/dev/null | sed -E 's/\.[0-9]+//; s/ [A-Z]+$//')
+  tagged=$(date -d "$tagged" +%s 2>/dev/null) || tagged=
   case $tagged in ''|*[!0-9]*) ;; *) [ "$tagged" -le "$t" ] || t=$tagged ;; esac
   if [ $((now - t)) -lt "$image_min_age" ]; then
     echo "keep  image $1 (created or tagged within ${image_min_age}s)"
@@ -185,14 +241,22 @@ reap_image() {
   if run docker image rm "$1"; then images=$((images + 1)); else echo "warn  image $1 not removed (in use?)"; fi
 }
 
-for repo in $image_repos; do
-  for ref in $(docker images --filter "reference=$repo" --format '{{.Repository}}:{{.Tag}}'); do
-    case $ref in "$repo:"*) reap_image "$ref" ;; esac
+if [ "${REAP_DRY_RUN:-0}" = 1 ] || image_lock; then
+  # The image IDs a container uses (a lease, a stage, a stack), read under
+  # the lock and after the stale leases went above.
+  in_use=" $(docker ps -aq | xargs -r docker inspect -f '{{.Image}}' 2>/dev/null | tr '\n' ' ') "
+  for repo in $image_repos; do
+    for ref in $(docker images --filter "reference=$repo" --format '{{.Repository}}:{{.Tag}}'); do
+      case $ref in "$repo:"*) reap_image "$ref" ;; esac
+    done
+    for id in $(docker images -q --no-trunc --filter dangling=true --filter "label=ci.image.repository=$repo"); do
+      reap_image "$id"
+    done
   done
-  for id in $(docker images -q --no-trunc --filter dangling=true --filter "label=ci.image.repository=$repo"); do
-    reap_image "$id"
-  done
-done
+else
+  echo "keep  every image (the image lock was not free within ${lock_wait}s)"
+fi
+image_unlock
 
 if [ "${REAP_DRY_RUN:-0}" = 1 ]; then done_as="would be removed"; else done_as=removed; fi
 echo "reaper: $reaped compose project(s) and $images image(s) $done_as for prefix '$prefix'"

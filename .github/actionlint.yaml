@@ -1,4 +1,4 @@
-# actionlint-template: v5 — fleet self-hosted runner labels for actionlint.
+# actionlint-template: v7 — fleet self-hosted runner labels for actionlint.
 # Source of truth: software/templates/github-actions/actionlint.yaml in the
 # automatethethings repo. Copy to <repo>/.github/actionlint.yaml.
 #
@@ -12,7 +12,7 @@
 # only, not policy.
 #
 # v2 (2026-09-05, go-truststrap #46): add `code-review-qwen`, the label of
-# Gitea runner `gpu-host-code-review` (id 48), introduced with the label-driven
+# the GPU host's code-review Gitea runner (id 48), introduced with the label-driven
 # qwen review pilot. The runner was live and completing jobs while this
 # allowlist still omitted it, so actionlint correctly reported an unknown
 # runner and took `Lint` — and with it the whole staged gate — red on main.
@@ -34,6 +34,20 @@
 # devcontainer images and runs the stages in them, and `ci-gate`, where CI Gate runs
 # (Company Agent m386). go-quicraft's ci.yml has used both since v1.18.
 #
+# v6 (2026-10-20, Company Agent m867 (1), decision 96): `qwen`, where
+# code-review.yml's opencode review job runs, and `dells`, the label of the Dell
+# runners a repo's ci.yml may name. The ruling: fix the template, not the
+# project. The template ships every self-hosted label, so a repo copies it
+# verbatim and takes no per-project waiver; v6 also drops the one lab hostname
+# the v2 note named.
+#
+# v7 (2026-10-25, Company Agent m1258 (6)): `release`, the label of the
+# release-only runner. A release-only job names it in the server-conditional
+# form ci.yml uses for `bigdisk` and `ci-gate`,
+# `${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'release' }}`,
+# never plain `runs-on: release`, so a github.com copy still runs
+# (conventions/ci-standard.md §3).
+#
 # Verify against the fleet, not against this comment:
 #   curl -sH "Authorization: token $TOK" \
 #     "$GITEA/api/v1/admin/actions/runners" \
@@ -50,3 +64,6 @@ self-hosted-runner:
     - batch
     - bigdisk
     - ci-gate
+    - qwen
+    - dells
+    - release

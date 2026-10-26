@@ -80,10 +80,13 @@ jobs:
           # extended regex over ci.yml's step names. Add the repo's CUSTOMIZE
           # lint, build, unit, race and integration-class steps; never a
           # security, deps-check, trivy or setup step.
-          # CUSTOMIZE (xkey-android): ci.yml's Android stages; no build tags or
+          # CUSTOMIZE (xkey-android): v1.27 split lint: `make lint` is Android
+          # lint and `make lint-gates` the repository's own gates (actionlint
+          # and the script tests), each a deterministic stage (Codex review
+          # 7474). ci.yml's Android stages; no build tags or
           # go-objstore step, the JVM suite in place of integration-test, and
           # the runBlocking gate in place of the go-objstore one.
-          REVERT_STEPS: '^(make lint|make build|make coverage.*|make it-jvm-test.*|Soak.*|No runBlocking in production sources)$'
+          REVERT_STEPS: '^(make lint|make lint-gates|make build|make coverage.*|make it-jvm-test.*|Soak.*|No runBlocking in production sources)$'
           # CUSTOMIZE (xkey-android): the closing-link grammar of automerge.yml's
           # links(), verbatim: close/fix/resolve and their -s/-d/-es/-ed forms,
           # any case, an optional colon, any whitespace before #N. The reopen

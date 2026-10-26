@@ -1,11 +1,11 @@
 # xKey Android Makefile
 
 .PHONY: help build clean test integration-test install \
-	lint android-lint actionlint closing-links-test security trivy-fs ci ci-fast install-tools \
+	lint lint-gates android-lint actionlint closing-links-test security trivy-fs ci ci-fast install-tools \
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test
+	reaper-test revert-red-main-test image-lease-test
 
 .DEFAULT_GOAL := help
 
@@ -106,7 +106,12 @@ coverage: ## Unit tests plus the JaCoCo report (no threshold is enforced)
 	@echo ""
 	@echo "Report: app/build/reports/jacoco/coverageReport/html/index.html"
 
-lint: android-lint actionlint closing-links-test revert-red-main-test reaper-test deps-check-test ## Android lint + actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + deps-check's fixtures (offline)
+lint: android-lint ## Android lint on the debug variant (the repository's own gates run as lint-gates)
+
+# ci-template v1.27: the repository's own gates (scripts, workflows, their
+# tests) are not part of lint: CI's lint-gates job runs `make -k lint-gates`
+# in parallel with the image job's `make lint`, so nothing runs twice there.
+lint-gates: actionlint closing-links-test revert-red-main-test reaper-test image-lease-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the image lease fixtures + deps-check's fixtures (offline)
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -129,6 +134,9 @@ revert-red-main-test: ## Test that revert-red-main.yml resumes a partial run, ag
 
 reaper-test: ## Test reap-stale-ci-stacks.sh's image and lease rules against a stubbed docker (bash)
 	./scripts/reap-stale-ci-stacks-test.sh
+
+image-lease-test: ## Test ci.yml's image lease steps (rebuild once, export the new ID, fail after the retry, release the lock) against a stubbed docker and make (bash)
+	./scripts/image-lease-test.sh
 
 security: tools-check-trivy trivy-fs ## Security suite: trivy fs (vuln + secret, CRITICAL/HIGH blocking)
 
@@ -250,7 +258,7 @@ it-jvm-test: $(if $(filter sha256:%,$(IT_IMAGE)),,docker-build-it) ## Run the JV
 	$(COMPOSE) -p $(IT_PROJECT) run --rm integration \
 		sh -c 'cp -R /src /tmp/src && cd /tmp/src && exec make test'
 
-ci-fast: lint build test ## Everything CI runs except the security scan
+ci-fast: lint lint-gates build test ## Everything CI runs except the security scan
 
 ci: ci-fast security ## Everything a PR must pass
 

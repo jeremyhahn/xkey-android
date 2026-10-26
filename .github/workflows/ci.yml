@@ -1,9 +1,28 @@
-# ci-template: v1.25 (customized)
+# ci-template: v1.27.0 (customized)
 # CUSTOMIZE (xkey-android): a Kotlin/Gradle Android app, not a Go module. The
 # stages run the Android targets in this repo's devcontainer images
 # (build/docker/devcontainer); every Go-only step is replaced or removed in a
 # CUSTOMIZE block below that says which and why. The template's changelog
 # follows unchanged.
+# CUSTOMIZE (xkey-android, ruling 211, CA m1355, DS-3873): v1.27.0 adopted,
+# customized as follows. Each version is ported where it applies; the
+# template's changelog below is unchanged.
+#   - v1.25.1: the three lease steps are bounded and never skipped, by image
+#     ID with --pull never, rebuilding once if an image is gone.
+#   - v1.25.2: not applicable (IT_LEASE_ID, `docker tag`): this repository
+#     runs every image by the ID its lease holds, never by a tag.
+#     reap-stale-ci-stacks.sh v4 was already here as the in-use-by-ID check.
+#   - v1.25.3: the lease steps and reap-stale-ci-stacks.sh v5 share the image
+#     lock. No re-tag step, so no image-lock.sh file.
+#   - v1.25.4: already here (`types`, DS-3134).
+#   - v1.26: a draft PR runs no CI (`changes`, integration, arch-gates,
+#     lint-gates skip; image skips with `changes`; soak is dispatch and
+#     schedule only), and CI Gate fails on a draft.
+#   - v1.26.1: RELEASABILITY_TEST is a make target here and is empty: this
+#     repository has no releasability test, the hook and step stay.
+#   - v1.26.2: already here (DS-3465, #54), the literal cancel-in-progress.
+#   - v1.27.0: lint-gates job (toolchain image alone, no probe step, no
+#     GO_BUILD_TAGS), `make lint` is Android lint alone, in CI Gate as `pr`.
 # v1.25 (Company Agent m857, 2026-10-20): main has one concurrency group per
 # event, so a newer push to main cancels the older in-progress main push run.
 # At 20:00Z go-qrdb had three main-push runs in progress on three commits and
@@ -370,6 +389,12 @@ env:
   # v1.24 (CA m749, m751 (a)): the files a docs-only PR may touch. CUSTOMIZE: narrow it
   # in a repo that embeds or generates from docs/ (go:embed, OpenAPI, protos).
   DOCS_ONLY_PATTERN: '(\.md$|^docs/)'
+  # v1.26.1 (Company Agent m1128 (9)): the repository's releasability test, which
+  # a docs-only PR still runs because make coverage skips on it. CUSTOMIZE
+  # (xkey-android): a make target name (the template's is a `go test`
+  # argument list). Empty: this repository has no such test, so the hook
+  # and its docs-only step stay and run nothing.
+  RELEASABILITY_TEST: ""
   # CUSTOMIZE (xkey-android): the devcontainer images' names and fresh trusted
   # builds (Codex reviews 6470 and 6544 on PR #40). A push to main and a
   # schedule or dispatch on main are trusted; every other run is pr. Both come
@@ -395,6 +420,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
+    # v1.26: a draft PR runs no CI; the image job needs this one and skips with it.
+    if: ${{ !github.event.pull_request.draft }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         if: ${{ github.event_name == 'pull_request' && env.CI_FULL_TIER != 'true' }}
@@ -539,16 +566,76 @@ jobs:
       # the stages that run it (Codex review 6544), and each lease carries its
       # expiry, LEASE_SECONDS from now (ci.lease.expires, a Unix time;
       # reap-stale-ci-stacks.sh), so a cancelled job's lease stops counting.
+      # v1.25.1: the lease is bounded and never skipped: it leases each image
+      # by ID with --pull never, and if one is gone it builds both once and
+      # leases again; an image still missing fails the step.
+      # v1.25.2: not applicable here. Every later step runs the images by the
+      # IDs these leases hold, never by a tag, so there is no IT_LEASE_ID and
+      # no re-tag for a reaper's `docker image rm <tag>` to undo.
+      # v1.25.3: the leases are taken under the daemon's image lock, a created
+      # container named <prefix>image-lock that reap-stale-ci-stacks.sh v5
+      # takes around its in-use check and removals. A lock created more than
+      # 600 s ago is removed by its id; a step waits 660 s for it, then fails.
       - name: Lease the images
+        env:
+          IMAGE_ID_DIR: ${{ runner.temp }}/image-ids
         run: |
-          lease() {
-            local name
-            name="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-            docker create --name "$name" --label "ci.lease.expires=$(($(date +%s) + LEASE_SECONDS))" "$2" true >/dev/null
-            echo "$1=$name" >> "$GITHUB_ENV"
+          image_lock() {
+            local lock="${CI_STACK_PREFIX}image-lock" held at t i
+            for ((i = 0; i < 660; i++)); do
+              docker image inspect "$lock:base" >/dev/null 2>&1 ||
+                head -c 1024 /dev/zero | docker import - "$lock:base" >/dev/null 2>&1 || true
+              IMAGE_LOCK_ID=$(docker create --pull never --name "$lock" "$lock:base" true 2>/dev/null) && return 0
+              IMAGE_LOCK_ID=
+              if read -r held at < <(docker inspect -f '{{.Id}} {{.Created}}' "$lock" 2>/dev/null) &&
+                t=$(date -d "$at" +%s 2>/dev/null) && [ $(($(date +%s) - t)) -ge 600 ]; then
+                echo "removing the stale image lock $lock (created $at)"
+                docker rm "$held" >/dev/null 2>&1 || true
+                continue
+              fi
+              sleep 1
+            done
+            echo "::error::the image lock $lock was not free within 660 s"
+            return 1
           }
-          lease IT_LEASE "$IT_IMAGE"
-          lease TC_LEASE "$TOOLCHAIN_IMAGE"
+          image_unlock() {
+            [ -z "${IMAGE_LOCK_ID:-}" ] || docker rm "$IMAGE_LOCK_ID" >/dev/null 2>&1 || true
+            IMAGE_LOCK_ID=
+          }
+          trap image_unlock EXIT
+          leased=()
+          # take_leases: a lease on each image; none is kept when one fails.
+          take_leases() {
+            local pair id name
+            leased=()
+            for pair in "IT_LEASE=$IT_IMAGE" "TC_LEASE=$TOOLCHAIN_IMAGE"; do
+              id=${pair#*=}
+              name="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+              if ! docker create --pull never --name "$name" --label "ci.lease.expires=$(($(date +%s) + LEASE_SECONDS))" "$id" true >/dev/null; then
+                [ "${#leased[@]}" -eq 0 ] || docker rm "${leased[@]#*=}" >/dev/null 2>&1 || true
+                leased=()
+                return 1
+              fi
+              leased+=("${pair%%=*}=$name")
+            done
+          }
+          image_lock || exit 1
+          if ! take_leases; then
+            image_unlock
+            echo "an image is missing or went before its lease; building the images once"
+            it_tag=$(make -s it-image)
+            make docker-build IT_IMAGE="$it_tag"
+            IT_IMAGE=$(make -s it-image-id IT_IMAGE="$it_tag")
+            TOOLCHAIN_IMAGE=$(make -s toolchain-image-id)
+            { echo "TOOLCHAIN_IMAGE=$TOOLCHAIN_IMAGE"; echo "IT_IMAGE=$IT_IMAGE"; } >> "$GITHUB_ENV"
+            image_lock || exit 1
+            if ! take_leases; then
+              echo "::error::an image is missing after one rebuild, so this job holds no lease on it"
+              exit 1
+            fi
+          fi
+          image_unlock
+          printf '%s\n' "${leased[@]}" >> "$GITHUB_ENV"
 
       # v1.22: bound this repo's cache volumes on the host before the stages
       # add to them (ci-standard.md §6). It never fails the job.
@@ -562,6 +649,17 @@ jobs:
       - name: make lint
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint"
+      # v1.27: the repository's own gates (make lint-gates) run in the
+      # lint-gates job beside this one, never here and never as a prerequisite
+      # of lint.
+
+      # v1.26.1 (Company Agent m1128 (9)): a docs-only PR skips make coverage, so
+      # it runs the releasability test alone; any other run gets it from make
+      # coverage. CUSTOMIZE (xkey-android): RELEASABILITY_TEST names a make
+      # target; it is empty here (no such test), so this step is skipped.
+      - name: Releasability test (docs-only PR)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.changes.outputs.docs_only == 'true' }}
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make $RELEASABILITY_TEST"
 
       # CUSTOMIZE (xkey-android): the build-tag assertion is removed with
       # GO_BUILD_TAGS (scripts/assert-build-tags.sh is Go's; Gradle has no tags).
@@ -631,6 +729,129 @@ jobs:
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
           [ -z "${TC_LEASE:-}" ] || docker rm "$TC_LEASE" >/dev/null || true
 
+  # v1.27 (Company Agent m1192 (6), item 27): the repository's own gates run
+  # in this job, in parallel with the image job's `make lint`, not in series
+  # after it, so Lint's wall time is the longer of the two and not their sum.
+  # `make -k lint-gates` is actionlint over .github/workflows and the gate
+  # tests for the workflow scripts (closing links, revert-red-main, the
+  # reaper, deps-check); `make lint` is Android lint alone, so no gate runs
+  # twice. A lint-class check: it is on the PR tier and runs on a docs-only PR.
+  # CUSTOMIZE (xkey-android): the Makefile always defines lint-gates, so the
+  # template's probe step is dropped. The job needs only the toolchain image,
+  # which `make docker-build-toolchain` builds or reuses (the integration image
+  # is the image job's), and it leases that image by ID as the image job does.
+  # The gates are offline (stubbed docker, Gitea and a local remote; fixtures),
+  # so IN_IMAGE_NETWORK stays none. Needs in the toolchain image: actionlint
+  # and shellcheck (the Dockerfile's pinned actionlint and apt shellcheck),
+  # bash, git, jq and make. No gate needs python3.
+  lint-gates:
+    name: Lint Gates [toolchain image]
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    if: ${{ !github.event.pull_request.draft }}   # v1.26
+    timeout-minutes: 30       # CUSTOMIZE: the gates run in minutes; this is honest headroom
+    env:
+      CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      # v1.22: the cache volumes' trust class (as in the image job).
+      CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
+      CI_CACHE: 'off'         # CUSTOMIZE (xkey-android): as in the image job
+      LEASE_SECONDS: 2100     # CUSTOMIZE (xkey-android): timeout-minutes plus 5 min
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      # v1.21.1: mask the forge credentials before any other step (as above).
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      - name: Reap stale CI stacks
+        env:
+          REAP_IMAGE_REPOS: ${{ github.event.repository.name }}-toolchain
+        run: scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
+
+      # CUSTOMIZE (xkey-android): the toolchain image alone, run by ID (as in
+      # the image job).
+      - name: Build the toolchain image
+        env:
+          IMAGE_ID_DIR: ${{ runner.temp }}/image-ids
+        run: |
+          make docker-build-toolchain
+          tc=$(make -s toolchain-image-id)
+          echo "toolchain image $(make -s toolchain-image) = $tc"
+          echo "TOOLCHAIN_IMAGE=$tc" >> "$GITHUB_ENV"
+
+      # The image job's lease (v1.25.1 and v1.25.3) on the toolchain image:
+      # bounded, under the image lock, rebuilt once if the image is gone.
+      - name: Lease the toolchain image
+        env:
+          IMAGE_ID_DIR: ${{ runner.temp }}/image-ids
+        run: |
+          lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+          image_lock() {
+            local lock="${CI_STACK_PREFIX}image-lock" held at t i
+            for ((i = 0; i < 660; i++)); do
+              docker image inspect "$lock:base" >/dev/null 2>&1 ||
+                head -c 1024 /dev/zero | docker import - "$lock:base" >/dev/null 2>&1 || true
+              IMAGE_LOCK_ID=$(docker create --pull never --name "$lock" "$lock:base" true 2>/dev/null) && return 0
+              IMAGE_LOCK_ID=
+              if read -r held at < <(docker inspect -f '{{.Id}} {{.Created}}' "$lock" 2>/dev/null) &&
+                t=$(date -d "$at" +%s 2>/dev/null) && [ $(($(date +%s) - t)) -ge 600 ]; then
+                echo "removing the stale image lock $lock (created $at)"
+                docker rm "$held" >/dev/null 2>&1 || true
+                continue
+              fi
+              sleep 1
+            done
+            echo "::error::the image lock $lock was not free within 660 s"
+            return 1
+          }
+          image_unlock() {
+            [ -z "${IMAGE_LOCK_ID:-}" ] || docker rm "$IMAGE_LOCK_ID" >/dev/null 2>&1 || true
+            IMAGE_LOCK_ID=
+          }
+          trap image_unlock EXIT
+          take_lease() {
+            docker create --pull never --name "$lease" --label "ci.lease.expires=$(($(date +%s) + LEASE_SECONDS))" "$TOOLCHAIN_IMAGE" true >/dev/null
+          }
+          image_lock || exit 1
+          if ! take_lease; then
+            image_unlock
+            echo "toolchain image $TOOLCHAIN_IMAGE is missing or went before its lease; building it once"
+            make docker-build-toolchain
+            TOOLCHAIN_IMAGE=$(make -s toolchain-image-id)
+            echo "TOOLCHAIN_IMAGE=$TOOLCHAIN_IMAGE" >> "$GITHUB_ENV"
+            image_lock || exit 1
+            if ! take_lease; then
+              echo "::error::the toolchain image $TOOLCHAIN_IMAGE is missing after one rebuild, so this job holds no lease on it"
+              exit 1
+            fi
+          fi
+          image_unlock
+          echo "TC_LEASE=$lease" >> "$GITHUB_ENV"
+
+      # v1.22: bound this repo's cache volumes (as in the image job). It never
+      # fails the job and keeps every volume a container mounts.
+      - name: Trim the CI caches
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
+
+      # -k reports every failing gate in one pass.
+      - name: make lint-gates
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        env:
+          IN_IMAGE_NETWORK: none   # CUSTOMIZE: bridge when a gate needs a network; none of these does
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make -k lint-gates"
+
+      - name: Tear down
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/image-ids"
+          [ -z "${TC_LEASE:-}" ] || docker rm "$TC_LEASE" >/dev/null || true
+
   # Integration tests run in the integration image (ci-standard.md §2), as a
   # compose stack on the runner host started by `make integration-test`. The
   # stack is named per run under the repo's prefix, the job reaps stale stacks
@@ -638,7 +859,8 @@ jobs:
   # v1.23: full tier only (CI_FULL_TIER's expression); never on a plain PR.
   integration:
     name: Integration [integration image]
-    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+    # v1.26: never on a draft PR, ci:full or not.
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     timeout-minutes: 60       # CUSTOMIZE
     env:
@@ -694,10 +916,63 @@ jobs:
           echo "IT_IMAGE=$it" >> "$GITHUB_ENV"
           rm -rf "$IMAGE_ID_DIR"
 
+      # v1.25.1: the lease is bounded and never skipped: it leases the image
+      # by ID with --pull never, and if the image is gone it builds it once
+      # and leases again; an image still missing fails the step.
+      # v1.25.2: not applicable here. Every later step runs the image by the ID
+      # this lease holds, never by a tag, so there is no IT_LEASE_ID and no
+      # re-tag for a reaper's `docker image rm <tag>` to undo.
+      # v1.25.3: the lease runs under the daemon's image lock, a created
+      # container named <prefix>image-lock that reap-stale-ci-stacks.sh v5
+      # takes around its in-use check and removals. A lock created more than
+      # 600 s ago is removed by its id; a step waits 660 s for it, then fails.
       - name: Lease the integration image
+        env:
+          IMAGE_ID_DIR: ${{ runner.temp }}/image-ids
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-          docker create --name "$lease" --label "ci.lease.expires=$(($(date +%s) + LEASE_SECONDS))" "$IT_IMAGE" true >/dev/null
+          image_lock() {
+            local lock="${CI_STACK_PREFIX}image-lock" held at t i
+            for ((i = 0; i < 660; i++)); do
+              docker image inspect "$lock:base" >/dev/null 2>&1 ||
+                head -c 1024 /dev/zero | docker import - "$lock:base" >/dev/null 2>&1 || true
+              IMAGE_LOCK_ID=$(docker create --pull never --name "$lock" "$lock:base" true 2>/dev/null) && return 0
+              IMAGE_LOCK_ID=
+              if read -r held at < <(docker inspect -f '{{.Id}} {{.Created}}' "$lock" 2>/dev/null) &&
+                t=$(date -d "$at" +%s 2>/dev/null) && [ $(($(date +%s) - t)) -ge 600 ]; then
+                echo "removing the stale image lock $lock (created $at)"
+                docker rm "$held" >/dev/null 2>&1 || true
+                continue
+              fi
+              sleep 1
+            done
+            echo "::error::the image lock $lock was not free within 660 s"
+            return 1
+          }
+          image_unlock() {
+            [ -z "${IMAGE_LOCK_ID:-}" ] || docker rm "$IMAGE_LOCK_ID" >/dev/null 2>&1 || true
+            IMAGE_LOCK_ID=
+          }
+          trap image_unlock EXIT
+          take_lease() {
+            docker create --pull never --name "$lease" --label "ci.lease.expires=$(($(date +%s) + LEASE_SECONDS))" "$IT_IMAGE" true >/dev/null
+          }
+          image_lock || exit 1
+          if ! take_lease; then
+            image_unlock
+            echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
+            it_tag=$(make -s it-image)
+            make docker-build-it IT_IMAGE="$it_tag"
+            IT_IMAGE=$(make -s it-image-id IT_IMAGE="$it_tag")
+            echo "IT_IMAGE=$IT_IMAGE" >> "$GITHUB_ENV"
+            rm -rf "$IMAGE_ID_DIR"
+            image_lock || exit 1
+            if ! take_lease; then
+              echo "::error::the integration image $IT_IMAGE is missing after one rebuild, so this job holds no lease on it"
+              exit 1
+            fi
+          fi
+          image_unlock
           echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
 
       # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
@@ -787,10 +1062,63 @@ jobs:
           echo "IT_IMAGE=$it" >> "$GITHUB_ENV"
           rm -rf "$IMAGE_ID_DIR"
 
+      # v1.25.1: the lease is bounded and never skipped: it leases the image
+      # by ID with --pull never, and if the image is gone it builds it once
+      # and leases again; an image still missing fails the step.
+      # v1.25.2: not applicable here. Every later step runs the image by the ID
+      # this lease holds, never by a tag, so there is no IT_LEASE_ID and no
+      # re-tag for a reaper's `docker image rm <tag>` to undo.
+      # v1.25.3: the lease runs under the daemon's image lock, a created
+      # container named <prefix>image-lock that reap-stale-ci-stacks.sh v5
+      # takes around its in-use check and removals. A lock created more than
+      # 600 s ago is removed by its id; a step waits 660 s for it, then fails.
       - name: Lease the integration image
+        env:
+          IMAGE_ID_DIR: ${{ runner.temp }}/image-ids
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-          docker create --name "$lease" --label "ci.lease.expires=$(($(date +%s) + LEASE_SECONDS))" "$IT_IMAGE" true >/dev/null
+          image_lock() {
+            local lock="${CI_STACK_PREFIX}image-lock" held at t i
+            for ((i = 0; i < 660; i++)); do
+              docker image inspect "$lock:base" >/dev/null 2>&1 ||
+                head -c 1024 /dev/zero | docker import - "$lock:base" >/dev/null 2>&1 || true
+              IMAGE_LOCK_ID=$(docker create --pull never --name "$lock" "$lock:base" true 2>/dev/null) && return 0
+              IMAGE_LOCK_ID=
+              if read -r held at < <(docker inspect -f '{{.Id}} {{.Created}}' "$lock" 2>/dev/null) &&
+                t=$(date -d "$at" +%s 2>/dev/null) && [ $(($(date +%s) - t)) -ge 600 ]; then
+                echo "removing the stale image lock $lock (created $at)"
+                docker rm "$held" >/dev/null 2>&1 || true
+                continue
+              fi
+              sleep 1
+            done
+            echo "::error::the image lock $lock was not free within 660 s"
+            return 1
+          }
+          image_unlock() {
+            [ -z "${IMAGE_LOCK_ID:-}" ] || docker rm "$IMAGE_LOCK_ID" >/dev/null 2>&1 || true
+            IMAGE_LOCK_ID=
+          }
+          trap image_unlock EXIT
+          take_lease() {
+            docker create --pull never --name "$lease" --label "ci.lease.expires=$(($(date +%s) + LEASE_SECONDS))" "$IT_IMAGE" true >/dev/null
+          }
+          image_lock || exit 1
+          if ! take_lease; then
+            image_unlock
+            echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
+            it_tag=$(make -s it-image)
+            make docker-build-it IT_IMAGE="$it_tag"
+            IT_IMAGE=$(make -s it-image-id IT_IMAGE="$it_tag")
+            echo "IT_IMAGE=$IT_IMAGE" >> "$GITHUB_ENV"
+            rm -rf "$IMAGE_ID_DIR"
+            image_lock || exit 1
+            if ! take_lease; then
+              echo "::error::the integration image $IT_IMAGE is missing after one rebuild, so this job holds no lease on it"
+              exit 1
+            fi
+          fi
+          image_unlock
           echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
 
       # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
@@ -847,6 +1175,7 @@ jobs:
   arch-gates:
     name: Architecture Gates
     runs-on: ubuntu-latest
+    if: ${{ !github.event.pull_request.draft }}   # v1.26
     # CUSTOMIZE (xkey-android): no OBJSTORE_SEAMS and no go-objstore step; a
     # Kotlin app has no Go imports and stores no blobs. The repo's own rule
     # stands in: coroutines for async work, never blocking (CLAUDE.md), so
@@ -876,7 +1205,7 @@ jobs:
     if: always()
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs.
-    needs: [changes, image, integration, soak, arch-gates]
+    needs: [changes, image, lint-gates, integration, soak, arch-gates]
     steps:
       - name: Fail closed on any non-success
         env:
@@ -886,7 +1215,13 @@ jobs:
           FULL_TIER: ${{ env.CI_FULL_TIER }}
           # v1.24: a `nightly` job runs on schedule and workflow_dispatch only.
           NIGHTLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          # v1.26: a draft PR runs no CI, so its gate fails rather than pass on skips.
+          DRAFT: ${{ github.event.pull_request.draft == true }}
         run: |
+          if [ "${DRAFT}" = true ]; then
+            echo "FAIL draft pull request: no CI runs on a draft. Mark it ready, then push an empty commit to start its run."
+            exit 1
+          fi
           BAD=0
           echo "full tier selected: ${FULL_TIER}; nightly selected: ${NIGHTLY}"
           check() { # <job> <result> <pr|full|nightly>
@@ -908,6 +1243,7 @@ jobs:
           # workflow_dispatch is nightly; every other job is pr.
           check changes     "${{ needs.changes.result }}" pr
           check image       "${{ needs.image.result }}" pr
+          check lint-gates  "${{ needs.lint-gates.result }}" pr
           check integration "${{ needs.integration.result }}" full
           check soak        "${{ needs.soak.result }}" nightly
           check arch-gates  "${{ needs.arch-gates.result }}" pr

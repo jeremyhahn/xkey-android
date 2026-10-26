@@ -382,5 +382,22 @@ rm "${FAKE}/fail-get"; run
 expect comment-read "rerun exit" "${RC}" 0
 expect_fresh comment-read
 
+# 18. Only `make lint-gates` failed (v1.27 lint split, Codex review 7474): it is a
+# deterministic stage, so the merge is reverted and relanded like any other.
+setup lint-gates
+jq -n '{jobs: [{id: 11, name: "Lint gates", conclusion: "failure", steps: [{name: "make lint-gates", conclusion: "failure"}]}]}' > "${FAKE}/jobs.json"
+run
+expect lint-gates "exit" "${RC}" 0
+expect_fresh lint-gates
+
+# 19. A failed step that is no deterministic stage (a name that only starts like
+# one, or a setup step) never reverts, and writes nothing.
+setup not-a-stage
+jq -n '{jobs: [{id: 11, name: "Lint gates", conclusion: "failure", steps: [{name: "make lint-gates-extra", conclusion: "failure"}, {name: "Set up job", conclusion: "failure"}]}]}' > "${FAKE}/jobs.json"
+run
+expect not-a-stage "exit" "${RC}" 0
+expect not-a-stage "writes" "$(wc -l < "${FAKE}/writes.log")" 0
+expect not-a-stage "reason" "$([[ ${OUT} == *"no failed step in run 1 is a deterministic stage"* ]] && echo yes)" yes
+
 [ "${fails}" -eq 0 ] || { echo "revert-red-main-test: ${fails} of ${runs} failed"; exit 1; }
 echo "revert-red-main-test: all ${runs} passed"
