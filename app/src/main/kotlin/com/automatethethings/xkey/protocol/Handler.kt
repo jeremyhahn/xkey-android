@@ -6,7 +6,9 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
+import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.ca.DeviceIdentity
 import com.automatethethings.xkey.ca.DeviceIdentityException
@@ -27,12 +29,16 @@ import com.automatethethings.xkey.crypto.ECDHException
 import com.automatethethings.xkey.crypto.EncryptionException
 import com.automatethethings.xkey.crypto.HMACException
 import com.automatethethings.xkey.crypto.KeyGenerationException
+import com.automatethethings.xkey.crypto.KeyInvalidatedException
 import com.automatethethings.xkey.crypto.KeyNotFoundException
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SigningException
 import com.automatethethings.xkey.crypto.StrongBoxUnavailableException
 import com.automatethethings.xkey.crypto.UnsupportedAlgorithmException
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.crypto.UserVerificationKey
+import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -110,6 +116,10 @@ interface MessageSender {
  * @param keystoreManager Manager for cryptographic key operations.
  * @param biometricLauncher Optional launcher for biometric authentication from services.
  * @param sessionAuthManager Optional manager for session-based authentication state.
+ * @param userVerificationKey The key `local.verifyUser` signs with; null for
+ *   the Keystore one. Tests supply a software key.
+ * @param userVerificationPrompt The biometric prompt that unlocks that key for
+ *   one signature; null for the activity or [BiometricHelper] prompt.
  */
 class RequestHandler(
     private val context: Context,
@@ -118,7 +128,9 @@ class RequestHandler(
     private val sessionAuthManager: SessionAuthManager?,
     private val pairedDeviceRepository: PairedDeviceRepository? = null,
     private val pinManager: PinManager? = null,
-    private val pivKeyManager: PivKeyManager? = null
+    private val pivKeyManager: PivKeyManager? = null,
+    userVerificationKey: UserVerificationKey? = null,
+    private val userVerificationPrompt: UserVerificationPrompt? = null
 ) {
     companion object {
         private const val TAG = "RequestHandler"
@@ -147,6 +159,24 @@ class RequestHandler(
             1 to "tee",
             2 to "strongbox"
         )
+
+        /**
+         * The context a transport installs around one request that arrived on a
+         * connection it *serves*: that connection's channel binding and
+         * authenticated peer, for as long as the request runs.
+         *
+         * One handler serves BLE, TCP and USB at once, so nothing about the
+         * session a request arrived on may be read from handler-wide state: a
+         * second transport's handshake would overwrite it, and a verifyUser or
+         * attestDevice answer would then commit to the other desktop's channel
+         * (Codex 7346). Unlike a [handleRawRequest] caller session, a served
+         * connection is the one the installed message sender reaches.
+         *
+         * @param binding the binding of the connection the request arrived on
+         * @param peerPublicKeyHex that connection's authenticated peer static key
+         */
+        fun servedConnection(binding: SessionBindingProvider, peerPublicKeyHex: String?): CoroutineContext =
+            CallerSession(binding, peerPublicKeyHex, served = true)
     }
 
     // Unified key storage DAO
@@ -193,16 +223,6 @@ class RequestHandler(
     private var connectedDevicePublicKeyHex: String? = null
 
     /**
-     * Supplies the live Noise session's static keys and prologue, from which
-     * `local.attestDevice` derives the anti-relay channel binding.
-     *
-     * Updated via [setSessionBindingProvider] by whichever transport owns the
-     * session.
-     */
-    @Volatile
-    private var sessionBindingProvider: SessionBindingProvider? = null
-
-    /**
      * This device's persistent attested identity (go-xkms#129).
      *
      * Built from nothing but the Keystore, so it is created here rather than
@@ -211,6 +231,14 @@ class RequestHandler(
      * that must not run until an attestation is actually asked for.
      */
     private val deviceAttestationKey by lazy { DeviceAttestationKey() }
+
+    /**
+     * The key `local.verifyUser` signs with, never the DAK (ruling 167). Lazy
+     * for the same reason as [deviceAttestationKey].
+     */
+    private val uvk: UserVerificationKey by lazy {
+        userVerificationKey ?: KeystoreUserVerificationKey(context)
+    }
 
     /**
      * Message sender for sending notifications to the connected laptop.
@@ -252,6 +280,7 @@ class RequestHandler(
         MethodNames.LOCAL_SET_KEY_POLICY to ::handleLocalSetKeyPolicy,
         MethodNames.LOCAL_ATTEST_KEY to ::handleLocalAttestKey,
         MethodNames.LOCAL_ATTEST_DEVICE to ::handleLocalAttestDevice,
+        MethodNames.LOCAL_VERIFY_USER to ::handleLocalVerifyUser,
         // Device enrollment, this phone as the enrollee.
         MethodNames.LOCAL_GET_DEVICE_ENROLLMENT_REQUEST to ::handleLocalGetDeviceEnrollmentRequest,
         MethodNames.LOCAL_STORE_DEVICE_CREDENTIAL to ::handleLocalStoreDeviceCredential,
@@ -350,21 +379,6 @@ class RequestHandler(
     fun getConnectedDevicePublicKeyHex(): String? = connectedDevicePublicKeyHex
 
     /**
-     * Supplies the live Noise session facts that `local.attestDevice` derives its
-     * channel binding from.
-     *
-     * Set by the transport when a session is established and cleared to null when
-     * it ends, alongside [setConnectedDevicePublicKeyHex]. Without it this device
-     * cannot bind an attestation to a channel and refuses to attest at all,
-     * rather than signing a transcript that would let a relayed signature pass.
-     *
-     * @param provider the provider, or null on disconnect.
-     */
-    fun setSessionBindingProvider(provider: SessionBindingProvider?) {
-        sessionBindingProvider = provider
-    }
-
-    /**
      * Sets the message sender for sending notifications to the connected laptop.
      *
      * This should be called when a BLE connection is established (with sender)
@@ -393,11 +407,11 @@ class RequestHandler(
      * phone-initiated direction, where the desktop sends `local.attestDevice`
      * right after the handshake and refuses the session without a verified answer.
      *
-     * The same dispatch as [handleRawRequest]; only the session differs. The
-     * transport-installed provider and peer key describe whichever session this
-     * phone is *serving*, which may be a different desktop, so for the duration
-     * of this call [binding] and [peerPublicKeyHex] stand in for them. Nothing
-     * global changes, so a concurrent responder session keeps its own.
+     * The same dispatch as [handleRawRequest]; only the session differs. For
+     * the duration of this call [binding] and [peerPublicKeyHex] describe the
+     * session the request arrived on, as [servedConnection] does for a session
+     * this phone serves. Nothing global changes, so a concurrent responder
+     * session keeps its own.
      *
      * @param binding the channel binding of the session [data] arrived on
      * @param peerPublicKeyHex that session's authenticated peer static key
@@ -406,18 +420,23 @@ class RequestHandler(
         data: ByteArray,
         binding: SessionBindingProvider,
         peerPublicKeyHex: String?,
-    ): ByteArray = withContext(CallerSession(binding, peerPublicKeyHex)) {
+    ): ByteArray = withContext(CallerSession(binding, peerPublicKeyHex, served = false)) {
         handleRawRequest(data)
     }
 
     /**
-     * The session a [handleRawRequest] call was made for, carried in the
-     * coroutine context so it reaches the handler without a second, forked
-     * dispatch path.
+     * The session a request arrived on, carried in the coroutine context so it
+     * reaches the handler without a second, forked dispatch path: a session
+     * this phone opened ([handleRawRequest] with a binding) or one it serves
+     * ([servedConnection]).
+     *
+     * @property served whether this phone serves the session, which is then
+     *   the one the installed message sender reaches
      */
     private class CallerSession(
         val binding: SessionBindingProvider,
         val peerPublicKeyHex: String?,
+        val served: Boolean,
     ) : AbstractCoroutineContextElement(Key) {
         companion object Key : CoroutineContext.Key<CallerSession>
     }
@@ -1976,8 +1995,8 @@ class RequestHandler(
             rpName = null,
             requestId = "$operationType-${request.id}",
             // The installed sender reaches the desktop this phone is serving,
-            // which is not the one waiting on a caller session's request.
-            notifyLaptop = currentCoroutineContext()[CallerSession] == null
+            // which is not the one waiting on a phone-initiated request.
+            notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
         )
 
         try {
@@ -2238,40 +2257,167 @@ class RequestHandler(
     }
 
     /**
+     * Handles `local.verifyUser` — on-demand user verification for a paired
+     * desktop (owner ruling 167, go-xkms#1712).
+     *
+     * Signs `"xkey-attest-transcript-v1" || 0x0b || "verify-user" || nonce ||
+     * channelBinding || SHA-256(UVK SPKI)` with the [UserVerificationKey], which
+     * Keystore unlocks only for a Class 3 biometric bound to that one signature.
+     * The answer carries the UVK chain, so the desktop can check the key's
+     * authorization list, and the signature, so it can check the user was
+     * present for this nonce on this session.
+     *
+     * Always prompts: the attestation and UV policies do not apply, since the
+     * prompt *is* the answer. Cancel, lockout and a missing biometric are
+     * errors, never a result. A pairing record is neither read nor written; the
+     * transport has already refused an unconfirmed session.
+     *
+     * Uses [Dispatchers.Main] because biometric prompts require the main thread.
+     */
+    private suspend fun handleLocalVerifyUser(request: Request): Response = withContext(Dispatchers.Main) {
+        val params = request.params
+            ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
+
+        val verifyParams = LocalVerifyUserParams.fromJson(params)
+        val nonce = verifyParams.getNonceBytes()
+
+        // As for attestation: derived from this device's own session, and a
+        // session we cannot bind to is a refusal.
+        val channelBinding = deriveChannelBinding()
+
+        val (certChain, signature) = try {
+            signVerifyUser(request, nonce, channelBinding)
+        } catch (e: KeyInvalidatedException) {
+            // A new biometric enrollment invalidated the UVK. Replace it and
+            // ask once more; a second invalidation is not retried.
+            Log.w(TAG, "User verification key invalidated; regenerating once")
+            uvk.regenerate()
+            try {
+                signVerifyUser(request, nonce, channelBinding)
+            } catch (again: KeyInvalidatedException) {
+                throw SigningException("user verification key was invalidated again", again)
+            }
+        }
+
+        val result = LocalVerifyUserResult(
+            protocolVersion = AttestTranscript.PROTOCOL_VERSION,
+            certificateChain = certChain.map { Base64.getEncoder().encodeToString(it.encoded) },
+            signature = Base64.getEncoder().encodeToString(signature),
+            signatureAlgorithm = KeystoreUserVerificationKey.WIRE_SIGNATURE_ALGORITHM
+        )
+
+        Log.i(TAG, "User verification completed: ${certChain.size} certificates in the chain")
+        Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * Builds the verify-user transcript over the UVK's current fingerprint and
+     * has the user approve its signature. Returns the chain the transcript
+     * commits to alongside the signature, so the two cannot disagree.
+     */
+    private suspend fun signVerifyUser(
+        request: Request,
+        nonce: ByteArray,
+        channelBinding: ByteArray
+    ): Pair<List<java.security.cert.X509Certificate>, ByteArray> {
+        val certChain = uvk.chain()
+        val transcript = AttestTranscript.build(
+            purpose = AttestTranscript.PURPOSE_VERIFY_USER,
+            nonce = nonce,
+            channelBinding = channelBinding,
+            deviceFingerprint = AttestedKeyFingerprint.of(certChain.first().encoded)
+        )
+
+        val isLocked = keyguardManager.isKeyguardLocked
+        showBiometricNotificationIfLocked(
+            operationType = "verifyUser",
+            rpName = null,
+            requestId = "verifyUser-${request.id}",
+            notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
+        )
+        return try {
+            val title = context.getString(R.string.verify_user_prompt_title)
+            val subtitle = context.getString(R.string.verify_user_prompt_subtitle)
+            val signature = userVerificationPrompt?.sign(transcript, title, subtitle, isLocked)
+                ?: promptWithUserVerificationKey(transcript, title, subtitle, isLocked)
+            certChain to signature
+        } finally {
+            cancelBiometricNotification()
+        }
+    }
+
+    /**
+     * The prompt used when no [UserVerificationPrompt] is injected: a Class 3 `BiometricPrompt`
+     * whose `CryptoObject` wraps the UVK [java.security.Signature].
+     *
+     * The signature is initialised here first even on the activity path, so an
+     * invalidated key surfaces as [KeyInvalidatedException] before any prompt.
+     */
+    private suspend fun promptWithUserVerificationKey(
+        message: ByteArray,
+        title: String,
+        subtitle: String,
+        showOnLockScreen: Boolean
+    ): ByteArray {
+        val signature = uvk.initSignature()
+        if (biometricLauncher != null) {
+            return biometricLauncher.requestCryptoSignature(
+                credentialId = "user-verification",
+                dataHash = message,
+                title = title,
+                subtitle = subtitle,
+                showOnLockScreen = showOnLockScreen,
+                keyAlias = KeystoreUserVerificationKey.ALIAS
+            )
+        }
+        val helper = biometricHelper
+            ?: throw ProtocolException(
+                "No activity available for biometric prompt",
+                errorCode = ErrorCodes.INTERNAL_ERROR
+            )
+        helper.authenticate(
+            cryptoObject = BiometricPrompt.CryptoObject(signature),
+            title = title,
+            subtitle = subtitle,
+            description = null
+        )
+        return try {
+            signature.update(message)
+            signature.sign()
+        } catch (e: Exception) {
+            throw SigningException("user verification key could not sign the transcript", e)
+        }
+    }
+
+    /**
      * The 32-byte channel binding for the session this request arrived on,
      * derived entirely from local state — the request carries no such field.
+     * A divergence from the desktop's own derivation surfaces because the
+     * desktop's signature check fails closed on it. The value itself is never
+     * logged: a channel binding identifies the session.
      *
-     * The derived value is logged at debug level, and the desktop logs its own.
-     * Should the two ends ever disagree, diffing the two logs says *which* side
-     * derived what; the discarded request field could only ever have said that
-     * they differed. The divergence still surfaces regardless, because the
-     * desktop's signature check fails closed on it.
-     *
-     * @throws ProtocolException when no session binding is available. Signing
-     *   without one would produce a transcript that commits to no channel, and
-     *   the desktop -- which rebuilds the transcript from its own session -- can
-     *   only reject it. Refusing here says why, rather than returning a signature
-     *   that looks well-formed and fails verification for reasons neither side
-     *   can see.
+     * @throws ProtocolException when the request carries no session binding.
+     *   Signing without one would produce a transcript that commits to no
+     *   channel, and the desktop -- which rebuilds the transcript from its own
+     *   session -- can only reject it. Refusing here says why, rather than
+     *   returning a signature that looks well-formed and fails verification for
+     *   reasons neither side can see.
      */
     private suspend fun deriveChannelBinding(): ByteArray {
-        // The caller's session when there is one, and then only that: a
-        // phone-initiated session that cannot bind must refuse, not fall back to
-        // whichever session this phone happens to be serving.
-        val provider = currentCoroutineContext()[CallerSession]?.binding ?: sessionBindingProvider
-        val binding = provider?.binding()
+        // The session the request arrived on, and only that. There is no
+        // handler-wide fallback: with BLE, TCP and USB sharing this handler, any
+        // other session is another desktop's channel (Codex 7346).
+        val binding = currentCoroutineContext()[CallerSession]?.binding?.binding()
             ?: throw ProtocolException(
                 "Device attestation requires an established Noise session to bind to",
                 errorCode = ErrorCodes.ATTESTATION_FAILED
             )
 
-        val derived = AttestTranscript.channelBinding(
+        return AttestTranscript.channelBinding(
             initiatorStaticPublicKey = binding.initiatorStaticPublicKey,
             responderStaticPublicKey = binding.responderStaticPublicKey,
             prologue = binding.prologue
         )
-        Log.d(TAG, "Derived attestation channel binding: ${derived.joinToString("") { "%02x".format(it) }}")
-        return derived
     }
 
     /**
@@ -2298,21 +2444,25 @@ class RequestHandler(
     /**
      * The authenticated peer whose per-device policy governs this request --
      * the attestation prompt, attestation freshness, the pairing fingerprint
-     * binding. That is the caller session's peer when the request arrived on
-     * one, and the served session's otherwise.
+     * binding. That is the peer of the connection the request arrived on, and
+     * the served peer only for a request that names no connection at all.
      *
      * A caller session is never backfilled from the global peer. That one
-     * belongs to whichever desktop this phone is serving, so its trust would
+     * belongs to whichever desktop this phone last served, so its trust would
      * decide a prompt -- or bind a fingerprint -- for a different machine.
      *
-     * @return the peer's static key hex, or null when there is no caller
-     *   session and no served peer either
-     * @throws ProtocolException when a caller session carries no peer key
+     * @return the peer's static key hex, or null when the request's connection
+     *   authenticated no peer, or names no connection and none is served
+     * @throws ProtocolException when a phone-initiated session carries no peer key
      */
     private suspend fun attestingPeerPublicKeyHex(): String? {
         val caller = currentCoroutineContext()[CallerSession] ?: return connectedDevicePublicKeyHex
         val peer = caller.peerPublicKeyHex
         if (peer.isNullOrEmpty()) {
+            // A served connection that authenticated no peer is an unknown
+            // peer, prompted for as before; a session this phone opened must
+            // name the desktop it opened it to.
+            if (caller.served) return null
             throw ProtocolException(
                 "Request arrived on a session with no authenticated peer key",
                 errorCode = ErrorCodes.ATTESTATION_FAILED

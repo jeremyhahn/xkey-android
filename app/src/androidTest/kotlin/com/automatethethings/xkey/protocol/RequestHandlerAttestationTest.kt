@@ -25,6 +25,7 @@ import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.UserVerificationPolicy
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.AfterClass
@@ -133,13 +134,22 @@ class RequestHandlerAttestationTest {
     }
 
     /**
+     * The binding of the connection every request here arrives on, as the
+     * transport installs it per connection.
+     */
+    private lateinit var connectionBinding: SessionBindingProvider
+
+    /** The authenticated peer of that connection. */
+    private var servedPeer: String? = null
+
+    /**
      * Baseline: a confirmed peer that does not demand a prior device
      * attestation, and no user verification, so the handlers run headless.
      */
     @Before
     fun resetHandlerState() {
-        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
-        handler.setSessionBindingProvider {
+        connectPeer(peerKeyHex)
+        connectionBinding = SessionBindingProvider {
             SessionBinding(initiatorStatic, responderStatic, sessionPrologue)
         }
         pairedDevices.updateDeviceSettings(
@@ -418,7 +428,7 @@ class RequestHandlerAttestationTest {
      */
     @Test
     fun attestDeviceRefusesWhenThereIsNoSessionToBindTo() {
-        handler.setSessionBindingProvider(null)
+        connectionBinding = SessionBindingProvider { null }
 
         assertEquals(
             ErrorCodes.ATTESTATION_FAILED,
@@ -506,7 +516,7 @@ class RequestHandlerAttestationTest {
         // Start from a clean binding so the assertion is about THIS attestation.
         pairedDevices.removeDevice(peerKeyHex)
         pairedDevices.addDevice(peerKeyHex, peerName)
-        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        connectPeer(peerKeyHex)
         assertNull(
             "precondition: a freshly paired device carries no fingerprint yet",
             pairedDevices.getDevice(peerKeyHex)?.deviceFingerprint
@@ -535,7 +545,7 @@ class RequestHandlerAttestationTest {
     fun attestDeviceDoesNotRebindTheFingerprintOnReattest() {
         pairedDevices.removeDevice(peerKeyHex)
         pairedDevices.addDevice(peerKeyHex, peerName)
-        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        connectPeer(peerKeyHex)
         val stale = "ff".repeat(32)
         pairedDevices.updateDeviceFingerprint(peerKeyHex, stale)
 
@@ -557,7 +567,7 @@ class RequestHandlerAttestationTest {
     fun attestDeviceWithoutAConnectedPeerBindsNothing() {
         pairedDevices.removeDevice(peerKeyHex)
         pairedDevices.addDevice(peerKeyHex, peerName)
-        handler.setConnectedDevicePublicKeyHex(null)
+        connectPeer(null)
 
         attestDevice(randomNonce(), AttestTranscript.PURPOSE_PAIR).ok()
 
@@ -663,7 +673,17 @@ class RequestHandlerAttestationTest {
      */
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
-        return runBlocking { handler.handleRequest(request) }
+        return runBlocking {
+            withContext(RequestHandler.servedConnection(connectionBinding, servedPeer)) {
+                handler.handleRequest(request)
+            }
+        }
+    }
+
+    /** The desktop this phone serves: the requests' connection, and the handler's served peer. */
+    private fun connectPeer(publicKeyHex: String?) {
+        servedPeer = publicKeyHex
+        handler.setConnectedDevicePublicKeyHex(publicKeyHex)
     }
 
     /**

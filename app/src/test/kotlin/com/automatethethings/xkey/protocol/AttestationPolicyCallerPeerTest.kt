@@ -39,6 +39,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -207,46 +208,72 @@ class AttestationPolicyCallerPeerTest {
     }
 
     // -----------------------------------------------------------------
-    // No caller session: the served peer decides, as before
+    // A served connection: its own peer decides
     // -----------------------------------------------------------------
 
     @Test
-    fun withNoCallerSessionAPairedServedPeerIsStillNotPrompted() = runTest {
-        serveIncomingSession(PAIRED_PEER)
-
-        handler.handleRawRequest(attestRequest())
+    fun aPairedServedPeerIsNotPrompted() = runTest {
+        onServedConnection(PAIRED_PEER) { handler.handleRawRequest(attestRequest()) }
 
         assertPrompts(0)
     }
 
     @Test
-    fun withNoCallerSessionAnUnpairedServedPeerIsStillPrompted() = runTest {
-        serveIncomingSession(UNPAIRED_PEER)
-
-        handler.handleRawRequest(attestRequest())
+    fun anUnpairedServedPeerIsPrompted() = runTest {
+        onServedConnection(UNPAIRED_PEER) { handler.handleRawRequest(attestRequest()) }
 
         assertPrompts(1)
     }
 
-    /** No caller session and no served peer either: prompt, never assume. */
+    /**
+     * The global served peer is whichever desktop connected last; a
+     * connection's own peer decides, never that one (Codex 7346).
+     */
     @Test
-    fun withNoCallerSessionAndNoServedPeerThePromptIsStillRequired() = runTest {
-        handler.setSessionBindingProvider(incomingBinding)
+    fun anotherConnectionsPairedPeerDoesNotExemptThisOne() = runTest {
+        handler.setConnectedDevicePublicKeyHex(PAIRED_PEER)
 
-        handler.handleRawRequest(attestRequest())
+        onServedConnection(UNPAIRED_PEER) { handler.handleRawRequest(attestRequest()) }
 
         assertPrompts(1)
+    }
+
+    /** A served connection that authenticated no peer: prompt, never assume. */
+    @Test
+    fun aServedConnectionWithNoPeerIsStillPrompted() = runTest {
+        handler.setConnectedDevicePublicKeyHex(PAIRED_PEER)
+
+        onServedConnection(null) { handler.handleRawRequest(attestRequest()) }
+
+        assertPrompts(1)
+    }
+
+    /**
+     * A request on no connection has no channel to bind to: it is refused
+     * before the policy is read, and the served peer lends it nothing.
+     */
+    @Test
+    fun aRequestOnNoConnectionIsRefusedWithoutAPrompt() = runTest {
+        handler.setConnectedDevicePublicKeyHex(PAIRED_PEER)
+
+        val response = handler.handleRawRequest(attestRequest())
+
+        assertEquals(ErrorCodes.ATTESTATION_FAILED, Response.fromJson(response).error?.code)
+        assertPrompts(0)
     }
 
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
-    /** What the transport installs when a desktop connects to this phone. */
+    /** The desktop this phone last served: a peer no other session may borrow. */
     private fun serveIncomingSession(peerPublicKeyHex: String) {
         handler.setConnectedDevicePublicKeyHex(peerPublicKeyHex)
-        handler.setSessionBindingProvider(incomingBinding)
     }
+
+    /** Runs [block] as the transport routes a request from a served connection. */
+    private suspend fun <T> onServedConnection(peerPublicKeyHex: String?, block: suspend () -> T): T =
+        withContext(RequestHandler.servedConnection(incomingBinding, peerPublicKeyHex)) { block() }
 
     private fun attestRequest(): ByteArray {
         val nonce = ByteArray(AttestTranscript.BINDING_SIZE) { (it + 1).toByte() }

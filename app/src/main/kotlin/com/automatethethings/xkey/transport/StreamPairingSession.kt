@@ -30,6 +30,7 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
 import com.automatethethings.xkey.protocol.SessionBinding
+import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.MessageSender
@@ -45,13 +46,18 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.Closeable
 import java.io.IOException
@@ -102,6 +108,17 @@ class StreamPairingSession(
         private const val IDENTITY_ACK_UNKNOWN: Byte = 0x00
         private const val FINGERPRINT_SIZE = 32
         private const val PROLOGUE_VERSION = "xkey-v1"
+
+        /**
+         * Frames read ahead of the request being answered. A request-response
+         * peer has one request in flight, plus the answers to the phone's own
+         * requests, which each client awaits one at a time: more than this
+         * ends the connection.
+         */
+        private const val FRAME_BUFFER = 16
+
+        /** How long the frames read before the end of a stream have to be delivered. */
+        private const val DRAIN_TIMEOUT_MS = 5_000L
     }
 
     /** What [transportMethods] add to each request routed to the shared handler. */
@@ -119,6 +136,9 @@ class StreamPairingSession(
 
     /** Closes a revoked connection's streams off the thread that removed the device. */
     private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Reads each connection's frames, so its end is seen while a request waits. */
+    private val readScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** The connection whose handshake completed most recently, while it lasts. */
     @Volatile private var activeConnection: Connection? = null
@@ -166,6 +186,15 @@ class StreamPairingSession(
 
         /** The request the message loop is waiting on, if any. */
         @Volatile var request: Job? = null
+
+        /** [request], when it is one the peer sent rather than a response being routed. */
+        @Volatile var inboundRequest: Job? = null
+
+        /** The peer's stream has ended: the frames already read are all it will send. */
+        @Volatile var inputEnded = false
+
+        /** Ends the connection if the frames read before the end of the stream are not delivered in time. */
+        @Volatile private var drainDeadline: Job? = null
 
         /** Completes when the connection is revoked or ends. */
         val over = CompletableDeferred<Unit>()
@@ -218,9 +247,29 @@ class StreamPairingSession(
             teardownScope.launch { closeStreams() }
         }
 
+        /**
+         * The peer will send nothing more. The connection stays live so the
+         * frames already read are still delivered -- a response the peer sent
+         * before it closed settles its request (Codex 7380) -- but the request
+         * the peer is waiting on, perhaps on a prompt, is cancelled: nobody
+         * will read its answer. A drain that has not finished by
+         * [DRAIN_TIMEOUT_MS], such as one stuck behind a write the peer no
+         * longer reads, ends the connection.
+         */
+        fun endInput() {
+            inputEnded = true
+            inboundRequest?.cancel()
+            drainDeadline = teardownScope.launch {
+                delay(DRAIN_TIMEOUT_MS)
+                end()
+            }
+            if (ended) drainDeadline?.cancel()
+        }
+
         /** Marks the connection ended, stops its request and closes its streams. */
         fun end() {
             synchronized(state) { ended = true }
+            drainDeadline?.cancel()
             stop()
             closeStreams()
         }
@@ -267,9 +316,6 @@ class StreamPairingSession(
             }
 
             connection.install()
-            requestHandler.setSessionBindingProvider {
-                connection.binding?.takeIf { connection.isCurrent }?.copyOf()
-            }
 
             // A device the user already approved does not have to re-confirm on
             // every reconnect: the Noise handshake cryptographically proves it
@@ -290,7 +336,6 @@ class StreamPairingSession(
                     activeConnection = null
                     messageRouter?.cancelAllPending()
                     requestHandler.setConnectedDevicePublicKeyHex(null)
-                    requestHandler.setSessionBindingProvider(null)
                 }
             }
         }
@@ -357,10 +402,75 @@ class StreamPairingSession(
         return StreamMessageFraming.readMessage(connection.input)
     }
 
+    /**
+     * Answers the peer's frames in order, one request at a time, while
+     * [readFrames] watches the stream: a peer that goes away while a request
+     * waits -- on a prompt nobody will answer -- cancels the request and its
+     * prompt at once (Codex 7369, finding 2). The frames it sent before it
+     * went away are still drained, so a response among them settles its
+     * request (Codex 7380); then the loop returns and the connection ends.
+     */
     private suspend fun messageLoop(connection: Connection, isActive: () -> Boolean) {
+        val frames = Channel<ByteArray>(FRAME_BUFFER)
+        val reader = readScope.launch { readFrames(connection, frames) }
+        try {
+            answerFrames(connection, frames, isActive)
+        } finally {
+            reader.cancel()
+        }
+    }
+
+    /**
+     * Reads frames until the stream ends. The end of the stream, or a read
+     * that fails -- the framing reads both as an [IOException] -- ends the
+     * connection's input and closes [frames] behind the frames already read,
+     * which the message loop still delivers before the connection ends.
+     *
+     * The reader never waits on [frames]: a peer that sends more than
+     * [FRAME_BUFFER] frames ahead of the request being answered has broken
+     * request-response, and its connection ends at once. A reader parked on
+     * a full buffer would stop watching the stream, and a disconnect while a
+     * prompt waits would never cancel it (Codex 7374).
+     *
+     * A blocking read cannot be cancelled, so this runs apart from [serve],
+     * which returns without waiting for it; ending the connection closes the
+     * stream under it.
+     */
+    private fun readFrames(connection: Connection, frames: Channel<ByteArray>) {
+        try {
+            while (connection.isLive) {
+                val frame = StreamMessageFraming.readMessage(connection.input)
+                if (!frames.trySend(frame).isSuccess) {
+                    Log.w(TAG, "[$transportLabel] peer sent more than $FRAME_BUFFER frames ahead of a request; ending the connection")
+                    connection.end()
+                    frames.close()
+                    return
+                }
+            }
+            frames.close()
+        } catch (e: Exception) {
+            connection.endInput()
+            frames.close(e)
+        }
+    }
+
+    /**
+     * Decrypts and dispatches the frames in the order they were read. Once
+     * the peer's stream has ended, the frames it sent before are drained: a
+     * response still settles the phone's request with the peer's own result
+     * (Codex 7380), but a request is not run and nothing more is written,
+     * since nobody will read it.
+     */
+    private suspend fun answerFrames(
+        connection: Connection,
+        frames: ReceiveChannel<ByteArray>,
+        isActive: () -> Boolean,
+    ) {
         while (isActive() && connection.isLive) {
             val ciphertext = try {
-                StreamMessageFraming.readMessage(connection.input)
+                frames.receive()
+            } catch (e: ClosedReceiveChannelException) {
+                break
             } catch (e: IOException) {
                 Log.i(TAG, "[$transportLabel] peer disconnected: ${e.message}")
                 break
@@ -373,14 +483,18 @@ class StreamPairingSession(
                 break
             }
 
+            val inbound = !isResponse(plaintext)
+            if (inbound && connection.inputEnded) continue
+
             val responseBytes = try {
-                runRequest(connection, plaintext)
+                runRequest(connection, plaintext, inbound)
             } catch (e: IOException) {
                 Log.i(TAG, "[$transportLabel] connection ended while a request ran: ${e.message}")
                 break
             }
-            if (responseBytes == null) {
-                // Incoming message was a response to one of our outbound requests.
+            if (responseBytes == null || connection.inputEnded) {
+                // A response to one of our outbound requests, or a request
+                // whose peer went away while it ran.
                 continue
             }
 
@@ -394,15 +508,36 @@ class StreamPairingSession(
     }
 
     /**
+     * Whether [plaintext] is the peer's response to a phone-initiated request,
+     * by the rule [BidirectionalMessageRouter.processMessage] routes it with:
+     * a result or an error, and no method. Without a router nothing is.
+     */
+    private fun isResponse(plaintext: ByteArray): Boolean {
+        if (messageRouter == null) return false
+        val obj = try {
+            JSONObject(String(plaintext, Charsets.UTF_8))
+        } catch (e: JSONException) {
+            return false
+        }
+        val hasMethod = obj.has("method") && !obj.isNull("method")
+        val hasResult = obj.has("result") && !obj.isNull("result")
+        val hasError = obj.has("error") && !obj.isNull("error")
+        return !hasMethod && (hasResult || hasError)
+    }
+
+    /**
      * Runs one request on the main thread and waits for it, or for the
      * connection to be revoked or end, whichever comes first. A request
-     * outlived by its connection is cancelled and answers nothing.
+     * outlived by its connection is cancelled and answers nothing; so is an
+     * [inbound] one -- a request the peer sent, not a response being routed
+     * -- once the peer's stream has ended.
      */
-    private suspend fun runRequest(connection: Connection, plaintext: ByteArray): ByteArray? {
+    private suspend fun runRequest(connection: Connection, plaintext: ByteArray, inbound: Boolean): ByteArray? {
         val context = currentCoroutineContext().minusKey(Job) + Dispatchers.Main
         val job = requestScope.async(context) { interceptOrRoute(plaintext, connection) }
         connection.request = job
-        if (!connection.isLive) job.cancel()
+        if (inbound) connection.inboundRequest = job
+        if (!connection.isLive || (inbound && connection.inputEnded)) job.cancel()
         try {
             val response = try {
                 select<ByteArray?> {
@@ -419,6 +554,7 @@ class StreamPairingSession(
         } finally {
             if (!job.isCompleted) job.cancel()
             connection.request = null
+            connection.inboundRequest = null
         }
     }
 
@@ -459,9 +595,16 @@ class StreamPairingSession(
         routeTransportMethod(plaintext)?.let { return it }
 
         // The router calls the handler in this coroutine, so the elements
-        // reach it per request and never outlive it.
+        // reach it per request and never outlive it. The connection's own
+        // binding and peer ride along: the handler is shared with BLE and the
+        // other stream transport, so nothing handler-wide can say which
+        // session this request arrived on (Codex 7346).
         val router = messageRouter
-        return withContext(routingContext) {
+        val caller = if (connection == null) EmptyCoroutineContext else RequestHandler.servedConnection(
+            SessionBindingProvider { connection.binding?.takeIf { connection.isCurrent }?.copyOf() },
+            connection.peerKeyHex,
+        )
+        return withContext(routingContext + caller) {
             if (router != null) router.processMessage(plaintext)
             else requestHandler.handleRawRequest(plaintext)
         }

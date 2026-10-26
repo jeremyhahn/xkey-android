@@ -190,11 +190,14 @@
             android:showWhenLocked="true"
             android:turnScreenOn="true" />
 
-        <!-- Crypto signing activity for PER_OPERATION mode biometric-bound signing -->
+        <!-- Crypto signing activity for PER_OPERATION mode biometric-bound signing.
+             Standard launch mode: every request gets its own instance, which reads
+             its request in onCreate. PendingCryptoSignatures shows one at a time;
+             singleTop could hand a request to an instance that is finishing and
+             drop it (Codex 7369). -->
         <activity
             android:name=".ui.CryptoSigningActivity"
             android:exported="false"
-            android:launchMode="singleTop"
             android:theme="@style/Theme.xKey.Transparent"
             android:excludeFromRecents="true"
             android:noHistory="true"

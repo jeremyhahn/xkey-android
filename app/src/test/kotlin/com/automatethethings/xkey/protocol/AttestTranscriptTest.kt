@@ -58,6 +58,20 @@ class AttestTranscriptTest {
             "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f" +
             "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
 
+    /**
+     * `local.verifyUser` (owner ruling 167, go-xkms `pkg/pairingproto`
+     * `attest_vectors_test.go` at 109f9c16f). The last field is the UVK's
+     * fingerprint; the inputs are the same as for pair and reattest.
+     */
+    private val verifyUserTranscriptHex =
+        "786b65792d6174746573742d7472616e7363726970742d76310b7665726966792d75736572" +
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+            "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f" +
+            "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+
+    private val verifyUserDigestHex =
+        "30f3f98d0ccfa8302dbc2768119257aa0cbf18b5e2391fe8c08a1dca8dd11a04"
+
     private val pairDigestHex =
         "9596fd4bb233398dde69c6d396fca68efe4f8f78340938c5ed4312c3c16fb464"
 
@@ -151,6 +165,34 @@ class AttestTranscriptTest {
                 )
             ).toHex()
         )
+    }
+
+    @Test
+    fun `verify-user transcript matches the cross-repo vector byte for byte`() {
+        val transcript = AttestTranscript.build(
+            AttestTranscript.PURPOSE_VERIFY_USER, nonce, channelBinding, deviceFingerprint
+        )
+        assertEquals(133, transcript.size)
+        assertEquals(verifyUserTranscriptHex, transcript.toHex())
+        assertEquals(verifyUserDigestHex, sha256(transcript).toHex())
+    }
+
+    @Test
+    fun `verify-user purpose matches the pinned constant`() {
+        assertEquals(
+            "7665726966792d75736572",
+            AttestTranscript.PURPOSE_VERIFY_USER.toByteArray(Charsets.US_ASCII).toHex()
+        )
+    }
+
+    /** The UVK's attestation challenge: the constant alone, no trailing bytes. */
+    @Test
+    fun `user verification challenge matches the pinned constant`() {
+        assertEquals(
+            "786b65792d757365722d766572696669636174696f6e2d7631",
+            AttestTranscript.USER_VERIFICATION_CHALLENGE.toHex()
+        )
+        assertEquals(25, AttestTranscript.USER_VERIFICATION_CHALLENGE.size)
     }
 
     // ---- Channel binding vectors -----------------------------------------

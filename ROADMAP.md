@@ -47,6 +47,7 @@ Wire-coupled to go-xkms through the pairing contract (Noise-XX + JSON-RPC), not 
 - **phone-initiated-pairing** — phone-initiated attestation and pairing SAS display ([go-xkms#1306](../../../go-xkms/issues/1306)) — [#14](../../issues/14), PR #42 — done
 - **request-generation-echo** — pairing responses echo per-request generation — [#10](../../issues/10), PR #42 — done
 - **remote-backup-password** — password sent on remote backup create and restore ([go-xkms#690](../../../go-xkms/issues/690)) — [#11](../../issues/11), PR #61 — done
+- **fido2-built-in-uv** — biometric-gated verify-user RPC for FIDO2 built-in UV ([go-xkms#1716](../../../go-xkms/pulls/1716)) — [#13](../../issues/13) — done
 
 ## Now
 
@@ -66,7 +67,6 @@ None.
 ## Later
 
 - **password-vault-rpcs** — password store and seal store RPCs handled — [#55](../../issues/55) — blocked: go-xkms USB PasswordVault row (ruling 130); the desktop-sent `Password*`/`SealStore*` handlers shipped in PR #42 (#12)
-- **fido2-built-in-uv** — biometric-gated verify-user RPC for FIDO2 built-in UV — [#13](../../issues/13) — blocked: `verifyUser` undefined in go-xkms
 - **protected-memory** — Noise static and session keys under an Android protected-memory clause — [#6](../../issues/6) — blocked: owner ruling pending; Noise key zeroize shipped in PR #46 (#6)
 
 ## Future
@@ -76,5 +76,5 @@ None.
 ## Dependencies
 
 - Up: none pinned (not a Go module); wire contract with go-xkms per the handbook's xkey-android wire contract (software docs/12).
-- Up: go-xkms defines the `verifyUser` RPC, needed by #13.
+- Up: go-xkms `local.verifyUser` wire (go-xkms#1716, main 109f9c16f); the desktop verifier and pinUvAuthToken via UV are go-xkms's.
 - Down: go-xkms xkmsd `phone` key backend, `xkey device *` pairing and `xkey fido2 --backend phone`.

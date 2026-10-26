@@ -132,6 +132,23 @@ class AttestationException(
 ) : XKeyCryptoException("Key attestation failed: $reason", cause)
 
 /**
+ * Exception thrown when a biometric-bound key was permanently invalidated —
+ * Keystore's `KeyPermanentlyInvalidatedException`, typed so callers that can
+ * recover by minting a new key do not depend on an Android class.
+ *
+ * A new biometric enrollment (or removing the last one) invalidates every key
+ * created with `setInvalidatedByBiometricEnrollment(true)`. The key is gone for
+ * good; the only recovery is a new key.
+ *
+ * @param reason Description of the invalidated key.
+ * @param cause The underlying exception, if any.
+ */
+class KeyInvalidatedException(
+    reason: String,
+    cause: Throwable? = null
+) : XKeyCryptoException(reason, cause)
+
+/**
  * Exception thrown when credential storage operations fail.
  *
  * @param operation The storage operation that failed.

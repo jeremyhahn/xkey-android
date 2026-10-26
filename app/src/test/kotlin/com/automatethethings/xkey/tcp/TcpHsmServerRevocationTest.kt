@@ -44,6 +44,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -70,6 +72,9 @@ class TcpHsmServerRevocationTest {
 
     private companion object {
         const val TIMEOUT_MS = 10_000L
+
+        /** StreamPairingSession's frame buffer. */
+        const val FRAME_BUFFER = 16
         val REQUEST = """{"jsonrpc":"2.0","id":9,"method":"remote.sync","params":{}}""".toByteArray()
     }
 
@@ -201,6 +206,99 @@ class TcpHsmServerRevocationTest {
     }
 
     /**
+     * The desktop's stream ends while its `local.verifyUser` waits on a prompt
+     * nobody answers (Codex 7369). The request is cancelled with no user
+     * input, nothing is written, and the server goes back to listening and
+     * serves the next connection.
+     */
+    @Test
+    fun aStreamThatEndsWhileVerifyUserPromptsCancelsItAndTheNextConnectionIsServed() = runBlocking<Unit> {
+        val shown = CompletableDeferred<Unit>()
+        val dismissed = CompletableDeferred<Unit>()
+        coEvery {
+            requestHandler.handleRawRequest(match<ByteArray> { String(it).contains("local.verifyUser") })
+        } coAnswers {
+            shown.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                dismissed.complete(Unit)
+            }
+        }
+        val desktop = connectPaired()
+        val verifyUser = JSONObject()
+            .put("jsonrpc", "2.0")
+            .put("id", 7)
+            .put("method", "local.verifyUser")
+            .put("params", JSONObject())
+        desktop.send(desktop.noise.encrypt(verifyUser.toString().toByteArray()))
+        withTimeout(TIMEOUT_MS) { shown.await() }
+
+        desktop.endOutput()
+
+        withTimeout(TIMEOUT_MS) { dismissed.await() }
+        desktop.assertClosedByPhone()
+        withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
+        verify(timeout = TIMEOUT_MS) { requestHandler.setConnectedDevicePublicKeyHex(null) }
+
+        val next = connectPaired()
+        assertTrue(next.request("system.ping").getJSONObject("result").getBoolean("ok"))
+    }
+
+    /**
+     * The desktop sends past the frame buffer while its `local.verifyUser`
+     * waits on a prompt nobody answers, then closes (Codex 7374). The close
+     * still cancels the request, and the server serves the next connection.
+     */
+    @Test
+    fun aFrameBufferOverflowThenCloseWhileVerifyUserPromptsCancelsItAndTheNextConnectionIsServed() = runBlocking<Unit> {
+        assertOverflowCancelsVerifyUserAndTheNextIsServed(thenClose = true)
+    }
+
+    /** The overflow alone ends the connection, and the server serves the next one. */
+    @Test
+    fun aFrameBufferOverflowWhileVerifyUserPromptsEndsTheConnectionAndTheNextIsServed() = runBlocking<Unit> {
+        assertOverflowCancelsVerifyUserAndTheNextIsServed(thenClose = false)
+    }
+
+    private suspend fun assertOverflowCancelsVerifyUserAndTheNextIsServed(thenClose: Boolean) {
+        val shown = CompletableDeferred<Unit>()
+        val dismissed = CompletableDeferred<Unit>()
+        coEvery {
+            requestHandler.handleRawRequest(match<ByteArray> { String(it).contains("local.verifyUser") })
+        } coAnswers {
+            shown.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                dismissed.complete(Unit)
+            }
+        }
+        val desktop = connectPaired()
+        desktop.send(desktop.noise.encrypt(jsonRpc(id = 7, method = "local.verifyUser")))
+        withTimeout(TIMEOUT_MS) { shown.await() }
+
+        repeat(FRAME_BUFFER + 1) { desktop.send(desktop.noise.encrypt(jsonRpc(id = 8 + it, method = "system.ping"))) }
+        if (thenClose) desktop.endOutput()
+
+        withTimeout(TIMEOUT_MS) { dismissed.await() }
+        desktop.assertClosedByPhone()
+        withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
+        verify(timeout = TIMEOUT_MS) { requestHandler.setConnectedDevicePublicKeyHex(null) }
+
+        val next = connectPaired()
+        assertTrue(next.request("system.ping").getJSONObject("result").getBoolean("ok"))
+    }
+
+    private fun jsonRpc(id: Int, method: String): ByteArray = JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", id)
+        .put("method", method)
+        .put("params", JSONObject())
+        .toString()
+        .toByteArray()
+
+    /**
      * The desktop stops reading, so the phone's outbound writes fill the
      * socket buffers until one blocks; then the desktop ends its stream
      * (Codex 7162). The teardown closes the connection before it waits on
@@ -209,6 +307,21 @@ class TcpHsmServerRevocationTest {
      */
     @Test
     fun anEofWhileAnOutboundWriteIsBlockedEndsTheConnectionAndTheNextIsServed() = runBlocking<Unit> {
+        assertEofBehindABlockedWriteEndsTheConnection(answerWaiting = false)
+    }
+
+    /**
+     * As above, but an answer to the desktop's last request waits on the send
+     * lock behind the blocked write when the stream ends, so the frames read
+     * before the end cannot finish draining. The drain is bounded: the
+     * connection ends, and the next one is served (Codex 7380).
+     */
+    @Test
+    fun anEofWhileAnAnswerWaitsBehindABlockedWriteEndsTheConnectionAndTheNextIsServed() = runBlocking<Unit> {
+        assertEofBehindABlockedWriteEndsTheConnection(answerWaiting = true)
+    }
+
+    private suspend fun assertEofBehindABlockedWriteEndsTheConnection(answerWaiting: Boolean) = coroutineScope {
         val desktop = connectPaired()
         val large = JSONObject()
             .put("jsonrpc", "2.0")
@@ -238,6 +351,11 @@ class TcpHsmServerRevocationTest {
         assertTrue("the sends never filled the socket buffers", last > 0)
         assertTrue("a write must be blocked", sender.isActive)
 
+        if (answerWaiting) {
+            desktop.send(desktop.noise.encrypt(jsonRpc(id = 10, method = "system.ping")))
+            // The ping is answered and its answer queues for the send lock.
+            delay(500)
+        }
         desktop.endOutput()
 
         withTimeout(TIMEOUT_MS) { sender.join() }

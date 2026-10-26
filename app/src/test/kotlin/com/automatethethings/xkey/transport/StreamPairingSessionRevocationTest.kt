@@ -21,11 +21,13 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.ErrorCodes
+import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -364,6 +366,26 @@ class StreamPairingSessionRevocationTest {
             // Nothing was written.
         }
         desktop.assertNoFrame()
+    }
+
+    /**
+     * `local.verifyUser` answers only a confirmed, paired session (#13): an
+     * unconfirmed one is refused by the gate, so the handler — and with it
+     * the biometric prompt — is never reached.
+     */
+    @Test
+    fun verifyUserOnAnUnconfirmedSessionIsRefusedBeforeTheHandler() = runBlocking {
+        val phone = connectUnpaired()
+        val nonce = java.util.Base64.getEncoder().encodeToString(ByteArray(32))
+
+        val reply = phone.desktop.request(
+            MethodNames.LOCAL_VERIFY_USER,
+            params = JSONObject().put("protocolVersion", 2).put("nonce", nonce)
+        )
+
+        assertEquals(ErrorCodes.PAIRING_REQUIRED, reply.getJSONObject("error").getInt("code"))
+        coVerify(exactly = 0) { requestHandler.handleRawRequest(any<ByteArray>()) }
+        coVerify(exactly = 0) { requestHandler.handleRawRequest(any<ByteArray>(), any(), any()) }
     }
 
     /**

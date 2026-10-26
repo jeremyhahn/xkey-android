@@ -137,10 +137,10 @@ class BiometricActivityLauncher(
     private val pendingRequests = ConcurrentHashMap<Long, CancellableContinuation<BiometricResult>>()
 
     /**
-     * Map of pending crypto signing requests, keyed by request ID.
-     * Values are continuations that will be resumed when results arrive.
+     * Pending crypto signing requests. A request cancelled while it waits
+     * takes its prompt down with it.
      */
-    private val pendingCryptoRequests = ConcurrentHashMap<Long, CancellableContinuation<CryptoSigningResult>>()
+    private val pendingCryptoRequests = PendingCryptoSignatures()
 
     /**
      * Whether the receiver is currently registered.
@@ -203,8 +203,6 @@ class BiometricActivityLauncher(
 
             val requestId = requestIdString.toLongOrNull() ?: return
 
-            val continuation = pendingCryptoRequests.remove(requestId) ?: return
-
             val success = intent.getBooleanExtra(
                 CryptoSigningActivity.EXTRA_SUCCESS,
                 false
@@ -227,7 +225,7 @@ class BiometricActivityLauncher(
                 CryptoSigningResult.Error(errorCode, errorMessage)
             }
 
-            continuation.resume(result)
+            pendingCryptoRequests.complete(requestId, result)
         }
     }
 
@@ -300,12 +298,8 @@ class BiometricActivityLauncher(
             continuation?.cancel()
         }
 
-        // Cancel all pending crypto signing requests
-        val pendingCryptoIds = pendingCryptoRequests.keys.toList()
-        for (requestId in pendingCryptoIds) {
-            val continuation = pendingCryptoRequests.remove(requestId)
-            continuation?.cancel()
-        }
+        // Cancel all pending crypto signing requests, and their prompts
+        pendingCryptoRequests.cancelAll()
     }
 
     /**
@@ -386,6 +380,8 @@ class BiometricActivityLauncher(
      * @param title The title to display in the biometric prompt.
      * @param subtitle The subtitle providing context (e.g., relying party name).
      * @param showOnLockScreen Whether to show the prompt over the lock screen.
+     * @param keyAlias A full Keystore alias to sign with instead of the
+     *   credential's (the user verification key); null for a credential key.
      *
      * @return The DER-encoded ECDSA signature bytes.
      *
@@ -401,7 +397,8 @@ class BiometricActivityLauncher(
         dataHash: ByteArray,
         title: String,
         subtitle: String,
-        showOnLockScreen: Boolean = false
+        showOnLockScreen: Boolean = false,
+        keyAlias: String? = null
     ): ByteArray {
         check(isRegistered) {
             "BiometricActivityLauncher must be registered before requesting crypto signature"
@@ -409,23 +406,17 @@ class BiometricActivityLauncher(
 
         val dataHashBase64 = Base64.getEncoder().encodeToString(dataHash)
 
-        val result = suspendCancellableCoroutine { continuation ->
-            val requestId = requestIdGenerator.incrementAndGet()
-
-            pendingCryptoRequests[requestId] = continuation
-
-            continuation.invokeOnCancellation {
-                pendingCryptoRequests.remove(requestId)
-            }
-
+        // Cancelling this coroutine dismisses the prompt and signs nothing.
+        val result = pendingCryptoRequests.await { requestId ->
             val intent = CryptoSigningActivity.createIntent(
                 context = context,
-                requestId = requestId.toString(),
+                requestId = requestId,
                 credentialId = credentialId,
                 dataHashBase64 = dataHashBase64,
                 title = title,
                 subtitle = subtitle,
-                showOnLockScreen = showOnLockScreen
+                showOnLockScreen = showOnLockScreen,
+                keyAlias = keyAlias
             ).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }

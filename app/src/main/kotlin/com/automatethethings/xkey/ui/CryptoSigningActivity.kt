@@ -65,6 +65,7 @@ class CryptoSigningActivity : FragmentActivity() {
     private var requestId: String = ""
     private var biometricPrompt: BiometricPrompt? = null
     private var hasFinished = false
+    private var controller: CryptoSigningController? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,21 +81,25 @@ class CryptoSigningActivity : FragmentActivity() {
             return
         }
 
+        // Registered before anything else can deliver, so a cancel for this
+        // request -- even one that arrived before this activity came up --
+        // dismisses the prompt and delivers nothing.
+        val controller = CryptoSigningController(
+            requestId = requestId,
+            mainExecutor = ContextCompat.getMainExecutor(this),
+            deliverSuccess = ::sendSuccessResult,
+            deliverError = ::sendErrorResult,
+            finish = ::finishWithResult,
+        ).also { this.controller = it }
+        if (!controller.start()) return
+
         val credentialId = intent.getStringExtra(EXTRA_CREDENTIAL_ID) ?: run {
-            sendErrorResult(
-                errorCode = ERROR_CODE_INVALID_REQUEST,
-                errorMessage = "Missing credential ID"
-            )
-            finish()
+            controller.fail(ERROR_CODE_INVALID_REQUEST, "Missing credential ID")
             return
         }
 
         val dataHashBase64 = intent.getStringExtra(EXTRA_DATA_HASH) ?: run {
-            sendErrorResult(
-                errorCode = ERROR_CODE_INVALID_REQUEST,
-                errorMessage = "Missing data hash"
-            )
-            finish()
+            controller.fail(ERROR_CODE_INVALID_REQUEST, "Missing data hash")
             return
         }
 
@@ -118,21 +123,21 @@ class CryptoSigningActivity : FragmentActivity() {
         val dataHash = try {
             Base64.getDecoder().decode(dataHashBase64)
         } catch (e: Exception) {
-            sendErrorResult(
-                errorCode = ERROR_CODE_INVALID_REQUEST,
-                errorMessage = "Invalid data hash encoding: ${e.message}"
-            )
-            finish()
+            controller.fail(ERROR_CODE_INVALID_REQUEST, "Invalid data hash encoding: ${e.message}")
             return
         }
 
         // Perform crypto-bound signing
-        performCryptoSigning(credentialId, dataHash, title, subtitle)
+        performCryptoSigning(controller, credentialId, dataHash, title, subtitle)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        biometricPrompt?.cancelAuthentication()
+        // Releasing dismisses the prompt the controller holds, which is this
+        // one, and answers a request this activity leaves unsettled, unless a
+        // recreated instance is about to take it over.
+        controller?.release(recreating = isChangingConfigurations)
+        controller = null
         biometricPrompt = null
     }
 
@@ -155,28 +160,27 @@ class CryptoSigningActivity : FragmentActivity() {
     /**
      * Performs crypto-bound signing with biometric authentication.
      *
+     * @param controller The request's controller; every outcome goes through it.
      * @param credentialId The credential ID (key alias suffix in keystore).
      * @param dataHash The data hash to sign.
      * @param title Title for the biometric prompt.
      * @param subtitle Subtitle for the biometric prompt.
      */
     private fun performCryptoSigning(
+        controller: CryptoSigningController,
         credentialId: String,
         dataHash: ByteArray,
         title: String,
         subtitle: String
     ) {
-        // Get private key from keystore
-        val alias = KEY_ALIAS_PREFIX + credentialId
+        // Get private key from keystore; a full alias names a key outside the
+        // credential namespace (the user verification key).
+        val alias = intent.getStringExtra(EXTRA_KEY_ALIAS) ?: (KEY_ALIAS_PREFIX + credentialId)
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
 
         val privateKey = keyStore.getKey(alias, null) as? PrivateKey
         if (privateKey == null) {
-            sendErrorResult(
-                errorCode = ERROR_CODE_KEY_NOT_FOUND,
-                errorMessage = "Key not found for credential: $credentialId"
-            )
-            finishWithResult()
+            controller.fail(ERROR_CODE_KEY_NOT_FOUND, "Key not found for credential: $credentialId")
             return
         }
 
@@ -187,11 +191,7 @@ class CryptoSigningActivity : FragmentActivity() {
             signature.initSign(privateKey)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize signature", e)
-            sendErrorResult(
-                errorCode = ERROR_CODE_CRYPTO_ERROR,
-                errorMessage = "Failed to initialize signature: ${e.message}"
-            )
-            finishWithResult()
+            controller.fail(ERROR_CODE_CRYPTO_ERROR, "Failed to initialize signature: ${e.message}")
             return
         }
 
@@ -199,18 +199,22 @@ class CryptoSigningActivity : FragmentActivity() {
         val cryptoObject = BiometricPrompt.CryptoObject(signature)
 
         // Show biometric prompt with crypto object
-        showBiometricPrompt(cryptoObject, dataHash, title, subtitle)
+        showBiometricPrompt(controller, cryptoObject, dataHash, title, subtitle)
     }
 
     /**
      * Shows the crypto-bound biometric authentication prompt.
      *
+     * @param controller The request's controller; a cancel through it
+     *   dismisses this prompt, and an authentication it has cancelled signs
+     *   nothing.
      * @param cryptoObject The CryptoObject wrapping the Signature.
      * @param dataHash The data hash to sign after successful authentication.
      * @param title The title for the biometric prompt.
      * @param subtitle The subtitle for the biometric prompt.
      */
     private fun showBiometricPrompt(
+        controller: CryptoSigningController,
         cryptoObject: BiometricPrompt.CryptoObject,
         dataHash: ByteArray,
         title: String,
@@ -223,33 +227,25 @@ class CryptoSigningActivity : FragmentActivity() {
                 // Get the authenticated signature from the result
                 val authenticatedSignature = result.cryptoObject?.signature
                 if (authenticatedSignature == null) {
-                    sendErrorResult(
-                        errorCode = ERROR_CODE_CRYPTO_ERROR,
-                        errorMessage = "No signature in authentication result"
-                    )
-                    finishWithResult()
+                    controller.fail(ERROR_CODE_CRYPTO_ERROR, "No signature in authentication result")
                     return
                 }
 
-                // Perform the signing with the authenticated signature
-                try {
-                    authenticatedSignature.update(dataHash)
-                    val signatureBytes = authenticatedSignature.sign()
-                    val signatureBase64 = Base64.getEncoder().encodeToString(signatureBytes)
-                    sendSuccessResult(signatureBase64)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Signing failed after authentication", e)
-                    sendErrorResult(
-                        errorCode = ERROR_CODE_SIGNING_FAILED,
-                        errorMessage = "Signing failed: ${e.message}"
-                    )
+                // Perform the signing with the authenticated signature, unless
+                // the request was cancelled while the prompt was up.
+                controller.succeed {
+                    try {
+                        authenticatedSignature.update(dataHash)
+                        authenticatedSignature.sign()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Signing failed after authentication", e)
+                        throw e
+                    }
                 }
-                finishWithResult()
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                sendErrorResult(errorCode, errString.toString())
-                finishWithResult()
+                controller.fail(errorCode, errString.toString())
             }
 
             override fun onAuthenticationFailed() {
@@ -259,7 +255,9 @@ class CryptoSigningActivity : FragmentActivity() {
             }
         }
 
-        biometricPrompt = BiometricPrompt(this, executor, callback)
+        val prompt = BiometricPrompt(this, executor, callback)
+        biometricPrompt = prompt
+        if (!controller.attach { prompt.cancelAuthentication() }) return
 
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
@@ -270,14 +268,10 @@ class CryptoSigningActivity : FragmentActivity() {
             .build()
 
         try {
-            biometricPrompt?.authenticate(promptInfo, cryptoObject)
+            prompt.authenticate(promptInfo, cryptoObject)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show biometric prompt", e)
-            sendErrorResult(
-                errorCode = ERROR_CODE_PROMPT_FAILED,
-                errorMessage = "Failed to show biometric prompt: ${e.message}"
-            )
-            finishWithResult()
+            controller.fail(ERROR_CODE_PROMPT_FAILED, "Failed to show biometric prompt: ${e.message}")
         }
     }
 
@@ -286,11 +280,12 @@ class CryptoSigningActivity : FragmentActivity() {
      */
     private fun handleCancellation() {
         biometricPrompt?.cancelAuthentication()
-        sendErrorResult(
-            errorCode = BiometricPrompt.ERROR_USER_CANCELED,
-            errorMessage = "User cancelled authentication"
-        )
-        finishWithResult()
+        val controller = controller
+        if (controller != null) {
+            controller.fail(BiometricPrompt.ERROR_USER_CANCELED, "User cancelled authentication")
+        } else {
+            finishWithResult()
+        }
     }
 
     /**
@@ -392,6 +387,12 @@ class CryptoSigningActivity : FragmentActivity() {
         const val EXTRA_SHOW_ON_LOCK_SCREEN = "com.automatethethings.xkey.extra.SHOW_ON_LOCK_SCREEN"
 
         /**
+         * Extra key for a full Keystore alias that replaces the credential alias.
+         * Type: String (optional)
+         */
+        const val EXTRA_KEY_ALIAS = "com.automatethethings.xkey.extra.KEY_ALIAS"
+
+        /**
          * Extra key indicating whether the operation succeeded.
          * Type: Boolean
          */
@@ -453,6 +454,8 @@ class CryptoSigningActivity : FragmentActivity() {
          * @param title The title for the biometric prompt.
          * @param subtitle The subtitle for the biometric prompt.
          * @param showOnLockScreen Whether to show the prompt over the lock screen.
+         * @param keyAlias A full Keystore alias to sign with instead of the
+         *   credential's; null for a credential key.
          * @return An intent configured to launch the activity.
          */
         fun createIntent(
@@ -462,9 +465,11 @@ class CryptoSigningActivity : FragmentActivity() {
             dataHashBase64: String,
             title: String = DEFAULT_TITLE,
             subtitle: String = DEFAULT_SUBTITLE,
-            showOnLockScreen: Boolean = false
+            showOnLockScreen: Boolean = false,
+            keyAlias: String? = null
         ): Intent {
             return Intent(context, CryptoSigningActivity::class.java).apply {
+                keyAlias?.let { putExtra(EXTRA_KEY_ALIAS, it) }
                 putExtra(EXTRA_REQUEST_ID, requestId)
                 putExtra(EXTRA_CREDENTIAL_ID, credentialId)
                 putExtra(EXTRA_DATA_HASH, dataHashBase64)

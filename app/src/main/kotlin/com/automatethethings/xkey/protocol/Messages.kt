@@ -874,6 +874,7 @@ object MethodNames {
     const val LOCAL_SET_KEY_POLICY = "local.setKeyPolicy"
     const val LOCAL_ATTEST_KEY = "local.attestKey"
     const val LOCAL_ATTEST_DEVICE = "local.attestDevice"
+    const val LOCAL_VERIFY_USER = "local.verifyUser"
     const val LOCAL_GET_CAPABILITIES = "local.getCapabilities"
     const val LOCAL_LIST_FIDO2_CREDENTIALS = "local.listFido2Credentials"
     const val LOCAL_SIGN_FIDO2_ASSERTION = "local.signFido2Assertion"
@@ -1762,6 +1763,116 @@ data class LocalAttestDeviceResult(
             put("deviceLocked", deviceLocked)
             put("verifiedBootKey", verifiedBootKey)
             put("verifiedBootHash", verifiedBootHash)
+        }
+    }
+}
+
+/**
+ * Parameters for `local.verifyUser` — on-demand user verification (owner ruling
+ * 167, go-xkms `pkg/pairingproto/verify_user.go`).
+ *
+ * The desktop asks for proof that this phone's user was verified **now**, before
+ * it mints a CTAP 2.1 `pinUvAuthToken` "via UV". Like `local.attestDevice` the
+ * request carries no channel binding and no purpose: the binding is derived from
+ * this device's own Noise session and the purpose is fixed to
+ * [AttestTranscript.PURPOSE_VERIFY_USER].
+ *
+ * @property protocolVersion Always [AttestTranscript.PROTOCOL_VERSION].
+ * @property nonce Base64-encoded 32-byte challenge, drawn by the desktop.
+ */
+data class LocalVerifyUserParams(
+    val protocolVersion: Int,
+    val nonce: String
+) {
+    companion object {
+        /**
+         * Parses and validates the params. Any version other than
+         * [AttestTranscript.PROTOCOL_VERSION], and any nonce that is not 32
+         * bytes of valid base64, is [ErrorCodes.INVALID_PARAMS].
+         */
+        fun fromJson(params: JSONObject): LocalVerifyUserParams {
+            val version = params.optInt("protocolVersion", 0)
+            if (version != AttestTranscript.PROTOCOL_VERSION) {
+                throw ProtocolException(
+                    "local.verifyUser requires protocolVersion ${AttestTranscript.PROTOCOL_VERSION}; " +
+                        "this request asked for " + if (version == 0) "none" else "$version",
+                    errorCode = ErrorCodes.INVALID_PARAMS
+                )
+            }
+            val parsed = LocalVerifyUserParams(
+                protocolVersion = version,
+                nonce = params.getStringOrNull("nonce")
+                    ?: throw ProtocolException("Missing 'nonce'", errorCode = ErrorCodes.INVALID_PARAMS)
+            )
+            parsed.getNonceBytes()
+            return parsed
+        }
+    }
+
+    /** The 32-byte challenge, refusing any other length or undecodable text. */
+    fun getNonceBytes(): ByteArray {
+        val bytes = try {
+            Base64.getDecoder().decode(nonce)
+        } catch (e: IllegalArgumentException) {
+            throw ProtocolException("'nonce' is not valid base64", errorCode = ErrorCodes.INVALID_PARAMS)
+        }
+        if (bytes.size != AttestTranscript.BINDING_SIZE) {
+            throw ProtocolException(
+                "'nonce' must be ${AttestTranscript.BINDING_SIZE} bytes, got ${bytes.size}",
+                errorCode = ErrorCodes.INVALID_PARAMS
+            )
+        }
+        return bytes
+    }
+
+    fun toJson(): JSONObject {
+        return JSONObject().apply {
+            put("protocolVersion", protocolVersion)
+            put("nonce", nonce)
+        }
+    }
+}
+
+/**
+ * Result of `local.verifyUser` — on-demand user verification (owner ruling 167).
+ *
+ * @property protocolVersion Always [AttestTranscript.PROTOCOL_VERSION].
+ * @property certificateChain Base64-encoded X.509 chain of the User Verification
+ *   Key, leaf first, root last. Sent in every result; the pairing record does
+ *   not hold it.
+ * @property signature Base64 ASN.1 DER ECDSA by the UVK over the
+ *   [AttestTranscript.PURPOSE_VERIFY_USER] transcript, made behind a fresh
+ *   Class 3 biometric.
+ * @property signatureAlgorithm Always "ES256".
+ */
+data class LocalVerifyUserResult(
+    val protocolVersion: Int,
+    val certificateChain: List<String>,
+    val signature: String,
+    val signatureAlgorithm: String
+) {
+    companion object {
+        fun fromJson(json: JSONObject): LocalVerifyUserResult {
+            val chain = json.getJSONArray("certificateChain")
+            return LocalVerifyUserResult(
+                protocolVersion = json.getInt("protocolVersion"),
+                certificateChain = List(chain.length()) { chain.getString(it) },
+                signature = json.getString("signature"),
+                signatureAlgorithm = json.getString("signatureAlgorithm")
+            )
+        }
+    }
+
+    fun toJson(): JSONObject {
+        val chainArray = JSONArray()
+        for (cert in certificateChain) {
+            chainArray.put(cert)
+        }
+        return JSONObject().apply {
+            put("protocolVersion", protocolVersion)
+            put("certificateChain", chainArray)
+            put("signature", signature)
+            put("signatureAlgorithm", signatureAlgorithm)
         }
     }
 }

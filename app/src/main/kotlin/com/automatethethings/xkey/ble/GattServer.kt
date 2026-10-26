@@ -48,6 +48,7 @@ import com.automatethethings.xkey.protocol.PairingConfirmParams
 import com.automatethethings.xkey.protocol.PairingConfirmResult
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
 import com.automatethethings.xkey.protocol.readGeneration
+import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.transport.confirmAlreadyPaired
 import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.settings.PairedDeviceData
@@ -828,10 +829,10 @@ class GattServer(
 
         // Cleared under the Noise lock, so a handshake completing on another
         // coroutine either publishes before this or sees its session gone.
-        noiseMutex.withLock {
+        val ended = noiseMutex.withLock {
+            val session = noiseSession
             // Clear connected device public key from request handler
             requestHandler.setConnectedDevicePublicKeyHex(null)
-            requestHandler.setSessionBindingProvider(null)
 
             connectedDevice = null
             noiseSession = null
@@ -846,6 +847,13 @@ class GattServer(
             authenticatedPeerKeyHex = null
 
             _connectionState.value = ConnectionState.Disconnected
+            session
+        }
+
+        // A request the peer left waiting -- on a prompt nobody will answer --
+        // is cancelled with its prompt; it answers nothing (Codex 7369).
+        if (ended != null) {
+            requestJobs.forEach { (job, owner) -> if (owner === ended) job.cancel() }
         }
     }
 
@@ -1100,10 +1108,6 @@ class GattServer(
                     return
                 }
                 if (complete) {
-                    val binding = session.sessionBinding()
-                    requestHandler.setSessionBindingProvider {
-                        binding?.takeIf { isCurrent(session) }?.copyOf()
-                    }
                     _connectionState.value = ConnectionState.Connected(device.name ?: "Unknown", device.address)
                 }
                 response to complete
@@ -1240,9 +1244,21 @@ class GattServer(
         }
 
         Log.d(TAG, "Processing request...")
+        // The request carries this session's binding and peer, read once under
+        // the Noise lock as the SAS reads them. The handler is shared with the
+        // stream transports, so nothing handler-wide can say which session a
+        // request arrived on (Codex 7346); the router calls the handler in
+        // this coroutine, so the element reaches it.
+        val binding = noiseMutex.withLock { session?.takeIf { isCurrent(it) }?.sessionBinding() }
+        val caller = RequestHandler.servedConnection(
+            SessionBindingProvider { binding?.takeIf { isCurrent(session) }?.copyOf() },
+            binding?.initiatorStaticPublicKey?.toHexString(),
+        )
         val router = messageRouter
-        return if (router != null) router.processMessage(plaintext)
-        else requestHandler.handleRawRequest(plaintext)
+        return withContext(caller) {
+            if (router != null) router.processMessage(plaintext)
+            else requestHandler.handleRawRequest(plaintext)
+        }
     }
 
     /**

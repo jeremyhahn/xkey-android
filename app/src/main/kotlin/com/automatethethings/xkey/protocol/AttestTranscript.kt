@@ -58,6 +58,13 @@ object AttestTranscript {
     /** Reconnect or an explicit re-attest of a device already on record. */
     const val PURPOSE_REATTEST = "reattest"
 
+    /**
+     * On-demand user verification (`local.verifyUser`, owner ruling 167). Signed
+     * by the User Verification Key, never by the DAK, and carries the UVK's own
+     * fingerprint in the last field.
+     */
+    const val PURPOSE_VERIFY_USER = "verify-user"
+
     /** Length of the nonce, channel binding and device fingerprint, in bytes. */
     const val BINDING_SIZE = 32
 
@@ -83,19 +90,29 @@ object AttestTranscript {
     val GENESIS_CHALLENGE = "xkey-device-attestation-v1".toByteArray(Charsets.US_ASCII)
 
     /**
+     * The attestation challenge every User Verification Key is born attesting,
+     * 25 bytes ASCII. Distinct from [GENESIS_CHALLENGE] so a UVK leaf can never
+     * pass for a DAK leaf, or the reverse. Trailing bytes are reserved for the
+     * prover; this build adds none.
+     */
+    val USER_VERIFICATION_CHALLENGE = "xkey-user-verification-v1".toByteArray(Charsets.US_ASCII)
+
+    /**
      * The bytes signed by the Device Attestation Key for one attestation
      * exchange:
      *
      * ```
      * "xkey-attest-transcript-v1"   25 bytes ASCII
      * len8(purpose)                  1 byte
-     * purpose                        "pair" | "reattest", ASCII
+     * purpose                        "pair" | "reattest" | "verify-user", ASCII
      * nonce                         32 bytes, drawn by the verifier
      * channelBinding                32 bytes, derived locally by [channelBinding]
      * deviceFingerprint             32 raw bytes, NOT hex
      * ```
      *
-     * 126 bytes for `pair`, 130 for `reattest`.
+     * 126 bytes for `pair`, 130 for `reattest`, 133 for `verify-user`. For
+     * `verify-user` the last field is the User Verification Key's fingerprint,
+     * not the DAK's.
      *
      * The single-byte length in front of [purpose] is not decoration: without it
      * `("pair", nonce)` and `("pairX", nonce')` can serialize identically, and a
@@ -120,7 +137,7 @@ object AttestTranscript {
         channelBinding: ByteArray,
         deviceFingerprint: ByteArray,
     ): ByteArray {
-        require(purpose == PURPOSE_PAIR || purpose == PURPOSE_REATTEST) {
+        require(purpose == PURPOSE_PAIR || purpose == PURPOSE_REATTEST || purpose == PURPOSE_VERIFY_USER) {
             "unknown attestation purpose '$purpose'"
         }
         require(nonce.size == BINDING_SIZE) { "nonce must be $BINDING_SIZE bytes, got ${nonce.size}" }

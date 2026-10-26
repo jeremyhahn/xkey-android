@@ -31,6 +31,7 @@ import com.automatethethings.xkey.settings.UserVerificationPolicy
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.ui.MainActivity
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
@@ -140,6 +141,9 @@ class RequestHandlerBiometricGateTest {
         }
     }
 
+    /** The authenticated peer of the connection requests arrive on. */
+    private var servedPeer: String? = null
+
     /**
      * Baseline: a confirmed, unrestricted peer, no activity attached, and the
      * headless policy every other suite runs with. Each test opts into the
@@ -148,13 +152,7 @@ class RequestHandlerBiometricGateTest {
     @Before
     fun resetHandlerState() {
         handler.setActivity(null)
-        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
-        // local.attestDevice binds its signature to the live Noise session and
-        // refuses without one, so every path through the biometric gate needs a
-        // session present before the gate is what fails.
-        handler.setSessionBindingProvider {
-            SessionBinding(ByteArray(32) { 0x11 }, ByteArray(32) { 0x22 }, ByteArray(0))
-        }
+        connectPeer(peerKeyHex)
         pairedDevices.updateDeviceSettings(
             publicKeyHex = peerKeyHex,
             requireAttestationForKeyUse = false,
@@ -232,7 +230,7 @@ class RequestHandlerBiometricGateTest {
     @Test
     fun aKnownPeerSkipsTheAttestationPrompt() {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
-        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        connectPeer(peerKeyHex)
 
         val result = call(
             "local.attestKey",
@@ -245,7 +243,7 @@ class RequestHandlerBiometricGateTest {
     @Test
     fun aKnownPeerAlsoSkipsThePromptForDeviceAttestation() {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
-        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        connectPeer(peerKeyHex)
 
         val result = call("local.attestDevice", attestDeviceParams()).ok()
 
@@ -260,7 +258,7 @@ class RequestHandlerBiometricGateTest {
     @Test
     fun anUnpairedPeerDoesNotSkipTheAttestationPrompt() {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
-        handler.setConnectedDevicePublicKeyHex(UNKNOWN_PEER_HEX)
+        connectPeer(UNKNOWN_PEER_HEX)
 
         val response = call(
             "local.attestKey",
@@ -274,7 +272,7 @@ class RequestHandlerBiometricGateTest {
     @Test
     fun anUnpairedPeerDoesNotSkipThePromptForDeviceAttestationEither() {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
-        handler.setConnectedDevicePublicKeyHex(UNKNOWN_PEER_HEX)
+        connectPeer(UNKNOWN_PEER_HEX)
 
         val response = call("local.attestDevice", attestDeviceParams())
 
@@ -290,7 +288,7 @@ class RequestHandlerBiometricGateTest {
     @Test
     fun anAnonymousSessionDoesNotSkipTheAttestationPrompt() {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
-        handler.setConnectedDevicePublicKeyHex(null)
+        connectPeer(null)
 
         val response = call(
             "local.attestKey",
@@ -304,7 +302,7 @@ class RequestHandlerBiometricGateTest {
     @Test
     fun anAnonymousSessionDoesNotSkipThePromptForDeviceAttestationEither() {
         requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
-        handler.setConnectedDevicePublicKeyHex(null)
+        connectPeer(null)
 
         val response = call("local.attestDevice", attestDeviceParams())
 
@@ -607,7 +605,20 @@ class RequestHandlerBiometricGateTest {
      */
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
-        return runBlocking { handler.handleRequest(request) }
+        // local.attestDevice binds its signature to the connection the request
+        // arrived on and refuses without one, so every request arrives on a
+        // connection with a binding, and the biometric gate is what fails.
+        val connection = RequestHandler.servedConnection(
+            { SessionBinding(ByteArray(32) { 0x11 }, ByteArray(32) { 0x22 }, ByteArray(0)) },
+            servedPeer
+        )
+        return runBlocking { withContext(connection) { handler.handleRequest(request) } }
+    }
+
+    /** The desktop this phone serves: the requests' connection, and the handler's served peer. */
+    private fun connectPeer(publicKeyHex: String?) {
+        servedPeer = publicKeyHex
+        handler.setConnectedDevicePublicKeyHex(publicKeyHex)
     }
 
     /** A protocol version 2 `local.attestDevice` request (go-xkms#129). */

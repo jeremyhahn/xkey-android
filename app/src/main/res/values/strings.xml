@@ -56,6 +56,8 @@
     <string name="biometric_prompt_title">Authenticate</string>
     <string name="biometric_prompt_subtitle">Confirm your identity to sign</string>
     <string name="biometric_prompt_negative">Cancel</string>
+    <string name="verify_user_prompt_title">Verify it\'s you</string>
+    <string name="verify_user_prompt_subtitle">Your paired desktop is asking to verify you</string>
 
     <!-- Notifications -->
     <string name="notification_channel_name">xKey Service</string>

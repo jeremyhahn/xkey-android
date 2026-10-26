@@ -213,7 +213,7 @@ class GattServerSessionRaceTest {
     /**
      * C: the removal lands inside msg3 processing, after the transport keys
      * are split and before they are installed. The handshake resets them
-     * before it returns, never publishes a binding or the connected state,
+     * before it returns, never publishes the connected state,
      * and the session is torn down.
      */
     @Test
@@ -239,7 +239,6 @@ class GattServerSessionRaceTest {
         assertTrue("the split produced transport keys", keys.keys.containsAll(setOf("sendKey", "recvKey")))
         keys.forEach { (name, key) -> assertTrue("$name must be zero when msg3 returns", key.isAllZero()) }
         assertFalse(session.isHandshakeComplete())
-        verify(exactly = 0) { requestHandler.setSessionBindingProvider(isNull(inverse = true)) }
         verify(timeout = TIMEOUT_MS) { gatt.cancelConnection(device) }
         eventually("the session is torn down") { server.connectionState.value == ConnectionState.Disconnected }
         assertNotEquals(ConnectionState.Connected("desktop", ADDRESS), server.connectionState.value)

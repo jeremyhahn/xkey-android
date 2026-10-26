@@ -470,4 +470,54 @@ class BiometricActivityLauncherTest {
             failureOf { deferred.await() }
         )
     }
+
+    // ------------------------------------- overlapping signing requests (Codex 7369)
+
+    @Test
+    fun overlappingSigningRequests_takeTurnsAndBothSettle() {
+        launcher.register()
+        val first = startCryptoSignature(ByteArray(32) { 1 })
+        val firstIntent = awaitLaunchedIntent()
+        val second = startCryptoSignature(ByteArray(32) { 2 })
+        Thread.sleep(200)
+        assertEquals("one prompt at a time", 1, recordingContext.launched.size)
+
+        sendSigningResult(requestIdOf(firstIntent), true, Base64.getEncoder().encodeToString(byteArrayOf(1)))
+        assertArrayEquals(byteArrayOf(1), runBlocking { withTimeout(15_000L) { first.await() } })
+
+        val deadline = System.currentTimeMillis() + 10_000L
+        while (recordingContext.launched.size < 2 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        val secondIntent = recordingContext.launched[1]
+        assertFalse(requestIdOf(firstIntent) == requestIdOf(secondIntent))
+        sendSigningResult(requestIdOf(secondIntent), false, null, BiometricPrompt.ERROR_USER_CANCELED, "cancelled")
+
+        assertTrue(failureOf { second.await() } is UserCancelledException)
+    }
+
+    /**
+     * Two requests launch the real [CryptoSigningActivity] back to back, for
+     * keys that do not exist: neither displaces the other, and both settle.
+     */
+    @Test
+    fun twoOverlappingLaunchesOfTheSigningActivity_bothSettle() {
+        val realLauncher = BiometricActivityLauncher(appContext)
+        realLauncher.register()
+        try {
+            val requests = (1..2).map { n ->
+                scope.async {
+                    realLauncher.requestCryptoSignature(
+                        credentialId = "missing-$n-${System.nanoTime()}",
+                        dataHash = ByteArray(32) { n.toByte() },
+                        title = "xKey Signing",
+                        subtitle = "example.test"
+                    )
+                }
+            }
+            for (request in requests) {
+                assertTrue(failureOf { request.await() } is KeyNotFoundException)
+            }
+        } finally {
+            realLauncher.unregister()
+        }
+    }
 }
