@@ -117,7 +117,7 @@ class TcpHsmServerRevocationTest {
 
     @After
     fun tearDown() {
-        server.stop()
+        server.stopAndAwaitStopped()
         Dispatchers.resetMain()
         mainThread.shutdownNow()
         unmockkAll()

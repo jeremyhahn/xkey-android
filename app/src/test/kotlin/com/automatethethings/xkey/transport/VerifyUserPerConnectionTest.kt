@@ -53,6 +53,7 @@ import java.math.BigInteger
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.SecureRandom
@@ -340,8 +341,7 @@ class VerifyUserPerConnectionTest {
         peer.desktop.send(peer.desktop.noise.encrypt(verifyUserRequest(NONCE_B)))
         val promptJob = withTimeout(TIMEOUT_MS) { prompt.shown.await() }
 
-        repeat(frames) { peer.desktop.send(peer.desktop.noise.encrypt(pingRequest(id = 2 + it))) }
-        if (thenClose) peer.desktop.endOutput()
+        sendUntilOverflowEnds(peer.desktop, frames, thenClose)
 
         withTimeout(TIMEOUT_MS) { prompt.dismissed.await() }
         withTimeout(TIMEOUT_MS) { promptJob.join() }
@@ -359,6 +359,28 @@ class VerifyUserPerConnectionTest {
         }
         assertSignedFor(next.desktop.noise, NONCE_C, reply)
         assertEquals(2, prompt.prompts.get())
+    }
+
+    /**
+     * Sends [frames] pings on [desktop] and, if [thenClose], ends its stream.
+     *
+     * The frame past [FRAME_BUFFER] ends the connection (#69): the phone
+     * closes its socket with the later frames unread, which resets the
+     * connection, so a send or the close after that frame may fail. That is
+     * the overflow at work, and the desktop stops there. A failure before
+     * the overflowing frame is sent is not, and fails the test.
+     */
+    private fun sendUntilOverflowEnds(desktop: DesktopPeer, frames: Int, thenClose: Boolean) {
+        var sent = 0
+        try {
+            while (sent < frames) {
+                desktop.send(desktop.noise.encrypt(pingRequest(id = 2 + sent)))
+                sent++
+            }
+            if (thenClose) desktop.endOutput()
+        } catch (e: SocketException) {
+            if (sent <= FRAME_BUFFER) throw e
+        }
     }
 
     /**

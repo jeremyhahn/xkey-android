@@ -21,6 +21,7 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.transport.DesktopPeer
+import io.mockk.clearMocks
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -98,15 +99,36 @@ class TcpHsmServerHandshakeTimeoutTest {
             """{"jsonrpc":"2.0","id":$id,"result":{"ok":true}}""".toByteArray()
         }
         server = TcpHsmServer(requestHandler = requestHandler, pairedDeviceRepository = repo)
-        server.handshakeTimeoutMs = DEADLINE_MS
         port = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
         server.start(mockk<Context>(relaxed = true), port)
-        runBlocking { withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } } }
+        runBlocking {
+            withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
+            warmUp()
+        }
+        // Read at the start of each connection's serve, so from the next one on.
+        server.handshakeTimeoutMs = DEADLINE_MS
+    }
+
+    /**
+     * Serves one desktop end to end under the default deadline (#69). The
+     * first connection in a JVM is cold: the phone's static-key load, which
+     * comes before `serve` starts the deadline, took over a second on two
+     * CPUs, and the desktop's key setup and both sides' first handshake run
+     * inside the deadline. A cold first test was cut late, or cut a desktop
+     * that was meant to pair. Each test times warm connections instead.
+     */
+    private suspend fun warmUp() {
+        val desktop = DesktopPeer(Socket(InetAddress.getLoopbackAddress(), port))
+        repo.addDevice(desktop.publicKeyHex, "warm-up")
+        desktop.handshake()
+        assertTrue(desktop.request("system.ping").getJSONObject("result").getBoolean("ok"))
+        server.closeAndAwaitListening(desktop)
+        clearMocks(requestHandler, answers = false)
     }
 
     @After
     fun tearDown() {
-        server.stop()
+        server.stopAndAwaitStopped()
         Dispatchers.resetMain()
         mainThread.shutdownNow()
         unmockkAll()
