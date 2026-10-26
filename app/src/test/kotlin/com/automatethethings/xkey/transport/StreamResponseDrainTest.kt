@@ -45,12 +45,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
@@ -83,7 +80,8 @@ class StreamResponseDrainTest {
     private lateinit var pairing: StreamPairingSession
     private lateinit var mainThread: ExecutorService
     private lateinit var listener: ServerSocket
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val connections = ServedConnections()
+    private val scope = connections.scope
 
     @Before
     fun setUp() {
@@ -131,7 +129,7 @@ class StreamResponseDrainTest {
 
     @After
     fun tearDown() {
-        scope.cancel()
+        connections.end()
         listener.close()
         Dispatchers.resetMain()
         mainThread.shutdownNow()
@@ -274,7 +272,7 @@ class StreamResponseDrainTest {
     private suspend fun connect(): Peer {
         val desktop = DesktopPeer(Socket(listener.inetAddress, listener.localPort))
         repo.addDevice(desktop.publicKeyHex, "desktop")
-        val accepted = listener.accept()
+        val accepted = connections.track(listener.accept())
         val input = ObservedInput(accepted.getInputStream())
         val connected = CompletableDeferred<Unit>()
         val served = CompletableDeferred<Result<Unit>>()

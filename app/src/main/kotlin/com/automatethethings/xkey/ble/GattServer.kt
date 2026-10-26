@@ -28,6 +28,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -35,6 +36,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -94,6 +96,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 
 /**
  * BLE GATT server for xKey protocol.
@@ -102,7 +106,9 @@ import java.util.concurrent.atomic.AtomicLong
  * encrypted session, and dispatches protocol requests to the handler.
  *
  * Thread safety: All state mutations are protected by mutex locks.
- * The GATT callbacks run on the Binder thread pool.
+ * The GATT callbacks run on the Binder thread pool and return at once: each
+ * connection's events are queued and handled in order by one coroutine, so a
+ * disconnect is handled after the writes that arrived before it (#63).
  */
 class GattServer(
     private val context: Context,
@@ -165,8 +171,26 @@ class GattServer(
         // both passed, which is what separates it from a bare CA signature.
         private const val TRUST_LEVEL_FULL_ATTESTATION = "full-attestation"
 
+        // The CCCD values that enable notifications and indications (Core
+        // Vol 3 Part G 3.3.3.3), the same bytes as BluetoothGattDescriptor's
+        // constants, which the JVM's android.jar leaves null.
+        private val CCCD_ENABLE_NOTIFICATION = byteArrayOf(0x01, 0x00)
+        private val CCCD_ENABLE_INDICATION = byteArrayOf(0x02, 0x00)
+        private val CCCD_DISABLE = byteArrayOf(0x00, 0x00)
+
         // How long a send waits for the peer to write the CCCD before giving up.
         private const val NOTIFICATION_READY_TIMEOUT_MS = 5_000L
+
+        // GATT events one connection may queue ahead of the one being handled.
+        // A whole message is at most FragmentReassembler's 1000 fragments, so
+        // a peer that sends one while an event waits on a lock still fits;
+        // more is a flood, and the connection ends (#63).
+        private const val EVENT_QUEUE_CAPACITY = 1024
+
+        // How long a disconnect waits for the events queued before it to be
+        // handled, as StreamPairingSession's drain, before it ends the
+        // connection anyway (#63).
+        private const val DRAIN_DEADLINE_MS = 5_000L
     }
 
     /** Allocates IDs for outbound enrollment requests. */
@@ -196,16 +220,26 @@ class GattServer(
     @Volatile
     private var noiseSession: NoiseSession? = null
 
+    /**
+     * The queue of the connection [noiseSession] was made on. Written before
+     * the session, and cleared after it under [noiseMutex], so a send that
+     * finds its session current finds its connection's queue here.
+     */
+    @Volatile
+    private var sessionQueue: EventQueue? = null
+
     // MTU negotiated per device
     private val deviceMtu = ConcurrentHashMap<String, Int>()
 
     // Fragment reassembly per device
     private val fragmentBuffer = ConcurrentHashMap<String, FragmentReassembler>()
 
-    // Notification subscription state per device
+    // The latest CCCD write of each device's published connection, where a
+    // waiting send reads it (see notificationsWritten). A descriptor read
+    // takes the open connection's own, from its link.
     private val notificationEnabled = ConcurrentHashMap<String, Boolean>()
 
-    // CompletableDeferred to synchronize notification readiness
+    // Completed while each device's latest CCCD write is an enable; a disable re-arms it
     private val notificationReady = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
 
     // Tracks whether the current connection has completed pairing confirmation.
@@ -286,6 +320,14 @@ class GattServer(
     /** Test seam: runs after the frame is encrypted and before it is delivered. */
     @Volatile
     internal var afterAdmissionForTest: (suspend () -> Unit)? = null
+
+    /**
+     * Each connection's event queue, by device address: the latest one, kept
+     * until its consumer ends. Guarded by [eventQueuesLock].
+     */
+    private val eventQueues = HashMap<String, EventQueue>()
+
+    private val eventQueuesLock = Any()
 
     /** Revokes the live session when its desktop is unpaired (#59). */
     private val removalListener = PairedDeviceRemovalListener { revoke(it) }
@@ -440,6 +482,8 @@ class GattServer(
         notificationReady.values.forEach { it.cancel() }
         notificationReady.clear()
         serviceAddedLatch = null
+        // No callback follows a closed server, so each queue ends here.
+        synchronized(eventQueuesLock) { eventQueues.values.forEach { endInput(it) } }
 
         scope.launch { _connectionState.value = ConnectionState.Disconnected }
 
@@ -544,18 +588,20 @@ class GattServer(
             val deviceAddress = device.address
             Log.i(TAG, "Connection state changed: device=$deviceAddress, status=$status, newState=$newState")
 
-            scope.launch {
-                Log.i(TAG, "Processing connection state change for ${device.address}")
-                stateMutex.withLock {
-                    Log.i(TAG, "Acquired mutex for connection handling, newState=$newState")
-                    when (newState) {
-                        BluetoothProfile.STATE_CONNECTED -> {
-                            handleDeviceConnected(device)
-                        }
-                        BluetoothProfile.STATE_DISCONNECTED -> {
-                            handleDeviceDisconnected(device)
-                        }
+            when (newState) {
+                // Only a connect begins a queue (Codex 7527): every other
+                // callback finds the one it began, or is dropped.
+                BluetoothProfile.STATE_CONNECTED -> synchronized(eventQueuesLock) {
+                    if (beginQueue(device) == null) {
+                        Log.w(TAG, "Ignoring a connect from $deviceAddress: the server is stopped")
                     }
+                }
+                // Never queued behind the writes, so a full queue cannot
+                // refuse it: it ends the queue, which still hands over what
+                // arrived before it. A connection already ended has no queue
+                // to end.
+                BluetoothProfile.STATE_DISCONNECTED -> synchronized(eventQueuesLock) {
+                    openQueueOf(device)?.let { endInput(it) }
                 }
             }
         }
@@ -563,7 +609,8 @@ class GattServer(
         @SuppressLint("MissingPermission")
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             Log.d(TAG, "MTU changed: device=${device.address}, mtu=$mtu")
-            deviceMtu[device.address] = mtu.coerceIn(DEFAULT_MTU, MAX_MTU)
+            val negotiated = mtu.coerceIn(DEFAULT_MTU, MAX_MTU)
+            enqueue(device, GattEvent.MtuChanged(negotiated))
         }
 
         @SuppressLint("MissingPermission")
@@ -574,6 +621,12 @@ class GattServer(
             characteristic: BluetoothGattCharacteristic
         ) {
             Log.d(TAG, "Read request: device=${device.address}, characteristic=${characteristic.uuid}")
+
+            if (!isOpen(device)) {
+                Log.w(TAG, "Refusing a read from ${device.address}: its connection is not open")
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                return
+            }
 
             when (characteristic.uuid) {
                 STATUS_UUID -> {
@@ -647,20 +700,17 @@ class GattServer(
                 return
             }
 
-            // Send response first to avoid blocking
+            // Handled in order with the connection's other events. A write
+            // its connection's queue does not take is refused, not ignored.
+            val queued = enqueue(device, GattEvent.Write(value))
             if (responseNeeded) {
                 gattServer?.sendResponse(
                     device,
                     requestId,
-                    BluetoothGatt.GATT_SUCCESS,
+                    if (queued) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE,
                     0,
                     null
                 )
-            }
-
-            // Process the data asynchronously
-            scope.launch {
-                processIncomingData(device, value)
             }
         }
 
@@ -673,13 +723,18 @@ class GattServer(
         ) {
             Log.d(TAG, "Descriptor read request: device=${device.address}, descriptor=${descriptor.uuid}")
 
-            if (descriptor.uuid == CCCD_UUID) {
-                val isEnabled = notificationEnabled[device.address] == true
-                val value = if (isEnabled) {
-                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                } else {
-                    BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-                }
+            // The latest CCCD write of the open connection, from its link,
+            // which takes each write before the consumer publishes it. The
+            // published map can still hold the connection a reconnect
+            // replaced (Codex 7557). Null when no connection is open.
+            val enabled = synchronized(eventQueuesLock) { openLink(device)?.let { it.notifications == true } }
+            if (enabled == null) {
+                Log.w(TAG, "Refusing a descriptor read from ${device.address}: its connection is not open")
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+            } else if (descriptor.uuid == CCCD_UUID) {
+                // The platform's ENABLE_NOTIFICATION_VALUE and
+                // DISABLE_NOTIFICATION_VALUE bytes.
+                val value = (if (enabled) CCCD_ENABLE_NOTIFICATION else CCCD_DISABLE).copyOf()
                 gattServer?.sendResponse(
                     device,
                     requestId,
@@ -711,19 +766,24 @@ class GattServer(
             Log.d(TAG, "Descriptor write request: device=${device.address}, descriptor=${descriptor.uuid}")
 
             if (descriptor.uuid == CCCD_UUID && value != null) {
-                val enable = value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
-                        value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
-                notificationEnabled[device.address] = enable
-                if (enable) {
-                    notificationReady[device.address]?.complete(Unit)
+                val enable = value.contentEquals(CCCD_ENABLE_NOTIFICATION) ||
+                        value.contentEquals(CCCD_ENABLE_INDICATION)
+                // Recorded here, not by the consumer: a frame written before
+                // this write has the consumer waiting on it (Codex 7477), and
+                // the latest write decides that wait (Codex 7498). One
+                // outside an open connection is refused (Codex 7527).
+                val recorded = notificationsWritten(device, enable)
+                if (recorded) {
+                    Log.d(TAG, "Notifications ${if (enable) "enabled" else "disabled"} for ${device.address}")
+                } else {
+                    Log.w(TAG, "Refusing a CCCD write from ${device.address}: its connection is not open")
                 }
-                Log.d(TAG, "Notifications ${if (enable) "enabled" else "disabled"} for ${device.address}")
 
                 if (responseNeeded) {
                     gattServer?.sendResponse(
                         device,
                         requestId,
-                        BluetoothGatt.GATT_SUCCESS,
+                        if (recorded) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE,
                         0,
                         null
                     )
@@ -763,11 +823,273 @@ class GattServer(
         }
     }
 
+    /** A GATT callback, queued for its connection's consumer. */
+    private sealed class GattEvent {
+        class Connected(val link: Link) : GattEvent()
+        class Write(val value: ByteArray) : GattEvent()
+        class MtuChanged(val mtu: Int) : GattEvent()
+    }
+
+    /**
+     * What the stack reports about one connection that a send waiting on the
+     * consumer needs before the consumer can handle it: a send the consumer
+     * makes cannot wait for an event queued behind it (Codex 7477). Begun by
+     * the connect callback and ended by the disconnect, so a callback outside
+     * that span sets nothing on it.
+     */
+    private class Link {
+        /** The latest CCCD write the stack delivered, null until one is. Under [eventQueuesLock]. */
+        var notifications: Boolean? = null
+
+        /**
+         * Completed by an enable; a disable after it replaces it with a new
+         * one, so a waiting send waits for the next enable. Cancelled when
+         * the connection ends. Under [eventQueuesLock].
+         */
+        @Volatile
+        var ready = CompletableDeferred<Unit>()
+
+        /** Whether the consumer has handled the connect and published this link's CCCD state. */
+        var published = false
+
+        /** The MTU the stack last reported, null until it reports one. */
+        @Volatile
+        var mtu: Int? = null
+    }
+
+    /**
+     * One connection's GATT events, in the order the stack delivered them,
+     * and the one coroutine that handles them (#63).
+     *
+     * A coroutine launched per callback does not run in order: a disconnect
+     * could settle the phone's pending requests as "Connection lost" before
+     * the write that carried the desktop's answer was decrypted. Here the
+     * disconnect is not queued but closes [events], behind the events that
+     * arrived before it, so a full queue cannot refuse it.
+     *
+     * The consumer runs with this queue in its context, which is how
+     * [handleApplicationMessage] knows it is draining one.
+     */
+    private class EventQueue(val device: BluetoothDevice) : AbstractCoroutineContextElement(EventQueue) {
+        companion object Key : CoroutineContext.Key<EventQueue>
+
+        val events = Channel<GattEvent>(EVENT_QUEUE_CAPACITY)
+
+        /**
+         * The disconnect was seen. What arrived before it is still handled,
+         * but a request among it is not run and nothing more is written.
+         */
+        @Volatile
+        var inputEnded = false
+
+        /** The peer queued more than [EVENT_QUEUE_CAPACITY] events: what is queued is dropped. */
+        @Volatile
+        var flooded = false
+
+        /** The link the connect began on this queue; null until one does. */
+        @Volatile
+        var link: Link? = null
+
+        lateinit var consumer: Job
+    }
+
+    /**
+     * Begins [device]'s connection: a queue of its own, holding the connect,
+     * and the one consumer that handles it once the device's last consumer
+     * has finished. The only place a queue is made (Codex 7527): a callback
+     * that finds none open is dropped, so no consumer outlives its
+     * connection. A connect that finds the last connection's queue still
+     * open ends it first, so a device has one open queue at a time.
+     *
+     * @return the queue, or null once [stop] or [destroy] has closed the
+     *   server, where no disconnect would follow to end it
+     *
+     * Call under [eventQueuesLock].
+     */
+    private fun beginQueue(device: BluetoothDevice): EventQueue? {
+        if (gattServer == null || !scope.isActive) return null
+        val address = device.address
+        val previous = eventQueues[address]
+        previous?.let { endInput(it) }
+
+        val queue = EventQueue(device)
+        val link = Link()
+        queue.link = link
+        queue.events.trySend(GattEvent.Connected(link))
+        queue.consumer = scope.launch(queue) { consume(queue, previous?.consumer) }
+        eventQueues[address] = queue
+        queue.consumer.invokeOnCompletion {
+            synchronized(eventQueuesLock) { eventQueues.remove(address, queue) }
+        }
+        return queue
+    }
+
+    /**
+     * [device]'s open queue: the one a connect began and no disconnect,
+     * overflow, [stop] or [destroy] has ended. A callback from an earlier
+     * connection, or after any of those, finds none. Call under
+     * [eventQueuesLock].
+     */
+    private fun openQueueOf(device: BluetoothDevice): EventQueue? =
+        eventQueues[device.address]?.takeUnless { it.inputEnded || !it.consumer.isActive }
+
+    /** Whether [device] has an open queue; see [openQueueOf]. */
+    private fun isOpen(device: BluetoothDevice): Boolean = synchronized(eventQueuesLock) { openQueueOf(device) != null }
+
+    /**
+     * The link of [device]'s open connection; see [openQueueOf]. Call under
+     * [eventQueuesLock].
+     */
+    private fun openLink(device: BluetoothDevice): Link? = openQueueOf(device)?.link
+
+    /**
+     * Records a CCCD write on [device]'s open link, and, once the consumer
+     * has published the link, in [notificationEnabled] and
+     * [notificationReady], where a waiting send reads it. The latest write
+     * decides: an enable after a disable releases a send waiting behind the
+     * frame the consumer is answering (Codex 7498). A write from an earlier
+     * connection, after a disconnect or after [destroy] finds no link and
+     * changes nothing.
+     *
+     * The order of the writes is what a lock-free reader relies on: a
+     * disable replaces the readiness before it records false, and an enable
+     * records true before it completes the readiness.
+     *
+     * @return false when it found no open link
+     */
+    private fun notificationsWritten(device: BluetoothDevice, enabled: Boolean): Boolean = synchronized(eventQueuesLock) {
+        val link = openLink(device) ?: return false
+        val address = device.address
+        if (enabled) {
+            link.notifications = true
+            if (link.published) notificationEnabled[address] = true
+            link.ready.complete(Unit)
+        } else {
+            if (link.ready.isCompleted) {
+                link.ready = CompletableDeferred()
+                if (link.published) notificationReady[address] = link.ready
+            }
+            link.notifications = false
+            if (link.published) notificationEnabled[address] = false
+        }
+        true
+    }
+
+    /**
+     * Makes [link] the CCCD state of [device]'s connection: what the stack
+     * reported before the consumer reached the connect, and, through
+     * [notificationsWritten], what it reports after. Call under
+     * [eventQueuesLock].
+     */
+    private fun publish(device: BluetoothDevice, link: Link) {
+        val address = device.address
+        notificationReady[address] = link.ready
+        val notifications = link.notifications
+        if (notifications != null) notificationEnabled[address] = notifications else notificationEnabled.remove(address)
+        link.published = true
+    }
+
+    /**
+     * Queues [event] for the consumer of [device]'s open connection without
+     * waiting. A peer that fills the queue has broken request-response, and
+     * its connection ends, as a stream peer's does that sends too many frames
+     * ahead.
+     *
+     * Nothing is queued without an open queue: a callback that resumes after
+     * the disconnect, an overflow, [stop] or [destroy] would otherwise leave
+     * a consumer waiting for a disconnect that has already been seen (Codex
+     * 7527). It is dropped until the next connect.
+     *
+     * @return whether the event was queued
+     */
+    @SuppressLint("MissingPermission")
+    private fun enqueue(device: BluetoothDevice, event: GattEvent): Boolean {
+        synchronized(eventQueuesLock) {
+            val queue = openQueueOf(device)
+            if (queue == null) {
+                Log.w(TAG, "Dropping a ${event.javaClass.simpleName} event from ${device.address}: its connection is not open")
+                return false
+            }
+            if (queue.events.trySend(event).isSuccess) {
+                // A send waiting for notifications fragments at this MTU even
+                // when the event is queued behind the one it answers.
+                if (event is GattEvent.MtuChanged) queue.link?.mtu = event.mtu
+                return true
+            }
+            queue.flooded = true
+            endInput(queue)
+        }
+        Log.w(TAG, "${device.address} queued more than $EVENT_QUEUE_CAPACITY events; ending the connection")
+        try { gattServer?.cancelConnection(device) } catch (_: Exception) {}
+        return false
+    }
+
+    /**
+     * Ends [queue]'s input: its consumer handles what is queued, then the
+     * disconnect. A drain that outlasts [DRAIN_DEADLINE_MS] is cut short, so
+     * a stuck event cannot hold the teardown. Call under [eventQueuesLock].
+     */
+    private fun endInput(queue: EventQueue) {
+        if (queue.inputEnded) return
+        queue.inputEnded = true
+        queue.events.close()
+        // A send waiting for notifications stops now, not at its timeout:
+        // the disconnect it waits behind would otherwise wait for it.
+        queue.link?.ready?.cancel()
+        val consumer = queue.consumer
+        val deadline = scope.launch {
+            delay(DRAIN_DEADLINE_MS)
+            if (consumer.isActive) {
+                Log.w(TAG, "Events from ${queue.device.address} did not drain in $DRAIN_DEADLINE_MS ms; disconnecting")
+                consumer.cancel()
+            }
+        }
+        // A consumer that drains in time takes its deadline with it, so
+        // nothing holds the queue once the consumer has ended.
+        consumer.invokeOnCompletion { deadline.cancel() }
+    }
+
+    /**
+     * Handles [queue]'s events one at a time, in order, after [previous],
+     * the consumer of the device's last connection. Once the queue is closed
+     * and drained, or the drain deadline passes, the device is disconnected.
+     */
+    private suspend fun consume(queue: EventQueue, previous: Job?) {
+        try {
+            previous?.join()
+            for (event in queue.events) {
+                if (queue.flooded) continue
+                try {
+                    handleEvent(queue.device, event)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Handling a GATT event from ${queue.device.address} failed", e)
+                }
+            }
+        } finally {
+            withContext(NonCancellable) {
+                stateMutex.withLock { handleDeviceDisconnected(queue.device) }
+            }
+        }
+    }
+
+    private suspend fun handleEvent(device: BluetoothDevice, event: GattEvent) {
+        when (event) {
+            is GattEvent.Connected -> stateMutex.withLock { handleDeviceConnected(device, event.link) }
+            is GattEvent.Write -> processIncomingData(device, event.value)
+            // A rejected connection's MTU is not kept: its disconnect clears nothing.
+            is GattEvent.MtuChanged -> if (connectedDevice?.address == device.address) {
+                deviceMtu[device.address] = event.mtu
+            }
+        }
+    }
+
     /**
      * Handles a new device connection.
      */
     @SuppressLint("MissingPermission")
-    private suspend fun handleDeviceConnected(device: BluetoothDevice) {
+    private suspend fun handleDeviceConnected(device: BluetoothDevice, link: Link) {
         Log.i(TAG, "Device connecting: ${device.address}, GATT services: ${gattServer?.services?.size ?: 0}")
         gattServer?.services?.forEach { svc ->
             Log.i(TAG, "Available service for client: ${svc.uuid}")
@@ -783,7 +1105,8 @@ class GattServer(
         connectedDevice = device
         deviceMtu[device.address] = DEFAULT_MTU
         fragmentBuffer[device.address] = FragmentReassembler()
-        notificationReady[device.address] = CompletableDeferred()
+        // The CCCD writes the link recorded before this, and from here on.
+        synchronized(eventQueuesLock) { publish(device, link) }
         pairingConfirmed = false
         identityExchangeComplete = false
         remotePublicKeyHex = null
@@ -801,6 +1124,7 @@ class GattServer(
             session.loadStaticKey(context)
             Log.i(TAG, "Static key loaded")
 
+            sessionQueue = currentCoroutineContext()[EventQueue]
             noiseSession = session
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create Noise session", e)
@@ -836,6 +1160,7 @@ class GattServer(
 
             connectedDevice = null
             noiseSession = null
+            sessionQueue = null
             establishedSession = null
             deviceMtu.remove(device.address)
             fragmentBuffer.remove(device.address)
@@ -953,15 +1278,19 @@ class GattServer(
             return
         }
 
+        // Once the disconnect is seen, only an application frame is drained:
+        // it may carry the desktop's answer to the phone's request (#63).
+        val ended = draining()
+
         // Handle pre-handshake identity exchange
         if (!identityExchangeComplete) {
-            handleIdentityExchange(device, completeMessage)
+            if (!ended) handleIdentityExchange(device, completeMessage)
             return
         }
 
         if (!session.isHandshakeComplete()) {
             // Process handshake message
-            handleHandshakeMessage(device, completeMessage)
+            if (!ended) handleHandshakeMessage(device, completeMessage)
         } else {
             // Process encrypted application message
             handleApplicationMessage(device, completeMessage)
@@ -1120,8 +1449,8 @@ class GattServer(
             if (established && isCurrent(session)) {
                 Log.i(TAG, "Noise handshake complete with ${device.address}")
 
-                // Send status notification
-                sendStatusNotification(device)
+                // Send status notification, unless the peer has disconnected
+                if (!draining()) sendStatusNotification(device)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Handshake processing failed", e)
@@ -1166,6 +1495,46 @@ class GattServer(
         // material, passwords and OATH secrets, so it is never logged.
         Log.d(TAG, "Decrypted message: ${plaintext.size} bytes")
 
+        // Draining a connection's queue (#63), only a response to the phone's
+        // own request is handled in place, so it settles before a disconnect
+        // queued behind it. A request can wait on the user, and the queue must
+        // not wait with it: it runs on its own, as each write did before. One
+        // read after the disconnect was seen is not run and answers nothing.
+        val queue = currentCoroutineContext()[EventQueue]
+        if (queue != null && !isResponse(plaintext)) {
+            if (queue.inputEnded) {
+                Log.d(TAG, "Not running a request whose peer has disconnected")
+                return
+            }
+            scope.launch(queue) { answerMessage(device, session, plaintext) }
+            return
+        }
+        answerMessage(device, session, plaintext)
+    }
+
+    /**
+     * Whether [plaintext] is the peer's response to a phone-initiated request,
+     * by the rule [BidirectionalMessageRouter.processMessage] routes it with:
+     * a result or an error, and no method. Without a router nothing is.
+     */
+    private fun isResponse(plaintext: ByteArray): Boolean {
+        if (messageRouter == null) return false
+        val obj = try {
+            JSONObject(String(plaintext, Charsets.UTF_8))
+        } catch (e: Exception) {
+            return false
+        }
+        val hasMethod = obj.has("method") && !obj.isNull("method")
+        val hasResult = obj.has("result") && !obj.isNull("result")
+        val hasError = obj.has("error") && !obj.isNull("error")
+        return !hasMethod && (hasResult || hasError)
+    }
+
+    /**
+     * Routes the decrypted [plaintext] that arrived on [session] and sends
+     * its answer, unless the peer disconnected meanwhile.
+     */
+    private suspend fun answerMessage(device: BluetoothDevice, session: NoiseSession, plaintext: ByteArray) {
         // The request runs as a job of this session, so unpairing the desktop
         // cancels it even while it waits on the user's approval.
         val response: ByteArray = try {
@@ -1191,6 +1560,13 @@ class GattServer(
             }
         }
         Log.d(TAG, "Got response: ${response.size} bytes")
+
+        // Nobody reads an answer written after the disconnect.
+        // Admission refuses it too, should the disconnect land after this.
+        if (draining()) {
+            Log.d(TAG, "Peer disconnected; the response is not sent")
+            return
+        }
 
         try {
             sendOnSession(session, device, response, revalidatePeer = false)
@@ -2083,7 +2459,9 @@ class GattServer(
      *
      * @param data The plaintext message bytes to encrypt and send.
      * @throws PeerNotPairedException if the desktop is no longer paired.
-     * @throws java.io.IOException if no active session or device is connected.
+     * @throws java.io.IOException if no active session or device is connected,
+     *   or the connection's disconnect was seen and it is draining; nothing
+     *   is encrypted then.
      */
     override suspend fun sendEncryptedMessage(data: ByteArray) {
         val session = noiseSession
@@ -2105,7 +2483,8 @@ class GattServer(
      * consumed the frame is delivered or the session is torn down.
      *
      * @throws PeerNotPairedException if the session was revoked or its peer is no longer paired
-     * @throws java.io.IOException if the session is gone or the frame could not be delivered
+     * @throws java.io.IOException if the session is gone, its connection is
+     *   draining after a disconnect, or the frame could not be delivered
      */
     private suspend fun sendOnSession(
         session: NoiseSession,
@@ -2125,6 +2504,12 @@ class GattServer(
                         val peerKeyHex = session.getRemoteStaticKey()?.toHexString()
                         if (session === revokedSession) throw PeerNotPairedException(peerKeyHex)
                         if (!isCurrent(session)) throw java.io.IOException("The session is no longer live")
+                        // Its connection's disconnect was seen: the session
+                        // still decrypts the replies queued before it, but
+                        // encrypts nothing more (Codex 7557).
+                        if (sessionQueue?.inputEnded == true) {
+                            throw java.io.IOException("The connection to ${device.address} is closing")
+                        }
                         if (revalidatePeer) {
                             pairedDeviceRepository?.requirePaired(peerKeyHex)
                             // Paired in the store but not confirmed on this
@@ -2155,6 +2540,11 @@ class GattServer(
     private fun abandon(session: NoiseSession) {
         synchronized(revocationLock) {
             if (noiseSession !== session || endedSession === session) return
+            // A frame the stack refused while its connection drains ends nothing yet:
+            // nothing more is sent on the session, and the replies queued
+            // before the disconnect still decrypt on it. It ends with the
+            // drain (Codex 7557).
+            if (sessionQueue?.inputEnded == true) return
             endedSession = session
         }
         requestJobs.forEach { (job, owner) -> if (owner === session) job.cancel() }
@@ -2171,8 +2561,21 @@ class GattServer(
      */
     private suspend fun sendResponse(device: BluetoothDevice, response: ByteArray) {
         val channel = openChannel(device) ?: return
+        // Checked after the wait, which a disconnect can end with the
+        // readiness already complete (Codex 7557).
+        if (draining()) {
+            Log.d(TAG, "Peer disconnected; the frame is not sent")
+            return
+        }
         deliver(channel, response, session = null)
     }
+
+    /**
+     * Whether the connection the caller handles events for has seen its
+     * disconnect: what was queued before it still drains, but nothing more
+     * is sent on it (Codex 7557).
+     */
+    private suspend fun draining(): Boolean = currentCoroutineContext()[EventQueue]?.inputEnded == true
 
     /** What a frame is notified on, resolved once before it is sent. */
     private class NotificationChannel(
@@ -2192,28 +2595,28 @@ class GattServer(
         val characteristic = responseCharacteristic ?: return null
         val server = gattServer ?: return null
 
-        // Wait for CCCD notification to be enabled (up to 5s).
-        // stop() and handleDeviceDisconnected *cancel* this deferred, and an
+        // Wait, up to 5s, until the latest CCCD write enables notifications.
+        // stop() and handleDeviceDisconnected *cancel* the readiness, and an
         // await on a cancelled deferred throws CancellationException rather
         // than returning null. Letting it propagate would reach
         // handleApplicationMessage's catch, which would try to answer over the
         // connection that just went away and throw again.
         val awaited = runCatching {
-            withTimeoutOrNull(NOTIFICATION_READY_TIMEOUT_MS) {
-                notificationReady[device.address]?.await()
-            }
+            withTimeoutOrNull(NOTIFICATION_READY_TIMEOUT_MS) { awaitNotifications(device.address) }
         }
         if (awaited.isFailure) {
             Log.i(TAG, "Connection to ${device.address} closed while waiting to send; dropping response")
             return null
         }
-
-        if (notificationEnabled[device.address] != true) {
+        if (awaited.getOrNull() != true) {
             Log.e(TAG, "Notifications not enabled for ${device.address} after waiting")
             return null
         }
 
-        val mtu = deviceMtu[device.address] ?: DEFAULT_MTU
+        // The MTU of the connection this send runs for, when it runs for one:
+        // its MTU event may be queued behind this frame's (Codex 7477).
+        val link = currentCoroutineContext()[EventQueue]?.link
+        val mtu = link?.mtu ?: deviceMtu[device.address] ?: DEFAULT_MTU
         // Max payload per fragment: ATT value limit (MTU-3) minus fragment header (7 bytes)
         val maxPayloadSize = minOf(mtu - 3, 512) - FragmentReassembler.HEADER_SIZE
         if (maxPayloadSize < Fragmenter.MIN_PAYLOAD_SIZE) {
@@ -2232,6 +2635,23 @@ class GattServer(
     }
 
     /**
+     * Waits until [address]'s latest CCCD write is an enable. A disable after
+     * the enable that completed the readiness has replaced it, so the wait
+     * goes on for the next enable (Codex 7498).
+     *
+     * @return false when there is no readiness to wait for, or it was
+     *   completed but its connection's notifications are not enabled
+     */
+    private suspend fun awaitNotifications(address: String): Boolean {
+        while (true) {
+            val ready = notificationReady[address] ?: return false
+            ready.await()
+            if (notificationEnabled[address] == true) return true
+            if (notificationReady[address] === ready) return false
+        }
+    }
+
+    /**
      * Notifies [response] on [channel], fragment by fragment. A frame sent
      * for [session] stops as soon as that session is torn down.
      *
@@ -2244,10 +2664,8 @@ class GattServer(
         session: NoiseSession?
     ): Boolean {
         val device = channel.device
+        // The frame's bytes are never logged, only its size.
         Log.d(TAG, "sendResponse: response_size=${response.size}")
-        if (response.size <= 64) {
-            Log.d(TAG, "sendResponse: response_hex=${response.joinToString("") { "%02x".format(it) }}")
-        }
 
         val fragments = channel.fragmenter.fragment(response)
         Log.d(TAG, "Sending ${fragments.size} fragment(s) to ${device.address}")

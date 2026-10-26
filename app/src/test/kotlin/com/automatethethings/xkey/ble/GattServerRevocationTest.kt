@@ -118,6 +118,7 @@ class GattServerRevocationTest {
     @After
     fun tearDown() {
         server.destroy()
+        awaitScopeFinished(server)
         unmockkAll()
     }
 

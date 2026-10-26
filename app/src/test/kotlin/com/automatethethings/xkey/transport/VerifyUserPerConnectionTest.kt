@@ -71,11 +71,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -84,6 +82,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
@@ -94,6 +93,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
@@ -127,7 +127,8 @@ class VerifyUserPerConnectionTest {
     private lateinit var pairing: StreamPairingSession
     private lateinit var mainThread: ExecutorService
     private lateinit var listener: ServerSocket
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val connections = ServedConnections()
+    private val scope = connections.scope
 
     @Before
     fun setUp() {
@@ -187,12 +188,26 @@ class VerifyUserPerConnectionTest {
 
     @After
     fun tearDown() {
-        scope.cancel()
+        connections.end()
         listener.close()
         gattServer.destroy()
+        // destroy() cancels the server's scope but does not wait for it; a
+        // coroutine still unwinding logs through Log, so wait for the scope
+        // before Log is unmocked. The wait comes before resetMain and the main
+        // thread's shutdown, so work dispatched to Main can still finish.
+        awaitGattScopeFinished()
         Dispatchers.resetMain()
         mainThread.shutdownNow()
         unmockkAll()
+    }
+
+    private fun awaitGattScopeFinished() {
+        val job = getGattField<CoroutineScope>("scope").coroutineContext.job
+        assertTrue("destroy() must cancel the GATT server's scope", job.isCancelled)
+        val finished = runBlocking { withTimeoutOrNull(SCOPE_DRAIN_TIMEOUT_MS) { job.join() } }
+        if (finished == null) {
+            fail("the GATT server's scope did not finish within $SCOPE_DRAIN_TIMEOUT_MS ms of destroy()")
+        }
     }
 
     @Test
@@ -488,7 +503,7 @@ class VerifyUserPerConnectionTest {
     private suspend fun connectOverStream(): StreamPeer {
         val desktop = DesktopPeer(Socket(listener.inetAddress, listener.localPort))
         repo.addDevice(desktop.publicKeyHex, "desktop B")
-        val accepted = listener.accept()
+        val accepted = connections.track(listener.accept())
         val connected = CompletableDeferred<Unit>()
         val served = CompletableDeferred<Result<Unit>>()
         scope.launch {
@@ -590,6 +605,7 @@ class VerifyUserPerConnectionTest {
 
     private companion object {
         const val TIMEOUT_MS = 10_000L
+        const val SCOPE_DRAIN_TIMEOUT_MS = 5_000L
         const val BLE_ADDRESS = "AA:BB:CC:DD:EE:FF"
 
         /** StreamPairingSession's frame buffer. */

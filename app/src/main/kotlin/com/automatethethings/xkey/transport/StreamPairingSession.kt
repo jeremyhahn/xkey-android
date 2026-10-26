@@ -119,7 +119,19 @@ class StreamPairingSession(
 
         /** How long the frames read before the end of a stream have to be delivered. */
         private const val DRAIN_TIMEOUT_MS = 5_000L
+
+        /**
+         * How long a peer has, from the start of [serve], to finish the
+         * identity exchange and the Noise XX handshake (#64). One deadline
+         * for the whole handshake, not one per read, so a peer that drips
+         * bytes cannot extend it. A desktop on loopback or USB finishes in
+         * milliseconds; nothing before the handshake waits on the user.
+         */
+        const val HANDSHAKE_TIMEOUT_MS = 10_000L
     }
+
+    /** Test seam: the handshake deadline, [HANDSHAKE_TIMEOUT_MS] outside tests. */
+    @Volatile internal var handshakeTimeoutMs: Long = HANDSHAKE_TIMEOUT_MS
 
     /** What [transportMethods] add to each request routed to the shared handler. */
     private val routingContext: CoroutineContext =
@@ -183,6 +195,9 @@ class StreamPairingSession(
         @Volatile var confirmed = false
         @Volatile var revoked = false
         @Volatile var ended = false
+
+        /** The handshake did not complete by the deadline, which ended the connection. */
+        @Volatile var handshakeExpired = false
 
         /** The request the message loop is waiting on, if any. */
         @Volatile var request: Job? = null
@@ -266,6 +281,21 @@ class StreamPairingSession(
             if (ended) drainDeadline?.cancel()
         }
 
+        /**
+         * Ends a connection whose handshake has not been installed by the
+         * deadline: closing its streams fails the read the handshake is
+         * blocked in. Under [state], so a handshake installed first is left
+         * alone.
+         */
+        fun expireHandshake() {
+            synchronized(state) {
+                if (established || ended) return
+                handshakeExpired = true
+                ended = true
+            }
+            end()
+        }
+
         /** Marks the connection ended, stops its request and closes its streams. */
         fun end() {
             synchronized(state) { ended = true }
@@ -294,7 +324,9 @@ class StreamPairingSession(
 
     /**
      * Runs the full responder protocol over [input]/[output] until the peer
-     * disconnects, [isActive] returns false, or the peer is unpaired.
+     * disconnects, [isActive] returns false, or the peer is unpaired. A peer
+     * that has not finished the handshake within [handshakeTimeoutMs] has its
+     * streams closed, and this returns (#64).
      *
      * @param noiseSession a session with its static key already loaded.
      * @param isActive returns false to stop the message loop (e.g., on shutdown).
@@ -309,13 +341,27 @@ class StreamPairingSession(
     ) {
         val connection = Connection(input, output, noiseSession)
         PairedDeviceRepository.addRemovalListener(connection)
+        // A blocking read cannot be cancelled, so the deadline closes the
+        // streams under it. Once the handshake is installed it no longer
+        // applies: a paired desktop may stay quiet for as long as it likes.
+        val deadline = teardownScope.launch {
+            delay(handshakeTimeoutMs)
+            connection.expireHandshake()
+        }
         try {
-            performHandshake(connection)
-            if (!noiseSession.isHandshakeComplete()) {
-                throw IOException("Noise handshake did not complete")
+            try {
+                performHandshake(connection)
+                if (!noiseSession.isHandshakeComplete()) {
+                    throw IOException("Noise handshake did not complete")
+                }
+                connection.install()
+            } catch (e: IOException) {
+                if (!connection.handshakeExpired) throw e
+                Log.w(TAG, "[$transportLabel] handshake did not complete within $handshakeTimeoutMs ms; closing the connection")
+                return
+            } finally {
+                deadline.cancel()
             }
-
-            connection.install()
 
             // A device the user already approved does not have to re-confirm on
             // every reconnect: the Noise handshake cryptographically proves it

@@ -149,6 +149,7 @@ class GattServerReconnectTest {
     @After
     fun tearDown() {
         server.destroy()
+        awaitScopeFinished(server)
         unmockkAll()
     }
 

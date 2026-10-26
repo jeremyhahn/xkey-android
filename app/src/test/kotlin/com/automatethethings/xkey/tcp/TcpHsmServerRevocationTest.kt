@@ -162,6 +162,7 @@ class TcpHsmServerRevocationTest {
         repo.addDevice(desktop.publicKeyHex, "desktop")
         server.sendEncryptedMessage(REQUEST)
         assertEquals("remote.sync", desktop.readEncrypted().getString("method"))
+        server.closeAndAwaitListening(desktop)
     }
 
     /**
@@ -203,6 +204,7 @@ class TcpHsmServerRevocationTest {
 
         val next = connectPaired()
         assertTrue(next.request("system.ping").getJSONObject("result").getBoolean("ok"))
+        server.closeAndAwaitListening(next)
     }
 
     /**
@@ -243,6 +245,7 @@ class TcpHsmServerRevocationTest {
 
         val next = connectPaired()
         assertTrue(next.request("system.ping").getJSONObject("result").getBoolean("ok"))
+        server.closeAndAwaitListening(next)
     }
 
     /**
@@ -288,6 +291,7 @@ class TcpHsmServerRevocationTest {
 
         val next = connectPaired()
         assertTrue(next.request("system.ping").getJSONObject("result").getBoolean("ok"))
+        server.closeAndAwaitListening(next)
     }
 
     private fun jsonRpc(id: Int, method: String): ByteArray = JSONObject()
@@ -365,6 +369,7 @@ class TcpHsmServerRevocationTest {
 
         val next = connectPaired()
         assertTrue(next.request("system.ping").getJSONObject("result").getBoolean("ok"))
+        server.closeAndAwaitListening(next)
     }
 
     /** The same desktop key, paired again after a removal, is served on the next connection. */
@@ -380,6 +385,7 @@ class TcpHsmServerRevocationTest {
         assertTrue(second.request("system.ping").getJSONObject("result").getBoolean("ok"))
         server.sendEncryptedMessage(REQUEST)
         assertEquals("remote.sync", second.readEncrypted().getString("method"))
+        server.closeAndAwaitListening(second)
     }
 
     private suspend fun connectPaired(

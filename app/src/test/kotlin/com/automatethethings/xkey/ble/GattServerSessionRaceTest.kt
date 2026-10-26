@@ -131,6 +131,7 @@ class GattServerSessionRaceTest {
     @After
     fun tearDown() {
         server.destroy()
+        awaitScopeFinished(server)
         unmockkAll()
     }
 

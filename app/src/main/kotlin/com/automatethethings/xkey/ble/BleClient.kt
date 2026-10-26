@@ -48,6 +48,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -101,6 +102,9 @@ class BleClient(
         private const val HANDSHAKE_TIMEOUT_MS = 30_000L
         private const val REQUEST_TIMEOUT_MS = 60_000L
         private const val MTU_REQUEST_TIMEOUT_MS = 5_000L
+        // How long a disconnect waits for the fragments queued ahead of it
+        // before it wakes the request still waiting (#63).
+        private const val DRAIN_DEADLINE_MS = 5_000L
 
         // Default MTU (minimum guaranteed)
         private const val DEFAULT_MTU = 23
@@ -238,10 +242,11 @@ class BleClient(
      * GATT callback non-blocking.
      *
      * Each is tagged with the [Connection] it arrived on, so the consumer
-     * reassembles it in that connection's own buffer and drops it once that
-     * connection has ended: see [InboundFragment].
+     * reassembles it in that connection's own buffer: see [Inbound]. The
+     * stack's disconnect is queued behind them, so a reply that arrived before
+     * it still reaches its request (#63).
      */
-    private val inboundFragments = Channel<InboundFragment>(Channel.UNLIMITED)
+    private val inboundFragments = Channel<Inbound>(Channel.UNLIMITED)
 
     // Pending response for the request/response pattern, and the connection
     // its request went out on, so a disconnect wakes only its own connection's
@@ -275,25 +280,28 @@ class BleClient(
     init {
         // One consumer, so fragments are reassembled in arrival order.
         scope.launch {
-            for (fragment in inboundFragments) {
+            for (event in inboundFragments) {
                 inboundFragmentHook?.invoke()
-                // Reassembled only while its connection is still the client's,
-                // and in that connection's own buffer: a fragment queued
-                // before its connection ended must not start or finish a
-                // message of the next one. Only this consumer touches a
-                // connection's buffer, so no reset can race it.
-                val source = fragment.connection
-                if (source !== connection) {
-                    Log.w(TAG, "Dropping a fragment from a connection that has ended")
-                    continue
-                }
-                try {
-                    val completeMessage = source.reassembler.addFragment(fragment.bytes)
-                    if (completeMessage != null) {
-                        handleCompleteMessage(source, completeMessage)
+                val source = event.connection
+                when (event) {
+                    // Every fragment of its connection is ahead of it, so a
+                    // reply among them has already reached its request. Only
+                    // now is a request still waiting on it woken (#63).
+                    is Inbound.Disconnected -> takePendingResponse(source)?.cancel()
+                    // Reassembled in its own connection's buffer, so a
+                    // fragment queued before its connection ended never starts
+                    // or finishes a message of the next one. Only this
+                    // consumer touches a connection's buffer, so no reset can
+                    // race it. Once its connection has ended, the message is
+                    // only a reply: see handleCompleteMessage.
+                    is Inbound.Fragment -> try {
+                        val completeMessage = source.reassembler.addFragment(event.bytes)
+                        if (completeMessage != null) {
+                            handleCompleteMessage(source, completeMessage)
+                        }
+                    } catch (e: FragmentException) {
+                        Log.e(TAG, "Fragment error", e)
                     }
-                } catch (e: FragmentException) {
-                    Log.e(TAG, "Fragment error", e)
                 }
             }
         }
@@ -768,13 +776,19 @@ class BleClient(
      * Releases a connection [swapConnection] ended, outside [connectionLock]:
      * cancels its request workers, fails the write it left unacknowledged —
      * no ack is coming for it on a connection that has ended — and wakes the
-     * request waiting for a reply on it.
+     * request waiting for a reply on it, unless [wakeWaiter] is false because
+     * the inbound consumer will once it has drained the connection's
+     * fragments (#63).
      */
-    private fun releaseConnection(ended: Pair<Connection, ((Int) -> Unit)?>?, reason: String) {
+    private fun releaseConnection(
+        ended: Pair<Connection, ((Int) -> Unit)?>?,
+        reason: String,
+        wakeWaiter: Boolean = true
+    ) {
         val (previous, orphaned) = ended ?: return
         previous.requests.cancel()
         failWrite(orphaned, reason)
-        takePendingResponse(previous)?.cancel()
+        if (wakeWaiter) takePendingResponse(previous)?.cancel()
     }
 
     private suspend fun performHandshake(expectedRemoteKey: ByteArray?) {
@@ -988,12 +1002,17 @@ class BleClient(
             // that connection's or tear it down. The connection is ended only
             // if this is its GATT object, and what is released below is the
             // one it ended, so not even a check gone stale could end, cancel
-            // or wake another connection's.
+            // or wake another connection's. The disconnect is queued behind
+            // the fragments in the same step, as no fragment of the
+            // connection can be queued after it (#63).
+            var disconnectQueued = false
             val owned = takeIfOwned(gatt) {
                 val ended = if (
                     newState == BluetoothProfile.STATE_DISCONNECTED && connection?.gatt === gatt
                 ) {
-                    swapConnection(null)
+                    swapConnection(null)?.also { (previous, _) ->
+                        disconnectQueued = inboundFragments.trySend(Inbound.Disconnected(previous)).isSuccess
+                    }
                 } else {
                     null
                 }
@@ -1027,10 +1046,22 @@ class BleClient(
                     // a reply that will never come. Ended above, so no write
                     // is admitted to the connection; released here, outside
                     // connectionLock, which the resumed writer may need at
-                    // once: its request workers are cancelled, its write
-                    // failed and its request's waiter woken. The teardown then
-                    // finds the connection already ended.
-                    releaseConnection(ended, "disconnected from GATT server")
+                    // once: its request workers are cancelled and its write
+                    // failed. Its request's waiter is woken by the inbound
+                    // consumer once the reply queued ahead of the disconnect,
+                    // if any, has reached it, or at the drain deadline (#63).
+                    // The teardown then finds the connection already ended.
+                    releaseConnection(ended, "disconnected from GATT server", wakeWaiter = !disconnectQueued)
+                    if (disconnectQueued && ended != null) {
+                        val previous = ended.first
+                        scope.launch {
+                            delay(DRAIN_DEADLINE_MS)
+                            takePendingResponse(previous)?.let {
+                                Log.w(TAG, "Fragments not drained by the deadline; failing the waiting request")
+                                it.cancel()
+                            }
+                        }
+                    }
                     scope.launch {
                         stateMutex.withLock {
                             // Unless a disconnect and a new connection got the
@@ -1148,7 +1179,7 @@ class BleClient(
             // desktop has nothing to send, so there is nothing to keep.
             val queued = takeIfOwned(gatt) {
                 connection?.takeIf { it.gatt === gatt }?.let { owner ->
-                    inboundFragments.trySend(InboundFragment(owner, value))
+                    inboundFragments.trySend(Inbound.Fragment(owner, value))
                 }
             }
             if (queued == null) {
@@ -1165,27 +1196,28 @@ class BleClient(
 
     /**
      * Routes a whole message by the state of [source], the connection it
-     * arrived on, and only while that is still the client's. Read from the
-     * current connection instead, a message of one that ended would be taken
-     * by the next one: its handshake would read it as a reply, or its session
-     * would decrypt it.
+     * arrived on. Read from the current connection instead, a message of one
+     * that ended would be taken by the next one: its handshake would read it
+     * as a reply, or its session would decrypt it.
      *
-     * If [source] ends after the check, the message still goes only to its
-     * own handshake channel or session. The next connection cannot have a
-     * request waiting by then: its handshake needs this consumer, which is
-     * still here.
+     * Once [source] has ended, the message is decrypted by its own session
+     * and only a reply is kept, and only for a request that went out on
+     * [source]: the desktop may have answered just before it disconnected
+     * (#63). A handshake message or a request from the desktop is dropped,
+     * and nothing is written.
      */
     private fun handleCompleteMessage(source: Connection, message: ByteArray) {
         Log.d(TAG, "Complete message received: ${message.size} bytes")
 
-        if (source !== connection) {
-            Log.w(TAG, "Dropping a message from a connection that has ended")
-            return
-        }
+        val ended = source !== connection
         val session = source.session
 
         // Check if we're still in handshake phase
         if (!session.isHandshakeComplete()) {
+            if (ended) {
+                Log.w(TAG, "Dropping a handshake message from a connection that has ended")
+                return
+            }
             // Route to this connection's own handshake channel. Unbounded, so
             // this never fails while the channel is open.
             source.handshakeResponses.trySend(message)
@@ -1203,6 +1235,10 @@ class BleClient(
 
             val inbound = asInboundRequest(plaintext)
             if (inbound != null) {
+                if (ended) {
+                    Log.w(TAG, "Dropping a request from a connection that has ended")
+                    return
+                }
                 dispatchInboundRequest(session, inbound, plaintext)
                 return
             }
@@ -1210,8 +1246,9 @@ class BleClient(
             // Route to the request that is waiting, if one still is. Taking
             // the deferred rather than completing it in place means a
             // duplicated or late reply cannot satisfy a request that a later
-            // one already superseded.
-            val waiter = takePendingResponse()
+            // one already superseded. An ended connection's reply goes only
+            // to a request that went out on it.
+            val waiter = if (ended) takePendingResponse(source) else takePendingResponse()
             if (waiter == null) {
                 Log.w(TAG, "Discarding a response no request is waiting for")
             } else {
@@ -1448,8 +1485,14 @@ class BleClient(
         val handshakeResponses = Channel<ByteArray>(Channel.UNLIMITED)
     }
 
-    /** An inbound fragment and the [Connection] it arrived on. */
-    private class InboundFragment(val connection: Connection, val bytes: ByteArray)
+    /** What the stack delivered on a [Connection], in the order it did. */
+    private sealed class Inbound(val connection: Connection) {
+        /** A notified fragment. */
+        class Fragment(connection: Connection, val bytes: ByteArray) : Inbound(connection)
+
+        /** The stack's disconnect, queued behind the fragments that came before it. */
+        class Disconnected(connection: Connection) : Inbound(connection)
+    }
 
     /** The points of an encrypted write [writeStepHook] is called at. */
     internal enum class WriteStep {

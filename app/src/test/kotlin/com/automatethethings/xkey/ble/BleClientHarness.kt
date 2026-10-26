@@ -573,10 +573,14 @@ class BleClientHarness(
         return next
     }
 
-    /** Releases the client. Safe to call more than once. */
+    /**
+     * Releases the client and waits for its coroutines to finish, so none
+     * outlives the test's mocks. Safe to call more than once.
+     */
     fun close() {
         runCatching { runBlocking { client.destroy() } }
         if (ackAfterTheNextWriteStarts) ackThread.shutdownNow()
+        awaitScopeFinished(client)
     }
 
     companion object {

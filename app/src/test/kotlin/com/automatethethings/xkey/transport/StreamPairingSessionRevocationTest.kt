@@ -47,13 +47,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
@@ -92,7 +89,8 @@ class StreamPairingSessionRevocationTest {
     private lateinit var pairing: StreamPairingSession
     private lateinit var mainThread: ExecutorService
     private lateinit var listener: ServerSocket
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val connections = ServedConnections()
+    private val scope = connections.scope
 
     @Before
     fun setUp() {
@@ -131,7 +129,7 @@ class StreamPairingSessionRevocationTest {
 
     @After
     fun tearDown() {
-        scope.cancel()
+        connections.end()
         listener.close()
         Dispatchers.resetMain()
         mainThread.shutdownNow()
@@ -536,7 +534,7 @@ class StreamPairingSessionRevocationTest {
 
     /** Accepts [desktop]'s connection and runs the phone's side of it. */
     private suspend fun serve(desktop: DesktopPeer, gate: GatedOutputStream? = null): Phone {
-        val accepted = listener.accept()
+        val accepted = connections.track(listener.accept())
         val noise = NoiseSession().also { it.loadStaticKey(context) }
         val connected = CompletableDeferred<Unit>()
         val served = CompletableDeferred<Throwable?>()

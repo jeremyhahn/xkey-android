@@ -78,6 +78,13 @@ class TcpHsmServer(
         transportLabel = "TCP",
     )
 
+    /** Test seam: the pairing session's handshake deadline. */
+    internal var handshakeTimeoutMs: Long
+        get() = pairingSession.handshakeTimeoutMs
+        set(value) {
+            pairingSession.handshakeTimeoutMs = value
+        }
+
     private val _state = MutableStateFlow<TcpHsmState>(TcpHsmState.Stopped)
 
     /** Observable state of the TCP server. */
