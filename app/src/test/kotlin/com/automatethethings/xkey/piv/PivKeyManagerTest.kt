@@ -346,17 +346,22 @@ class PivKeyManagerTest {
 
     @Test
     fun `PivSlotEntity equality uses content comparison for byte arrays`() {
+        // createdAt defaults to the clock and takes part in equals, so two rows
+        // built a millisecond apart would differ: pin it.
+        val createdAt = 1_700_000_000_000L
         val entity1 = PivSlotEntity(
             id = 1,
             slotId = "9A",
             publicKeyDer = byteArrayOf(1, 2, 3),
-            certificateDer = byteArrayOf(4, 5, 6)
+            certificateDer = byteArrayOf(4, 5, 6),
+            createdAt = createdAt
         )
         val entity2 = PivSlotEntity(
             id = 1,
             slotId = "9A",
             publicKeyDer = byteArrayOf(1, 2, 3),
-            certificateDer = byteArrayOf(4, 5, 6)
+            certificateDer = byteArrayOf(4, 5, 6),
+            createdAt = createdAt
         )
 
         assertEquals(entity1, entity2)
@@ -365,15 +370,19 @@ class PivKeyManagerTest {
 
     @Test
     fun `PivSlotEntity inequality for different byte arrays`() {
+        // Pinned so the rows differ only in the key bytes, not in createdAt.
+        val createdAt = 1_700_000_000_000L
         val entity1 = PivSlotEntity(
             id = 1,
             slotId = "9A",
-            publicKeyDer = byteArrayOf(1, 2, 3)
+            publicKeyDer = byteArrayOf(1, 2, 3),
+            createdAt = createdAt
         )
         val entity2 = PivSlotEntity(
             id = 1,
             slotId = "9A",
-            publicKeyDer = byteArrayOf(4, 5, 6)
+            publicKeyDer = byteArrayOf(4, 5, 6),
+            createdAt = createdAt
         )
 
         assertFalse(entity1 == entity2)
