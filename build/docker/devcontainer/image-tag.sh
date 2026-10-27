@@ -13,13 +13,6 @@
 #            one a pull request changes is hashed, so it names another image.
 # it:        the whole build context: the commit's tree, and on a dirty
 #            checkout the diff and every untracked file .gitignore keeps.
-#            From ci-template v1.29 also APK_INDEX_SUM, the Alpine package
-#            index checksum (scripts/apk-index-sum.sh) CI passes; `none` here,
-#            whose base is Debian. CUSTOMIZE (xkey-android, Software comment
-#            158438): also APT_INDEX_SUM, the Debian package index checksum
-#            (scripts/apt-index-sum.sh). Each sum, unset or empty, leaves the
-#            tag alone; both unset, the tag is the tree's alone.
-#            scripts/image-tag-test.sh (make lint-gates) checks this.
 #
 # The namespace is the run's class, as a name (Codex review 6470). trusted,
 # the default, is a developer's own make and CI's push, schedule or dispatch
@@ -55,12 +48,6 @@ case "${1:-}" in
 			git rev-parse 'HEAD^{tree}'
 			git diff HEAD --binary
 			git ls-files --others --exclude-standard -z | xargs -0r sha256sum
-			if [ -n "${APK_INDEX_SUM:-}" ]; then
-				printf 'APK_INDEX_SUM=%s\n' "$APK_INDEX_SUM"
-			fi
-			if [ -n "${APT_INDEX_SUM:-}" ]; then
-				printf 'APT_INDEX_SUM=%s\n' "$APT_INDEX_SUM"
-			fi
 		} | sha256sum | cut -c1-16)
 		echo "${REPO}-ci-it:${ns}${hash}"
 		;;

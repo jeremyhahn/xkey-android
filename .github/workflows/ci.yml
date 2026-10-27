@@ -1,4 +1,4 @@
-# ci-template: v1.29.0 (customized)
+# ci-template: v1.28.0 (customized)
 # CUSTOMIZE (xkey-android): a Kotlin/Gradle Android app, not a Go module. The
 # stages run the Android targets in this repo's devcontainer images
 # (build/docker/devcontainer); every Go-only step is replaced or removed in a
@@ -27,50 +27,6 @@
 #     runs on every event, a docs-only PR included, wherever `make lint`
 #     runs; it keeps IN_IMAGE_NETWORK=bridge. security and trivy image stay
 #     full tier. No needs or results line changes.
-#   - v1.29.0 part (a) (rulings 220(5), 221(4) and 222(5), DS-4075, handbook
-#     ae1ff84): "Read the Alpine package index" runs before each of the three
-#     "Name the integration image" steps (image, integration, soak; this
-#     repository's lint-gates job never names that image), and
-#     scripts/apk-index-sum.sh v1 ships unchanged. The base is Debian
-#     (BASE_IMAGE in scripts/tool-pins.sh), so APK_INDEX_SUM is the constant
-#     `none`: the Dockerfile declares no ARG APK_INDEX_SUM and runs no apk
-#     upgrade step (devcontainer.md §6). Its FROM names ${BASE_IMAGE}, which
-#     has no global ARG default, so each step sets APK_BASE_IMAGES from
-#     tool-pins.sh. image-tag.sh's `it` case hashes a non-empty sum, and
-#     docker-build-it alone takes it as --build-arg. CUSTOMIZE (xkey-android,
-#     Software comment 158438, ruling 223(13)): the Debian mirror. "Read the
-#     Debian package index" follows each Alpine step and runs
-#     scripts/apt-index-sum.sh into APT_INDEX_SUM, which image-tag.sh's `it`
-#     case hashes the same way and docker-build-it alone passes; the
-#     Dockerfile's `integration` stage declares ARG APT_INDEX_SUM and runs
-#     `apt-get upgrade`. scripts/image-tag-test.sh (lint-gates) gates the
-#     tag hashing (Codex review 7678). Part (b), the parallel stage jobs,
-#     waits for v1.30.
-# v1.29.0 (Company Agent ruling 220(5) and 221(4), 2026-10-27; handbook #474):
-# the Alpine package index checksum joins the integration image's tag hash.
-# Before v1.29 the tag hashed only the tree, so a tree whose files had not
-# changed kept its cached image after Alpine shipped a fix, and `trivy image`
-# stayed red on a fixed CVE until an unrelated file moved (go-enclave main
-# fd83b79ce, CVE-2026-92392, libcurl 8.23.0-r0). A new step, "Read the Alpine
-# package index", runs scripts/apk-index-sum.sh (v1, ships beside this file)
-# and puts its value in APK_INDEX_SUM. Every job that names the integration
-# image (image, lint-gates, integration, soak) runs it before "Name the
-# integration image", so none waits for the image job's serial stages. The
-# repository's `make -s it-image` hashes APK_INDEX_SUM, and `make
-# docker-build` passes it to the integration image's build as `--build-arg
-# APK_INDEX_SUM`. The Dockerfile's `integration` stage declares the ARG and
-# then, as root, runs `apk upgrade --no-cache`, so a new sum misses the cache
-# from that step on (ci-standard.md §9, devcontainer.md §6); `base` and
-# `toolchain` do not declare it. So a new Alpine package release changes the
-# tag and forces a rebuild, with the fixed package. A base image the script
-# cannot read fails the job: a missing index is never a pass. A repository
-# adopts v1.29 as one PR: this file, scripts/apk-index-sum.sh (in its
-# shellcheck list), the Makefile's APK_INDEX_SUM in it-image and docker-build,
-# and the Dockerfile's ARG and apk upgrade. A repository whose integration
-# image has no apk base gets `none`, a constant, so its tag changes only with
-# its tree. The parallel stage jobs move to v1.30: `runs-on` cannot take a
-# needs output on Gitea 1.27.1 (run 68501), and the registry-push question is
-# with the owner (169).
 # v1.28.0 (Company Agent ruling 219(3), 2026-10-26): `make deps-check` joins
 # the PR tier as a lint-class gate. Its step in the image job drops the
 # CI_FULL_TIER condition and runs on every event, as `make lint` does, so a
@@ -533,14 +489,6 @@ jobs:
   # (in-toolchain-image.sh v2, ci-standard.md §6), so a stage writes its
   # caches there and not into its container's layer.
   #
-  # v1.29 (Company Agent ruling 220(5)): the job reads the Alpine package
-  # indexes the build resolves against (scripts/apk-index-sum.sh, ships beside
-  # this file) into APK_INDEX_SUM, which the integration image's tag hashes and
-  # its build takes as a build argument (ci-standard.md §9, devcontainer.md
-  # §6). A new Alpine package release, a CVE fix among them, changes the tag,
-  # so the next run rebuilds the image rather than reuse a cached one with the
-  # old package (go-enclave main fd83b79ce, CVE-2026-92392).
-  #
   # The forge credentials reach the image build only as the gomodauth BuildKit
   # secret, from a file outside the context that the job removes.
   # No step and no make target prints that file, the job environment (`env`,
@@ -599,29 +547,6 @@ jobs:
       # <repo>-ci-it:<hash> (`make -s it-image`, ci-standard.md §9), so every
       # job of every run on this runner names the same image for the same
       # tree, builds it once and reuses it. No job removes it; the reap step does.
-      # v1.29 (ruling 220(5)): the Alpine package index checksum joins the
-      # integration image's tag hash (scripts/apk-index-sum.sh). A base image
-      # the script cannot read fails the step.
-      # CUSTOMIZE (xkey-android): the Dockerfile's FROM names ${BASE_IMAGE},
-      # which has no global ARG default, so APK_BASE_IMAGES is the base
-      # scripts/tool-pins.sh pins. It is Debian, so the sum is `none`.
-      - name: Read the Alpine package index
-        run: |
-          APK_BASE_IMAGES=$(. scripts/tool-pins.sh && printf '%s' "$BASE_IMAGE")
-          export APK_BASE_IMAGES
-          sum=$(scripts/apk-index-sum.sh)
-          echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
-
-      # CUSTOMIZE (xkey-android, Software comment 158438, ruling 223(13)): the
-      # Debian mirror of the step above, whose sum is `none` on this base.
-      # scripts/apt-index-sum.sh hashes the pinned BASE_IMAGE's apt index
-      # into APT_INDEX_SUM, which the integration tag hashes and whose build
-      # runs `apt-get upgrade` again. An unreadable index fails the job.
-      - name: Read the Debian package index
-        run: |
-          sum=$(scripts/apt-index-sum.sh)
-          echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
-
       - name: Name the integration image
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
@@ -984,26 +909,6 @@ jobs:
           REAP_IMAGE_REPOS: ${{ github.event.repository.name }}-toolchain
         run: scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
 
-      # v1.29: the Alpine package index checksum (as in the image job).
-      # CUSTOMIZE (xkey-android): APK_BASE_IMAGES from scripts/tool-pins.sh
-      # (as in the image job).
-      - name: Read the Alpine package index
-        run: |
-          APK_BASE_IMAGES=$(. scripts/tool-pins.sh && printf '%s' "$BASE_IMAGE")
-          export APK_BASE_IMAGES
-          sum=$(scripts/apk-index-sum.sh)
-          echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
-
-      # CUSTOMIZE (xkey-android, Software comment 158438, ruling 223(13)): the
-      # Debian mirror of the step above, whose sum is `none` on this base.
-      # scripts/apt-index-sum.sh hashes the pinned BASE_IMAGE's apt index
-      # into APT_INDEX_SUM, which the integration tag hashes and whose build
-      # runs `apt-get upgrade` again. An unreadable index fails the job.
-      - name: Read the Debian package index
-        run: |
-          sum=$(scripts/apt-index-sum.sh)
-          echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
-
       # v1.23: the content-addressed integration image (as in the image job).
       - name: Name the integration image
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
@@ -1149,26 +1054,6 @@ jobs:
         env:
           REAP_IMAGE_REPOS: ${{ github.event.repository.name }}-toolchain
         run: scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
-
-      # v1.29: the Alpine package index checksum (as in the image job).
-      # CUSTOMIZE (xkey-android): APK_BASE_IMAGES from scripts/tool-pins.sh
-      # (as in the image job).
-      - name: Read the Alpine package index
-        run: |
-          APK_BASE_IMAGES=$(. scripts/tool-pins.sh && printf '%s' "$BASE_IMAGE")
-          export APK_BASE_IMAGES
-          sum=$(scripts/apk-index-sum.sh)
-          echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
-
-      # CUSTOMIZE (xkey-android, Software comment 158438, ruling 223(13)): the
-      # Debian mirror of the step above, whose sum is `none` on this base.
-      # scripts/apt-index-sum.sh hashes the pinned BASE_IMAGE's apt index
-      # into APT_INDEX_SUM, which the integration tag hashes and whose build
-      # runs `apt-get upgrade` again. An unreadable index fails the job.
-      - name: Read the Debian package index
-        run: |
-          sum=$(scripts/apt-index-sum.sh)
-          echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
       # v1.23: the content-addressed integration image (as in the image job).
       - name: Name the integration image

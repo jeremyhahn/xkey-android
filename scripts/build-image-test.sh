@@ -26,18 +26,16 @@ f() { printf '%s/names/%s' "${S}" "${1//\//%}"; }
 cmd=$1; shift
 case ${cmd} in
 build)
-	name= iid= target= bargs=
+	name= iid= target=
 	while [ $# -gt 0 ]; do
 		case $1 in
 		-t) name=$2; shift 2 ;;
 		--iidfile) iid=$2; shift 2 ;;
 		--target) target=$2; shift 2 ;;
-		--build-arg) bargs+=" $2"; shift 2 ;;
-		-f | --label) shift 2 ;;
+		-f | --build-arg | --label) shift 2 ;;
 		*) shift ;;
 		esac
 	done
-	echo "${target}:${bargs}" >> "${S}/buildargs"
 	[ -z "${STUB_BUILD_FAIL:-}" ] || { echo "ERROR: failed to solve: stub" >&2; exit 1; }
 	if [ -n "${STUB_SAME_ID:-}" ]; then
 		id=sha256:$(printf '%s' "${target}" | sha256sum | cut -c1-64)
@@ -193,17 +191,6 @@ for kind in toolchain it; do
 	check "${kind}: failed build: no ID written" test ! -s "${T}/ids-a/${kind}.iid"
 	check "${kind}: failed build: the tag is untouched" eq "$(tag_id "${tag}")" sha256:old
 done
-
-# ci-template v1.29: the Alpine index sum reaches the integration build alone,
-# and so does its CUSTOMIZE (xkey-android) Debian mirror, APT_INDEX_SUM.
-reset
-stub make -s -C "${ROOT}" docker-build-it IT_IMAGE="${IT}" APK_INDEX_SUM=sum1 APT_INDEX_SUM=aptsum1 > "${T}/out-a" 2>&1 || true
-stub make -s -C "${ROOT}" docker-build-toolchain APK_INDEX_SUM=sum1 APT_INDEX_SUM=aptsum1 > "${T}/out-b" 2>&1 || true
-check "apk: the integration build takes APK_INDEX_SUM" grep -q '^integration:.* APK_INDEX_SUM=sum1' "${S}/buildargs"
-check "apk: the toolchain build does not" eq "$(grep -c '^toolchain:.*APK_INDEX_SUM' "${S}/buildargs" || true)" 0
-check "apk: the toolchain build ran" grep -q '^toolchain:' "${S}/buildargs"
-check "apt: the integration build takes APT_INDEX_SUM" grep -q '^integration:.* APT_INDEX_SUM=aptsum1' "${S}/buildargs"
-check "apt: the toolchain build does not" eq "$(grep -c '^toolchain:.*APT_INDEX_SUM' "${S}/buildargs" || true)" 0
 
 if [ "${FAILED}" != 0 ]; then
 	echo "build-image-test: FAILED"

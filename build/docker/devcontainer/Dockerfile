@@ -203,16 +203,9 @@ USER 1000
 # TODO(#35): how this stage reaches a device or emulator waits on Software; until then `make integration-test` stops at device-check.
 FROM base AS integration
 ARG APT_PROXY=
-# ci-template v1.29, CUSTOMIZE (xkey-android, Software comment 158438): the
-# Debian mirror of devcontainer.md section 6's `ARG APK_INDEX_SUM` and
-# `apk upgrade --no-cache`. APT_INDEX_SUM (scripts/apt-index-sum.sh) is the
-# package index checksum the image's tag hashes; a new one misses the cache
-# from this RUN on, so `apt-get upgrade` takes the fixed packages that base's
-# cached upgrade layer does not have. base and toolchain do not declare it.
-ARG APT_INDEX_SUM=
 USER root
 RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \
- && apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends make \
+ && apt-get update && apt-get install -y --no-install-recommends make \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy
 USER 1000
 COPY --chown=1000:1000 . /src
