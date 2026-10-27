@@ -213,11 +213,19 @@ dependencies {
     // 1.80.2 (CVE-2026-8763, CVE-2026-13506), from sdk-common, raised with
     // bcpkix and bcutil 1.80.2, which Bouncy Castle releases with it. AGP adds
     // lint-gradle only when the configuration has no dependencies; constraints
-    // are not dependencies.
+    // are not dependencies. Its guava 33.4.0-jre (CVE-2026-102554), from lint
+    // 32.4.1, is raised the same way.
+    //
+    // guava (CVE-2026-102554): 33.3.1-android reaches the APK from media3
+    // 1.11.1 and CameraX 1.6.2, and kapt's 33.2.1-jre comes from Room's
+    // compiler (auto-common 1.2.1).
     constraints {
         add("androidLintTool", libs.bouncycastle.bcprov)
         add("androidLintTool", libs.bouncycastle.bcpkix)
         add("androidLintTool", libs.bouncycastle.bcutil)
+        add("androidLintTool", libs.guava.jre)
+        implementation(libs.guava.android)
+        kapt(libs.guava.jre)
     }
 }
 
