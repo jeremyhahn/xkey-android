@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test image-lease-test build-image-test
+	reaper-test revert-red-main-test image-lease-test build-image-test image-tag-test
 
 .DEFAULT_GOAL := help
 
@@ -111,7 +111,7 @@ lint: android-lint ## Android lint on the debug variant (the repository's own ga
 # ci-template v1.27: the repository's own gates (scripts, workflows, their
 # tests) are not part of lint: CI's lint-gates job runs `make -k lint-gates`
 # in parallel with the image job's `make lint`, so nothing runs twice there.
-lint-gates: actionlint closing-links-test revert-red-main-test reaper-test image-lease-test build-image-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the image lease fixtures + the concurrent image build fixtures + deps-check's fixtures (offline)
+lint-gates: actionlint closing-links-test revert-red-main-test reaper-test image-lease-test build-image-test image-tag-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the image lease fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline)
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -140,6 +140,9 @@ image-lease-test: ## Test ci.yml's image lease steps (rebuild once, export the n
 
 build-image-test: ## Test two concurrent cold builds of one image tag (make docker-build-toolchain, docker-build-it) against a stubbed docker (bash)
 	./scripts/build-image-test.sh
+
+image-tag-test: ## Test that the package index sums move the integration image tag and never the toolchain's, and scripts/apt-index-sum.sh against a stubbed docker (bash)
+	./scripts/image-tag-test.sh
 
 security: tools-check-trivy trivy-fs ## Security suite: trivy fs (vuln + secret, CRITICAL/HIGH blocking)
 
@@ -200,7 +203,15 @@ docker-build: docker-build-toolchain docker-build-it ## Build the toolchain and 
 # name of its own and only then points $$tag at the ID the build wrote, so
 # concurrent cold builds of one tag all succeed (main run 68429); with
 # IMAGE_FRESH=true it keeps that name, which the stages' ID needs.
-DOCKER_BUILD_IMAGE = env $(DOCKER_BUILD) --label "ci.image.repository=$${tag%%:*}" --target $(2)
+# ci-template v1.29: the integration build alone takes APK_INDEX_SUM, the Alpine
+# package index checksum its tag hashes (image-tag.sh). CUSTOMIZE
+# (xkey-android): the base is Debian, so CI's sum is `none` and the Dockerfile
+# declares no ARG for it (devcontainer.md section 6). Its Debian mirror,
+# APT_INDEX_SUM (scripts/apt-index-sum.sh, Software comment 158438), goes to
+# the integration build alone too, whose stage declares it and runs
+# `apt-get upgrade`, so a new sum rebuilds with the fixed packages.
+DOCKER_BUILD_IMAGE = env $(DOCKER_BUILD) --label "ci.image.repository=$${tag%%:*}" --target $(2) \
+	$(if $(filter integration,$(2)),--build-arg "APK_INDEX_SUM=$${APK_INDEX_SUM:-}" --build-arg "APT_INDEX_SUM=$${APT_INDEX_SUM:-}")
 reuse_or_build = if [ "$(IMAGE_FRESH)" = true ]; then \
 		case "$(BASE_IMAGE)" in *@sha256:*) ;; *) echo "BASE_IMAGE=$(BASE_IMAGE) is not pinned by digest (scripts/tool-pins.sh)"; exit 1 ;; esac; \
 		iid="$(IMAGE_ID_DIR)/$(1).iid"; mkdir -p "$(IMAGE_ID_DIR)" && rm -f "$$iid" \
