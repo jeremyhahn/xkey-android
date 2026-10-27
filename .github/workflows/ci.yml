@@ -1,12 +1,12 @@
-# ci-template: v1.27.0 (customized)
+# ci-template: v1.28.0 (customized)
 # CUSTOMIZE (xkey-android): a Kotlin/Gradle Android app, not a Go module. The
 # stages run the Android targets in this repo's devcontainer images
 # (build/docker/devcontainer); every Go-only step is replaced or removed in a
 # CUSTOMIZE block below that says which and why. The template's changelog
 # follows unchanged.
 # CUSTOMIZE (xkey-android, ruling 211, CA m1355, DS-3873): v1.27.0 adopted,
-# customized as follows. Each version is ported where it applies; the
-# template's changelog below is unchanged.
+# then v1.28.0 (ruling 220(3), DS-4023), customized as follows. Each version
+# is ported where it applies; the template's changelog below is unchanged.
 #   - v1.25.1: the three lease steps are bounded and never skipped, by image
 #     ID with --pull never, rebuilding once if an image is gone.
 #   - v1.25.2: not applicable (IT_LEASE_ID, `docker tag`): this repository
@@ -23,6 +23,19 @@
 #   - v1.26.2: already here (DS-3465, #54), the literal cancel-in-progress.
 #   - v1.27.0: lint-gates job (toolchain image alone, no probe step, no
 #     GO_BUILD_TAGS), `make lint` is Android lint alone, in CI Gate as `pr`.
+#   - v1.28.0 (ruling 220(3), DS-4023, handbook 0d451ecf7): `make deps-check`
+#     runs on every event, a docs-only PR included, wherever `make lint`
+#     runs; it keeps IN_IMAGE_NETWORK=bridge. security and trivy image stay
+#     full tier. No needs or results line changes.
+# v1.28.0 (Company Agent ruling 219(3), 2026-10-26): `make deps-check` joins
+# the PR tier as a lint-class gate. Its step in the image job drops the
+# CI_FULL_TIER condition and runs on every event, as `make lint` does, so a
+# module behind its dependency floor fails the PR, not main after the merge
+# (go-objstore main 8946d5f53 went red on its push run for exactly this; fixed
+# by go-objstore #127). The step keeps IN_IMAGE_NETWORK=bridge for the module
+# proxy and runs in seconds; it stays on the full tier too. The image job is
+# already `pr` in CI Gate, so no needs or results line changes. A repository
+# adopts v1.28 as a CI-file PR; none hand-patches its ci.yml ahead of it.
 # v1.25 (Company Agent m857, 2026-10-20): main has one concurrency group per
 # event, so a newer push to main cancels the older in-progress main push run.
 # At 20:00Z go-qrdb had three main-push runs in progress on three commits and
@@ -51,7 +64,8 @@
 # two tiers. A pull request runs the PR tier only: lint (with
 # assert-build-tags and arch-gates), build, and the unit suite under -race
 # (`make coverage`, so unit test and race are one step). Integration, Soak,
-# security, deps-check and trivy image do not run on a PR. The full tier runs
+# security, deps-check and trivy image do not run on a PR (v1.28 puts
+# deps-check on the PR tier). The full tier runs
 # on main after every merge (push), nightly (a new `schedule:` trigger), on
 # workflow_dispatch, and on a PR labelled ci:full (kept as the opt-in). A new
 # `soak` job loops the integration suite in the integration image for
@@ -465,8 +479,10 @@ jobs:
   # bridge) for the vulnerability databases and the module proxy.
   #
   # v1.23: lint, assert-build-tags, build and coverage are the PR tier and run
-  # on every event. security, deps-check and trivy image are full tier only
+  # on every event. security and trivy image are full tier only
   # (env.CI_FULL_TIER): main after every merge, nightly, dispatch, ci:full.
+  # v1.28: deps-check is a lint-class gate on the PR tier and runs on every
+  # event (ruling 219(3)).
   #
   # v1.22: every stage mounts the build and golangci-lint cache volumes, and a
   # bridge stage the module cache volume, from the runner's Docker host
@@ -696,8 +712,10 @@ jobs:
 
       # Fails when a library, first-party or third-party, is behind its latest
       # release without devops.md §9's documented reason (ci-standard.md §1).
+      # v1.28: a lint-class gate of seconds on the PR tier, every event, a
+      # docs-only PR included (ruling 219(3)); it was full tier only from v1.23.
       - name: make deps-check
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         env:
           IN_IMAGE_NETWORK: bridge
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make deps-check
