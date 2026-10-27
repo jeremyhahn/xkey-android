@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test image-lease-test
+	reaper-test revert-red-main-test image-lease-test build-image-test
 
 .DEFAULT_GOAL := help
 
@@ -111,7 +111,7 @@ lint: android-lint ## Android lint on the debug variant (the repository's own ga
 # ci-template v1.27: the repository's own gates (scripts, workflows, their
 # tests) are not part of lint: CI's lint-gates job runs `make -k lint-gates`
 # in parallel with the image job's `make lint`, so nothing runs twice there.
-lint-gates: actionlint closing-links-test revert-red-main-test reaper-test image-lease-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the image lease fixtures + deps-check's fixtures (offline)
+lint-gates: actionlint closing-links-test revert-red-main-test reaper-test image-lease-test build-image-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the image lease fixtures + the concurrent image build fixtures + deps-check's fixtures (offline)
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -137,6 +137,9 @@ reaper-test: ## Test reap-stale-ci-stacks.sh's image and lease rules against a s
 
 image-lease-test: ## Test ci.yml's image lease steps (rebuild once, export the new ID, fail after the retry, release the lock) against a stubbed docker and make (bash)
 	./scripts/image-lease-test.sh
+
+build-image-test: ## Test two concurrent cold builds of one image tag (make docker-build-toolchain, docker-build-it) against a stubbed docker (bash)
+	./scripts/build-image-test.sh
 
 security: tools-check-trivy trivy-fs ## Security suite: trivy fs (vuln + secret, CRITICAL/HIGH blocking)
 
@@ -193,17 +196,20 @@ docker-build: docker-build-toolchain docker-build-it ## Build the toolchain and 
 # scripts/reap-stale-ci-stacks.sh ages an image by. CUSTOMIZE (xkey-android):
 # the fresh build, and the ci.image.repository label on every build, by which
 # the reaper finds this repo's images a later build has untagged (Codex review
-# 6544).
-DOCKER_BUILD_IMAGE = $(DOCKER_BUILD) --label "ci.image.repository=$${tag%%:*}" --target $(2) -t "$$tag"
+# 6544). Every build goes through scripts/build-image.sh, which builds under a
+# name of its own and only then points $$tag at the ID the build wrote, so
+# concurrent cold builds of one tag all succeed (main run 68429); with
+# IMAGE_FRESH=true it keeps that name, which the stages' ID needs.
+DOCKER_BUILD_IMAGE = env $(DOCKER_BUILD) --label "ci.image.repository=$${tag%%:*}" --target $(2)
 reuse_or_build = if [ "$(IMAGE_FRESH)" = true ]; then \
 		case "$(BASE_IMAGE)" in *@sha256:*) ;; *) echo "BASE_IMAGE=$(BASE_IMAGE) is not pinned by digest (scripts/tool-pins.sh)"; exit 1 ;; esac; \
 		iid="$(IMAGE_ID_DIR)/$(1).iid"; mkdir -p "$(IMAGE_ID_DIR)" && rm -f "$$iid" \
-			&& $(DOCKER_BUILD_IMAGE) --pull --no-cache --iidfile "$$iid" .; \
+			&& ./scripts/build-image.sh --keep-name "$$tag" "$$iid" $(DOCKER_BUILD_IMAGE) --pull --no-cache; \
 	else \
 		{ docker image inspect "$$tag" > /dev/null 2>&1 && docker tag "$$tag" "$$tag"; } \
 		|| { [ "$(IMAGE_NAMESPACE)" = pr ] && trusted=$$($(IMAGE_TAG) $(1)) \
 			&& docker image inspect "$$trusted" > /dev/null 2>&1 && docker tag "$$trusted" "$$tag"; } \
-		|| $(DOCKER_BUILD_IMAGE) .; \
+		|| ./scripts/build-image.sh "$$tag" - $(DOCKER_BUILD_IMAGE); \
 	fi
 
 # image_id <image-tag.sh kind>,<tag>: the ID the run's stages use. With
