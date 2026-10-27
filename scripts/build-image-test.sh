@@ -8,7 +8,9 @@
 # succeed; with IMAGE_FRESH=true each job's `make -s <kind>-image-id` is the
 # sha256: ID its own build wrote, still on the daemon, and the tag names one of
 # them; without it no build's own name stays behind; a failed build leaves the
-# tag alone. Needs bash and make only. `make build-image-test`.
+# tag alone; a final re-tag that collides with another job's (main run 69069)
+# is retried, a bounded number of times, and no other error is. Needs bash and
+# make only. `make build-image-test`.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -67,6 +69,17 @@ tag)
 	sha256:*) grep -qxF "${src}" "${S}/ids" || exit 1; id=${src} ;;
 	*) [ -e "$(f "${src}")" ] || exit 1; id=$(cat "$(f "${src}")") ;;
 	esac
+	# The first STUB_TAG_FAILS tries fail: STUB_TAG_ERR=exists as a concurrent
+	# re-tag's create does (run 69069), else as some other error.
+	echo "${dst}" >> "${S}/tagtries"
+	if [ "$(wc -l < "${S}/tagtries")" -le "${STUB_TAG_FAILS:-0}" ]; then
+		if [ "${STUB_TAG_ERR:-}" = exists ]; then
+			echo "Error response from daemon: failed to create an image docker.io/library/${dst} with target ${id} after deleting the existing one: AlreadyExists: image \"docker.io/library/${dst}\": already exists" >&2
+		else
+			echo "Error response from daemon: stub: no space left on device" >&2
+		fi
+		exit 1
+	fi
 	# docker tag replaces the name, whoever wrote it.
 	echo "${id}" > "$(f "${dst}").$$" && mv "$(f "${dst}").$$" "$(f "${dst}")"
 	echo "tag ${dst} ${id}" >> "${S}/log"
@@ -99,6 +112,7 @@ reset() {
 	mkdir -p "${S}/names"
 	: > "${S}/ids"
 	: > "${S}/log"
+	: > "${S}/tagtries"
 }
 
 # stub <command...>: the command against the stub docker.
@@ -190,6 +204,43 @@ for kind in toolchain it; do
 	check "${kind}: failed build: make fails" ne "${rc}" 0
 	check "${kind}: failed build: no ID written" test ! -s "${T}/ids-a/${kind}.iid"
 	check "${kind}: failed build: the tag is untouched" eq "$(tag_id "${tag}")" sha256:old
+done
+
+# The final re-tag against a concurrent re-tag of the same name (main run
+# 69069, job 323125): `already exists` is retried up to 5 tries, each pointing
+# the tag at the job's own build; any other error fails at once. With and
+# without --keep-name, which alone decides whether the build's own name stays.
+# retag <fails> <exists|other> [--keep-name]: build-image.sh with the stub's
+# first <fails> tags failing; sets RC, ID (the build's) and TRIES.
+retag() {
+	reset
+	rc=0
+	stub STUB_TAG_FAILS="$1" STUB_TAG_ERR="$2" BUILD_IMAGE_TAG_BACKOFF_MS=1 \
+		"${ROOT}/scripts/build-image.sh" "${@:3}" "${TC}" - docker build > "${T}/out-a" 2>&1 || rc=$?
+	RC=${rc} ID=$(tail -n 1 "${S}/ids") TRIES=$(wc -l < "${S}/tagtries")
+}
+for keep in "" --keep-name; do
+	# kept: the names a build leaves besides the tag, its own with --keep-name.
+	k=${keep:+keep-name: } kept=0
+	[ -z "${keep}" ] || kept=1
+
+	retag 1 exists ${keep:+"${keep}"}
+	check "retag: ${k}one collision, then a free name: exits 0" eq "${RC}" 0
+	check "retag: ${k}one collision, then a free name: the tag names the job's own build" eq "$(tag_id "${TC}")" "${ID}"
+	check "retag: ${k}one collision, then a free name: two tries" eq "${TRIES}" 2
+	check "retag: ${k}one collision, then a free name: the build's own name stays only with --keep-name" eq "$(ls "${S}/names" | wc -l)" "$((1 + kept))"
+
+	retag 99 exists ${keep:+"${keep}"}
+	check "retag: ${k}always colliding: exits 1" eq "${RC}" 1
+	check "retag: ${k}always colliding: the bound, 5 tries" eq "${TRIES}" 5
+	check "retag: ${k}always colliding: one line names the tag" grep -q "could not point ${TC} at " "${T}/out-a"
+	check "retag: ${k}always colliding: the tag is not set" eq "$(tag_id "${TC}")" ""
+	check "retag: ${k}always colliding: the build's own name stays only with --keep-name" eq "$(ls "${S}/names" | wc -l)" "${kept}"
+
+	retag 99 other ${keep:+"${keep}"}
+	check "retag: ${k}another error: exits 1" eq "${RC}" 1
+	check "retag: ${k}another error: one try" eq "${TRIES}" 1
+	check "retag: ${k}another error: the build's own name stays only with --keep-name" eq "$(ls "${S}/names" | wc -l)" "${kept}"
 done
 
 if [ "${FAILED}" != 0 ]; then

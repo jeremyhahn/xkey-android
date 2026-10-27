@@ -63,7 +63,33 @@ if ! [[ ${id} =~ ^sha256:[0-9a-f]{64}$ ]]; then
 	echo "$0: the build of ${tag} wrote '${id}' to ${iid}, not an image ID" >&2
 	exit 1
 fi
-docker tag "${id}" "${tag}"
-if [ "${keep}" != true ]; then
-	docker image rm "${name}" > /dev/null || echo "$0: could not remove the build's own name ${name}" >&2
-fi
+drop_name() {
+	[ "${keep}" = true ] || docker image rm "${name}" > /dev/null || echo "$0: could not remove the build's own name ${name}" >&2
+}
+
+# CUSTOMIZE (xkey-android): concurrent re-tags of one tag (main run 69069, job
+# 323125). The containerd image store re-tags a name as a delete, then a
+# create, so when two jobs re-tag <tag> at once the second create can fail
+# `image "<tag>": already exists`. Docker has no atomic re-tag, so that error
+# alone is retried, up to tag_tries tries with a jittered back-off (under 10 s
+# in all), each pointing <tag> at this build's own ID again. Any other error
+# fails at once.
+tag_tries=5
+backoff_ms=${BUILD_IMAGE_TAG_BACKOFF_MS:-500}
+try=1
+while ! err=$(docker tag "${id}" "${tag}" 2>&1); do
+	printf '%s\n' "${err}" >&2
+	case ${err} in
+	*"already exists"*) ;;
+	*) drop_name; exit 1 ;;
+	esac
+	if [ "${try}" -ge "${tag_tries}" ]; then
+		echo "$0: could not point ${tag} at ${id}: a concurrent re-tag collided ${tag_tries} times" >&2
+		drop_name
+		exit 1
+	fi
+	ms=$((backoff_ms * try + RANDOM % (2 * backoff_ms)))
+	sleep "$((ms / 1000)).$(printf '%03d' $((ms % 1000)))"
+	try=$((try + 1))
+done
+drop_name
