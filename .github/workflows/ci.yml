@@ -1,4 +1,4 @@
-# ci-template: v1.29.0 (customized)
+# ci-template: v1.29.2 (customized)
 # CUSTOMIZE (xkey-android): a Kotlin/Gradle Android app, not a Go module. The
 # stages run the Android targets in this repo's devcontainer images
 # (build/docker/devcontainer); every Go-only step is replaced or removed in a
@@ -46,6 +46,28 @@
 #     `apt-get upgrade`. scripts/image-tag-test.sh (lint-gates) gates the
 #     tag hashing (Codex review 7678). Part (b), the parallel stage jobs,
 #     waits for v1.30.
+#   - v1.29.1 (ruling 226(15), 108 repair; ruling 252, CA m1664 (e),
+#     DS-4492): the lint-gates job runs `make lint-gates` without `-k`, so the
+#     first failing gate ends the step. No other job change.
+#   - v1.29.2 (ruling 239(8); ruling 252): comments only. This repository has
+#     no path-gated CUSTOMIZE job (no job's `if:` reads `needs.changes.*`;
+#     the `docs_only` tests gate steps inside a job), so nothing is
+#     restructured; the comment block stands beside the image job's
+#     CUSTOMIZE note.
+# v1.29.2 (Company Agent ruling 239(8), 2026-10-28): comments only; no job,
+# gate or tier changes. A CUSTOMIZE job gated on a changes output (a path-gated
+# suite) needs the image job too and tests an output of the image job in its
+# `if:`. On a pull_request, an `if:` that reads only `needs.changes.result` or
+# only `needs.changes.outputs.*` left such a job skipped unstarted (two runs
+# in a row); one that also tests the image job's output started it. A
+# repository needs no adoption PR.
+# v1.29.1 (Company Agent ruling 226(15), 108 repair, 2026-10-27): lint fails
+# fast. The lint-gates job runs `make lint-gates` without `-k`, so the first
+# failing gate ends the step. Under `-k` make went on running the other gates
+# after one had failed: in go-quicbaas run 68949 Lint took 51.5 min, 37 of
+# them after the `go vet` failure. A red gate now reports as soon as it fails,
+# and the gates after it run on the next push. No other job, gate or tier
+# changes. A repository adopts v1.29.1 as a CI-file PR.
 # v1.29.0 (Company Agent ruling 220(5) and 221(4), 2026-10-27; handbook #474):
 # the Alpine package index checksum joins the integration image's tag hash.
 # Before v1.29 the tag hashed only the tree, so a tree whose files had not
@@ -825,7 +847,7 @@ jobs:
   # v1.27 (Company Agent m1192 (6), item 27): the repository's own gates run
   # in this job, in parallel with the image job's `make lint`, not in series
   # after it, so Lint's wall time is the longer of the two and not their sum.
-  # `make -k lint-gates` is actionlint over .github/workflows and the gate
+  # `make lint-gates` is actionlint over .github/workflows and the gate
   # tests for the workflow scripts (closing links, revert-red-main, the
   # reaper, deps-check); `make lint` is Android lint alone, so no gate runs
   # twice. A lint-class check: it is on the PR tier and runs on a docs-only PR.
@@ -837,6 +859,9 @@ jobs:
   # so IN_IMAGE_NETWORK stays none. Needs in the toolchain image: actionlint
   # and shellcheck (the Dockerfile's pinned actionlint and apt shellcheck),
   # bash, git, jq and make. No gate needs python3.
+  # v1.29.1 (ruling 226(15), 108 repair): the step fails fast. `make
+  # lint-gates` runs without `-k`, so the first failing gate ends the step
+  # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
@@ -932,12 +957,12 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
 
-      # -k reports every failing gate in one pass.
+      # v1.29.1: no -k; the first failing gate ends the step (ruling 226(15)).
       - name: make lint-gates
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         env:
           IN_IMAGE_NETWORK: none   # CUSTOMIZE: bridge when a gate needs a network; none of these does
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make -k lint-gates"
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint-gates"
 
       - name: Tear down
         if: always()
@@ -1295,6 +1320,15 @@ jobs:
   # Gate's needs list and check lines. v1.23: such a suite is full tier (the
   # integration job's `if:`, `full` in CI Gate) unless it is lint, build,
   # unit or race, which stay on the PR tier.
+  # v1.29.2 (ruling 239(8)): a CUSTOMIZE job that runs only when certain
+  # paths change (the changes job gains an output for them, `optee` here)
+  # needs the image job as well, and its `if:` tests an image job output
+  # that its build step sets (here `built`, which the image job declares in
+  # `outputs:` when a repository adds such a job), never `needs.<job>.result`
+  # and never the changes job's outputs alone. Reading `needs.changes.outputs.*`
+  # in the same `if:` is fine:
+  #   needs: [changes, image]
+  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.optee == 'true')) }}
 
   # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
   # go-objstore owns every blob backend (docs/00), and a repo reaches it only

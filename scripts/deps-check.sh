@@ -14,8 +14,10 @@
 # Gradle without --offline, whatever GRADLE_OFFLINE says.
 #
 # How a candidate is chosen: a stable version is compared with stable releases
-# only (the init script and STABLE_RE agree); one already on a pre-release is
-# compared with every release. Every release in maven-metadata.xml newer than
+# only (the init script and STABLE_RE agree), even when the report's newest is
+# a pre-release, which the plugin passes when its rule did not run: the newest
+# stable release is checked instead, and none newer is reported, not failed.
+# One already on a pre-release is compared with every release. Every release in maven-metadata.xml newer than
 # the current version and not newer than the newest, by Maven's version order
 # (MAVEN_JQ, a port of ComparableVersion), is dated; one older than DEPS_CHECK_GRACE_DAYS (7) fails the check.
 # The newest must be among them. A report that is not a dependencyUpdates
@@ -149,6 +151,18 @@ newer_releases() {
 		select(. != "") | select(mv_compare(.; $cur) > 0 and mv_compare(.; $latest) <= 0)'
 }
 
+# newest_stable current: of the versions on stdin, one per line, the newest
+# stable one newer than current in Maven's order; nothing when there is none.
+newest_stable() {
+	local v stable=""
+	while read -r v; do
+		if [ -n "${v}" ] && ! non_stable "${v}"; then stable+="${v}"$'\n'; fi
+	done
+	jq -Rnr --arg cur "$1" "${MAVEN_JQ}"'
+		reduce (inputs | select(. != "") | select(mv_compare(.; $cur) > 0)) as $v (null;
+			if . == null or mv_compare($v; .) > 0 then $v else . end) // empty' <<< "${stable}"
+}
+
 # age_days url: days since the file's Last-Modified (the last one, after redirects).
 age_days() {
 	local hdr lm t
@@ -162,7 +176,7 @@ age_days() {
 # check group name current latest: 0 pass, 1 fail; prints one line. It runs
 # under `||`, so errexit is off: every fetch and parse is checked here.
 check() {
-	local g=$1 n=$2 cur=$3 latest=$4 repo base="" meta="" versions candidates v age reason rc young="" dated=""
+	local g=$1 n=$2 cur=$3 latest=$4 repo base="" meta="" versions candidates stable v age reason rc young="" dated=""
 	if reason=$(exempt_reason "${g}:${n}"); then
 		echo "exempt  ${g}:${n} ${cur} (newest ${latest}): ${reason}"
 		return 0
@@ -199,13 +213,27 @@ check() {
 		echo "FAIL    ${g}:${n} ${cur}: the newest, ${latest}, is not in ${base}/maven-metadata.xml"
 		return 1
 	fi
+	# A stable version is compared with stable releases only, whatever the
+	# report's newest: the plugin passes a pre-release when a configuration's
+	# rejectVersionIf did not run, so the newest stable release takes its place.
+	if non_stable "${latest}" && ! non_stable "${cur}"; then
+		if ! stable=$(newest_stable "${cur}" <<< "${versions}"); then
+			echo "FAIL    ${g}:${n} ${cur}: could not order the versions in ${base}/maven-metadata.xml"
+			return 1
+		fi
+		if [ -z "${stable}" ]; then
+			echo "report  ${g}:${n} ${cur}: no stable release newer than ${cur} (newest ${latest} is a pre-release)"
+			return 0
+		fi
+		latest=${stable}
+	fi
 	if ! candidates=$(newer_releases "${cur}" "${latest}" <<< "${versions}"); then
 		echo "FAIL    ${g}:${n} ${cur}: could not order the versions in ${base}/maven-metadata.xml"
 		return 1
 	fi
 	while read -r v; do
 		[ -n "${v}" ] || continue
-		if non_stable "${v}" && ! non_stable "${cur}" && [ "${v}" != "${latest}" ]; then
+		if non_stable "${v}" && ! non_stable "${cur}"; then
 			continue
 		fi
 		if ! age=$(age_days "${base}/${v}/${n}-${v}.pom"); then

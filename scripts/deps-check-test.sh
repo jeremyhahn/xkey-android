@@ -51,6 +51,11 @@ release qual "2.0-alpha01@40 days ago" "2.0-rc01@30 days ago" "2.0-beta01@35 day
 release undated "1.0@40 days ago" "1.1@10 days ago" "1.2@3 days ago"
 # Maven orders 1.0-1 before 1.0.1: the separator is not punctuation to drop.
 release sep "1.0-1@40 days ago" "1.0.1@10 days ago" "1.0.2@3 days ago"
+# A stable pin whose newest is a pre-release (kotlin-stdlib 2.4.21 and
+# 2.5.0-Beta2): no stable release newer, a young one, an old one.
+release beta "1.0@40 days ago" "1.1-Beta2@8 days ago"
+release betayoung "1.0@40 days ago" "1.0.1@3 days ago" "1.1-Beta2@10 days ago"
+release betaold "1.0@40 days ago" "1.0.1@10 days ago" "1.1-Beta2@8 days ago"
 rm "${TMP}/repo/com/example/undated/1.1/undated-1.1.pom"
 mkdir -p "${TMP}/repo/com/example/empty"
 echo "<metadata><versioning></versioning></metadata>" > "${TMP}/repo/com/example/empty/maven-metadata.xml"
@@ -105,6 +110,9 @@ expect 1 FAIL "${TMP}/exempt" later 1.1 1.3               # 1.2, listed before 1
 expect 1 FAIL "${TMP}/exempt" num 1.9 1.10                 # 1.9.1 is between, and old
 expect 0 report "${TMP}/exempt" qual 2.0-rc01 2.0         # beta01 is older than rc01
 expect 1 FAIL "${TMP}/exempt" qual 2.0-beta01 2.0         # rc01 is newer than beta01, and old
+expect 0 report "${TMP}/exempt" beta 1.0 1.1-Beta2         # stable pin, newest an old Beta: no stable newer
+expect 0 report "${TMP}/exempt" betayoung 1.0 1.1-Beta2    # the young 1.0.1 is checked, not the Beta
+expect 1 FAIL "${TMP}/exempt" betaold 1.0 1.1-Beta2        # the old 1.0.1 still fails
 expect 1 FAIL "${TMP}/exempt" young 1.0 1.2               # the newest is not in the metadata
 expect 1 FAIL "${TMP}/exempt" undated 1.0 1.2             # 1.1 has no release date
 expect 1 FAIL "${TMP}/exempt" absent 1.0 1.1              # no repository serves its metadata

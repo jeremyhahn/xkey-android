@@ -109,8 +109,9 @@ coverage: ## Unit tests plus the JaCoCo report (no threshold is enforced)
 lint: android-lint ## Android lint on the debug variant (the repository's own gates run as lint-gates)
 
 # ci-template v1.27: the repository's own gates (scripts, workflows, their
-# tests) are not part of lint: CI's lint-gates job runs `make -k lint-gates`
+# tests) are not part of lint: CI's lint-gates job runs `make lint-gates`
 # in parallel with the image job's `make lint`, so nothing runs twice there.
+# v1.29.1: without -k, so the first failing gate ends the run.
 lint-gates: actionlint closing-links-test revert-red-main-test reaper-test image-lease-test build-image-test image-tag-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the image lease fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline)
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
