@@ -58,6 +58,7 @@ class PivSlotEntityTest {
     fun `an empty slot row carries no key material`() {
         val empty = PivSlotEntity(slotId = "9C")
 
+        assertEquals("9C", empty.slotId)
         assertEquals(0L, empty.id)
         assertNull(empty.algorithm)
         assertNull(empty.publicKeyDer)
