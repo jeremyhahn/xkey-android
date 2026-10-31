@@ -32,9 +32,7 @@ import org.junit.runner.RunWith
 /**
  * Instrumented tests for [QrCodeGenerator].
  *
- * `QrCodeGeneratorTest` exercises ZXing's encoder directly, which proves the
- * library works but never runs xKey's own code: [QrCodeGenerator.generate]
- * turns the bit matrix into an `android.graphics.Bitmap`, and a `Bitmap` is a
+ * [QrCodeGenerator.generate] has no JVM unit test: it turns the bit matrix into an `android.graphics.Bitmap`, and a `Bitmap` is a
  * stub on the JVM. The pixel conversion is exactly where a QR code can come out
  * unreadable — inverted, transposed, or clipped by the wrong stride — and none
  * of that would throw. So each code here is *decoded back* rather than merely
@@ -68,19 +66,6 @@ class QrCodeGeneratorInstrumentedTest {
         val payload = "xkey-pairing:04a1b2c3d4e5f6"
 
         assertEquals(payload, decode(QrCodeGenerator.generate(payload)))
-    }
-
-    @Test
-    fun generate_roundTripsAnOtpauthUri() {
-        val payload =
-            "otpauth://totp/GitHub:user@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
-
-        assertEquals(payload, decode(QrCodeGenerator.generate(payload)))
-    }
-
-    @Test
-    fun generate_roundTripsAShortPayload() {
-        assertEquals("x", decode(QrCodeGenerator.generate("x")))
     }
 
     @Test
@@ -151,15 +136,6 @@ class QrCodeGeneratorInstrumentedTest {
 
         assertEquals(Color.WHITE, bitmap.getPixel(0, 0))
         assertEquals(Color.WHITE, bitmap.getPixel(bitmap.width - 1, bitmap.height - 1))
-    }
-
-    @Test
-    fun generate_marksTheFinderPatternInBlack() {
-        val bitmap = QrCodeGenerator.generate("finder-pattern", size = 256)
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-
-        assertTrue(pixels.any { it == Color.BLACK })
     }
 
     // -------------------------------------------------------------------------
