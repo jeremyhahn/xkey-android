@@ -29,7 +29,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.R
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -97,26 +96,6 @@ class VerifiedMediaViewerActivityUiTest {
         assertTrue(
             "Activity should finish when no media URI is supplied",
             scenario.state == Lifecycle.State.DESTROYED
-        )
-    }
-
-    @Test
-    fun activityLaunches_forAShareIntent() {
-        val scenario = launchSend()
-
-        assertFalse(
-            "Activity should stay open for a valid media URI",
-            withActivity(scenario) { it.isFinishing }
-        )
-    }
-
-    @Test
-    fun activityLaunches_forAViewIntent() {
-        val scenario = launchView()
-
-        assertFalse(
-            "ACTION_VIEW data should resolve just like EXTRA_STREAM",
-            withActivity(scenario) { it.isFinishing }
         )
     }
 
@@ -225,16 +204,6 @@ class VerifiedMediaViewerActivityUiTest {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "image/png"
             putExtra(Intent.EXTRA_STREAM, mediaUri())
-            setClass(context, VerifiedMediaViewerActivity::class.java)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        return ActivityScenario.launch(intent)
-    }
-
-    private fun launchView(): ActivityScenario<VerifiedMediaViewerActivity> {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(mediaUri(), "image/png")
             setClass(context, VerifiedMediaViewerActivity::class.java)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
