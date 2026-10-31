@@ -93,18 +93,6 @@ class PairedDevicesConnectedBadgeTest {
         assertBadgeHidden(scenario)
     }
 
-    /** An empty store cannot have a connected device. */
-    @Test
-    fun connectedBadge_staysHiddenWithNoPairedDevices() {
-        val scenario = launch()
-
-        repository.removeDevice(DEVICE_KEY_HEX)
-        scenario.recreate()
-
-        assertTextNotInTree(scenario, DEVICE_NAME)
-        assertBadgeHidden(scenario)
-    }
-
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------

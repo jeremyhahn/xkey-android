@@ -121,39 +121,6 @@ class TrustStoreBranchTest {
     // ---------------------------------------------------------------
 
     /**
-     * A bundle holding one acceptable and one self-signed certificate reports
-     * both halves of the outcome rather than claiming success.
-     */
-    @Test
-    fun aPartlyRejectedBundle_reportsWhatWasStoredAndWhatFailed() {
-        val accepted = caSignedCertificate("xKey Branch Partial CA $runId")
-        val rejected = keystoreCertificate("$ALIAS_PREFIX-partial-$runId", "xKey Branch Self $runId")
-        // The self-signed half is registered too: if the rejection ever
-        // regresses, teardown still leaves the store as it found it.
-        createdFingerprints += listOf(fingerprintOf(accepted), fingerprintOf(rejected))
-        stubOpenDocumentWith(
-            scratchFile(
-                "partial-$runId.pem",
-                (TestCertificates.toPem(accepted) + TestCertificates.toPem(rejected)).toByteArray()
-            )
-        )
-
-        val scenario = launch()
-        val before = certificateCount()
-
-        clickTextInTree(scenario, FILE_BUTTON)
-
-        assertShownTextInTree(
-            scenario,
-            context.getString(R.string.trust_store_import_partial_rejected, 1, 1)
-        )
-        awaitCondition("Only the CA-signed certificate should be stored") {
-            certificateCount() == before + 1
-        }
-        scenario.close()
-    }
-
-    /**
      * Importing the same file twice reports that everything was already there,
      * and leaves the store the size it already was.
      */

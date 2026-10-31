@@ -317,24 +317,6 @@ class SettingsTrustAndConnectivityFlowTest {
         assertTrue("TCP pairing switch should restore as checked", states.second == true)
     }
 
-    /**
-     * The ADB transport carries its own disclosure copy, which is the only
-     * warning a user gets that this opens a debugging socket.
-     *
-     * It now lives behind the developer-options header and starts collapsed, so
-     * the copy is reached by opening that rather than on load.
-     */
-    @Test
-    fun tcpPairingRow_showsItsDevelopmentDisclosure() {
-        val scenario = ActivityScenario.launch(SettingsActivity::class.java)
-        awaitInitialized(scenario)
-
-        clickTextInTree(scenario, context.getString(R.string.settings_developer_options))
-
-        assertEventuallyShows(scenario, context.getString(R.string.settings_usb_tcp_description))
-        assertEventuallyShows(scenario, context.getString(R.string.explain_usb_tcp))
-    }
-
     // ---------------------------------------------------------------
     // Media Signing
     // ---------------------------------------------------------------

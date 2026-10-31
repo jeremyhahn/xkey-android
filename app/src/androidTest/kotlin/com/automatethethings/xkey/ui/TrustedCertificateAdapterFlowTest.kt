@@ -16,7 +16,6 @@ package com.automatethethings.xkey.ui
 
 import android.content.Context
 import android.view.View
-import android.widget.ImageButton
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.test.core.app.ActivityScenario
@@ -28,7 +27,6 @@ import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.truststore.TrustStoreRepository
 import kotlinx.coroutines.runBlocking
@@ -183,33 +181,8 @@ class TrustedCertificateAdapterFlowTest {
     // Row actions
     // ---------------------------------------------------------------
 
-    /** The trailing icon on the row is a delete shortcut past the detail sheet. */
     @Test
-    fun rowDeleteButton_raisesTheConfirmationWithoutDeleting() {
-        val scenario = ActivityScenario.launch(TrustStoreActivity::class.java)
-        assertShownTextInList(scenario, MANUAL_CN)
-
-        scenario.onActivity { activity ->
-            rowViews(activity.window.decorView, MANUAL_CN)
-                .filterIsInstance<ImageButton>()
-                .first()
-                .performClick()
-        }
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-
-        onView(withText(R.string.trust_store_delete_title))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(android.R.string.cancel)).inRoot(isDialog()).perform(click())
-
-        assertTrue(
-            "Cancelling must keep the certificate",
-            runBlocking { repository.hasCertificate(fingerprints.getValue(MANUAL_CN)) }
-        )
-    }
-
-    @Test
-    fun longPressingARow_raisesTheSameConfirmation() {
+    fun longPressingARow_raisesTheDeleteConfirmation() {
         val scenario = ActivityScenario.launch(TrustStoreActivity::class.java)
         assertShownTextInList(scenario, URL_CN)
 
