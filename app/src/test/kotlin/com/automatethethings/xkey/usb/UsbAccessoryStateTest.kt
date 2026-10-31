@@ -15,15 +15,23 @@
 package com.automatethethings.xkey.usb
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Unit tests for [UsbAccessoryState].
  *
- * UsbAccessoryServerTest drives the server's state transitions; Connected
- * needs a live accessory, so its payload is checked here.
+ * UsbAccessoryServerTest drives the server's state transitions; Handshaking
+ * and Connected need a live accessory, so they are checked here.
  */
 class UsbAccessoryStateTest {
+
+    @Test
+    fun `Handshaking is a singleton`() {
+        val a = UsbAccessoryState.Handshaking
+        val b = UsbAccessoryState.Handshaking
+        assertTrue(a === b)
+    }
 
     @Test
     fun `Connected carries accessory info`() {
