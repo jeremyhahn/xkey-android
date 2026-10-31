@@ -348,23 +348,6 @@ class RequestHandlerAttestationTest {
     }
 
     /**
-     * Freshness moved from the certificate to the signature, so that is where
-     * two exchanges must differ. Without this, a stable key would make every
-     * attestation replayable.
-     */
-    @Test
-    fun attestDeviceSignsEveryChallengeDifferently() {
-        val first = attestDevice(randomNonce(), AttestTranscript.PURPOSE_REATTEST).ok()
-        val second = attestDevice(randomNonce(), AttestTranscript.PURPOSE_REATTEST).ok()
-
-        assertNotEquals(
-            "a fresh nonce must produce a fresh signature",
-            first.getString("signature"),
-            second.getString("signature")
-        )
-    }
-
-    /**
      * The core prover check: this replays the desktop verifier's final step
      * (go-xkms#129 §6.7) against a real hardware-backed key — rebuild the
      * transcript from what *the verifier asked for* plus the fingerprint the

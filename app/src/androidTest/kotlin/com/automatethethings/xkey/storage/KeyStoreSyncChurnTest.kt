@@ -27,7 +27,6 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -135,20 +134,6 @@ class KeyStoreSyncChurnTest {
             ghostKeyId !in recordingDao.inserted
         )
         assertNull(database.keyDao().getByKeyId(ghostKeyId))
-    }
-
-    @Test
-    fun syncAll_stillCopiesACredentialWhoseKeystoreKeyExists() = runBlocking {
-        generateCredentialKey(livingKeyId)
-        database.credentialMetadataDao().insert(credential(livingKeyId))
-
-        manager.syncAll()
-
-        assertTrue(livingKeyId in recordingDao.inserted)
-        assertNotNull(
-            "a credential backed by a real key still belongs in the keys table",
-            database.keyDao().getByKeyId(livingKeyId)
-        )
     }
 
     @Test

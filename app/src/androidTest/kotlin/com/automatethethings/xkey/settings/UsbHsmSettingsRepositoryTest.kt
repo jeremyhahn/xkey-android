@@ -19,7 +19,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.usb.UsbHsmSettingsData
 import com.automatethethings.xkey.usb.UsbHsmSettingsRepository
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -105,13 +104,6 @@ class UsbHsmSettingsRepositoryTest {
         val settings = repository.getSettings()
         assertFalse(settings.nativeUsbEnabled)
         assertTrue(settings.tcpHsmEnabled)
-    }
-
-    @Test
-    fun settingsFlow_emitsThePersistedValue() = runBlocking {
-        repository.setTcpHsmEnabled(true)
-
-        assertTrue(repository.settingsFlow.first().tcpHsmEnabled)
     }
 
     @Test

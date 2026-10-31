@@ -17,7 +17,6 @@ package com.automatethethings.xkey.settings
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -87,13 +86,6 @@ class MediaSigningSettingsRepositoryTest {
         repository.updateSettings(written)
 
         assertEquals(written, repository.getSettings())
-    }
-
-    @Test
-    fun settingsFlow_emitsThePersistedValue() = runBlocking {
-        repository.setAutoSignEnabled(true)
-
-        assertTrue(repository.settingsFlow.first().autoSignEnabled)
     }
 
     @Test

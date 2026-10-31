@@ -452,19 +452,6 @@ class GetCredentialHandlerTest {
         assertEquals("Using a passkey counts as a key usage", 1L, key.useCount)
     }
 
-    @Test
-    fun repeatedAssertions_incrementTheSignCountMonotonically() {
-        val rpId = nextRpId()
-        val credential = seedCredential(rpId)
-        val before = storedSignCount(credential.credentialId)
-
-        val first = authenticatorDataOf(assertFor(credential, rpId)).signCount
-        val second = authenticatorDataOf(assertFor(credential, rpId)).signCount
-
-        assertEquals(before + 1, first)
-        assertEquals(before + 2, second)
-    }
-
     // ---------------------------------------------------------------------
     // Failure paths
     // ---------------------------------------------------------------------

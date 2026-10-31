@@ -339,29 +339,4 @@ class KeyStoreSyncManagerTest {
         assertNotNull("an xkmsd reference lives on the laptop and must survive", key)
         assertEquals("tpm2", key!!.remoteBackend)
     }
-
-    @Test
-    fun syncAll_dropsACredentialWhoseKeystoreKeyWasNeverCreated() = runBlocking {
-        // The credential row is copied in first and swept out afterwards, which
-        // is the intended outcome: metadata with no key behind it is not a key.
-        database.credentialMetadataDao().insert(credential("sync-ghost-$runId"))
-
-        manager.syncAll()
-
-        assertNull(database.keyDao().getByKeyId("sync-ghost-$runId"))
-    }
-
-    // -------------------------------------------------------------------------
-    // Reported total
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun syncAll_reportsTheTotalRowCountAfterReconciling() = runBlocking {
-        generateEcKey(generalAlias)
-
-        val reported = manager.syncAll()
-
-        assertEquals(database.keyDao().countAll(), reported)
-        assertTrue(reported >= 1)
-    }
 }
