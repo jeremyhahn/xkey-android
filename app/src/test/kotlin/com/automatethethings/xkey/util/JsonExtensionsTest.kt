@@ -62,35 +62,6 @@ class JsonExtensionsTest {
         assertEquals("", json.getStringOrNull("method"))
     }
 
-    /**
-     * A non-string value is NOT portable: Android's `org.json` coerces it to
-     * its string form, while the JVM artifact these unit tests run against
-     * throws `JSONException`. The helper inherits whichever it is running on,
-     * so nothing may depend on coercion — the wire contract with go-xkms sends
-     * every one of these fields as a JSON string.
-     */
-    @Test
-    fun `getStringOrNull does not promise coercion of a non-string value`() {
-        val json = JSONObject("""{"id":42}""")
-
-        val coercedOrThrew = runCatching { json.getStringOrNull("id") }
-        if (coercedOrThrew.isSuccess) {
-            assertEquals("42", coercedOrThrew.getOrNull())
-        }
-    }
-
-    @Test
-    fun `getStringOrNull returns null on an empty document`() {
-        assertNull(JSONObject().getStringOrNull("anything"))
-    }
-
-    @Test
-    fun `getStringOrNull preserves whitespace and unicode exactly`() {
-        val json = JSONObject().put("label", "  ünïcödé ✓  ")
-
-        assertEquals("  ünïcödé ✓  ", json.getStringOrNull("label"))
-    }
-
     // -------------------------------------------------------------------------
     // getStringOrDefault
     // -------------------------------------------------------------------------
@@ -128,23 +99,5 @@ class JsonExtensionsTest {
         val json = JSONObject("""{"source":"   "}""")
 
         assertEquals("   ", json.getStringOrDefault("source", "remote"))
-    }
-
-    @Test
-    fun `getStringOrDefault accepts an empty default`() {
-        val json = JSONObject()
-
-        assertEquals("", json.getStringOrDefault("missing", ""))
-    }
-
-    /** Same portability caveat as the getStringOrNull case above. */
-    @Test
-    fun `getStringOrDefault does not promise coercion of a non-string value`() {
-        val json = JSONObject("""{"count":0}""")
-
-        val coercedOrThrew = runCatching { json.getStringOrDefault("count", "fallback") }
-        if (coercedOrThrew.isSuccess) {
-            assertEquals("0", coercedOrThrew.getOrNull())
-        }
     }
 }

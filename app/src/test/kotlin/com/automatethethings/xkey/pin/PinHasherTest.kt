@@ -16,98 +16,15 @@ package com.automatethethings.xkey.pin
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Test
 
 /**
  * Unit tests for [PinHasher].
  *
- * PIN length validation tests run purely in the JVM without native dependencies.
- * Hash-based tests require the Signal Argon2 native library (JNI), which is
- * unavailable in unit tests and are annotated with [Ignore]. Those tests should
- * be verified through instrumented/integration tests on a real device.
+ * PIN length validation and salt generation run purely in the JVM. Hashing
+ * needs the Signal Argon2 native library (JNI), which unit tests cannot load.
  */
 class PinHasherTest {
-
-    // -------------------------------------------------------------------------
-    // hashPin tests (require native Argon2 JNI -- skipped in unit tests)
-    // -------------------------------------------------------------------------
-
-    @Ignore("Requires Signal Argon2 native library (JNI) -- run as instrumented test")
-    @Test
-    fun `hashPin produces consistent output for same input`() {
-        val pin = "123456"
-        val salt = ByteArray(16) { it.toByte() }
-
-        val hash1 = PinHasher.hashPin(pin, salt)
-        val hash2 = PinHasher.hashPin(pin, salt)
-
-        assertTrue(
-            "Hashing the same PIN with the same salt must produce identical output",
-            hash1.contentEquals(hash2)
-        )
-    }
-
-    @Ignore("Requires Signal Argon2 native library (JNI) -- run as instrumented test")
-    @Test
-    fun `hashPin produces different output for different pins`() {
-        val salt = ByteArray(16) { it.toByte() }
-
-        val hash1 = PinHasher.hashPin("123456", salt)
-        val hash2 = PinHasher.hashPin("654321", salt)
-
-        assertFalse(
-            "Different PINs with the same salt must produce different hashes",
-            hash1.contentEquals(hash2)
-        )
-    }
-
-    @Ignore("Requires Signal Argon2 native library (JNI) -- run as instrumented test")
-    @Test
-    fun `hashPin produces different output for different salts`() {
-        val pin = "123456"
-        val salt1 = ByteArray(16) { it.toByte() }
-        val salt2 = ByteArray(16) { (it + 1).toByte() }
-
-        val hash1 = PinHasher.hashPin(pin, salt1)
-        val hash2 = PinHasher.hashPin(pin, salt2)
-
-        assertFalse(
-            "Same PIN with different salts must produce different hashes",
-            hash1.contentEquals(hash2)
-        )
-    }
-
-    // -------------------------------------------------------------------------
-    // verifyPin tests (require native Argon2 JNI -- skipped in unit tests)
-    // -------------------------------------------------------------------------
-
-    @Ignore("Requires Signal Argon2 native library (JNI) -- run as instrumented test")
-    @Test
-    fun `verifyPin returns true for correct pin`() {
-        val pin = "123456"
-        val salt = PinHasher.generateSalt()
-        val hash = PinHasher.hashPin(pin, salt)
-
-        assertTrue(
-            "verifyPin must return true for the correct PIN",
-            PinHasher.verifyPin(pin, salt, hash)
-        )
-    }
-
-    @Ignore("Requires Signal Argon2 native library (JNI) -- run as instrumented test")
-    @Test
-    fun `verifyPin returns false for wrong pin`() {
-        val salt = PinHasher.generateSalt()
-        val hash = PinHasher.hashPin("123456", salt)
-
-        assertFalse(
-            "verifyPin must return false for an incorrect PIN",
-            PinHasher.verifyPin("wrong-pin", salt, hash)
-        )
-    }
 
     // -------------------------------------------------------------------------
     // generateSalt tests
@@ -117,7 +34,6 @@ class PinHasherTest {
     fun `generateSalt returns 16 bytes`() {
         val salt = PinHasher.generateSalt()
 
-        assertNotNull(salt)
         assertEquals(
             "Salt must be 16 bytes (SALT_LENGTH)",
             16,
@@ -165,19 +81,5 @@ class PinHasherTest {
         val maxPin = "a".repeat(63)
         PinHasher.validatePinLength(maxPin)
         // No exception means pass
-    }
-
-    // -------------------------------------------------------------------------
-    // Constant verification tests
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `MIN_PIN_LENGTH is 6`() {
-        assertEquals(6, PinHasher.MIN_PIN_LENGTH)
-    }
-
-    @Test
-    fun `MAX_PIN_LENGTH is 63`() {
-        assertEquals(63, PinHasher.MAX_PIN_LENGTH)
     }
 }

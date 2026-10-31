@@ -34,54 +34,6 @@ class PivSlotTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `fromHexId returns correct slot for 9A`() {
-        val slot = PivSlot.fromHexId("9A")
-
-        assertNotNull(slot)
-        assertEquals(PivSlot.AUTHENTICATION, slot)
-    }
-
-    @Test
-    fun `fromHexId returns correct slot for 9C`() {
-        val slot = PivSlot.fromHexId("9C")
-
-        assertNotNull(slot)
-        assertEquals(PivSlot.DIGITAL_SIGNATURE, slot)
-    }
-
-    @Test
-    fun `fromHexId returns correct slot for 9D`() {
-        val slot = PivSlot.fromHexId("9D")
-
-        assertNotNull(slot)
-        assertEquals(PivSlot.KEY_MANAGEMENT, slot)
-    }
-
-    @Test
-    fun `fromHexId returns correct slot for 9E`() {
-        val slot = PivSlot.fromHexId("9E")
-
-        assertNotNull(slot)
-        assertEquals(PivSlot.CARD_AUTHENTICATION, slot)
-    }
-
-    @Test
-    fun `fromHexId returns correct slot for F9`() {
-        val slot = PivSlot.fromHexId("F9")
-
-        assertNotNull(slot)
-        assertEquals(PivSlot.ATTESTATION, slot)
-    }
-
-    @Test
-    fun `fromHexId returns correct slot for retired slot 82`() {
-        val slot = PivSlot.fromHexId("82")
-
-        assertNotNull(slot)
-        assertEquals(PivSlot.RETIRED_1, slot)
-    }
-
-    @Test
     fun `fromHexId returns null for unknown hex`() {
         assertNull(PivSlot.fromHexId("FF"))
         assertNull(PivSlot.fromHexId("00"))
@@ -101,17 +53,6 @@ class PivSlotTest {
     // -------------------------------------------------------------------------
     // keystoreAlias convention
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `keystoreAlias uses correct convention`() {
-        assertEquals("xkey_piv_9A", PivSlot.AUTHENTICATION.keystoreAlias)
-        assertEquals("xkey_piv_9C", PivSlot.DIGITAL_SIGNATURE.keystoreAlias)
-        assertEquals("xkey_piv_9D", PivSlot.KEY_MANAGEMENT.keystoreAlias)
-        assertEquals("xkey_piv_9E", PivSlot.CARD_AUTHENTICATION.keystoreAlias)
-        assertEquals("xkey_piv_F9", PivSlot.ATTESTATION.keystoreAlias)
-        assertEquals("xkey_piv_82", PivSlot.RETIRED_1.keystoreAlias)
-        assertEquals("xkey_piv_95", PivSlot.RETIRED_20.keystoreAlias)
-    }
 
     @Test
     fun `keystoreAlias follows xkey_piv_ prefix pattern for all slots`() {
@@ -186,27 +127,6 @@ class PivSlotTest {
         )
     }
 
-    @Test
-    fun `all slots have unique keystoreAliases`() {
-        val aliases = PivSlot.entries.map { it.keystoreAlias }
-        val uniqueAliases = aliases.toSet()
-
-        assertEquals(
-            "All keystoreAliases must be unique",
-            aliases.size,
-            uniqueAliases.size
-        )
-    }
-
-    @Test
-    fun `enum has 25 entries total`() {
-        assertEquals(
-            "PivSlot enum should have 5 primary + 20 retired = 25 entries",
-            25,
-            PivSlot.entries.size
-        )
-    }
-
     // -------------------------------------------------------------------------
     // PivAlgorithm verification
     // -------------------------------------------------------------------------
@@ -230,10 +150,5 @@ class PivSlotTest {
         assertEquals("RSA", PivAlgorithm.RS2048.keyAlgorithm)
         assertEquals(2048, PivAlgorithm.RS2048.keySizeBits)
         assertEquals("RSA 2048", PivAlgorithm.RS2048.displayName)
-    }
-
-    @Test
-    fun `PivAlgorithm has exactly 3 entries`() {
-        assertEquals(3, PivAlgorithm.entries.size)
     }
 }

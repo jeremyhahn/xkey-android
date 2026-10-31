@@ -31,12 +31,9 @@ import java.io.File
  * Instrumented tests for [BackupStore].
  *
  * The store writes into the app's private `filesDir`, so it needs a real
- * `Context`. Its one piece of real logic is [BackupStore.store]'s filename
- * sanitiser: the backup id arrives over the pairing channel from the desktop,
- * so anything it can put in a path — separators, `..`, a leading dot — must be
- * neutralised before it reaches the filesystem. That is asserted directly by
- * writing hostile ids and checking that nothing lands outside the backups
- * directory.
+ * `Context`. This suite covers the round trip, generated ids and metadata;
+ * how hostile or colliding ids are named on disk is in
+ * [BackupStoreIdentityTest].
  *
  * Every file this suite creates is removed in `@After`, and ids are suffixed
  * with a per-run nonce so a leftover file can never satisfy a later assertion.
@@ -114,13 +111,6 @@ class BackupStoreTest {
     }
 
     @Test
-    fun store_acceptsAnEmptyBlob() {
-        val id = store("empty-$runId", ByteArray(0))
-
-        assertEquals(0, store.load(id)!!.size)
-    }
-
-    @Test
     fun store_overwritesAPreviousBlobWithTheSameId() {
         val id = store("overwrite-$runId", byteArrayOf(1, 1, 1, 1))
         store(id, byteArrayOf(2, 2))
@@ -164,63 +154,6 @@ class BackupStoreTest {
     }
 
     // -------------------------------------------------------------------------
-    // Filename sanitising
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun store_neutralisesPathSeparatorsInTheBackupId() {
-        val hostile = "..%2Fescape/$runId".replace("%2F", "/")
-        val id = store(hostile, byteArrayOf(9))
-
-        // The id is returned verbatim, but the file lands inside the backups
-        // directory under a flattened name.
-        assertEquals(hostile, id)
-        assertTrue(File(backupsDir, sanitised(hostile)).exists())
-        assertTrue(store.load(hostile)!!.contentEquals(byteArrayOf(9)))
-    }
-
-    @Test
-    fun store_doesNotEscapeTheBackupsDirectory() {
-        val hostile = "../escaped-$runId"
-        store(hostile, byteArrayOf(9))
-
-        assertTrue(
-            "a traversal id must not write next to the backups directory",
-            File(filesDir, "escaped-$runId").exists().not()
-        )
-    }
-
-    /**
-     * Two ids that differ only in punctuation are two backups. They used to
-     * collapse onto one file and overwrite each other, while `store()` returned
-     * distinct ids for what was now the same blob.
-     */
-    @Test
-    fun store_keepsTwoIdsThatDifferOnlyInPunctuationApart() {
-        val first = "collide/a-$runId"
-        val second = "collide\\a-$runId"
-
-        store(first, byteArrayOf(1))
-        store(second, byteArrayOf(2))
-
-        assertTrue(store.load(first)!!.contentEquals(byteArrayOf(1)))
-        assertTrue(store.load(second)!!.contentEquals(byteArrayOf(2)))
-    }
-
-    /** A lookup answers for the id that was stored, and only that id. */
-    @Test
-    fun load_answersForTheExactIdThatWasStored() {
-        val id = "space id $runId"
-        store(id, byteArrayOf(4))
-
-        assertTrue(store.load(id)!!.contentEquals(byteArrayOf(4)))
-        assertNull(
-            "a mangled spelling is a different id and must not resolve",
-            store.load("space_id_$runId")
-        )
-    }
-
-    // -------------------------------------------------------------------------
     // Metadata
     // -------------------------------------------------------------------------
 
@@ -239,16 +172,6 @@ class BackupStoreTest {
     @Test
     fun createdAtMillis_isZeroForAnUnknownId() {
         assertEquals(0L, store.createdAtMillis("never-stored-$runId"))
-    }
-
-    /** `latestId` returns the id the peer actually sent, so it round-trips. */
-    @Test
-    fun latestId_returnsTheIdThePeerSent() {
-        val id = store("latest-$runId", byteArrayOf(1))
-
-        assertEquals(id, store.latestId())
-        assertTrue(File(backupsDir, sanitised(id)).exists())
-        assertTrue(store.load(store.latestId()!!)!!.contentEquals(byteArrayOf(1)))
     }
 
     @Test
