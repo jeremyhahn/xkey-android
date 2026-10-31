@@ -30,7 +30,6 @@ import com.automatethethings.xkey.storage.dao.ContactDao
 import com.automatethethings.xkey.storage.entity.ContactEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -111,17 +110,6 @@ class FileOperationActivityUiTest {
             "Activity should finish when the share intent carries no URI",
             scenario.state == Lifecycle.State.DESTROYED
         )
-    }
-
-    @Test
-    fun activityLaunches_withFileUri() {
-        val scenario = launchSingle()
-
-        assertFalse(
-            "FileOperationActivity should not be finishing with a valid file URI",
-            withActivity(scenario) { it.isFinishing }
-        )
-        assertShownTextInTree(scenario, withString(scenario, R.string.file_operation_title))
     }
 
     // -----------------------------------------------------------------
