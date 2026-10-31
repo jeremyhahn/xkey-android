@@ -16,7 +16,6 @@ package com.automatethethings.xkey.pin
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 /**
@@ -35,7 +34,6 @@ class PinHasherTest {
     fun `generateSalt returns 16 bytes`() {
         val salt = PinHasher.generateSalt()
 
-        assertNotNull(salt)
         assertEquals(
             "Salt must be 16 bytes (SALT_LENGTH)",
             16,
