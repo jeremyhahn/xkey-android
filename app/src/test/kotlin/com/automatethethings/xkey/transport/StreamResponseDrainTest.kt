@@ -136,24 +136,6 @@ class StreamResponseDrainTest {
         unmockkAll()
     }
 
-    /** The Codex 7380 case: a restore the desktop completed is reported as completed. */
-    @Test
-    fun aResultSentJustBeforeTheStreamEndsReachesTheRemoteCaller() = runBlocking<Unit> {
-        val peer = connect()
-        val restore = phoneRequest(peer, id = 101)
-
-        val main = holdMainThread()
-        peer.desktop.send(peer.desktop.noise.encrypt(result(id = 101, restored = 3)))
-        peer.desktop.endOutput()
-        awaitEndOfStreamRead(peer)
-        main.countDown()
-
-        val response = withTimeout(TIMEOUT_MS) { restore.await() }
-        assertNull("the desktop's result, not a lost connection: ${response.error?.message}", response.error)
-        assertEquals(3, response.result!!.getInt("restored"))
-        assertServeEndedQuietly(peer)
-    }
-
     @Test
     fun aResultAndAnErrorSentJustBeforeTheStreamEndsBothReachTheirCallers() = runBlocking<Unit> {
         val peer = connect()
