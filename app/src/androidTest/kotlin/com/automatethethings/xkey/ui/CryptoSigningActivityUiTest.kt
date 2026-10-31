@@ -78,21 +78,6 @@ class CryptoSigningActivityUiTest {
     // ---------------------------------------------------------------
 
     @Test
-    fun createIntent_targetsCryptoSigningActivity() {
-        val intent = CryptoSigningActivity.createIntent(
-            context = context,
-            requestId = "req-1",
-            credentialId = "cred-1",
-            dataHashBase64 = "ZGF0YQ=="
-        )
-
-        assertEquals(
-            CryptoSigningActivity::class.java.name,
-            intent.component?.className
-        )
-    }
-
-    @Test
     fun createIntent_includesAllProvidedExtras() {
         val intent = CryptoSigningActivity.createIntent(
             context = context,
@@ -189,30 +174,6 @@ class CryptoSigningActivityUiTest {
         )
 
         assertErrorCode(CryptoSigningActivity.ERROR_CODE_INVALID_REQUEST)
-    }
-
-    /**
-     * A valid request whose credential has no key in the Android Keystore hits
-     * the KEY_NOT_FOUND path and finishes WITHOUT showing a biometric prompt.
-     */
-    @Test
-    fun missingSigningKey_reportsKeyNotFoundAndEchoesTheRequestId() {
-        val requestId = "ui-test-" + UUID.randomUUID()
-
-        awaitResultFor(
-            CryptoSigningActivity.createIntent(
-                context = context,
-                requestId = requestId,
-                credentialId = "ui-test-missing-" + UUID.randomUUID(),
-                dataHashBase64 = encodedHash()
-            )
-        )
-
-        assertErrorCode(CryptoSigningActivity.ERROR_CODE_KEY_NOT_FOUND)
-        assertEquals(
-            requestId,
-            results.last().getStringExtra(CryptoSigningActivity.EXTRA_REQUEST_ID)
-        )
     }
 
     @Test

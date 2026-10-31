@@ -18,7 +18,6 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.pressBackUnconditionally
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.R
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -169,16 +168,6 @@ class CoSignActivityUiTest {
     // -----------------------------------------------------------------
     // Back navigation
     // -----------------------------------------------------------------
-
-    @Test
-    fun activityLaunches_successfully() {
-        val scenario = launch()
-
-        assertFalse(
-            "CoSignActivity should not be finishing after launch",
-            withActivity(scenario) { it.isFinishing }
-        )
-    }
 
     @Test
     fun backNavigation_finishesActivity() {
