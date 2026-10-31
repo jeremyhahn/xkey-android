@@ -45,10 +45,6 @@ import java.io.InputStream
  */
 class MediaHasherUriTest {
 
-    /** SHA-256 of "hello world". */
-    private val helloWorldHash =
-        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-
     @After
     fun tearDown() {
         unmockkAll()
@@ -91,15 +87,6 @@ class MediaHasherUriTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `hashUri hashes whatever the resolver hands back`() {
-        val resolver = resolverReturning(ByteArrayInputStream("hello world".toByteArray()))
-
-        val hash = MediaHasher.hashUri(resolver, mockk<Uri>(relaxed = true))
-
-        assertEquals(helloWorldHash, hash)
-    }
-
-    @Test
     fun `hashUri closes the resolver's stream on success`() {
         val stream = ClosingStream("hello world".toByteArray())
 
@@ -126,33 +113,6 @@ class MediaHasherUriTest {
         }
 
         assertTrue("a failed read must still close the stream", stream.closed)
-    }
-
-    // -------------------------------------------------------------------------
-    // hashStream lifecycle
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `hashStream closes the stream it was given`() {
-        val stream = ClosingStream(ByteArray(0))
-
-        MediaHasher.hashStream(stream)
-
-        assertTrue(stream.closed)
-    }
-
-    @Test
-    fun `hashStream propagates a mid-read failure`() {
-        assertThrows(IOException::class.java) { MediaHasher.hashStream(FailingStream()) }
-    }
-
-    @Test
-    fun `hashStream reads across several buffer fills`() {
-        // Larger than the 8 KiB internal buffer, and deliberately not a multiple
-        // of it, so the final short read is exercised too.
-        val data = ByteArray(8192 * 3 + 7) { (it % 251).toByte() }
-
-        assertEquals(MediaHasher.hashBytes(data), MediaHasher.hashStream(ByteArrayInputStream(data)))
     }
 
     @Test

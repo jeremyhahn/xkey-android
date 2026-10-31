@@ -16,7 +16,6 @@ package com.automatethethings.xkey.credential.handler
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -123,11 +122,6 @@ class BrowserAllowlistTest {
             val app = apps.getJSONObject(i)
             assertEquals("Each app entry must have type 'android'", "android", app.getString("type"))
         }
-    }
-
-    @Test
-    fun `allowlist is not empty string`() {
-        assertFalse("Allowlist must not be empty", BrowserAllowlist.PRIVILEGED_BROWSERS.isEmpty())
     }
 
     @Test

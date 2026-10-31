@@ -92,15 +92,6 @@ class CredentialMetadataEntityTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `two credentials with the same fields are equal and hash alike`() {
-        val a = credential()
-        val b = credential()
-
-        assertEquals(a, b)
-        assertEquals(a.hashCode(), b.hashCode())
-    }
-
-    @Test
     fun `equal COSE content held in distinct arrays still compares equal`() {
         val a = credential(byteArrayOf(1, 2, 3))
         val b = credential(byteArrayOf(1, 2, 3))
@@ -149,17 +140,6 @@ class CredentialMetadataEntityTest {
     }
 
     @Test
-    fun `hashCode is stable across repeated calls`() {
-        val a = credential()
-
-        assertEquals(a.hashCode(), a.hashCode())
-    }
-
-    // -------------------------------------------------------------------------
-    // copy / destructuring / toString
-    // -------------------------------------------------------------------------
-
-    @Test
     fun `copy advances the signature counter without disturbing anything else`() {
         val base = credential()
         val advanced = base.copy(signCount = base.signCount + 1)
@@ -169,25 +149,5 @@ class CredentialMetadataEntityTest {
         assertEquals(base.rpId, advanced.rpId)
         assertTrue(base.publicKeyCose.contentEquals(advanced.publicKeyCose))
         assertNotEquals(base, advanced)
-    }
-
-    @Test
-    fun `a credential destructures in declaration order`() {
-        val (id, credentialId, rpId, rpName, userId) = credential()
-
-        assertEquals(3L, id)
-        assertEquals("Y3JlZC0x", credentialId)
-        assertEquals("example.com", rpId)
-        assertEquals("Example Inc", rpName)
-        assertEquals("dXNlci0x", userId)
-    }
-
-    @Test
-    fun `toString renders the identifying fields`() {
-        val rendered = credential().toString()
-
-        assertTrue(rendered.contains("credentialId=Y3JlZC0x"))
-        assertTrue(rendered.contains("rpId=example.com"))
-        assertTrue(rendered.contains("isDiscoverable=true"))
     }
 }

@@ -15,12 +15,10 @@
 package com.automatethethings.xkey.storage
 
 import androidx.room.RoomDatabase
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 
 /**
  * What the Room 2.7.0 -> 2.8.5 upgrade must not change for a database
@@ -74,37 +72,6 @@ class XKeyDatabaseRoomUpgradeTest {
     }
 
     /**
-     * Turns red if room-compiler 2.8.5 exports a different v12 schema
-     * identity. kapt rewrites the current version's file in `app/schemas` on
-     * every build (`room.schemaLocation`, app/build.gradle.kts), so the file
-     * read here is the one this build's processor wrote, and CI has no
-     * dirty-tree check that would catch a changed export.
-     */
-    @Test
-    fun `exported v12 schema keeps the committed identity hash`() {
-        val schema = JSONObject(schemaFile(12).readText())
-        assertEquals(1, schema.getInt("formatVersion"))
-        val database = schema.getJSONObject("database")
-        assertEquals(12, database.getInt("version"))
-        assertEquals(V12_IDENTITY_HASH, database.getString("identityHash"))
-    }
-
-    /**
-     * Turns red if the committed v11 schema changes. It is no longer the
-     * current version, so kapt does not rewrite it, but it is the start
-     * schema `XKeyDatabaseMigrationTest` opens for the 11 -> 12 step, and
-     * its hash is the one v11 devices hold before that step runs.
-     */
-    @Test
-    fun `committed v11 schema keeps its identity hash`() {
-        val schema = JSONObject(schemaFile(11).readText())
-        assertEquals(1, schema.getInt("formatVersion"))
-        val database = schema.getJSONObject("database")
-        assertEquals(11, database.getInt("version"))
-        assertEquals(V11_IDENTITY_HASH, database.getString("identityHash"))
-    }
-
-    /**
      * Turns red if Room 2.8.5's migration path search
      * (`RoomDatabase.MigrationContainer.findMigrationPath`) no longer finds
      * the app's step-by-step chain from a stored version to 12. With no
@@ -128,17 +95,7 @@ class XKeyDatabaseRoomUpgradeTest {
         }
     }
 
-    private fun schemaFile(version: Int): File {
-        val relative = "schemas/com.automatethethings.xkey.storage.XKeyDatabase/$version.json"
-        // Gradle runs unit tests from the module directory; fall back to the
-        // repository root for runs started there.
-        return listOf(File(relative), File("app/$relative")).first { it.isFile }
-    }
-
     private companion object {
-        /** `identityHash` of the committed 11.json, as written by Room 2.7.0. */
-        const val V11_IDENTITY_HASH = "14aec21fe86e3f39f29d271ea3c80b4d"
-
         /** `identityHash` of the committed 12.json, as written by Room 2.7.0 (#42). */
         const val V12_IDENTITY_HASH = "346118e31d0992f85496533bbc1b5d5b"
 

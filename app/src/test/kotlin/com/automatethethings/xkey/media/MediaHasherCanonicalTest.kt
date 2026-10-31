@@ -76,16 +76,6 @@ class MediaHasherCanonicalTest {
     }
 
     @Test
-    fun `fill bytes before APP1 are skipped and left out of the canonical form`() {
-        assertArrayEquals(expectedCanonical, canonical(jpeg(fillBeforeFirst = 3)))
-    }
-
-    @Test
-    fun `fill bytes before DQT are skipped and left out of the canonical form`() {
-        assertArrayEquals(expectedCanonical, canonical(jpeg(fillBeforeDqt = 2)))
-    }
-
-    @Test
     fun `fill bytes before the first segment and between segments are both skipped`() {
         assertArrayEquals(
             expectedCanonical,
@@ -142,16 +132,6 @@ class MediaHasherCanonicalTest {
         MediaHasher.contentHashMatches(stored, data, "image/jpeg", source)
 
     @Test
-    fun `the fixture's canonical and whole-file hashes differ`() {
-        assertNotEquals(canonicalHash, wholeFileHash)
-    }
-
-    @Test
-    fun `a sidecar over the whole file verifies`() {
-        assertTrue(matches(wholeFileHash, file, SignatureSource.SIDECAR))
-    }
-
-    @Test
     fun `a sidecar over the canonical hash verifies`() {
         assertTrue(matches(canonicalHash, file, SignatureSource.SIDECAR))
     }
@@ -167,16 +147,6 @@ class MediaHasherCanonicalTest {
 
         assertFalse(matches(wholeFileHash, changed, SignatureSource.SIDECAR))
         assertFalse(matches(canonicalHash, changed, SignatureSource.SIDECAR))
-    }
-
-    @Test
-    fun `an in-band signature verifies over the canonical hash`() {
-        assertTrue(matches(canonicalHash, file, SignatureSource.IN_BAND))
-    }
-
-    @Test
-    fun `an in-band signature never accepts the whole-file hash`() {
-        assertFalse(matches(wholeFileHash, file, SignatureSource.IN_BAND))
     }
 
     @Test

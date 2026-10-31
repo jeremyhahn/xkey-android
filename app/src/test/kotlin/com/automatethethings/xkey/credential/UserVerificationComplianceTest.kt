@@ -106,52 +106,8 @@ class UserVerificationComplianceTest {
 
     // --- rule 2: honest reporting (WebAuthn L3 section 6.1) ---
 
-    @Test
-    fun uvBitIsSetOnlyWhenVerificationHappened() {
-        val verified = UserVerificationCompliance.flags(userVerified = true)
-        val unverified = UserVerificationCompliance.flags(userVerified = false)
-
-        assertEquals(
-            "UV bit must be set when verified",
-            UserVerificationCompliance.FLAG_UV,
-            verified.toInt() and UserVerificationCompliance.FLAG_UV
-        )
-        assertEquals(
-            "UV bit must be clear when not verified",
-            0,
-            unverified.toInt() and UserVerificationCompliance.FLAG_UV
-        )
-    }
-
-    @Test
-    fun userPresenceIsReportedIndependentlyOfVerification() {
-        val presentOnly = UserVerificationCompliance.flags(
-            userPresent = true,
-            userVerified = false
-        )
-        assertEquals(
-            "UP must be set even when UV is not",
-            UserVerificationCompliance.FLAG_UP,
-            presentOnly.toInt() and UserVerificationCompliance.FLAG_UP
-        )
-    }
-
-    @Test
-    fun attestedCredentialDataBitIsSetForRegistrationOnly() {
-        val registration = UserVerificationCompliance.flags(
-            userVerified = true,
-            attestedCredentialData = true
-        )
-        val assertion = UserVerificationCompliance.flags(
-            userVerified = true,
-            attestedCredentialData = false
-        )
-        assertEquals(
-            UserVerificationCompliance.FLAG_AT,
-            registration.toInt() and UserVerificationCompliance.FLAG_AT
-        )
-        assertEquals(0, assertion.toInt() and UserVerificationCompliance.FLAG_AT)
-    }
+    // The exact flag bytes pin every bit: UV only when verified, UP
+    // independently of UV, AT for registration only.
 
     @Test
     fun registrationFlagsMatchTheSpecEncoding() {

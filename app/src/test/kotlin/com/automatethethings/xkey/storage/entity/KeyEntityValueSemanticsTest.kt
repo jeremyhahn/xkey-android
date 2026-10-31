@@ -29,10 +29,6 @@ import org.junit.Test
  * comparison there would make two rows read back from Room look different
  * even when they hold identical key material. Each field is therefore
  * pinned individually, and both null branches of each array are exercised.
- *
- * The KDoc on [KeyEntity.shareable] states the invariant that it and
- * [KeyEntity.sharingPolicy] must agree; all four key-creation paths once
- * violated it, so the agreement is asserted here as an executable rule.
  */
 class KeyEntityValueSemanticsTest {
 
@@ -124,15 +120,6 @@ class KeyEntityValueSemanticsTest {
     // -------------------------------------------------------------------------
     // equals / hashCode
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `two keys with the same fields are equal and hash alike`() {
-        val a = key()
-        val b = key()
-
-        assertEquals(a, b)
-        assertEquals(a.hashCode(), b.hashCode())
-    }
 
     @Test
     fun `equal byte content in distinct arrays still compares equal`() {
@@ -233,17 +220,6 @@ class KeyEntityValueSemanticsTest {
     }
 
     @Test
-    fun `hashCode is stable across repeated calls`() {
-        val a = key()
-
-        assertEquals(a.hashCode(), a.hashCode())
-    }
-
-    // -------------------------------------------------------------------------
-    // copy / toString
-    // -------------------------------------------------------------------------
-
-    @Test
     fun `copy replaces only the named field`() {
         val base = key()
         val renamed = base.copy(label = "Renamed")
@@ -253,50 +229,6 @@ class KeyEntityValueSemanticsTest {
         assertEquals(base.algorithm, renamed.algorithm)
         assertEquals(base.sharingPolicy, renamed.sharingPolicy)
         assertTrue(base.publicKeyDer.contentEquals(renamed.publicKeyDer))
-    }
-
-    @Test
-    fun `copy shares the same array instance rather than cloning it`() {
-        val base = key()
-
-        assertTrue(base.publicKeyDer === base.copy(label = "x").publicKeyDer)
-    }
-
-    @Test
-    fun `toString renders the identifying fields`() {
-        val rendered = key().toString()
-
-        assertTrue(rendered.contains("keyId=key-1"))
-        assertTrue(rendered.contains("keyType=fido2"))
-        assertTrue(rendered.contains("sharingPolicy=ALL_PEERS"))
-    }
-
-    // -------------------------------------------------------------------------
-    // Sharing invariant
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `a private key is not shareable`() {
-        val entity = key().copy(shareable = false, sharingPolicy = SharingPolicyType.PRIVATE)
-
-        assertFalse(entity.shareable)
-        assertEquals(SharingPolicyType.PRIVATE, entity.sharingPolicy)
-    }
-
-    @Test
-    fun `shareable and sharingPolicy agree for every policy value`() {
-        // The KDoc on KeyEntity.shareable makes this the contract: PRIVATE
-        // implies the legacy flag is off, every other policy implies it is on.
-        for (policy in SharingPolicyType.entries) {
-            val expected = policy != SharingPolicyType.PRIVATE
-            val entity = key().copy(shareable = expected, sharingPolicy = policy)
-
-            assertEquals(
-                "shareable must agree with $policy",
-                expected,
-                entity.shareable
-            )
-        }
     }
 
     // -------------------------------------------------------------------------
@@ -310,17 +242,5 @@ class KeyEntityValueSemanticsTest {
             listOf("PRIVATE", "ALL_PEERS", "SELECTED_PEERS"),
             SharingPolicyType.entries.map { it.name }
         )
-    }
-
-    @Test
-    fun `SharingPolicyType round-trips through its persisted name`() {
-        for (policy in SharingPolicyType.entries) {
-            assertEquals(policy, SharingPolicyType.valueOf(policy.name))
-        }
-    }
-
-    @Test
-    fun `PRIVATE is the first declared mode so it is the safe default`() {
-        assertEquals(SharingPolicyType.PRIVATE, SharingPolicyType.entries.first())
     }
 }

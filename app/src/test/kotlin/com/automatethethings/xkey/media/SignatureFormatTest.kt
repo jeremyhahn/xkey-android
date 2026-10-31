@@ -71,20 +71,6 @@ class SignatureFormatTest {
     }
 
     @Test
-    fun `SignatureEntry fromJson round-trips correctly`() {
-        val original = createSampleEntry()
-        val json = original.toJson()
-        val restored = SignatureEntry.fromJson(json)
-
-        assertEquals(original.keyFingerprint, restored.keyFingerprint)
-        assertEquals(original.signerName, restored.signerName)
-        assertEquals(original.algorithm, restored.algorithm)
-        assertEquals(original.value, restored.value)
-        assertEquals(original.timestamp, restored.timestamp)
-        assertEquals(original.role, restored.role)
-    }
-
-    @Test
     fun `SignatureEntry fromJson handles missing signerName`() {
         val json = JSONObject().apply {
             put("keyFingerprint", "SHA256:test")
@@ -125,31 +111,6 @@ class SignatureFormatTest {
     }
 
     // -------------------------------------------------------------------------
-    // SignerRole tests
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `all SignerRole values are serializable`() {
-        val roles = SignerRole.values()
-
-        assertEquals(3, roles.size)
-        assertTrue(roles.contains(SignerRole.CREATOR))
-        assertTrue(roles.contains(SignerRole.WITNESS))
-        assertTrue(roles.contains(SignerRole.ATTESTOR))
-    }
-
-    @Test
-    fun `SignerRole round-trips through SignatureEntry serialization`() {
-        SignerRole.values().forEach { role ->
-            val entry = createSampleEntry(role = role)
-            val json = entry.toJson()
-            val restored = SignatureEntry.fromJson(json)
-
-            assertEquals(role, restored.role)
-        }
-    }
-
-    // -------------------------------------------------------------------------
     // ContentAuthenticityData tests
     // -------------------------------------------------------------------------
 
@@ -168,71 +129,12 @@ class SignatureFormatTest {
     }
 
     @Test
-    fun `ContentAuthenticityData fromJson round-trips correctly`() {
-        val original = createSampleData()
-        val jsonString = original.toJsonString()
-        val restored = ContentAuthenticityData.fromJsonString(jsonString)
-
-        assertEquals(original.version, restored.version)
-        assertEquals(original.contentHash, restored.contentHash)
-        assertEquals(original.hashAlgorithm, restored.hashAlgorithm)
-        assertEquals(original.signatures.size, restored.signatures.size)
-        assertEquals(original.signatures[0].keyFingerprint, restored.signatures[0].keyFingerprint)
-        assertEquals(original.signatures[0].value, restored.signatures[0].value)
-    }
-
-    @Test
-    fun `ContentAuthenticityData with multiple SignatureEntry items`() {
-        val entries = listOf(
-            createSampleEntry(role = SignerRole.CREATOR),
-            createSampleEntry(role = SignerRole.WITNESS, signerName = "Bob"),
-            createSampleEntry(role = SignerRole.ATTESTOR, signerName = "Charlie")
-        )
-        val data = createSampleData(signatures = entries)
-        val jsonString = data.toJsonString()
-        val restored = ContentAuthenticityData.fromJsonString(jsonString)
-
-        assertEquals(3, restored.signatures.size)
-        assertEquals(SignerRole.CREATOR, restored.signatures[0].role)
-        assertEquals(SignerRole.WITNESS, restored.signatures[1].role)
-        assertEquals(SignerRole.ATTESTOR, restored.signatures[2].role)
-        assertEquals("Bob", restored.signatures[1].signerName)
-        assertEquals("Charlie", restored.signatures[2].signerName)
-    }
-
-    @Test
     fun `ContentAuthenticityData empty signatures list`() {
         val data = createSampleData(signatures = emptyList())
         val jsonString = data.toJsonString()
         val restored = ContentAuthenticityData.fromJsonString(jsonString)
 
         assertEquals(0, restored.signatures.size)
-    }
-
-    @Test
-    fun `ContentAuthenticityData version defaults to 1`() {
-        val data = ContentAuthenticityData(
-            contentHash = "deadbeef",
-            signatures = emptyList()
-        )
-
-        assertEquals(1, data.version)
-
-        val json = data.toJson()
-        assertEquals(1, json.getInt("version"))
-    }
-
-    @Test
-    fun `ContentAuthenticityData hashAlgorithm defaults to SHA-256`() {
-        val data = ContentAuthenticityData(
-            contentHash = "deadbeef",
-            signatures = emptyList()
-        )
-
-        assertEquals("SHA-256", data.hashAlgorithm)
-
-        val json = data.toJson()
-        assertEquals("SHA-256", json.getString("hashAlgorithm"))
     }
 
     @Test

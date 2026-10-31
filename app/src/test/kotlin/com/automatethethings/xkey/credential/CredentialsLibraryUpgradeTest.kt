@@ -17,10 +17,8 @@ package com.automatethethings.xkey.credential
 import android.content.ComponentName
 import android.os.Bundle
 import androidx.credentials.CreateCredentialRequest
-import androidx.credentials.CreateCredentialResponse
 import androidx.credentials.CreatePublicKeyCredentialRequest
 import androidx.credentials.CreatePublicKeyCredentialResponse
-import androidx.credentials.Credential
 import androidx.credentials.CredentialOption
 import androidx.credentials.GetPublicKeyCredentialOption
 import androidx.credentials.PublicKeyCredential
@@ -54,8 +52,9 @@ import org.junit.Test
  * The request tests use the same public parse functions the provider-side
  * library applies to the framework's request (`CreateCredentialRequest`
  * and `CredentialOption.createFrom`); the response tests use the
- * constructors CredentialSelectorActivity calls (:134, :190) and the
- * `createFrom` a relying party's library applies to them.
+ * constructors CredentialSelectorActivity calls (:134, :190); parsing a
+ * response back is the relying party's library, not xKey, so it is not
+ * tested here.
  */
 class CredentialsLibraryUpgradeTest {
 
@@ -84,22 +83,6 @@ class CredentialsLibraryUpgradeTest {
         assertEquals(REGISTRATION_RESPONSE_JSON, value.captured)
     }
 
-    /** Turns red if 1.6.0 no longer parses a registration response from that key. */
-    @Test
-    fun `registration response parses back from the relying party's bundle`() {
-        val data = mockk<Bundle>(relaxed = true) {
-            every { getString(KEY_REGISTRATION_RESPONSE) } returns REGISTRATION_RESPONSE_JSON
-        }
-
-        val parsed = CreateCredentialResponse.createFrom(TYPE_PUBLIC_KEY, data)
-
-        assertTrue(parsed is CreatePublicKeyCredentialResponse)
-        assertEquals(
-            REGISTRATION_RESPONSE_JSON,
-            (parsed as CreatePublicKeyCredentialResponse).registrationResponseJson
-        )
-    }
-
     /**
      * Turns red if 1.6.0 changed the key or type string an assertion
      * response is written under, or rejects the app's assertion JSON.
@@ -117,22 +100,6 @@ class CredentialsLibraryUpgradeTest {
         assertEquals(TYPE_PUBLIC_KEY, PublicKeyCredential.TYPE_PUBLIC_KEY_CREDENTIAL)
         assertEquals(KEY_AUTHENTICATION_RESPONSE, key.captured)
         assertEquals(ASSERTION_RESPONSE_JSON, value.captured)
-    }
-
-    /** Turns red if 1.6.0 no longer parses an assertion response from that key. */
-    @Test
-    fun `assertion response parses back from the relying party's bundle`() {
-        val data = mockk<Bundle>(relaxed = true) {
-            every { getString(KEY_AUTHENTICATION_RESPONSE) } returns ASSERTION_RESPONSE_JSON
-        }
-
-        val parsed = Credential.createFrom(TYPE_PUBLIC_KEY, data)
-
-        assertTrue(parsed is PublicKeyCredential)
-        assertEquals(
-            ASSERTION_RESPONSE_JSON,
-            (parsed as PublicKeyCredential).authenticationResponseJson
-        )
     }
 
     /**

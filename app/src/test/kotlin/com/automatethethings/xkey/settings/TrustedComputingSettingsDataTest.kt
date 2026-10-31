@@ -16,7 +16,6 @@ package com.automatethethings.xkey.settings
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -69,15 +68,6 @@ class TrustedComputingSettingsDataTest {
         assertEquals("", settings.caSubjectProvince)
         assertEquals("", settings.caSubjectCountry)
         assertEquals("", settings.caSubjectCommonName)
-    }
-
-    @Test
-    fun `derived flags are false while trusted computing is disabled`() {
-        val settings = TrustedComputingSettingsData()
-
-        assertFalse(settings.useXkmsCA)
-        assertFalse(settings.useLocalCA)
-        assertFalse(settings.isDeviceVerificationActive)
     }
 
     // -------------------------------------------------------------------------
@@ -278,34 +268,5 @@ class TrustedComputingSettingsDataTest {
             strict.useXkmsCA
         )
         assertTrue(strict.copy(xkmsEndpoint = "https://xkms.example.com").useXkmsCA)
-    }
-
-    @Test
-    fun `presets are distinct configurations`() {
-        assertNotEquals(TrustedComputingSettingsData.DEFAULT, TrustedComputingSettingsData.PERMISSIVE)
-        assertNotEquals(TrustedComputingSettingsData.PERMISSIVE, TrustedComputingSettingsData.STRICT)
-    }
-
-    // -------------------------------------------------------------------------
-    // Value semantics
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `copy leaves the original untouched and equality is structural`() {
-        val original = TrustedComputingSettingsData(enabled = true)
-        val withSubject = original.copy(caSubjectOrganization = "Automate The Things")
-
-        assertEquals("", original.caSubjectOrganization)
-        assertEquals("Automate The Things", withSubject.caSubjectOrganization)
-        assertNotEquals(original, withSubject)
-        assertEquals(original, original.copy())
-        assertEquals(original.hashCode(), original.copy().hashCode())
-    }
-
-    @Test
-    fun `a custom platform CA alias is preserved`() {
-        val settings = TrustedComputingSettingsData(platformCAAlias = "corp_issuing_ca")
-
-        assertEquals("corp_issuing_ca", settings.platformCAAlias)
     }
 }

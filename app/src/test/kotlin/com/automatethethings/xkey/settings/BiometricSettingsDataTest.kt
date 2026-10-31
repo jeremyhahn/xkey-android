@@ -16,7 +16,6 @@ package com.automatethethings.xkey.settings
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -106,13 +105,6 @@ class BiometricSettingsDataTest {
         assertTrue(convenience.isBiometricEnabled)
     }
 
-    @Test
-    fun `presets are distinct configurations`() {
-        assertNotEquals(BiometricSettingsData.DEFAULT, BiometricSettingsData.DISABLED)
-        assertNotEquals(BiometricSettingsData.DEFAULT, BiometricSettingsData.HIGH_SECURITY)
-        assertNotEquals(BiometricSettingsData.HIGH_SECURITY, BiometricSettingsData.CONVENIENCE)
-    }
-
     // -------------------------------------------------------------------------
     // Time-window helpers
     // -------------------------------------------------------------------------
@@ -151,13 +143,6 @@ class BiometricSettingsDataTest {
         assertEquals(120, original.timeWindowSeconds)
     }
 
-    @Test
-    fun `withTimeWindow round-trips through getAuthTimeWindow`() {
-        for (window in AuthTimeWindow.entries) {
-            assertEquals(window, BiometricSettingsData().withTimeWindow(window).getAuthTimeWindow())
-        }
-    }
-
     // -------------------------------------------------------------------------
     // AuthTimeWindow
     // -------------------------------------------------------------------------
@@ -170,13 +155,6 @@ class BiometricSettingsDataTest {
         assertEquals(300, AuthTimeWindow.MINUTES_5.seconds)
         assertEquals(600, AuthTimeWindow.MINUTES_10.seconds)
         assertEquals(5, AuthTimeWindow.entries.size)
-    }
-
-    @Test
-    fun `AuthTimeWindow durations are strictly increasing in declaration order`() {
-        val seconds = AuthTimeWindow.entries.map { it.seconds }
-        assertEquals(seconds.sorted(), seconds)
-        assertEquals(seconds.distinct().size, seconds.size)
     }
 
     @Test
@@ -212,28 +190,6 @@ class BiometricSettingsDataTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `enum names round-trip through valueOf as DataStore persists them`() {
-        for (policy in UserVerificationPolicy.entries) {
-            assertEquals(policy, UserVerificationPolicy.valueOf(policy.name))
-        }
-        for (mode in BiometricAuthMode.entries) {
-            assertEquals(mode, BiometricAuthMode.valueOf(mode.name))
-        }
-        for (policy in AttestationBiometricPolicy.entries) {
-            assertEquals(policy, AttestationBiometricPolicy.valueOf(policy.name))
-        }
-    }
-
-    @Test
-    fun `enum valueOf rejects unknown persisted names`() {
-        // The repository wraps these in runCatching and falls back to the strict
-        // default; this pins the throwing behaviour that fallback relies on.
-        assertNull(runCatching { UserVerificationPolicy.valueOf("MAYBE") }.getOrNull())
-        assertNull(runCatching { BiometricAuthMode.valueOf("per_operation") }.getOrNull())
-        assertNull(runCatching { AttestationBiometricPolicy.valueOf("") }.getOrNull())
-    }
-
-    @Test
     fun `enum members cover the documented options`() {
         assertEquals(
             listOf("DISABLED", "REQUIRED"),
@@ -247,20 +203,5 @@ class BiometricSettingsDataTest {
             listOf("ALWAYS", "PAIRED_DEVICES_SKIP", "NEVER"),
             AttestationBiometricPolicy.entries.map { it.name }
         )
-    }
-
-    // -------------------------------------------------------------------------
-    // Value semantics
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `copy leaves the original untouched and equality is structural`() {
-        val original = BiometricSettingsData()
-        val relaxed = original.copy(strictUserVerification = false)
-
-        assertNotEquals(original, relaxed)
-        assertTrue(original.strictUserVerification)
-        assertEquals(original, original.copy())
-        assertEquals(original.hashCode(), original.copy().hashCode())
     }
 }

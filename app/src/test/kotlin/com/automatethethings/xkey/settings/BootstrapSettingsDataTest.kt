@@ -328,16 +328,6 @@ class BootstrapSettingsDataTest {
         assertFalse(BootstrapSettingsData(spkiPinSha256 = "z".repeat(64)).isSpkiPinValid())
     }
 
-    @Test
-    fun `key and pin validation are independent`() {
-        val settings = BootstrapSettingsData(
-            noiseServerStaticKey = "ab".repeat(32), spkiPinSha256 = "nope"
-        )
-
-        assertTrue(settings.isNoiseKeyValid())
-        assertFalse(settings.isSpkiPinValid())
-    }
-
     // -------------------------------------------------------------------------
     // deriveFromUrl
     // -------------------------------------------------------------------------

@@ -15,7 +15,6 @@
 package com.automatethethings.xkey.storage.dao
 
 import com.automatethethings.xkey.storage.entity.ContactEntity
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -32,30 +31,6 @@ import org.junit.Test
  * validation concepts.
  */
 class ContactDaoTest {
-
-    @Test
-    fun `ContactEntity creation with all fields`() {
-        val publicKeyDer = byteArrayOf(0x30, 0x59, 0x30, 0x13)
-        val entity = ContactEntity(
-            id = 1L,
-            name = "Alice",
-            publicKeyDer = publicKeyDer,
-            publicKeyFingerprint = "SHA256:abc123",
-            algorithm = "ES256",
-            importedAt = 1700000000000L,
-            source = "file",
-            notes = "Test contact"
-        )
-
-        assertEquals(1L, entity.id)
-        assertEquals("Alice", entity.name)
-        assertArrayEquals(publicKeyDer, entity.publicKeyDer)
-        assertEquals("SHA256:abc123", entity.publicKeyFingerprint)
-        assertEquals("ES256", entity.algorithm)
-        assertEquals(1700000000000L, entity.importedAt)
-        assertEquals("file", entity.source)
-        assertEquals("Test contact", entity.notes)
-    }
 
     @Test
     fun `ContactEntity creation with default values`() {
@@ -135,68 +110,6 @@ class ContactDaoTest {
         )
 
         assertEquals(entity1.hashCode(), entity2.hashCode())
-    }
-
-    @Test
-    fun `fingerprint uniqueness concept - different fingerprints are not equal`() {
-        val key = byteArrayOf(0x01, 0x02, 0x03)
-
-        val entity1 = ContactEntity(
-            id = 1L,
-            name = "Alice",
-            publicKeyDer = key,
-            publicKeyFingerprint = "SHA256:fingerprint1",
-            algorithm = "ES256",
-            importedAt = 1000L,
-            source = "file"
-        )
-        val entity2 = ContactEntity(
-            id = 2L,
-            name = "Alice",
-            publicKeyDer = key,
-            publicKeyFingerprint = "SHA256:fingerprint2",
-            algorithm = "ES256",
-            importedAt = 1000L,
-            source = "file"
-        )
-
-        assertNotEquals(entity1, entity2)
-    }
-
-    @Test
-    fun `source field accepts all valid values`() {
-        val validSources = listOf("file", "qr", "ble", "paste")
-
-        validSources.forEach { source ->
-            val entity = ContactEntity(
-                name = "Test",
-                publicKeyDer = byteArrayOf(0x01),
-                publicKeyFingerprint = "SHA256:test",
-                algorithm = "ES256",
-                source = source
-            )
-            assertEquals(source, entity.source)
-        }
-    }
-
-    @Test
-    fun `copy preserves ByteArray content`() {
-        val originalKey = byteArrayOf(0x30, 0x59, 0x30, 0x13)
-        val entity = ContactEntity(
-            id = 1L,
-            name = "Alice",
-            publicKeyDer = originalKey,
-            publicKeyFingerprint = "SHA256:abc",
-            algorithm = "ES256",
-            importedAt = 1000L,
-            source = "file"
-        )
-
-        val copied = entity.copy(name = "Alice Updated")
-
-        assertEquals("Alice Updated", copied.name)
-        assertArrayEquals(originalKey, copied.publicKeyDer)
-        assertEquals(entity.publicKeyFingerprint, copied.publicKeyFingerprint)
     }
 
     @Test

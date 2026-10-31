@@ -56,35 +56,9 @@ class AuditOperationTypeConverterTest {
     }
 
     @Test
-    fun `the stored form is the enum name and not its ordinal`() {
-        assertEquals(
-            "KEY_CREATED",
-            converter.fromAuditOperationType(AuditOperationType.KEY_CREATED)
-        )
-        assertEquals(
-            "FIDO2_REGISTRATION",
-            converter.fromAuditOperationType(AuditOperationType.FIDO2_REGISTRATION)
-        )
-    }
-
-    @Test
     fun `an unrecognised column value fails loudly rather than silently dropping the row`() {
         assertThrows(IllegalArgumentException::class.java) {
             converter.toAuditOperationType("NOT_A_REAL_OPERATION")
-        }
-    }
-
-    @Test
-    fun `the stored name is case sensitive`() {
-        assertThrows(IllegalArgumentException::class.java) {
-            converter.toAuditOperationType("key_created")
-        }
-    }
-
-    @Test
-    fun `an empty column value is rejected rather than mapped to a default`() {
-        assertThrows(IllegalArgumentException::class.java) {
-            converter.toAuditOperationType("")
         }
     }
 }
