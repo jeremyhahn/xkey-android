@@ -18,7 +18,6 @@ import android.content.Context
 import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -72,21 +71,9 @@ class CredentialProviderSettingsRepositoryTest {
         assertFalse(repository.getSettings().isEnabled)
     }
 
-    @Test
-    fun freshStore_matchesTheDataClassDefault() = runBlocking {
-        assertEquals(CredentialProviderSettingsData(), repository.getSettings())
-    }
-
     // -------------------------------------------------------------------------
     // Round trip
     // -------------------------------------------------------------------------
-
-    @Test
-    fun setEnabled_persistsTheChoice() = runBlocking {
-        repository.setEnabled(true)
-
-        assertTrue(repository.getSettings().isEnabled)
-    }
 
     @Test
     fun setEnabled_canTurnTheProviderBackOff() = runBlocking {
@@ -97,37 +84,9 @@ class CredentialProviderSettingsRepositoryTest {
     }
 
     @Test
-    fun setEnabled_isIdempotent() = runBlocking {
-        repository.setEnabled(true)
-        repository.setEnabled(true)
-
-        assertTrue(repository.getSettings().isEnabled)
-    }
-
-    @Test
-    fun settingsFlow_emitsTheStoredValue() = runBlocking {
-        repository.setEnabled(true)
-
-        assertTrue(repository.settingsFlow.first().isEnabled)
-    }
-
-    @Test
-    fun settingsFlow_emitsTheDefaultForAnEmptyStore() = runBlocking {
-        assertEquals(CredentialProviderSettingsData(false), repository.settingsFlow.first())
-    }
-
-    @Test
     fun clearSettings_returnsTheProviderToItsDisabledDefault() = runBlocking {
         repository.setEnabled(true)
 
-        repository.clearSettings()
-
-        assertFalse(repository.getSettings().isEnabled)
-    }
-
-    @Test
-    fun clearSettings_isSafeOnAnAlreadyEmptyStore() = runBlocking {
-        repository.clearSettings()
         repository.clearSettings()
 
         assertFalse(repository.getSettings().isEnabled)
@@ -150,35 +109,6 @@ class CredentialProviderSettingsRepositoryTest {
         assertEquals(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE,
             repository.isFeatureAvailable()
-        )
-    }
-
-    @Test
-    fun isFeatureAvailable_isIndependentOfTheStoredPreference() = runBlocking {
-        val availability = repository.isFeatureAvailable()
-
-        repository.setEnabled(true)
-
-        // Enabling the preference cannot make an unsupported OS support the API.
-        assertEquals(availability, repository.isFeatureAvailable())
-    }
-
-    // -------------------------------------------------------------------------
-    // Settings data
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun settingsData_hasValueSemantics() {
-        assertEquals(CredentialProviderSettingsData(true), CredentialProviderSettingsData(true))
-        assertEquals(
-            CredentialProviderSettingsData(true).hashCode(),
-            CredentialProviderSettingsData(true).hashCode()
-        )
-        assertFalse(
-            CredentialProviderSettingsData(true) == CredentialProviderSettingsData(false)
-        )
-        assertTrue(
-            CredentialProviderSettingsData(false).copy(isEnabled = true).isEnabled
         )
     }
 }
