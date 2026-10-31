@@ -34,6 +34,43 @@ class PivSlotTest {
     // -------------------------------------------------------------------------
 
     @Test
+    fun `every slot maps to its fixed hex id and keystore alias`() {
+        val expected = listOf(
+            Triple(PivSlot.AUTHENTICATION, "9A", "xkey_piv_9A"),
+            Triple(PivSlot.DIGITAL_SIGNATURE, "9C", "xkey_piv_9C"),
+            Triple(PivSlot.KEY_MANAGEMENT, "9D", "xkey_piv_9D"),
+            Triple(PivSlot.CARD_AUTHENTICATION, "9E", "xkey_piv_9E"),
+            Triple(PivSlot.ATTESTATION, "F9", "xkey_piv_F9"),
+            Triple(PivSlot.RETIRED_1, "82", "xkey_piv_82"),
+            Triple(PivSlot.RETIRED_2, "83", "xkey_piv_83"),
+            Triple(PivSlot.RETIRED_3, "84", "xkey_piv_84"),
+            Triple(PivSlot.RETIRED_4, "85", "xkey_piv_85"),
+            Triple(PivSlot.RETIRED_5, "86", "xkey_piv_86"),
+            Triple(PivSlot.RETIRED_6, "87", "xkey_piv_87"),
+            Triple(PivSlot.RETIRED_7, "88", "xkey_piv_88"),
+            Triple(PivSlot.RETIRED_8, "89", "xkey_piv_89"),
+            Triple(PivSlot.RETIRED_9, "8A", "xkey_piv_8A"),
+            Triple(PivSlot.RETIRED_10, "8B", "xkey_piv_8B"),
+            Triple(PivSlot.RETIRED_11, "8C", "xkey_piv_8C"),
+            Triple(PivSlot.RETIRED_12, "8D", "xkey_piv_8D"),
+            Triple(PivSlot.RETIRED_13, "8E", "xkey_piv_8E"),
+            Triple(PivSlot.RETIRED_14, "8F", "xkey_piv_8F"),
+            Triple(PivSlot.RETIRED_15, "90", "xkey_piv_90"),
+            Triple(PivSlot.RETIRED_16, "91", "xkey_piv_91"),
+            Triple(PivSlot.RETIRED_17, "92", "xkey_piv_92"),
+            Triple(PivSlot.RETIRED_18, "93", "xkey_piv_93"),
+            Triple(PivSlot.RETIRED_19, "94", "xkey_piv_94"),
+            Triple(PivSlot.RETIRED_20, "95", "xkey_piv_95"),
+        )
+
+        assertEquals("table must cover every slot", PivSlot.entries.toSet(), expected.map { it.first }.toSet())
+        expected.forEach { (slot, hexId, alias) ->
+            assertEquals("fromHexId(\"$hexId\") must return $slot", slot, PivSlot.fromHexId(hexId))
+            assertEquals("$slot keystoreAlias", alias, slot.keystoreAlias)
+        }
+    }
+
+    @Test
     fun `fromHexId returns null for unknown hex`() {
         assertNull(PivSlot.fromHexId("FF"))
         assertNull(PivSlot.fromHexId("00"))

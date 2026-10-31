@@ -55,6 +55,14 @@ class DaneVerifierTest {
 
     // --- computeTlsaData ---
 
+    @Test
+    fun computesExactMatchAsTheRawCertificateDer() {
+        assertArrayEquals(
+            cert.encoded,
+            DaneVerifier.computeTlsaData(cert, TlsaRecord.SELECTOR_FULL_CERT, TlsaRecord.MATCHING_EXACT)
+        )
+    }
+
     // --- verifyPeerChain ---
 
     @Test
