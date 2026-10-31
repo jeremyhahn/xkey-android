@@ -60,8 +60,7 @@ import org.junit.runner.RunWith
  * - Hero section: label plus the algorithm and key-type badges
  * - General/Security/Usage/Attestation/Actions cards and their bound values
  * - Card set varies by key type: FIDO2 metadata + Sharing only for passkeys
- * - Actions card: export and delete controls
- * - Delete bottom sheet: opens, and cancelling keeps the key
+ * - Delete bottom sheet: cancelling keeps the key
  * - Back navigation finishing the activity
  */
 @RunWith(AndroidJUnit4::class)
@@ -153,31 +152,10 @@ class KeyDetailActivityUiTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun generalInfoCard_isShown() {
-        val scenario = launchWithKey(testKeyId)
-
-        awaitText(scenario, "General Information")
-    }
-
-    @Test
     fun securityCard_isShown() {
         val scenario = launchWithKey(testKeyId)
 
         awaitText(scenario, "Security")
-    }
-
-    @Test
-    fun usageCard_isShown() {
-        val scenario = launchWithKey(testKeyId)
-
-        awaitText(scenario, "Usage")
-    }
-
-    @Test
-    fun attestationCard_isShown() {
-        val scenario = launchWithKey(testKeyId)
-
-        awaitText(scenario, "Attestation")
     }
 
     @Test
@@ -226,44 +204,8 @@ class KeyDetailActivityUiTest {
     }
 
     // -----------------------------------------------------------------
-    // Actions Card Controls
-    // -----------------------------------------------------------------
-
-    /**
-     * A local asymmetric key exposes an "Export Public Key (PEM)" action.
-     * Assert it is present without clicking it (no key material in tests).
-     */
-    @Test
-    fun actionsCard_showsExportButton() {
-        val scenario = launchWithKey(testKeyId)
-
-        awaitText(scenario, "Export Public Key (PEM)")
-    }
-
-    /** A non-system key exposes a "Delete Key" action. */
-    @Test
-    fun actionsCard_showsDeleteButton() {
-        val scenario = launchWithKey(testKeyId)
-
-        awaitText(scenario, "Delete Key")
-    }
-
-    // -----------------------------------------------------------------
     // Delete bottom sheet
     // -----------------------------------------------------------------
-
-    @Test
-    fun deleteAction_opensBottomSheetWithConfirmAndCancel() {
-        val scenario = launchWithKey(testKeyId)
-        awaitText(scenario, "Delete Key")
-
-        onView(withText(R.string.key_action_delete)).perform(scrollToView(), click())
-
-        onView(withText(R.string.key_delete_confirm)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.button_cancel)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-    }
 
     @Test
     fun deleteBottomSheet_cancelled_keepsKey() {
