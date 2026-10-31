@@ -136,14 +136,6 @@ class PairedDevicesActivityUiTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun deviceList_bindsEveryPairedDevice() {
-        val scenario = launch()
-
-        assertShownTextInList(scenario, FRESH_NAME)
-        assertShownTextInList(scenario, ATTESTED_NAME)
-    }
-
-    @Test
     fun deviceList_itemCountMatchesRepository() {
         val scenario = launch()
         assertShownTextInList(scenario, FRESH_NAME)
