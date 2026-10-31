@@ -16,16 +16,14 @@ package com.automatethethings.xkey.ui
 
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Tests for PasskeyAdapter DiffUtil callback and display name resolution.
+ * Tests for the PasskeyAdapter DiffUtil callback.
  *
- * Verifies that the adapter correctly identifies item changes and that
- * the display name fallback chain works as expected.
+ * Verifies that the adapter correctly identifies item changes.
  */
 class PasskeyAdapterTest {
 
@@ -114,61 +112,6 @@ class PasskeyAdapterTest {
 
         // signCount is not tracked by DiffUtil, so contents are "same"
         assertTrue(diffCallback.areContentsTheSame(old, new))
-    }
-
-    // -------------------------------------------------------------------------
-    // Display Name Resolution
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `display name prefers rpName`() {
-        val key = createFido2Key(rpName = "GitHub", rpId = "github.com", label = "My Key")
-        val displayName = key.rpName ?: key.rpId ?: key.label
-        assertEquals("GitHub", displayName)
-    }
-
-    @Test
-    fun `display name falls back to rpId when rpName is null`() {
-        val key = createFido2Key(rpName = null, rpId = "github.com", label = "My Key")
-        val displayName = key.rpName ?: key.rpId ?: key.label
-        assertEquals("github.com", displayName)
-    }
-
-    @Test
-    fun `display name falls back to label when rpName and rpId are null`() {
-        val key = createFido2Key(rpName = null, rpId = null, label = "My Key")
-        val displayName = key.rpName ?: key.rpId ?: key.label
-        assertEquals("My Key", displayName)
-    }
-
-    @Test
-    fun `initial letter is uppercase first char of rpName`() {
-        val key = createFido2Key(rpName = "github.com")
-        val displayName = key.rpName ?: key.rpId ?: key.label
-        val initial = displayName.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-        assertEquals("G", initial)
-    }
-
-    @Test
-    fun `initial letter uses question mark for empty name`() {
-        val key = createFido2Key(rpName = "", rpId = null, label = "")
-        val displayName = key.rpName ?: key.rpId ?: key.label
-        val initial = displayName.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-        assertEquals("?", initial)
-    }
-
-    @Test
-    fun `username prefers userName over userDisplayName`() {
-        val key = createFido2Key(userName = "user@example.com", userDisplayName = "John Doe")
-        val userName = key.userName ?: key.userDisplayName
-        assertEquals("user@example.com", userName)
-    }
-
-    @Test
-    fun `username falls back to userDisplayName`() {
-        val key = createFido2Key(userName = null, userDisplayName = "John Doe")
-        val userName = key.userName ?: key.userDisplayName
-        assertEquals("John Doe", userName)
     }
 
     // -------------------------------------------------------------------------
