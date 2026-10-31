@@ -77,6 +77,24 @@ class OathCredentialEntityTest {
         assertEquals(0, entity.useCount)
     }
 
+    @Test
+    fun `a credential may carry a null issuer`() {
+        val entity = credential().copy(issuer = null)
+
+        assertNull(entity.issuer)
+        assertEquals("user@example.com", entity.accountName)
+    }
+
+    @Test
+    fun `copy advances an HOTP counter without disturbing anything else`() {
+        val base = credential().copy(oathType = "HOTP", counter = 7L)
+        val advanced = base.copy(counter = base.counter + 1)
+
+        assertEquals(8L, advanced.counter)
+        assertEquals(base.oathId, advanced.oathId)
+        assertTrue(base.secretEncrypted.contentEquals(advanced.secretEncrypted))
+    }
+
     // -------------------------------------------------------------------------
     // equals / hashCode
     // -------------------------------------------------------------------------
