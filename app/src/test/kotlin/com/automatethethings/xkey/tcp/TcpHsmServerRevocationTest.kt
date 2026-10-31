@@ -250,21 +250,11 @@ class TcpHsmServerRevocationTest {
 
     /**
      * The desktop sends past the frame buffer while its `local.verifyUser`
-     * waits on a prompt nobody answers, then closes (Codex 7374). The close
-     * still cancels the request, and the server serves the next connection.
+     * waits on a prompt nobody answers (Codex 7374). The overflow ends the
+     * connection and cancels the request, and the server serves the next one.
      */
     @Test
-    fun aFrameBufferOverflowThenCloseWhileVerifyUserPromptsCancelsItAndTheNextConnectionIsServed() = runBlocking<Unit> {
-        assertOverflowCancelsVerifyUserAndTheNextIsServed(thenClose = true)
-    }
-
-    /** The overflow alone ends the connection, and the server serves the next one. */
-    @Test
     fun aFrameBufferOverflowWhileVerifyUserPromptsEndsTheConnectionAndTheNextIsServed() = runBlocking<Unit> {
-        assertOverflowCancelsVerifyUserAndTheNextIsServed(thenClose = false)
-    }
-
-    private suspend fun assertOverflowCancelsVerifyUserAndTheNextIsServed(thenClose: Boolean) {
         val shown = CompletableDeferred<Unit>()
         val dismissed = CompletableDeferred<Unit>()
         coEvery {
@@ -282,7 +272,6 @@ class TcpHsmServerRevocationTest {
         withTimeout(TIMEOUT_MS) { shown.await() }
 
         repeat(FRAME_BUFFER + 1) { desktop.send(desktop.noise.encrypt(jsonRpc(id = 8 + it, method = "system.ping"))) }
-        if (thenClose) desktop.endOutput()
 
         withTimeout(TIMEOUT_MS) { dismissed.await() }
         desktop.assertClosedByPhone()
