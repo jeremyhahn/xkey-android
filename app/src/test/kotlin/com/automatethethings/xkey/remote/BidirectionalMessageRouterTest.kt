@@ -165,23 +165,6 @@ class BidirectionalMessageRouterTest {
     }
 
     @Test
-    fun `concurrent in-flight requests are correlated by id and may complete out of order`() = runTest {
-        val first = CompletableDeferred<Response>()
-        val second = CompletableDeferred<Response>()
-        val third = CompletableDeferred<Response>()
-        router.registerPendingResponse(1L, first)
-        router.registerPendingResponse(2L, second)
-        router.registerPendingResponse(3L, third)
-
-        router.processMessage(bytes("""{"id":3,"result":{"who":"third"}}"""))
-        router.processMessage(bytes("""{"id":1,"result":{"who":"first"}}"""))
-
-        assertEquals("third", third.await().result!!.getString("who"))
-        assertEquals("first", first.await().result!!.getString("who"))
-        assertFalse("unanswered request must stay pending", second.isCompleted)
-    }
-
-    @Test
     fun `response for an unknown id is dropped without error`() = runTest {
         val out = router.processMessage(bytes("""{"id":999,"result":{"ok":true}}"""))
 

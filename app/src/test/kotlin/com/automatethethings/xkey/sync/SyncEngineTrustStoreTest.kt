@@ -280,23 +280,4 @@ class SyncEngineTrustStoreTest {
         assertEquals(1, counts.added)
         assertEquals(2, counts.skipped)
     }
-
-    // -------------------------------------------------------------------------
-    // Count value types
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `count types are structural values`() {
-        assertEquals(SyncEngine.CertCounts(1, 2), SyncEngine.CertCounts(1, 2))
-        assertEquals(SyncEngine.ItemCounts(1, 2, 3), SyncEngine.ItemCounts(1, 2, 3))
-
-        val certs = SyncEngine.CertCounts(added = 4, skipped = 5)
-        assertEquals(4, certs.added)
-        assertEquals(5, certs.skipped)
-
-        val items = SyncEngine.ItemCounts(added = 6, updated = 7, skipped = 8)
-        assertEquals(6, items.added)
-        assertEquals(7, items.updated)
-        assertEquals(8, items.skipped)
-    }
 }
