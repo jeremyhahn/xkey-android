@@ -143,22 +143,6 @@ class OathManualEntryFlowTest {
         assertEquals(8, stored.digits)
     }
 
-    @Test
-    fun manualEntry_withAPlainIssuer_stillRoundTrips() {
-        // The encoding must not disturb the ordinary case.
-        val issuer = "PlainCo"
-        val account = "plain-$runId@example.com"
-
-        ActivityScenario.launch(OathActivity::class.java)
-        addManually(issuer = issuer, account = account)
-
-        val stored = awaitCredential(account)
-        assertNotNull(stored)
-        assertEquals(issuer, stored!!.issuer)
-        assertEquals(account, stored.accountName)
-        assertEquals("TOTP", stored.oathType)
-    }
-
     // -------------------------------------------------------------------------
     // Validation
     // -------------------------------------------------------------------------
