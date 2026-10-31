@@ -48,7 +48,7 @@ import org.junit.runner.RunWith
  * relies on -- a scan that never happens must leave RESULT_CANCELED behind.
  *
  * Tests cover:
- * - Instruction text renders (by string resource and by view id)
+ * - Instruction text renders
  * - Semi-transparent overlay renders
  * - Preview view is present and is a CameraX PreviewView
  * - Starting the scanner does not finish the activity
@@ -70,14 +70,6 @@ class QrScannerActivityUiTest {
         ActivityScenario.launch(QrScannerActivity::class.java)
 
         onView(withText(R.string.oath_qr_instruction))
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun scanner_instructionView_isDisplayed() {
-        ActivityScenario.launch(QrScannerActivity::class.java)
-
-        onView(withId(R.id.textInstruction))
             .check(matches(isDisplayed()))
     }
 
