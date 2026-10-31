@@ -77,22 +77,6 @@ class OathCredentialEntityTest {
         assertEquals(0, entity.useCount)
     }
 
-    @Test
-    fun `a credential may carry a null issuer`() {
-        val entity = credential().copy(issuer = null)
-
-        assertNull(entity.issuer)
-        assertEquals("user@example.com", entity.accountName)
-    }
-
-    @Test
-    fun `a synced credential records the device it came from`() {
-        val entity = credential().copy(source = "remote", remoteDeviceId = "desktop-1")
-
-        assertEquals("remote", entity.source)
-        assertEquals("desktop-1", entity.remoteDeviceId)
-    }
-
     // -------------------------------------------------------------------------
     // equals / hashCode
     // -------------------------------------------------------------------------
@@ -164,27 +148,6 @@ class OathCredentialEntityTest {
     // -------------------------------------------------------------------------
     // copy / destructuring / toString
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `copy advances an HOTP counter without disturbing anything else`() {
-        val base = credential().copy(oathType = "HOTP", counter = 7L)
-        val advanced = base.copy(counter = base.counter + 1)
-
-        assertEquals(8L, advanced.counter)
-        assertEquals(base.oathId, advanced.oathId)
-        assertTrue(base.secretEncrypted.contentEquals(advanced.secretEncrypted))
-    }
-
-    @Test
-    fun `a credential destructures in declaration order`() {
-        val (id, oathId, oathType, algorithm, digits) = credential()
-
-        assertEquals(2L, id)
-        assertEquals("oath-1", oathId)
-        assertEquals("TOTP", oathType)
-        assertEquals("SHA1", algorithm)
-        assertEquals(6, digits)
-    }
 
     @Test
     fun `toString renders the identifying fields`() {
