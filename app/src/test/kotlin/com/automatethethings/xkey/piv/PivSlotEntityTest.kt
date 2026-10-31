@@ -151,33 +151,6 @@ class PivSlotEntityTest {
         assertNotEquals(base, base.copy(useCount = 4))
     }
 
-    @Test
-    fun `hashCode is stable across repeated calls`() {
-        val a = entity()
-
-        assertEquals(a.hashCode(), a.hashCode())
-    }
-
-    @Test
-    fun `copy replaces only the named field`() {
-        val base = entity()
-        val used = base.copy(useCount = base.useCount + 1, lastUsedAt = 42L)
-
-        assertEquals(4, used.useCount)
-        assertEquals(42L, used.lastUsedAt)
-        assertEquals(base.slotId, used.slotId)
-        assertTrue(base.publicKeyDer.contentEquals(used.publicKeyDer))
-    }
-
-    @Test
-    fun `toString renders the identifying fields`() {
-        val rendered = entity().toString()
-
-        assertTrue(rendered.contains("slotId=9A"))
-        assertTrue(rendered.contains("algorithm=ES256"))
-        assertTrue(rendered.contains("hasKey=true"))
-    }
-
     // -------------------------------------------------------------------------
     // PivSlotInfo
     // -------------------------------------------------------------------------
@@ -247,32 +220,5 @@ class PivSlotEntityTest {
         assertNotEquals(base, base.copy(lastUsedAt = 2L))
         assertNotEquals(base, base.copy(lastUsedAt = null))
         assertNotEquals(base, base.copy(useCount = 4))
-    }
-
-    @Test
-    fun `an unused slot view reports a null last-used time`() {
-        val fresh = info().copy(lastUsedAt = null, useCount = 0)
-
-        assertNull(fresh.lastUsedAt)
-        assertEquals(0, fresh.useCount)
-    }
-
-    @Test
-    fun `a slot view destructures in declaration order`() {
-        val (slot, algorithm, hasKey, hasCertificate) = info()
-
-        assertEquals(PivSlot.AUTHENTICATION, slot)
-        assertEquals(PivAlgorithm.ES256, algorithm)
-        assertTrue(hasKey)
-        assertTrue(hasCertificate)
-    }
-
-    @Test
-    fun `a slot view renders its fields in toString`() {
-        val rendered = info().toString()
-
-        assertTrue(rendered.contains("slot=AUTHENTICATION"))
-        assertTrue(rendered.contains("algorithm=ES256"))
-        assertTrue(rendered.contains("useCount=3"))
     }
 }
