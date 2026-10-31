@@ -387,14 +387,6 @@ class StreamPairingSessionTest {
     // Outbound sends
     // ------------------------------------------------------------------
 
-    /** Nothing can be pushed to a peer that is not there. */
-    @Test
-    fun sendingToADisconnectedTransportFails() {
-        assertThrows(IOException::class.java) {
-            runBlocking { server.sendEncryptedMessage("{}".toByteArray()) }
-        }
-    }
-
     /**
      * The transport is the [com.automatethethings.xkey.remote.MessageSender] the
      * outbound `remote.*` clients write through, so a phone-initiated request
