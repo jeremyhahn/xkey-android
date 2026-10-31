@@ -28,8 +28,7 @@ import org.junit.Test
  * case: an empty slot legitimately has no public key and no certificate, so
  * `equals` has to treat null-versus-null as equal, null-versus-present as
  * unequal in both directions, and identical-content-in-different-arrays as
- * equal. `PivKeyManagerTest` spot-checks two of those; this suite pins all of
- * them plus the field-by-field comparison.
+ * equal. This suite pins all of them plus the field-by-field comparison.
  */
 class PivSlotEntityTest {
 
@@ -85,6 +84,15 @@ class PivSlotEntityTest {
     fun `two slot rows with the same fields are equal and hash alike`() {
         assertEquals(entity(), entity())
         assertEquals(entity().hashCode(), entity().hashCode())
+    }
+
+    @Test
+    fun `slot rows with equal key content in distinct arrays are equal`() {
+        val a = entity(publicKeyDer = byteArrayOf(1, 2, 3), certificateDer = byteArrayOf(4, 5, 6))
+        val b = entity(publicKeyDer = byteArrayOf(1, 2, 3), certificateDer = byteArrayOf(4, 5, 6))
+
+        assertEquals(a, b)
+        assertEquals(a.hashCode(), b.hashCode())
     }
 
     @Test
