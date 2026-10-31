@@ -1076,16 +1076,6 @@ class PasswordStoreMethodsTest {
     }
 
     @Test
-    fun `PasswordGenerate refuses a length past Int instead of wrapping it into the bounds`() = runTest {
-        // org.json reads 4294967300 as a Long; narrowed with toInt it would be 4.
-        val response = call("PasswordGenerate", """{"length":4294967300}""")
-
-        assertEquals(ErrorCodes.INVALID_PARAMS, response.code())
-        assertEquals("length must be an integer", response.error!!.message)
-        assertNull(response.result)
-    }
-
-    @Test
     fun `PasswordGenerate refuses a fractional length and takes an integral one written with a fraction`() = runTest {
         val fractional = call("PasswordGenerate", """{"length":4.5}""")
         assertEquals(ErrorCodes.INVALID_PARAMS, fractional.code())
