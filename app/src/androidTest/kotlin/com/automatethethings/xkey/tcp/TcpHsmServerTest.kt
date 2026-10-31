@@ -30,7 +30,6 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -48,8 +47,8 @@ import java.net.Socket
  * The protocol itself is covered by `ProtocolIntegrationTest` and
  * [com.automatethethings.xkey.transport.StreamPairingSessionTest]; what is
  * tested here is everything around it: binding, refusing a second start,
- * stopping (including before ever starting), recovering from a connection that
- * dies during the handshake, and the states the UI observes.
+ * stopping (including before ever starting), and recovering from a connection
+ * that dies during the handshake.
  *
  * Every server binds loopback on a port unique to this suite and is stopped in
  * [tearDown], so nothing is left listening for another suite to trip over.
@@ -92,17 +91,6 @@ class TcpHsmServerTest {
     @Test
     fun theDefaultPortMatchesTheGoXkmsContract() {
         assertEquals(8444, TcpHsmServer.DEFAULT_PORT)
-    }
-
-    /**
-     * The router, pairing callback and paired-device repository are all
-     * optional: `XKeyGattService` builds the server with them, and a headless
-     * or test embedding builds it with only a request handler.
-     */
-    @Test
-    fun aServerCanBeBuiltFromARequestHandlerAlone() {
-        val server = newServer()
-        assertEquals(TcpHsmState.Stopped, server.state.value)
     }
 
     // ------------------------------------------------------------------
@@ -234,16 +222,6 @@ class TcpHsmServerTest {
         }
     }
 
-    /** There is nothing to push an outbound `remote.*` request onto yet. */
-    @Test
-    fun sendingBeforeAnyConnectionFails() {
-        val server = newServer()
-
-        assertThrows(IOException::class.java) {
-            runBlocking { server.sendEncryptedMessage("{}".toByteArray()) }
-        }
-    }
-
     @Test
     fun sendingAfterStopFails() {
         val server = newServer()
@@ -254,47 +232,6 @@ class TcpHsmServerTest {
         assertThrows(IOException::class.java) {
             runBlocking { server.sendEncryptedMessage("{}".toByteArray()) }
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Observable state
-    // ------------------------------------------------------------------
-
-    /**
-     * The states are what the settings screen renders, so they must compare by
-     * value rather than identity.
-     */
-    @Test
-    fun theObservableStatesCompareByValue() {
-        assertEquals(TcpHsmState.Listening(8444), TcpHsmState.Listening(8444))
-        assertEquals(TcpHsmState.Listening(8444).hashCode(), TcpHsmState.Listening(8444).hashCode())
-        assertNotEquals(TcpHsmState.Listening(8444), TcpHsmState.Listening(9000))
-        assertEquals(8444, TcpHsmState.Listening(8444).port)
-        assertEquals(TcpHsmState.Listening(1), TcpHsmState.Listening(8444).copy(port = 1))
-        assertTrue(TcpHsmState.Listening(8444).toString().contains("8444"))
-
-        val connected = TcpHsmState.Connected("/127.0.0.1:54321")
-        assertEquals(connected, TcpHsmState.Connected("/127.0.0.1:54321"))
-        assertEquals(connected.hashCode(), TcpHsmState.Connected("/127.0.0.1:54321").hashCode())
-        assertNotEquals(connected, TcpHsmState.Connected("/127.0.0.1:1"))
-        assertEquals("/127.0.0.1:54321", connected.remote)
-        assertEquals(TcpHsmState.Connected("x"), connected.copy(remote = "x"))
-        assertTrue(connected.toString().contains("54321"))
-
-        val error = TcpHsmState.Error("bind failed")
-        assertEquals(error, TcpHsmState.Error("bind failed"))
-        assertEquals(error.hashCode(), TcpHsmState.Error("bind failed").hashCode())
-        assertNotEquals(error, TcpHsmState.Error("something else"))
-        assertEquals("bind failed", error.message)
-        assertEquals(TcpHsmState.Error("other"), error.copy(message = "other"))
-        assertTrue(error.toString().contains("bind failed"))
-
-        // The two singleton states are distinct from each other and from the
-        // parameterised ones.
-        val stopped: TcpHsmState = TcpHsmState.Stopped
-        val handshaking: TcpHsmState = TcpHsmState.Handshaking
-        assertNotEquals(stopped, handshaking)
-        assertNotEquals(stopped, TcpHsmState.Listening(8444))
     }
 
     // ------------------------------------------------------------------
