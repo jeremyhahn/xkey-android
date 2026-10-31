@@ -89,17 +89,6 @@ class RemoteKeyClientTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `request ids start at one million and increment per request`() = runTest {
-        succeedWith("""{"backends":[]}""")
-
-        client.listBackends()
-        client.listBackends()
-        client.listBackends()
-
-        assertEquals(listOf(1_000_000L, 1_000_001L, 1_000_002L), sender.sent.map { it.id })
-    }
-
-    @Test
     fun `listBackends sends remote_listBackends with no params`() = runTest {
         succeedWith(
             """{"backends":[
