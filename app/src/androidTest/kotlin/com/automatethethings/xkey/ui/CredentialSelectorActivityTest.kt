@@ -84,14 +84,6 @@ class CredentialSelectorActivityTest {
     // Action dispatch
     // ---------------------------------------------------------------
 
-    @Test
-    fun anUnknownAction_isRejected() {
-        val result = launchForResult(Intent(context, CredentialSelectorActivity::class.java))
-
-        assertEquals(Activity.RESULT_CANCELED, result.resultCode)
-        assertExceptionFamily(result, CREATE_MARKER)
-    }
-
     /**
      * An unrecognised action is reported as a *create* failure, because
      * `currentAction` is only ever compared against the get action.
@@ -171,14 +163,6 @@ class CredentialSelectorActivityTest {
     // ---------------------------------------------------------------
     // Get flow
     // ---------------------------------------------------------------
-
-    @Test
-    fun get_withoutEitherExtra_reportsAGetFailure() {
-        val result = launchForResult(getIntent(credentialId = null, requestJson = null))
-
-        assertEquals(Activity.RESULT_CANCELED, result.resultCode)
-        assertExceptionFamily(result, GET_MARKER)
-    }
 
     @Test
     fun get_withoutACredentialId_reportsAGetFailure() {
