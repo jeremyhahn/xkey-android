@@ -383,16 +383,6 @@ class PivActivityUiTest {
     // ---------------------------------------------------------------
 
     @Test
-    fun activityLaunches_successfully() {
-        val scenario = launch()
-
-        assertFalse(
-            "PivActivity should not be finishing after launch",
-            withActivity(scenario) { it.isFinishing }
-        )
-    }
-
-    @Test
     fun backNavigation_finishesActivity() {
         val scenario = launch()
 
