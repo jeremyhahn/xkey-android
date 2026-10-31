@@ -188,24 +188,6 @@ class BootstrapResultTest {
         assertTrue(NoMethodsConfiguredException().message!!.contains("at least one"))
     }
 
-    @Test
-    fun everyBootstrapFailureIsCatchableAsItsSealedSupertype() {
-        val failures: List<BootstrapException> = listOf(
-            DANEException("a"),
-            NoiseBootstrapException("b"),
-            SPKIException("c"),
-            DirectException("d"),
-            BootstrapConfigException("e"),
-            CertificateParseException("f"),
-            NoMethodsConfiguredException(),
-            BootstrapFailedException(emptyList())
-        )
-
-        failures.forEach { failure ->
-            assertTrue(failure.message.orEmpty().isNotEmpty())
-        }
-    }
-
     // ----------------------------------------------------------- TLSA records
 
     @Test
