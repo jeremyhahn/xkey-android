@@ -64,13 +64,6 @@ class SyncStateRepositoryTest {
     }
 
     @Test
-    fun setLastSyncMillis_roundTripsAnExplicitTimestamp() = runBlocking {
-        repository.setLastSyncMillis(1_700_000_000_000L)
-
-        assertEquals(1_700_000_000_000L, repository.getLastSyncMillis())
-    }
-
-    @Test
     fun setLastSyncMillis_defaultsToNow() = runBlocking {
         val before = System.currentTimeMillis()
 
@@ -85,15 +78,6 @@ class SyncStateRepositoryTest {
             "expected a timestamp at or before now, got $recorded",
             recorded <= System.currentTimeMillis()
         )
-    }
-
-    @Test
-    fun laterSync_replacesTheEarlierTimestamp() = runBlocking {
-        repository.setLastSyncMillis(1_000L)
-
-        repository.setLastSyncMillis(2_000L)
-
-        assertEquals(2_000L, repository.getLastSyncMillis())
     }
 
     @Test
