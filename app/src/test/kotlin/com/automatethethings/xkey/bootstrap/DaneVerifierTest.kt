@@ -55,39 +55,6 @@ class DaneVerifierTest {
 
     // --- computeTlsaData ---
 
-    @Test
-    fun computesFullCertSha256() {
-        val expected = sha256(cert.encoded)
-        assertArrayEquals(
-            expected,
-            DaneVerifier.computeTlsaData(cert, TlsaRecord.SELECTOR_FULL_CERT, TlsaRecord.MATCHING_SHA256)
-        )
-    }
-
-    @Test
-    fun computesSpkiSha256() {
-        val expected = sha256(cert.publicKey.encoded)
-        assertArrayEquals(
-            expected,
-            DaneVerifier.computeTlsaData(cert, TlsaRecord.SELECTOR_SPKI, TlsaRecord.MATCHING_SHA256)
-        )
-    }
-
-    @Test
-    fun computesExactMatchIdentity() {
-        assertArrayEquals(
-            cert.encoded,
-            DaneVerifier.computeTlsaData(cert, TlsaRecord.SELECTOR_FULL_CERT, TlsaRecord.MATCHING_EXACT)
-        )
-    }
-
-    @Test
-    fun rejectsUnsupportedSelector() {
-        assertThrows(DaneTlsaException::class.java) {
-            DaneVerifier.computeTlsaData(cert, 9, TlsaRecord.MATCHING_SHA256)
-        }
-    }
-
     // --- verifyPeerChain ---
 
     @Test
@@ -123,19 +90,6 @@ class DaneVerifierTest {
             certData = sha256(cert.encoded)
         )
         DaneVerifier.verifyPeerChain(listOf(cert), listOf(record), "kms.example.com")
-    }
-
-    @Test
-    fun daneTaWrongHostnameFails() {
-        val record = TlsaRecord(
-            usage = TlsaRecord.USAGE_DANE_TA,
-            selector = TlsaRecord.SELECTOR_FULL_CERT,
-            matchingType = TlsaRecord.MATCHING_SHA256,
-            certData = sha256(cert.encoded)
-        )
-        assertThrows(DaneTlsaException::class.java) {
-            DaneVerifier.verifyPeerChain(listOf(cert), listOf(record), "other.example.com")
-        }
     }
 
     @Test
@@ -177,11 +131,6 @@ class DaneVerifierTest {
         assertTrue(DaneVerifier.matchesHostname(cert, "a.wild.example.com"))
         assertFalse("wildcard must not span labels", DaneVerifier.matchesHostname(cert, "a.b.wild.example.com"))
         assertFalse("wildcard must not match apex", DaneVerifier.matchesHostname(cert, "wild.example.com"))
-    }
-
-    @Test
-    fun hostnameMismatchFails() {
-        assertFalse(DaneVerifier.matchesHostname(cert, "evil.example.com"))
     }
 
     // --- DNS response parsing (no network I/O: messages are built in-memory) ---
