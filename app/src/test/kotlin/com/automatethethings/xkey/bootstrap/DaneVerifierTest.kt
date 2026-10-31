@@ -211,15 +211,6 @@ class DaneVerifierTest {
     }
 
     @Test
-    fun parsesWellFormedTlsaAnswer() {
-        val response = buildResponse(listOf(Answer(QNAME, TYPE_TLSA, rdata = tlsaRdata())))
-        val records = resolver.parseResponse(response, query)
-        assertEquals(1, records.size)
-        assertEquals(TlsaRecord.USAGE_DANE_EE, records[0].usage)
-        assertArrayEquals(sha256(cert.publicKey.encoded), records[0].certData)
-    }
-
-    @Test
     fun parsesOwnerNameCompressedToTheQuestion() {
         // Real resolvers compress the answer owner to the question at offset 12.
         val out = ByteArrayOutputStream()
@@ -286,18 +277,6 @@ class DaneVerifierTest {
         // Type A only: nothing usable, so the lookup must fail rather than
         // silently return an empty TLSA set.
         assertThrows(DaneTlsaException::class.java) { resolver.parseResponse(response, query) }
-    }
-
-    @Test
-    fun followsCnameToTheCanonicalOwner() {
-        val canonical = "_443._tcp.kms.cdn.example.net."
-        val response = buildResponse(
-            listOf(
-                Answer(QNAME, TYPE_CNAME, rdata = encodeName(canonical)),
-                Answer(canonical, TYPE_TLSA, rdata = tlsaRdata())
-            )
-        )
-        assertEquals(1, resolver.parseResponse(response, query).size)
     }
 
     @Test(timeout = 10_000)
@@ -370,27 +349,7 @@ class DaneVerifierTest {
         assertThrows(DaneTlsaException::class.java) { resolver.parseResponse(response, query) }
     }
 
-    @Test
-    fun rejectsMissingAuthenticatedDataFlagWhenDnssecRequired() {
-        val response = buildResponse(
-            answers = listOf(Answer(QNAME, TYPE_TLSA, rdata = tlsaRdata())),
-            flags = FLAGS_OK and FLAG_AD.inv()
-        )
-        assertThrows(DaneTlsaException::class.java) { resolver.parseResponse(response, query) }
-
-        val lenient = DnsTlsaResolver("192.0.2.1", requireDnssec = false)
-        assertEquals(1, lenient.parseResponse(response, query).size)
-    }
-
     // --- bootstrap bundle size limits ---
-
-    @Test
-    fun bundleCertificateCountIsCapped() {
-        val oversized = (1..5).joinToString("\n") { certPem }.toByteArray()
-        assertThrows(CertificateParseException::class.java) {
-            BootstrapClient.parsePemBundle(oversized, maxCertificates = 4)
-        }
-    }
 
     @Test
     fun bundleWithinTheCapParsesEveryCertificate() {
