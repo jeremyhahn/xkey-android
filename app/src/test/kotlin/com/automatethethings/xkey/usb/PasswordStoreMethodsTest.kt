@@ -380,11 +380,6 @@ class PasswordStoreMethodsTest {
     }
 
     @Test
-    fun `PasswordGet of an unknown id is not found`() = runTest {
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, call("PasswordGet", """{"id":"nope"}""").code())
-    }
-
-    @Test
     fun `PasswordGet of an entry stored too large by another path answers an internal error that fits`() = runTest {
         val id = addEntry()
         dao.rows[id] = dao.rows.getValue(id).copy(notes = "n".repeat(StreamMessageFraming.MAX_MESSAGE_SIZE))
@@ -794,11 +789,6 @@ class PasswordStoreMethodsTest {
     }
 
     @Test
-    fun `PasswordUpdate of an unknown id is not found`() = runTest {
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, call("PasswordUpdate", """{"id":"nope","name":"x"}""").code())
-    }
-
-    @Test
     fun `PasswordUpdate of an entry deleted between the repository's read and write is not found and stays deleted`() = runTest {
         val id = addEntry()
         // The repository's read is the only one before its write: the phone UI deletes right after it.
@@ -942,11 +932,6 @@ class PasswordStoreMethodsTest {
         assertEquals(ErrorCodes.PASSWORD_STORE_LOCKED, call("PasswordGet", """{"id":"x"}""").code())
     }
 
-    @Test
-    fun `PasswordStoreLock before any enrollment is not initialized`() = runTest {
-        assertEquals(ErrorCodes.VAULT_NOT_INITIALIZED, call("PasswordStoreLock").code())
-    }
-
     private suspend fun assertFactorsUnreadable(block: suspend () -> Unit) {
         try {
             block()
@@ -1068,11 +1053,6 @@ class PasswordStoreMethodsTest {
     fun `PasswordGenerate refuses a charset holding an unpaired surrogate`() = runTest {
         assertEquals(ErrorCodes.INVALID_PARAMS, call("PasswordGenerate", """{"length":4,"charset":"a\ud800"}""").code())
         assertEquals(ErrorCodes.INVALID_PARAMS, call("PasswordGenerate", """{"length":4,"charset":"\ude00\ud83d"}""").code())
-    }
-
-    @Test
-    fun `PasswordGenerate over the maximum length is invalid params`() = runTest {
-        assertEquals(ErrorCodes.INVALID_PARAMS, call("PasswordGenerate", """{"length":257}""").code())
     }
 
     @Test

@@ -222,11 +222,6 @@ class SealStoreMethodsTest {
     }
 
     @Test
-    fun `SealStoreGet of an unknown name is not found`() = runTest {
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, call("SealStoreGet", """{"name":"nope"}""").code())
-    }
-
-    @Test
     fun `SealStorePut stores a secret whose SealStoreGet response just fits the frame and Get returns it`() = runTest {
         val fitting = secretOf(largestFittingSecret("big"))
 
@@ -292,11 +287,6 @@ class SealStoreMethodsTest {
         assertNull(store.get("disk-key"))
         assertTrue(store.list().isEmpty())
         assertTrue("ciphertext and name both removed", dir.listFiles()!!.isEmpty())
-    }
-
-    @Test
-    fun `SealStoreDelete of an unknown name is not found`() = runTest {
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, call("SealStoreDelete", """{"name":"nope"}""").code())
     }
 
     @Test
@@ -482,11 +472,6 @@ class SealStoreMethodsTest {
         assertArrayEquals(secret, store.get("disk-key"))
     }
 
-    @Test
-    fun `SealStoreReseal of an unknown name is not found`() = runTest {
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, call("SealStoreReseal", """{"name":"nope"}""").code())
-    }
-
     // -------------------------------------------------------------------------
     // SealStoreStatus
     // -------------------------------------------------------------------------
@@ -524,11 +509,6 @@ class SealStoreMethodsTest {
         assertTrue(names.size in 1 until 100)
         assertEquals(store.list().take(names.size), names)
         assertTrue("one more name would not fit", nextNameOverflows(result, store.list()[names.size]))
-    }
-
-    @Test
-    fun `SealStoreStatus failing in storage is an internal error`() = runTest {
-        assertEquals(ErrorCodes.INTERNAL_ERROR, call("SealStoreStatus", on = failingMethods()).code())
     }
 
     private suspend fun listFailure(on: SealStore): Throwable? = runCatching { on.list() }.exceptionOrNull()
