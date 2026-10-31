@@ -433,23 +433,40 @@ class GetCredentialHandlerTest {
     fun signCount_incrementsAndIsPersistedInBothStores() {
         val rpId = nextRpId()
         val credential = seedCredential(rpId)
-        val before = storedSignCount(credential.credentialId)
+        assertEquals(0L, storedSignCount(credential.credentialId))
 
-        val authData = authenticatorDataOf(assertFor(credential, rpId))
+        val first = authenticatorDataOf(assertFor(credential, rpId))
 
         assertEquals(
             "The reported counter is the new value, not the stored one",
-            before + 1,
-            authData.signCount
+            1L,
+            first.signCount
         )
-        assertEquals(before + 1, storedSignCount(credential.credentialId))
+        assertEquals(1L, storedSignCount(credential.credentialId))
         val key = runBlocking { keyDao.getByKeyId(credential.credentialId) }!!
         assertEquals(
             "The unified key store mirrors the counter",
-            before + 1,
+            1L,
             key.signCount
         )
         assertEquals("Using a passkey counts as a key usage", 1L, key.useCount)
+
+        // A second login on the same, already-used credential must advance
+        // from the persisted counter, not report 1 again (relying parties
+        // treat a non-increasing counter as a cloned authenticator).
+        val second = authenticatorDataOf(assertFor(credential, rpId))
+
+        assertEquals(
+            "The second assertion advances the already-used counter",
+            2L,
+            second.signCount
+        )
+        assertEquals(2L, storedSignCount(credential.credentialId))
+        assertEquals(
+            "The unified key store mirrors the advanced counter",
+            2L,
+            runBlocking { keyDao.getByKeyId(credential.credentialId) }!!.signCount
+        )
     }
 
     // ---------------------------------------------------------------------
