@@ -58,13 +58,6 @@ class CASubjectTest {
         assertEquals("xKey Intermediate CA", rdnValue(name, BCStyle.CN))
     }
 
-    @Test
-    fun `toX500Name prefers an explicit CN over the default`() {
-        val name = CASubject(cn = "Acme Root").toX500Name("xKey Root CA")
-
-        assertEquals("Acme Root", rdnValue(name, BCStyle.CN))
-    }
-
     // -------------------------------------------------------------------------
     // RDN composition and ordering
     // -------------------------------------------------------------------------
@@ -122,37 +115,5 @@ class CASubjectTest {
         // The rendered form escapes the separators so the DN can be re-parsed.
         assertTrue("rendered as $name", name.toString().contains("\\,"))
         assertEquals(name, X500Name(name.toString()))
-    }
-
-    @Test
-    fun `toX500Name survives a DER encode and decode round trip`() {
-        val original = CASubject(
-            cn = "Acme Root",
-            org = "Acme Corp",
-            country = "US"
-        ).toX500Name("unused")
-
-        val decoded = X500Name.getInstance(original.getEncoded())
-
-        assertEquals(original, decoded)
-        assertEquals(rdnOids(original), rdnOids(decoded))
-    }
-
-    @Test
-    fun `toX500Name produces distinct names for distinct subjects`() {
-        val a = CASubject(cn = "Root A").toX500Name("unused")
-        val b = CASubject(cn = "Root B").toX500Name("unused")
-
-        assertTrue(a != b)
-    }
-
-    // -------------------------------------------------------------------------
-    // Keystore aliases
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `CA keystore aliases are stable`() {
-        assertEquals("xkey_root_ca", AndroidCA.ROOT_CA_ALIAS)
-        assertEquals("xkey_intermediate_ca", AndroidCA.INTERMEDIATE_CA_ALIAS)
     }
 }

@@ -127,20 +127,22 @@ class BaseMessagesTest {
     }
 
     @Test
-    fun `GenerateKeyParams toJson emits exactly the four wire fields`() {
-        val json = GenerateKeyParams(helloB64, CoseAlgorithms.ES256).toJson()
+    fun `GenerateKeyParams toJson emits exactly the four wire fields with their values`() {
+        val json = GenerateKeyParams(
+            "aGVsbG8=",
+            CoseAlgorithms.ES384,
+            requireUserVerification = false,
+            preferStrongBox = false
+        ).toJson()
 
         assertEquals(
             setOf("credentialId", "algorithm", "requireUserVerification", "preferStrongBox"),
             json.keySet()
         )
-    }
-
-    @Test
-    fun `GenerateKeyParams round-trips through toJson and fromJson`() {
-        val original = GenerateKeyParams(helloB64, CoseAlgorithms.ES384, requireUserVerification = false)
-
-        assertEquals(original, GenerateKeyParams.fromJson(original.toJson()))
+        assertEquals("aGVsbG8=", json.getString("credentialId"))
+        assertEquals(-35, json.getInt("algorithm"))
+        assertEquals(false, json.getBoolean("requireUserVerification"))
+        assertEquals(false, json.getBoolean("preferStrongBox"))
     }
 
     // -------------------------------------------------------------------------
@@ -237,17 +239,13 @@ class BaseMessagesTest {
     }
 
     @Test
-    fun `SignParams toJson emits exactly the three wire fields`() {
-        val json = SignParams(helloB64, helloB64).toJson()
+    fun `SignParams toJson emits exactly the three wire fields with their values`() {
+        val json = SignParams("aGVsbG8=", "ZGF0YQ==", userVerificationRequired = false).toJson()
 
         assertEquals(setOf("credentialId", "dataHash", "userVerificationRequired"), json.keySet())
-    }
-
-    @Test
-    fun `SignParams round-trips through toJson and fromJson`() {
-        val original = SignParams(helloB64, helloB64, userVerificationRequired = false)
-
-        assertEquals(original, SignParams.fromJson(original.toJson()))
+        assertEquals("aGVsbG8=", json.getString("credentialId"))
+        assertEquals("ZGF0YQ==", json.getString("dataHash"))
+        assertEquals(false, json.getBoolean("userVerificationRequired"))
     }
 
     @Test
@@ -293,15 +291,11 @@ class BaseMessagesTest {
     }
 
     @Test
-    fun `DeleteKeyParams toJson emits exactly credentialId`() {
-        assertEquals(setOf("credentialId"), DeleteKeyParams(helloB64).toJson().keySet())
-    }
+    fun `DeleteKeyParams toJson emits exactly credentialId with its value`() {
+        val json = DeleteKeyParams("aGVsbG8=").toJson()
 
-    @Test
-    fun `DeleteKeyParams round-trips through toJson and fromJson`() {
-        val original = DeleteKeyParams(helloB64)
-
-        assertEquals(original, DeleteKeyParams.fromJson(original.toJson()))
+        assertEquals(setOf("credentialId"), json.keySet())
+        assertEquals("aGVsbG8=", json.getString("credentialId"))
     }
 
     @Test
@@ -407,17 +401,12 @@ class BaseMessagesTest {
     }
 
     @Test
-    fun `PairingConfirmParams toJson emits exactly deviceName and publicKeyHex`() {
+    fun `PairingConfirmParams toJson emits exactly deviceName and publicKeyHex with their values`() {
         val json = PairingConfirmParams("laptop", "deadbeef").toJson()
 
         assertEquals(setOf("deviceName", "publicKeyHex"), json.keySet())
-    }
-
-    @Test
-    fun `PairingConfirmParams round-trips through toJson and fromJson`() {
-        val original = PairingConfirmParams("laptop", "deadbeef")
-
-        assertEquals(original, PairingConfirmParams.fromJson(original.toJson()))
+        assertEquals("laptop", json.getString("deviceName"))
+        assertEquals("deadbeef", json.getString("publicKeyHex"))
     }
 
     @Test

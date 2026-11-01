@@ -248,6 +248,16 @@ class OathEngineRfcVectorTest {
     // -------------------------------------------------------------------------
 
     @Test
+    fun `a different secret yields a different code`() {
+        val other = "09876543210987654321".toByteArray(Charsets.US_ASCII)
+
+        assertNotEquals(
+            OathEngine.generateHotpCode(seedSha1, 0L, "SHA1", 6),
+            OathEngine.generateHotpCode(other, 0L, "SHA1", 6)
+        )
+    }
+
+    @Test
     fun `a one-byte secret still produces a well-formed code`() {
         val code = OathEngine.generateHotpCode(byteArrayOf(0x2a), 0L, "SHA1", 6)
 

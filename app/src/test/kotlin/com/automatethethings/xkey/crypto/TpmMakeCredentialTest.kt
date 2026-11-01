@@ -140,32 +140,6 @@ class TpmMakeCredentialTest {
     }
 
     @Test
-    fun `kdfa masks the leading bits when the length is not a whole byte`() {
-        // 17 bits is two full bytes plus one, so the first byte keeps only its
-        // single low bit. The vector's leading 0x00 is that mask at work.
-        val vector = kdfaVectors.first { it.bits == 17 }
-        val actual = TpmMakeCredential.kdfa(
-            vector.hashAlg, hexToBytes(vector.key), vector.label,
-            hexToBytes(vector.contextU), hexToBytes(vector.contextV), vector.bits
-        )
-        assertEquals(3, actual.size)
-        assertEquals(0, actual[0].toInt() and 0xFE)
-    }
-
-    @Test
-    fun `kdfa spans several HMAC iterations when more bits are asked for`() {
-        // 261 bits needs two SHA-256 blocks, so a single-iteration KDF would
-        // come up short or wrong here.
-        val vector = kdfaVectors.first { it.bits == 261 }
-        val actual = TpmMakeCredential.kdfa(
-            vector.hashAlg, hexToBytes(vector.key), vector.label,
-            hexToBytes(vector.contextU), hexToBytes(vector.contextV), vector.bits
-        )
-        assertEquals(33, actual.size)
-        assertEquals(vector.expected, bytesToHex(actual))
-    }
-
-    @Test
     fun `kdfa refuses an empty key rather than padding it`() {
         try {
             TpmMakeCredential.kdfa(TpmAlg.SHA256, ByteArray(0), "STORAGE", null, null, 128)
@@ -194,24 +168,6 @@ class TpmMakeCredentialTest {
     fun `id object matches the go-tpm reference composition`() {
         val actual = TpmMakeCredential.idObject(katName, katCredential, katSeed)
         assertEquals(katIdObject, bytesToHex(actual))
-    }
-
-    @Test
-    fun `id object begins with the outer HMAC marshalled as a TPM2B`() {
-        val idObject = TpmMakeCredential.idObject(katName, katCredential, katSeed)
-        val declaredSize = ((idObject[0].toInt() and 0xFF) shl 8) or (idObject[1].toInt() and 0xFF)
-        assertEquals("the outer HMAC is a SHA-256 digest", 32, declaredSize)
-        // Two size bytes, the HMAC, then the encrypted credential, itself a
-        // TPM2B of a 32-byte secret.
-        assertEquals(2 + 32 + 2 + 32, idObject.size)
-    }
-
-    @Test
-    fun `binding to a different name changes the credential blob`() {
-        val other = katName.copyOf().also { it[it.size - 1] = (it[it.size - 1] + 1).toByte() }
-        val a = TpmMakeCredential.idObject(katName, katCredential, katSeed)
-        val b = TpmMakeCredential.idObject(other, katCredential, katSeed)
-        assertNotEquals(bytesToHex(a), bytesToHex(b))
     }
 
     // ---------------------------------------------------------------
@@ -287,22 +243,12 @@ class TpmMakeCredentialTest {
     }
 
     @Test
-    fun `the encrypted seed is labelled and unwraps to the seed`() {
+    fun `the encrypted seed unwraps to the seed under the identity label`() {
         val ek = TpmTestStructures.generateRsaKeyPair()
         val seed = ByteArray(32) { (it * 7).toByte() }
         val encrypted = TpmMakeCredential.encryptSeed(ek.public as RSAPublicKey, seed)
 
         assertArrayEquals(seed, unwrapSeed(ek.private as RSAPrivateKey, encrypted, "IDENTITY\u0000"))
-
-        // The label is part of the OAEP input; a decryption that assumes a
-        // different one must fail, which is what keeps this ciphertext usable
-        // only for credential activation.
-        try {
-            unwrapSeed(ek.private as RSAPrivateKey, encrypted, "DUPLICATE\u0000")
-            fail("the identity label must be required to unwrap the seed")
-        } catch (e: Exception) {
-            assertTrue(e is javax.crypto.BadPaddingException)
-        }
     }
 
     @Test

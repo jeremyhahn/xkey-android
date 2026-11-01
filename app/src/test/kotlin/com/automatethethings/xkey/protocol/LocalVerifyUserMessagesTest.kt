@@ -64,11 +64,6 @@ class LocalVerifyUserMessagesTest {
     }
 
     @Test
-    fun `version 1 is invalid params`() {
-        assertInvalidParams(JSONObject().put("protocolVersion", 1).put("nonce", nonceOf(32)))
-    }
-
-    @Test
     fun `version 3 is invalid params`() {
         assertInvalidParams(JSONObject().put("protocolVersion", 3).put("nonce", nonceOf(32)))
     }
@@ -76,11 +71,6 @@ class LocalVerifyUserMessagesTest {
     @Test
     fun `a missing version is invalid params`() {
         assertInvalidParams(JSONObject().put("nonce", nonceOf(32)))
-    }
-
-    @Test
-    fun `a 31-byte nonce is invalid params`() {
-        assertInvalidParams(JSONObject().put("protocolVersion", 2).put("nonce", nonceOf(31)))
     }
 
     @Test

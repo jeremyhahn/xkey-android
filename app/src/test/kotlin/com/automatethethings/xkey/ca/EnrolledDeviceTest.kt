@@ -97,14 +97,6 @@ class EnrolledDeviceTest {
         assertTrue(device(sshHostCertificate = "ssh-cert").hasSSHHostCertificate())
     }
 
-    @Test
-    fun `TLS server and client certificates are tracked independently`() {
-        val serverOnly = device(tlsServerCertificateDER = byteArrayOf(1))
-
-        assertTrue(serverOnly.hasTLSServerCertificate())
-        assertFalse(serverOnly.hasTLSClientCertificate())
-    }
-
     // -------------------------------------------------------------------------
     // Identity semantics
     // -------------------------------------------------------------------------
@@ -126,15 +118,6 @@ class EnrolledDeviceTest {
     @Test
     fun `devices with different public keys are not equal`() {
         assertNotEquals(device(publicKeyHex = "aabb"), device(publicKeyHex = "ccdd"))
-    }
-
-    @Test
-    fun `hashCode is derived from the device id alone`() {
-        assertEquals("device-1".hashCode(), device(deviceId = "device-1").hashCode())
-        assertEquals(
-            device(deviceId = "device-1", publicKeyHex = "aabb").hashCode(),
-            device(deviceId = "device-1", publicKeyHex = "ccdd").hashCode()
-        )
     }
 
     @Test

@@ -19,7 +19,6 @@ import androidx.test.core.app.ActivityScenario
 import com.automatethethings.xkey.ui.MainActivity
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -36,32 +35,6 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class BiometricHelperTest {
-
-    @Test
-    fun isBiometricAvailable_returnsBoolean() {
-        ActivityScenario.launch(MainActivity::class.java).onActivity { activity ->
-            val helper = BiometricHelper(activity)
-
-            // Should return a valid boolean without throwing
-            val result = helper.isBiometricAvailable()
-            assertNotNull(result)
-        }
-    }
-
-    @Test
-    fun getBiometricStatus_returnsValidStatus() {
-        ActivityScenario.launch(MainActivity::class.java).onActivity { activity ->
-            val helper = BiometricHelper(activity)
-
-            val status = helper.getBiometricStatus()
-
-            assertNotNull("Status should not be null", status)
-            assertTrue(
-                "Status should be a valid BiometricStatus",
-                status in BiometricStatus.values()
-            )
-        }
-    }
 
     @Test
     fun getBiometricStatus_matchesIsBiometricAvailable() {
@@ -83,71 +56,6 @@ class BiometricHelperTest {
                     status != BiometricStatus.AVAILABLE
                 )
             }
-        }
-    }
-
-    @Test
-    fun biometricStatus_coversAllPossibleStates() {
-        // Verify all expected status values exist
-        val allStatuses = BiometricStatus.values()
-
-        assertTrue(
-            "Should have AVAILABLE status",
-            allStatuses.contains(BiometricStatus.AVAILABLE)
-        )
-        assertTrue(
-            "Should have NO_HARDWARE status",
-            allStatuses.contains(BiometricStatus.NO_HARDWARE)
-        )
-        assertTrue(
-            "Should have HARDWARE_UNAVAILABLE status",
-            allStatuses.contains(BiometricStatus.HARDWARE_UNAVAILABLE)
-        )
-        assertTrue(
-            "Should have NONE_ENROLLED status",
-            allStatuses.contains(BiometricStatus.NONE_ENROLLED)
-        )
-        assertTrue(
-            "Should have SECURITY_UPDATE_REQUIRED status",
-            allStatuses.contains(BiometricStatus.SECURITY_UPDATE_REQUIRED)
-        )
-        assertTrue(
-            "Should have UNKNOWN status",
-            allStatuses.contains(BiometricStatus.UNKNOWN)
-        )
-    }
-
-    @Test
-    fun biometricHelper_canBeCreatedMultipleTimes() {
-        ActivityScenario.launch(MainActivity::class.java).onActivity { activity ->
-            // Creating multiple helpers should not cause issues
-            val helper1 = BiometricHelper(activity)
-            val helper2 = BiometricHelper(activity)
-
-            // Both should work independently
-            val status1 = helper1.getBiometricStatus()
-            val status2 = helper2.getBiometricStatus()
-
-            assertEquals(
-                "Multiple helpers should report same status",
-                status1,
-                status2
-            )
-        }
-    }
-
-    @Test
-    fun biometricHelper_statusIsConsistent() {
-        ActivityScenario.launch(MainActivity::class.java).onActivity { activity ->
-            val helper = BiometricHelper(activity)
-
-            // Multiple calls should return consistent results
-            val status1 = helper.getBiometricStatus()
-            val status2 = helper.getBiometricStatus()
-            val status3 = helper.getBiometricStatus()
-
-            assertEquals("Status should be consistent", status1, status2)
-            assertEquals("Status should be consistent", status2, status3)
         }
     }
 

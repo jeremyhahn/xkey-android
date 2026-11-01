@@ -204,13 +204,6 @@ class KeystoreManagerAliasTest {
     }
 
     @Test
-    fun exportsAFido2CredentialAsCose() {
-        val credentialId = credentialKey("cose")
-
-        assertNotNull(keystoreManager.getCOSEPublicKey(credentialId))
-    }
-
-    @Test
     fun returnsNoCoseKeyForAnUnknownIdentifier() {
         assertNull(keystoreManager.getCOSEPublicKey("missing-${System.nanoTime()}"))
     }

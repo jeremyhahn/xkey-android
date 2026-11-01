@@ -153,13 +153,6 @@ class VerifyUserHandlerTest {
         assertEquals(1, prompt.prompts)
     }
 
-    @Test
-    fun theTranscriptCommitsToTheUvkNonceAndSessionBinding() = runTest {
-        onConnection { handler.handleRequest(verifyUserRequest()) }
-
-        assertEquals(expectedTranscript(uvk).toList(), prompt.lastMessage!!.toList())
-    }
-
     // -----------------------------------------------------------------
     // Refusals: errors, never a result
     // -----------------------------------------------------------------

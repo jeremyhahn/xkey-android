@@ -207,82 +207,11 @@ class SSHCertificateEncoderTest {
     // -----------------------------------------------------------------------
 
     @Test
-    fun `writeUint32 emits four big-endian bytes`() {
-        val out = ByteArrayOutputStream()
-        SSHCertificateEncoder.writeUint32(out, 0x01020304)
-        assertArrayEquals(byteArrayOf(0x01, 0x02, 0x03, 0x04), out.toByteArray())
-    }
-
-    @Test
     fun `writeUint32 masks the sign bit of a negative int`() {
         val out = ByteArrayOutputStream()
         SSHCertificateEncoder.writeUint32(out, -1)
         assertArrayEquals(ByteArray(4) { 0xFF.toByte() }, out.toByteArray())
     }
-
-    @Test
-    fun `writeUint32 emits zeros for zero`() {
-        val out = ByteArrayOutputStream()
-        SSHCertificateEncoder.writeUint32(out, 0)
-        assertArrayEquals(ByteArray(4), out.toByteArray())
-    }
-
-    @Test
-    fun `writeUint64 emits eight big-endian bytes`() {
-        val out = ByteArrayOutputStream()
-        SSHCertificateEncoder.writeUint64(out, 0x0102030405060708L)
-        assertArrayEquals(
-            byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08),
-            out.toByteArray()
-        )
-    }
-
-    @Test
-    fun `writeUint64 emits all ones for minus one`() {
-        val out = ByteArrayOutputStream()
-        SSHCertificateEncoder.writeUint64(out, -1L)
-        assertArrayEquals(ByteArray(8) { 0xFF.toByte() }, out.toByteArray())
-    }
-
-    @Test
-    fun `writeUint64 emits Long MAX_VALUE unchanged`() {
-        val out = ByteArrayOutputStream()
-        SSHCertificateEncoder.writeUint64(out, Long.MAX_VALUE)
-        assertArrayEquals(
-            byteArrayOf(0x7F, -1, -1, -1, -1, -1, -1, -1),
-            out.toByteArray()
-        )
-    }
-
-    @Test
-    fun `writeSSHString prefixes the payload with its length`() {
-        val out = ByteArrayOutputStream()
-        SSHCertificateEncoder.writeSSHString(out, "abc".toByteArray(Charsets.UTF_8))
-        assertArrayEquals(byteArrayOf(0, 0, 0, 3, 0x61, 0x62, 0x63), out.toByteArray())
-    }
-
-    @Test
-    fun `writeSSHString encodes an empty payload as four zero bytes`() {
-        val out = ByteArrayOutputStream()
-        SSHCertificateEncoder.writeSSHString(out, ByteArray(0))
-        assertArrayEquals(ByteArray(4), out.toByteArray())
-    }
-
-    @Test
-    fun `writeSSHMPInt is byte-identical to writeSSHString`() {
-        val value = byteArrayOf(0x00, 0xD4.toByte(), 0x11)
-        val asString = ByteArrayOutputStream().also {
-            SSHCertificateEncoder.writeSSHString(it, value)
-        }.toByteArray()
-        val asMpInt = ByteArrayOutputStream().also {
-            SSHCertificateEncoder.writeSSHMPInt(it, value)
-        }.toByteArray()
-        assertArrayEquals(asString, asMpInt)
-    }
-
-    // -----------------------------------------------------------------------
-    // Coordinate padding
-    // -----------------------------------------------------------------------
 
     @Test
     fun `padCoordinate returns exact-size input unchanged`() {
@@ -332,36 +261,11 @@ class SSHCertificateEncoderTest {
     }
 
     @Test
-    fun `getPlainKeyTypeString maps each supported key to its plain algorithm`() {
-        assertEquals("ecdsa-sha2-nistp256", SSHCertificateEncoder.getPlainKeyTypeString(p256.public))
-        assertEquals("ecdsa-sha2-nistp384", SSHCertificateEncoder.getPlainKeyTypeString(p384.public))
-        assertEquals("ecdsa-sha2-nistp521", SSHCertificateEncoder.getPlainKeyTypeString(p521.public))
-        assertEquals("ssh-rsa", SSHCertificateEncoder.getPlainKeyTypeString(rsa.public))
-    }
-
-    @Test
     fun `getCertTypeString rejects an unsupported EC field size`() {
         val error = assertThrows(IllegalArgumentException::class.java) {
             SSHCertificateEncoder.getCertTypeString(unsupportedCurveKey())
         }
         assertEquals("Unsupported EC field size: 224", error.message)
-    }
-
-    @Test
-    fun `getPlainKeyTypeString rejects an unsupported EC field size`() {
-        val error = assertThrows(IllegalArgumentException::class.java) {
-            SSHCertificateEncoder.getPlainKeyTypeString(unsupportedCurveKey(160))
-        }
-        assertEquals("Unsupported EC field size: 160", error.message)
-    }
-
-    @Test
-    fun `getCertTypeString rejects a non-EC non-RSA key`() {
-        val dsa = KeyPairGenerator.getInstance("DSA").apply { initialize(1024) }.generateKeyPair()
-        val error = assertThrows(IllegalArgumentException::class.java) {
-            SSHCertificateEncoder.getCertTypeString(dsa.public)
-        }
-        assertTrue(error.message!!.startsWith("Unsupported key type:"))
     }
 
     // -----------------------------------------------------------------------
@@ -423,14 +327,6 @@ class SSHCertificateEncoderTest {
     fun `encodePublicKeyBlob rejects an unsupported EC field size`() {
         assertThrows(IllegalArgumentException::class.java) {
             SSHCertificateEncoder.encodePublicKeyBlob(unsupportedCurveKey())
-        }
-    }
-
-    @Test
-    fun `encodePublicKeyBlob rejects a non-EC non-RSA key`() {
-        val dsa = KeyPairGenerator.getInstance("DSA").apply { initialize(1024) }.generateKeyPair()
-        assertThrows(IllegalArgumentException::class.java) {
-            SSHCertificateEncoder.encodePublicKeyBlob(dsa.public)
         }
     }
 

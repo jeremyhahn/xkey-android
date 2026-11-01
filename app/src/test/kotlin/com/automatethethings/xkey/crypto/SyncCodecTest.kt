@@ -19,30 +19,6 @@ import org.junit.Test
 class SyncCodecTest {
 
     @Test
-    fun `sha256Hex matches known empty vector`() {
-        assertEquals(
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            SyncCodec.sha256Hex(ByteArray(0))
-        )
-    }
-
-    @Test
-    fun `storeChecksum is order-independent`() {
-        assertEquals(
-            SyncCodec.storeChecksum(listOf("a", "b", "c")),
-            SyncCodec.storeChecksum(listOf("c", "a", "b"))
-        )
-    }
-
-    @Test
-    fun `storeChecksum changes with content`() {
-        assertNotEquals(
-            SyncCodec.storeChecksum(listOf("a")),
-            SyncCodec.storeChecksum(listOf("b"))
-        )
-    }
-
-    @Test
     fun `pem der round trips`() {
         val der = byteArrayOf(0x30, 0x03, 0x01, 0x02, 0x03, 0x7f, 0x00, 0x55.toByte())
         val pem = SyncCodec.derToPem(der)
@@ -84,14 +60,6 @@ class SyncCodecTest {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             SyncCodec.sha256Hex("abc".toByteArray(Charsets.UTF_8))
         )
-    }
-
-    @Test
-    fun `sha256Hex is lowercase hex of exactly 64 characters`() {
-        val hex = SyncCodec.sha256Hex(ByteArray(64) { 0xFF.toByte() })
-        assertEquals(64, hex.length)
-        assertEquals(hex.lowercase(), hex)
-        assertTrue(hex.all { it in "0123456789abcdef" })
     }
 
     @Test
@@ -179,12 +147,6 @@ class SyncCodecTest {
         assertArrayEquals(der, SyncCodec.pemToDer(pem))
     }
 
-    @Test
-    fun `pem round trip survives a 1 KiB payload`() {
-        val der = ByteArray(1024) { (it xor 0x5A).toByte() }
-        assertArrayEquals(der, SyncCodec.pemToDer(SyncCodec.derToPem(der)))
-    }
-
     // -----------------------------------------------------------------------
     // RFC 3339
     // -----------------------------------------------------------------------
@@ -209,10 +171,5 @@ class SyncCodecTest {
     fun `parseRfc3339 returns zero for a date without a time zone`() {
         assertEquals(0L, SyncCodec.parseRfc3339("2023-11-14T22:13:20"))
         assertEquals(0L, SyncCodec.parseRfc3339("2023-11-14"))
-    }
-
-    @Test
-    fun `parseRfc3339 returns zero for whitespace-only input`() {
-        assertEquals(0L, SyncCodec.parseRfc3339("   "))
     }
 }

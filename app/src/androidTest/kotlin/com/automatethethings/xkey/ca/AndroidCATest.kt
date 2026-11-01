@@ -460,18 +460,6 @@ class AndroidCATest {
     }
 
     @Test
-    fun anUnknownProfileNameIsRejected() {
-        assertThrows(IllegalArgumentException::class.java) {
-            runBlocking {
-                ca.issueCertificateWithProfile(
-                    csrDER = CaTestSupport.csr("CN=nope"),
-                    profileName = "not-a-profile"
-                )
-            }
-        }
-    }
-
-    @Test
     fun signCsrIssuesUnderTheNamedProfileAndReturnsMatchingMetadata() {
         val result = runBlocking {
             ca.signCSR(

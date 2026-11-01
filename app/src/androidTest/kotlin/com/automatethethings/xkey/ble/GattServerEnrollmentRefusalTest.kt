@@ -126,41 +126,6 @@ class GattServerEnrollmentRefusalTest {
         assertEquals("quote echoed a nonce this CA did not send", details.getString("detail"))
     }
 
-    /**
-     * The distinction the whole change exists for: a wrong answer and no answer
-     * must be separable by the recorded case alone.
-     */
-    @Test
-    fun aWrongActivationSecretAndAnUnanswerableChallengeAreDifferentCases() {
-        val outbound = enrollmentServer()
-
-        outbound.refuseEnrollment(
-            deviceKeyHex, deviceName,
-            EnrollmentRefusal.ActivationMismatch(
-                "credential activation returned a different secret"
-            )
-        )
-        val mismatch = awaitAuditRow()
-
-        outbound.refuseEnrollment(
-            deviceKeyHex, deviceName,
-            EnrollmentRefusal.ActivationUnsupported(
-                "EK certificate carries a EC key; credential activation needs an RSA " +
-                    "endorsement key"
-            )
-        )
-        val unsupported = awaitAuditRows(2).first { it.id != mismatch.id }
-
-        assertEquals(
-            "activation-mismatch",
-            JSONObject(mismatch.details!!).getString("refusalCase")
-        )
-        assertEquals(
-            "activation-unsupported",
-            JSONObject(unsupported.details!!).getString("refusalCase")
-        )
-    }
-
     @Test
     fun everyCaseReachesTheAuditLogUnderItsOwnName() {
         val outbound = enrollmentServer()

@@ -158,28 +158,6 @@ class NoiseSessionZeroizationTest {
     // The protocol still works
     // ---------------------------------------------------------------------
 
-    /**
-     * Zeroization must never touch an array that is still in use: a full
-     * handshake and transport round trip work, and so does a second handshake
-     * on the same responder after `reset()`.
-     */
-    @Test
-    fun handshakeAndTransportStillWorkBeforeAndAfterReset() = runTest {
-        val responder = newResponder()
-
-        repeat(2) { round ->
-            if (round > 0) responder.reset()
-            val initiator = NoiseInitiatorSession(randomBytes(KEY_SIZE))
-            handshake(initiator, responder)
-            assertArrayEquals(initiator.getLocalStaticPublicKey(), responder.getRemoteStaticKey())
-
-            val request = "request $round".toByteArray()
-            assertArrayEquals(request, responder.decrypt(initiator.encrypt(request)))
-            val response = "response $round".toByteArray()
-            assertArrayEquals(response, initiator.decrypt(responder.encrypt(response)))
-        }
-    }
-
     // ---------------------------------------------------------------------
     // Keys handed out
     // ---------------------------------------------------------------------

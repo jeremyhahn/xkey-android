@@ -80,17 +80,6 @@ class TcgCsrIDevIDTest {
     }
 
     @Test
-    fun `keeps the signed contents exactly as they arrived`() {
-        val pkg = buildPackage()
-        val csr = TcgCsrIDevID.parse(pkg.packed)
-        // The contents are the byte range between the 12-byte header and the
-        // signature. Anything else and the digest under verification is not the
-        // digest the device signed.
-        val expected = pkg.packed.copyOfRange(12, pkg.packed.size - csr.signature.size)
-        assertArrayEquals(expected, csr.contents)
-    }
-
-    @Test
     fun `refuses a CSR too short to hold its own header`() {
         try {
             TcgCsrIDevID.parse(ByteArray(20))

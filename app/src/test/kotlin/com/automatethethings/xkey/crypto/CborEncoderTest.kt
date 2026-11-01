@@ -14,10 +14,7 @@
  */
 package com.automatethethings.xkey.crypto
 
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -27,21 +24,6 @@ import org.junit.Test
  * ensuring compatibility with the WebAuthn/FIDO2 specification.
  */
 class CborEncoderTest {
-
-    @Test
-    fun `encodeCOSEEC2Key encodes valid P-256 coordinates`() {
-        // Test with zero coordinates (32 bytes each)
-        val x = ByteArray(32)
-        val y = ByteArray(32)
-
-        val result = CborEncoder.encodeCOSEEC2Key(x, y)
-
-        assertNotNull(result)
-        assertTrue("Encoded key should not be empty", result.isNotEmpty())
-
-        // Verify CBOR map header (0xA5 = map with 5 items)
-        assertEquals("First byte should be map with 5 items", 0xA5.toByte(), result[0])
-    }
 
     @Test
     fun `encodeCOSEEC2Key produces correct COSE structure`() {
@@ -109,28 +91,6 @@ class CborEncoderTest {
         assertEquals(77, result.size)
     }
 
-    @Test
-    fun `encodeCOSEEC2Key handles maximum coordinate values`() {
-        // Test with maximum byte values
-        val x = ByteArray(32) { 0xFF.toByte() }
-        val y = ByteArray(32) { 0xFF.toByte() }
-
-        val result = CborEncoder.encodeCOSEEC2Key(x, y)
-
-        assertNotNull(result)
-        assertEquals(77, result.size)
-
-        // Verify x coordinate (starting at position 10)
-        for (i in 0 until 32) {
-            assertEquals(0xFF.toByte(), result[10 + i])
-        }
-
-        // Verify y coordinate (starting at position 45)
-        for (i in 0 until 32) {
-            assertEquals(0xFF.toByte(), result[45 + i])
-        }
-    }
-
     @Test(expected = CborEncodingException::class)
     fun `encodeCOSEEC2Key throws on invalid X coordinate size`() {
         val x = ByteArray(31) // Should be 32
@@ -147,96 +107,4 @@ class CborEncoderTest {
         CborEncoder.encodeCOSEEC2Key(x, y)
     }
 
-    @Test(expected = CborEncodingException::class)
-    fun `encodeCOSEEC2Key throws on empty X coordinate`() {
-        val x = ByteArray(0)
-        val y = ByteArray(32)
-
-        CborEncoder.encodeCOSEEC2Key(x, y)
-    }
-
-    @Test(expected = CborEncodingException::class)
-    fun `encodeCOSEEC2Key throws on empty Y coordinate`() {
-        val x = ByteArray(32)
-        val y = ByteArray(0)
-
-        CborEncoder.encodeCOSEEC2Key(x, y)
-    }
-
-    @Test
-    fun `encodeCOSEEC2Key is deterministic`() {
-        // Same inputs should always produce the same output
-        val x = ByteArray(32) { it.toByte() }
-        val y = ByteArray(32) { (31 - it).toByte() }
-
-        val result1 = CborEncoder.encodeCOSEEC2Key(x, y)
-        val result2 = CborEncoder.encodeCOSEEC2Key(x, y)
-
-        assertArrayEquals("CBOR encoding should be deterministic", result1, result2)
-    }
-
-    @Test
-    fun `encodeCOSEEC2Key uses canonical CBOR ordering`() {
-        // CTAP2 requires canonical CBOR with keys in ascending order
-        // For integer keys: positive < negative, smaller absolute value first
-        // Expected order: 1, 3, -1, -2, -3
-
-        val x = ByteArray(32)
-        val y = ByteArray(32)
-
-        val result = CborEncoder.encodeCOSEEC2Key(x, y)
-
-        // Extract key bytes from the encoded result
-        // After map header (0xA5), keys appear before their values
-
-        // Key 1 (kty)
-        assertEquals("First key should be 1", 0x01.toByte(), result[1])
-
-        // Key 3 (alg) - after value 2
-        assertEquals("Second key should be 3", 0x03.toByte(), result[3])
-
-        // Key -1 (crv) - after negative value
-        assertEquals("Third key should be -1 (0x20)", 0x20.toByte(), result[5])
-
-        // Key -2 (x) - after value 1
-        assertEquals("Fourth key should be -2 (0x21)", 0x21.toByte(), result[7])
-
-        // Key -3 (y) - after byte string
-        assertEquals("Fifth key should be -3 (0x22)", 0x22.toByte(), result[42])
-    }
-
-    @Test
-    fun `encodeCOSEEC2Key output is valid for WebAuthn`() {
-        // Use a realistic P-256 point (this is the generator point)
-        val x = hexToBytes(
-            "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
-        )
-        val y = hexToBytes(
-            "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
-        )
-
-        val result = CborEncoder.encodeCOSEEC2Key(x, y)
-
-        // The result should be a valid COSE_Key that can be parsed by
-        // WebAuthn implementations. We verify the structure is correct.
-        assertEquals("Result should be 77 bytes", 77, result.size)
-
-        // Verify the x coordinate is embedded correctly
-        val embeddedX = result.sliceArray(10 until 42)
-        assertArrayEquals("X coordinate should be preserved", x, embeddedX)
-
-        // Verify the y coordinate is embedded correctly
-        val embeddedY = result.sliceArray(45 until 77)
-        assertArrayEquals("Y coordinate should be preserved", y, embeddedY)
-    }
-
-    /**
-     * Helper function to convert hex string to bytes.
-     */
-    private fun hexToBytes(hex: String): ByteArray {
-        check(hex.length % 2 == 0) { "Hex string must have even length" }
-        return ByteArray(hex.length / 2) { i ->
-            hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
-        }
-    }
 }

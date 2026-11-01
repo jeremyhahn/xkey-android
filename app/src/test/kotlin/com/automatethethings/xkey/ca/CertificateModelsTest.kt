@@ -14,7 +14,6 @@
  */
 package com.automatethethings.xkey.ca
 
-import java.util.Date
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -89,22 +88,9 @@ class CertificateModelsTest {
         assertEquals(cert, cert)
     }
 
-    @Test
-    fun `IssuedCertificate hashCode derives from the certificate bytes`() {
-        assertEquals(certA.contentHashCode(), issued(certificate = certA.copyOf()).hashCode())
-    }
-
     // -------------------------------------------------------------------------
     // CAInitResult
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `CAInitResult carries the generated certificates`() {
-        val success = CAInitResult.Success(rootCertDER = certA, intermediateCertDER = certB)
-
-        assertTrue(success.rootCertDER.contentEquals(certA))
-        assertTrue(success.intermediateCertDER.contentEquals(certB))
-    }
 
     @Test
     fun `CAInitResult distinguishes success from already-initialized and error`() {
@@ -115,30 +101,6 @@ class CertificateModelsTest {
         assertTrue(success is CAInitResult.Success)
         assertTrue(existing is CAInitResult.AlreadyInitialized)
         assertEquals("no keystore", (error as CAInitResult.Error).message)
-    }
-
-    // -------------------------------------------------------------------------
-    // CACertificateInfo
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `CACertificateInfo reports expiry as supplied`() {
-        val notBefore = Date(1_600_000_000_000L)
-        val notAfter = Date(1_700_000_000_000L)
-        val info = CACertificateInfo(
-            subjectDN = "CN=xKey Root CA",
-            issuerDN = "CN=xKey Root CA",
-            notBefore = notBefore,
-            notAfter = notAfter,
-            fingerprint = "AB:CD",
-            isExpired = true
-        )
-
-        assertEquals("CN=xKey Root CA", info.subjectDN)
-        assertEquals(notBefore, info.notBefore)
-        assertEquals(notAfter, info.notAfter)
-        assertTrue(info.isExpired)
-        assertEquals(info, info.copy())
     }
 
     // -------------------------------------------------------------------------

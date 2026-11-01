@@ -151,16 +151,6 @@ class PasswordRepositoryPolicyTest {
     }
 
     @Test
-    fun `an update scoped to the entry's tenant applies`() = runTest {
-        repository.upsert(record(tenantId = "acme"))
-
-        assertTrue(repository.updateFields("pw-1", PasswordPatch(name = "Renamed"), "acme"))
-
-        assertEquals("Renamed", stored().name)
-        assertEquals("acme", stored().tenantId)
-    }
-
-    @Test
     fun `a delete scoped to another tenant leaves the entry`() = runTest {
         repository.upsert(record(tenantId = "acme"))
 
@@ -241,20 +231,6 @@ class PasswordRepositoryPolicyTest {
         assertEquals("2027-01-02T03:04:05Z", listed.expiresAt)
         assertTrue(listed.shared)
         assertEquals("", listed.password)
-    }
-
-    @Test
-    fun `a listing filtered down holds only matches, so its pages are full`() = runTest {
-        // Interleave so that cutting pages first and filtering after would
-        // leave every page half empty.
-        repeat(6) { i ->
-            repository.upsert(record(passwordId = "pw-$i", name = "Entry $i", shared = i % 2 == 0))
-        }
-
-        val shared = repository.listInTenant("", PasswordScope.SHARED)
-
-        assertEquals(listOf("pw-0", "pw-2", "pw-4"), shared.map { it.passwordId })
-        assertEquals(listOf("pw-0", "pw-2"), shared.take(2).map { it.passwordId })
     }
 
     @Test

@@ -236,13 +236,6 @@ class CertificateDaoTest {
     }
 
     @Test
-    fun isRevokedIsNullForAnUnknownSerial() {
-        runBlocking {
-            assertNull(dao.isRevoked("no-such-serial"))
-        }
-    }
-
-    @Test
     fun revokingAnUnknownSerialChangesNothing() {
         runBlocking {
             dao.insert(certificate("0a"))

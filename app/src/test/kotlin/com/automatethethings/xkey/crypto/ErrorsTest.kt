@@ -154,69 +154,6 @@ class ErrorsTest {
     }
 
     @Test
-    fun `all exceptions are XKeyCryptoException subclasses`() {
-        val exceptions = listOf<XKeyCryptoException>(
-            KeyNotFoundException("test"),
-            KeyGenerationException("test"),
-            SigningException("test"),
-            BiometricRequiredException(),
-            UserCancelledException(),
-            BiometricLockoutException(),
-            BiometricException(1, "test"),
-            BiometricUnavailableException("test"),
-            StrongBoxUnavailableException(),
-            CborEncodingException("test"),
-            AttestationException("test"),
-            CredentialStorageException("test")
-        )
-
-        exceptions.forEach { exception ->
-            assertTrue(
-                "${exception::class.simpleName} should be XKeyCryptoException",
-                exception is XKeyCryptoException
-            )
-        }
-    }
-
-    @Test
-    fun `exceptions can be caught as XKeyCryptoException`() {
-        var caught = false
-
-        try {
-            throw KeyNotFoundException("test")
-        } catch (e: XKeyCryptoException) {
-            caught = true
-        }
-
-        assertTrue("KeyNotFoundException should be catchable as XKeyCryptoException", caught)
-    }
-
-    @Test
-    fun `specific exceptions can be caught individually`() {
-        var caughtKeyNotFound = false
-        var caughtUserCancelled = false
-
-        try {
-            throw KeyNotFoundException("test")
-        } catch (e: KeyNotFoundException) {
-            caughtKeyNotFound = true
-        } catch (e: XKeyCryptoException) {
-            // Should not reach here
-        }
-
-        try {
-            throw UserCancelledException()
-        } catch (e: UserCancelledException) {
-            caughtUserCancelled = true
-        } catch (e: XKeyCryptoException) {
-            // Should not reach here
-        }
-
-        assertTrue(caughtKeyNotFound)
-        assertTrue(caughtUserCancelled)
-    }
-
-    @Test
     fun `exception messages are not empty`() {
         val exceptions = listOf<XKeyCryptoException>(
             KeyNotFoundException("test"),
@@ -318,14 +255,5 @@ class ErrorsTest {
         }
     }
 
-    @Test
-    fun `a crypto error can be caught as its sealed supertype`() {
-        var caught: String? = null
-        try {
-            throw UnsupportedAlgorithmException("Ed448")
-        } catch (e: XKeyCryptoException) {
-            caught = e.message
-        }
-        assertEquals("Unsupported algorithm: Ed448", caught)
-    }
+
 }

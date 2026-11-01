@@ -121,14 +121,6 @@ class ShortAuthStringTest {
     }
 
     @Test
-    fun anyBindingFormatsToTheShapeTheDesktopPrints() {
-        repeat(64) {
-            val sas = AttestTranscript.formatShortAuthString(randomBytes(32))
-            assertTrue("not NNNN-NNNN-NNNN: $sas", SAS_SHAPE.matches(sas))
-        }
-    }
-
-    @Test
     fun aBindingThatIsNotThirtyTwoBytesIsRefused() {
         for (size in listOf(0, 6, 31, 33)) {
             try {

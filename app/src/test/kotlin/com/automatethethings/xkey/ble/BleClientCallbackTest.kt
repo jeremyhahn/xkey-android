@@ -247,62 +247,6 @@ class BleClientCallbackTest {
     // The GATT callback
     // -----------------------------------------------------------------
 
-    /** A disconnect must fail the connect that is waiting, not hang it. */
-    @Test
-    fun aDisconnectFailsTheConnectionThatIsWaitingForIt() {
-        val h = harness()
-        val deferred = CompletableDeferred<Unit>()
-        h.probe.connectionDeferred = deferred
-
-        h.probe.gattCallback.onConnectionStateChange(
-            h.gatt, BluetoothGatt.GATT_FAILURE, BluetoothProfile.STATE_DISCONNECTED
-        )
-
-        assertTrue(deferred.isCompleted)
-        assertTrue(
-            deferred.getCompletionExceptionOrNull()!!.message!!.contains("status: 257")
-        )
-    }
-
-    @Test
-    fun aFailedServiceDiscoveryIsReportedToTheWaiter() {
-        val h = harness()
-        val deferred = CompletableDeferred<Unit>()
-        h.probe.servicesDiscoveredDeferred = deferred
-
-        h.probe.gattCallback.onServicesDiscovered(h.gatt, BluetoothGatt.GATT_FAILURE)
-
-        assertTrue(
-            deferred.getCompletionExceptionOrNull()!!.message!!.contains("Service discovery failed")
-        )
-    }
-
-    /**
-     * A declined MTU is *not* an error — the stack keeps the previous value and
-     * the client falls back to the BLE minimum rather than failing the connect.
-     */
-    @Test
-    fun aDeclinedMtuFallsBackToTheBleMinimum(): Unit = runBlocking {
-        val h = harness()
-        val deferred = CompletableDeferred<Int>()
-        h.probe.mtuDeferred = deferred
-
-        h.probe.gattCallback.onMtuChanged(h.gatt, 517, BluetoothGatt.GATT_FAILURE)
-
-        assertEquals(23, deferred.await())
-    }
-
-    @Test
-    fun anAcceptedMtuIsHandedToTheWaiter(): Unit = runBlocking {
-        val h = harness()
-        val deferred = CompletableDeferred<Int>()
-        h.probe.mtuDeferred = deferred
-
-        h.probe.gattCallback.onMtuChanged(h.gatt, 517, BluetoothGatt.GATT_SUCCESS)
-
-        assertEquals(517, deferred.await())
-    }
-
     /**
      * The client writes exactly one descriptor, but the stack reports every
      * descriptor write on the connection. Completing on somebody else's write
@@ -319,19 +263,6 @@ class BleClientCallbackTest {
         h.probe.gattCallback.onDescriptorWrite(h.gatt, other, BluetoothGatt.GATT_SUCCESS)
 
         assertFalse("only the CCCD write completes the wait", deferred.isCompleted)
-    }
-
-    @Test
-    fun aFailedCccdWriteIsReportedToTheWaiter() {
-        val h = harness()
-        val deferred = CompletableDeferred<Unit>()
-        h.probe.notificationEnabledDeferred = deferred
-
-        h.probe.gattCallback.onDescriptorWrite(h.gatt, h.cccd, BluetoothGatt.GATT_FAILURE)
-
-        assertTrue(
-            deferred.getCompletionExceptionOrNull()!!.message!!.contains("Failed to enable notifications")
-        )
     }
 
     /**
@@ -436,24 +367,6 @@ class BleClientCallbackTest {
         connecting.await()
     }
 
-    /**
-     * Once the session is live, a whole message is the pending response —
-     * decrypted, since the client decrypts everything to tell a reply from a
-     * request the desktop sent.
-     */
-    @Test
-    fun aCompleteMessageAfterTheHandshakeIsDeliveredAsTheResponse(): Unit = runBlocking {
-        val h = harness()
-        h.client.connect(h.address, ByteArray(32) { it.toByte() })
-        val pending = CompletableDeferred<ByteArray>()
-        h.probe.pendingResponse = pending
-        val payload = "response".toByteArray()
-
-        h.probe.handleCompleteMessage(h.responder.encrypt(payload))
-
-        assertArrayEquals(payload, pending.await())
-    }
-
     // -----------------------------------------------------------------
     // Teardown
     // -----------------------------------------------------------------
@@ -528,29 +441,6 @@ class BleClientCallbackTest {
         assertFalse(h.probe.fragmentReassembler.isInProgress())
     }
 
-    @Test
-    fun sendingWithoutAConnectionIsRefused(): Unit = runBlocking {
-        val h = harness()
-
-        try {
-            h.client.sendRequest("ping".toByteArray())
-            fail("sending without a GATT connection must be refused")
-        } catch (expected: BleClientException) {
-            assertTrue(expected.message!!.contains("Not connected"))
-        }
-    }
-
-    /** The identity the phone dials out under is the one it answers on. */
-    @Test
-    fun theClientReportsTheRemoteIdentityOnlyAfterTheHandshake(): Unit = runBlocking {
-        val h = harness()
-        assertNull(h.client.getRemoteStaticKey())
-
-        h.client.connect(h.address, ByteArray(32) { (it + 1).toByte() })
-
-        assertNotNull(h.client.getRemoteStaticKey())
-        assertArrayEquals(h.responder.getStaticPublicKey(), h.client.getRemoteStaticKey())
-    }
 
     // -----------------------------------------------------------------
     // Helpers

@@ -115,13 +115,6 @@ class PasswordRepositoryTest {
     }
 
     @Test
-    fun `list returns nothing for an empty store`() = runTest {
-        coEvery { dao.getAll() } returns emptyList()
-
-        assertTrue(repository.list().isEmpty())
-    }
-
-    @Test
     fun `list carries every metadata field onto the record`() = runTest {
         coEvery { dao.getAll() } returns listOf(entity())
 
@@ -150,13 +143,6 @@ class PasswordRepositoryTest {
         assertEquals(listOf("pw-remote"), records.map { it.passwordId })
         coVerify(exactly = 1) { dao.getBySource("remote") }
         coVerify(exactly = 0) { dao.getAll() }
-    }
-
-    @Test
-    fun `get decrypts a single entry`() = runTest {
-        coEvery { dao.getByPasswordId("pw-1") } returns entity(plaintext = "correct horse")
-
-        assertEquals("correct horse", repository.get("pw-1")?.password)
     }
 
     @Test

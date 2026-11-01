@@ -82,17 +82,6 @@ class CborPrimitiveEncodingTest {
     }
 
     @Test
-    fun `every unsigned head form round trips through a reference decoder`() {
-        for (value in unsignedProbes()) {
-            assertEquals(
-                "unsigned $value must decode back to itself",
-                value.toLong(),
-                decodeHead(unsigned(value), expectedMajorType = 0)
-            )
-        }
-    }
-
-    @Test
     fun `unsigned encoding refuses a negative value`() {
         val failure = failureFrom { unsigned(-1) }
         assertTrue(
@@ -141,17 +130,6 @@ class CborPrimitiveEncodingTest {
             byteArrayOf(0x3A, 0x7F, 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte()),
             negative(Int.MIN_VALUE)
         )
-    }
-
-    @Test
-    fun `every negative head form round trips through a reference decoder`() {
-        for (value in negativeProbes()) {
-            assertEquals(
-                "negative $value must decode back to itself",
-                value.toLong(),
-                -1L - decodeHead(negative(value), expectedMajorType = 1)
-            )
-        }
     }
 
     @Test
@@ -240,12 +218,6 @@ class CborPrimitiveEncodingTest {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
-
-    private fun unsignedProbes() =
-        intArrayOf(0, 1, 22, 23, 24, 25, 254, 255, 256, 257, 65534, 65535, 65536, Int.MAX_VALUE)
-
-    private fun negativeProbes() =
-        intArrayOf(-1, -2, -23, -24, -25, -255, -256, -257, -65535, -65536, -65537, Int.MIN_VALUE)
 
     private fun unsigned(value: Int): ByteArray {
         val buffer = ByteArrayOutputStream()

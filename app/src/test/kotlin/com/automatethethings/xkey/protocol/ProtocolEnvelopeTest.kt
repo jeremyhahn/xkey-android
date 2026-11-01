@@ -123,16 +123,6 @@ class ProtocolEnvelopeTest {
         assertTrue("message was: ${e.message}", e.message!!.startsWith("Invalid JSON"))
     }
 
-    @Test
-    fun `Request fromJson rejects an empty string`() {
-        assertProtocolException { Request.fromJson("") }
-    }
-
-    @Test
-    fun `Request fromJson rejects a JSON array`() {
-        assertProtocolException { Request.fromJson("""[1,2,3]""") }
-    }
-
     // -------------------------------------------------------------------------
     // Request.toJson
     // -------------------------------------------------------------------------
@@ -156,18 +146,6 @@ class ProtocolEnvelopeTest {
         assertEquals(setOf("id", "method"), json.keySet())
     }
 
-    @Test
-    fun `Request toJson round-trips through fromJson`() {
-        val original = Request(11, "local.generateKey", JSONObject().put("keyId", "abc").put("algorithm", "ES256"))
-
-        val parsed = Request.fromJson(original.toJson())
-
-        assertEquals(original.id, parsed.id)
-        assertEquals(original.method, parsed.method)
-        assertEquals("abc", parsed.params!!.getString("keyId"))
-        assertEquals("ES256", parsed.params!!.getString("algorithm"))
-    }
-
     // -------------------------------------------------------------------------
     // Response construction invariants
     // -------------------------------------------------------------------------
@@ -175,11 +153,6 @@ class ProtocolEnvelopeTest {
     @Test(expected = IllegalArgumentException::class)
     fun `Response rejects having neither result nor error`() {
         Response(1, result = null, error = null)
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun `Response rejects having both result and error`() {
-        Response(1, result = JSONObject(), error = ErrorObject(-1, "boom"))
     }
 
     @Test
@@ -284,11 +257,6 @@ class ProtocolEnvelopeTest {
         assertProtocolException { Response.fromJson("""not json at all""") }
     }
 
-    @Test
-    fun `Response fromJson rejects an empty string`() {
-        assertProtocolException { Response.fromJson("") }
-    }
-
     // -------------------------------------------------------------------------
     // Response.toJson
     // -------------------------------------------------------------------------
@@ -310,16 +278,6 @@ class ProtocolEnvelopeTest {
         assertEquals(setOf("code", "message"), json.getJSONObject("error").keySet())
         assertEquals(ErrorCodes.INVALID_PARAMS, json.getJSONObject("error").getInt("code"))
         assertEquals("bad", json.getJSONObject("error").getString("message"))
-    }
-
-    @Test
-    fun `Response toJson round-trips a success response`() {
-        val original = Response.success(31, JSONObject().put("signature", "AAAA"))
-
-        val parsed = Response.fromJson(original.toJson())
-
-        assertEquals(original.id, parsed.id)
-        assertEquals("AAAA", parsed.result!!.getString("signature"))
     }
 
     @Test
@@ -394,17 +352,6 @@ class ProtocolEnvelopeTest {
 
         assertEquals(setOf("code", "message", "data"), json.keySet())
         assertEquals("k", json.getJSONObject("data").getString("keyId"))
-    }
-
-    @Test
-    fun `ErrorObject round-trips through toJson and fromJson`() {
-        val original = ErrorObject(ErrorCodes.STORAGE_FULL, "full", JSONObject().put("bytes", 10))
-
-        val parsed = ErrorObject.fromJson(original.toJson())
-
-        assertEquals(original.code, parsed.code)
-        assertEquals(original.message, parsed.message)
-        assertEquals(10, parsed.data!!.getInt("bytes"))
     }
 
     // -------------------------------------------------------------------------

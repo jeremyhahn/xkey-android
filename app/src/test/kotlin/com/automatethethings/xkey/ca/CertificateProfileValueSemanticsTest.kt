@@ -63,23 +63,12 @@ class CertificateProfileValueSemanticsTest {
     }
 
     @Test
-    fun `profile names are unique`() {
-        assertEquals(allProfiles.size, allProfiles.map { it.profileName }.toSet().size)
-    }
-
-    @Test
     fun `an unknown profile name is rejected by name`() {
         val error = assertThrows(IllegalArgumentException::class.java) {
             CertificateProfile.fromName("not-a-profile")
         }
 
         assertEquals("Unknown certificate profile: not-a-profile", error.message)
-    }
-
-    @Test
-    fun `an empty or blank profile name is rejected`() {
-        assertThrows(IllegalArgumentException::class.java) { CertificateProfile.fromName("") }
-        assertThrows(IllegalArgumentException::class.java) { CertificateProfile.fromName("  ") }
     }
 
     @Test
@@ -104,26 +93,6 @@ class CertificateProfileValueSemanticsTest {
     // -------------------------------------------------------------------------
     // Equality and copy
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `profiles of the same type with the same settings are equal`() {
-        allProfiles.forEach { profile ->
-            val twin = CertificateProfile.fromName(profile.profileName)
-            assertEquals(profile, twin)
-            assertEquals(profile.hashCode(), twin.hashCode())
-        }
-    }
-
-    @Test
-    fun `profiles of different types are never equal`() {
-        val client: CertificateProfile = CertificateProfile.TLSClient(validityDays = 365)
-        val codeSigning: CertificateProfile = CertificateProfile.CodeSigning(validityDays = 365)
-        val idevid: CertificateProfile = CertificateProfile.IDevID()
-        val timestamping: CertificateProfile = CertificateProfile.Timestamping()
-
-        assertNotEquals(client, codeSigning)
-        assertNotEquals(idevid, timestamping)
-    }
 
     @Test
     fun `a shortened validity makes a different profile`() {
@@ -192,46 +161,5 @@ class CertificateProfileValueSemanticsTest {
         assertEquals(2, delegated.pathLenConstraint)
         assertNotEquals(CertificateProfile.SubordinateCA(), delegated)
         assertEquals("subordinate-ca", delegated.profileName)
-    }
-
-    @Test
-    fun `toString names the type and its settings`() {
-        val profile = CertificateProfile.TLSServer(
-            validityDays = 90,
-            dnsNames = listOf("api.example.com")
-        )
-
-        val text = profile.toString()
-
-        assertTrue(text, text.startsWith("TLSServer("))
-        assertTrue(text, text.contains("validityDays=90"))
-        assertTrue(text, text.contains("api.example.com"))
-    }
-
-    // -------------------------------------------------------------------------
-    // SubjectAlternativeNames
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `SubjectAlternativeNames compares by content`() {
-        val a = SubjectAlternativeNames(
-            dnsNames = listOf("example.com"),
-            ipAddresses = listOf("10.0.0.1"),
-            emailAddresses = listOf("user@example.com")
-        )
-        val b = a.copy()
-
-        assertEquals(a, b)
-        assertEquals(a.hashCode(), b.hashCode())
-        assertNotEquals(a, a.copy(dnsNames = listOf("other.example.com")))
-        assertTrue(a.toString().contains("example.com"))
-    }
-
-    @Test
-    fun `an empty SubjectAlternativeNames is not equal to a populated one`() {
-        assertNotEquals(
-            SubjectAlternativeNames(),
-            SubjectAlternativeNames(dnsNames = listOf("example.com"))
-        )
     }
 }

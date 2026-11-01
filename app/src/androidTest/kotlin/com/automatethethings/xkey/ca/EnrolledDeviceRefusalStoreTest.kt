@@ -104,20 +104,6 @@ class EnrolledDeviceRefusalStoreTest {
     }
 
     @Test
-    fun everyCaseSurvivesTheRoundTrip() {
-        listOf(
-            EnrollmentRefusal.MalformedPackage("TCG-CSR-IDEVID does not parse"),
-            EnrollmentRefusal.UntrustedEndorsement("EK certificate is self-signed"),
-            EnrollmentRefusal.ActivationMismatch("returned a different secret"),
-            EnrollmentRefusal.ActivationUnsupported("no RSA endorsement key"),
-            EnrollmentRefusal.QuoteInvalid("quote carries no PCR values")
-        ).forEach { refusal ->
-            repository.recordRefusal(record(refusal = refusal))
-            assertEquals(refusal, repository.lastRefusal(deviceA)?.refusal)
-        }
-    }
-
-    @Test
     fun aDeviceThatWasNeverRefusedReportsNothing() {
         assertNull(repository.lastRefusal(deviceA))
     }

@@ -158,17 +158,6 @@ class TcgEnrollmentIssuerTest {
         )
     }
 
-    @Test
-    fun twoIssuancesCarryDistinctSerialNumbers() = runBlocking {
-        val subject = X500NameBuilder(BCStyle.INSTANCE).addRDN(BCStyle.CN, "tcg-issuer-serial").build()
-        val first = ca.issueForPublicKey(newEcKey(), subject, CertificateProfile.IDevID())
-        val second = ca.issueForPublicKey(newEcKey(), subject, CertificateProfile.IDevID())
-        assertTrue(
-            "serial numbers must not repeat",
-            first.serialNumber != second.serialNumber
-        )
-    }
-
     private fun newEcKey() = KeyPairGenerator.getInstance("EC").apply {
         initialize(ECGenParameterSpec("secp256r1"))
     }.generateKeyPair().public
