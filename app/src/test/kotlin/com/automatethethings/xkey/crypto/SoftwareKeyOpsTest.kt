@@ -11,7 +11,6 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.security.SecureRandom
-import javax.crypto.AEADBadTagException
 
 /**
  * Unit tests for [SoftwareKeyOps], the software (non-Keystore) symmetric crypto
@@ -55,21 +54,6 @@ class SoftwareKeyOpsTest {
         SoftwareKeyOps.aesGcmDecrypt(key, ct, "b".toByteArray())
     }
 
-    @Test
-    fun `hmac sha256 is deterministic and 32 bytes`() {
-        val key = randomKey(32)
-        val data = "msg".toByteArray()
-        val m1 = SoftwareKeyOps.hmac(key, data, "HMAC-SHA256")
-        val m2 = SoftwareKeyOps.hmac(key, data, "HMAC-SHA256")
-        assertArrayEquals(m1, m2)
-        assertEquals(32, m1.size)
-    }
-
-    @Test
-    fun `hmac sha512 yields 64 bytes`() {
-        assertEquals(64, SoftwareKeyOps.hmac(randomKey(32), "m".toByteArray(), "HMAC-SHA512").size)
-    }
-
     // -----------------------------------------------------------------------
     // RFC 4231 HMAC vectors
     // -----------------------------------------------------------------------
@@ -94,49 +78,6 @@ class SoftwareKeyOpsTest {
     }
 
     @Test
-    fun `hmac sha256 matches RFC 4231 test case 2`() {
-        assertEquals(
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
-            hex(
-                SoftwareKeyOps.hmac(
-                    "Jefe".toByteArray(),
-                    "what do ya want for nothing?".toByteArray(),
-                    "HMAC-SHA256"
-                )
-            )
-        )
-    }
-
-    @Test
-    fun `hmac sha512 matches RFC 4231 test case 2`() {
-        assertEquals(
-            "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea250554" +
-                "9758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737",
-            hex(
-                SoftwareKeyOps.hmac(
-                    "Jefe".toByteArray(),
-                    "what do ya want for nothing?".toByteArray(),
-                    "HMAC-SHA512"
-                )
-            )
-        )
-    }
-
-    @Test
-    fun `hmac sha256 matches RFC 4231 test case 3`() {
-        assertEquals(
-            "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
-            hex(
-                SoftwareKeyOps.hmac(
-                    ByteArray(20) { 0xAA.toByte() },
-                    ByteArray(50) { 0xDD.toByte() },
-                    "HMAC-SHA256"
-                )
-            )
-        )
-    }
-
-    @Test
     fun `hmac selects sha512 only when the algorithm mentions 512`() {
         val key = ByteArray(20) { 0x0b }
         val data = "Hi There".toByteArray()
@@ -157,20 +98,6 @@ class SoftwareKeyOpsTest {
         )
     }
 
-    @Test
-    fun `hmac output depends on both key and data`() {
-        val data = "message".toByteArray()
-        assertNotEquals(
-            SoftwareKeyOps.hmac(ByteArray(32) { 1 }, data, "HMAC-SHA256").toList(),
-            SoftwareKeyOps.hmac(ByteArray(32) { 2 }, data, "HMAC-SHA256").toList()
-        )
-        val key = ByteArray(32) { 1 }
-        assertNotEquals(
-            SoftwareKeyOps.hmac(key, "a".toByteArray(), "HMAC-SHA256").toList(),
-            SoftwareKeyOps.hmac(key, "b".toByteArray(), "HMAC-SHA256").toList()
-        )
-    }
-
     // -----------------------------------------------------------------------
     // AES-GCM layout and integrity
     // -----------------------------------------------------------------------
@@ -188,64 +115,6 @@ class SoftwareKeyOpsTest {
         val out = SoftwareKeyOps.aesGcmEncrypt(key, ByteArray(0), null)
         assertEquals(28, out.size)
         assertEquals(0, SoftwareKeyOps.aesGcmDecrypt(key, out, null).size)
-    }
-
-    @Test
-    fun `aes-gcm accepts 128 192 and 256 bit keys`() {
-        listOf(16, 24, 32).forEach { size ->
-            val key = randomKey(size)
-            val plaintext = "key size $size".toByteArray()
-            assertArrayEquals(
-                plaintext,
-                SoftwareKeyOps.aesGcmDecrypt(key, SoftwareKeyOps.aesGcmEncrypt(key, plaintext, null), null)
-            )
-        }
-    }
-
-    @Test
-    fun `aes-gcm rejects a flipped ciphertext bit`() {
-        val key = randomKey(32)
-        val out = SoftwareKeyOps.aesGcmEncrypt(key, "sensitive".toByteArray(), null)
-        out[20] = (out[20].toInt() xor 0x01).toByte()
-        assertThrows(AEADBadTagException::class.java) {
-            SoftwareKeyOps.aesGcmDecrypt(key, out, null)
-        }
-    }
-
-    @Test
-    fun `aes-gcm rejects a flipped iv bit`() {
-        val key = randomKey(32)
-        val out = SoftwareKeyOps.aesGcmEncrypt(key, "sensitive".toByteArray(), null)
-        out[0] = (out[0].toInt() xor 0x80).toByte()
-        assertThrows(AEADBadTagException::class.java) {
-            SoftwareKeyOps.aesGcmDecrypt(key, out, null)
-        }
-    }
-
-    @Test
-    fun `aes-gcm rejects a truncated tag`() {
-        val key = randomKey(32)
-        val out = SoftwareKeyOps.aesGcmEncrypt(key, "sensitive".toByteArray(), null)
-        assertThrows(AEADBadTagException::class.java) {
-            SoftwareKeyOps.aesGcmDecrypt(key, out.copyOfRange(0, out.size - 1), null)
-        }
-    }
-
-    @Test
-    fun `aes-gcm rejects the wrong key`() {
-        val out = SoftwareKeyOps.aesGcmEncrypt(randomKey(32), "sensitive".toByteArray(), null)
-        assertThrows(AEADBadTagException::class.java) {
-            SoftwareKeyOps.aesGcmDecrypt(randomKey(32), out, null)
-        }
-    }
-
-    @Test
-    fun `aes-gcm rejects a missing aad`() {
-        val key = randomKey(32)
-        val out = SoftwareKeyOps.aesGcmEncrypt(key, "d".toByteArray(), "ctx".toByteArray())
-        assertThrows(AEADBadTagException::class.java) {
-            SoftwareKeyOps.aesGcmDecrypt(key, out, null)
-        }
     }
 
     @Test

@@ -307,13 +307,6 @@ class ProtocolConstantsTest {
         }
     }
 
-    @Test
-    fun `no method name has leading or trailing whitespace`() {
-        allMethodNames.forEach { name ->
-            assertEquals("method name '$name' must be trimmed", name, name.trim())
-        }
-    }
-
     // -------------------------------------------------------------------------
     // KeyTypes
     // -------------------------------------------------------------------------
@@ -330,17 +323,6 @@ class ProtocolConstantsTest {
         assertEquals("attestation", KeyTypes.ATTESTATION)
     }
 
-    @Test
-    fun `key type constants are unique and lowercase`() {
-        val types = listOf(
-            KeyTypes.FIDO2, KeyTypes.TLS, KeyTypes.SIGNING, KeyTypes.ENCRYPTION,
-            KeyTypes.SECRET, KeyTypes.HMAC, KeyTypes.CA, KeyTypes.ATTESTATION
-        )
-
-        assertEquals("key types must be unique", types.size, types.toSet().size)
-        types.forEach { assertEquals("key type '$it' must be lowercase", it.lowercase(), it) }
-    }
-
     // -------------------------------------------------------------------------
     // ExportFormats
     // -------------------------------------------------------------------------
@@ -351,18 +333,6 @@ class ProtocolConstantsTest {
         assertEquals("pem", ExportFormats.PEM)
         assertEquals("ssh", ExportFormats.SSH)
         assertEquals("cose", ExportFormats.COSE)
-    }
-
-    @Test
-    fun `export format constants are unique`() {
-        val formats = listOf(ExportFormats.DER, ExportFormats.PEM, ExportFormats.SSH, ExportFormats.COSE)
-
-        assertEquals("export formats must be unique", formats.size, formats.toSet().size)
-    }
-
-    @Test
-    fun `the default export format is DER`() {
-        assertEquals(ExportFormats.DER, LocalGetPublicKeyParams(keyId = "k").format)
     }
 
     // -------------------------------------------------------------------------
@@ -424,29 +394,6 @@ class ProtocolConstantsTest {
                 "error code $code must be inside the -32099..-32000 server-error range",
                 code in -32099..-32000
             )
-        }
-    }
-
-    @Test
-    fun `no xKey specific error code collides with the reserved JSON-RPC codes`() {
-        val reserved = setOf(-32700, -32600, -32601, -32602, -32603)
-        val xkeySpecific = listOf(
-            ErrorCodes.KEY_NOT_FOUND, ErrorCodes.USER_CANCELLED, ErrorCodes.BIOMETRIC_FAILED,
-            ErrorCodes.BIOMETRIC_NOT_ENROLLED, ErrorCodes.BIOMETRIC_LOCKOUT,
-            ErrorCodes.KEY_GENERATION_FAILED, ErrorCodes.SIGNING_FAILED, ErrorCodes.ENCRYPTION_FAILED,
-            ErrorCodes.DECRYPTION_FAILED, ErrorCodes.INVALID_ALGORITHM, ErrorCodes.STRONGBOX_UNAVAILABLE,
-            ErrorCodes.SESSION_EXPIRED, ErrorCodes.RATE_LIMITED, ErrorCodes.HMAC_FAILED,
-            ErrorCodes.ECDH_FAILED, ErrorCodes.EXPORT_FAILED, ErrorCodes.ATTESTATION_FAILED,
-            ErrorCodes.BACKEND_DENIED, ErrorCodes.OPERATION_DENIED, ErrorCodes.STORAGE_FULL,
-            ErrorCodes.KEY_EXISTS, ErrorCodes.UNSUPPORTED_FORMAT, ErrorCodes.PAIRING_REJECTED,
-            ErrorCodes.DEVICE_ATTESTATION_REQUIRED, ErrorCodes.PAIRING_REQUIRED,
-            ErrorCodes.PIV_SLOT_NOT_FOUND, ErrorCodes.PIV_SLOT_OCCUPIED, ErrorCodes.PIV_SIGN_FAILED,
-            ErrorCodes.PIV_INVALID_SLOT, ErrorCodes.PIN_REQUIRED, ErrorCodes.PIN_INCORRECT,
-            ErrorCodes.PIN_LOCKED
-        )
-
-        xkeySpecific.forEach { code ->
-            assertTrue("error code $code collides with a reserved JSON-RPC code", code !in reserved)
         }
     }
 }

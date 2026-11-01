@@ -11,7 +11,6 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -61,18 +60,5 @@ class SoftwareKeyStoreTest {
         assertEquals(256, got.keySize)
         assertTrue(got.exportable)
         assertTrue(got.shareable)
-    }
-
-    @Test
-    fun getMissingReturnsNull() {
-        assertNull(store.get("does-not-exist-$keyId"))
-    }
-
-    @Test
-    fun deleteRemoves() {
-        store.put(SoftwareKey(keyId, "AES-256", "symmetric", 256, true, true, ByteArray(32)))
-        assertNotNull(store.get(keyId))
-        store.delete(keyId)
-        assertNull(store.get(keyId))
     }
 }

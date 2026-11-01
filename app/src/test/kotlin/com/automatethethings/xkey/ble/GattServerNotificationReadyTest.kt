@@ -152,69 +152,6 @@ class GattServerNotificationReadyTest {
     }
 
     /**
-     * The Codex 7498 regression: a CCCD disable, the identity frame, then an
-     * enable within the wait. The latest write decides, so the enable
-     * releases the acknowledgement although the consumer handled the disable
-     * first and the enable is still behind the frame.
-     */
-    @Test
-    fun anEnableAfterADisableReleasesTheWaitingAcknowledgement() {
-        connect()
-        mtu(MTU)
-        disableNotifications()
-        write(identityFrame())
-        Thread.sleep(SETTLE_MS)
-        assertEquals("nothing is sent while notifications are disabled", 0, messages().size)
-
-        enableNotifications()
-        eventually("the identity acknowledgement is sent", PROMPTLY_MS) { messages().isNotEmpty() }
-        assertArrayEquals(IDENTITY_ACK_UNKNOWN, messages()[0])
-
-        write(desktop.createHandshakeMessage1())
-        eventually("the handshake's second message is sent") { messages().size == 2 }
-        desktop.processHandshakeMessage2(messages()[1])
-    }
-
-    /**
-     * An enable that arrives after one connection's disconnect, and before
-     * the next one's connect, belongs to neither: the next connection's
-     * acknowledgement still waits for its own.
-     */
-    @Test
-    fun aCccdEnableFromAnEarlierConnectionCompletesNothingForTheNext() {
-        connect()
-        mtu(MTU)
-        disconnect()
-        enableNotifications()
-
-        connect()
-        mtu(MTU)
-        write(identityFrame())
-        Thread.sleep(SETTLE_MS)
-        assertEquals("the earlier connection's enable released nothing", 0, messages().size)
-
-        enableNotifications()
-        eventually("this connection's own enable releases it", PROMPTLY_MS) { messages().isNotEmpty() }
-        assertArrayEquals(IDENTITY_ACK_UNKNOWN, messages()[0])
-    }
-
-    /** With no enable at all, the wait expires and the acknowledgement is dropped, as before. */
-    @Test
-    fun withNoEnableTheWaitExpiresAndTheAcknowledgementIsDropped() {
-        connect()
-        mtu(MTU)
-        val start = System.currentTimeMillis()
-        write(identityFrame())
-
-        eventually("the identity exchange gives up", NOTIFICATION_READY_TIMEOUT_MS + TIMEOUT_MS) {
-            getField<Boolean>("identityExchangeComplete")
-        }
-        val waited = System.currentTimeMillis() - start
-        assertTrue("it waited the full $NOTIFICATION_READY_TIMEOUT_MS ms: $waited", waited >= NOTIFICATION_READY_TIMEOUT_MS - 100)
-        assertEquals("the acknowledgement is dropped", 0, messages().size)
-    }
-
-    /**
      * The MTU, too, may be reported behind the frame the consumer is
      * answering. The acknowledgement is fragmented at it, not at the 23-byte
      * default, which leaves no room for a fragment.

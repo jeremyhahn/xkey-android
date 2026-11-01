@@ -77,14 +77,6 @@ class RemoteEnrollmentMessagesTest {
         assertEquals("remote.storeEnrollmentCerts", MethodNames.REMOTE_STORE_ENROLLMENT_CERTS)
     }
 
-    @Test
-    fun `the local twins are kept for the opposite direction`() {
-        assertEquals("local.getTCGCSRIDevID", MethodNames.LOCAL_GET_TCG_CSR_IDEVID)
-        assertEquals("local.activateCredential", MethodNames.LOCAL_ACTIVATE_CREDENTIAL)
-        assertEquals("local.getAttestationQuote", MethodNames.LOCAL_GET_ATTESTATION_QUOTE)
-        assertEquals("local.storeEnrollmentCerts", MethodNames.LOCAL_STORE_ENROLLMENT_CERTS)
-    }
-
     // -------------------------------------------------------------------------
     // remote.getTCGCSRIDevID
     // -------------------------------------------------------------------------

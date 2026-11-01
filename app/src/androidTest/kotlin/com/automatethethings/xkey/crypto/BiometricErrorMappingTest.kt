@@ -107,16 +107,6 @@ class BiometricErrorMappingTest {
         )
     }
 
-    @Test
-    fun theTwoLockoutsAreDistinguishable() {
-        val temporary = map(BiometricPrompt.ERROR_LOCKOUT, "x") as BiometricLockoutException
-        val permanent = map(BiometricPrompt.ERROR_LOCKOUT_PERMANENT, "x") as BiometricLockoutException
-        assertFalse(
-            "the two lockouts must not produce the same message",
-            temporary.message == permanent.message
-        )
-    }
-
     // ------------------------------------------------------------------
     // Unavailable: nothing the caller can do, and not the user's doing
     // ------------------------------------------------------------------

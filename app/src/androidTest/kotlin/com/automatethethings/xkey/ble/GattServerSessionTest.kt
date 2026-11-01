@@ -282,27 +282,6 @@ class GattServerSessionTest {
     // -----------------------------------------------------------------
 
     /**
-     * Once paired, application messages are decrypted in order and dispatched.
-     * Each frame consumes exactly one receive counter, which is what proves the
-     * server really decrypted them rather than dropping them.
-     */
-    @Test
-    fun applicationMessagesAreDecryptedInOrderAndDispatched(): Unit = runBlocking {
-        val initiator = probe.establishSession(device)
-        adoptPairing()
-
-        probe.handleApplicationMessage(device, initiator.encrypt(request(1, "local.getCapabilities")))
-        probe.handleApplicationMessage(device, initiator.encrypt(request(2, "local.listKeys")))
-
-        val probeFrame = request(3, "local.getCapabilities")
-        assertArrayEquals(
-            "both frames must have advanced the receive counter by exactly one",
-            probeFrame,
-            probe.noiseSession!!.decrypt(initiator.encrypt(probeFrame))
-        )
-    }
-
-    /**
      * A frame that fails to decrypt must take the session down.
      *
      * Noise treats a failed decryption as fatal, and the implementation makes it

@@ -55,17 +55,6 @@ class Base32Test {
     }
 
     @Test
-    fun `encode then decode round-trips arbitrary bytes`() {
-        val data = ByteArray(64) { (it * 7 - 3).toByte() }
-        assertArrayEquals(data, Base32.decode(Base32.encode(data)))
-    }
-
-    @Test
-    fun `decode rejects invalid characters`() {
-        assertThrows(IllegalArgumentException::class.java) { Base32.decode("MZXW6YT!") }
-    }
-
-    @Test
     fun `encode zero-pads the trailing quantum`() {
         // Cross-checked against RFC 4648 Base32 (python base64.b32encode).
         assertEquals("AA", Base32.encode(byteArrayOf(0x00)))

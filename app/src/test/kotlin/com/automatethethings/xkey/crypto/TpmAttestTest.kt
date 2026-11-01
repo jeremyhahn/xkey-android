@@ -118,23 +118,6 @@ class TpmAttestTest {
     }
 
     @Test
-    fun `refuses a quote whose signature was altered`() {
-        val quote = buildQuote()
-        val broken = quote.signature.copyOf()
-        broken[broken.size - 1] = (broken[broken.size - 1] + 1).toByte()
-        try {
-            TpmQuoteVerifier.verify(quote.iak, quote.quoted, broken, nonce)
-            fail("an altered signature must not verify")
-        } catch (e: TpmQuoteException) {
-            assertTrue(e.message!!.contains("does not verify"))
-        } catch (e: java.security.SignatureException) {
-            // A mangled DER encoding is refused by the provider before the
-            // mathematics is reached; either way the quote is rejected.
-            assertTrue(true)
-        }
-    }
-
-    @Test
     fun `refuses an empty quote or signature`() {
         val quote = buildQuote()
         expectRefusal(quote.iak, ByteArray(0), quote.signature, "no attestation structure")

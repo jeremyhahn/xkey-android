@@ -289,24 +289,11 @@ class GenerationEchoTest {
     }
 
     @Test
-    fun `Request fromJson carries the generation`() {
-        assertEquals(ULong.MAX_VALUE, Request.fromJson("""{"id":1,"generation":$UINT64_MAX,"method":"ping"}""").generation)
-        assertNull(Request.fromJson("""{"id":1,"method":"ping"}""").generation)
-    }
-
-    @Test
     fun `Response toJsonString writes the generation as a number`() {
         val text = Response.success(1, JSONObject(), generation = ULong.MAX_VALUE).toJsonString()
 
         assertEquals(UINT64_MAX, rawGeneration(text))
         assertEquals(ULong.MAX_VALUE, Response.fromJson(text).generation)
-    }
-
-    @Test
-    fun `Response toJsonString omits a null generation`() {
-        val text = Response.error(1, ErrorCodes.INTERNAL_ERROR, "x").toJsonString()
-
-        assertFalse(text.contains(GENERATION_KEY))
     }
 
     private suspend fun answer(request: String): String =

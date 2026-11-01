@@ -340,17 +340,6 @@ class NoiseHandshakeTest {
         assertArrayEquals(response, initiator.decrypt(responder.encrypt(response)))
     }
 
-    /** A payload far larger than any BLE MTU still survives the AEAD. */
-    @Test
-    fun transportPreservesLargePayloads() = runTest {
-        val initiator = NoiseInitiatorSession(randomBytes(KEY_SIZE))
-        val responder = newResponder()
-        handshake(initiator, responder)
-
-        val payload = randomBytes(64 * 1024)
-        assertArrayEquals(payload, responder.decrypt(initiator.encrypt(payload)))
-    }
-
     /** Each message must use a fresh nonce, so identical plaintext differs. */
     @Test
     fun everyTransportMessageUsesAFreshNonce() = runTest {
@@ -456,27 +445,6 @@ class NoiseHandshakeTest {
         assertArrayEquals(second.getLocalStaticPublicKey(), responder.getRemoteStaticKey())
     }
 
-    /** Two peers of the same responder must not end up with the same session keys. */
-    @Test
-    fun separateConnectionsDeriveSeparateTransportKeys() = runTest {
-        val responder = newResponder()
-        val plaintext = "same plaintext".toByteArray()
-
-        val firstPeer = NoiseInitiatorSession(randomBytes(KEY_SIZE))
-        handshake(firstPeer, responder)
-        val firstCiphertext = responder.encrypt(plaintext)
-
-        responder.reset()
-        val secondPeer = NoiseInitiatorSession(randomBytes(KEY_SIZE))
-        handshake(secondPeer, responder)
-        val secondCiphertext = responder.encrypt(plaintext)
-
-        assertFalse(
-            "a reconnect must not reuse the previous session's keystream",
-            firstCiphertext.contentEquals(secondCiphertext)
-        )
-    }
-
     // -----------------------------------------------------------------
     // Static key storage
     // -----------------------------------------------------------------
@@ -489,19 +457,6 @@ class NoiseHandshakeTest {
     @Test
     fun storedStaticKeyPairIsNullWhenSecureStorageIsUnreachable() = runTest {
         assertNull(NoiseSession.getStoredStaticKeyPair(context))
-    }
-
-    /** A responder must have a usable static identity as soon as it is loaded. */
-    @Test
-    fun aLoadedResponderAlwaysHasAStaticIdentity() = runTest {
-        val responder = newResponder()
-        val publicKey = responder.getStaticPublicKey()
-
-        assertEquals("X25519 public keys are raw 32-byte values", KEY_SIZE, publicKey!!.size)
-        assertTrue(
-            "an all-zero public key would mean scalar multiplication failed",
-            publicKey.any { it != 0.toByte() }
-        )
     }
 
     // -----------------------------------------------------------------

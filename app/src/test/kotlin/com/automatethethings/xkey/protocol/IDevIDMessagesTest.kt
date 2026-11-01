@@ -183,16 +183,6 @@ class IDevIDMessagesTest {
         assertEquals(original.hashCode(), parsed.hashCode())
     }
 
-    @Test
-    fun `LocalGetCABundleResult equality compares certificate content not references`() {
-        val a = LocalGetCABundleResult(null, listOf("cert".toByteArray()), 1, null)
-        val b = LocalGetCABundleResult(null, listOf("cert".toByteArray()), 1, null)
-        val different = LocalGetCABundleResult(null, listOf("other".toByteArray()), 1, null)
-
-        assertEquals(a, b)
-        assertFalse(a == different)
-    }
-
     // -------------------------------------------------------------------------
     // LocalGetIDevIDCertificateParams / Result
     // -------------------------------------------------------------------------

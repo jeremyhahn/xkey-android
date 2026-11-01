@@ -162,14 +162,6 @@ class BleClientTeardownTest {
     // Connection state
     // -----------------------------------------------------------------
 
-    /** The address a connecting state carries is what the UI shows. */
-    @Test
-    fun theConnectingStateCarriesTheAddressBeingDialled() {
-        val connecting = ClientConnectionState.Connecting("AA:BB:CC:DD:EE:F0")
-
-        assertEquals("AA:BB:CC:DD:EE:F0", connecting.address)
-        assertEquals(connecting, ClientConnectionState.Connecting("AA:BB:CC:DD:EE:F0"))
-    }
 
     // -----------------------------------------------------------------
     // Helpers

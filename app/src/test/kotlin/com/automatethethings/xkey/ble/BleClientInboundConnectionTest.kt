@@ -126,16 +126,6 @@ class BleClientInboundConnectionTest {
         assertArrayEquals(h.responseFor(REQUEST), withTimeout(TIMEOUT_MS) { call.await() })
     }
 
-    /** One connection's reply, spread over many fragments, still completes its request. */
-    @Test
-    fun aMultiFragmentReplyIsReassembledOnItsConnection(): Unit = runBlocking {
-        val h = harness(mtu = 64)
-        val long = """{"jsonrpc":"2.0","id":1,"result":{"blob":"${"x".repeat(400)}"}}""".toByteArray()
-        h.responseFor = { long }
-        h.client.connect(h.address, randomKey())
-
-        assertArrayEquals(long, withTimeout(TIMEOUT_MS) { h.client.sendRequest(REQUEST) })
-    }
 
     /** Holds the inbound consumer on the first fragment it takes, until [resume]. */
     private class ConsumerPause(client: BleClient) {

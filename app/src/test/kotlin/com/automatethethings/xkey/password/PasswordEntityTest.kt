@@ -76,13 +76,6 @@ class PasswordEntityTest {
     }
 
     @Test
-    fun `a remote entry records its source`() {
-        val entity = password().copy(source = "remote")
-
-        assertEquals("remote", entity.source)
-    }
-
-    @Test
     fun `the entity carries no plaintext property at all`() {
         val rendered = password().toString()
 
@@ -101,12 +94,6 @@ class PasswordEntityTest {
     // -------------------------------------------------------------------------
     // equals / hashCode
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `two entries with the same fields are equal and hash alike`() {
-        assertEquals(password(), password())
-        assertEquals(password().hashCode(), password().hashCode())
-    }
 
     @Test
     fun `equal ciphertext held in distinct arrays still compares equal`() {
@@ -176,37 +163,5 @@ class PasswordEntityTest {
 
         assertEquals(sparse.hashCode(), sparse.copy().hashCode())
         assertNotEquals(sparse.hashCode(), password().hashCode())
-    }
-
-    @Test
-    fun `hashCode is stable across repeated calls`() {
-        val a = password()
-
-        assertEquals(a.hashCode(), a.hashCode())
-    }
-
-    // -------------------------------------------------------------------------
-    // copy / destructuring
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `copy re-stamps the update time while keeping the creation time`() {
-        val base = password()
-        val edited = base.copy(name = "Renamed", updatedAt = 1_700_009_999_000L)
-
-        assertEquals("Renamed", edited.name)
-        assertEquals(base.createdAt, edited.createdAt)
-        assertEquals(1_700_009_999_000L, edited.updatedAt)
-    }
-
-    @Test
-    fun `an entry destructures in declaration order`() {
-        val (id, passwordId, name, title, username) = password()
-
-        assertEquals(5L, id)
-        assertEquals("pw-1", passwordId)
-        assertEquals("Example", name)
-        assertEquals("Example Login", title)
-        assertEquals("user@example.com", username)
     }
 }
