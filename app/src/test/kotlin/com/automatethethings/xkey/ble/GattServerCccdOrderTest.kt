@@ -80,7 +80,8 @@ class GattServerCccdOrderTest(private val row: String) {
         private const val PROMPTLY_MS = 2_000L
 
         // Long enough for the consumer to reach the wait, and for a send that
-        // was released to have gone out.
+        // was released to have gone out. The spacing is the row itself: the
+        // waiting send must see each CCCD write before the next one lands.
         private const val SETTLE_MS = 300L
 
         private val ENABLE = byteArrayOf(0x01, 0x00)

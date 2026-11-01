@@ -86,7 +86,9 @@ class GattServerDrainingTest {
         const val TIMEOUT_MS = 5_000L
 
         // Long enough for a coroutine to reach the lock it waits on, or for a
-        // send that was let through to have gone out.
+        // send that was let through to have gone out. The wait is the check,
+        // not a stand-in for a signal: a Mutex shows no waiter, and "nothing
+        // is sent" has no event to await.
         const val SETTLE_MS = 300L
 
         val ENABLE = byteArrayOf(0x01, 0x00)

@@ -57,6 +57,8 @@ class RemoteKeyClientTest {
     private val lastRequest: Request get() = sender.lastRequest
     private val lastParams: JSONObject get() = requireNotNull(lastRequest.params)
 
+    private fun JSONObject.keySet(): Set<String> = keys().asSequence().toSet()
+
     @Before
     fun setUp() {
         stubAndroidLog()
@@ -133,8 +135,7 @@ class RemoteKeyClientTest {
 
         assertEquals("remote.listKeys", lastRequest.method)
         assertEquals("tpm2", lastParams.getString("backend"))
-        assertFalse("algorithm is omitempty on the Go side", lastParams.has("algorithm"))
-        assertEquals(1, lastParams.length())
+        assertEquals("algorithm is omitempty on the Go side", setOf("backend"), lastParams.keySet())
     }
 
     @Test
@@ -146,6 +147,7 @@ class RemoteKeyClientTest {
 
         val keys = client.listKeys(backend = "tpm2", algorithm = "ecdsa-p256")
 
+        assertEquals(setOf("backend", "algorithm"), lastParams.keySet())
         assertEquals("ecdsa-p256", lastParams.getString("algorithm"))
         assertEquals(1, keys.size)
         assertEquals("k1", keys[0].keyId)
@@ -172,6 +174,7 @@ class RemoteKeyClientTest {
         val result = client.getPublicKey(backend = "tpm2", keyId = "k1")
 
         assertEquals("remote.getPublicKey", lastRequest.method)
+        assertEquals(setOf("backend", "keyId", "format"), lastParams.keySet())
         assertEquals("tpm2", lastParams.getString("backend"))
         assertEquals("k1", lastParams.getString("keyId"))
         assertEquals("der", lastParams.getString("format"))
@@ -195,8 +198,8 @@ class RemoteKeyClientTest {
         val result = client.sign(backend = "tpm2", keyId = "k1", data = "ZGF0YQ==")
 
         assertEquals("remote.sign", lastRequest.method)
+        assertEquals(setOf("backend", "keyId", "data"), lastParams.keySet())
         assertEquals("ZGF0YQ==", lastParams.getString("data"))
-        assertFalse(lastParams.has("algorithm"))
         assertEquals("c2ln", result.signature)
         assertEquals("ECDSA_SHA256", result.algorithm)
     }
@@ -207,8 +210,8 @@ class RemoteKeyClientTest {
 
         client.sign(backend = "tpm2", keyId = "k1", data = "ZGF0YQ==", algorithm = "RSA_PSS_SHA256")
 
+        assertEquals(setOf("backend", "keyId", "data", "algorithm"), lastParams.keySet())
         assertEquals("RSA_PSS_SHA256", lastParams.getString("algorithm"))
-        assertEquals(4, lastParams.length())
     }
 
     @Test
@@ -229,13 +232,13 @@ class RemoteKeyClientTest {
 
         assertEquals("Y3Q=", client.encrypt("soft", "k1", plaintext = "cHQ="))
         assertEquals("remote.encrypt", lastRequest.method)
+        assertEquals(setOf("backend", "keyId", "plaintext"), lastParams.keySet())
         assertEquals("cHQ=", lastParams.getString("plaintext"))
-        assertEquals(3, lastParams.length())
 
         client.encrypt("soft", "k1", plaintext = "cHQ=", algorithm = "AES_GCM", aad = "YWFk")
+        assertEquals(setOf("backend", "keyId", "plaintext", "algorithm", "aad"), lastParams.keySet())
         assertEquals("AES_GCM", lastParams.getString("algorithm"))
         assertEquals("YWFk", lastParams.getString("aad"))
-        assertEquals(5, lastParams.length())
     }
 
     @Test
@@ -256,8 +259,8 @@ class RemoteKeyClientTest {
         val secret = client.deriveKey("tpm2", "k1", peerPublicKey = "cGVlcg==")
 
         assertEquals("remote.deriveKey", lastRequest.method)
+        assertEquals(setOf("backend", "keyId", "peerPublicKey"), lastParams.keySet())
         assertEquals("cGVlcg==", lastParams.getString("peerPublicKey"))
-        assertEquals(3, lastParams.length())
         assertEquals("c2VjcmV0", secret)
     }
 
@@ -271,9 +274,7 @@ class RemoteKeyClientTest {
         val result = client.generateKey(backend = "tpm2", keyId = "k9", algorithm = "ecdsa-p256")
 
         assertEquals("remote.generateKey", lastRequest.method)
-        assertFalse(lastParams.has("keySizeBits"))
-        assertFalse(lastParams.has("label"))
-        assertEquals(3, lastParams.length())
+        assertEquals(setOf("backend", "keyId", "algorithm"), lastParams.keySet())
         assertEquals("k9", result.keyId)
         assertEquals("cHVi", result.publicKey)
         assertEquals(256, result.keySizeBits)
@@ -288,6 +289,7 @@ class RemoteKeyClientTest {
             keySizeBits = 2048, label = "my key"
         )
 
+        assertEquals(setOf("backend", "keyId", "algorithm", "keySizeBits", "label"), lastParams.keySet())
         assertEquals(2048, lastParams.getInt("keySizeBits"))
         assertEquals("my key", lastParams.getString("label"))
         assertNull("publicKey is nullable for non-exportable backends", result.publicKey)

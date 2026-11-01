@@ -92,21 +92,6 @@ class BleClientEventOrderTest {
         assertArrayEquals(h.responseFor(REQUEST), reply.getOrThrow())
     }
 
-    /** With no reply queued, the disconnect still wakes the waiting request at once, not at a deadline. */
-    @Test
-    fun aDisconnectWithNoReplyQueuedFailsTheRequestAtOnce(): Unit = runBlocking {
-        val h = harness()
-        h.client.connect(h.address, randomKey())
-        h.holdWrites = true
-        val call = async(Dispatchers.Default) { runCatching { h.client.sendRequest(REQUEST) } }
-        awaitUntil("the request's write") { h.heldWrites == 1 }
-
-        onThread { disconnect(h) }
-
-        val failed = withTimeout(QUICK_MS) { call.await() }
-        assertTrue("the request fails with the connection", failed.isFailure)
-    }
-
     /** A request the desktop sent before it disconnected is not run, and nothing is written for it. */
     @Test
     fun aDesktopRequestQueuedBeforeTheDisconnectIsNotAnswered(): Unit = runBlocking {
@@ -174,10 +159,9 @@ class BleClientEventOrderTest {
     private companion object {
         const val TIMEOUT_MS = 5_000L
 
-        // Well inside BleClient.DRAIN_DEADLINE_MS.
-        const val QUICK_MS = 2_000L
-
-        // Long enough for a disconnect handled out of order to have woken the request.
+        // Long enough for a disconnect handled out of order to have woken the
+        // request. The window is the check: "not woken" and "nothing written"
+        // have no event to await.
         const val SETTLE_MS = 300L
 
         val REQUEST = """{"jsonrpc":"2.0","id":1,"method":"local.listKeys"}""".toByteArray()

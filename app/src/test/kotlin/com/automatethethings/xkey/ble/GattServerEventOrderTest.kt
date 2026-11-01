@@ -74,7 +74,9 @@ class GattServerEventOrderTest {
         const val TIMEOUT_MS = 5_000L
 
         // Long enough for a disconnect handled out of order to have settled
-        // the pending requests.
+        // the pending requests. The window is the check: the consumer waits
+        // on the Noise lock, which shows no waiter, and "not settled" has no
+        // event to await.
         const val SETTLE_MS = 300L
 
         // GattServer.EVENT_QUEUE_CAPACITY.

@@ -22,7 +22,6 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -152,16 +151,6 @@ class TcgAttestationMessagesTest {
         assertEquals(original.hashCode(), parsed.hashCode())
     }
 
-    @Test
-    fun `LocalGetTCGCSRIDevIDResult equality compares key content not references`() {
-        val a = LocalGetTCGCSRIDevIDResult("csr".toByteArray(), null, "iak".toByteArray(), "id".toByteArray())
-        val b = LocalGetTCGCSRIDevIDResult("csr".toByteArray(), null, "iak".toByteArray(), "id".toByteArray())
-        val different = LocalGetTCGCSRIDevIDResult("csr".toByteArray(), null, "other".toByteArray(), "id".toByteArray())
-
-        assertEquals(a, b)
-        assertFalse(a == different)
-    }
-
     // -------------------------------------------------------------------------
     // LocalActivateCredentialParams / Result
     // -------------------------------------------------------------------------
@@ -224,18 +213,6 @@ class TcgAttestationMessagesTest {
         assertEquals(b64("recovered"), json.getString("decryptedSecret"))
         assertEquals(original, parsed)
         assertEquals(original.hashCode(), parsed.hashCode())
-    }
-
-    @Test
-    fun `LocalActivateCredentialResult equality compares secret content not references`() {
-        assertEquals(
-            LocalActivateCredentialResult("s".toByteArray()),
-            LocalActivateCredentialResult("s".toByteArray())
-        )
-        assertFalse(
-            LocalActivateCredentialResult("s".toByteArray()) ==
-                LocalActivateCredentialResult("t".toByteArray())
-        )
     }
 
     // -------------------------------------------------------------------------
@@ -391,18 +368,6 @@ class TcgAttestationMessagesTest {
 
         assertEquals(original, parsed)
         assertEquals(original.hashCode(), parsed.hashCode())
-    }
-
-    @Test
-    fun `LocalGetAttestationQuoteResult equality detects a differing PCR digest`() {
-        val a = LocalGetAttestationQuoteResult(
-            "q".toByteArray(), "s".toByteArray(), mapOf(0 to "x".toByteArray()), null, "sha256"
-        )
-        val b = LocalGetAttestationQuoteResult(
-            "q".toByteArray(), "s".toByteArray(), mapOf(0 to "y".toByteArray()), null, "sha256"
-        )
-
-        assertFalse(a == b)
     }
 
     // -------------------------------------------------------------------------

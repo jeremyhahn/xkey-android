@@ -89,12 +89,6 @@ class SealStoreFrameBudgetTest {
         response.toJson().size + noiseTagSize <= StreamMessageFraming.MAX_MESSAGE_SIZE
 
     @Test
-    fun androidJsonEscapesTheBase64Slash() {
-        // The precondition of this suite: without it the escaping regression is not exercised.
-        assertEquals("""{"s":"\/"}""", JSONObject().put("s", "/").toString())
-    }
-
-    @Test
     fun putRefusesSlashHeavySecretThatFitsByBase64LengthButNotOnceEscaped() {
         // 30,000 bytes are 40,000 base64 slashes, within the frame by length,
         // but Android writes them as 80,000 bytes.

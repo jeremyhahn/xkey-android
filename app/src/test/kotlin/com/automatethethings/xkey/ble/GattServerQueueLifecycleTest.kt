@@ -77,7 +77,9 @@ class GattServerQueueLifecycleTest {
         // caused by one expiring.
         const val PROMPTLY_MS = 2_000L
 
-        // Long enough for the consumer to reach a wait, or to have handled an event.
+        // Long enough for the consumer to reach a wait, or to have handled an
+        // event. The wait is the check: a consumer blocked on a lock shows no
+        // signal, and "nothing reopened" or "nothing sent" has no event to await.
         const val SETTLE_MS = 300L
 
         val ENABLE = byteArrayOf(0x01, 0x00)
