@@ -119,7 +119,9 @@ class GattServer(
     private val trustedComputingSettingsRepository: TrustedComputingSettingsRepository? = null,
     private val androidCA: AndroidCA? = null,
     private val enrolledDeviceRepository: EnrolledDeviceRepository? = null,
-    private val trustStoreRepository: TrustStoreRepository? = null
+    private val trustStoreRepository: TrustStoreRepository? = null,
+    /** How long a send waits for the peer to write the CCCD before giving up. */
+    private val notificationReadyTimeoutMs: Long = NOTIFICATION_READY_TIMEOUT_MS
 ) : MessageSender {
     // Extension function for hex encoding
     private fun ByteArray.toHexString(): String = joinToString("") { "%02x".format(it) }
@@ -2602,7 +2604,7 @@ class GattServer(
         // handleApplicationMessage's catch, which would try to answer over the
         // connection that just went away and throw again.
         val awaited = runCatching {
-            withTimeoutOrNull(NOTIFICATION_READY_TIMEOUT_MS) { awaitNotifications(device.address) }
+            withTimeoutOrNull(notificationReadyTimeoutMs) { awaitNotifications(device.address) }
         }
         if (awaited.isFailure) {
             Log.i(TAG, "Connection to ${device.address} closed while waiting to send; dropping response")

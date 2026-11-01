@@ -56,7 +56,7 @@ import org.junit.runners.Parameterized
  *   frame is answered; `*E` sends it on that enable, not before.
  *
  * A row with no `*` drops the acknowledgement: at the disconnect when it has
- * one after `I`, otherwise when the five-second wait expires.
+ * one after `I`, otherwise when the notification-ready wait expires.
  *
  * The rule: the acknowledgement goes out the first moment, within the wait,
  * that the latest CCCD write of the frame's connection is an enable, and
@@ -72,17 +72,23 @@ class GattServerCccdOrderTest(private val row: String) {
         private const val MTU = 247
         private const val TIMEOUT_MS = 5_000L
 
-        // GattServer.NOTIFICATION_READY_TIMEOUT_MS.
-        private const val NOTIFICATION_READY_TIMEOUT_MS = 5_000L
+        // The notification-ready wait this test gives the server, in place of
+        // the production five seconds, so a row that waits it out costs
+        // 0.6 s.
+        private const val NOTIFICATION_READY_TIMEOUT_MS = 600L
 
-        // Well inside the five-second wait, so what happens in it was not
-        // caused by the wait expiring.
-        private const val PROMPTLY_MS = 2_000L
+        // Well inside the wait, so what happens in it was not caused by the
+        // wait expiring: a row's releasing write or disconnect comes at most
+        // three settles after the frame, which leaves the wait more than
+        // 400 ms.
+        private const val PROMPTLY_MS = 300L
 
         // Long enough for the consumer to reach the wait, and for a send that
         // was released to have gone out. The spacing is the row itself: the
         // waiting send must see each CCCD write before the next one lands.
-        private const val SETTLE_MS = 300L
+        // Four settles, the most a row spends after the frame, stay inside
+        // the wait.
+        private const val SETTLE_MS = 50L
 
         private val ENABLE = byteArrayOf(0x01, 0x00)
         private val DISABLE = byteArrayOf(0x00, 0x00)
@@ -210,6 +216,7 @@ class GattServerCccdOrderTest(private val row: String) {
             mockk<RequestHandler>(relaxed = true),
             pairingCallback = mockk(),
             pairedDeviceRepository = PairedDeviceRepository(InMemorySharedPreferences()),
+            notificationReadyTimeoutMs = NOTIFICATION_READY_TIMEOUT_MS,
         )
         setField("gattServer", gatt)
         setField("responseCharacteristic", response)
