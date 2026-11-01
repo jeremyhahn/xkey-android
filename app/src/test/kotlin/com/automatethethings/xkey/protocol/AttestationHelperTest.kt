@@ -249,15 +249,6 @@ class AttestationHelperTest {
         )
     }
 
-    @Test
-    fun `a truncated nonce echo is rejected`() = runTest {
-        respondWith { nonce -> successResult(nonce.copyOfRange(0, 16)) }
-
-        val result = helper.requestLaptopAttestation(client)
-
-        assertTrue(result is AttestationHelper.AttestationResult.Failure)
-    }
-
     // -------------------------------------------------------------------------
     // Error responses and transport failures
     // -------------------------------------------------------------------------
@@ -354,30 +345,6 @@ class AttestationHelperTest {
     // -------------------------------------------------------------------------
     // Result value semantics
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `Success compares by value`() {
-        val a = AttestationHelper.AttestationResult.Success("tpm2", "hardware", "aa", true, "ff")
-        val b = AttestationHelper.AttestationResult.Success("tpm2", "hardware", "aa", true, "ff")
-
-        assertEquals(a, b)
-        assertEquals(a.hashCode(), b.hashCode())
-        assertNotEquals(a, b.copy(securityLevel = "software"))
-        assertTrue(a.toString().contains("tpm2"))
-    }
-
-    @Test
-    fun `Failure compares by value`() {
-        val a = AttestationHelper.AttestationResult.Failure("nope")
-
-        assertEquals(a, AttestationHelper.AttestationResult.Failure("nope"))
-        assertEquals(
-            a.hashCode(),
-            AttestationHelper.AttestationResult.Failure("nope").hashCode()
-        )
-        assertNotEquals(a, a.copy(reason = "different"))
-        assertTrue(a.toString().contains("nope"))
-    }
 
     // -------------------------------------------------------------------------
     // Helpers

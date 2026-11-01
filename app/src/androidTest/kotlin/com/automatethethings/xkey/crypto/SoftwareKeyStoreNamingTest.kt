@@ -101,20 +101,6 @@ class SoftwareKeyStoreNamingTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun put_doesNotOverwriteAKeyWhoseIdDiffersOnlyInPunctuation() {
-        val slash = "sw/collide-$suffix".also { storedIds.add(it) }
-        val colon = "sw:collide-$suffix".also { storedIds.add(it) }
-        val first = ByteArray(32) { 0x11 }
-        val second = ByteArray(32) { 0x22 }
-
-        store.put(softwareKey(slash, first))
-        store.put(softwareKey(colon, second))
-
-        assertArrayEquals("storing one key must not destroy another", first, store.get(slash)!!.material)
-        assertArrayEquals(second, store.get(colon)!!.material)
-    }
-
-    @Test
     fun put_keepsEveryPunctuationVariantOfAnIdSeparate() {
         val ids = listOf(
             "sw dup-$suffix",

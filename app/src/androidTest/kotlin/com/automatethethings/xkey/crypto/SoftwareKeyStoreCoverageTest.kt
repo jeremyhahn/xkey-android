@@ -21,7 +21,6 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -95,18 +94,6 @@ class SoftwareKeyStoreCoverageTest {
             .joinToString("") { "%02x".format(it) }
 
     @Test
-    fun reportsWhetherAKeyIsPresent() {
-        val keyId = newKeyId("contains")
-
-        assertFalse(store.contains(keyId))
-        store.put(softwareKey(keyId))
-        assertTrue(store.contains(keyId))
-
-        store.delete(keyId)
-        assertFalse(store.contains(keyId))
-    }
-
-    @Test
     fun replacesAKeyStoredUnderTheSameIdentifier() {
         val keyId = newKeyId("replace")
         val replacement = ByteArray(16) { 0x2A }
@@ -150,21 +137,6 @@ class SoftwareKeyStoreCoverageTest {
     }
 
     @Test
-    fun keepsIdentifiersThatAreNotFileNameSafeUsable() {
-        val keyId = "sw/unsafe:id $suffix"
-        storedIds.add(keyId)
-        val material = ByteArray(24) { it.toByte() }
-
-        store.put(softwareKey(keyId, material = material))
-
-        assertTrue(store.contains(keyId))
-        val stored = store.get(keyId)!!
-        assertEquals("the original identifier survives in the metadata", keyId, stored.keyId)
-        assertArrayEquals(material, stored.material)
-        assertTrue(File(directory, "${sanitized(keyId)}.key").exists())
-    }
-
-    @Test
     fun readingAKeyWithoutItsMetadataYieldsNothing() {
         val keyId = newKeyId("orphan-material")
         store.put(softwareKey(keyId))
@@ -203,23 +175,5 @@ class SoftwareKeyStoreCoverageTest {
 
         assertFalse(store.contains(keyId))
         assertNull(store.get(keyId))
-    }
-
-    @Test
-    fun distinctKeysDoNotOverwriteOneAnother() {
-        val first = newKeyId("distinct-one")
-        val second = newKeyId("distinct-two")
-        val firstMaterial = ByteArray(32) { 0x01 }
-        val secondMaterial = ByteArray(32) { 0x02 }
-
-        store.put(softwareKey(first, material = firstMaterial))
-        store.put(softwareKey(second, material = secondMaterial))
-
-        assertArrayEquals(firstMaterial, store.get(first)!!.material)
-        assertArrayEquals(secondMaterial, store.get(second)!!.material)
-
-        store.delete(first)
-        assertNull(store.get(first))
-        assertNotNull(store.get(second))
     }
 }

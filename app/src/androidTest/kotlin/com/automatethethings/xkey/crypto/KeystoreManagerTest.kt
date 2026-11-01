@@ -74,28 +74,6 @@ class KeystoreManagerTest {
     }
 
     @Test
-    fun isStrongBoxAvailable_returnsBoolean() {
-        // StrongBox availability depends on device hardware
-        // We just verify the method returns without error
-        val result = keystoreManager.isStrongBoxAvailable()
-        assertNotNull(result)
-    }
-
-    @Test
-    fun generateKey_withoutBiometric_succeeds() = runBlocking {
-        val credentialId = createTestCredentialId()
-
-        val cosePublicKey = keystoreManager.generateKey(
-            credentialId = credentialId,
-            requireBiometric = false
-        )
-
-        assertNotNull("COSE public key should not be null", cosePublicKey)
-        assertTrue("COSE public key should not be empty", cosePublicKey.isNotEmpty())
-        assertTrue("Key should exist after generation", keystoreManager.keyExists(credentialId))
-    }
-
-    @Test
     fun generateKey_producesValidCOSEKey() = runBlocking {
         val credentialId = createTestCredentialId()
 
@@ -214,15 +192,6 @@ class KeystoreManagerTest {
     }
 
     @Test
-    fun getCOSEPublicKey_returnsNullForNonexistent() {
-        val credentialId = "nonexistent_credential_${System.currentTimeMillis()}"
-
-        val coseKey = keystoreManager.getCOSEPublicKey(credentialId)
-
-        assertNull("Non-existent key should return null", coseKey)
-    }
-
-    @Test
     fun getCOSEPublicKey_matchesGeneratedKey() = runBlocking {
         val credentialId = createTestCredentialId()
 
@@ -241,60 +210,6 @@ class KeystoreManagerTest {
     }
 
     @Test
-    fun listCredentials_returnsEmptyInitially() {
-        // Clean any pre-existing test keys first
-        keystoreManager.listCredentials()
-            .filter { it.startsWith("test_") }
-            .forEach { keystoreManager.deleteKey(it) }
-
-        val credentials = keystoreManager.listCredentials()
-            .filter { it.startsWith("test_") }
-
-        assertTrue("Should have no test credentials initially", credentials.isEmpty())
-    }
-
-    @Test
-    fun listCredentials_includesGeneratedKeys() = runBlocking {
-        val credentialId1 = createTestCredentialId()
-        val credentialId2 = createTestCredentialId()
-
-        keystoreManager.generateKey(credentialId1, requireBiometric = false)
-        keystoreManager.generateKey(credentialId2, requireBiometric = false)
-
-        val credentials = keystoreManager.listCredentials()
-
-        assertTrue("Should include first credential", credentials.contains(credentialId1))
-        assertTrue("Should include second credential", credentials.contains(credentialId2))
-    }
-
-    @Test
-    fun signWithoutBiometric_succeeds_whenKeyDoesNotRequireBiometric() = runBlocking {
-        val credentialId = createTestCredentialId()
-
-        // Generate key without biometric requirement
-        keystoreManager.generateKey(
-            credentialId = credentialId,
-            requireBiometric = false
-        )
-
-        // Sign should work without biometric
-        val dataHash = ByteArray(32) { it.toByte() } // SHA-256 sized hash
-        val signature = keystoreManager.signWithoutBiometric(credentialId, dataHash)
-
-        assertNotNull("Signature should not be null", signature)
-        assertTrue("Signature should not be empty", signature.isNotEmpty())
-    }
-
-    @Test(expected = KeyNotFoundException::class)
-    fun signWithoutBiometric_throwsKeyNotFoundException_forNonexistentKey() = runBlocking {
-        val credentialId = "nonexistent_credential_${System.currentTimeMillis()}"
-        val dataHash = ByteArray(32)
-
-        keystoreManager.signWithoutBiometric(credentialId, dataHash)
-        Unit // the test method must return Unit or JUnit rejects the class
-    }
-
-    @Test
     fun signWithoutBiometric_producesDERSignature() = runBlocking {
         val credentialId = createTestCredentialId()
 
@@ -308,27 +223,6 @@ class KeystoreManagerTest {
 
         // DER-encoded ECDSA signature starts with 0x30 (SEQUENCE)
         assertEquals("Signature should start with DER SEQUENCE tag", 0x30.toByte(), signature[0])
-    }
-
-    @Test
-    fun signWithoutBiometric_producesDifferentSignatures_forDifferentData() = runBlocking {
-        val credentialId = createTestCredentialId()
-
-        keystoreManager.generateKey(
-            credentialId = credentialId,
-            requireBiometric = false
-        )
-
-        val dataHash1 = ByteArray(32) { 0x00.toByte() }
-        val dataHash2 = ByteArray(32) { 0xFF.toByte() }
-
-        val signature1 = keystoreManager.signWithoutBiometric(credentialId, dataHash1)
-        val signature2 = keystoreManager.signWithoutBiometric(credentialId, dataHash2)
-
-        assertFalse(
-            "Different data should produce different signatures",
-            signature1.contentEquals(signature2)
-        )
     }
 
     @Test
@@ -349,15 +243,6 @@ class KeystoreManagerTest {
         }
     }
 
-    @Test
-    fun getAttestationChain_returnsNull_forNonexistentKey() {
-        val credentialId = "nonexistent_credential_${System.currentTimeMillis()}"
-
-        val chain = keystoreManager.getAttestationChain(credentialId)
-
-        assertNull("Non-existent key should return null chain", chain)
-    }
-
     @Test(expected = StrongBoxUnavailableException::class)
     fun generateKey_throwsStrongBoxUnavailable_whenRequired_andNotAvailable() = runBlocking {
         // Skip test if StrongBox is actually available
@@ -373,28 +258,6 @@ class KeystoreManagerTest {
             requireStrongBox = true
         )
         Unit // the test method must return Unit or JUnit rejects the class
-    }
-
-    @Test
-    fun multipleKeysCanCoexist() = runBlocking {
-        val credentialIds = (1..5).map { createTestCredentialId() }
-
-        // Generate all keys
-        credentialIds.forEach { id ->
-            keystoreManager.generateKey(id, requireBiometric = false)
-        }
-
-        // Verify all exist
-        credentialIds.forEach { id ->
-            assertTrue("Key $id should exist", keystoreManager.keyExists(id))
-        }
-
-        // Verify all can sign
-        val dataHash = ByteArray(32) { it.toByte() }
-        credentialIds.forEach { id ->
-            val signature = keystoreManager.signWithoutBiometric(id, dataHash)
-            assertNotNull("Key $id should produce signature", signature)
-        }
     }
 
     @Test

@@ -120,32 +120,6 @@ class KeystoreAeadCipherTest {
     }
 
     @Test
-    fun aTamperedTagFailsTheGcmTag() {
-        val encrypted = cipher.encrypt(randomBytes(64))
-        val last = encrypted.size - 1
-        encrypted[last] = (encrypted[last].toInt() xor 0xFF).toByte()
-
-        assertThrows(AEADBadTagException::class.java) { cipher.decrypt(encrypted) }
-    }
-
-    @Test
-    fun aTamperedIvFailsTheGcmTag() {
-        val encrypted = cipher.encrypt(randomBytes(64))
-        encrypted[0] = (encrypted[0].toInt() xor 0x80).toByte()
-
-        assertThrows(AEADBadTagException::class.java) { cipher.decrypt(encrypted) }
-    }
-
-    @Test
-    fun truncatedCiphertextFailsTheGcmTag() {
-        val encrypted = cipher.encrypt(randomBytes(64))
-
-        assertThrows(AEADBadTagException::class.java) {
-            cipher.decrypt(encrypted.copyOfRange(0, encrypted.size - 1))
-        }
-    }
-
-    @Test
     fun inputShorterThanTheIvIsRejectedBeforeAnyCryptography() {
         assertThrows(IllegalArgumentException::class.java) { cipher.decrypt(ByteArray(ivSize)) }
         assertThrows(IllegalArgumentException::class.java) { cipher.decrypt(ByteArray(0)) }

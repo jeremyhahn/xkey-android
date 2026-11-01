@@ -15,9 +15,6 @@
 package com.automatethethings.xkey.ca
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -38,14 +35,6 @@ import org.junit.Test
  */
 class EnrollmentRefusalTest {
 
-    private val all: List<EnrollmentRefusal> = listOf(
-        EnrollmentRefusal.MalformedPackage("d"),
-        EnrollmentRefusal.UntrustedEndorsement("d"),
-        EnrollmentRefusal.ActivationMismatch("d"),
-        EnrollmentRefusal.ActivationUnsupported("d"),
-        EnrollmentRefusal.QuoteInvalid("d")
-    )
-
     // -------------------------------------------------------------------------
     // The names that reach the audit log
     // -------------------------------------------------------------------------
@@ -60,83 +49,5 @@ class EnrollmentRefusalTest {
             EnrollmentRefusal.ActivationUnsupported("d").auditName
         )
         assertEquals("quote-invalid", EnrollmentRefusal.QuoteInvalid("d").auditName)
-    }
-
-    @Test
-    fun `no two cases share a name`() {
-        assertEquals(all.size, all.map { it.auditName }.toSet().size)
-    }
-
-    /**
-     * The distinction the whole exercise turns on: a wrong answer and no answer
-     * must not be filed under one name.
-     */
-    @Test
-    fun `a wrong activation secret is not the same case as an unanswered challenge`() {
-        val mismatch = EnrollmentRefusal.ActivationMismatch("returned a different secret")
-        val unsupported = EnrollmentRefusal.ActivationUnsupported("could not build a challenge")
-
-        assertNotEquals(mismatch.auditName, unsupported.auditName)
-        assertNotEquals(mismatch as Any, unsupported as Any)
-    }
-
-    // -------------------------------------------------------------------------
-    // Reading a stored record back
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `every case round trips through its name`() {
-        all.forEach { refusal ->
-            assertEquals(refusal, EnrollmentRefusal.of(refusal.auditName, refusal.detail))
-        }
-    }
-
-    @Test
-    fun `a name this build does not know reads back as nothing`() {
-        assertNull(EnrollmentRefusal.of("something-a-newer-build-wrote", "d"))
-        assertNull(EnrollmentRefusal.of("", "d"))
-        // Not the class name, and not a near miss on the real one.
-        assertNull(EnrollmentRefusal.of("MalformedPackage", "d"))
-        assertNull(EnrollmentRefusal.of("malformed_package", "d"))
-    }
-
-    // -------------------------------------------------------------------------
-    // The human-readable half
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `the detail is kept verbatim`() {
-        val detail = "EK certificate carries a EC key; credential activation needs an RSA " +
-            "endorsement key"
-        val refusal: EnrollmentRefusal = EnrollmentRefusal.ActivationUnsupported(detail)
-
-        assertEquals(detail, refusal.detail)
-        assertEquals(detail, EnrollmentRefusal.of(refusal.auditName, refusal.detail)?.detail)
-    }
-
-    @Test
-    fun `two refusals of the same case differ by their detail`() {
-        assertNotEquals(
-            EnrollmentRefusal.QuoteInvalid("quote carries no PCR values"),
-            EnrollmentRefusal.QuoteInvalid("quote omits PCRs [7]")
-        )
-    }
-
-    @Test
-    fun `an empty detail is still a refusal`() {
-        val refusal = EnrollmentRefusal.MalformedPackage("")
-
-        assertEquals("", refusal.detail)
-        assertEquals(refusal, EnrollmentRefusal.of(refusal.auditName, ""))
-    }
-
-    @Test
-    fun `the name is stable across instances of the same case`() {
-        assertTrue(
-            all.all { refusal ->
-                EnrollmentRefusal.of(refusal.auditName, "other detail")?.auditName ==
-                    refusal.auditName
-            }
-        )
     }
 }

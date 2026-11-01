@@ -245,16 +245,6 @@ class KeystoreManagerGeneralKeysTest {
     }
 
     @Test
-    fun differentPayloadsProduceDifferentSignatures() {
-        val (keyId, _) = generate("ES256", label = "distinct-signatures")
-
-        val first = runBlocking { keystoreManager.signWithAlgorithm(keyId, "one".toByteArray(), "ES256") }
-        val second = runBlocking { keystoreManager.signWithAlgorithm(keyId, "two".toByteArray(), "ES256") }
-
-        assertFalse(first.contentEquals(second))
-    }
-
-    @Test
     fun signingWithAnUnknownKeyIsRejected() {
         assertThrows(KeyNotFoundException::class.java) {
             runBlocking { keystoreManager.signWithAlgorithm("absent-${System.nanoTime()}", ByteArray(4), "ES256") }

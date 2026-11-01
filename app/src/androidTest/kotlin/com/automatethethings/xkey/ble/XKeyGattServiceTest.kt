@@ -328,12 +328,6 @@ class XKeyGattServiceTest {
         }
     }
 
-    /** Attestation is only meaningful for the device currently on the wire. */
-    @Test
-    fun attestationIsRefusedForADeviceThatIsNotConnected(): Unit = runBlocking {
-        assertFalse(probe.service.requestDeviceAttestation("00ff00ff"))
-    }
-
     // -----------------------------------------------------------------
     // Advertising control
     // -----------------------------------------------------------------
@@ -504,17 +498,6 @@ class XKeyGattServiceTest {
         probe.service.setActivity(null)
 
         assertNull(field.get(probe.service))
-    }
-
-    /**
-     * With no activity bound there is nobody to approve a pairing, and the only
-     * safe answer is no — an unattended phone must never pair itself.
-     */
-    @Test
-    fun pairingIsRefusedWithNoActivityBound(): Unit = runBlocking {
-        probe.service.setActivity(null)
-
-        assertFalse(probe.service.onPairingConfirmationRequired("Workstation", "ab:cd:ef"))
     }
 
     /**

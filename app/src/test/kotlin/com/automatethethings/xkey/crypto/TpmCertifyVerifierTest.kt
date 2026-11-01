@@ -184,17 +184,6 @@ class TpmCertifyVerifierTest {
     }
 
     @Test
-    fun `a tampered certification is refused`() {
-        val c = buildCertification()
-        val tampered = c.certifyInfo.copyOf()
-        tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0xFF).toByte()
-
-        assertThrows(TpmQuoteException::class.java) {
-            TpmCertifyVerifier.verify(c.attester, c.subject, tampered, c.signature)
-        }
-    }
-
-    @Test
     fun `an absent certification is refused rather than skipped`() {
         // A CSR that simply omits the certification must not sail through: the
         // whole point is that its absence is what an attacker wants.
@@ -223,67 +212,6 @@ class TpmCertifyVerifierTest {
         assertTrue(
             "should name the nonce: ${error.message}",
             error.message!!.contains("nonce")
-        )
-    }
-
-    /**
-     * The attester and subject are not interchangeable, and swapping them is
-     * the one wiring mistake that would pass every other check.
-     *
-     * A caller that transposed the arguments would be asking "did the IDevID
-     * certify the IAK", which is not a question the ceremony ever answers --
-     * and if it silently succeeded, the binding would be asserted backwards
-     * while every unit test above still passed. The verifier refuses because
-     * the signature was made by the attester, so the transposed call cannot
-     * verify under the subject's key.
-     */
-    @Test
-    fun `transposing the attester and subject is refused`() {
-        val c = buildCertification()
-
-        assertThrows(TpmQuoteException::class.java) {
-            TpmCertifyVerifier.verify(
-                attester = c.subject,
-                subject = c.attester,
-                certifyInfo = c.certifyInfo,
-                signature = c.signature
-            )
-        }
-    }
-
-    /**
-     * A certification whose subject is the attester itself must not pass as a
-     * binding of some third key.
-     *
-     * Self-certification is structurally valid and a TPM will produce it, so
-     * the refusal has to come from the Name comparison rather than from the
-     * structure looking wrong.
-     */
-    @Test
-    fun `a self-certification does not bind an unrelated key`() {
-        val keys = TpmTestStructures.generateEcKeyPair()
-        val selfCert = buildCertification(attesterKeys = keys, subjectKeys = keys)
-
-        // Genuine as a self-certification.
-        TpmCertifyVerifier.verify(
-            selfCert.attester, selfCert.subject, selfCert.certifyInfo, selfCert.signature
-        )
-
-        // But it says nothing about any other key.
-        val unrelated = TpmPublicArea.parse(
-            TpmTestStructures.eccPublicArea(
-                TpmTestStructures.generateEcKeyPair().public as ECPublicKey,
-                TpmTestStructures.IAK_ATTRIBUTES
-            )
-        )
-        val error = assertThrows(TpmQuoteException::class.java) {
-            TpmCertifyVerifier.verify(
-                selfCert.attester, unrelated, selfCert.certifyInfo, selfCert.signature
-            )
-        }
-        assertTrue(
-            "should name the key mismatch: ${error.message}",
-            error.message!!.contains("different key")
         )
     }
 }

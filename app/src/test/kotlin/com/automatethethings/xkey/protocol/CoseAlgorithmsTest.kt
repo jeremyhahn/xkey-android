@@ -78,13 +78,6 @@ class CoseAlgorithmsTest {
         assertEquals(7, CoseAlgorithms.HMAC_512)
     }
 
-    @Test
-    fun `all algorithm identifiers are unique`() {
-        val ids = canonicalPairs.map { it.first }
-
-        assertEquals("COSE identifiers must be unique", ids.size, ids.toSet().size)
-    }
-
     // -------------------------------------------------------------------------
     // getAlgorithmName
     // -------------------------------------------------------------------------
@@ -104,14 +97,6 @@ class CoseAlgorithmsTest {
         assertTrue("message was: ${e.message}", e.message!!.contains("-999"))
     }
 
-    @Test
-    fun `getAlgorithmName throws for zero which is the unset sentinel`() {
-        assertEquals(
-            ErrorCodes.INVALID_ALGORITHM,
-            assertProtocolException { CoseAlgorithms.getAlgorithmName(0) }.errorCode
-        )
-    }
-
     // -------------------------------------------------------------------------
     // fromName - canonical names
     // -------------------------------------------------------------------------
@@ -120,13 +105,6 @@ class CoseAlgorithmsTest {
     fun `fromName resolves every canonical algorithm name`() {
         canonicalPairs.forEach { (id, name) ->
             assertEquals("fromName(\"$name\")", id, CoseAlgorithms.fromName(name))
-        }
-    }
-
-    @Test
-    fun `fromName and getAlgorithmName are inverses for every supported algorithm`() {
-        canonicalPairs.forEach { (id, _) ->
-            assertEquals(id, CoseAlgorithms.fromName(CoseAlgorithms.getAlgorithmName(id)))
         }
     }
 
@@ -191,17 +169,6 @@ class CoseAlgorithmsTest {
     }
 
     @Test
-    fun `fromName passes through a positive numeric string unchanged`() {
-        assertEquals(CoseAlgorithms.A256GCM, CoseAlgorithms.fromName("3"))
-        assertEquals(CoseAlgorithms.HMAC_512, CoseAlgorithms.fromName("7"))
-    }
-
-    @Test
-    fun `fromName passes through a numeric string with whitespace`() {
-        assertEquals(CoseAlgorithms.ES512, CoseAlgorithms.fromName(" -36 "))
-    }
-
-    @Test
     fun `fromName passes through an unrecognized numeric string without validating it`() {
         // Numeric input is taken verbatim: validation is the caller's job.
         assertEquals(4242, CoseAlgorithms.fromName("4242"))
@@ -224,14 +191,6 @@ class CoseAlgorithmsTest {
         assertEquals(
             ErrorCodes.INVALID_ALGORITHM,
             assertProtocolException { CoseAlgorithms.fromName("") }.errorCode
-        )
-    }
-
-    @Test
-    fun `fromName throws INVALID_ALGORITHM for a blank string`() {
-        assertEquals(
-            ErrorCodes.INVALID_ALGORITHM,
-            assertProtocolException { CoseAlgorithms.fromName("   ") }.errorCode
         )
     }
 

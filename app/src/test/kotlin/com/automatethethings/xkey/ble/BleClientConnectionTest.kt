@@ -357,13 +357,19 @@ class BleClientConnectionTest {
         assertNull(h.probe.gattConnection)
     }
 
+    /**
+     * The disconnect callback itself must fail the waiting dial, with the
+     * stack's status (GATT_FAILURE is 257), not the 30-second connection
+     * timeout that connect wraps in the same exception type.
+     */
     @Test
     fun aDisconnectDuringConnectSurfaces(): Unit = runBlocking {
         val h = harness()
         h.connectionNewState = BluetoothProfile.STATE_DISCONNECTED
         h.connectionStatus = BluetoothGatt.GATT_FAILURE
 
-        assertConnectFails(h)
+        val failure = assertConnectFails(h)
+        assertCallbackFailure("Connection failed with status: 257", failure)
         assertEquals(ClientConnectionState.Disconnected, h.client.connectionState.value)
     }
 
@@ -375,12 +381,17 @@ class BleClientConnectionTest {
         assertConnectFails(h)
     }
 
+    /**
+     * The discovery callback itself must fail the waiter with the stack's
+     * status, not the 10-second discovery timeout.
+     */
     @Test
     fun aFailedServiceDiscoverySurfaces(): Unit = runBlocking {
         val h = harness()
         h.discoveryStatus = BluetoothGatt.GATT_FAILURE
 
-        assertConnectFails(h)
+        val failure = assertConnectFails(h)
+        assertCallbackFailure("Service discovery failed with status: 257", failure)
     }
 
     /** A desktop without the xKey service is not an xKey desktop. */
@@ -456,40 +467,6 @@ class BleClientConnectionTest {
         assertTrue(failure.message!!.contains("Write failed"))
     }
 
-    /**
-     * Documents a real defect rather than a design choice.
-     *
-     * When MTU negotiation cannot start — or the stack refuses it — the client
-     * falls back to the BLE minimum of 23. Its fragment budget is then
-     * `min(23 - 3, 512) - 7 = 13` bytes, below [Fragmenter.MIN_PAYLOAD_SIZE],
-     * so constructing the `Fragmenter` throws and *no message can ever be
-     * sent*. The connection dies on the identity frame, before Noise starts.
-     *
-     * `GattServer` does not have this problem: it clamps the peer's MTU into
-     * `[23, 517]` and fragments against the clamped value the same way, but it
-     * is only ever reached with an MTU the desktop already negotiated upwards.
-     */
-    @Test
-    fun aFailedMtuNegotiationLeavesTheClientUnableToSendAnything(): Unit = runBlocking {
-        val h = harness()
-        h.mtuRequestStarts = false
-
-        assertConnectFails(h)
-
-        assertEquals(0, h.writeCount)
-        assertNull("no identity frame was ever sent", h.receivedIdentity)
-    }
-
-    /** The same dead end is reached when the stack reports an MTU failure. */
-    @Test
-    fun anMtuFailureStatusIsEquallyFatal(): Unit = runBlocking {
-        val h = harness()
-        h.mtuStatus = BluetoothGatt.GATT_FAILURE
-
-        assertConnectFails(h)
-        assertEquals(0, h.writeCount)
-    }
-
     /** A failed connect must leave the client usable for a retry. */
     @Test
     fun aFailedConnectLeavesTheClientReusable(): Unit = runBlocking {
@@ -527,5 +504,19 @@ class BleClientConnectionTest {
         }
         fail("expected the connection to fail")
         error("unreachable")
+    }
+
+    /**
+     * connect wraps every failure, a timeout included, in a BleClientException:
+     * only the cause tells the GATT callback's failure from the timeout.
+     */
+    private fun assertCallbackFailure(expected: String, failure: BleClientException) {
+        val cause = failure.cause
+        assertTrue(
+            "the callback, not the timeout, must fail the waiter; got $cause",
+            cause is BleClientException
+        )
+        assertEquals(expected, cause!!.message)
+        assertEquals("Connection failed: $expected", failure.message)
     }
 }

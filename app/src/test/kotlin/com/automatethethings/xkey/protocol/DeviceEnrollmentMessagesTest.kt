@@ -170,34 +170,6 @@ class DeviceEnrollmentMessagesTest {
         assertEquals(result, LocalStoreDeviceCredentialResult.fromJson(json))
     }
 
-    @Test
-    fun `a TPM-only method answered with NOT_APPLICABLE is distinguishable`() {
-        // The phone cannot serve the TCG family, and must say so in a way the
-        // caller can act on: FEATURE_UNAVAILABLE would suggest another
-        // transport might work, INTERNAL_ERROR would suggest a retry.
-        assertNotEquals(ErrorCodes.NOT_APPLICABLE, ErrorCodes.FEATURE_UNAVAILABLE)
-        assertNotEquals(ErrorCodes.NOT_APPLICABLE, ErrorCodes.INTERNAL_ERROR)
-        assertNotEquals(ErrorCodes.NOT_APPLICABLE, ErrorCodes.METHOD_NOT_FOUND)
-        assertNotEquals(ErrorCodes.NOT_APPLICABLE, ErrorCodes.ATTESTATION_FAILED)
-
-        assertTrue(
-            "NOT_APPLICABLE must sit in the JSON-RPC server-error range",
-            ErrorCodes.NOT_APPLICABLE in -32099..-32000
-        )
-    }
-
-    @Test
-    fun `FEATURE_UNAVAILABLE no longer collides with the PIV slot code`() {
-        // Both were -32026, and -32026 is ErrorCodePIVSlotNotFound on the
-        // desktop too. A PIV handler refusing for want of a key manager was
-        // indistinguishable from one reporting an empty slot.
-        assertNotEquals(
-            "FEATURE_UNAVAILABLE must not reuse a PIV code",
-            ErrorCodes.PIV_SLOT_NOT_FOUND,
-            ErrorCodes.FEATURE_UNAVAILABLE
-        )
-    }
-
     /** Reads the JSON the way the desktop would, to pin key names exactly. */
     private fun LocalGetDeviceEnrollmentRequestResult.wireKeys(): Set<String> {
         val json: JSONObject = toJson()

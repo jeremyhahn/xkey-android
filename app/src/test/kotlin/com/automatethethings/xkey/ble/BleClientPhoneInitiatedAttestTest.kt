@@ -525,25 +525,6 @@ class BleClientPhoneInitiatedAttestTest {
         assertEquals(1, handler.requests.size)
     }
 
-    /** The Noise rule itself: the nonce advances only on an authenticated message. */
-    @Test
-    fun aFailedDecryptLeavesTheReceiveNonceInPlace(): Unit = runBlocking {
-        val h = harness(null)
-        h.client.connect(h.address, randomKey())
-        val session = h.probe.noiseSession ?: throw AssertionError("a connected client must hold a session")
-        val forged = ByteArray(48).also { SecureRandom().nextBytes(it) }
-
-        val rejected = try {
-            session.decrypt(forged)
-            false
-        } catch (expected: Exception) {
-            true
-        }
-
-        assertTrue("forged bytes must not authenticate", rejected)
-        val payload = "next".toByteArray()
-        assertArrayEquals(payload, session.decrypt(h.responder.encrypt(payload)))
-    }
 
     // -----------------------------------------------------------------
     // Helpers

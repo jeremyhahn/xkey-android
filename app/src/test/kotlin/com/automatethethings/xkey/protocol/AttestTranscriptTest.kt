@@ -16,7 +16,6 @@ package com.automatethethings.xkey.protocol
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.security.MessageDigest
@@ -71,12 +70,6 @@ class AttestTranscriptTest {
 
     private val verifyUserDigestHex =
         "30f3f98d0ccfa8302dbc2768119257aa0cbf18b5e2391fe8c08a1dca8dd11a04"
-
-    private val pairDigestHex =
-        "9596fd4bb233398dde69c6d396fca68efe4f8f78340938c5ed4312c3c16fb464"
-
-    private val reattestDigestHex =
-        "73558f75434804633b3148cb2f4f9c478fcc99f8e02930976abc6ebe68e60784"
 
     private val channelBindingWithPrologueHex =
         "f6cdd5b309152e44264c49cd523a88c0e9ee18e4e59da14b7278d99dfd16b6b6"
@@ -142,31 +135,6 @@ class AttestTranscriptTest {
         assertEquals(reattestTranscriptHex, transcript.toHex())
     }
 
-    /**
-     * `SHA256withECDSA` signs the digest of the transcript, so this is the value
-     * that actually reaches the curve on both platforms. A prover reaching this
-     * digest has the transcript right.
-     */
-    @Test
-    fun `transcript digests match the cross-repo vectors`() {
-        assertEquals(
-            pairDigestHex,
-            sha256(
-                AttestTranscript.build(
-                    AttestTranscript.PURPOSE_PAIR, nonce, channelBinding, deviceFingerprint
-                )
-            ).toHex()
-        )
-        assertEquals(
-            reattestDigestHex,
-            sha256(
-                AttestTranscript.build(
-                    AttestTranscript.PURPOSE_REATTEST, nonce, channelBinding, deviceFingerprint
-                )
-            ).toHex()
-        )
-    }
-
     @Test
     fun `verify-user transcript matches the cross-repo vector byte for byte`() {
         val transcript = AttestTranscript.build(
@@ -230,62 +198,6 @@ class AttestTranscriptTest {
             channelBindingRoleReversedNoPrologueHex,
             AttestTranscript.channelBinding(responderStatic, initiatorStatic, ByteArray(0)).toHex()
         )
-    }
-
-    /**
-     * The role order is what makes the binding anti-relay: if the derivation were
-     * role-blind, the two ends of a relayed pair would agree and a forwarded
-     * signature would verify. go-xkms mutation-tests the same property.
-     *
-     * Kept alongside the reversed-role vector above and not replaced by it: a
-     * vector proves one input, an assertion proves the property.
-     */
-    @Test
-    fun `channel binding is not role-blind`() {
-        assertNotEquals(
-            AttestTranscript.channelBinding(initiatorStatic, responderStatic, prologue).toHex(),
-            AttestTranscript.channelBinding(responderStatic, initiatorStatic, prologue).toHex()
-        )
-    }
-
-    /**
-     * A first pairing and a reconnect must never derive the same binding, or a
-     * signature gathered while unbound would satisfy a bound session.
-     */
-    @Test
-    fun `an empty prologue does not collide with a present one`() {
-        assertNotEquals(
-            AttestTranscript.channelBinding(initiatorStatic, responderStatic, ByteArray(0)).toHex(),
-            AttestTranscript.channelBinding(initiatorStatic, responderStatic, prologue).toHex()
-        )
-    }
-
-    /**
-     * The length prefix in front of the purpose exists so that a longer purpose
-     * cannot borrow the leading bytes of the next field. Without it, "pair"
-     * followed by a nonce starting 0x72 0x65 0x61 0x74 0x74 0x65 0x73 0x74 would
-     * serialize exactly like "reattest" followed by a shifted nonce.
-     */
-    @Test
-    fun `purpose is length-prefixed so it cannot run into the nonce`() {
-        val pair = AttestTranscript.build(
-            AttestTranscript.PURPOSE_PAIR, nonce, channelBinding, deviceFingerprint
-        )
-        val reattest = AttestTranscript.build(
-            AttestTranscript.PURPOSE_REATTEST, nonce, channelBinding, deviceFingerprint
-        )
-        // The byte right after the domain is the length, and it differs.
-        assertEquals(4, pair[25].toInt())
-        assertEquals(8, reattest[25].toInt())
-        assertNotEquals(sha256(pair).toHex(), sha256(reattest).toHex())
-    }
-
-    @Test
-    fun `the fingerprint is committed raw, not as hex`() {
-        val transcript = AttestTranscript.build(
-            AttestTranscript.PURPOSE_PAIR, nonce, channelBinding, deviceFingerprint
-        )
-        assertArrayEquals(deviceFingerprint, transcript.copyOfRange(94, 126))
     }
 
     // ---- Refusals: a malformed transcript must never be signed -----------

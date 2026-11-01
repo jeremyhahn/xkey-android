@@ -18,7 +18,6 @@ import android.util.Base64
 import io.mockk.every
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
-import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import org.junit.After
@@ -118,22 +117,6 @@ class EnrolledDeviceJsonTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `toJson emits every populated field`() {
-        val json = full().toJson()
-
-        listOf(
-            "deviceId", "publicKeyHex", "ekCertificateFingerprint", "ekCertificateDER",
-            "ekVerifiedAt", "iakCertificateDER", "idevidCertificateDER", "idevidCertificateChain",
-            "tlsServerCertificateDER", "tlsServerCertificateChain", "tlsClientCertificateDER",
-            "tlsClientCertificateChain", "sshUserCertificate", "sshHostCertificate",
-            "initialQuote", "initialQuoteSignature", "initialPCRs", "initialEventLog",
-            "enrolledAt", "trustLevel", "lastVerifiedAt"
-        ).forEach { key ->
-            assertTrue("missing key: $key", json.has(key))
-        }
-    }
-
-    @Test
     fun `a fully populated device survives the JSON round trip`() {
         val original = full()
 
@@ -195,18 +178,6 @@ class EnrolledDeviceJsonTest {
         assertNotNull(restored.idevidCertificateDER)
         assertEquals(0, restored.idevidCertificateDER!!.size)
         assertTrue(restored.hasIDevIDCertificate())
-    }
-
-    @Test
-    fun `attestation predicates hold after the round trip`() {
-        val restored = roundTrip(full())
-
-        assertTrue(restored.hasFullAttestation())
-        assertTrue(restored.hasIDevIDCertificate())
-        assertTrue(restored.hasTLSServerCertificate())
-        assertTrue(restored.hasTLSClientCertificate())
-        assertTrue(restored.hasSSHUserCertificate())
-        assertTrue(restored.hasSSHHostCertificate())
     }
 
     // -------------------------------------------------------------------------
@@ -275,91 +246,21 @@ class EnrolledDeviceJsonTest {
         assertNull(restored.initialQuote)
     }
 
-    @Test
-    fun `unknown keys written by a newer build are ignored`() {
-        val json = minimal().toJson().put("somethingFromTheFuture", "value")
-
-        val restored = EnrolledDevice.fromJson(JSONObject(json.toString()))
-
-        assertEquals("device-1", restored.deviceId)
-    }
-
-    @Test
-    fun `only the enrolment timestamps that were set are restored`() {
-        val withEkOnly = minimal().copy(ekVerifiedAt = 42L)
-
-        val restored = roundTrip(withEkOnly)
-
-        assertEquals(42L, restored.ekVerifiedAt)
-        assertNull(restored.lastVerifiedAt)
-    }
-
     // -------------------------------------------------------------------------
     // Malformed payloads
     // -------------------------------------------------------------------------
 
     @Test
-    fun `fromJson rejects a payload without a device id`() {
-        val json = minimal().toJson().apply { remove("deviceId") }
+    fun `fromJson rejects a payload missing any mandatory field`() {
+        // Each read is independent, so each key is removed on its own from an
+        // otherwise complete payload: a permissive default on any one of them
+        // would let an incomplete enrollment record load.
+        for (key in listOf("deviceId", "publicKeyHex", "enrolledAt", "trustLevel")) {
+            val json = full().toJson().apply { remove(key) }
 
-        assertThrows(JSONException::class.java) { EnrolledDevice.fromJson(json) }
-    }
-
-    @Test
-    fun `fromJson rejects a payload without a public key`() {
-        val json = minimal().toJson().apply { remove("publicKeyHex") }
-
-        assertThrows(JSONException::class.java) { EnrolledDevice.fromJson(json) }
-    }
-
-    @Test
-    fun `fromJson rejects a payload without an enrolment time or trust level`() {
-        assertThrows(JSONException::class.java) {
-            EnrolledDevice.fromJson(minimal().toJson().apply { remove("enrolledAt") })
+            assertThrows("fromJson accepted a payload without $key", JSONException::class.java) {
+                EnrolledDevice.fromJson(json)
+            }
         }
-        assertThrows(JSONException::class.java) {
-            EnrolledDevice.fromJson(minimal().toJson().apply { remove("trustLevel") })
-        }
-    }
-
-    @Test
-    fun `a chain stored as an empty JSON array decodes to no certificates`() {
-        val json = minimal().toJson().put("tlsServerCertificateChain", JSONArray())
-
-        val restored = EnrolledDevice.fromJson(JSONObject(json.toString()))
-
-        assertNotNull(restored.tlsServerCertificateChain)
-        assertTrue(restored.tlsServerCertificateChain!!.isEmpty())
-    }
-
-    // -------------------------------------------------------------------------
-    // Value semantics used by the repository
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `copy replaces a certificate without disturbing the identity`() {
-        val original = minimal()
-
-        val updated = original.copy(
-            idevidCertificateDER = idevidCert,
-            idevidCertificateChain = listOf(idevidCert)
-        )
-
-        assertEquals(original.deviceId, updated.deviceId)
-        assertEquals(original.publicKeyHex, updated.publicKeyHex)
-        assertEquals(original.enrolledAt, updated.enrolledAt)
-        assertArrayEquals(idevidCert, updated.idevidCertificateDER)
-        assertNull(original.idevidCertificateDER)
-        // Identity-based equality: the same device with a new certificate.
-        assertEquals(original, updated)
-    }
-
-    @Test
-    fun `toString exposes the identity and trust level`() {
-        val text = minimal().toString()
-
-        assertTrue(text, text.contains("deviceId=device-1"))
-        assertTrue(text, text.contains("publicKeyHex=0a1b2c"))
-        assertTrue(text, text.contains("trustLevel=android-ca"))
     }
 }

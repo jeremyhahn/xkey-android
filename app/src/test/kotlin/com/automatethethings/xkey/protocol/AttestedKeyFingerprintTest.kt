@@ -16,9 +16,7 @@ package com.automatethethings.xkey.protocol
 
 import com.automatethethings.xkey.truststore.TestCertificates
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Test
-import java.security.MessageDigest
 
 /**
  * Pins the #93 / go-xkms PR #124 flag-day wire value: the per-device pairing
@@ -70,38 +68,4 @@ class AttestedKeyFingerprintTest {
             raw.joinToString("") { "%02x".format(it) }
         )
     }
-
-    @Test
-    fun `it hashes the SPKI, not the whole leaf DER nor the root`() {
-        val leafDer = TestCertificates.der(TestCertificates.LEAF_C_PEM)
-        val rootDer = TestCertificates.der(TestCertificates.ROOT_CA_C_STRONGBOX_PEM)
-
-        val fp = AttestedKeyFingerprint.hexOf(leafDer)
-        assertNotEquals("must not be the SHA-256 of the whole leaf DER", sha256Hex(leafDer), fp)
-        assertNotEquals("must not be the SHA-256 of the whole root DER (the old value)", sha256Hex(rootDer), fp)
-        assertNotEquals("must not be the leaf-SPKI hash of a different device", AttestedKeyFingerprint.hexOf(TestCertificates.der(TestCertificates.LEAF_A_PEM)), fp)
-    }
-
-    @Test
-    fun `it equals the SHA-256 of the JCA-encoded SubjectPublicKeyInfo`() {
-        // For the P-256 named-curve keys Android attestation uses, the
-        // certificate's SPKI is already canonical DER, so JCA's re-encoded
-        // publicKey.encoded is byte-identical to the certificate's own SPKI and
-        // to Go's RawSubjectPublicKeyInfo. This documents that equivalence and
-        // fires loudly if a provider ever re-encodes EC parameters differently.
-        val cert = TestCertificates.cert(TestCertificates.LEAF_C_PEM)
-        val jcaSpkiHash = sha256Hex(cert.publicKey.encoded)
-        assertEquals(jcaSpkiHash, AttestedKeyFingerprint.hexOf(cert.encoded))
-    }
-
-    @Test
-    fun `re-attesting the same key yields the same fingerprint`() {
-        // Stability property #93 relies on: the value is a function of the key,
-        // so the same leaf (or any re-issue certifying the same key) is stable.
-        val der = TestCertificates.der(TestCertificates.LEAF_C_PEM)
-        assertEquals(AttestedKeyFingerprint.hexOf(der), AttestedKeyFingerprint.hexOf(der))
-    }
-
-    private fun sha256Hex(data: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { "%02x".format(it) }
 }

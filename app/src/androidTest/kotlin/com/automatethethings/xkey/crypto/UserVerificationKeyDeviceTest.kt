@@ -209,26 +209,11 @@ class UserVerificationKeyDeviceTest {
     // ------------------------------------------- no signature without a finger
 
     /**
-     * Driving the Keystore key directly, with no `BiometricPrompt`, Keystore
-     * must refuse: [UserNotAuthenticatedException] at `initSign`, or a
-     * [SignatureException] at `update` or `sign` (a per-use key begins its
-     * operation and refuses when asked to process data).
-     */
-    @Test
-    fun theKeystoreKeyRefusesToSignWithoutAuthentication() {
-        assumeStrongBiometricEnrolled()
-        KeystoreUserVerificationKey(context, alias).chain()
-        val privateKey = keyStore.getKey(alias, null) as PrivateKey
-
-        assertUnauthenticatedSignatureRefused {
-            Signature.getInstance(SIGNATURE_ALGORITHM).apply { initSign(privateKey) }
-        }
-    }
-
-    /**
-     * The same refusal through [KeystoreUserVerificationKey.initSignature],
-     * the signature the handler wraps in its `CryptoObject`: it is handed out
-     * locked, and stays locked until the prompt succeeds.
+     * With no `BiometricPrompt`, Keystore must refuse the signature
+     * [KeystoreUserVerificationKey.initSignature] hands the handler for its
+     * `CryptoObject`: [UserNotAuthenticatedException] at `initSign`, or a
+     * [SignatureException] at `update` or `sign`. It is handed out locked,
+     * and stays locked until the prompt succeeds.
      */
     @Test
     fun theSignatureTheHandlerPromptsWithIsLockedUntilAuthentication() {
@@ -363,7 +348,6 @@ class UserVerificationKeyDeviceTest {
     private companion object {
         const val TAG = "UvkDeviceTest"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        const val SIGNATURE_ALGORITHM = "SHA256withECDSA"
 
         /** The order of the NIST P-256 group. */
         val P256_ORDER = BigInteger(

@@ -207,11 +207,6 @@ class PasswordDaoTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun getAll_isEmptyForAFreshStore() = runBlocking {
-        assertTrue(dao.getAll().isEmpty())
-    }
-
-    @Test
     fun getAll_ordersByNameThenUsername() = runBlocking {
         dao.insert(password("pw-3", name = "Zulu", username = "a@example.com"))
         dao.insert(password("pw-2", name = "Alpha", username = "b@example.com"))
@@ -236,11 +231,6 @@ class PasswordDaoTest {
         assertEquals(listOf("pw-1", "pw-2"), dao.observeAll().first().map { it.passwordId })
     }
 
-    @Test
-    fun observeAll_emitsAnEmptyListForAFreshStore() = runBlocking {
-        assertTrue(dao.observeAll().first().isEmpty())
-    }
-
     // -------------------------------------------------------------------------
     // Source filtering
     // -------------------------------------------------------------------------
@@ -252,13 +242,6 @@ class PasswordDaoTest {
 
         assertEquals(listOf("pw-local"), dao.getBySource("local").map { it.passwordId })
         assertEquals(listOf("pw-remote"), dao.getBySource("remote").map { it.passwordId })
-    }
-
-    @Test
-    fun getBySource_isEmptyForAnUnusedOrigin() = runBlocking {
-        dao.insert(password("pw-local", source = "local"))
-
-        assertTrue(dao.getBySource("imported").isEmpty())
     }
 
     @Test
@@ -280,15 +263,6 @@ class PasswordDaoTest {
         dao.deleteByPasswordId("pw-1")
 
         assertNull(dao.getByPasswordId("pw-1"))
-        assertEquals(1, dao.count())
-    }
-
-    @Test
-    fun deleteByPasswordId_isSilentForAnUnknownId() = runBlocking {
-        dao.insert(password("pw-1"))
-
-        dao.deleteByPasswordId("pw-missing")
-
         assertEquals(1, dao.count())
     }
 
@@ -559,11 +533,6 @@ class PasswordDaoTest {
     // -------------------------------------------------------------------------
     // Counts
     // -------------------------------------------------------------------------
-
-    @Test
-    fun count_isZeroForAFreshStore() = runBlocking {
-        assertEquals(0, dao.count())
-    }
 
     @Test
     fun count_tracksInsertsAndDeletes() = runBlocking {

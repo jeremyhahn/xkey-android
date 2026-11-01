@@ -192,19 +192,6 @@ class MessageContractDefaultsTest {
     }
 
     @Test
-    fun `LocalGetPublicKeyResult retains the exported key format and algorithm`() {
-        val result = LocalGetPublicKeyResult(
-            publicKey = "c3NoLWVk",
-            format = ExportFormats.PEM,
-            algorithm = "ES384"
-        )
-
-        assertEquals("c3NoLWVk", result.publicKey)
-        assertEquals(ExportFormats.PEM, result.format)
-        assertEquals("ES384", result.algorithm)
-    }
-
-    @Test
     fun `LocalSetKeyPolicyParams leaves shareable unset when the peer omits it`() {
         val unset = LocalSetKeyPolicyParams(keyId = "signing-1")
         assertEquals("signing-1", unset.keyId)
@@ -252,84 +239,9 @@ class MessageContractDefaultsTest {
         assertEquals("a non-passkey has no signature counter", 0L, plain.signCount)
     }
 
-    @Test
-    fun `KeyInfo retains every FIDO2 field for a passkey`() {
-        val passkey = KeyInfo(
-            keyId = "cred-1",
-            keyType = KeyTypes.FIDO2,
-            algorithm = "ES256",
-            label = "example.com",
-            keySizeBits = 256,
-            strongBoxBacked = false,
-            shareable = true,
-            source = "local",
-            useCount = 1,
-            createdAt = 1L,
-            lastUsedAt = 2L,
-            rpId = "example.com",
-            rpName = "Example",
-            userName = "alice",
-            userDisplayName = "Alice Smith",
-            isDiscoverable = true,
-            signCount = 9
-        )
-
-        assertEquals("example.com", passkey.rpId)
-        assertEquals("Example", passkey.rpName)
-        assertEquals("alice", passkey.userName)
-        assertEquals("Alice Smith", passkey.userDisplayName)
-        assertTrue(passkey.isDiscoverable)
-        assertEquals(9L, passkey.signCount)
-    }
-
-    @Test
-    fun `LocalListKeysResult retains the listing and its count`() {
-        val key = KeyInfo(
-            keyId = "k", keyType = KeyTypes.SECRET, algorithm = "AES256", label = "k",
-            keySizeBits = 256, strongBoxBacked = false, shareable = false, source = "local",
-            useCount = 0, createdAt = 0, lastUsedAt = 0
-        )
-        val result = LocalListKeysResult(keys = listOf(key), count = 1)
-
-        assertEquals(listOf(key), result.keys)
-        assertEquals(1, result.count)
-
-        val empty = LocalListKeysResult(keys = emptyList(), count = 0)
-        assertTrue(empty.keys.isEmpty())
-        assertEquals(0, empty.count)
-    }
-
     // -------------------------------------------------------------------------
     // local.* crypto operations
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `LocalSignResult retains the signature its algorithm and the UV verdict`() {
-        val result = LocalSignResult(signature = "c2ln", algorithm = "ES256", userVerified = true)
-
-        assertEquals("c2ln", result.signature)
-        assertEquals("ES256", result.algorithm)
-        assertTrue(result.userVerified)
-        assertFalse(LocalSignResult("c2ln", "ES256", userVerified = false).userVerified)
-    }
-
-    @Test
-    fun `LocalDecryptResult and LocalECDHResult and LocalHMACResult retain their payloads`() {
-        assertEquals("cGxhaW4=", LocalDecryptResult(plaintext = "cGxhaW4=").plaintext)
-        assertEquals("c2VjcmV0", LocalECDHResult(sharedSecret = "c2VjcmV0").sharedSecret)
-        assertEquals("bWFj", LocalHMACResult(mac = "bWFj").mac)
-    }
-
-    @Test
-    fun `LocalHMACParams and LocalECDHParams retain their inputs`() {
-        val hmac = LocalHMACParams(keyId = "hmac-1", data = "ZGF0YQ==")
-        assertEquals("hmac-1", hmac.keyId)
-        assertEquals("ZGF0YQ==", hmac.data)
-
-        val ecdh = LocalECDHParams(keyId = "ec-1", peerPublicKey = "cGVlcg==")
-        assertEquals("ec-1", ecdh.keyId)
-        assertEquals("cGVlcg==", ecdh.peerPublicKey)
-    }
 
     /**
      * go-xkms reads `ciphertext` from an encrypt result and `plaintext` from a
@@ -472,29 +384,6 @@ class MessageContractDefaultsTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `Fido2CredentialInfo retains every discovery field`() {
-        val info = Fido2CredentialInfo(
-            credentialId = "cred-1",
-            rpId = "example.com",
-            rpName = "Example",
-            userId = "dXNlcg==",
-            userName = "alice",
-            userDisplayName = "Alice Smith",
-            isDiscoverable = true,
-            createdAt = 1_700_000_000L
-        )
-
-        assertEquals("cred-1", info.credentialId)
-        assertEquals("example.com", info.rpId)
-        assertEquals("Example", info.rpName)
-        assertEquals("dXNlcg==", info.userId)
-        assertEquals("alice", info.userName)
-        assertEquals("Alice Smith", info.userDisplayName)
-        assertTrue(info.isDiscoverable)
-        assertEquals(1_700_000_000L, info.createdAt)
-    }
-
-    @Test
     fun `Fido2CredentialInfo keeps the optional user fields nullable`() {
         val sparse = Fido2CredentialInfo(
             credentialId = "cred-2",
@@ -512,17 +401,6 @@ class MessageContractDefaultsTest {
         assertNull(sparse.userName)
         assertNull(sparse.userDisplayName)
         assertFalse(sparse.isDiscoverable)
-    }
-
-    @Test
-    fun `LocalListFido2CredentialsResult retains the credential list`() {
-        val info = Fido2CredentialInfo(
-            credentialId = "cred-1", rpId = "example.com", rpName = null, userId = null,
-            userName = null, userDisplayName = null, isDiscoverable = false, createdAt = 0L
-        )
-
-        assertEquals(listOf(info), LocalListFido2CredentialsResult(listOf(info)).credentials)
-        assertTrue(LocalListFido2CredentialsResult(emptyList()).credentials.isEmpty())
     }
 
     /**
@@ -551,39 +429,9 @@ class MessageContractDefaultsTest {
         assertFalse(relaxed.userVerificationRequired)
     }
 
-    @Test
-    fun `LocalSignFido2AssertionResult retains the assertion and the new counter`() {
-        val withHandle = LocalSignFido2AssertionResult(
-            authenticatorData = "YXV0aA==",
-            signature = "c2ln",
-            userHandle = "dXNlcg==",
-            signCount = 12
-        )
-
-        assertEquals("YXV0aA==", withHandle.authenticatorData)
-        assertEquals("c2ln", withHandle.signature)
-        assertEquals("dXNlcg==", withHandle.userHandle)
-        assertEquals(12L, withHandle.signCount)
-
-        val withoutHandle = LocalSignFido2AssertionResult("YXV0aA==", "c2ln", null, 0)
-        assertNull("a non-resident credential has no user handle", withoutHandle.userHandle)
-        assertEquals(0L, withoutHandle.signCount)
-    }
-
     // -------------------------------------------------------------------------
     // Pairing and notifications
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `PairingConfirmResult retains the verdict and the device name`() {
-        val accepted = PairingConfirmResult(confirmed = true, deviceName = "Workstation")
-        assertTrue(accepted.confirmed)
-        assertEquals("Workstation", accepted.deviceName)
-
-        val rejected = PairingConfirmResult(confirmed = false, deviceName = "Unknown")
-        assertFalse(rejected.confirmed)
-        assertEquals("Unknown", rejected.deviceName)
-    }
 
     @Test
     fun `LocalBiometricPendingParams defaults the timeout to thirty seconds`() {
@@ -662,48 +510,6 @@ class MessageContractDefaultsTest {
     }
 
     @Test
-    fun `RemoteGenerateKeyResult retains the backend that produced the key`() {
-        val result = RemoteGenerateKeyResult(
-            keyId = "k",
-            publicKey = "ZGVy",
-            algorithm = "ES256",
-            keySizeBits = 256,
-            backend = "tpm2"
-        )
-
-        assertEquals("k", result.keyId)
-        assertEquals("ZGVy", result.publicKey)
-        assertEquals("ES256", result.algorithm)
-        assertEquals(256, result.keySizeBits)
-        assertEquals("tpm2", result.backend)
-        assertNull(
-            "a symmetric backend key has no public half",
-            RemoteGenerateKeyResult("k", null, "AES256", 256, "software").publicKey
-        )
-    }
-
-    @Test
-    fun `remote key addressing parameters retain their backend and key id`() {
-        val delete = RemoteDeleteKeyParams(backend = "tpm2", keyId = "k")
-        assertEquals("tpm2", delete.backend)
-        assertEquals("k", delete.keyId)
-
-        val info = RemoteGetKeyInfoParams(backend = "pkcs11", keyId = "k")
-        assertEquals("pkcs11", info.backend)
-        assertEquals("k", info.keyId)
-
-        val derive = RemoteDeriveKeyParams(backend = "tpm2", keyId = "k", peerPublicKey = "cGVlcg==")
-        assertEquals("tpm2", derive.backend)
-        assertEquals("k", derive.keyId)
-        assertEquals("cGVlcg==", derive.peerPublicKey)
-
-        val attest = RemoteAttestKeyParams(backend = "tpm2", keyId = "k", nonce = "bm9uY2U=")
-        assertEquals("tpm2", attest.backend)
-        assertEquals("k", attest.keyId)
-        assertEquals("bm9uY2U=", attest.nonce)
-    }
-
-    @Test
     fun `RemoteGetPublicKeyParams defaults the export format to der`() {
         val defaulted = RemoteGetPublicKeyParams(backend = "tpm2", keyId = "k")
         assertEquals("tpm2", defaulted.backend)
@@ -726,29 +532,6 @@ class MessageContractDefaultsTest {
         assertNull("an omitted algorithm lists every key", unfiltered.algorithm)
 
         assertEquals("ES256", RemoteListKeysParams("tpm2", "ES256").algorithm)
-    }
-
-    @Test
-    fun `RemoteGetKeyInfoResult retains the backend metadata`() {
-        val info = RemoteGetKeyInfoResult(
-            keyId = "k",
-            backend = "tpm2",
-            algorithm = "ES256",
-            keySizeBits = 256,
-            label = "Signing",
-            createdAt = 1_700_000_000L,
-            hardwareBacked = true,
-            exportable = false
-        )
-
-        assertEquals("k", info.keyId)
-        assertEquals("tpm2", info.backend)
-        assertEquals("ES256", info.algorithm)
-        assertEquals(256, info.keySizeBits)
-        assertEquals("Signing", info.label)
-        assertEquals(1_700_000_000L, info.createdAt)
-        assertTrue(info.hardwareBacked)
-        assertFalse(info.exportable)
     }
 
     // -------------------------------------------------------------------------

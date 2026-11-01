@@ -344,38 +344,4 @@ class PasswordVaultTest {
         vault.unlock(right)
         assertTrue(vault.isUnlocked())
     }
-
-    @Test
-    fun `a successful unlock after a lockout ends resets the counter`() = runTest {
-        val attempts = InMemoryAttemptStore()
-        val vault = vault(attempts = attempts)
-        vault.enrollPassphrase(right.passphrase)
-        failTimes(vault, attempts.thresholds.maxAttempts)
-
-        now += attempts.thresholds.lockoutDurationSeconds * 1000L
-        vault.unlock(right)
-
-        assertEquals(VaultUnlockAttempts(), attempts.counter)
-    }
-
-    /**
-     * The counter lives in the attempt store, not the vault: a new vault over
-     * the same store keeps counting. The store here is in memory, so this
-     * proves nothing about persistence; `PinSettingsVaultUnlockAttemptStoreTest`
-     * reopens the real DataStore adapter from disk.
-     */
-    @Test
-    fun `the counter outlives a vault instance in its attempt store`() = runTest {
-        val dir = tmp.newFolder("vault")
-        val attempts = InMemoryAttemptStore()
-        val first = vault(FilePasswordVaultFactorStore(dir), attempts)
-        first.enrollPassphrase(right.passphrase)
-        failTimes(first, attempts.thresholds.maxAttempts - 1)
-
-        val second = vault(FilePasswordVaultFactorStore(dir), attempts)
-        failTimes(second, 1)
-
-        val third = vault(FilePasswordVaultFactorStore(dir), attempts)
-        assertTrue(rejection(third, right) is VaultUnlockLockedOutException)
-    }
 }

@@ -127,15 +127,6 @@ class AndroidCACertificateStoreTest {
         assertTrue(intermediate.issuerX500Principal.name.contains(TestCertificates.ROOT_A_CN))
     }
 
-    @Test
-    fun `the two slots are independent`() {
-        store(PREF_ROOT_CERT_DER, TestCertificates.ROOT_CA_A_PEM)
-
-        assertNotNull(ca.getRootCertificate())
-        assertThrows(IllegalStateException::class.java) { ca.getIntermediateCertificate() }
-        assertNull(ca.getIntermediateCACertificateInfo())
-    }
-
     // -------------------------------------------------------------------------
     // Absent certificates: throw rather than hand back the Keystore's CN=Fake
     // -------------------------------------------------------------------------

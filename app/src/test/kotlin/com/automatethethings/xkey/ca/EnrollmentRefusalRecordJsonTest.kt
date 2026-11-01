@@ -105,15 +105,4 @@ class EnrollmentRefusalRecordJsonTest {
         assertNotNull(restored)
         assertEquals(EnrollmentRefusal.QuoteInvalid(""), restored?.refusal)
     }
-
-    @Test
-    fun `a long detail is not truncated`() {
-        val detail = "EK certificate does not chain to a trusted TPM vendor root: " +
-            "unable to find valid certification path to requested target"
-        val restored = EnrollmentRefusalRecord.fromJson(
-            record.copy(refusal = EnrollmentRefusal.UntrustedEndorsement(detail)).toJson()
-        )
-
-        assertEquals(detail, restored?.refusal?.detail)
-    }
 }

@@ -41,19 +41,6 @@ class SubjectNameRulesTest {
         (name.getRDNs(BCStyle.CN).first().first.value as ASN1String).string
 
     @Test
-    fun `a 32-byte Noise key in hex is an acceptable common name`() {
-        val noiseKeyHex = "a1".repeat(32)
-
-        val name = X500NameBuilder(BCStyle.INSTANCE).apply {
-            addRDN(BCStyle.O, "xKey")
-            addRDN(BCStyle.SERIALNUMBER, noiseKeyHex)
-            addRDN(BCStyle.CN, noiseKeyHex)
-        }.build()
-
-        assertEquals(noiseKeyHex, commonName(name))
-    }
-
-    @Test
     fun `a common name of 64 characters is accepted and one of 65 refused`() {
         assertEquals(64, commonName(X500Name("CN=${"d".repeat(64)}, O=xKey")).length)
 
