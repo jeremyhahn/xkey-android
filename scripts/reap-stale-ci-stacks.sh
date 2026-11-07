@@ -3,12 +3,12 @@
 #
 #   usage: scripts/reap-stale-ci-stacks.sh <prefix> [min-age-seconds]
 #
-# v1 (ci-template v1.18, 2026-10-12); v2 and v3 below. An integration job's
-# `if: always()` teardown runs only while the job process lives. When the host
-# or its Docker daemon dies mid-job, the job is gone and so is its teardown: the
-# compose stack stays behind, exited, with its networks and volumes (11 stacks
-# on core-01 and core-02 after the 2026-10-11/12 restarts). Nothing else
-# removes them, so the first step of every integration job runs this.
+# For a runner host that outlives its jobs (a self-hosted runner or a
+# developer machine); a GitHub-hosted runner is fresh per job and needs none
+# of it. An integration job's `if: always()` teardown runs only while the job
+# process lives. When the host or its Docker daemon dies mid-job, the job is
+# gone and so is its teardown: the compose stack stays behind, exited, with
+# its networks and volumes. Nothing else removes them.
 #
 # What it removes, on the Docker host the job talks to:
 #   - a compose project (label com.docker.compose.project) whose name starts
@@ -16,75 +16,62 @@
 #     networks and volumes (same label);
 #   - a container outside compose whose name starts with <prefix>, when stale,
 #     with its anonymous volumes.
-# v2 (ci-template v1.23, Company Agent m674 item 3, 2026-10-18; the go-qrdb
-# #814 pattern): images too. The integration image is named by its content,
-# <prefix>it:<hash> (`make -s it-image`, ci-standard.md §9), and every job and
-# run of that tree on this runner reuses it, so no job removes it. This
-# removes a <prefix>it image created at least REAP_IMAGE_MIN_AGE seconds ago,
-# default 7200 (2 h: the longest full-tier run plus headroom), so an image a
-# run still needs is not old enough. `docker image rm` without force refuses
-# an image a container (running or stopped) uses, so a live stack's image is
-# never removed. Age alone does not protect a reused image older than that,
-# so every job that needs the image holds a lease on it: a created, never
-# started container named <prefix>lease-<run>-..., removed at its Tear down
-# (ci.yml). A lease a dead job leaves is stale like any other container
-# outside compose, and goes after <min-age-seconds>; its image goes on the
-# reap after that.
-# v3 (ci-template v1.23.1, 2026-10-19): an image's age runs
-# from the later of its `.Created` and its last tag time
-# (`.Metadata.LastTagTime`). A rebuild from a full cache keeps the old
-# `.Created` but re-tags the image, so v2 saw a just-rebuilt image as stale and
-# a parallel job's reaper removed it between its build and its lease
-# (go-quicraft main runs 57389 and 57484).
-# CUSTOMIZE (xkey-android, Codex review 6544 on PR #40): the toolchain image
-# family too, and leases that expire.
-#   - REAP_IMAGE_REPOS (ci.yml: <repo>-toolchain, whose tags are <hash> and
+#   - images. The integration image is named by its content, <prefix>it:<hash>
+#     (`make -s it-image`), and every job and run of that tree on this host
+#     reuses it, so no job removes it. This removes a <prefix>it image idle
+#     for at least REAP_IMAGE_MIN_AGE seconds, default 7200 (2 h: the longest
+#     full-tier run plus headroom), so an image a run still needs is not old
+#     enough. `docker image rm` without force refuses an image a container
+#     (running or stopped) uses, so a live stack's image is never removed.
+#     A job may hold a lease on an image: a created, never started container
+#     named <prefix>lease-<run>-.... A lease a dead job leaves is stale like
+#     any other container outside compose, and goes after <min-age-seconds>;
+#     its image goes on the reap after that.
+#   - An image's age runs from the later of its `.Created` and its last tag
+#     time (`.Metadata.LastTagTime`). A rebuild from a full cache keeps the
+#     old `.Created` but re-tags the image, so creation time alone would make
+#     a just-rebuilt image look stale to a parallel job's reaper.
+#   - REAP_IMAGE_REPOS (<repo>-toolchain, whose tags are <hash> and
 #     pr-<hash>) names more image repositories to reap by the same rule as
 #     <prefix>it. Each family's untagged images go too: a trusted run builds
 #     fresh every time (Makefile IMAGE_FRESH), so its build moves the tag off
 #     the last one, which no tag lookup finds again. `make docker-build`
 #     labels every image ci.image.repository=<repository>, and an untagged
 #     image is reaped only under one of these names.
-#   - An image is removed only when no container uses it, checked by ID
-#     before the removal: `docker image rm <tag>` of an image with two tags
-#     (a pr- tag a run took from the trusted one) only untags it, even while a
-#     lease holds it. Its age runs from the later of its creation and its last
-#     tag, which a run's reuse of a tag moves (the Makefile re-tags it), so it
-#     is the image's last use: an image in use is kept, an idle one goes
-#     REAP_IMAGE_MIN_AGE after its last use. An old trusted tag is only a
-#     cache (no trusted run reuses it), so age is its only test.
+#   - An image is removed only when no container, running or created, uses
+#     its ID, checked before the removal: `docker image rm <tag>` of an image
+#     with two tags (a pr- tag a run took from the trusted one) only untags
+#     it, even while a lease holds it. A run's reuse of a tag moves its tag
+#     time (the Makefile re-tags it), so the age is the image's last use: an
+#     image in use is kept, an idle one goes REAP_IMAGE_MIN_AGE after its
+#     last use. An old trusted tag is only a cache (no trusted run reuses
+#     it), so age is its only test. The log line names the lease or stage
+#     that keeps an image.
 #   - A lease (any <prefix> container) may carry ci.lease.expires, a Unix
-#     time: past it, the lease is stale even before <min-age-seconds>. ci.yml
-#     sets the job timeout plus 5 min, so a cancelled job's lease stops
-#     holding its images then, and <min-age-seconds> still caps any lease.
-# v4 (ci-template v1.25.2): a tag is kept while any container, running or
-# created, uses its image id; `docker image rm <tag>` on an image with two tags
-# only untags it, even while a lease holds the id. CUSTOMIZE (xkey-android):
-# the in_use list (above) already did this by id, for every family, so v4 is
-# already here; its log line names the lease or stage that keeps the image.
-# v5 (ci-template v1.25.3): the image loop runs under the daemon's image lock,
-# so a job cannot take its lease between the reaper's in-use check and its
-# `docker image rm`. The lock is a created, never-started container named
-# <prefix>image-lock, from <prefix>image-lock:base (an empty image this script
-# imports when it is missing); the daemon refuses a second container of that
-# name, so there is one holder at a time. The ci.yml lease steps take the same
-# lock. A lock created more than 600 s ago is a dead holder's and is removed by
-# its id. The reaper waits up to REAP_LOCK_WAIT seconds (default 60) for it,
-# and without it removes no image that run. The in-use list is read after the
-# lock is taken. v5 also reads the tag time as a string: on Docker 29
-# `{{.Metadata.LastTagTime.Unix}}` is a template error, the inspect came back
-# without an id, and v3 and v4 then removed the tag whatever its age or
-# lease. An image the inspect gives no id for is now kept.
+#     time: past it, the lease is stale even before <min-age-seconds>.
+#   - The image loop runs under the daemon's image lock, so a job cannot take
+#     a lease between the reaper's in-use check and its `docker image rm`.
+#     The lock is a created, never-started container named
+#     <prefix>image-lock, from <prefix>image-lock:base (an empty image this
+#     script imports when it is missing); the daemon refuses a second
+#     container of that name, so there is one holder at a time. A lock
+#     created more than 600 s ago is a dead holder's and is removed by its
+#     id. The reaper waits up to REAP_LOCK_WAIT seconds (default 60) for it,
+#     and without it removes no image that run. The in-use list is read after
+#     the lock is taken. The tag time is read as a string: on Docker 29
+#     `{{.Metadata.LastTagTime.Unix}}` is a template error, and an inspect
+#     without an id would have removed the tag whatever its age or lease. An
+#     image the inspect gives no id for is kept.
 #
 # Stale: exited or dead and finished at least <min-age-seconds> ago, or
 # created and never started at least that long ago. A project with any
 # container running, paused, restarting or removing is never touched.
 #
-# <min-age-seconds> defaults to 11100: the runners' 3h job timeout plus 5 min,
+# <min-age-seconds> defaults to 11100: a 3 h job timeout plus 5 min,
 # so no job that could still own the stack is alive. Pass the job's own
 # timeout-minutes * 60 plus a margin only if you know every runner's timeout.
 #
-# The prefix is the repo's own (`qrdb-int`, `recountly-ci-`): the name the job
+# The prefix is the repo's own (`xkey-android-ci-`): the name the job
 # gives its compose project, without the run id. Never a prefix another repo's
 # projects could start with.
 #
@@ -104,7 +91,7 @@ image_min_age=${REAP_IMAGE_MIN_AGE:-7200}
 case $image_min_age in
   '' | *[!0-9]*) echo "REAP_IMAGE_MIN_AGE must be a number: $image_min_age" >&2; exit 2 ;;
 esac
-# CUSTOMIZE (xkey-android): the image families (above).
+# The image families (above).
 image_repos="${prefix}it ${REAP_IMAGE_REPOS:-}"
 for repo in ${REAP_IMAGE_REPOS:-}; do
   case $repo in
@@ -135,7 +122,7 @@ stale() {
     *) return 1 ;;
   esac
   t=$(date -d "$t" +%s 2>/dev/null) || return 1
-  # CUSTOMIZE (xkey-android): a lease past its expiry (above).
+  # A lease past its expiry (above).
   case $expires in
     '' | *[!0-9]*) ;;
     *) [ "$now" -lt "$expires" ] || return 0 ;;
@@ -143,7 +130,7 @@ stale() {
   [ $((now - t)) -ge "$min_age" ]
 }
 
-# image_lock: take the daemon's image lock (v5, above), waiting up to
+# image_lock: take the daemon's image lock (above), waiting up to
 # REAP_LOCK_WAIT seconds; 1 when it is not taken. image_unlock drops it.
 lock="${prefix}image-lock"
 lock_id=
@@ -208,8 +195,7 @@ docker ps -a --filter "name=^$prefix" \
     fi
   done
 
-# Content-addressed images (v2, above). CUSTOMIZE (xkey-android): every
-# family in image_repos, their untagged images, and the in-use check (above).
+# Content-addressed images (above): every family in image_repos, their untagged images, and the in-use check (above).
 images=0
 in_use=' '
 

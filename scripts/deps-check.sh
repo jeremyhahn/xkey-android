@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# The latest-version check, `make deps-check` (handbook ci-standard.md section 1,
-# devops.md section 9). Fails when a library or Gradle plugin is behind a release
+# The latest-version check, `make deps-check`. Fails when a library or Gradle plugin is behind a release
 # older than 7 days; reports, without failing, one younger than that.
 #
 #   usage: scripts/deps-check.sh               run Gradle, then evaluate
@@ -24,7 +23,7 @@
 # report, a repository that cannot be read, metadata without versions and a
 # release without a date all fail the check: nothing is passed unread.
 #
-# Exemptions (devops.md section 9: a pin held below latest carries its reason):
+# Exemptions (a pin held below latest carries its reason):
 # scripts/deps-check-exempt.txt, one line per library, '#' starts a comment:
 #
 #   group:name  reason, who decided, YYYY-MM-DD

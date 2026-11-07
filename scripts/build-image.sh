@@ -5,8 +5,8 @@
 #
 # The command is run with `-t <name> --iidfile <iidfile> .` appended.
 #
-# CUSTOMIZE (xkey-android): concurrent cold builds of one tag (main run 68429,
-# job 319235). `docker build -t <tag>` names the image as its last step, and
+# Concurrent cold builds of one tag: `docker build -t <tag>` names the image
+# as its last step, and
 # BuildKit's exporter names it by an update, then a create when the update
 # finds no such name. A change to an image's inputs is a tag no runner has, so
 # the jobs that build it at once on one daemon (image, lint-gates,
@@ -67,8 +67,7 @@ drop_name() {
 	[ "${keep}" = true ] || docker image rm "${name}" > /dev/null || echo "$0: could not remove the build's own name ${name}" >&2
 }
 
-# CUSTOMIZE (xkey-android): concurrent re-tags of one tag (main run 69069, job
-# 323125). The containerd image store re-tags a name as a delete, then a
+# Concurrent re-tags of one tag: the containerd image store re-tags a name as a delete, then a
 # create, so when two jobs re-tag <tag> at once the second create can fail
 # `image "<tag>": already exists`. Docker has no atomic re-tag, so that error
 # alone is retried, up to tag_tries tries with a jittered back-off (under 10 s

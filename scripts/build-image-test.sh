@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests concurrent cold builds of one image tag (main run 68429, job 319235):
+# Tests concurrent cold builds of one image tag:
 # the real `make docker-build-toolchain` and `make docker-build-it`, two at
 # once, against a stub docker whose build names its image the way BuildKit's
 # exporter does, an update and, when the name is missing, a create, with both
@@ -8,7 +8,7 @@
 # succeed; with IMAGE_FRESH=true each job's `make -s <kind>-image-id` is the
 # sha256: ID its own build wrote, still on the daemon, and the tag names one of
 # them; without it no build's own name stays behind; a failed build leaves the
-# tag alone; a final re-tag that collides with another job's (main run 69069)
+# tag alone; a final re-tag that collides with another job's
 # is retried, a bounded number of times, and no other error is. Needs bash and
 # make only. `make build-image-test`.
 set -euo pipefail
@@ -72,7 +72,7 @@ tag)
 	*) [ -e "$(f "${src}")" ] || exit 1; id=$(cat "$(f "${src}")") ;;
 	esac
 	# The first STUB_TAG_FAILS tries fail: STUB_TAG_ERR=exists as a concurrent
-	# re-tag's create does (run 69069), else as some other error.
+	# re-tag's create does, else as some other error.
 	echo "${dst}" >> "${S}/tagtries"
 	if [ "$(wc -l < "${S}/tagtries")" -le "${STUB_TAG_FAILS:-0}" ]; then
 		if [ "${STUB_TAG_ERR:-}" = exists ]; then
@@ -153,7 +153,7 @@ TC=$(make -s -C "${ROOT}" toolchain-image)
 IT=xkey-android-ci-it:test
 
 # The stub reproduces the race: two builds tagged alike, at once, and the
-# second create fails as job 319235 did.
+# second create fails with `already exists`.
 reset
 stub STUB_BUILDERS=2 docker build -t "${TC}" . > "${T}/out-a" 2>&1 & pa=$!
 stub STUB_BUILDERS=2 docker build -t "${TC}" . > "${T}/out-b" 2>&1 & pb=$!
@@ -208,8 +208,8 @@ for kind in toolchain it; do
 	check "${kind}: failed build: the tag is untouched" eq "$(tag_id "${tag}")" sha256:old
 done
 
-# ci-template v1.29: the Alpine index sum reaches the integration build alone,
-# and so does its CUSTOMIZE (xkey-android) Debian mirror, APT_INDEX_SUM.
+# The Alpine index sum reaches the integration build alone, and so does its
+# Debian counterpart, APT_INDEX_SUM.
 reset
 stub make -s -C "${ROOT}" docker-build-it IT_IMAGE="${IT}" APK_INDEX_SUM=sum1 APT_INDEX_SUM=aptsum1 > "${T}/out-a" 2>&1 || true
 stub make -s -C "${ROOT}" docker-build-toolchain APK_INDEX_SUM=sum1 APT_INDEX_SUM=aptsum1 > "${T}/out-b" 2>&1 || true
@@ -219,8 +219,8 @@ check "apk: the toolchain build ran" grep -q '^toolchain:' "${S}/buildargs"
 check "apt: the integration build takes APT_INDEX_SUM" grep -q '^integration:.* APT_INDEX_SUM=aptsum1' "${S}/buildargs"
 check "apt: the toolchain build does not" eq "$(grep -c '^toolchain:.*APT_INDEX_SUM' "${S}/buildargs" || true)" 0
 
-# The final re-tag against a concurrent re-tag of the same name (main run
-# 69069, job 323125): `already exists` is retried up to 5 tries, each pointing
+# The final re-tag against a concurrent re-tag of the same name:
+# `already exists` is retried up to 5 tries, each pointing
 # the tag at the job's own build; any other error fails at once. With and
 # without --keep-name, which alone decides whether the build's own name stays.
 # retag <fails> <exists|other> [--keep-name]: build-image.sh with the stub's

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# apt-index-sum: CUSTOMIZE (xkey-android) beside apk-index-sum.sh v1
-# (ci-template v1.29; Software comment 158438, ruling 223(13)) — one checksum
+# apt-index-sum: the Debian counterpart of apk-index-sum.sh — one checksum
 # of the Debian package index the devcontainer build resolves against.
 #
 # This repository's base is Debian (BASE_IMAGE in scripts/tool-pins.sh), so

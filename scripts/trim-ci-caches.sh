@@ -2,12 +2,12 @@
 # Bound the size of this repo's CI cache volumes on the runner host.
 #
 #   usage: scripts/trim-ci-caches.sh <prefix> <image> [max-gib]
-#   e.g.   scripts/trim-ci-caches.sh go-enclave-ci- "$TOOLCHAIN_IMAGE"
+#   e.g.   scripts/trim-ci-caches.sh xkey-android-ci- "$TOOLCHAIN_IMAGE"
 #
-# v1 (ci-template v1.22, Company Agent m616 item 2). in-toolchain-image.sh v2
-# keeps the build, golangci-lint and module caches in named volumes,
-# <prefix>cache-<class>-{gobuild,golangci,gomod}, on the Docker host the job
-# talks to (ci-standard.md §6). Go trims its build cache of entries unused for
+# in-toolchain-image.sh can keep the build, golangci-lint and module caches
+# in named volumes, <prefix>cache-<class>-{gobuild,golangci,gomod}, on the
+# Docker host the job talks to (this repository runs with CI_CACHE=off, so it
+# has none). Go trims its build cache of entries unused for
 # five days, but nothing trims the module cache, so the volumes would grow
 # without bound. This measures them and, while their total is over <max-gib>,
 # removes the largest one no container is using. A removed volume comes back

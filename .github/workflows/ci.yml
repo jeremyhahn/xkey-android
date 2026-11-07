@@ -1,452 +1,96 @@
-# ci-template: v1.29.2 (customized)
-# CUSTOMIZE (xkey-android): a Kotlin/Gradle Android app, not a Go module. The
-# stages run the Android targets in this repo's devcontainer images
-# (build/docker/devcontainer); every Go-only step is replaced or removed in a
-# CUSTOMIZE block below that says which and why. The template's changelog
-# follows unchanged.
-# CUSTOMIZE (xkey-android): every job runs on GitHub-hosted ubuntu-latest
-# (4 cores, 16 GB RAM, about 14 GB free on /, 6-hour job limit); no job picks
-# its runner by github.server_url. Each job that builds an image first frees
-# the disk the runner's preinstalled toolchains hold, and Gradle runs at most
-# 4 workers (gradle.properties). Every job fits one runner, so none is
-# sharded.
-# CUSTOMIZE (xkey-android, ruling 211, CA m1355, DS-3873): v1.27.0 adopted,
-# then v1.28.0 (ruling 220(3), DS-4023), customized as follows. Each version
-# is ported where it applies; the template's changelog below is unchanged.
-#   - v1.25.1 to v1.25.3: not applicable. Every job runs on a fresh
-#     GitHub-hosted runner whose Docker daemon no other job shares, so there
-#     is no image lease, no image lock and no reap step.
-#   - v1.25.4: already here (`types`, DS-3134).
-#   - v1.26: a draft PR runs no CI (`changes`, integration, arch-gates,
-#     lint-gates skip; image skips with `changes`; soak is dispatch and
-#     schedule only), and CI Gate fails on a draft.
-#   - v1.26.1: RELEASABILITY_TEST is a make target here and is empty: this
-#     repository has no releasability test, the hook and step stay.
-#   - v1.26.2: already here (DS-3465, #54), the literal cancel-in-progress.
-#   - v1.27.0: lint-gates job (toolchain image alone, no probe step, no
-#     GO_BUILD_TAGS), `make lint` is Android lint alone, in CI Gate as `pr`.
-#   - v1.28.0 (ruling 220(3), DS-4023, handbook 0d451ecf7): `make deps-check`
-#     runs on every event, a docs-only PR included, wherever `make lint`
-#     runs; it keeps IN_IMAGE_NETWORK=bridge. security and trivy image stay
-#     full tier. No needs or results line changes.
-#   - v1.29.0 part (a) (rulings 220(5), 221(4) and 222(5), DS-4075, handbook
-#     ae1ff84): "Read the Alpine package index" runs before each of the three
-#     "Name the integration image" steps (image, integration, soak; this
-#     repository's lint-gates job never names that image), and
-#     scripts/apk-index-sum.sh v1 ships unchanged. The base is Debian
-#     (BASE_IMAGE in scripts/tool-pins.sh), so APK_INDEX_SUM is the constant
-#     `none`: the Dockerfile declares no ARG APK_INDEX_SUM and runs no apk
-#     upgrade step (devcontainer.md §6). Its FROM names ${BASE_IMAGE}, which
-#     has no global ARG default, so each step sets APK_BASE_IMAGES from
-#     tool-pins.sh. image-tag.sh's `it` case hashes a non-empty sum, and
-#     docker-build-it alone takes it as --build-arg. CUSTOMIZE (xkey-android,
-#     Software comment 158438, ruling 223(13)): the Debian mirror. "Read the
-#     Debian package index" follows each Alpine step and runs
-#     scripts/apt-index-sum.sh into APT_INDEX_SUM, which image-tag.sh's `it`
-#     case hashes the same way and docker-build-it alone passes; the
-#     Dockerfile's `integration` stage declares ARG APT_INDEX_SUM and runs
-#     `apt-get upgrade`. scripts/image-tag-test.sh (lint-gates) gates the
-#     tag hashing (Codex review 7678). Part (b), the parallel stage jobs,
-#     waits for v1.30.
-#   - v1.29.1 (ruling 226(15), 108 repair; ruling 252, CA m1664 (e),
-#     DS-4492): the lint-gates job runs `make lint-gates` without `-k`, so the
-#     first failing gate ends the step. No other job change.
-#   - v1.29.2 (ruling 239(8); ruling 252): comments only. This repository has
-#     no path-gated CUSTOMIZE job (no job's `if:` reads `needs.changes.*`;
-#     the `docs_only` tests gate steps inside a job), so nothing is
-#     restructured; the comment block stands beside the image job's
-#     CUSTOMIZE note.
-# v1.29.2 (Company Agent ruling 239(8), 2026-10-28): comments only; no job,
-# gate or tier changes. A CUSTOMIZE job gated on a changes output (a path-gated
-# suite) needs the image job too and tests an output of the image job in its
-# `if:`. On a pull_request, an `if:` that reads only `needs.changes.result` or
-# only `needs.changes.outputs.*` left such a job skipped unstarted (two runs
-# in a row); one that also tests the image job's output started it. A
-# repository needs no adoption PR.
-# v1.29.1 (Company Agent ruling 226(15), 108 repair, 2026-10-27): lint fails
-# fast. The lint-gates job runs `make lint-gates` without `-k`, so the first
-# failing gate ends the step. Under `-k` make went on running the other gates
-# after one had failed: in go-quicbaas run 68949 Lint took 51.5 min, 37 of
-# them after the `go vet` failure. A red gate now reports as soon as it fails,
-# and the gates after it run on the next push. No other job, gate or tier
-# changes. A repository adopts v1.29.1 as a CI-file PR.
-# v1.29.0 (Company Agent ruling 220(5) and 221(4), 2026-10-27; handbook #474):
-# the Alpine package index checksum joins the integration image's tag hash.
-# Before v1.29 the tag hashed only the tree, so a tree whose files had not
-# changed kept its cached image after Alpine shipped a fix, and `trivy image`
-# stayed red on a fixed CVE until an unrelated file moved (go-enclave main
-# fd83b79ce, CVE-2026-92392, libcurl 8.23.0-r0). A new step, "Read the Alpine
-# package index", runs scripts/apk-index-sum.sh (v1, ships beside this file)
-# and puts its value in APK_INDEX_SUM. Every job that names the integration
-# image (image, lint-gates, integration, soak) runs it before "Name the
-# integration image", so none waits for the image job's serial stages. The
-# repository's `make -s it-image` hashes APK_INDEX_SUM, and `make
-# docker-build` passes it to the integration image's build as `--build-arg
-# APK_INDEX_SUM`. The Dockerfile's `integration` stage declares the ARG and
-# then, as root, runs `apk upgrade --no-cache`, so a new sum misses the cache
-# from that step on (ci-standard.md §9, devcontainer.md §6); `base` and
-# `toolchain` do not declare it. So a new Alpine package release changes the
-# tag and forces a rebuild, with the fixed package. A base image the script
-# cannot read fails the job: a missing index is never a pass. A repository
-# adopts v1.29 as one PR: this file, scripts/apk-index-sum.sh (in its
-# shellcheck list), the Makefile's APK_INDEX_SUM in it-image and docker-build,
-# and the Dockerfile's ARG and apk upgrade. A repository whose integration
-# image has no apk base gets `none`, a constant, so its tag changes only with
-# its tree. The parallel stage jobs move to v1.30: `runs-on` cannot take a
-# needs output on Gitea 1.27.1 (run 68501), and the registry-push question is
-# with the owner (169).
-# v1.28.0 (Company Agent ruling 219(3), 2026-10-26): `make deps-check` joins
-# the PR tier as a lint-class gate. Its step in the image job drops the
-# CI_FULL_TIER condition and runs on every event, as `make lint` does, so a
-# module behind its dependency floor fails the PR, not main after the merge
-# (go-objstore main 8946d5f53 went red on its push run for exactly this; fixed
-# by go-objstore #127). The step keeps IN_IMAGE_NETWORK=bridge for the module
-# proxy and runs in seconds; it stays on the full tier too. The image job is
-# already `pr` in CI Gate, so no needs or results line changes. A repository
-# adopts v1.28 as a CI-file PR; none hand-patches its ci.yml ahead of it.
-# v1.25 (Company Agent m857, 2026-10-20): main has one concurrency group per
-# event, so a newer push to main cancels the older in-progress main push run.
-# At 20:00Z go-qrdb had three main-push runs in progress on three commits and
-# 148 jobs waited fleet-wide. The main group is `main-{event}` (m774 option
-# (i), on go-qrdb main since m772), not the ref alone, so a workflow_dispatch
-# or schedule run on main never cancels a push run. This reverses v1.22.1 and
-# v1.23 (m636, m695): an older main commit no longer keeps its own run, and
-# the newest run validates every merge under it. cancel-in-progress stays a
-# literal `true`. A PR ref is one group, as before. Only the group changes.
-# v1.24.1 (2026-10-20): the changelog and comments cite no internal
-# repository and no internal issue number, so a repository that publishes its
-# workflows passes its releasability scan. One job change: the `changes`
-# job's diff takes --no-renames, so a file moved from code into docs/ lists
-# its old path too and the PR is not docs-only.
-# v1.24 (owner ruling 2026-10-19, Company Agent m749 and m751 (a), (e)):
-# a PR whose every changed file is markdown or under docs/ (DOCS_ONLY_PATTERN,
-# the new `changes` job) runs lint alone: build, the build-tag assertion and
-# make coverage skip. Soak moves off main pushes and ci:full to the nightly
-# schedule and workflow_dispatch, a `nightly` job in the Gate (ci-standard.md
-# §8, §10).
-# v1.23.1 (2026-10-19): ships reap-stale-ci-stacks.sh v3, which
-# ages an integration image from the later of its creation and its last tag,
-# so a parallel job's reaper no longer removes an image just rebuilt from
-# cache (go-quicraft main runs 57389 and 57484). No job changes.
-# v1.23 (owner item 101 as approved, Company Agent m650 item 3, 2026-10-18):
-# two tiers. A pull request runs the PR tier only: lint (with
-# assert-build-tags and arch-gates), build, and the unit suite under -race
-# (`make coverage`, so unit test and race are one step). Integration, Soak,
-# security, deps-check and trivy image do not run on a PR (v1.28 puts
-# deps-check on the PR tier). The full tier runs
-# on main after every merge (push), nightly (a new `schedule:` trigger), on
-# workflow_dispatch, and on a PR labelled ci:full (kept as the opt-in). A new
-# `soak` job loops the integration suite in the integration image for
-# SOAK_MINUTES. CI Gate stays the one required check; integration and soak are
-# `full` in it. A red full tier on main is reverted through a PR by the new
-# revert-red-main.yml (ships beside this file; ci-standard.md §8). A repo's
-# CUSTOMIZE race job joins the PR tier (`pr` in CI Gate, no tier `if:`); its
-# other CUSTOMIZE suites take CI_FULL_TIER's expression and are `full`.
-# v1.23 also (Company Agent m674 item 3, 2026-10-18: per-run image tags filled
-# core-01 at 100G per 17 minutes): one image tag per family, keyed by
-# content. The integration image is <repo>-ci-it:<hash> (`make -s it-image`,
-# the go-qrdb #814 pattern), built once per runner and reused by every job and
-# run with that tree; no job removes it, and reap-stale-ci-stacks.sh v2
-# removes one older than REAP_IMAGE_MIN_AGE that no container uses
-# (ci-standard.md §9).
-# v1.23 also (Company Agent m695, 2026-10-18): the concurrency block keeps
-# cancel-in-progress a literal `true` and gives main one group per event and
-# commit, so main runs never cancel or queue behind each other; v1.22.1's
-# expression left go-qrdb main run 57063 waiting with no task.
-# v1.22.2 (Company Agent m641 item 2 and m646 item 3, 2026-10-18): each stage
-# runs at the job slot's CPU bound. in-toolchain-image.sh v3 reads the job
-# container's cgroup cpu.max and gives the stage container that --cpus, with
-# GOMAXPROCS and GOFLAGS=-p from it; golangci-lint follows the quota. No
-# number is hardcoded: a 4-CPU runner gives 4. No job changes.
-# v1.22.1 (Company Agent m636 item 2, 2026-10-18, after go-quicbaas main
-# fe167500f was left with no completed run): the concurrency block is
-# canonical. A newer push to a PR ref still cancels that ref's older run, but
-# a push to main never cancels an in-flight main run: each main commit keeps
-# its run, so every merge is validated. Every repository carried the block as
-# a CUSTOMIZE copy with `cancel-in-progress: true` on every ref, main included
-# (devops.md §9); the copy goes and the canonical block replaces it. Adopted
-# with the v1.22 rollout.
-# v1.22 (Company Agent m616 item 2, 2026-10-18, after CI job layers filled the
-# runner disks): the image job's stages keep the Go build, golangci-lint and
-# module caches in named volumes on the runner's Docker host, kept across jobs
-# and split by trust class (CI_CACHE_CLASS: `main` for a push to main, `pr`
-# otherwise), never in a job container's writable layer or its /tmp
-# (ci-standard.md §6; in-toolchain-image.sh v2). A new step,
-# trim-ci-caches.sh, bounds the repo's cache volumes on the host
-# (CI_CACHE_MAX_GIB, default 32).
-# v1.21.1 (Company Agent m605 item 8, 2026-10-18, after a forge token printed
-# in a go-xkms run): the image and integration jobs mask the forge
-# credentials first, and no step or make target prints an env file, the job
-# environment or a matched line; lint steps and `make check-public-literals`
-# report path and line only, and `make stage-gomodauth` runs silent
-# (ci-standard.md §5). Every v1.21 rollout PR adopts v1.21.1 before it merges.
-# v1.21 (Company Agent m598 items 1 and 2, 2026-10-18): every stage runs in
-# the project's own devcontainer image (ci-standard.md §2, devcontainer.md §7).
-# Through v1.20 lint, security, build and test installed Go with setup-go on
-# the runner and ran their own flag sets, which §2 ("not the runner image, ...
-# not a tool installed on the runner") and devops.md §4 and §8 rule out; a repo
-# that also ran the stages in its image (go-quicraft a141c3c) ran each twice.
-# Now one image job (m601 (a), go-quicraft's shape) builds the images once
-# (`make docker-build`) and runs each stage's make target in the toolchain
-# image as a step, through scripts/in-toolchain-image.sh (from go-quicraft,
-# ships beside this file): lint, build, test (`make coverage` with
-# COVERAGE_THRESHOLD, m601 (c)), security, deps-check (new, ci-standard.md
-# §1) and trivy image on the integration image (it leaves the CUSTOMIZE note).
-# The integration stage stays its own job, `make integration-test` in the
-# integration image. Both run on GitHub-hosted ubuntu-latest.
-# setup-go, the runner tool installs and the SARIF upload (m601 (d): CI runs
-# on Gitea) are gone, and with them GO_VERSION: the image pins Go. The tag
-# assertion moves to scripts/assert-build-tags.sh (ships beside this file).
-# CI Gate runs on ubuntu-latest with go-quicraft's pr/full tier, and its
-# needs list and check lines are a CUSTOMIZE block (m598 item 2). The make
-# variables the jobs pass are in devcontainer.md §6 (m601 (b)).
+# CI for a Kotlin/Gradle Android app. Every stage runs a make target inside
+# this repository's devcontainer images (build/docker/devcontainer), so CI and
+# a developer's machine run the same tools at the same pinned versions; no
+# step installs a toolchain on the runner.
 #
-# v1.20 (Company Agent m270 items 1 and 9, 2026-10-16): the CUSTOMIZE image
-# job's `trivy image` also takes `--skip-dirs /opt/go/mod`, so a secret match
-# in a third-party module's source inside the image's Go module cache no
-# longer fails the scan; a secret in the repo's own layers still does, and no
-# repo carries its own trivy secret config. A new `arch-gates` job (from
-# go-xkms) fails a direct go-objstore import outside the repo's storage seam,
-# and CI Gate needs it.
-# v1.19 (Company Agent m262 items 3 and 4, 2026-10-16): the CUSTOMIZE image
-# job takes `trivy image --ignore-unfixed` (devops.md §8): a fixed CVE still
-# blocks, an advisory with no fixed package does not, and no repo adds a
-# .trivyignore for it. The github.com gosec install builds the latest gosec
-# tag against the latest x/tools in the one form of devcontainer.md §2.
+# Runners. Every job runs on GitHub-hosted ubuntu-latest (4 cores, 16 GB RAM,
+# about 14 GB free on /, 6-hour job limit). Each job that builds an image
+# first frees the disk the runner's preinstalled toolchains hold, and Gradle
+# runs at most 4 workers (gradle.properties). Every job fits one runner, so
+# none is sharded. Each run gets fresh runners whose Docker daemon no other
+# job shares, so no job leases, locks or reaps images.
 #
-# v1.18 (2026-10-12): a CUSTOMIZE integration job that starts
-# containers on the runner host runs scripts/reap-stale-ci-stacks.sh first
-# (ships beside this file). Its `if: always()` teardown dies with the job when
-# the host or the Docker daemon goes down, and nothing removed the stack after:
-# 11 exited stacks, with their networks and volumes, stayed on core-01 and
-# core-02 after the 2026-10-11/12 restarts. See the CUSTOMIZE note above
-# ci-gate.
+# Tiers. A pull request runs the PR tier: lint, deps-check, build and the unit
+# suite with coverage (the image job), the repository's own gates
+# (lint-gates) and the architecture gate (arch-gates). The full tier adds
+# integration, security and `trivy image`; it runs on a push to main, on
+# workflow_dispatch, on the nightly schedule and on a PR labelled ci:full.
+# Soak runs on the schedule and on workflow_dispatch only. A draft PR runs no
+# CI, and CI Gate fails on a draft. A PR whose every changed file matches
+# DOCS_ONLY_PATTERN runs lint alone.
 #
-# v1.17: third-party actions pinned by commit, the tag in a
-# trailing comment (devops.md §9 "Actions are pinned by commit").
+# CI Gate is the one required check. It needs every job and fails closed on
+# any result but success, naming a skipped job apart from a failed one. Every
+# job starts at once, so a run takes as long as its slowest job.
 #
-# v1.16: gosec, govulncheck and actionlint
-# install only on github.com; Gitea jobs use the runner image's baked, pinned
-# tools.
+# Concurrency. A newer push to a PR cancels that PR's older run. On main each
+# event and commit is its own group, so every merge keeps its run and a
+# dispatch or schedule run never cancels a push run. cancel-in-progress is a
+# literal `true`: an expression there once left a main run queued with no
+# task.
 #
-# v1.15 (2026-10-05): push runs on main
-# only again. automerge.yml v7 opens each merge train as a PR from
-# merge-train/* into main, so the train gets its CI from the pull_request
-# trigger like any PR, and block_on_outdated_branch stays on (owner,
-# 2026-10-04: "leave the block_on_outdated_branch turned on, we want to make
-# sure we are requiring the latest from main in all branches before they get
-# merged in"). The parallel stages of v1.14 stay.
+# Integration image tag. The integration image is <repo>-ci-it:<hash>
+# (`make -s it-image`): a hash of the tree and of the base image's package
+# index (APT_INDEX_SUM from scripts/apt-index-sum.sh; APK_INDEX_SUM is the
+# constant `none`, since the base is Debian). Without the index sum, a tree
+# whose files had not changed kept its cached image after the distribution
+# shipped a fix, and `trivy image` stayed red on a fixed CVE until an
+# unrelated file moved. The Dockerfile's `integration` stage takes the sum as
+# a build argument and runs `apt-get upgrade` after it, so a new package
+# release changes the tag and rebuilds with the fixed package. An index the
+# script cannot read fails the job: a missing index is never a pass.
+# scripts/image-tag-test.sh (lint-gates) tests the tag hashing.
 #
-# v1.14 (2026-10-04): every job starts
-# at once, so a run takes as long as its slowest job. security, test and any
-# CUSTOMIZE integration job no longer wait on lint + build; CI Gate, the one
-# required check, still needs every job and fails closed on any result but
-# success. (v1.14 also ran push on 'merge-train/**' for automerge.yml v6's
-# trains; v1.15 drops that.) Owner, 2026-10-04: "yes
-# lets batch the merges. make sure we are doing things efficiently!" and "use
-# merge trains where possible if that helps!". Supersedes v1.9's staged
-# ordering: a broken push now spends the heavy tier too, in exchange for the
-# shortest wall-clock to a green gate, which is what a train waits on.
-#
-# v1.13 (2026-09-27): GO_VERSION 1.26.7 -> 1.27.1, in
-# lockstep with nightly-template v1.6.
-#
-# v1.12 (2026-08-28, go-blockstore #22 round 2): refresh install-shellcheck.sh to
-# the hardened version — the idempotency fast path that trusted an existing
-# binary on its `--version` string alone is removed, so the extracted binary's
-# SHA-256 is verified every run (an attacker who pre-seeds a matching --version
-# no longer bypasses the checksum). The v1.11 copy shipped the pre-round-2
-# script carrying that hole; this replaces it byte-for-byte with merged main.
-#
-# v1.11 (2026-08-28, go-blockstore #22): the lint job installs a PINNED,
-# checksum-verified shellcheck (install-shellcheck.sh, ships beside this file)
-# so actionlint's SC* rules actually run — without shellcheck on PATH actionlint
-# silently disables them and exits 0, and a real SC2046 reached main that way.
-# SHIPS-WITH gains install-shellcheck.sh (chmod +x, copy to scripts/).
-#
-# v1.10 (2026-08-27, go-blockstore #7 Codex review):
-#   - actionlint runs in the lint job. devops.md §4 lists actionlint in
-#     `make lint`, but through v1.9 the canonical CI never ran it — so the
-#     workflow files were the one thing in every repo no CI check read, and a
-#     misspelled runner label or invalid Actions YAML reached main having
-#     passed a green required gate. Ships with .github/actionlint.yaml (same
-#     template directory), which is what keeps self-hosted labels from
-#     reading as unknown runners.
-#   - the gosec SARIF upload is guarded on the PR head not being a fork.
-#     GitHub downgrades the token to read-only for a pull_request from a fork
-#     REGARDLESS of the `permissions:` block below, so the step failed the PR
-#     for something an external contributor could not fix.
-#
-# v1.9 (2026-08-20, owner ruling — FAIL-FAST STAGED PIPELINE): iterate fast.
-# Gitea cannot cancel in-flight jobs (no cancel route — task #90), so
-# fail-fast comes from ORDERING: a fast tier (lint + build, ~minutes) gates
-# the expensive tier (security, test, integration where present). A broken
-# push reports in minutes and burns nothing downstream; a green push pays
-# one fast-tier of extra latency. trivy and fips move to nightly.yml
-# (schedule + workflow_dispatch): both were known-red on every push (fips:
-# tracked per-repo fips140=only issues; trivy: undiagnosed install failure),
-# and a known-red job burning 60-90 runner-minutes per push verifies
-# nothing. The gate now distinguishes SKIP (upstream stage failed) from
-# FAIL, both failing closed — this supersedes v1.8.1's lint-decoupling,
-# whose silent-skip hazard is closed at the source (pinned linter) and in
-# the gate (named skips).
-#
-# v1.9.1 (2026-09-01, owner ruling — devops.md 8a): the trivy move above is
-# ALPHA-ONLY, and the note that it "gates nothing" is a phase, not a property.
-# Every repo here is private and unreleased; from the first release published to
-# the github.com mirror, that repo moves `trivy fs` BACK into ci.yml and into
-# the ci-gate `needs`, blocking on CRITICAL/HIGH. Two consequences for adopters:
-#   - the exposure window is real and accepted: in alpha a dependency CVE
-#     surfaces at the next nightly, not at the push that introduces it;
-#   - a repo where trivy is GREEN may keep it in ci.yml today and that is NOT a
-#     deviation. The "undiagnosed install failure" premise above is repo-
-#     specific and was measurably false in go-trusted-platform, where trivy fs
-#     caught two live HIGH x/mod CVEs on 2026-08-19. Nightly is the floor.
-# See conventions/devops.md 8a for the trigger and the reasoning.
-#
-# v1.8 (2026-08-19): gosec and govulncheck triage their own exit codes. A shell
-# reports a signal death as 128+N, so an OOM kill leaves 137 — indistinguishable
-# from a real finding in the job summary, which is all the Gitea API exposes
-# (task #97). Found on go-quicbaas: gosec reported `Issues : 0`, govulncheck was
-# SIGKILLed while four sibling repos ran heavy jobs on the same host, and the
-# Makefile reported it as "reachable vulnerabilities" — a phantom CVE hunt
-# waiting to happen. Both steps still exit non-zero; they only say WHICH it was.
-# The same conflation exists in every repo's Makefile vuln target — fix it there
-# too when adopting this version.
-#
-# v1.7 (2026-08-18): gosec -concurrency 4. The v1.6 GOMEMLIMIT/GOMAXPROCS
-# bound was PROVEN INSUFFICIENT: gosec sizes its pool from runtime.NumCPU()
-# (the host's 24 cores, GOMAXPROCS notwithstanding), so live SSA for ~24
-# packages exceeded the 16 GB container cap with all three observed scans
-# carrying GOMEMLIMIT=10GiB while pinned at 16/16 GiB. Live heap cannot be
-# GC'd away; only lower analysis concurrency shrinks it.
-#
-# v1.6 (2026-08-18): GOMEMLIMIT + GOMAXPROCS on the security job. The Go
-# toolchain does not see cgroup limits — inside a 16 GB container it read the
-# HOST's 24 cores and 94 GB, ran 24 gosec workers, and grew the heap until the
-# cgroup had to swap 10.9 GB of anonymous memory. It never OOMed (swap absorbed
-# it), so instead of failing it thrashed: memory PSI 98, 43% of the host's CPU
-# in iowait, every other job on the box starved. Full evidence in the job's
-# comment block below. This is a TUNING fix, not a capacity one: the host had
-# 56 GB free throughout.
-#
-# v1.5 (2026-08-18): triggers narrowed to `[main]`. The template shipped
-# `[master, main, develop]` with a "CUSTOMIZE" note, so 15 of 20 repos still
-# name branches that DO NOT EXIST — the template contradicted the ratified
-# trunk-based standard (company CLAUDE.md: "no branches, and the trunk is
-# main"), and a template that disagrees with the standard loses every time it
-# is copied. Inert today, because no event can fire for a branch that is
-# absent; the cost is latent, not current. Recreate `develop` in any of those
-# repos and its every commit runs CI twice — one push run and one
-# pull_request run for the same sha — with nothing to cancel the second
-# (only a ref-keyed concurrency group would cancel it: devops.md §9b).
-# Do NOT re-add a branch list "for safety": a repo that needs a second trunk
-# is a decision for the owner, not a default.
-#
-# v1.4 (2026-08-17): `fips` job added (owner mandate, security-review.md §6)
-# — build + unit tests under GOFIPS140=latest with GODEBUG=fips140=only, wired
-# into ci-gate. Rolls out per repo through each project agent's own issue
-# (NOT a blind template sweep): FIPS mode surfaces real incompatibilities
-# (non-approved primitives) that each agent must resolve or escalate as an
-# owner decision before its repo adopts v1.4.
-#
-# v1.3 (2026-08-14): `workflow_dispatch:` trigger added, so a phantom failure
-# (runner crash, host overload; see infra lessons.md) can be retried without
-# pushing an empty commit.
-#
-#   CORRECTION (2026-08-19): this entry originally claimed "Gitea's build
-#   exposes no rerun API, so without it the only way to retry a phantom
-#   failure is an empty commit." That premise is FALSE and it propagated to
-#   five repos. `swagger.v1.json` on 1.27.1 publishes three re-run routes:
-#     /repos/{owner}/{repo}/actions/runs/{run}/rerun
-#     /repos/{owner}/{repo}/actions/runs/{run}/rerun-failed-jobs
-#     /repos/{owner}/{repo}/actions/runs/{run}/jobs/{job_id}/rerun
-#   `rerun-failed-jobs` re-runs only a run's failed jobs. Note the job-level
-#   route is NESTED under the run — the flat `jobs/{id}/rerun` shape does not
-#   exist, and probing that shape is how two of us concluded the API was
-#   missing. A 404 does not distinguish a missing route from a missing
-#   resource; swagger is the authority.
-#
-#   Stated precisely, because the mistake is easy to make in reverse: these
-#   routes are PUBLISHED IN THE SPEC — verified. They have NOT yet been
-#   executed here, so do not upgrade this to "rerun works" until someone has
-#   actually run one. What IS measured: there is no `cancel` route at any
-#   path, and DELETE returns 400 "this workflow run is not done" on anything
-#   unfinished, so no REST call can shed a queued run (task #90).
-#
-#   `workflow_dispatch` KEEPS its place regardless, on an independent
-#   justification: re-run acts on an existing run, so it cannot help when a
-#   run was never created — the lazy-creation case where a fresh head shows
-#   no jobs for minutes. Removing the trigger because re-run exists would be
-#   an overcorrection.
-#
-# v1.2 (2026-08-14): actions/checkout and actions/setup-go moved to @v6 —
-# §9 already named checkout@v6 the standard and repos were shipping green on
-# v6/v6 while this file still said v4/v5 (same defect class as promising a
-# gate the template doesn't implement: the standard and the template must
-# never disagree).
-#
-# v1.1 (2026-08-14): gosec findings now also print to the job log (the SARIF
-# upload only exists on github.com, so on Gitea the findings were invisible).
-# Also NEVER add `GOPROXY: direct` / `GOSUMDB: off` to a repo's env block:
-# GOPRIVATE (injected by the runners, dependency-resolution.md §6) already
-# exempts first-party modules from proxy and sumdb; the blanket override
-# disables checksum-database verification for every third-party dependency
-# and breaks the build when an upstream re-points a tag (go-tpm-tools v0.4.8,
-# 2026-08-14). `ghcr.io` likewise does not exist on Gitea — use the Gitea
-# registry (lessons.md).
-# Source of truth: software/templates/github-actions/ci.yml in the
-# handbook. Copied into each repo (never workflow_call: the
-# template lives inside the security boundary and cannot be referenced from
-# github.com). Blocks marked CUSTOMIZE are the only expected divergence;
-# everything else drifting from the template is a defect (devops.md §8).
-#
-# Runs on GitHub Actions, every job on GitHub-hosted ubuntu-latest.
+# Other rules this file keeps:
+#   - The jobs that use forge credentials mask them first, and no step or make
+#     target prints an env file, the job environment or a matched line.
+#   - lint-gates runs `make lint-gates` without `-k`, so the first failing
+#     gate ends the step instead of the rest running on after it.
+#   - actionlint runs with shellcheck on PATH; without it actionlint silently
+#     skips its SC* rules and exits 0. .github/actionlint.yaml lists the
+#     self-hosted runner labels a workflow may name.
+#   - `trivy image` takes --ignore-unfixed: a fixed CVE blocks, an advisory
+#     with no fixed package does not.
+#   - Third-party actions are pinned by commit, with the tag in a trailing
+#     comment.
+#   - Triggers name main only: the trunk is main, and a second trunk would run
+#     every commit twice.
+#   - workflow_dispatch lets a run that died for an infrastructure reason be
+#     retried without an empty commit.
+#   - There is no race job and no FIPS job: the repository has no Go code.
 
 name: CI
 
 on:
   push:
-    # trunk-based: main is the ONLY trunk. automerge.yml's merge trains are
-    # PRs from merge-train/* and get CI from pull_request (v1.15).
+    # Trunk-based: main is the only trunk.
     branches: [main]
   pull_request:
     branches: [main]
-    # CUSTOMIZE (xkey-android): no `labeled` (DS-3134, gtp #853). Gitea 1.27.1
-    # sends every label add AND remove as `label_updated`, and its matcher
-    # maps that to `labeled` whichever label moved, with no
-    # `github.event.label` in the payload. Each `task:*` or `code-review`
-    # change then started a run that the `concurrency` block let cancel the
-    # PR's run in progress, and a run whose jobs an `if:` skips would post
-    # `skipped` over the real run's `CI / *` contexts, CI Gate included. An
-    # action outside `types` matches nothing: no run, no status. The cost:
-    # adding `ci:full` waits for the PR's next push, or takes effect through
-    # `workflow_dispatch`.
-    # (#35, Codex 6491) Until then a docs-only PR keeps its last run's green
-    # CI Gate, with Build, Test and Security skipped. To validate it in full
-    # before merge, push to the PR or dispatch this workflow on its branch:
-    # a workflow_dispatch run is never docs-only.
+    # No `labeled`: a label change would start a run that the `concurrency`
+    # block lets cancel the PR's run in progress, and a run whose jobs an
+    # `if:` skips posts `skipped` over the real run's `CI / *` contexts, CI
+    # Gate included. The cost: adding `ci:full` takes effect at the PR's next
+    # push, or through `workflow_dispatch`.
+    # Until then a docs-only PR keeps its last run's green CI Gate, with
+    # build, test and security skipped. To validate it in full before merge,
+    # push to the PR or dispatch this workflow on its branch: a
+    # workflow_dispatch run is never docs-only.
     types: [opened, synchronize, reopened]
   workflow_dispatch:                    # re-fire a whole workflow; also the
                                         # only retry when a run was never
-                                        # created (see v1.3 correction above)
-  # v1.23: main's full tier nightly as well as after every merge. Scheduled
-  # runs are on the default branch. CUSTOMIZE: the hour, off nightly.yml's.
+                                        # created
+  # main's full tier nightly as well as after every merge. Scheduled runs are
+  # on the default branch.
   schedule:
     - cron: '0 4 * * *'
 
-# v1.25: on main the group is the workflow and the event, so a push to main
-# cancels the in-progress main push run of an older commit, and a schedule or
-# workflow_dispatch run cancels only an older run of its own event (Company
-# Agent m857, m774 option (i)). Every other ref is one group, so a PR's newer
-# run cancels the older. No expression reaches cancel-in-progress: Gitea
-# 1.27.1 never released go-qrdb main run 57063, the first run after v1.22.1
-# set it to an expression (Company Agent m695).
-# CUSTOMIZE (xkey-android, DS-3465, Software m1092 (3), 2026-10-24): main has
-# one group per event and commit with a literal true, so a newer main push never
-# cancels an older main run; a PR ref still cancels its older run. This
-# overrides v1.25's main-{event} group for this repository: the v1.23 (m695)
-# shape, no expression in cancel-in-progress (Codex 6977).
+# On main the group is the event and the commit, so a newer push to main never
+# cancels an older main run (every merge keeps its run) and a schedule or
+# workflow_dispatch run never cancels a push run. Every other ref is one
+# group, so a PR's newer run cancels the older. No expression reaches
+# cancel-in-progress: a run after it was set to an expression was never
+# released.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: true
@@ -455,35 +99,32 @@ permissions:
   contents: read
 
 env:
-  # CUSTOMIZE (xkey-android): no coverage threshold is ratified for this app
-  # (a product decision, not CI wiring), so the variable stays and is empty:
-  # `make coverage` runs the unit suite and writes the JaCoCo report, enforces
-  # no number, and refuses a non-empty value rather than ignore it.
+  # No coverage threshold is set for this app (a product decision, not CI
+  # wiring), so the variable stays and is empty: `make coverage` runs the unit
+  # suite and writes the JaCoCo report, enforces no number, and refuses a
+  # non-empty value rather than ignore it.
   COVERAGE_THRESHOLD: ''
-  # CUSTOMIZE (xkey-android): GO_BUILD_TAGS is removed. Gradle has no build
-  # tags; the variants are AGP build types, and CI builds and tests debug.
-  # v1.23: the full tier (ci-standard.md §8). Every event but pull_request
-  # (push to main, schedule, workflow_dispatch), and a PR labelled ci:full.
+  # Gradle has no build tags; the variants are AGP build types, and CI builds
+  # and tests debug.
+  # The full tier: every event but pull_request (push to main, schedule,
+  # workflow_dispatch), and a PR labelled ci:full.
   # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
   # the integration job repeats this expression. Keep them equal.
   CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
-  # v1.24 (CA m749, m751 (a)): the files a docs-only PR may touch. CUSTOMIZE: narrow it
-  # in a repo that embeds or generates from docs/ (go:embed, OpenAPI, protos).
+  # The files a docs-only PR may touch. Narrow it if the build ever embeds or
+  # generates from docs/.
   DOCS_ONLY_PATTERN: '(\.md$|^docs/)'
-  # v1.26.1 (Company Agent m1128 (9)): the repository's releasability test, which
-  # a docs-only PR still runs because make coverage skips on it. CUSTOMIZE
-  # (xkey-android): a make target name (the template's is a `go test`
-  # argument list). Empty: this repository has no such test, so the hook
+  # The repository's releasability test, which a docs-only PR still runs
+  # because make coverage skips on it: a make target name. Empty: this repository has no such test, so the hook
   # and its docs-only step stay and run nothing.
   RELEASABILITY_TEST: ""
-  # CUSTOMIZE (xkey-android): the devcontainer images' names and fresh trusted
-  # builds (Codex reviews 6470 and 6544 on PR #40). A push to main and a
+  # The devcontainer images' names and fresh trusted builds. A push to main and a
   # schedule or dispatch on main are trusted; every other run is pr. Both come
   # from the event and the ref, never from a name a PR picks, and every make
   # call reads them from here. IMAGE_NAMESPACE is a name only (trusted tags
-  # <hash>, pr tags pr-<hash>; image-tag.sh) and protects nothing: the
-  # runners' daemons are shared between pull request runs and main's, and a
-  # pull request's run executes its own Makefile, so it can write any tag.
+  # <hash>, pr tags pr-<hash>; image-tag.sh) and protects nothing: a Docker
+  # daemon may serve pull request runs and main's alike, and a pull request's
+  # run executes its own Makefile, so it can write any tag.
   # IMAGE_FRESH is the guard: a trusted run builds every image it uses from
   # its own inputs, with no tag reuse and no build cache, and runs each by the
   # ID its build wrote (Makefile IMAGE_FRESH; scripts/in-toolchain-image.sh
@@ -492,8 +133,7 @@ env:
   IMAGE_FRESH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
 
 jobs:
-  # v1.24 (CA m749, m751 (a)): a PR whose every changed file matches DOCS_ONLY_PATTERN
-  # runs lint only; build and make coverage are skipped. Off pull_request, or
+  # A PR whose every changed file matches DOCS_ONLY_PATTERN runs lint only; build and make coverage are skipped. Off pull_request, or
   # on a ci:full PR, docs_only is always false. Any doubt (a failed diff, an
   # empty list) reads as false, so the tier fails toward running the tests.
   changes:
@@ -502,7 +142,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
-    # v1.26: a draft PR runs no CI; the image job needs this one and skips with it.
+    # A draft PR runs no CI; the image job needs this one and skips with it.
     if: ${{ !github.event.pull_request.draft }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -528,76 +168,58 @@ jobs:
           echo "docs only: $docs_only"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
 
-  # v1.21: every stage runs in the project's own devcontainer image and no
-  # other (ci-standard.md §2, devcontainer.md §7). One image job (Company Agent
-  # m601 (a)) builds the images once from build/docker/devcontainer/Dockerfile
+  # Every stage runs in the project's own devcontainer image and no other. One
+  # image job builds the images once from build/docker/devcontainer/Dockerfile
   # at this commit (`make docker-build`) and runs each stage's `make` target in
-  # the toolchain image as its own step, through scripts/in-toolchain-image.sh
-  # (ships beside this file), which copies the checkout into the container: a
-  # runner reaches its daemon through a socket, so a bind mount would resolve
-  # on the daemon's host. A failed step names its stage; `if: !cancelled()`
-  # runs every stage after a failed one, so one run reports them all.
+  # the toolchain image as its own step, through scripts/in-toolchain-image.sh,
+  # which copies the checkout into the container: a runner reaches its daemon
+  # through a socket, so a bind mount would resolve on the daemon's host. A
+  # failed step names its stage; `if: !cancelled()` runs every stage after a
+  # failed one, so one run reports them all.
   #
-  # No job installs a Go toolchain or a tool on the runner: the image's pin file
-  # (devcontainer.md §2) decides every version, and the Makefile carries every
-  # flag set (devops.md §4; §8: CI runs gosec through the developers' target).
-  # GO_BUILD_TAGS reaches every target as a make variable, so the tag set is
-  # still written once. build, test and lint run with no network, on the
-  # image's module cache; security and deps-check get one (IN_IMAGE_NETWORK=
-  # bridge) for the vulnerability databases and the module proxy.
+  # No job installs a toolchain or a tool on the runner: the image's pin file
+  # (scripts/tool-pins.sh) decides every version, and the Makefile carries
+  # every flag set, so CI runs the developers' targets. build, test and lint
+  # run with no network, on the image's dependency cache; security and
+  # deps-check get one (IN_IMAGE_NETWORK=bridge) for the vulnerability
+  # databases and the dependency repositories.
   #
-  # v1.23: lint, assert-build-tags, build and coverage are the PR tier and run
-  # on every event. security and trivy image are full tier only
-  # (env.CI_FULL_TIER): main after every merge, nightly, dispatch, ci:full.
-  # v1.28: deps-check is a lint-class gate on the PR tier and runs on every
-  # event (ruling 219(3)).
+  # lint, deps-check, build and coverage are the PR tier and run on every
+  # event. security and trivy image are full tier only (env.CI_FULL_TIER):
+  # main after every merge, nightly, dispatch, ci:full.
   #
-  # v1.22: every stage mounts the build and golangci-lint cache volumes, and a
-  # bridge stage the module cache volume, from the runner's Docker host
-  # (in-toolchain-image.sh v2, ci-standard.md §6), so a stage writes its
-  # caches there and not into its container's layer.
+  # The job reads the base image's package index into APT_INDEX_SUM, which
+  # the integration image's tag hashes and its build takes as a build
+  # argument. A new package release, a CVE fix among them, changes the tag,
+  # so the next run rebuilds the image rather than reuse a cached one with
+  # the old package.
   #
-  # v1.29 (Company Agent ruling 220(5)): the job reads the Alpine package
-  # indexes the build resolves against (scripts/apk-index-sum.sh, ships beside
-  # this file) into APK_INDEX_SUM, which the integration image's tag hashes and
-  # its build takes as a build argument (ci-standard.md §9, devcontainer.md
-  # §6). A new Alpine package release, a CVE fix among them, changes the tag,
-  # so the next run rebuilds the image rather than reuse a cached one with the
-  # old package (go-enclave main fd83b79ce, CVE-2026-92392).
-  #
-  # The forge credentials reach the image build only as the gomodauth BuildKit
-  # secret, from a file outside the context that the job removes.
-  # No step and no make target prints that file, the job environment (`env`,
-  # `printenv`, `set -x`) or a matched line: `make stage-gomodauth` and the
-  # file writes run silent, and lint steps and `make check-public-literals`
-  # report path and line only (ci-standard.md §5, Company Agent m605 item 8).
+  # No step and no make target prints a credential, the job environment
+  # (`env`, `printenv`, `set -x`) or a matched line: lint steps and `make
+  # check-public-literals` report path and line only.
   #
   # Runner: GitHub-hosted ubuntu-latest, which has Docker. The cold image
   # builds (no layer cache survives a run) and the stages fit 150 minutes.
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
     runs-on: ubuntu-latest
-    needs: changes             # v1.24 (CA m749, m751 (a))
-    timeout-minutes: 150      # CUSTOMIZE: two cold image builds and every stage on 4 cores
+    needs: changes
+    timeout-minutes: 150      # two cold image builds and every stage on 4 cores
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
-      # v1.22: the cache volumes' trust class. Only a push to main writes the
-      # caches main's build reads; every other event, pull requests included,
-      # gets the `pr` set (ci-standard.md §6). v1.23: the nightly schedule runs
-      # on main, so it writes main's set too.
+      # The cache volumes' trust class. Only a push to main or the nightly
+      # schedule (which runs on main) writes the caches main's build reads;
+      # every other event, pull requests included, gets the `pr` set.
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
-      # CUSTOMIZE (xkey-android): no Go build, golangci-lint or module cache
-      # volumes. Gradle reads every dependency from the image's read-only cache
+      # No cache volumes. Gradle reads every dependency from the image's read-only cache
       # (GRADLE_RO_DEP_CACHE) and each stage gets a fresh, writable Gradle home
-      # that goes with its container (scripts/in-toolchain-image.sh's CUSTOMIZE
-      # block), so no cache outlives a stage and trim-ci-caches.sh finds none.
+      # that goes with its container (scripts/in-toolchain-image.sh), so no cache outlives a stage and trim-ci-caches.sh finds none.
       CI_CACHE: 'off'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      # v1.21.1 (Company Agent m605 item 8): mask the forge credentials before
-      # any other step. The runner injects them as plain environment
-      # (dependency-resolution.md §6), which the log does not mask by itself,
+      # Mask the forge credentials before any other step. A runner that injects
+      # them does so as plain environment, which the log does not mask by itself,
       # and the token sits inside GIT_CONFIG_KEY_0's URL, so it is masked alone
       # as well.
       - name: Mask the forge credentials
@@ -609,10 +231,9 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
-      # CUSTOMIZE (xkey-android, GitHub-hosted): a hosted runner is a fresh VM
-      # per job, so nothing removed here is shared. The host's .NET, Android
-      # SDK and GHC go (the stages use the images' own JDK and SDK), and the
-      # preloaded images with them.
+      # A hosted runner is a fresh VM per job, so nothing removed here is
+      # shared. The host's .NET, Android SDK and GHC go (the stages use the
+      # images' own JDK and SDK), and the preloaded images with them.
       - name: Free runner disk
         if: ${{ runner.environment == 'github-hosted' }}
         run: |
@@ -620,13 +241,11 @@ jobs:
           docker image prune --all --force
           df -h /
 
-      # v1.23 (Company Agent m674 item 3, 2026-10-18): the integration image is named by its content,
-      # <repo>-ci-it:<hash> (`make -s it-image`, ci-standard.md §9), so every
-      # job names the same image for the same tree.
-      # v1.29 (ruling 220(5)): the Alpine package index checksum joins the
-      # integration image's tag hash (scripts/apk-index-sum.sh). A base image
-      # the script cannot read fails the step.
-      # CUSTOMIZE (xkey-android): the Dockerfile's FROM names ${BASE_IMAGE},
+      # The integration image is named by its content, <repo>-ci-it:<hash>
+      # (`make -s it-image`), so every job names the same image for the same
+      # tree. An Alpine package index checksum joins the tag hash
+      # (scripts/apk-index-sum.sh); a base image the script cannot read fails
+      # the step. The Dockerfile's FROM names ${BASE_IMAGE},
       # which has no global ARG default, so APK_BASE_IMAGES is the base
       # scripts/tool-pins.sh pins. It is Debian, so the sum is `none`.
       - name: Read the Alpine package index
@@ -636,8 +255,7 @@ jobs:
           sum=$(scripts/apk-index-sum.sh)
           echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
-      # CUSTOMIZE (xkey-android, Software comment 158438, ruling 223(13)): the
-      # Debian mirror of the step above, whose sum is `none` on this base.
+      # The Debian mirror of the step above, whose sum is `none` on this base.
       # scripts/apt-index-sum.sh hashes the pinned BASE_IMAGE's apt index
       # into APT_INDEX_SUM, which the integration tag hashes and whose build
       # runs `apt-get upgrade` again. An unreadable index fails the job.
@@ -649,15 +267,13 @@ jobs:
       - name: Name the integration image
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
-      # CUSTOMIZE: host tuning a test needs (e.g. QUIC UDP buffers:
-      # sudo sysctl -w net.core.rmem_max=7340032 net.core.wmem_max=7340032)
-      # goes here; the container shares the runner's kernel.
+      # Host tuning a test needs goes here; the container shares the runner's
+      # kernel.
 
-      # CUSTOMIZE (xkey-android): no gomodauth secret. The image's Gradle
+      # No build secret. The image's Gradle
       # dependencies come from public Maven repositories, so no forge
       # credential is written to a file or reaches the build.
-      # CUSTOMIZE (xkey-android): every later step runs the images by ID
-      # (Codex review 6544): on a trusted run the IDs the fresh builds wrote,
+      # Every later step runs the images by ID: on a trusted run the IDs the fresh builds wrote,
       # else the IDs the tags name now. TOOLCHAIN_IMAGE and IT_IMAGE hold the
       # IDs from here on.
       - name: Build the devcontainer images
@@ -670,57 +286,44 @@ jobs:
           echo "toolchain image $(make -s toolchain-image) = $tc; integration image $IT_IMAGE = $it"
           { echo "TOOLCHAIN_IMAGE=$tc"; echo "IT_IMAGE=$it"; } >> "$GITHUB_ENV"
 
-      # v1.22: bound this repo's cache volumes on the host before the stages
-      # add to them (ci-standard.md §6). It never fails the job.
+      # Bound this repo's cache volumes on the host before the stages add to
+      # them. It never fails the job.
       - name: Trim the CI caches
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
 
-      # CUSTOMIZE (xkey-android): make lint is Android lint (lintDebug,
-      # abortOnError) and actionlint with shellcheck (devops.md §4), in place
-      # of gofmt, vet and golangci-lint. No GO_BUILD_TAGS.
+      # make lint is Android lint (lintDebug, abortOnError) and actionlint with
+      # shellcheck.
       - name: make lint
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint"
-      # v1.27: the repository's own gates (make lint-gates) run in the
+      # The repository's own gates (make lint-gates) run in the
       # lint-gates job beside this one, never here and never as a prerequisite
       # of lint.
 
-      # v1.26.1 (Company Agent m1128 (9)): a docs-only PR skips make coverage, so
-      # it runs the releasability test alone; any other run gets it from make
-      # coverage. CUSTOMIZE (xkey-android): RELEASABILITY_TEST names a make
-      # target; it is empty here (no such test), so this step is skipped.
+      # A docs-only PR skips make coverage, so it runs the releasability test
+      # alone; any other run gets it from make coverage. RELEASABILITY_TEST
+      # names a make target; it is empty here (no such test), so this step is skipped.
       - name: Releasability test (docs-only PR)
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.changes.outputs.docs_only == 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make $RELEASABILITY_TEST"
 
-      # CUSTOMIZE (xkey-android): the build-tag assertion is removed with
-      # GO_BUILD_TAGS (scripts/assert-build-tags.sh is Go's; Gradle has no tags).
-
-      # CUSTOMIZE (xkey-android): make build is the debug APK (assembleDebug).
+      # make build is the debug APK (assembleDebug).
       # A release build needs signing credentials, which CI is not given.
       - name: make build
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make build"
 
-      # The test stage (m601 (c)): make coverage runs the whole unit suite with
-      # -race (make test's flags), the PR tier's unit test and race checks in
-      # one run (v1.23), and fails when total coverage is below
-      # COVERAGE_THRESHOLD (testing-guidelines.md), so the suite runs once.
-      # Tags matter here too: without them tag-gated packages are neither
-      # tested nor counted. The integration stage is its own job below.
-      # CUSTOMIZE (xkey-android): make coverage is the JVM unit suite
-      # (testDebugUnitTest, the wire-compatibility vectors included) and its
-      # JaCoCo report. There is no -race to fold in, and no threshold
-      # (COVERAGE_THRESHOLD above). No GO_BUILD_TAGS.
+      # The test stage: make coverage is the JVM unit suite (testDebugUnitTest,
+      # the wire-compatibility vectors included) and its JaCoCo report, so the
+      # suite runs once. There is no threshold (COVERAGE_THRESHOLD above). The
+      # integration stage is its own job below.
       - name: make coverage (unit tests and the threshold)
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make coverage COVERAGE_THRESHOLD=$COVERAGE_THRESHOLD"
 
-      # CUSTOMIZE (xkey-android): make security is trivy fs, vuln and secret,
-      # blocking on CRITICAL/HIGH, over the repo and build/docker (devops.md
-      # §8, kept in CI as §8a allows while green), in place of gosec,
-      # govulncheck and go mod verify. No GO_BUILD_TAGS.
+      # make security is trivy fs, vuln and secret, blocking on CRITICAL/HIGH,
+      # over the repo and build/docker.
       - name: make security
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
         env:
@@ -728,25 +331,22 @@ jobs:
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make security"
 
       # Fails when a library, first-party or third-party, is behind its latest
-      # release without devops.md §9's documented reason (ci-standard.md §1).
-      # v1.28: a lint-class gate of seconds on the PR tier, every event, a
-      # docs-only PR included (ruling 219(3)); it was full tier only from v1.23.
+      # release without a documented reason. A lint-class gate of seconds on
+      # the PR tier, every event, a docs-only PR included, so a dependency
+      # behind its floor fails the PR, not main after the merge.
       - name: make deps-check
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         env:
           IN_IMAGE_NETWORK: bridge
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make deps-check
 
-      # The integration image is gated before any push to either registry
-      # (devops.md §8): --ignore-unfixed (v1.19) and --skip-dirs /opt/go/mod
-      # (v1.20). trivy fs and make security never take --ignore-unfixed.
-      # A PR builds no image for a registry, so the scan is full tier (v1.23).
-      # CUSTOMIZE (xkey-android): no --skip-dirs /opt/go/mod; the image has no
-      # Go module cache, and the jars in its Gradle cache are scanned.
-      # CUSTOMIZE (xkey-android): trivy's cache (--cache-dir) and temp files
-      # (TMPDIR) go under /src, the stage container's writable layer on the
-      # host's disk: those jars need the Java DB, whose download and extraction
-      # overflow the container's 3 GiB /tmp (main's run 61457).
+      # The integration image is scanned with --ignore-unfixed; trivy fs and
+      # make security never take it. A PR builds no image for a registry, so
+      # the scan is full tier. The jars in the image's Gradle cache are
+      # scanned. trivy's cache (--cache-dir) and temp files (TMPDIR) go under
+      # /src, the stage container's writable layer on the host's disk: those
+      # jars need the Java DB, whose download and extraction overflow the
+      # container's 3 GiB /tmp.
       - name: trivy image (integration image)
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
         env:
@@ -762,38 +362,38 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
           rm -rf "$RUNNER_TEMP/image-ids"
 
-  # v1.27 (Company Agent m1192 (6), item 27): the repository's own gates run
+  # The repository's own gates run
   # in this job, in parallel with the image job's `make lint`, not in series
   # after it, so Lint's wall time is the longer of the two and not their sum.
   # `make lint-gates` is actionlint over .github/workflows and the gate
   # tests for the workflow scripts (closing links, revert-red-main, the
   # reaper, deps-check); `make lint` is Android lint alone, so no gate runs
   # twice. A lint-class check: it is on the PR tier and runs on a docs-only PR.
-  # CUSTOMIZE (xkey-android): the Makefile always defines lint-gates, so the
-  # template's probe step is dropped. The job needs only the toolchain image,
+  # The job needs only the toolchain image,
   # which `make docker-build-toolchain` builds or reuses (the integration image
   # is the image job's), and it runs that image by ID as the image job does.
-  # The gates are offline (stubbed docker, Gitea and a local remote; fixtures),
+  # The gates are offline (stubbed docker, a stubbed forge API and a local
+  # remote; fixtures),
   # so IN_IMAGE_NETWORK stays none. Needs in the toolchain image: actionlint
   # and shellcheck (the Dockerfile's pinned actionlint and apt shellcheck),
   # bash, git, jq and make. No gate needs python3.
-  # v1.29.1 (ruling 226(15), 108 repair): the step fails fast. `make
+  # The step fails fast. `make
   # lint-gates` runs without `-k`, so the first failing gate ends the step
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
     runs-on: ubuntu-latest
-    if: ${{ !github.event.pull_request.draft }}   # v1.26
-    timeout-minutes: 75       # CUSTOMIZE: a cold toolchain image build, then gates of minutes
+    if: ${{ !github.event.pull_request.draft }}
+    timeout-minutes: 75       # a cold toolchain image build, then gates of minutes
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
-      # v1.22: the cache volumes' trust class (as in the image job).
+      # The cache volumes' trust class (as in the image job).
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
-      CI_CACHE: 'off'         # CUSTOMIZE (xkey-android): as in the image job
+      CI_CACHE: 'off'         # as in the image job
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      # v1.21.1: mask the forge credentials before any other step (as above).
+      # Mask the forge credentials before any other step (as above).
       - name: Mask the forge credentials
         run: |
           for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
@@ -803,10 +403,9 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
-      # CUSTOMIZE (xkey-android, GitHub-hosted): a hosted runner is a fresh VM
-      # per job, so nothing removed here is shared. The host's .NET, Android
-      # SDK and GHC go (the stages use the images' own JDK and SDK), and the
-      # preloaded images with them.
+      # A hosted runner is a fresh VM per job, so nothing removed here is
+      # shared. The host's .NET, Android SDK and GHC go (the stages use the
+      # images' own JDK and SDK), and the preloaded images with them.
       - name: Free runner disk
         if: ${{ runner.environment == 'github-hosted' }}
         run: |
@@ -814,8 +413,7 @@ jobs:
           docker image prune --all --force
           df -h /
 
-      # CUSTOMIZE (xkey-android): the toolchain image alone, run by ID (as in
-      # the image job).
+      # The toolchain image alone, run by ID (as in the image job).
       - name: Build the toolchain image
         env:
           IMAGE_ID_DIR: ${{ runner.temp }}/image-ids
@@ -825,17 +423,17 @@ jobs:
           echo "toolchain image $(make -s toolchain-image) = $tc"
           echo "TOOLCHAIN_IMAGE=$tc" >> "$GITHUB_ENV"
 
-      # v1.22: bound this repo's cache volumes (as in the image job). It never
+      # Bound this repo's cache volumes (as in the image job). It never
       # fails the job and keeps every volume a container mounts.
       - name: Trim the CI caches
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
 
-      # v1.29.1: no -k; the first failing gate ends the step (ruling 226(15)).
+      # No -k: the first failing gate ends the step.
       - name: make lint-gates
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         env:
-          IN_IMAGE_NETWORK: none   # CUSTOMIZE: bridge when a gate needs a network; none of these does
+          IN_IMAGE_NETWORK: none   # bridge when a gate needs a network; none of these does
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint-gates"
 
       - name: Tear down
@@ -843,26 +441,25 @@ jobs:
         run: |
           rm -rf "$RUNNER_TEMP/image-ids"
 
-  # Integration tests run in the integration image (ci-standard.md §2), as a
+  # Integration tests run in the integration image, as a
   # compose stack on the runner host started by `make integration-test`. The
   # stack is named per run under the repo's prefix, and the job keeps its own
   # teardown last under `if: always()`.
-  # v1.23: full tier only (CI_FULL_TIER's expression); never on a plain PR.
+  # Full tier only (CI_FULL_TIER's expression); never on a plain PR.
   integration:
     name: Integration [integration image]
-    # v1.26: never on a draft PR, ci:full or not.
+    # Never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120      # CUSTOMIZE: a cold integration image build and the JVM suite
+    timeout-minutes: 120      # a cold integration image build and the JVM suite
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       IT_PROJECT: ${{ github.event.repository.name }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      # v1.21.1 (Company Agent m605 item 8): mask the forge credentials before
-      # any other step. The runner injects them as plain environment
-      # (dependency-resolution.md §6), which the log does not mask by itself,
+      # Mask the forge credentials before any other step. A runner that injects
+      # them does so as plain environment, which the log does not mask by itself,
       # and the token sits inside GIT_CONFIG_KEY_0's URL, so it is masked alone
       # as well.
       - name: Mask the forge credentials
@@ -874,10 +471,9 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
-      # CUSTOMIZE (xkey-android, GitHub-hosted): a hosted runner is a fresh VM
-      # per job, so nothing removed here is shared. The host's .NET, Android
-      # SDK and GHC go (the stages use the images' own JDK and SDK), and the
-      # preloaded images with them.
+      # A hosted runner is a fresh VM per job, so nothing removed here is
+      # shared. The host's .NET, Android SDK and GHC go (the stages use the
+      # images' own JDK and SDK), and the preloaded images with them.
       - name: Free runner disk
         if: ${{ runner.environment == 'github-hosted' }}
         run: |
@@ -885,9 +481,8 @@ jobs:
           docker image prune --all --force
           df -h /
 
-      # v1.29: the Alpine package index checksum (as in the image job).
-      # CUSTOMIZE (xkey-android): APK_BASE_IMAGES from scripts/tool-pins.sh
-      # (as in the image job).
+      # The Alpine package index checksum, APK_BASE_IMAGES from
+      # scripts/tool-pins.sh (as in the image job).
       - name: Read the Alpine package index
         run: |
           APK_BASE_IMAGES=$(. scripts/tool-pins.sh && printf '%s' "$BASE_IMAGE")
@@ -895,8 +490,7 @@ jobs:
           sum=$(scripts/apk-index-sum.sh)
           echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
-      # CUSTOMIZE (xkey-android, Software comment 158438, ruling 223(13)): the
-      # Debian mirror of the step above, whose sum is `none` on this base.
+      # The Debian mirror of the step above, whose sum is `none` on this base.
       # scripts/apt-index-sum.sh hashes the pinned BASE_IMAGE's apt index
       # into APT_INDEX_SUM, which the integration tag hashes and whose build
       # runs `apt-get upgrade` again. An unreadable index fails the job.
@@ -905,7 +499,7 @@ jobs:
           sum=$(scripts/apt-index-sum.sh)
           echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
-      # v1.23: the content-addressed integration image (as in the image job).
+      # The content-addressed integration image (as in the image job).
       - name: Name the integration image
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
@@ -922,15 +516,15 @@ jobs:
           echo "IT_IMAGE=$it" >> "$GITHUB_ENV"
           rm -rf "$IMAGE_ID_DIR"
 
-      # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
+      # Host tuning the suite needs goes here, as in the image job.
 
-      # CUSTOMIZE (xkey-android): no module credential file; Gradle resolves
+      # No credential file; Gradle resolves
       # nothing at run time (the image's read-only cache, --offline), and the
       # integration service has no network.
 
-      # CUSTOMIZE (xkey-android): make integration-test is the instrumented
-      # suite and needs a device or emulator over adb; the runners have no
-      # device and no KVM, so it stays local (#7 Tier 3). This job runs
+      # make integration-test is the instrumented suite and needs a device or
+      # emulator over adb; the runners have no device and no KVM, so it stays
+      # local. This job runs
       # make it-jvm-test instead: the JVM unit suite (testDebugUnitTest, the
       # wire-compatibility vectors included) offline in the hardened
       # integration service. It proves the integration image and its
@@ -944,28 +538,27 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env"
           IT_IMAGE="$IT_IMAGE" docker compose -f build/docker/devcontainer/compose.yaml -p "$IT_PROJECT" down --volumes || true
 
-  # Soak (v1.23, owner item 101): the integration suite looped in the
+  # Soak: the integration suite looped in the
   # integration image until SOAK_MINUTES have passed, each iteration its own
   # compose stack, torn down before the next; the first red iteration fails
-  # the job. v1.24 (owner ruling 2026-10-19, Company Agent m751 (e)): nightly
-  # and workflow_dispatch only, off main pushes and off ci:full; the Gate marks
-  # it `nightly`. It replaces nothing in batch.yml, whose soak stays a dispatch.
+  # the job. Nightly and workflow_dispatch only, off main pushes and off
+  # ci:full; the Gate marks it `nightly`.
   soak:
     name: Soak [integration image]
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 150      # CUSTOMIZE: a cold image build, SOAK_MINUTES and one iteration
+    timeout-minutes: 150      # a cold image build, SOAK_MINUTES and one iteration
     env:
-      SOAK_MINUTES: 30        # CUSTOMIZE
-      # CUSTOMIZE (xkey-android): it-jvm-test, the JVM suite in the hardened
-      # integration service; integration-test needs a device (integration job).
-      SOAK_TARGET: it-jvm-test   # CUSTOMIZE: a make target of the integration image
+      SOAK_MINUTES: 30
+      # it-jvm-test, the JVM suite in the hardened integration service;
+      # integration-test needs a device (integration job).
+      SOAK_TARGET: it-jvm-test   # a make target of the integration image
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       IT_PROJECT: ${{ github.event.repository.name }}-ci-${{ github.run_id }}-${{ github.run_attempt }}-soak
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      # v1.21.1: mask the forge credentials before any other step (as above).
+      # Mask the forge credentials before any other step (as above).
       - name: Mask the forge credentials
         run: |
           for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
@@ -975,10 +568,9 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
-      # CUSTOMIZE (xkey-android, GitHub-hosted): a hosted runner is a fresh VM
-      # per job, so nothing removed here is shared. The host's .NET, Android
-      # SDK and GHC go (the stages use the images' own JDK and SDK), and the
-      # preloaded images with them.
+      # A hosted runner is a fresh VM per job, so nothing removed here is
+      # shared. The host's .NET, Android SDK and GHC go (the stages use the
+      # images' own JDK and SDK), and the preloaded images with them.
       - name: Free runner disk
         if: ${{ runner.environment == 'github-hosted' }}
         run: |
@@ -986,9 +578,8 @@ jobs:
           docker image prune --all --force
           df -h /
 
-      # v1.29: the Alpine package index checksum (as in the image job).
-      # CUSTOMIZE (xkey-android): APK_BASE_IMAGES from scripts/tool-pins.sh
-      # (as in the image job).
+      # The Alpine package index checksum, APK_BASE_IMAGES from
+      # scripts/tool-pins.sh (as in the image job).
       - name: Read the Alpine package index
         run: |
           APK_BASE_IMAGES=$(. scripts/tool-pins.sh && printf '%s' "$BASE_IMAGE")
@@ -996,8 +587,7 @@ jobs:
           sum=$(scripts/apk-index-sum.sh)
           echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
-      # CUSTOMIZE (xkey-android, Software comment 158438, ruling 223(13)): the
-      # Debian mirror of the step above, whose sum is `none` on this base.
+      # The Debian mirror of the step above, whose sum is `none` on this base.
       # scripts/apt-index-sum.sh hashes the pinned BASE_IMAGE's apt index
       # into APT_INDEX_SUM, which the integration tag hashes and whose build
       # runs `apt-get upgrade` again. An unreadable index fails the job.
@@ -1006,7 +596,7 @@ jobs:
           sum=$(scripts/apt-index-sum.sh)
           echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
-      # v1.23: the content-addressed integration image (as in the image job).
+      # The content-addressed integration image (as in the image job).
       - name: Name the integration image
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
@@ -1023,10 +613,9 @@ jobs:
           echo "IT_IMAGE=$it" >> "$GITHUB_ENV"
           rm -rf "$IMAGE_ID_DIR"
 
-      # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
+      # Host tuning the suite needs goes here, as in the image job.
 
-      # CUSTOMIZE (xkey-android): no module credential file (as in the
-      # integration job), so no MODULE_ENV_FILE and no GO_BUILD_TAGS below.
+      # No credential file (as in the integration job).
 
       - name: Soak (integration suite, looped)
         run: |
@@ -1056,41 +645,32 @@ jobs:
           fi
           rm -f "$RUNNER_TEMP/soak-project"
 
-  # CUSTOMIZE: further stages run in the image job as steps of the same
-  # shape (one `make` target in the toolchain image, `if: !cancelled()`). A
-  # suite that needs its own runner or stack (tagged suites, cross-arch,
-  # contrib modules) is a job of the integration job's shape and joins CI
-  # Gate's needs list and check lines. v1.23: such a suite is full tier (the
-  # integration job's `if:`, `full` in CI Gate) unless it is lint, build,
-  # unit or race, which stay on the PR tier.
-  # v1.29.2 (ruling 239(8)): a CUSTOMIZE job that runs only when certain
-  # paths change (the changes job gains an output for them, `optee` here)
-  # needs the image job as well, and its `if:` tests an image job output
-  # that its build step sets (here `built`, which the image job declares in
-  # `outputs:` when a repository adds such a job), never `needs.<job>.result`
-  # and never the changes job's outputs alone. Reading `needs.changes.outputs.*`
-  # in the same `if:` is fine:
+  # Further stages run in the image job as steps of the same shape (one
+  # `make` target in the toolchain image, `if: !cancelled()`). A suite that
+  # needs its own runner or stack is a job of the integration job's shape and
+  # joins CI Gate's needs list and check lines. Such a suite is full tier (the
+  # integration job's `if:`, `full` in CI Gate) unless it is lint, build or
+  # unit, which stay on the PR tier.
+  # A job that runs only when certain paths change (the changes job gains an
+  # output for them, `optee` here) needs the image job as well, and its `if:`
+  # tests an image job output that its build step sets (here `built`, which
+  # the image job declares in `outputs:` when such a job is added), never
+  # `needs.<job>.result` and never the changes job's outputs alone: an `if:`
+  # that read only those left the job skipped unstarted on a pull_request.
+  # Reading `needs.changes.outputs.*` in the same `if:` is fine:
   #   needs: [changes, image]
   #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.optee == 'true')) }}
 
-  # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
-  # go-objstore owns every blob backend (docs/00), and a repo reaches it only
-  # through the packages that are its storage seam. Test files are exempt, and
-  # go-objstore itself passes. CUSTOMIZE: OBJSTORE_SEAMS, an extended regex of
-  # the paths that may import go-objstore (go-xkms: 'pkg/ca/|pkg/storage/');
-  # empty means none may. CUSTOMIZE: the repo's own layering rules (go-xkms:
-  # xkmsctl and xkey depend only on sdk/go) are further steps in this job.
-  # A source check with grep, not a stage: it runs on the runner's shell.
-  # v1.23: a lint-class check, so it stays on the PR tier.
+  # Architecture gate: the repository's layering rules, as source checks with
+  # grep on the runner's shell, not a stage. A lint-class check, so it stays
+  # on the PR tier.
   arch-gates:
     name: Architecture Gates
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: ${{ !github.event.pull_request.draft }}   # v1.26
-    # CUSTOMIZE (xkey-android): no OBJSTORE_SEAMS and no go-objstore step; a
-    # Kotlin app has no Go imports and stores no blobs. The repo's own rule
-    # stands in: coroutines for async work, never blocking (CLAUDE.md), so
-    # runBlocking is banned from production sources (tests may use it).
+    if: ${{ !github.event.pull_request.draft }}
+    # Coroutines for async work, never blocking (CLAUDE.md), so runBlocking is
+    # banned from production sources (tests may use it).
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
@@ -1103,30 +683,29 @@ jobs:
           fi
           echo "OK: no runBlocking in app/src/main"
 
-  # The single required check (devops.md §1). Every job above must appear in
+  # The single required check. Every job above must appear in
   # BOTH the needs list and the results check — a gate that can pass vacuously
-  # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
-  # on Gitea and reports success while jobs fail.
-  # CUSTOMIZE (xkey-android): no fips job (there is no Go code); trivy runs
-  # in the image job on the full tier.
+  # is worse than no gate. Do not use join(needs.*.result); it can evaluate
+  # empty and report success while jobs fail.
+  # No fips job (there is no Go code); trivy runs in the image job on the
+  # full tier.
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: always()
-    # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
-    # check line below; remove none of the template's jobs.
+    # The job list. Add every new job here AND as a check line below.
     needs: [changes, image, lint-gates, integration, soak, arch-gates]
     steps:
       - name: Fail closed on any non-success
         env:
-          # The full tier is CI_FULL_TIER (v1.23): every event but a PR, and a
+          # The full tier is CI_FULL_TIER: every event but a PR, and a
           # PR labelled ci:full. A job marked `full` may be skipped below only
           # when it is not selected; a `pr` job may never be skipped.
           FULL_TIER: ${{ env.CI_FULL_TIER }}
-          # v1.24: a `nightly` job runs on schedule and workflow_dispatch only.
+          # A `nightly` job runs on schedule and workflow_dispatch only.
           NIGHTLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-          # v1.26: a draft PR runs no CI, so its gate fails rather than pass on skips.
+          # A draft PR runs no CI, so its gate fails rather than pass on skips.
           DRAFT: ${{ github.event.pull_request.draft == true }}
         run: |
           if [ "${DRAFT}" = true ]; then
@@ -1149,7 +728,7 @@ jobs:
               *) echo "FAIL $1 ($2)"; BAD=1;;
             esac
           }
-          # CUSTOMIZE: one line per job in needs above. A job gated to the
+          # One line per job in needs above. A job gated to the
           # full tier by its `if:` is marked full, one gated to schedule and
           # workflow_dispatch is nightly; every other job is pr.
           check changes     "${{ needs.changes.result }}" pr

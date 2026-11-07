@@ -9,7 +9,7 @@
 
 .DEFAULT_GOAL := help
 
-# The one pin file (handbook devcontainer.md section 2), shared with the image.
+# The one pin file, shared with the image.
 include scripts/tool-pins.sh
 
 DEBUG_APK := app/build/outputs/apk/debug/app-debug.apk
@@ -28,8 +28,7 @@ else
 ADB_MISSING := adb not found at ADB=$(ADB)
 endif
 
-# CI calls these same targets (handbook devops.md section 4: the Makefile is the
-# contract), so a red CI job reproduces locally with the same command.
+# CI calls these same targets (the Makefile is the contract), so a red CI job reproduces locally with the same command.
 GRADLEW ?= ./gradlew
 # The devcontainer sets GRADLE_OFFLINE=true: every dependency comes from the
 # image's read-only cache, nothing downloads at run time.
@@ -39,16 +38,15 @@ TOOLS_BIN ?= $(HOME)/.local/bin
 
 DEVCONTAINER := build/docker/devcontainer
 IMAGE_TAG := $(DEVCONTAINER)/image-tag.sh
-# The images' names (image-tag.sh, Codex review 6470): trusted, the default
+# The images' names (image-tag.sh): trusted, the default
 # for a developer's own make and CI's push, schedule or dispatch on main, tags
 # <hash>; pr, which ci.yml passes for every other run, tags pr-<hash>, and may
 # take the trusted image of the same content (`docker tag`). The namespace is
-# a name only and protects nothing (Codex review 6544): a pull request's run
+# a name only and protects nothing: a pull request's run
 # executes its own Makefile against the daemon main's runs use, so it can
 # write any tag, a trusted one included. IMAGE_FRESH is the guard.
 IMAGE_NAMESPACE ?= trusted
-# CUSTOMIZE (xkey-android): fresh trusted builds (Codex review 6544 on PR
-# #40), until trusted runs get a daemon or registry pull requests cannot
+# Fresh trusted builds, until trusted runs get a daemon or registry pull requests cannot
 # write. IMAGE_FRESH=true, which ci.yml sets on a trusted run, never reuses a
 # tag: it builds every image from this checkout's fingerprinted inputs, with
 # no build cache (--no-cache: a pull request's builds write the same cache)
@@ -64,7 +62,7 @@ IMAGE_ID_DIR ?= build/image-ids
 # whichever service it runs.
 COMPOSE := TOOLCHAIN_IMAGE=$$($(IMAGE_TAG) toolchain $(IMAGE_NAMESPACE)) IT_IMAGE=$${IT_IMAGE:-$$($(IMAGE_TAG) it $(IMAGE_NAMESPACE))} \
 	docker compose -f $(DEVCONTAINER)/compose.yaml
-# APT_PROXY comes from the caller's environment (devcontainer.md section 4).
+# APT_PROXY comes from the caller's environment.
 DOCKER_BUILD := DOCKER_BUILDKIT=1 docker build -f $(DEVCONTAINER)/Dockerfile \
 	--build-arg BASE_IMAGE=$(BASE_IMAGE) --build-arg APT_PROXY=$(DEVCACHE_APT_PROXY)
 
@@ -97,7 +95,7 @@ test: ## Run unit tests (JVM, no device)
 	@echo ""
 	@echo "Reports: app/build/reports/tests/testDebugUnitTest/"
 
-# The name ci-template's coverage stage calls. No coverage threshold is
+# The name CI's coverage stage calls. No coverage threshold is
 # ratified for this app, so none is enforced, and a value is refused rather
 # than silently ignored.
 coverage: ## Unit tests plus the JaCoCo report (no threshold is enforced)
@@ -108,10 +106,10 @@ coverage: ## Unit tests plus the JaCoCo report (no threshold is enforced)
 
 lint: android-lint ## Android lint on the debug variant (the repository's own gates run as lint-gates)
 
-# ci-template v1.27: the repository's own gates (scripts, workflows, their
-# tests) are not part of lint: CI's lint-gates job runs `make lint-gates`
-# in parallel with the image job's `make lint`, so nothing runs twice there.
-# v1.29.1: without -k, so the first failing gate ends the run.
+# The repository's own gates (scripts, workflows, their tests) are not part
+# of lint: CI's lint-gates job runs `make lint-gates` in parallel with the
+# image job's `make lint`, so nothing runs twice there. It runs without -k,
+# so the first failing gate ends the run.
 lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline)
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
@@ -130,7 +128,7 @@ actionlint: ## Lint the workflow files (requires actionlint + shellcheck on PATH
 closing-links-test: ## Test revert-red-main.yml's closing-link parse against fixtures (bash + jq)
 	./scripts/closing-links-test.sh
 
-revert-red-main-test: ## Test that revert-red-main.yml resumes a partial run, against a stubbed Gitea and a local remote (bash + git + jq)
+revert-red-main-test: ## Test that revert-red-main.yml resumes a partial run, against a stubbed forge API and a local remote (bash + git + jq)
 	./scripts/revert-red-main-test.sh
 
 reaper-test: ## Test reap-stale-ci-stacks.sh's image and lease rules against a stubbed docker (bash)
@@ -157,8 +155,7 @@ trivy-fs: ## Trivy filesystem scan for dependency CVEs and leaked secrets
 install-tools: ## Install the pinned, checksum-verified trivy into $(TOOLS_BIN)
 	./scripts/install-trivy.sh $(TOOLS_BIN)
 
-# The tool check fails closed when a tool is missing or off its pin
-# (devcontainer.md section 7).
+# The tool check fails closed when a tool is missing or off its pin.
 tools-check: tools-check-trivy tools-check-actionlint tools-check-gradle ## Fail when a pinned tool is missing or off its pin
 
 tools-check-trivy:
@@ -178,8 +175,7 @@ tools-check-gradle:
 		[ -n "$$v" ] || { echo "$(GRADLE) --version failed: no Gradle to run the gates"; exit 1; }; \
 		[ "$$v" = "$(GRADLE_VERSION)" ] || { echo "$(GRADLE) is Gradle $$v, not GRADLE_VERSION=$(GRADLE_VERSION) (scripts/tool-pins.sh)"; exit 1; }
 
-# ci-standard.md section 1: fail on a library behind a release older than 7
-# days, report a younger one. The one stage that needs the network: it runs
+# Fail on a library behind a release older than 7 days, report a younger one. The one stage that needs the network: it runs
 # Gradle without --offline. Exemptions: scripts/deps-check-exempt.txt.
 deps-check: ## Latest-version check: fail on a release older than 7 days (needs the network)
 	GRADLEW="$(GRADLEW)" ./scripts/deps-check.sh
@@ -194,18 +190,16 @@ docker-build: docker-build-toolchain docker-build-it ## Build the toolchain and 
 # keep $$tag when the daemon holds it; in the pr namespace, else take the
 # trusted image of the same content under $$tag; else build it. Taking an image
 # re-tags it, which moves its .Metadata.LastTagTime: the last-used mark
-# scripts/reap-stale-ci-stacks.sh ages an image by. CUSTOMIZE (xkey-android):
-# the fresh build, and the ci.image.repository label on every build, by which
-# the reaper finds this repo's images a later build has untagged (Codex review
-# 6544). Every build goes through scripts/build-image.sh, which builds under a
+# scripts/reap-stale-ci-stacks.sh ages an image by. Also the fresh build, and
+# the ci.image.repository label on every build, by which the reaper finds this
+# repo's images a later build has untagged. Every build goes through scripts/build-image.sh, which builds under a
 # name of its own and only then points $$tag at the ID the build wrote, so
-# concurrent cold builds of one tag all succeed (main run 68429); with
-# IMAGE_FRESH=true it keeps that name, which the stages' ID needs.
-# ci-template v1.29: the integration build alone takes APK_INDEX_SUM, the Alpine
-# package index checksum its tag hashes (image-tag.sh). CUSTOMIZE
-# (xkey-android): the base is Debian, so CI's sum is `none` and the Dockerfile
-# declares no ARG for it (devcontainer.md section 6). Its Debian mirror,
-# APT_INDEX_SUM (scripts/apt-index-sum.sh, Software comment 158438), goes to
+# concurrent cold builds of one tag all succeed; with IMAGE_FRESH=true it
+# keeps that name, which the stages' ID needs.
+# The integration build alone takes APK_INDEX_SUM, the Alpine package index
+# checksum its tag hashes (image-tag.sh). The base is Debian, so CI's sum is
+# `none` and the Dockerfile declares no ARG for it. Its Debian counterpart,
+# APT_INDEX_SUM (scripts/apt-index-sum.sh), goes to
 # the integration build alone too, whose stage declares it and runs
 # `apt-get upgrade`, so a new sum rebuilds with the fixed packages.
 DOCKER_BUILD_IMAGE = env $(DOCKER_BUILD) --label "ci.image.repository=$${tag%%:*}" --target $(2) \
@@ -248,8 +242,7 @@ toolchain-image: ## Print the toolchain image tag, hashed from its content
 it-image: ## Print the integration image tag, hashed from its content
 	@$(IMAGE_TAG) it $(IMAGE_NAMESPACE)
 
-# CUSTOMIZE (xkey-android): the image IDs CI runs its stages on (Codex review
-# 6544), after `make docker-build`.
+# The image IDs CI runs its stages on, after `make docker-build`.
 toolchain-image-id: ## Print the toolchain image's ID (IMAGE_FRESH=true: the one its build wrote)
 	@tag=$$($(IMAGE_TAG) toolchain $(IMAGE_NAMESPACE)) || exit; \
 		$(call image_id,toolchain,$$tag)
@@ -262,9 +255,9 @@ it-image-id: ## Print the integration image's ID (IMAGE_FRESH=true: the one its 
 # the runners lack, so CI proves the hardened integration image with the JVM
 # suite, offline. IT_PROJECT names the compose project CI tears down.
 IT_PROJECT ?= xkey-android-it
-# CUSTOMIZE (xkey-android): an IT_IMAGE that is an image ID (`make -s
+# An IT_IMAGE that is an image ID (`make -s
 # it-image-id`, as CI passes) is run as it is, with no build and no tag lookup.
-# CUSTOMIZE (xkey-android): the suite runs on a copy of the image's /src in the
+# The suite runs on a copy of the image's /src in the
 # /tmp tmpfs. The service's root is read-only, and Gradle 9 refuses a project
 # directory it cannot write ("Configuring project ':app' without an existing
 # directory is not allowed"); kapt also writes Room's schemas into app/schemas.

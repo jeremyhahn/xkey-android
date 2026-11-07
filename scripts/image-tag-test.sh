@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests the package index sums in the image tags (Codex review 7678) and
-# scripts/apt-index-sum.sh (Software comment 158438, ruling 223(13)).
+# Tests the package index sums in the image tags and
+# scripts/apt-index-sum.sh.
 #
 # Tags, from the real `make -s it-image` and `make -s toolchain-image`: two
 # different non-empty APK_INDEX_SUM or APT_INDEX_SUM values give different
@@ -12,7 +12,7 @@
 # stdout) with no _Packages file, when `docker run` or `apt-get update`
 # fails, and with no docker. Every `apt-get update` the integration tag
 # depends on (the Dockerfile's integration stage, the probe) passes
-# APT::Update::Error-Mode=any (Codex 7845). Needs bash, git and make only.
+# APT::Update::Error-Mode=any. Needs bash, git and make only.
 # `make image-tag-test` (make lint-gates).
 set -euo pipefail
 
@@ -38,7 +38,7 @@ is_sum() { [[ $1 =~ ^[0-9a-f]{64}$ ]]; }
 
 # strict_words <args>: apt-get arguments that hold `-o
 # APT::Update::Error-Mode=any`, so an index apt cannot refresh fails the
-# update instead of a warning (Codex 7845).
+# update instead of a warning.
 strict_words() {
 	local -a w
 	read -ra w <<< "$1"
@@ -231,7 +231,7 @@ check "apt: no docker: exit 1" eq "${RC}" 1
 check "apt: no docker: no sum" eq "${OUT}" ""
 check "apt: no docker: says so" grep -q "docker not found" "${T}/err"
 
-# ---- strict index refresh (Codex 7845) ----
+# ---- strict index refresh ----
 
 # Every `apt-get update` the APT_INDEX_SUM tag depends on fails on an index it
 # cannot refresh: the integration stage's, whose upgrade the tag reruns, and

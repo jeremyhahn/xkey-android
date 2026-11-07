@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests reap-stale-ci-stacks.sh's image and lease rules (Codex review 6544 on
-# PR #40) against a stubbed docker: the image families (<prefix>it and
+# Tests reap-stale-ci-stacks.sh's image and lease rules against a stubbed
+# docker: the image families (<prefix>it and
 # REAP_IMAGE_REPOS) and their untagged images, the in-use check, the last-use
 # age and the lease expiry. Needs bash and GNU date only, no Docker.
 # `make reaper-test`.
@@ -46,7 +46,7 @@ case ${cmd} in
     fi
     while read -r id _; do echo "${id}"; done < "${fix}/containers" ;;
   create)
-    # The image lock (v5): one container of that name at a time.
+    # The image lock: one container of that name at a time.
     [ -e "${fix}/lockheld" ] && exit 1
     echo "lockid created" > "${fix}/lockheld"
     echo lockid ;;
@@ -175,7 +175,7 @@ image rm ${PREFIX}it:iiii" REAP_IMAGE_REPOS="${TC}"
 [ ! -e "${tmp}/fix/nolock" ] || fail "an image was removed outside the image lock: $(cat "${tmp}/fix/nolock")"
 [ ! -e "${tmp}/fix/lockheld" ] || fail "the reaper left the image lock held"
 
-# Without REAP_IMAGE_REPOS only the <prefix>it family is reaped (v3).
+# Without REAP_IMAGE_REPOS only the <prefix>it family is reaped.
 fixture "" "\
 $(sha 1) ${TC}:aaaa $(ago $((5 * H))) $((now - 5 * H)) ${TC}
 $(sha 13) ${PREFIX}it:iiii $(ago $((5 * H))) $((now - 5 * H)) ${PREFIX}it"
