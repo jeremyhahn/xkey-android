@@ -25,7 +25,7 @@
 #
 # It reverts only a failure it can pin on the merge; anything else is left to
 # the coordinator:
-#   - the run is a push to main (not schedule, dispatch or a PR) whose
+#   - the run is a push to main (not dispatch or a PR) whose
 #     conclusion is failure, read again from the API by run id;
 #   - a job failed in a step named in REVERT_STEPS, the deterministic stages.
 #     security, deps-check and trivy can turn red on main with no merge at

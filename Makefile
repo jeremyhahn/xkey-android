@@ -39,7 +39,7 @@ TOOLS_BIN ?= $(HOME)/.local/bin
 DEVCONTAINER := build/docker/devcontainer
 IMAGE_TAG := $(DEVCONTAINER)/image-tag.sh
 # The images' names (image-tag.sh): trusted, the default
-# for a developer's own make and CI's push, schedule or dispatch on main, tags
+# for a developer's own make and CI's push or dispatch on main, tags
 # <hash>; pr, which ci.yml passes for every other run, tags pr-<hash>, and may
 # take the trusted image of the same content (`docker tag`). The namespace is
 # a name only and protects nothing: a pull request's run
