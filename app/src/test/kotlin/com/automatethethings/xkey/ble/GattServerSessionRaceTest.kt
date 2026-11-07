@@ -165,6 +165,7 @@ class GattServerSessionRaceTest {
         val result = withTimeout(TIMEOUT_MS) { request.await() }
         assertTrue("the cancelled request must end quietly: $result", result.isSuccess)
         approval.complete(Unit)
+        // The window is the check: "ran nothing" has no event to await.
         delay(200)
         assertFalse("an approval after the revocation must run nothing", ran.get())
         verify(timeout = TIMEOUT_MS) { gatt.cancelConnection(device) }

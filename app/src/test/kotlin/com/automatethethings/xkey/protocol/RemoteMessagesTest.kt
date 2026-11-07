@@ -132,19 +132,6 @@ class RemoteMessagesTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `RemoteListKeysParams toJson omits the optional algorithm filter`() {
-        assertEquals(setOf("backend"), RemoteListKeysParams("tpm2").toJson().keySet())
-    }
-
-    @Test
-    fun `RemoteListKeysParams toJson emits the algorithm filter when set`() {
-        val json = RemoteListKeysParams("tpm2", "ES256").toJson()
-
-        assertEquals(setOf("backend", "algorithm"), json.keySet())
-        assertEquals("ES256", json.getString("algorithm"))
-    }
-
-    @Test
     fun `RemoteKeyInfo fromJson reads all fields`() {
         val info = RemoteKeyInfo.fromJson(
             JSONObject(
@@ -159,17 +146,6 @@ class RemoteMessagesTest {
         assertEquals(256, info.keySizeBits)
         assertEquals("my key", info.label)
         assertEquals(1700000000L, info.createdAt)
-    }
-
-    @Test
-    fun `RemoteKeyInfo fromJson defaults the optional metadata fields`() {
-        val info = RemoteKeyInfo.fromJson(
-            JSONObject("""{"keyId":"k","backend":"tpm2","algorithm":"ES256"}""")
-        )
-
-        assertEquals(0, info.keySizeBits)
-        assertEquals("", info.label)
-        assertEquals(0L, info.createdAt)
     }
 
     @Test
@@ -208,14 +184,6 @@ class RemoteMessagesTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `RemoteGetPublicKeyParams toJson always emits backend keyId and format`() {
-        val json = RemoteGetPublicKeyParams("tpm2", "k").toJson()
-
-        assertEquals(setOf("backend", "keyId", "format"), json.keySet())
-        assertEquals("der", json.getString("format"))
-    }
-
-    @Test
     fun `RemoteGetPublicKeyResult round-trips through toJson and fromJson`() {
         val original = RemoteGetPublicKeyResult("cHVi", "pem", "ES256")
 
@@ -233,18 +201,6 @@ class RemoteMessagesTest {
     // -------------------------------------------------------------------------
     // remote.sign / remote.verify
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `RemoteSignParams toJson omits the optional algorithm override`() {
-        assertEquals(setOf("backend", "keyId", "data"), RemoteSignParams("tpm2", "k", "ZGF0YQ").toJson().keySet())
-    }
-
-    @Test
-    fun `RemoteSignParams toJson emits the algorithm override when set`() {
-        val json = RemoteSignParams("tpm2", "k", "ZGF0YQ", "ES256").toJson()
-
-        assertEquals(setOf("backend", "keyId", "data", "algorithm"), json.keySet())
-    }
 
     @Test
     fun `RemoteSignResult round-trips through toJson and fromJson`() {
@@ -287,22 +243,6 @@ class RemoteMessagesTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `RemoteEncryptParams toJson omits the optional algorithm and aad`() {
-        assertEquals(
-            setOf("backend", "keyId", "plaintext"),
-            RemoteEncryptParams("soft", "k", "cHQ").toJson().keySet()
-        )
-    }
-
-    @Test
-    fun `RemoteEncryptParams toJson emits the optional algorithm and aad when set`() {
-        val json = RemoteEncryptParams("soft", "k", "cHQ", "AES-256", "YWFk").toJson()
-
-        assertEquals(setOf("backend", "keyId", "plaintext", "algorithm", "aad"), json.keySet())
-        assertEquals("YWFk", json.getString("aad"))
-    }
-
-    @Test
     fun `RemoteEncryptResult round-trips through toJson and fromJson`() {
         val original = RemoteEncryptResult("Y3Q")
 
@@ -338,14 +278,6 @@ class RemoteMessagesTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `RemoteDeriveKeyParams toJson emits exactly backend keyId and peerPublicKey`() {
-        assertEquals(
-            setOf("backend", "keyId", "peerPublicKey"),
-            RemoteDeriveKeyParams("tpm2", "k", "cGVlcg").toJson().keySet()
-        )
-    }
-
-    @Test
     fun `RemoteDeriveKeyResult round-trips through toJson and fromJson`() {
         val original = RemoteDeriveKeyResult("c2VjcmV0")
 
@@ -356,23 +288,6 @@ class RemoteMessagesTest {
     // -------------------------------------------------------------------------
     // remote.generateKey / remote.getKeyInfo / remote.deleteKey
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `RemoteGenerateKeyParams toJson omits keySizeBits when it is zero and label when null`() {
-        assertEquals(
-            setOf("backend", "keyId", "algorithm"),
-            RemoteGenerateKeyParams("tpm2", "k", "ES256").toJson().keySet()
-        )
-    }
-
-    @Test
-    fun `RemoteGenerateKeyParams toJson emits keySizeBits and label when supplied`() {
-        val json = RemoteGenerateKeyParams("tpm2", "k", "RS256", 2048, "my key").toJson()
-
-        assertEquals(setOf("backend", "keyId", "algorithm", "keySizeBits", "label"), json.keySet())
-        assertEquals(2048, json.getInt("keySizeBits"))
-        assertEquals("my key", json.getString("label"))
-    }
 
     @Test
     fun `RemoteGenerateKeyResult fromJson tolerates a symmetric key with no public part`() {

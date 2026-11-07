@@ -1,4 +1,4 @@
-// The plugins' classpath: raise jars AGP 9.4.1 pulls in that trivy flags to
+// The plugins' classpath: raise jars AGP 9.5.1 pulls in that trivy flags to
 // their fixed releases. A constraint only lifts a module already in the graph.
 buildscript {
     dependencies {
@@ -13,7 +13,7 @@ buildscript {
             classpath(libs.jose4j)
             // jdom2 2.0.6 (CVE-2021-33813), from jetifier-processor 1.0.0-beta10
             classpath(libs.jdom2)
-            // guava 33.4.0-jre (CVE-2026-102554), from AGP's common 32.4.1
+            // guava 33.4.0-jre (CVE-2026-102554), from AGP's common 32.5.1
             classpath(libs.guava.jre)
         }
     }

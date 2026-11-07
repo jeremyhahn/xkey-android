@@ -36,53 +36,15 @@ class BrowserAllowlistTest {
     }
 
     @Test
-    fun `allowlist contains Chrome stable`() {
-        assertBrowserPresent("com.android.chrome")
-    }
+    fun `allowlist contains every supported browser`() {
+        val json = JSONObject(BrowserAllowlist.PRIVILEGED_BROWSERS)
+        val apps = json.getJSONArray("apps")
+        val listed = (0 until apps.length()).map {
+            apps.getJSONObject(it).getJSONObject("info").getString("package_name")
+        }.toSet()
 
-    @Test
-    fun `allowlist contains Chrome Beta`() {
-        assertBrowserPresent("com.chrome.beta")
-    }
-
-    @Test
-    fun `allowlist contains Chrome Dev`() {
-        assertBrowserPresent("com.chrome.dev")
-    }
-
-    @Test
-    fun `allowlist contains Chrome Canary`() {
-        assertBrowserPresent("com.chrome.canary")
-    }
-
-    @Test
-    fun `allowlist contains Firefox`() {
-        assertBrowserPresent("org.mozilla.firefox")
-    }
-
-    @Test
-    fun `allowlist contains Firefox Beta`() {
-        assertBrowserPresent("org.mozilla.firefox_beta")
-    }
-
-    @Test
-    fun `allowlist contains Firefox Nightly`() {
-        assertBrowserPresent("org.mozilla.fenix")
-    }
-
-    @Test
-    fun `allowlist contains Samsung Internet`() {
-        assertBrowserPresent("com.sec.android.app.sbrowser")
-    }
-
-    @Test
-    fun `allowlist contains Microsoft Edge`() {
-        assertBrowserPresent("com.microsoft.emmx")
-    }
-
-    @Test
-    fun `allowlist contains Vanadium`() {
-        assertBrowserPresent("app.vanadium.browser")
+        val missing = SUPPORTED_BROWSERS - listed
+        assertTrue("Allowlist must contain $missing", missing.isEmpty())
     }
 
     @Test
@@ -144,21 +106,6 @@ class BrowserAllowlistTest {
 
     // --- Helpers ---
 
-    private fun assertBrowserPresent(packageName: String) {
-        val json = JSONObject(BrowserAllowlist.PRIVILEGED_BROWSERS)
-        val apps = json.getJSONArray("apps")
-        var found = false
-        for (i in 0 until apps.length()) {
-            val app = apps.getJSONObject(i)
-            val info = app.getJSONObject("info")
-            if (info.getString("package_name") == packageName) {
-                found = true
-                break
-            }
-        }
-        assertTrue("Allowlist must contain $packageName", found)
-    }
-
     private fun getFingerprintForPackage(packageName: String): String {
         val json = JSONObject(BrowserAllowlist.PRIVILEGED_BROWSERS)
         val apps = json.getJSONArray("apps")
@@ -172,5 +119,20 @@ class BrowserAllowlistTest {
             }
         }
         throw AssertionError("Package $packageName not found in allowlist")
+    }
+
+    private companion object {
+        val SUPPORTED_BROWSERS = setOf(
+            "com.android.chrome",
+            "com.chrome.beta",
+            "com.chrome.dev",
+            "com.chrome.canary",
+            "org.mozilla.firefox",
+            "org.mozilla.firefox_beta",
+            "org.mozilla.fenix",
+            "com.sec.android.app.sbrowser",
+            "com.microsoft.emmx",
+            "app.vanadium.browser",
+        )
     }
 }

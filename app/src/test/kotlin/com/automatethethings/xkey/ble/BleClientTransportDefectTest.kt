@@ -190,7 +190,7 @@ class BleClientTransportDefectTest {
             h.gatt, h.responseCharacteristic, firstOfTwoFragments()
         )
 
-        Thread.sleep(50)
+        awaitScopeFinished(h.client)
         assertEquals(0, h.probe.fragmentReassembler.getFragmentCount())
     }
 
@@ -228,7 +228,8 @@ class BleClientTransportDefectTest {
 
         val next = CompletableDeferred<ByteArray>()
         h.probe.pendingResponse = next
-        Thread.sleep(50)
+        // handleCompleteMessage settles the stray reply on this thread, so
+        // there is nothing left to wait for before the check.
         assertFalse("a stray reply must not satisfy the next request", next.isCompleted)
     }
 

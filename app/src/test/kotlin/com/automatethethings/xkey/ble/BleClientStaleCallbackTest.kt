@@ -164,7 +164,8 @@ class BleClientStaleCallbackTest {
             h.gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
         )
 
-        val failure = withTimeout(TIMEOUT_MS) { call.await() }.exceptionOrNull()
+        // At once, not at a deadline.
+        val failure = withTimeout(QUICK_MS) { call.await() }.exceptionOrNull()
         assertTrue("the write must be failed, not left waiting: $failure", failure is BleClientException)
         awaitUntil("the link to be torn down") {
             h.client.connectionState.value == ClientConnectionState.Disconnected
@@ -244,6 +245,9 @@ class BleClientStaleCallbackTest {
 
     private companion object {
         const val TIMEOUT_MS = 5_000L
+
+        // Well inside BleClient.DRAIN_DEADLINE_MS.
+        const val QUICK_MS = 2_000L
 
         val REQUEST = """{"jsonrpc":"2.0","id":1,"method":"local.listKeys"}""".toByteArray()
 

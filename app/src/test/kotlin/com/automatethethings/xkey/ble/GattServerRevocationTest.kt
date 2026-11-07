@@ -179,6 +179,8 @@ class GattServerRevocationTest {
         notificationReady()[ADDRESS] = CompletableDeferred()
         val secrets = session.secretArraysForTest() - "staticPrivateKey"
         val send = async(Dispatchers.IO) { runCatching { server.sendEncryptedMessage(REQUEST) } }
+        // The window is the check: a send parked on the readiness shows no
+        // signal, so it is still waiting after 200 ms.
         delay(200)
         assertTrue("the send waits for notifications", send.isActive)
         assertEquals("nothing is encrypted before admission", 0L, session.sendNonceForTest())

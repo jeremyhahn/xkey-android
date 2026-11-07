@@ -48,6 +48,11 @@
 # never plain `runs-on: release`, so a github.com copy still runs
 # (conventions/ci-standard.md §3).
 #
+# v8 (xkey-android, GitHub-hosted runners): `batch`, `bigdisk` and `ci-gate`
+# removed. Every ci.yml job that named them runs on ubuntu-latest, and an
+# allowlisted label that no workflow uses cannot catch a typo of itself (see
+# v3).
+#
 # Verify against the fleet, not against this comment:
 #   curl -sH "Authorization: token $TOK" \
 #     "$GITEA/api/v1/admin/actions/runners" \
@@ -61,9 +66,6 @@ self-hosted-runner:
     - codex-task
     - claude
     - code-review
-    - batch
-    - bigdisk
-    - ci-gate
     - qwen
     - dells
     - release

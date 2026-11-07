@@ -1,6 +1,6 @@
 [versions]
 # Android Gradle Plugin
-agp = "9.4.1"
+agp = "9.5.1"
 
 # Kotlin
 kotlin = "2.4.21"
@@ -55,7 +55,7 @@ mockk = "1.14.11"
 uiautomator = "2.4.0"
 
 # Coverage: the JaCoCo plugin's tool and AGP's coverage instrumentation
-jacoco = "0.8.15"
+jacoco = "0.8.16"
 
 # Build tooling: fixed releases of jars the Android Gradle plugin pulls in
 # (constraints in build.gradle.kts; Bouncy Castle uses bouncycastle above)
