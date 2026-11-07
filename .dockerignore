@@ -6,6 +6,9 @@
 .idea
 .serena
 .claude
+lane-records
+scheduled_tasks.lock
+**/*.log
 build
 app/build
 # Credentials, at any depth: every one .gitignore names (keystore.properties
