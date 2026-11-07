@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test image-lease-test build-image-test image-tag-test
+	reaper-test revert-red-main-test build-image-test image-tag-test
 
 .DEFAULT_GOAL := help
 
@@ -112,7 +112,7 @@ lint: android-lint ## Android lint on the debug variant (the repository's own ga
 # tests) are not part of lint: CI's lint-gates job runs `make lint-gates`
 # in parallel with the image job's `make lint`, so nothing runs twice there.
 # v1.29.1: without -k, so the first failing gate ends the run.
-lint-gates: actionlint closing-links-test revert-red-main-test reaper-test image-lease-test build-image-test image-tag-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the image lease fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline)
+lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline)
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -135,9 +135,6 @@ revert-red-main-test: ## Test that revert-red-main.yml resumes a partial run, ag
 
 reaper-test: ## Test reap-stale-ci-stacks.sh's image and lease rules against a stubbed docker (bash)
 	./scripts/reap-stale-ci-stacks-test.sh
-
-image-lease-test: ## Test ci.yml's image lease steps (rebuild once, export the new ID, fail after the retry, release the lock) against a stubbed docker and make (bash)
-	./scripts/image-lease-test.sh
 
 build-image-test: ## Test two concurrent cold builds of one image tag (make docker-build-toolchain, docker-build-it) against a stubbed docker (bash)
 	./scripts/build-image-test.sh
