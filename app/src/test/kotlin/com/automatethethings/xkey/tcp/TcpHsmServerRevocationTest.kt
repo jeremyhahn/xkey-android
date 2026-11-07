@@ -250,7 +250,7 @@ class TcpHsmServerRevocationTest {
 
     /**
      * The desktop sends past the frame buffer while its `local.verifyUser`
-     * waits on a prompt nobody answers (Codex 7374). The overflow ends the
+     * waits on a prompt nobody answers. The overflow ends the
      * connection and cancels the request, and the server serves the next one.
      */
     @Test
