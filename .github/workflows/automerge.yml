@@ -155,7 +155,7 @@ jobs:
           # The repository agent is agent-<repo> (agent-git.sh's format), except
           # the company repo, whose AGENT_TOKEN is agent-company. The token
           # cannot read /user; comment() fails loudly if this is wrong.
-          AGENT_DOMAIN: example.internal
+          AGENT_DOMAIN: example.com
           TRAIN_BASE: main
           # A train with no CI result after this long is rebuilt.
           TRAIN_TIMEOUT_MIN: '120'

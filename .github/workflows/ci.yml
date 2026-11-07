@@ -143,7 +143,7 @@
 # CUSTOMIZE race job joins the PR tier (`pr` in CI Gate, no tier `if:`); its
 # other CUSTOMIZE suites take CI_FULL_TIER's expression and are `full`.
 # v1.23 also (Company Agent m674 item 3, 2026-10-18: per-run image tags filled
-# ci-node-1 at 100G per 17 minutes): one image tag per family, keyed by
+# core-01 at 100G per 17 minutes): one image tag per family, keyed by
 # content. The integration image is <repo>-ci-it:<hash> (`make -s it-image`,
 # the go-qrdb #814 pattern), built once per runner and reused by every job and
 # run with that tree; no job removes it, and reap-stale-ci-stacks.sh v2
@@ -157,7 +157,7 @@
 # runs at the job slot's CPU bound. in-toolchain-image.sh v3 reads the job
 # container's cgroup cpu.max and gives the stage container that --cpus, with
 # GOMAXPROCS and GOFLAGS=-p from it; golangci-lint follows the quota. No
-# number is hardcoded: a 4-CPU Dell slot gives 4. No job changes.
+# number is hardcoded: a 4-CPU runner gives 4. No job changes.
 # v1.22.1 (Company Agent m636 item 2, 2026-10-18, after go-quicbaas main
 # fe167500f was left with no completed run): the concurrency block is
 # canonical. A newer push to a PR ref still cancels that ref's older run, but
@@ -193,11 +193,11 @@
 # COVERAGE_THRESHOLD, m601 (c)), security, deps-check (new, ci-standard.md
 # §1) and trivy image on the integration image (it leaves the CUSTOMIZE note).
 # The integration stage stays its own job, `make integration-test` in the
-# integration image. Both run on bigdisk (ubuntu-latest on github.com).
+# integration image. Both run on GitHub-hosted ubuntu-latest.
 # setup-go, the runner tool installs and the SARIF upload (m601 (d): CI runs
 # on Gitea) are gone, and with them GO_VERSION: the image pins Go. The tag
 # assertion moves to scripts/assert-build-tags.sh (ships beside this file).
-# CI Gate runs on ci-gate (m386) with go-quicraft's pr/full tier, and its
+# CI Gate runs on ubuntu-latest with go-quicraft's pr/full tier, and its
 # needs list and check lines are a CUSTOMIZE block (m598 item 2). The make
 # variables the jobs pass are in devcontainer.md §6 (m601 (b)).
 #
@@ -218,8 +218,8 @@
 # containers on the runner host runs scripts/reap-stale-ci-stacks.sh first
 # (ships beside this file). Its `if: always()` teardown dies with the job when
 # the host or the Docker daemon goes down, and nothing removed the stack after:
-# 11 exited stacks, with their networks and volumes, stayed on ci-node-1 and
-# ci-node-2 after the 2026-10-11/12 restarts. See the CUSTOMIZE note above
+# 11 exited stacks, with their networks and volumes, stayed on core-01 and
+# core-02 after the 2026-10-11/12 restarts. See the CUSTOMIZE note above
 # ci-gate.
 #
 # v1.17: third-party actions pinned by commit, the tag in a

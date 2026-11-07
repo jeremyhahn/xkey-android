@@ -50,7 +50,7 @@
 # when the job has no quota; IN_IMAGE_CPUS overrides), and the sibling gets
 # --cpus N with GOMAXPROCS=N and GOFLAGS=-p=N. golangci-lint's default
 # concurrency follows the container CPU quota, so lint takes N with no flag.
-# A 4-CPU slot on the Dells gives 4; never a hardcoded number.
+# A 4-CPU runner gives 4; never a hardcoded number.
 #
 # The container is named <CI_STACK_PREFIX>tc-<pid>-<random>, under the prefix
 # scripts/reap-stale-ci-stacks.sh reaps (default <checkout dir>-ci-, which in CI

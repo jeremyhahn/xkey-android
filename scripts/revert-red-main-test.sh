@@ -172,7 +172,7 @@ run() {
 	RC=0
 	OUT=$(cd "${T}" && PATH="${T}/bin:${PATH}" BOT=token REPO_API=https://gitea/api/v1/repos/o/xkey-android \
 		GIT_URL="${BARE}" SERVER=https://gitea REPOSITORY=o/xkey-android RED_RUN=1 \
-		AGENT_DOMAIN=example.internal bash "${T}/run.sh" 2>&1) || RC=$?
+		AGENT_DOMAIN=example.com bash "${T}/run.sh" 2>&1) || RC=$?
 }
 
 runs=0 fails=0

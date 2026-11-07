@@ -74,7 +74,7 @@ jobs:
           SERVER: ${{ github.server_url }}
           REPOSITORY: ${{ github.repository }}
           RED_RUN: ${{ github.event.workflow_run.id }}
-          AGENT_DOMAIN: example.internal
+          AGENT_DOMAIN: example.com
           GATE_CONTEXT: 'CI / CI Gate (push)'
           # CUSTOMIZE: the step names of the repo's deterministic stages, an
           # extended regex over ci.yml's step names. Add the repo's CUSTOMIZE
