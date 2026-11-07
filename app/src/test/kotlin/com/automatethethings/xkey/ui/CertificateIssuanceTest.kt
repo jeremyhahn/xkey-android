@@ -47,11 +47,11 @@ class CertificateIssuanceTest {
 
     @Test
     fun `parseSANs separates DNS names from IPv4 addresses`() {
-        val input = "example.com\n192.168.1.1\nwww.example.com\n10.0.0.1"
+        val input = "example.com\n192.0.2.1\nwww.example.com\n198.51.100.1"
         val (dnsNames, ipAddresses) = parseSANs(input, isEmail = false)
 
         assertEquals(listOf("example.com", "www.example.com"), dnsNames)
-        assertEquals(listOf("192.168.1.1", "10.0.0.1"), ipAddresses)
+        assertEquals(listOf("192.0.2.1", "198.51.100.1"), ipAddresses)
     }
 
     @Test
@@ -74,11 +74,11 @@ class CertificateIssuanceTest {
 
     @Test
     fun `parseSANs trims whitespace from each line`() {
-        val input = "  example.com  \n  192.168.1.1  "
+        val input = "  example.com  \n  192.0.2.1  "
         val (dnsNames, ipAddresses) = parseSANs(input, isEmail = false)
 
         assertEquals(listOf("example.com"), dnsNames)
-        assertEquals(listOf("192.168.1.1"), ipAddresses)
+        assertEquals(listOf("192.0.2.1"), ipAddresses)
     }
 
     @Test
@@ -99,10 +99,10 @@ class CertificateIssuanceTest {
 
     @Test
     fun `parseSANs handles single IP entry`() {
-        val (dnsNames, ipAddresses) = parseSANs("10.0.0.1", isEmail = false)
+        val (dnsNames, ipAddresses) = parseSANs("198.51.100.1", isEmail = false)
 
         assertTrue(dnsNames.isEmpty())
-        assertEquals(listOf("10.0.0.1"), ipAddresses)
+        assertEquals(listOf("198.51.100.1"), ipAddresses)
     }
 
     // -------------------------------------------------------------------------
