@@ -92,6 +92,7 @@ class OathCredentialEntityTest {
 
         assertEquals(8L, advanced.counter)
         assertEquals(base.oathId, advanced.oathId)
+        assertEquals("HOTP", advanced.oathType)
         assertTrue(base.secretEncrypted.contentEquals(advanced.secretEncrypted))
     }
 
