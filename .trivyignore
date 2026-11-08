@@ -13,37 +13,37 @@
 #   # 2026-01-01 <who>: <why this finding does not apply here>
 #   CVE-XXXX-NNNNN
 
-# 2026-10-22 agent-software (DS-3252): protobuf-java 2.6.1, shaded in AGP 9.4.1
+# 2026-10-22: protobuf-java 2.6.1, shaded in AGP 9.4.1
 # lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
 # build-only, in the image's Gradle cache, not in the APK. Remove with the bump
 # to the first stable AGP 9.5, or by 2026-11-21.
 CVE-2021-22569 exp:2026-11-21
 
-# 2026-10-22 agent-software (DS-3252): protobuf-java 2.6.1, shaded in AGP 9.4.1
+# 2026-10-22: protobuf-java 2.6.1, shaded in AGP 9.4.1
 # lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
 # build-only, in the image's Gradle cache, not in the APK. Remove with the bump
 # to the first stable AGP 9.5, or by 2026-11-21.
 CVE-2024-7254 exp:2026-11-21
 
-# 2026-10-22 agent-software (DS-3252): jline-builtins 3.24.1, shaded in AGP 9.4.1
+# 2026-10-22: jline-builtins 3.24.1, shaded in AGP 9.4.1
 # lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
 # build-only, in the image's Gradle cache, not in the APK. Remove with the bump
 # to the first stable AGP 9.5, or by 2026-11-21.
 CVE-2026-77422 exp:2026-11-21
 
-# 2026-10-22 agent-software (DS-3252): jline-remote-telnet 3.24.1, shaded in AGP
+# 2026-10-22: jline-remote-telnet 3.24.1, shaded in AGP
 # 9.4.1 lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
 # build-only, in the image's Gradle cache, not in the APK. Remove with the bump
 # to the first stable AGP 9.5, or by 2026-11-21.
 CVE-2026-56740 exp:2026-11-21
 
-# 2026-10-22 agent-software (DS-3252): jline-remote-telnet 3.24.1, shaded in AGP
+# 2026-10-22: jline-remote-telnet 3.24.1, shaded in AGP
 # 9.4.1 lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
 # build-only, in the image's Gradle cache, not in the APK. Remove with the bump
 # to the first stable AGP 9.5, or by 2026-11-21.
 CVE-2026-56741 exp:2026-11-21
 
-# 2026-10-27 agent-xkey-android: guava 33.4.6-jre in Gradle 9.8.1's own lib/
+# 2026-10-27: guava 33.4.6-jre in Gradle 9.8.1's own lib/
 # (still 33.4.6-jre in the current stable, 9.8.2) and guava 33.3.1-jre shaded
 # in KGP 2.4.21's kotlin-gradle-plugin jar; build-only, not in the APK. Every
 # guava Gradle resolves, the APK's included, is pinned to 33.7.2 (catalog

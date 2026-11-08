@@ -66,7 +66,7 @@ None.
 
 ## Later
 
-- **password-vault-rpcs** — password store and seal store RPCs handled — [#55](../../issues/55) — blocked: go-xkms USB PasswordVault row (ruling 130); the desktop-sent `Password*`/`SealStore*` handlers shipped in PR #42 (#12)
+- **password-vault-rpcs** — password store and seal store RPCs handled — [#55](../../issues/55) — blocked: go-xkms USB PasswordVault row; the desktop-sent `Password*`/`SealStore*` handlers shipped in PR #42 (#12)
 - **protected-memory** — Noise static and session keys under an Android protected-memory clause — [#6](../../issues/6) — blocked: owner ruling pending; Noise key zeroize shipped in PR #46 (#6)
 
 ## Future
