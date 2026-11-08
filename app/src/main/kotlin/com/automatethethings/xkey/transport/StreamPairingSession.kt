@@ -161,6 +161,9 @@ class StreamPairingSession(
     /** Test seam: runs after a send's frame is encrypted and before it is written. */
     @Volatile internal var afterAdmissionForTest: (suspend () -> Unit)? = null
 
+    /** Test seam: runs when a send starts, before it waits on the send lock. */
+    @Volatile internal var beforeSendLockForTest: (suspend () -> Unit)? = null
+
     /**
      * One served connection: its streams, its Noise session, and whether it
      * is still allowed to carry frames.
@@ -856,6 +859,7 @@ class StreamPairingSession(
      * connection is ended.
      */
     private suspend fun send(connection: Connection, plaintext: ByteArray, phoneInitiated: Boolean) {
+        beforeSendLockForTest?.invoke()
         connection.sendLock.withLock {
             currentCoroutineContext().ensureActive()
             withContext(NonCancellable + Dispatchers.IO) {

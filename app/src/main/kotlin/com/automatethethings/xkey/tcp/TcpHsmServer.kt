@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -84,6 +85,16 @@ class TcpHsmServer(
         set(value) {
             pairingSession.handshakeTimeoutMs = value
         }
+
+    /** Test seam: runs when a send starts, before it waits on the send lock. */
+    internal var beforeSendLockForTest: (suspend () -> Unit)?
+        get() = pairingSession.beforeSendLockForTest
+        set(value) {
+            pairingSession.beforeSendLockForTest = value
+        }
+
+    /** Test seam: wraps each accepted connection's output stream. */
+    @Volatile internal var outputStreamForTest: ((OutputStream) -> OutputStream)? = null
 
     private val _state = MutableStateFlow<TcpHsmState>(TcpHsmState.Stopped)
 
@@ -168,7 +179,7 @@ class TcpHsmServer(
 
             pairingSession.serve(
                 input = socket.getInputStream(),
-                output = socket.getOutputStream(),
+                output = socket.getOutputStream().let { outputStreamForTest?.invoke(it) ?: it },
                 noiseSession = noiseSession,
                 isActive = { serverScope?.isActive == true && !socket.isClosed },
                 onConnected = { _state.value = TcpHsmState.Connected(remote) },
