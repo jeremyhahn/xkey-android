@@ -7,20 +7,30 @@
 # retries. The id is cut from the JSON with shell parameter expansion (the
 # image's fetch stage has no jq or python): the last .../releases/assets/<id>
 # URL before "name":"<file>", inside the same asset object. Any other URL fails
-# as before. The SHA-256 check is the same for either path and is the only
-# trust anchor.
+# as before, unless it redirects to a GitHub release URL: then the fallback
+# runs on that redirect target (services.gradle.org answers 307 with one). The
+# target is read without following it, and only one hop. The SHA-256 check is
+# the same for every path and is the only trust anchor.
 #
 # The Dockerfile installs this as /usr/local/bin/fetch; image-tag.sh hashes it
 # into the toolchain tag. scripts/fetch-test.sh (make lint-gates) tests it
 # offline against a stub curl.
 set -eu
-get() { curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 "$@"; }
+retry() { curl --proto '=https' --tlsv1.2 --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 "$@"; }
+get() { retry -fsSL "$@"; }
 if ! get -o "$2" "$1"; then
-  case "$1" in
+  url=$1
+  case "$url" in
     https://github.com/*/*/releases/download/*/*) ;;
-    *) exit 1 ;;
+    *)
+      url=$(retry -sS -o /dev/null -w '%{redirect_url}' "$1") || exit 1
+      case "$url" in
+        https://github.com/*/*/releases/download/*/*) echo "fetch: $1 redirects to $url" >&2 ;;
+        *) exit 1 ;;
+      esac
+      ;;
   esac
-  path=${1#https://github.com/}
+  path=${url#https://github.com/}
   repo=${path%%/releases/download/*}
   tag=${path#*/releases/download/}
   name=${tag##*/}
