@@ -18,6 +18,7 @@ package com.automatethethings.xkey.ble
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
@@ -125,6 +126,16 @@ class GattServerProbe(
         get() = read("authenticatedPeerKeyHex") as String?
         set(value) {
             write("authenticatedPeerKeyHex", value)
+        }
+
+    /**
+     * The open server handle every notification goes out on. Replacing it lets
+     * a test stand in for a stack that accepts notifications without a peer.
+     */
+    var gattServerHandle: BluetoothGattServer?
+        get() = read("gattServer") as BluetoothGattServer?
+        set(value) {
+            write("gattServer", value)
         }
 
     @Suppress("UNCHECKED_CAST")
