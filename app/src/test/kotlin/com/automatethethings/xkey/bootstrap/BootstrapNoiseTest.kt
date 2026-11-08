@@ -44,8 +44,8 @@ import java.util.Base64
  * a loopback socket; nothing here touches a routable address.
  *
  * The configuration guards (blank address, malformed key, bad port) already have
- * instrumented coverage in `BootstrapClientTest`; this suite is about everything
- * downstream of a successful connect.
+ * coverage in `BootstrapClientTest`; this suite is about everything downstream
+ * of a successful connect.
  */
 class BootstrapNoiseTest {
 
