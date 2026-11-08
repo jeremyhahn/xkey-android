@@ -20,7 +20,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.automatethethings.xkey.password.PasswordRecord
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -43,7 +42,8 @@ import java.util.Collections
  * No host activity is launched: the adapter's list handling is exercised
  * directly, and building rows needs no `Context` until a view holder is created.
  * `AsyncListDiffer` requires a Looper and dispatches on the main thread, hence an
- * instrumented test and `runOnMainSync`.
+ * instrumented test and `runOnMainSync`. The diff callback's own rules need
+ * neither and are asserted in the unit test `PasswordDiffCallbackTest`.
  */
 @RunWith(AndroidJUnit4::class)
 class PasswordAdapterDiffTest {
@@ -126,44 +126,6 @@ class PasswordAdapterDiffTest {
         submitAndAwait(items + record("c"))
 
         assertEquals(listOf("inserted:2:1"), events.toList())
-    }
-
-    // ---------------------------------------------------------------
-    // Diff callback semantics
-    // ---------------------------------------------------------------
-
-    @Test
-    fun itemsAreIdentifiedByTheirPasswordId() {
-        val callback = PasswordAdapter.PasswordDiffCallback()
-        val original = record("a", title = "GitHub")
-        val renamed = original.copy(title = "GitHub (work)")
-
-        assertTrue(callback.areItemsTheSame(original, renamed))
-        assertFalse(callback.areItemsTheSame(original, record("b", title = "GitHub")))
-    }
-
-    @Test
-    fun contentsCoverEverythingTheRowRenders() {
-        val callback = PasswordAdapter.PasswordDiffCallback()
-        val original = record("a", title = "GitHub", username = "jhahn", url = "github.com")
-
-        assertTrue(callback.areContentsTheSame(original, original.copy()))
-        assertFalse(callback.areContentsTheSame(original, original.copy(title = "GitLab")))
-        assertFalse(callback.areContentsTheSame(original, original.copy(username = "other")))
-        assertFalse(callback.areContentsTheSame(original, original.copy(url = "gitlab.com")))
-        assertFalse(callback.areContentsTheSame(original, original.copy(name = "renamed")))
-    }
-
-    /**
-     * The password value is never rendered in the list, so changing it must not
-     * redraw the row — that would be a needless re-bind of a secret-bearing item.
-     */
-    @Test
-    fun changingOnlyTheSecret_isNotAContentChange() {
-        val callback = PasswordAdapter.PasswordDiffCallback()
-        val original = record("a", title = "GitHub")
-
-        assertTrue(callback.areContentsTheSame(original, original.copy(password = "rotated")))
     }
 
     // ---------------------------------------------------------------
