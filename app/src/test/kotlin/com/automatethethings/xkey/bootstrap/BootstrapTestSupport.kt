@@ -163,7 +163,7 @@ internal object TestPki {
 /**
  * A stand-in HTTPS bootstrap endpoint for the JVM suites.
  *
- * Like the instrumented [BootstrapTestServer], this is an OkHttp interceptor
+ * Like [BootstrapTestServer], this is an OkHttp interceptor
  * rather than a socket listener, which matters for DANE: `createDaneHttpClient`
  * derives its client with `httpClient.newBuilder()`, so the interceptor is
  * carried over and the whole DANE fetch branch can be driven without standing up

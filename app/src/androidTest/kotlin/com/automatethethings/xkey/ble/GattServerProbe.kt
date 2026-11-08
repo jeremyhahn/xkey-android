@@ -16,10 +16,13 @@
 package com.automatethethings.xkey.ble
 
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.SystemClock
 import com.automatethethings.xkey.auth.SessionAuthManager
@@ -36,6 +39,7 @@ import java.security.SecureRandom
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Assume.assumeTrue
 
 /**
  * Reflective access to the half of [GattServer] that only the Bluetooth stack
@@ -124,6 +128,16 @@ class GattServerProbe(
             write("authenticatedPeerKeyHex", value)
         }
 
+    /**
+     * The open server handle every notification goes out on. Replacing it lets
+     * a test stand in for a stack that accepts notifications without a peer.
+     */
+    var gattServerHandle: BluetoothGattServer?
+        get() = read("gattServer") as BluetoothGattServer?
+        set(value) {
+            write("gattServer", value)
+        }
+
     @Suppress("UNCHECKED_CAST")
     val deviceMtu: Map<String, Int>
         get() = read("deviceMtu") as Map<String, Int>
@@ -172,16 +186,6 @@ class GattServerProbe(
     /** The one-byte status the STATUS characteristic reports. */
     fun statusValue(): ByteArray = invoke(getStatusValueMethod) as ByteArray
 
-    /** `SHA256(initiator_public_key || responder_fingerprint || "xkey-v1")`. */
-    fun computePrologueFromIdentity(publicKey: ByteArray, fingerprint: ByteArray): ByteArray =
-        invoke(prologueMethod, publicKey, fingerprint) as ByteArray
-
-    fun hexStringToByteArray(hex: String): ByteArray =
-        invoke(hexStringMethod, hex) as ByteArray
-
-    fun serializePCRValues(pcrValues: Map<Int, ByteArray>): ByteArray =
-        invoke(serializePcrMethod, pcrValues) as ByteArray
-
     fun adoptExistingPairing() {
         invoke(adoptPairingMethod)
     }
@@ -189,12 +193,60 @@ class GattServerProbe(
     fun rejectUnpaired(plaintext: ByteArray): ByteArray? =
         invoke(rejectUnpairedMethod, plaintext) as ByteArray?
 
+    /**
+     * Adopts [device] directly, on a fresh link with no CCCD write, outside
+     * any event queue. Only for a test that then calls the server's methods
+     * directly: the callbacks find no open queue for the device and drop or
+     * refuse what it sends, so a test that drives [gattCallback] connects
+     * with [connectThroughTheCallback] instead.
+     */
     suspend fun handleDeviceConnected(device: BluetoothDevice) {
-        callSuspend(handleConnectedMethod, device)
+        callSuspend(handleConnectedMethod, device, linkConstructor.newInstance())
     }
 
     suspend fun handleDeviceDisconnected(device: BluetoothDevice) {
         callSuspend(handleDisconnectedMethod, device)
+    }
+
+    /**
+     * Whether the server holds an event queue for [device]: one a connect
+     * callback began and whose consumer has not yet finished.
+     */
+    fun hasEventQueue(device: BluetoothDevice): Boolean =
+        synchronized(read("eventQueuesLock")!!) {
+            (read("eventQueues") as Map<*, *>).containsKey(device.address)
+        }
+
+    /**
+     * Connects [device] the way the stack does, on a started server: the
+     * connect callback begins the device's event queue with the connect at its
+     * head, and every later callback is queued behind it or recorded on its
+     * link. A callback from a device without an open queue is dropped.
+     *
+     * Returns once the queue has handled the connect, so the device is adopted
+     * and its link published: from then on a CCCD write shows in
+     * [notificationEnabled] as it is made, and a queued MTU change is awaited
+     * with [awaitMtu]. Skips the test where the local stack will not open a
+     * GATT server.
+     */
+    fun connectThroughTheCallback(device: BluetoothDevice) {
+        assumeTrue("the local stack would not open a GATT server", server.start())
+        gattCallback.onConnectionStateChange(
+            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
+        )
+        awaitUntil("the device to be adopted") {
+            connectedDevice?.address == device.address &&
+                server.connectionState.value == ConnectionState.Connecting
+        }
+    }
+
+    /**
+     * Returns once [device]'s event queue has applied an MTU change to
+     * [expected]. The connect records the default MTU, so a test that awaits
+     * the default after a connect awaits it after another value.
+     */
+    fun awaitMtu(device: BluetoothDevice, expected: Int, why: String = "the negotiated MTU") {
+        awaitUntil("the MTU to become $expected: $why") { deviceMtu[device.address] == expected }
     }
 
     suspend fun processIncomingData(device: BluetoothDevice, data: ByteArray) {
@@ -241,6 +293,9 @@ class GattServerProbe(
         write("noiseSession", responder)
         write("identityExchangeComplete", true)
         authenticatedPeerKeyHex = responder.getRemoteStaticKey()?.toHex()
+        // Published last, as `handleHandshakeMessage` does once the handshake
+        // completes, so isSessionEstablished() reports this session.
+        write("establishedSession", responder)
         return initiator
     }
 
@@ -278,14 +333,16 @@ class GattServerProbe(
     companion object {
         private val setupServiceMethod = declaredMethod("setupService")
         private val getStatusValueMethod = declaredMethod("getStatusValue")
-        private val prologueMethod =
-            declaredMethod("computePrologueFromIdentity", ByteArray::class.java, ByteArray::class.java)
-        private val hexStringMethod = declaredMethod("hexStringToByteArray", String::class.java)
-        private val serializePcrMethod = declaredMethod("serializePCRValues", Map::class.java)
         private val adoptPairingMethod = declaredMethod("adoptExistingPairing")
         private val rejectUnpairedMethod = declaredMethod("rejectUnpaired", ByteArray::class.java)
+        private val linkClass: Class<*> = try {
+            Class.forName("${GattServer::class.java.name}\$Link")
+        } catch (e: ClassNotFoundException) {
+            throw AssertionError("GattServer.Link is a seam these BLE tests drive", e)
+        }
+        private val linkConstructor = linkClass.getDeclaredConstructor().apply { isAccessible = true }
         private val handleConnectedMethod = declaredMethod(
-            "handleDeviceConnected", BluetoothDevice::class.java, Continuation::class.java
+            "handleDeviceConnected", BluetoothDevice::class.java, linkClass, Continuation::class.java
         )
         private val handleDisconnectedMethod = declaredMethod(
             "handleDeviceDisconnected", BluetoothDevice::class.java, Continuation::class.java

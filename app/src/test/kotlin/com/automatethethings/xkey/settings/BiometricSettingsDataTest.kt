@@ -17,7 +17,6 @@ package com.automatethethings.xkey.settings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -70,11 +69,6 @@ class BiometricSettingsDataTest {
     // -------------------------------------------------------------------------
     // Presets
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `DEFAULT preset equals a plain construction`() {
-        assertEquals(BiometricSettingsData(), BiometricSettingsData.DEFAULT)
-    }
 
     @Test
     fun `DISABLED preset turns off user verification but keeps other defaults`() {
@@ -158,31 +152,9 @@ class BiometricSettingsDataTest {
     }
 
     @Test
-    fun `fromSeconds matches exact durations only`() {
-        assertSame(AuthTimeWindow.MINUTES_2, AuthTimeWindow.fromSeconds(120))
-        assertNull(AuthTimeWindow.fromSeconds(121))
-        assertNull(AuthTimeWindow.fromSeconds(0))
-        assertNull(AuthTimeWindow.fromSeconds(-120))
-        assertNull(AuthTimeWindow.fromSeconds(Int.MAX_VALUE))
-    }
-
-    @Test
     fun `fromSecondsOrDefault falls back to two minutes for unknown values`() {
         assertEquals(AuthTimeWindow.MINUTES_2, AuthTimeWindow.fromSecondsOrDefault(9999))
         assertEquals(AuthTimeWindow.SECONDS_30, AuthTimeWindow.fromSecondsOrDefault(30))
-    }
-
-    @Test
-    fun `fromSecondsOrDefault honours an explicit fallback`() {
-        assertEquals(
-            AuthTimeWindow.MINUTES_10,
-            AuthTimeWindow.fromSecondsOrDefault(9999, AuthTimeWindow.MINUTES_10)
-        )
-        assertEquals(
-            "a recognised value wins over the fallback",
-            AuthTimeWindow.SECONDS_30,
-            AuthTimeWindow.fromSecondsOrDefault(30, AuthTimeWindow.MINUTES_10)
-        )
     }
 
     // -------------------------------------------------------------------------

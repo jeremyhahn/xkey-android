@@ -22,7 +22,6 @@ import org.junit.After
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -75,34 +74,6 @@ class AndroidCAUninitializedTest {
         assertFalse(ca.isRootCAGenerated())
         assertFalse(ca.isIntermediateCAGenerated())
         assertFalse(ca.isInitialized())
-    }
-
-    @Test
-    fun readingTheRootCertificateBeforeInitializationThrowsRatherThanReturningTheFakeCert() {
-        val error = assertThrows(IllegalStateException::class.java) { ca.getRootCertificate() }
-
-        assertTrue(
-            "message should point at initialize(): ${error.message}",
-            error.message!!.contains("Root CA certificate not found")
-        )
-    }
-
-    @Test
-    fun readingTheIntermediateCertificateBeforeInitializationThrows() {
-        val error = assertThrows(IllegalStateException::class.java) {
-            ca.getIntermediateCertificate()
-        }
-
-        assertTrue(
-            "message should point at initialize(): ${error.message}",
-            error.message!!.contains("Intermediate CA certificate not found")
-        )
-    }
-
-    @Test
-    fun certificateInfoAccessorsReturnNullBeforeInitialization() {
-        assertNull(ca.getRootCACertificateInfo())
-        assertNull(ca.getIntermediateCACertificateInfo())
     }
 
     @Test

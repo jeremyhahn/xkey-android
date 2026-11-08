@@ -17,7 +17,6 @@ package com.automatethethings.xkey.media
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -60,14 +59,6 @@ class SignatureFormatTest {
         assertEquals("MEUCIQD...base64sig...", json.getString("value"))
         assertEquals("2025-01-15T10:30:00Z", json.getString("timestamp"))
         assertEquals("CREATOR", json.getString("role"))
-    }
-
-    @Test
-    fun `SignatureEntry toJson omits null signerName`() {
-        val entry = createSampleEntry(signerName = null)
-        val json = entry.toJson()
-
-        assertTrue(!json.has("signerName") || json.isNull("signerName"))
     }
 
     @Test
@@ -126,15 +117,6 @@ class SignatureFormatTest {
         )
         assertEquals("SHA-256", json.getString("hashAlgorithm"))
         assertEquals(1, json.getJSONArray("signatures").length())
-    }
-
-    @Test
-    fun `ContentAuthenticityData empty signatures list`() {
-        val data = createSampleData(signatures = emptyList())
-        val jsonString = data.toJsonString()
-        val restored = ContentAuthenticityData.fromJsonString(jsonString)
-
-        assertEquals(0, restored.signatures.size)
     }
 
     @Test

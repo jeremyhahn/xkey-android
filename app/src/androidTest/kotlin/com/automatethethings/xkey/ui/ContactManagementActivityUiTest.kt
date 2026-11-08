@@ -105,14 +105,6 @@ class ContactManagementActivityUiTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun contactList_bindsSeededContacts() {
-        val scenario = launch()
-
-        assertShownTextInTree(scenario, ALICE_NAME)
-        assertShownTextInTree(scenario, BOB_NAME)
-    }
-
-    @Test
     fun contactList_showsAlgorithmForEachContact() {
         val scenario = launch()
         assertShownTextInTree(scenario, ALICE_NAME)

@@ -18,26 +18,25 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.io.ByteArrayInputStream
 
+/**
+ * Fixed SHA-256 vectors (FIPS 180-2) for [MediaHasher]: the algorithm and the
+ * lowercase hex form must match existing SHA-256 manifests.
+ */
 class MediaHasherTest {
 
     @Test
-    fun `hashBytes produces correct SHA-256 for known input`() {
-        // SHA-256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
-        val result = MediaHasher.hashBytes("hello world".toByteArray())
-
+    fun `hashBytes gives the lowercase hex SHA-256 of abc`() {
         assertEquals(
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
-            result
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            MediaHasher.hashBytes("abc".toByteArray(Charsets.US_ASCII))
         )
     }
 
     @Test
-    fun `hashStream produces correct SHA-256 for empty stream`() {
-        val result = MediaHasher.hashStream(ByteArrayInputStream(ByteArray(0)))
-
+    fun `hashStream gives the lowercase hex SHA-256 of an empty stream`() {
         assertEquals(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            result
+            MediaHasher.hashStream(ByteArrayInputStream(ByteArray(0)))
         )
     }
 }

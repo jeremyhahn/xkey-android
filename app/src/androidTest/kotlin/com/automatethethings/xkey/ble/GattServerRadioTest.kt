@@ -21,6 +21,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
@@ -58,7 +59,9 @@ import org.junit.runner.RunWith
  * None of this needs a peer, only a local adapter willing to open a GATT
  * server. Notifications aimed at a device that never connected are reported
  * undeliverable by the stack and are otherwise inert, so the whole path runs
- * for real right up to the final framework call. Where a device *is* needed it
+ * for real right up to the final framework call. An encrypted frame is the
+ * exception: a refused one abandons the session, so the tests that need it
+ * delivered swap in an [AcceptingServerHandle]. Where a device *is* needed it
  * is a well-formed address that is never dialled.
  *
  * The suite skips itself where there is no usable adapter — see the
@@ -277,11 +280,21 @@ class GattServerRadioTest {
      */
     @Test
     fun anOutboundMessageIsEncryptedAndLeavesTheSessionUsable(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
+        val handle = acceptNotifications()
+        probe.connectThroughTheCallback(device)
         val initiator = probe.establishSession(device)
         subscribe(mtu = 247)
+        // The send revalidates pairing, so the fresh peer must be trusted first.
+        adoptPairing()
 
-        probe.server.sendEncryptedMessage("""{"id":1,"method":"remote.ping"}""".toByteArray())
+        val message = """{"id":1,"method":"remote.ping"}""".toByteArray()
+        probe.server.sendEncryptedMessage(message)
+
+        assertArrayEquals(
+            "the stack must have taken the encrypted frame",
+            message,
+            initiator.decrypt(acceptedFrame(handle))
+        )
 
         val probeFrame = """{"id":2,"method":"local.getCapabilities"}""".toByteArray()
         assertArrayEquals(
@@ -312,7 +325,8 @@ class GattServerRadioTest {
      */
     @Test
     fun aPairedRequestIsAnsweredOverTheRadio(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
+        val handle = acceptNotifications()
+        probe.connectThroughTheCallback(device)
         val initiator = probe.establishSession(device)
         subscribe(mtu = 247)
         adoptPairing()
@@ -321,6 +335,10 @@ class GattServerRadioTest {
             device,
             initiator.encrypt(request(1, "local.getCapabilities"))
         )
+
+        val reply = JSONObject(String(initiator.decrypt(acceptedFrame(handle)), Charsets.UTF_8))
+        assertEquals("the stack must have taken the reply to request 1", 1L, reply.getLong("id"))
+        assertTrue("the session must survive the reply", probe.server.isSessionEstablished())
 
         // The reply was encrypted on the way out, so the send counter moved;
         // the receive half must still be exactly one frame ahead.
@@ -339,14 +357,53 @@ class GattServerRadioTest {
     private fun payloadBudgetFor(mtu: Int) =
         minOf(mtu - 3, 512) - FragmentReassembler.HEADER_SIZE
 
-    private suspend fun connectAndSubscribe(mtu: Int? = null) {
-        outbound.handleDeviceConnected(device)
+    /**
+     * Replaces the open handle with an [AcceptingServerHandle] that takes every
+     * response notification, as the stack does for a subscribed peer. The
+     * synthetic [device] never connected, so the stack refuses its
+     * notifications, and a refused encrypted frame abandons the session.
+     */
+    private fun acceptNotifications(): AcceptingServerHandle {
+        assumeTrue(
+            "mocking the final server handle needs API 28",
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+        )
+        val handle = AcceptingServerHandle(
+            probe.gattServerHandle!!, probe.responseCharacteristic!!, holdFirstFragment = false
+        )
+        probe.gattServerHandle = handle.server
+        return handle
+    }
+
+    /** Reassembles the one frame [handle] accepted from its fragments. */
+    private fun acceptedFrame(handle: AcceptingServerHandle): ByteArray {
+        val reassembler = FragmentReassembler()
+        var frame: ByteArray? = null
+        for (fragment in handle.frames) {
+            assertNull("the stack must have taken exactly one frame", frame)
+            frame = reassembler.addFragment(fragment)
+        }
+        assertNotNull("the stack must have taken a whole frame", frame)
+        return frame!!
+    }
+
+    private fun connectAndSubscribe(mtu: Int? = null) {
+        probe.connectThroughTheCallback(device)
         subscribe(mtu)
     }
 
-    /** Writes the CCCD the way a desktop does before it expects any reply. */
+    /**
+     * Negotiates [mtu], when given, and writes the CCCD the way a desktop does
+     * before it expects any reply. [device] must have been connected with
+     * [GattServerProbe.connectThroughTheCallback]: the MTU change is queued
+     * behind the connect and awaited, and the CCCD write is recorded on the
+     * published link as it is made.
+     */
     private fun subscribe(mtu: Int? = null) {
-        if (mtu != null) probe.gattCallback.onMtuChanged(device, mtu)
+        if (mtu != null) {
+            probe.gattCallback.onMtuChanged(device, mtu)
+            probe.awaitMtu(device, mtu)
+        }
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1,
             BluetoothGattDescriptor(

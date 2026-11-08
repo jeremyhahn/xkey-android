@@ -15,15 +15,19 @@
 
 package com.automatethethings.xkey.ble
 
-import androidx.test.ext.junit.runners.AndroidJUnit4
+import android.util.Log
+import io.mockk.every
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Before
 import org.junit.Test
-import org.junit.runner.RunWith
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
@@ -38,10 +42,8 @@ import java.security.SecureRandom
  * a Bluetooth radio: it is pure byte manipulation, which makes it the cheapest
  * meaningful coverage in the `ble` package.
  *
- * These tests run instrumented rather than as JVM unit tests only because both
- * classes call `android.util.Log`.
+ * Both classes call `android.util.Log`, so only that has to be stubbed.
  */
-@RunWith(AndroidJUnit4::class)
 class FragmentProtocolTest {
 
     private companion object {
@@ -74,6 +76,18 @@ class FragmentProtocolTest {
     // -----------------------------------------------------------------
     // Round trips
     // -----------------------------------------------------------------
+
+    @Before
+    fun setUp() {
+        mockkStatic(Log::class)
+        every { Log.d(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+    }
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
 
     /** A message that fits in one fragment carries both the first and last flags. */
     @Test
