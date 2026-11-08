@@ -4,7 +4,7 @@
 #
 #   usage: image-tag.sh toolchain|it [trusted|pr]
 #
-# toolchain: the Dockerfile, the pin file and the Gradle build files, the
+# toolchain: the Dockerfile, its fetch.sh, the pin file and the Gradle build files, the
 #            analogue of a Go module's go.mod and go.sum. They are every file
 #            the image is built from: the Dockerfile's warm stage copies in
 #            these and no other (keep its COPY lines equal to this list) and
@@ -43,7 +43,7 @@ esac
 
 case "${1:-}" in
 	toolchain)
-		hash=$(cat build/docker/devcontainer/Dockerfile scripts/tool-pins.sh \
+		hash=$(cat build/docker/devcontainer/Dockerfile build/docker/devcontainer/fetch.sh scripts/tool-pins.sh \
 			gradle/libs.versions.toml gradle/wrapper/gradle-wrapper.properties \
 			gradle/gradle-daemon-jvm.properties gradle.properties \
 			settings.gradle.kts build.gradle.kts app/build.gradle.kts |

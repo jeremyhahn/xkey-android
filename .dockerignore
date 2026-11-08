@@ -6,7 +6,11 @@
 .idea
 .serena
 .claude
+lane-records
+scheduled_tasks.lock
+**/*.log
 build
+!build/docker/devcontainer/fetch.sh
 app/build
 # Credentials, at any depth: every one .gitignore names (keystore.properties
 # holds storePassword and keyPassword). The integration stage copies the
