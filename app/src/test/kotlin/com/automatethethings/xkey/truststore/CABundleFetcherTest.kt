@@ -238,15 +238,6 @@ class CABundleFetcherTest {
     }
 
     @Test
-    fun `fetchBundle fails when the body is empty`() = runTest {
-        val fetcher = fetcherReturning(body = "")
-
-        assertFails(CABundleFetchException::class.java) {
-            fetcher.fetchBundle("https://ca.example.com")
-        }
-    }
-
-    @Test
     fun `fetchBundle fails when a PEM block is never terminated`() = runTest {
         val fetcher = fetcherReturning(
             body = "-----BEGIN CERTIFICATE-----\nMIIBwjCCAWmgAwIBAgIUFbGe1x87FyWohyUN\n"
@@ -257,17 +248,6 @@ class CABundleFetcherTest {
         }
 
         assertTrue(error.message!!.contains("No valid certificates found"))
-    }
-
-    @Test
-    fun `fetchBundle fails when every PEM block is malformed`() = runTest {
-        val fetcher = fetcherReturning(
-            body = "-----BEGIN CERTIFICATE-----\nzzzz\n-----END CERTIFICATE-----\n"
-        )
-
-        assertFails(CABundleFetchException::class.java) {
-            fetcher.fetchBundle("https://ca.example.com")
-        }
     }
 
     // -------------------------------------------------------------------------

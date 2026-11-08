@@ -21,9 +21,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Tests for PasskeyAdapter DiffUtil callback.
+ * Tests for the PasskeyAdapter DiffUtil callback.
  *
- * Verifies that the adapter correctly identifies item and content changes.
+ * Verifies that the adapter correctly identifies item changes.
  */
 class PasskeyAdapterTest {
 

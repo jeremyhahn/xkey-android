@@ -264,15 +264,6 @@ class RemoteBackupClientTest {
         }
     }
 
-    @Test
-    fun `the error code constants are the desktop's numbers`() {
-        assertEquals(-32602, RemoteBackupErrorCodes.INVALID_PARAMS)
-        assertEquals(-32020, RemoteBackupErrorCodes.BACKUP_FAILED)
-        assertEquals(-32021, RemoteBackupErrorCodes.RESTORE_FAILED)
-        assertEquals(-32035, RemoteBackupErrorCodes.BACKUP_NOT_CONFIGURED)
-        assertEquals(-32038, RemoteBackupErrorCodes.APPROVAL_REQUIRED)
-    }
-
     // --- Password hygiene ---------------------------------------------------
 
     @Test

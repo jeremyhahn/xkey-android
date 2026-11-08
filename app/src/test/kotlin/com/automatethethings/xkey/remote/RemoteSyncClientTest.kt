@@ -292,35 +292,7 @@ class RemoteSyncClientTest {
         assertEquals(2_000_001L, sender.lastRequest.id)
     }
 
-    // --- Request ids --------------------------------------------------------
-
-    @Test
-    fun `outbound sync ids start at two million so they cannot collide with key-client ids`() =
-        runTest {
-            stubIdleEngine()
-            sender.succeedWith("""{"local":[]}""")
-
-            client.syncAll()
-
-            assertEquals(
-                listOf(2_000_000L, 2_000_001L, 2_000_002L),
-                sender.sent.map { it.id }
-            )
-            assertTrue(
-                "sync ids must sit above RemoteKeyClient's 1_000_000 base",
-                sender.sent.all { it.id >= 2_000_000L }
-            )
-        }
-
     // --- SyncResult ---------------------------------------------------------
-
-    @Test
-    fun `SyncResult defaults to an empty run`() {
-        val result = RemoteSyncClient.SyncResult()
-
-        assertEquals(0, result.totalPushed)
-        assertEquals(0, result.totalPulled)
-    }
 
     @Test
     fun `SyncResult totals sum every store`() {

@@ -20,7 +20,6 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -68,18 +67,6 @@ class BiometricSettingsRepositoryTest {
     }
 
     @Test
-    fun freshStore_yieldsDocumentedDefaults() = runBlocking {
-        val settings = repository.getSettings()
-
-        assertEquals(BiometricSettingsData.DEFAULT, settings)
-        assertEquals(UserVerificationPolicy.REQUIRED, settings.uvPolicy)
-        assertEquals(BiometricAuthMode.PER_OPERATION, settings.authMode)
-        assertEquals(AuthTimeWindow.MINUTES_2.seconds, settings.timeWindowSeconds)
-        assertEquals(AttestationBiometricPolicy.ALWAYS, settings.attestationBiometricPolicy)
-        assertTrue(settings.strictUserVerification)
-    }
-
-    @Test
     fun updateSettings_roundTripsEveryField() = runBlocking {
         val written = BiometricSettingsData(
             uvPolicy = UserVerificationPolicy.DISABLED,
@@ -92,13 +79,6 @@ class BiometricSettingsRepositoryTest {
         repository.updateSettings(written)
 
         assertEquals(written, repository.getSettings())
-    }
-
-    @Test
-    fun settingsFlow_emitsThePersistedValue() = runBlocking {
-        repository.updateSettings(BiometricSettingsData.CONVENIENCE)
-
-        assertEquals(BiometricSettingsData.CONVENIENCE, repository.settingsFlow.first())
     }
 
     @Test

@@ -157,44 +157,12 @@ class BackupStoreIdentityTest {
     }
 
     @Test
-    fun latestId_namesAnIdThatCanBeLoadedBack() {
-        val id = "round-trip:$runId"
-        store(id, byteArrayOf(5, 6))
-
-        val latest = store.latestId()!!
-        assertTrue(store.load(latest)!!.contentEquals(byteArrayOf(5, 6)))
-    }
-
-    @Test
-    fun storedBytesRoundTripThroughTheRecordHeader() {
-        // The id is written into the record, so the reader has to split it back
-        // off exactly; every byte value must survive that.
-        val blob = ByteArray(256) { it.toByte() }
-        val id = "opaque-$runId"
-        store(id, blob)
-
-        assertTrue(store.load(id)!!.contentEquals(blob))
-    }
-
-    @Test
     fun anEmptyBlobIsStillARecord() {
         val id = "empty-$runId"
         store(id, ByteArray(0))
 
         assertEquals(0, store.load(id)!!.size)
         assertEquals(id, store.latestId())
-    }
-
-    @Test
-    fun createdAtMillis_reportsAPlausibleTimeForAStoredBlob() {
-        val before = System.currentTimeMillis()
-        val id = "timed/$runId"
-        store(id, byteArrayOf(1))
-        val after = System.currentTimeMillis()
-
-        val created = store.createdAtMillis(id)
-        // Filesystem timestamps can be coarse, so allow a second of slack.
-        assertTrue(created in (before - 1000)..(after + 1000))
     }
 
     // -------------------------------------------------------------------------

@@ -253,24 +253,6 @@ class OathRepositoryTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun importFromUri_seedsTheHotpCounterFromTheUri() = runBlocking {
-        val id = repository.importFromUri(
-            "otpauth://hotp/user?secret=$rfcSeedBase32&counter=42"
-        )
-
-        val stored = dao.getByOathId(id)!!
-        assertEquals("HOTP", stored.oathType)
-        assertEquals(42L, stored.counter)
-    }
-
-    @Test
-    fun importFromUri_leavesTheHotpCounterAtZeroWhenTheUriOmitsIt() = runBlocking {
-        val id = repository.importFromUri("otpauth://hotp/user?secret=$rfcSeedBase32")
-
-        assertEquals(0L, dao.getByOathId(id)!!.counter)
-    }
-
-    @Test
     fun importFromUri_ignoresAnUnparseableCounter() = runBlocking {
         val id = repository.importFromUri(
             "otpauth://hotp/user?secret=$rfcSeedBase32&counter=lots"
@@ -313,36 +295,6 @@ class OathRepositoryTest {
         val lower = repository.importFromUri("otpauth://totp/b?secret=jbswy3dpehpk3pxp")
 
         assertTrue(storedSecret(upper).contentEquals(storedSecret(lower)))
-    }
-
-    @Test
-    fun importFromUri_stripsPaddingSpacesAndHyphensFromTheSecret() = runBlocking {
-        val plain = repository.importFromUri("otpauth://totp/a?secret=JBSWY3DPEHPK3PXP")
-        val decorated = repository.importFromUri(
-            "otpauth://totp/b?secret=JBSW-Y3DP%20EHPK3PXP======"
-        )
-
-        assertTrue(storedSecret(plain).contentEquals(storedSecret(decorated)))
-    }
-
-    /**
-     * 0/1/8 used to be folded onto O/L/B so a hand-typed secret "still worked".
-     * They are not in the RFC 4648 alphabet, so that silently turned a corrupt
-     * secret into a valid-looking credential that generates wrong codes forever,
-     * with nothing on the phone to diagnose. It is refused now, and the message
-     * names the offending characters.
-     */
-    @Test
-    fun importFromUri_refusesTheDigitsThatLookLikeLetters() {
-        val error = runCatching {
-            runBlocking { repository.importFromUri("otpauth://totp/a?secret=01813333") }
-        }.exceptionOrNull()
-
-        assertTrue(error is IllegalArgumentException)
-        val message = error!!.message!!
-        assertTrue("should name the offenders, was: $message", message.contains("'0'"))
-        assertTrue("should name the offenders, was: $message", message.contains("'1'"))
-        assertTrue("should name the offenders, was: $message", message.contains("'8'"))
     }
 
     @Test

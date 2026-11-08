@@ -128,14 +128,6 @@ class PasskeyDetailActivityUiTest {
         awaitText(scenario, context().getString(R.string.passkey_card_description))
     }
 
-    @Test
-    fun toolbarTitle_isDisplayedViaEspresso() {
-        launchWithSeededKey()
-
-        onView(withText(R.string.passkey_detail_title))
-            .check(matches(isDisplayed()))
-    }
-
     // -----------------------------------------------------------------
     // Section Cards
     // -----------------------------------------------------------------

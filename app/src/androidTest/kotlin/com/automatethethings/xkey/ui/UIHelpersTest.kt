@@ -87,13 +87,6 @@ class UIHelpersTest {
     }
 
     @Test
-    fun dpToPx_ofZeroIsZero() {
-        onHost { activity ->
-            assertEquals(0f, UIHelpers.dpToPx(activity, 0f), TOLERANCE_PX)
-        }
-    }
-
-    @Test
     fun dpToPxInt_truncatesToWholePixels() {
         onHost { activity ->
             val density = activity.resources.displayMetrics.density

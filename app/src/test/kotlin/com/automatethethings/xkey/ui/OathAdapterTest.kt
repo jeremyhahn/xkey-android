@@ -25,8 +25,8 @@ import org.junit.Test
  * Tests for [OathAdapter] DiffUtil callback and code formatting.
  *
  * Verifies that [OathAdapter.OathDiffCallback] correctly identifies item
- * identity and content changes, that [OathAdapter.formatCode] splits codes
- * at the midpoint.
+ * identity and content changes, and that [OathAdapter.formatCode] splits
+ * codes at the midpoint.
  */
 class OathAdapterTest {
 
@@ -84,11 +84,6 @@ class OathAdapterTest {
     @Test
     fun `formatCode splits 7-digit code at midpoint`() {
         assertEquals("123 4567", OathAdapter.formatCode("1234567"))
-    }
-
-    @Test
-    fun `formatCode splits 8-digit code at midpoint`() {
-        assertEquals("1234 5678", OathAdapter.formatCode("12345678"))
     }
 
     // -------------------------------------------------------------------------

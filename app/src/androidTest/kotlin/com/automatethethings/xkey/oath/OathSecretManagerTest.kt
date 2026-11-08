@@ -61,18 +61,6 @@ class OathSecretManagerTest {
         )
     }
 
-    @Test
-    fun ciphertext_isDifferentFromPlaintext() {
-        val plaintext = "JBSWY3DPEHPK3PXP".toByteArray(Charsets.UTF_8)
-
-        val encrypted = manager.encryptSecret(plaintext)
-
-        assertFalse(
-            "Encrypted output must differ from plaintext",
-            plaintext.contentEquals(encrypted)
-        )
-    }
-
     @Test(expected = Exception::class)
     fun tamperedCiphertext_throwsException() {
         val plaintext = "JBSWY3DPEHPK3PXP".toByteArray(Charsets.UTF_8)

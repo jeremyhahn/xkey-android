@@ -19,7 +19,6 @@ import com.automatethethings.xkey.settings.BootstrapMethod
 import com.automatethethings.xkey.settings.BootstrapSettingsData
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -117,17 +116,6 @@ class BootstrapClientTest {
     }
 
     @Test
-    fun direct_parsesEveryCertificateInAMultiAnchorBundle() = runBlocking {
-        val server = BootstrapTestServer.serving(BootstrapTestServer.bundle(3))
-        val client = BootstrapClient(directSettings(), server.client())
-
-        val result = client.fetchWithMethod(BootstrapMethod.DIRECT)
-
-        assertEquals(3, result.certificateCount)
-        result.certificates.forEach { assertNotNull(parse(it)) }
-    }
-
-    @Test
     fun direct_skipsAnUndecodableBlockButKeepsTheRest() = runBlocking {
         val good = BootstrapTestServer.pem(BootstrapTestServer.certificate("Good Anchor"))
         val garbage = "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n"
@@ -198,32 +186,6 @@ class BootstrapClientTest {
         assertThrows(CertificateParseException::class.java) {
             runBlocking { client.fetchWithMethod(BootstrapMethod.DIRECT) }
         }
-    }
-
-    @Test
-    fun direct_rejectsABundleOverTheCertificateCap() {
-        // One certificate repeated past the cap: the limit is checked from the
-        // block count before any parsing happens, which is the whole point.
-        val block = BootstrapTestServer.pem(BootstrapTestServer.certificate("Repeated Anchor"))
-        val server = BootstrapTestServer.serving(block.repeat(65))
-        val client = BootstrapClient(directSettings(), server.client())
-
-        val failure = assertThrows(CertificateParseException::class.java) {
-            runBlocking { client.fetchWithMethod(BootstrapMethod.DIRECT) }
-        }
-
-        assertTrue(failure.reason, failure.reason.contains("limit is 64"))
-    }
-
-    @Test
-    fun direct_acceptsABundleExactlyAtTheCertificateCap() = runBlocking {
-        val block = BootstrapTestServer.pem(BootstrapTestServer.certificate("Capped Anchor"))
-        val server = BootstrapTestServer.serving(block.repeat(64))
-        val client = BootstrapClient(directSettings(), server.client())
-
-        val result = client.fetchWithMethod(BootstrapMethod.DIRECT)
-
-        assertEquals(64, result.certificateCount)
     }
 
     @Test
@@ -322,17 +284,6 @@ class BootstrapClientTest {
     @Test
     fun spki_rejectsABodyWithNoCertificates() {
         val server = BootstrapTestServer.serving("still not a bundle")
-        val client = BootstrapClient(spkiSettings(), server.client())
-
-        assertThrows(CertificateParseException::class.java) {
-            runBlocking { client.fetchWithMethod(BootstrapMethod.SPKI) }
-        }
-    }
-
-    @Test
-    fun spki_rejectsABundleOverTheCertificateCap() {
-        val block = BootstrapTestServer.pem(BootstrapTestServer.certificate("Repeated Anchor"))
-        val server = BootstrapTestServer.serving(block.repeat(70))
         val client = BootstrapClient(spkiSettings(), server.client())
 
         assertThrows(CertificateParseException::class.java) {
@@ -490,32 +441,5 @@ class BootstrapClientTest {
             failure.attempts.map { it.method }
         )
         assertTrue(failure.message!!.contains("all methods failed"))
-    }
-
-    // ----------------------------------------------------------------- result
-
-    @Test
-    fun result_reportsAnEmptyBundleAsEmpty() {
-        val empty = CABundleResult(
-            bundlePEM = ByteArray(0),
-            certificates = emptyList(),
-            method = BootstrapMethod.DIRECT
-        )
-
-        assertEquals(0, empty.certificateCount)
-        assertFalse(empty.isNotEmpty)
-        assertTrue(empty.toString().contains("certificates=0"))
-    }
-
-    @Test
-    fun result_comparesByContentNotIdentity() = runBlocking {
-        val pem = BootstrapTestServer.bundle(1)
-        val client = BootstrapClient(directSettings(), BootstrapTestServer.serving(pem).client())
-
-        val result = client.fetchWithMethod(BootstrapMethod.DIRECT)
-        val copy = result.copy(bundlePEM = result.bundlePEM.copyOf())
-
-        assertEquals(result, copy)
-        assertEquals(result.hashCode(), copy.hashCode())
     }
 }

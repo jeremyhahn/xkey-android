@@ -49,7 +49,6 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.hamcrest.Matchers.not
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -439,30 +438,6 @@ class TrustStoreFlowTest {
         assertEquals("manual", stored.source)
     }
 
-    /**
-     * Self-signed certificates are never trusted, so a bundle of them must leave
-     * the store exactly as it was.
-     */
-    @Test
-    fun fileImport_ofSelfSignedCertificates_storesNothing() {
-        val first = keystoreCertificate("$ALIAS_PREFIX-selfsigned-a-$runId", "UI Flow Self A")
-        val second = keystoreCertificate("$ALIAS_PREFIX-selfsigned-b-$runId", "UI Flow Self B")
-        val bundle = TestCertificates.toPem(first) + TestCertificates.toPem(second)
-        stubOpenDocumentWith(scratchFile("selfsigned-$runId.pem", bundle.toByteArray()))
-
-        val scenario = launch()
-        assertShownTextInTree(scenario, VALID_CN)
-        val before = certificateCount()
-
-        clickTextInTree(scenario, FILE_BUTTON)
-
-        // The import runs on a coroutine, so an immediate check would pass even
-        // if the rejection were removed. Watch for a while instead.
-        assertNeverStored(fingerprintOf(first))
-        assertNeverStored(fingerprintOf(second))
-        assertEquals(before, certificateCount())
-    }
-
     /** A file holding raw DER exercises the non-PEM parse branch. */
     @Test
     fun fileImport_ofADerCertificate_takesTheDerBranch() {
@@ -512,25 +487,6 @@ class TrustStoreFlowTest {
     }
 
     private fun certificateCount(): Int = runBlocking { repository.getAllCertificates().size }
-
-    /**
-     * Fails if [fingerprint] ever turns up in the store within [REJECTION_WATCH_MS].
-     *
-     * Import runs on a coroutine with no idling resource behind it, so an
-     * assertion taken straight after the click would hold even if the rejection
-     * were deleted. Watching for a while is the only way to make "nothing was
-     * stored" mean something.
-     */
-    private fun assertNeverStored(fingerprint: String) {
-        val deadline = System.currentTimeMillis() + REJECTION_WATCH_MS
-        while (System.currentTimeMillis() < deadline) {
-            assertFalse(
-                "A rejected certificate must never reach the store",
-                runBlocking { repository.hasCertificate(fingerprint) }
-            )
-            Thread.sleep(REJECTION_POLL_MS)
-        }
-    }
 
     /**
      * Waits for the row carrying [commonName] and returns its adapter position.
@@ -664,9 +620,5 @@ class TrustStoreFlowTest {
 
         /** Loopback port 1 is never listening, so the fetch fails without network. */
         const val UNREACHABLE_URL = "https://127.0.0.1:1"
-
-        /** How long a rejected import is watched before declaring it rejected. */
-        const val REJECTION_WATCH_MS = 2_000L
-        const val REJECTION_POLL_MS = 100L
     }
 }

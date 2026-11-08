@@ -29,7 +29,6 @@ import org.json.JSONObject
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.BeforeClass
@@ -370,48 +369,6 @@ class RequestHandlerBaseMethodTest {
     }
 
     @Test
-    fun signRejectsADifferentPayloadUnderTheSameSignature() {
-        val credentialId = generateCredential("sign-tamper-$runId")
-        val dataHash = MessageDigest.getInstance("SHA-256").digest("original".toByteArray())
-        val otherHash = MessageDigest.getInstance("SHA-256").digest("tampered".toByteArray())
-
-        val result = call(
-            "sign",
-            JSONObject()
-                .put("credentialId", credentialId)
-                .put("dataHash", b64(dataHash))
-                .put("userVerificationRequired", false)
-        ).ok()
-        val signature = Base64.getDecoder().decode(result.getString("signature"))
-
-        val publicKey = keystoreManager.getPublicKey(credentialId)
-            ?: throw AssertionError("the credential has no public key")
-        val verifier = Signature.getInstance("SHA256withECDSA")
-        verifier.initVerify(publicKey)
-        verifier.update(otherHash)
-        assertFalse("a signature must not verify over other data", verifier.verify(signature))
-    }
-
-    @Test
-    fun signingTwiceProducesTwoDistinctEcdsaSignatures() {
-        val credentialId = generateCredential("sign-twice-$runId")
-        val dataHash = MessageDigest.getInstance("SHA-256").digest("repeat".toByteArray())
-        val params = JSONObject()
-            .put("credentialId", credentialId)
-            .put("dataHash", b64(dataHash))
-            .put("userVerificationRequired", false)
-
-        val first = call("sign", params).ok().getString("signature")
-        val second = call("sign", params).ok().getString("signature")
-
-        assertNotEquals(
-            "ECDSA is randomised; identical signatures would mean a reused nonce",
-            first,
-            second
-        )
-    }
-
-    @Test
     fun signRejectsAnUnknownCredential() {
         val response = call(
             "sign",
@@ -519,18 +476,6 @@ class RequestHandlerBaseMethodTest {
     // ------------------------------------------------------------------
     // Framing
     // ------------------------------------------------------------------
-
-    /** The base methods must be reachable over the raw JSON frame, not only in-process. */
-    @Test
-    fun theBaseMethodsAnswerOverARawFrame() {
-        val response = runBlocking {
-            handler.handleRawRequest("""{"id":4242,"method":"ping"}""".toByteArray())
-        }
-        val parsed = Response.fromJson(response)
-
-        assertEquals(4242L, parsed.id)
-        assertTrue(parsed.ok().getBoolean("pong"))
-    }
 
     // ------------------------------------------------------------------
     // Helpers

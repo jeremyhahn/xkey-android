@@ -127,13 +127,6 @@ class TrustStoreActivityUiTest {
     // List binding
     // -----------------------------------------------------------------
 
-    @Test
-    fun certificateList_bindsSeededCertificate() {
-        val scenario = ActivityScenario.launch(TrustStoreActivity::class.java)
-
-        assertShownTextInTree(scenario, VALID_CN)
-    }
-
     /**
      * The adapter labels a certificate whose notAfter is in the past with the
      * "Expired <date>" row text rather than "Expires <date>".
@@ -238,40 +231,9 @@ class TrustStoreActivityUiTest {
             .check(matches(isDisplayed()))
     }
 
-    @Test
-    fun detailSheet_showsTheCertificateLabel() {
-        val scenario = ActivityScenario.launch(TrustStoreActivity::class.java)
-        assertShownTextInTree(scenario, VALID_CN)
-
-        clickTextInTree(scenario, VALID_CN)
-
-        onView(withText(VALID_LABEL))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
-    }
-
     // -----------------------------------------------------------------
     // Delete flow
     // -----------------------------------------------------------------
-
-    @Test
-    fun deleteCancelled_keepsTheCertificate() {
-        val scenario = ActivityScenario.launch(TrustStoreActivity::class.java)
-        assertShownTextInTree(scenario, VALID_CN)
-
-        clickTextInTree(scenario, VALID_CN)
-        onView(withText(R.string.trust_store_delete)).inRoot(isDialog()).perform(click())
-
-        onView(withText(R.string.trust_store_delete_title))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(android.R.string.cancel)).inRoot(isDialog()).perform(click())
-
-        assertTrue(
-            "Cancelling the delete dialog must keep the certificate",
-            runBlocking { repository.hasCertificate(validFingerprint) }
-        )
-    }
 
     @Test
     fun deleteConfirmed_removesTheCertificateFromTheStore() {

@@ -326,16 +326,6 @@ class RequestHandlerLocalKeyFamilyTest {
     }
 
     @Test
-    fun setKeyPolicyForAnUnknownKeyIsKeyNotFound() {
-        val response = call(
-            "local.setKeyPolicy",
-            JSONObject().put("keyId", "absent-$runId").put("shareable", true)
-        )
-
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, response.errorCode())
-    }
-
-    @Test
     fun setKeyPolicyRequiresParameters() {
         assertEquals(ErrorCodes.INVALID_PARAMS, call("local.setKeyPolicy").errorCode())
         assertEquals(

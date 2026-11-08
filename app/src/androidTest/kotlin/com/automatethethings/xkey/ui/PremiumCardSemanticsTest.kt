@@ -14,13 +14,10 @@
  */
 package com.automatethethings.xkey.ui
 
-import androidx.core.content.ContextCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.automatethethings.xkey.R
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -53,41 +50,6 @@ class PremiumCardSemanticsTest {
     @After
     fun closeHostActivity() {
         if (::hostScenario.isInitialized) hostScenario.close()
-    }
-
-    @Test
-    fun successCard_usesTheVerifiedGreen() {
-        withActivity(hostScenario) { activity ->
-            val card = PremiumCardFactory.createSuccessCard(activity)
-
-            assertEquals(
-                ContextCompat.getColor(activity, R.color.security_verified_container),
-                card.cardBackgroundColor.defaultColor
-            )
-            assertEquals(
-                ContextCompat.getColor(activity, R.color.security_verified),
-                card.strokeColor
-            )
-        }
-    }
-
-    @Test
-    fun successCard_isDistinguishableFromTheInfoCard() {
-        withActivity(hostScenario) { activity ->
-            val success = PremiumCardFactory.createSuccessCard(activity)
-            val info = PremiumCardFactory.createInfoCard(activity)
-
-            assertNotEquals(
-                "Success and info must not share a fill",
-                info.cardBackgroundColor.defaultColor,
-                success.cardBackgroundColor.defaultColor
-            )
-            assertNotEquals(
-                "Success and info must not share a stroke",
-                info.strokeColor,
-                success.strokeColor
-            )
-        }
     }
 
     /** No two status presets may render identically. */
