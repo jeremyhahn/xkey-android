@@ -33,6 +33,7 @@ import io.mockk.runs
 import io.mockk.unmockkAll
 import io.mockk.verify
 import java.io.IOException
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -41,12 +42,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -176,12 +176,17 @@ class TcpHsmServerRevocationTest {
         val started = CompletableDeferred<Unit>()
         val approval = CompletableDeferred<Unit>()
         val ran = AtomicBoolean(false)
+        val finished = CompletableDeferred<Unit>()
         coEvery {
             requestHandler.handleRawRequest(match<ByteArray> { String(it).contains("local.generateKey") })
         } coAnswers {
             started.complete(Unit)
-            approval.await()
-            ran.set(true)
+            try {
+                approval.await()
+                ran.set(true)
+            } finally {
+                finished.complete(Unit)
+            }
             """{"jsonrpc":"2.0","id":5,"result":{"ok":true}}""".toByteArray()
         }
         val desktop = connectPaired()
@@ -199,7 +204,8 @@ class TcpHsmServerRevocationTest {
         withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
         verify(timeout = TIMEOUT_MS) { requestHandler.setConnectedDevicePublicKeyHex(null) }
         approval.complete(Unit)
-        delay(200)
+        // A request the revocation left waiting would run now; either way its body ends.
+        withTimeout(TIMEOUT_MS) { finished.await() }
         assertFalse("an approval after the revocation must run nothing", ran.get())
 
         val next = connectPaired()
@@ -292,8 +298,9 @@ class TcpHsmServerRevocationTest {
         .toByteArray()
 
     /**
-     * The desktop stops reading, so the phone's outbound writes fill the
-     * socket buffers until one blocks; then the desktop ends its stream
+     * The desktop stops reading, and an outbound write from the phone fills
+     * the socket buffers until it blocks ([HoldingOutputStream]); then the
+     * desktop ends its stream
      * (Codex 7162). The teardown closes the connection before it waits on
      * the send lock: the blocked write fails, the connection ends, and the
      * server accepts and serves the next one.
@@ -314,8 +321,11 @@ class TcpHsmServerRevocationTest {
         assertEofBehindABlockedWriteEndsTheConnection(answerWaiting = true)
     }
 
-    private suspend fun assertEofBehindABlockedWriteEndsTheConnection(answerWaiting: Boolean) = coroutineScope {
+    private suspend fun assertEofBehindABlockedWriteEndsTheConnection(answerWaiting: Boolean) {
+        val output = CompletableDeferred<HoldingOutputStream>()
+        server.outputStreamForTest = { stream -> HoldingOutputStream(stream).also { output.complete(it) } }
         val desktop = connectPaired()
+        val held = withTimeout(TIMEOUT_MS) { output.await() }
         val large = JSONObject()
             .put("jsonrpc", "2.0")
             .put("id", 9)
@@ -324,30 +334,29 @@ class TcpHsmServerRevocationTest {
             .toString()
             .toByteArray()
         val sent = AtomicInteger()
-        val sender = launch(Dispatchers.IO) {
+        // Not a child of the test: if the write is never released the test
+        // fails at its timeout, and tearDown's stop closes the socket under it.
+        val sender = CoroutineScope(Dispatchers.IO).launch {
             try {
                 while (true) {
                     server.sendEncryptedMessage(large)
-                    sent.incrementAndGet()
+                    // The first frame goes out; the next write blocks.
+                    if (sent.incrementAndGet() == 1) held.holdWrites()
                 }
             } catch (e: IOException) {
                 // The teardown closed the connection under the blocked write.
             }
         }
-        var last = -1
-        withTimeout(TIMEOUT_MS) {
-            while (sent.get() != last) {
-                last = sent.get()
-                delay(500)
-            }
-        }
-        assertTrue("the sends never filled the socket buffers", last > 0)
+        withTimeout(TIMEOUT_MS) { held.writeBlocked.await() }
+        assertTrue("no send went out before the write blocked", sent.get() > 0)
         assertTrue("a write must be blocked", sender.isActive)
 
         if (answerWaiting) {
+            val answerQueued = CompletableDeferred<Unit>()
+            server.beforeSendLockForTest = { answerQueued.complete(Unit) }
             desktop.send(desktop.noise.encrypt(jsonRpc(id = 10, method = "system.ping")))
             // The ping is answered and its answer queues for the send lock.
-            delay(500)
+            withTimeout(TIMEOUT_MS) { answerQueued.await() }
         }
         desktop.endOutput()
 
@@ -385,5 +394,36 @@ class TcpHsmServerRevocationTest {
         desktop.handshake()
         withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Connected } }
         return desktop
+    }
+
+    /**
+     * A connection's output stream whose next write, once [holdWrites] is
+     * called, never finishes: it keeps writing to the socket until the
+     * buffers fill and the write blocks, and fails when the socket is closed.
+     */
+    private class HoldingOutputStream(private val socket: OutputStream) : OutputStream() {
+        @Volatile private var holding = false
+
+        /** Completes when a write that cannot finish has started. */
+        val writeBlocked = CompletableDeferred<Unit>()
+
+        fun holdWrites() {
+            holding = true
+        }
+
+        override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (!holding) return socket.write(b, off, len)
+            writeBlocked.complete(Unit)
+            // The desktop reads nothing: this blocks once the socket buffers
+            // fill, and fails when the connection is closed.
+            val filler = ByteArray(64 * 1024)
+            while (true) socket.write(filler)
+        }
+
+        override fun flush() = socket.flush()
+
+        override fun close() = socket.close()
     }
 }
