@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * The signing prompts on screen, by request id, so the service that launched
  * one can take it down when the request it answers is cancelled -- the session
- * revoked or unpaired, the transport gone, the handler timed out (Codex 7346).
+ * revoked or unpaired, the transport gone, the handler timed out.
  *
  * A cancel names one request and reaches only that request's prompt. One that
  * lands before its activity has come up is remembered, so the activity, when
