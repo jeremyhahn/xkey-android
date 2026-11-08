@@ -325,7 +325,7 @@ class TcpHsmServerRevocationTest {
         val output = CompletableDeferred<HoldingOutputStream>()
         server.outputStreamForTest = { stream -> HoldingOutputStream(stream).also { output.complete(it) } }
         val desktop = connectPaired()
-        val held = output.await()
+        val held = withTimeout(TIMEOUT_MS) { output.await() }
         val large = JSONObject()
             .put("jsonrpc", "2.0")
             .put("id", 9)
