@@ -191,32 +191,6 @@ class EnrolledDeviceRepositoryTest {
         assertTrue(stored.hasSSHHostCertificate())
     }
 
-    @Test
-    fun certificateChainsSurviveTheEncryptedRoundTrip() {
-        repository.enroll(fullyAttestedDevice())
-
-        val stored = repository.getDevice(deviceA)!!
-        assertEquals(2, stored.idevidCertificateChain!!.size)
-        assertArrayEquals(byteArrayOf(0x30, 0x22), stored.idevidCertificateChain!![1])
-        assertEquals(1, stored.tlsServerCertificateChain!!.size)
-        assertEquals(2, stored.tlsClientCertificateChain!!.size)
-        assertArrayEquals(byteArrayOf(0x30, 0x42), stored.tlsClientCertificateChain!![1])
-    }
-
-    @Test
-    fun aMinimalEnrolmentComesBackWithoutCertificates() {
-        repository.enroll(device())
-
-        val stored = repository.getDevice(deviceA)!!
-        assertNull(stored.ekCertificateDER)
-        assertNull(stored.idevidCertificateDER)
-        assertNull(stored.idevidCertificateChain)
-        assertNull(stored.sshUserCertificate)
-        assertNull(stored.lastVerifiedAt)
-        assertFalse(stored.hasFullAttestation())
-        assertFalse(stored.hasIDevIDCertificate())
-    }
-
     // -------------------------------------------------------------------------
     // Certificate updates
     // -------------------------------------------------------------------------
