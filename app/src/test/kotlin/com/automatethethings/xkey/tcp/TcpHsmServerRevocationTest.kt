@@ -42,11 +42,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -321,7 +321,7 @@ class TcpHsmServerRevocationTest {
         assertEofBehindABlockedWriteEndsTheConnection(answerWaiting = true)
     }
 
-    private suspend fun assertEofBehindABlockedWriteEndsTheConnection(answerWaiting: Boolean) = coroutineScope {
+    private suspend fun assertEofBehindABlockedWriteEndsTheConnection(answerWaiting: Boolean) {
         val output = CompletableDeferred<HoldingOutputStream>()
         server.outputStreamForTest = { stream -> HoldingOutputStream(stream).also { output.complete(it) } }
         val desktop = connectPaired()
@@ -334,7 +334,9 @@ class TcpHsmServerRevocationTest {
             .toString()
             .toByteArray()
         val sent = AtomicInteger()
-        val sender = launch(Dispatchers.IO) {
+        // Not a child of the test: if the write is never released the test
+        // fails at its timeout, and tearDown's stop closes the socket under it.
+        val sender = CoroutineScope(Dispatchers.IO).launch {
             try {
                 while (true) {
                     server.sendEncryptedMessage(large)
