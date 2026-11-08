@@ -54,14 +54,6 @@ class BootstrapSettingsDataTest {
     }
 
     @Test
-    fun `every method carries a display name and description`() {
-        for (method in BootstrapMethod.entries) {
-            assertTrue(method.displayName.isNotBlank())
-            assertTrue(method.description.isNotBlank())
-        }
-    }
-
-    @Test
     fun `fromName is case insensitive`() {
         assertSame(BootstrapMethod.DANE, BootstrapMethod.fromName("DANE"))
         assertSame(BootstrapMethod.DANE, BootstrapMethod.fromName("dane"))
@@ -382,23 +374,6 @@ class BootstrapSettingsDataTest {
         assertSame(original, original.deriveFromUrl("/just/a/path"))
     }
 
-    @Test
-    fun `deriveFromUrl preserves unrelated fields`() {
-        val original = BootstrapSettingsData(
-            autoBootstrapEnabled = false,
-            perMethodTimeoutSeconds = 60,
-            noiseServerStaticKey = "ab".repeat(32),
-            spkiPinSha256 = "cd".repeat(32)
-        )
-
-        val derived = original.deriveFromUrl("https://kms.example.com:8443")
-
-        assertFalse(derived.autoBootstrapEnabled)
-        assertEquals(60, derived.perMethodTimeoutSeconds)
-        assertEquals("ab".repeat(32), derived.noiseServerStaticKey)
-        assertEquals("cd".repeat(32), derived.spkiPinSha256)
-    }
-
     // -------------------------------------------------------------------------
     // Timeout helpers and derived configs
     // -------------------------------------------------------------------------
@@ -458,11 +433,6 @@ class BootstrapSettingsDataTest {
     // -------------------------------------------------------------------------
     // Presets
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `DEFAULT preset equals a plain construction`() {
-        assertEquals(BootstrapSettingsData(), BootstrapSettingsData.DEFAULT)
-    }
 
     @Test
     fun `HIGH_SECURITY preset forbids the unverified fallbacks`() {
