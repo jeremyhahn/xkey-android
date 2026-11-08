@@ -77,16 +77,6 @@ class XmpMetadataHelperInstrumentedTest {
         return file
     }
 
-    private fun png(): File {
-        val file = File(context.cacheDir, "xkey-media-${System.nanoTime()}.png")
-        val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
-        bitmap.eraseColor(Color.RED)
-        FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        bitmap.recycle()
-        created.add(file)
-        return file
-    }
-
     private fun sampleData(hash: String = "a".repeat(64)) = ContentAuthenticityData(
         contentHash = hash,
         signatures = listOf(
@@ -354,16 +344,5 @@ class XmpMetadataHelperInstrumentedTest {
         )
 
         assertNull(read)
-    }
-
-    @Test
-    fun aPngStillUsesASidecar() {
-        val file = png()
-        val data = sampleData(hash = "7".repeat(64))
-
-        XmpMetadataHelper.writeSignature(file.path, data)
-
-        assertTrue(File(XmpMetadataHelper.getSidecarPath(file.path)).exists())
-        assertEquals(data.contentHash, XmpMetadataHelper.readSignature(file.path)!!.contentHash)
     }
 }

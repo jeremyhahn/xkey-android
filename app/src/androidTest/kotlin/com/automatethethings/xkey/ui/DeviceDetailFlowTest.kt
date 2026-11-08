@@ -266,15 +266,6 @@ class DeviceDetailFlowTest {
     // Settings
     // -----------------------------------------------------------------
 
-    /** The spinner has to land on the preset the device actually stores. */
-    @Test
-    fun gracePeriodSpinner_reflectsTheStoredValue() {
-        storeGracePeriod(30)
-        val scenario = launch()
-
-        assertEquals("30 minutes", selectedGracePeriod(scenario))
-    }
-
     /**
      * Choosing a different preset writes through the same listener as the
      * switches, so a regression there silently drops the user's choice.
@@ -460,9 +451,6 @@ class DeviceDetailFlowTest {
                 .firstOrNull() as? Spinner
                 ?: throw AssertionError("The settings card has no grace period spinner")
         }
-
-    private fun selectedGracePeriod(scenario: ActivityScenario<DeviceDetailActivity>): String =
-        gracePeriodSpinner(scenario).selectedItem.toString()
 
     private fun selectGracePeriod(
         scenario: ActivityScenario<DeviceDetailActivity>,

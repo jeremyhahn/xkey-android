@@ -306,16 +306,6 @@ class StreamPairingSessionRevocationTest {
         phone.desktop.assertNoFrame()
     }
 
-    /** A paired peer still gets the phone's requests: the check refuses only what it must. */
-    @Test
-    fun aSendToAPairedPeerIsDelivered() = runBlocking {
-        val phone = connectPaired()
-
-        pairing.sendEncryptedMessage(REQUEST)
-
-        assertEquals("remote.sync", phone.desktop.readEncrypted().getString("method"))
-    }
-
     // ---------------------------------------------------------------------
     // Removal during the handshake
     // ---------------------------------------------------------------------

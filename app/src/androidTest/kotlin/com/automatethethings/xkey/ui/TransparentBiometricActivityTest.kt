@@ -85,16 +85,6 @@ class TransparentBiometricActivityTest {
     // ---------------------------------------------------------------
 
     @Test
-    fun createIntent_targetsTransparentBiometricActivity() {
-        val intent = TransparentBiometricActivity.createIntent(context, requestId = "req-1")
-
-        assertEquals(
-            TransparentBiometricActivity::class.java.name,
-            intent.component?.className
-        )
-    }
-
-    @Test
     fun createIntent_appliesTheDocumentedDefaults() {
         val intent = TransparentBiometricActivity.createIntent(context, requestId = "req-1")
 

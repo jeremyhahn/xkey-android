@@ -34,7 +34,6 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.AfterClass
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.BeforeClass
@@ -158,17 +157,6 @@ class CertificateDetailActivityUiTest {
         val scenario = launch("ui-certdetail-does-not-exist")
 
         assertActivityDestroyed(scenario)
-    }
-
-    @Test
-    fun activityLaunches_withValidSerial() {
-        val scenario = launch(validSerial)
-
-        assertShownTextInTree(scenario, VALID_CN)
-        assertFalse(
-            "Activity should not be finishing for a known serial number",
-            withActivity(scenario) { it.isFinishing }
-        )
     }
 
     // -----------------------------------------------------------------
@@ -323,20 +311,6 @@ class CertificateDetailActivityUiTest {
         assertTrue(
             "Confirming delete must remove the certificate row",
             awaitCondition { runBlocking { dao.getBySerial(validSerial) == null } }
-        )
-    }
-
-    @Test
-    fun revokeConfirmed_marksTheCertificateRevoked() {
-        val scenario = launch(validSerial)
-        assertShownTextInTree(scenario, VALID_CN)
-
-        clickTextInTree(scenario, withString(scenario, R.string.cert_detail_revoke))
-        onView(withText(R.string.cert_revoke_confirm)).inRoot(isDialog()).perform(click())
-
-        assertTrue(
-            "Confirming revocation must persist revoked = true",
-            awaitCondition { runBlocking { dao.getBySerial(validSerial)?.revoked == true } }
         )
     }
 

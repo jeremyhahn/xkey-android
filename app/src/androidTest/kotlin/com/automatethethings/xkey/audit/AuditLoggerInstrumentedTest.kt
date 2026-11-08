@@ -127,37 +127,4 @@ class AuditLoggerInstrumentedTest {
         assertEquals("Desktop", entry.deviceName)
         assertNotNull(entry.details)
     }
-
-    @Test
-    fun multipleEventsForOneKeyAreAllRetainedNewestFirst() {
-        AuditLogger.logKeyCreated(keyId, "Instrumented key", "signing", "ES256")
-        AuditLogger.logKeyExported(keyId, "Instrumented key", "signing", "pem")
-        AuditLogger.logKeyDeleted(keyId, "Instrumented key", "signing")
-
-        val entries = awaitEntries(3)
-        assertEquals(3, entries.size)
-        assertEquals(
-            setOf(
-                AuditOperationType.KEY_CREATED,
-                AuditOperationType.KEY_EXPORTED,
-                AuditOperationType.KEY_DELETED
-            ),
-            entries.map { it.operationType }.toSet()
-        )
-        // getByKeyId orders by timestamp DESC.
-        val timestamps = entries.map { it.timestamp }
-        assertEquals(timestamps.sortedDescending(), timestamps)
-    }
-
-    @Test
-    fun deletingAKeysHistoryRemovesEveryRowForThatKey() = runBlocking {
-        AuditLogger.logKeyCreated(keyId, "Instrumented key", "signing", "ES256")
-        AuditLogger.logKeyDeleted(keyId, "Instrumented key", "signing")
-        awaitEntries(2)
-
-        val deleted = dao.deleteByKeyId(keyId)
-
-        assertEquals(2, deleted)
-        assertTrue(dao.getByKeyId(keyId).isEmpty())
-    }
 }

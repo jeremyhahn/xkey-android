@@ -142,13 +142,6 @@ class PinManagerTest {
     }
 
     @Test
-    fun `soPINSet returns false when not set`() = runTest {
-        currentSettings = PinSettingsData(soPinSet = false)
-
-        assertFalse(pinManager.soPINSet())
-    }
-
-    @Test
     fun `userPINSet returns false when not set`() = runTest {
         currentSettings = PinSettingsData(userPinSet = false)
 

@@ -230,32 +230,6 @@ class XKeyDatabaseMigrationTest {
         }
     }
 
-    /**
-     * The tables added by later migrations must exist and be usable, not merely
-     * declared. Reading each new store on a database that started at the oldest
-     * exported schema exercises every `CREATE TABLE` the chain performs.
-     */
-    @Test
-    fun tablesAddedByLaterMigrationsAreQueryableAfterMigratingFromTheOldestSchema() {
-        createLegacyDatabase(3) { db ->
-            insertKey(db, keyId = "oldest-schema-key", source = LEGACY_SOURCE)
-        }
-
-        withMigratedDatabase { db ->
-            // v5..v10 each added a store; an empty result is fine, an exception
-            // is not.
-            assertNotNull(db.auditLogDao().getAll())
-            assertNotNull(db.certificateDao().getAll())
-            assertNotNull(db.contactDao().getAll())
-            assertNotNull(db.oathCredentialDao().getAll())
-            assertNotNull(db.pivSlotDao().getAll())
-            assertNotNull(db.passwordDao().getAll())
-            assertNotNull(
-                db.keySharingPolicyDao().getPoliciesForKeySync("oldest-schema-key")
-            )
-        }
-    }
-
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------

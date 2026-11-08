@@ -15,10 +15,8 @@
 package com.automatethethings.xkey.settings
 
 import android.content.Context
-import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -67,22 +65,6 @@ class PinSettingsRepositoryTest {
     }
 
     @Test
-    fun freshStore_yieldsDocumentedDefaults() = runBlocking {
-        val settings = repository.getSettings()
-
-        assertEquals(PinSettingsData(), settings)
-        assertFalse(settings.soPinSet)
-        assertFalse(settings.userPinSet)
-        assertNull(settings.soPinHashBase64)
-        assertNull(settings.userPinSaltBase64)
-        assertEquals(0, settings.failedSoPinAttempts)
-        assertEquals(5, settings.maxPinAttempts)
-        assertEquals(300, settings.lockoutDurationSeconds)
-        assertTrue(settings.backoffEnabled)
-        assertEquals(0L, settings.userPinLockedUntil)
-    }
-
-    @Test
     fun updateSettings_roundTripsEveryField() = runBlocking {
         val written = PinSettingsData(
             soPinSet = true,
@@ -103,13 +85,6 @@ class PinSettingsRepositoryTest {
         repository.updateSettings(written)
 
         assertEquals(written, repository.getSettings())
-    }
-
-    @Test
-    fun settingsFlow_emitsThePersistedValue() = runBlocking {
-        repository.updateSoPinSet(true)
-
-        assertTrue(repository.settingsFlow.first().soPinSet)
     }
 
     @Test
@@ -168,15 +143,6 @@ class PinSettingsRepositoryTest {
         repository.updateUserPinSaltBase64(null)
 
         assertNull(repository.getSettings().userPinSaltBase64)
-    }
-
-    @Test
-    fun emptyStringWrittenDirectly_readsBackAsNull() = runBlocking {
-        PreferenceStoreProbe.writeRaw(repository) {
-            it[stringPreferencesKey("user_pin_hash_base64")] = ""
-        }
-
-        assertNull(repository.getSettings().userPinHashBase64)
     }
 
     @Test

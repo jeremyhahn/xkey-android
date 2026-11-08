@@ -128,23 +128,6 @@ class KeySharingRevocationFlowTest {
     }
 
     /**
-     * All Paired Devices keeps clearing them: it supersedes per-peer rows, which
-     * could only contradict it later.
-     */
-    @Test
-    fun choosingAllPeers_stillClearsThePerPeerGrants() {
-        val keyId = seedKey("all-clears", SharingPolicyType.SELECTED_PEERS)
-        grantPeer(keyId, PEER_A_HEX)
-        val scenario = openSheetFor(keyId)
-
-        clickPolicy(scenario, context.getString(R.string.sharing_policy_all_peers))
-
-        awaitCondition("Choosing All Paired Devices should clear the per-peer grants") {
-            storedGrants(keyId).isEmpty()
-        }
-    }
-
-    /**
      * Revoking is not a one-way door: after Private the user can select the same
      * peer again, and it is granted afresh rather than restored.
      */

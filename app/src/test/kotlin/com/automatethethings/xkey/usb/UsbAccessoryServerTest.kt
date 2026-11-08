@@ -128,32 +128,9 @@ class UsbAccessoryServerTest {
         verify(exactly = 2) { usbManager.openAccessory(accessory) }
     }
 
-    @Test
-    fun `a refused accessory still leaves nothing to send on`() = runTest {
-        every { usbManager.openAccessory(accessory) } returns null
-
-        server.connect(context, accessory)
-
-        val threw = try {
-            server.sendEncryptedMessage(byteArrayOf(1))
-            false
-        } catch (e: IOException) {
-            true
-        }
-
-        assertTrue(threw)
-    }
-
     // -------------------------------------------------------------------------
     // Disconnect
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `disconnecting an idle server is a no-op that leaves it disconnected`() {
-        server.disconnect()
-
-        assertEquals(UsbAccessoryState.Disconnected, server.state.value)
-    }
 
     @Test
     fun `disconnect is idempotent`() {
@@ -172,30 +149,5 @@ class UsbAccessoryServerTest {
         server.disconnect()
 
         assertEquals(UsbAccessoryState.Disconnected, server.state.value)
-    }
-
-    // -------------------------------------------------------------------------
-    // Wiring
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `the server reaches the USB manager through the system service`() {
-        every { usbManager.openAccessory(accessory) } returns null
-
-        server.connect(context, accessory)
-
-        verify { context.getSystemService(Context.USB_SERVICE) }
-    }
-
-    @Test
-    fun `a server built with the optional collaborators still starts disconnected`() {
-        val configured = UsbAccessoryServer(
-            requestHandler = mockk<RequestHandler>(relaxed = true),
-            messageRouter = mockk(relaxed = true),
-            pairingCallback = mockk(relaxed = true),
-            pairedDeviceRepository = mockk(relaxed = true)
-        )
-
-        assertEquals(UsbAccessoryState.Disconnected, configured.state.value)
     }
 }

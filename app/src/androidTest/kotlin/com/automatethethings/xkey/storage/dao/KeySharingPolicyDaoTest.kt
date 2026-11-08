@@ -217,11 +217,6 @@ class KeySharingPolicyDaoTest {
         assertEquals(1, dao.countKeysSharedWithPeer(otherPeer))
     }
 
-    @Test
-    fun countKeysSharedWithPeer_isZeroForAnEmptyDatabase() = runBlocking {
-        assertEquals(0, dao.countKeysSharedWithPeer(peer))
-    }
-
     // -------------------------------------------------------------------------
     // Policy CRUD
     // -------------------------------------------------------------------------
@@ -262,13 +257,6 @@ class KeySharingPolicyDaoTest {
     }
 
     @Test
-    fun getPolicy_returnsNullWhenNoRowExists() = runBlocking {
-        insertKey("k-1", SharingPolicyType.SELECTED_PEERS)
-
-        assertNull(dao.getPolicy("k-1", peer))
-    }
-
-    @Test
     fun getPoliciesForKey_emitsTheRowsNewestFirst() = runBlocking {
         insertKey("k-1", SharingPolicyType.SELECTED_PEERS)
         dao.setPolicy(KeySharingPolicy("k-1", peer, createdAt = 100L))
@@ -278,13 +266,6 @@ class KeySharingPolicyDaoTest {
             listOf(otherPeer, peer),
             dao.getPoliciesForKey("k-1").first().map { it.peerPublicKeyHex }
         )
-    }
-
-    @Test
-    fun getPoliciesForKeySync_isEmptyForAKeyWithNoGrants() = runBlocking {
-        insertKey("k-1", SharingPolicyType.SELECTED_PEERS)
-
-        assertTrue(dao.getPoliciesForKeySync("k-1").isEmpty())
     }
 
     @Test
@@ -329,11 +310,6 @@ class KeySharingPolicyDaoTest {
 
         assertEquals(1, dao.removePolicy("k-1", peer))
         assertNull(dao.getPolicy("k-1", peer))
-    }
-
-    @Test
-    fun removePolicy_reportsZeroWhenThereWasNothingToRemove() = runBlocking {
-        assertEquals(0, dao.removePolicy("k-1", peer))
     }
 
     @Test

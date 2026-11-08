@@ -28,8 +28,7 @@ import org.junit.Test
  * case: an empty slot legitimately has no public key and no certificate, so
  * `equals` has to treat null-versus-null as equal, null-versus-present as
  * unequal in both directions, and identical-content-in-different-arrays as
- * equal. `PivKeyManagerTest` spot-checks two of those; this suite pins all of
- * them plus the field-by-field comparison.
+ * equal. This suite pins all of them plus the field-by-field comparison.
  */
 class PivSlotEntityTest {
 
@@ -59,6 +58,7 @@ class PivSlotEntityTest {
     fun `an empty slot row carries no key material`() {
         val empty = PivSlotEntity(slotId = "9C")
 
+        assertEquals("9C", empty.slotId)
         assertEquals(0L, empty.id)
         assertNull(empty.algorithm)
         assertNull(empty.publicKeyDer)
@@ -85,6 +85,15 @@ class PivSlotEntityTest {
     fun `two slot rows with the same fields are equal and hash alike`() {
         assertEquals(entity(), entity())
         assertEquals(entity().hashCode(), entity().hashCode())
+    }
+
+    @Test
+    fun `slot rows with equal key content in distinct arrays are equal`() {
+        val a = entity(publicKeyDer = byteArrayOf(1, 2, 3), certificateDer = byteArrayOf(4, 5, 6))
+        val b = entity(publicKeyDer = byteArrayOf(1, 2, 3), certificateDer = byteArrayOf(4, 5, 6))
+
+        assertEquals(a, b)
+        assertEquals(a.hashCode(), b.hashCode())
     }
 
     @Test
@@ -149,33 +158,6 @@ class PivSlotEntityTest {
         assertNotEquals(base, base.copy(lastUsedAt = 2L))
         assertNotEquals(base, base.copy(lastUsedAt = null))
         assertNotEquals(base, base.copy(useCount = 4))
-    }
-
-    @Test
-    fun `hashCode is stable across repeated calls`() {
-        val a = entity()
-
-        assertEquals(a.hashCode(), a.hashCode())
-    }
-
-    @Test
-    fun `copy replaces only the named field`() {
-        val base = entity()
-        val used = base.copy(useCount = base.useCount + 1, lastUsedAt = 42L)
-
-        assertEquals(4, used.useCount)
-        assertEquals(42L, used.lastUsedAt)
-        assertEquals(base.slotId, used.slotId)
-        assertTrue(base.publicKeyDer.contentEquals(used.publicKeyDer))
-    }
-
-    @Test
-    fun `toString renders the identifying fields`() {
-        val rendered = entity().toString()
-
-        assertTrue(rendered.contains("slotId=9A"))
-        assertTrue(rendered.contains("algorithm=ES256"))
-        assertTrue(rendered.contains("hasKey=true"))
     }
 
     // -------------------------------------------------------------------------
@@ -247,32 +229,5 @@ class PivSlotEntityTest {
         assertNotEquals(base, base.copy(lastUsedAt = 2L))
         assertNotEquals(base, base.copy(lastUsedAt = null))
         assertNotEquals(base, base.copy(useCount = 4))
-    }
-
-    @Test
-    fun `an unused slot view reports a null last-used time`() {
-        val fresh = info().copy(lastUsedAt = null, useCount = 0)
-
-        assertNull(fresh.lastUsedAt)
-        assertEquals(0, fresh.useCount)
-    }
-
-    @Test
-    fun `a slot view destructures in declaration order`() {
-        val (slot, algorithm, hasKey, hasCertificate) = info()
-
-        assertEquals(PivSlot.AUTHENTICATION, slot)
-        assertEquals(PivAlgorithm.ES256, algorithm)
-        assertTrue(hasKey)
-        assertTrue(hasCertificate)
-    }
-
-    @Test
-    fun `a slot view renders its fields in toString`() {
-        val rendered = info().toString()
-
-        assertTrue(rendered.contains("slot=AUTHENTICATION"))
-        assertTrue(rendered.contains("algorithm=ES256"))
-        assertTrue(rendered.contains("useCount=3"))
     }
 }

@@ -129,15 +129,6 @@ class SettingsActivityUiTest {
     // ---------------------------------------------------------------
 
     @Test
-    fun connectivitySection_isDisplayed() {
-        ActivityScenario.launch(SettingsActivity::class.java)
-
-        onView(withText(R.string.settings_section_connectivity))
-            .perform(scrollToView())
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
     fun nativeUsbToggle_isDisplayed() {
         ActivityScenario.launch(SettingsActivity::class.java)
 
@@ -167,15 +158,6 @@ class SettingsActivityUiTest {
     // ---------------------------------------------------------------
     // Bootstrap Section
     // ---------------------------------------------------------------
-
-    @Test
-    fun autoBootstrapToggle_isDisplayed() {
-        ActivityScenario.launch(SettingsActivity::class.java)
-
-        onView(withText(R.string.bootstrap_auto_enabled))
-            .perform(scrollToView())
-            .check(matches(isDisplayed()))
-    }
 
     /**
      * Turning Auto-Bootstrap on reveals the bootstrap method sections

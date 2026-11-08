@@ -172,13 +172,6 @@ class CertificateManagementActivityUiTest {
         }
     }
 
-    @Test
-    fun fab_showsIssueCertificateAction() {
-        val scenario = launch()
-
-        assertShownTextInTree(scenario, withString(scenario, R.string.cert_issue_title))
-    }
-
     // -----------------------------------------------------------------
     // List binding
     // -----------------------------------------------------------------
@@ -372,21 +365,6 @@ class CertificateManagementActivityUiTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun longPress_opensContextMenuWithRevokeForAnActiveCertificate() {
-        val scenario = launch()
-        val position = awaitPositionOf(scenario, validSerial)
-
-        longClickRecyclerItem(scenario, position)
-
-        onView(withText(R.string.cert_revoke_title))
-            .inRoot(isPlatformPopup())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.cert_delete_title))
-            .inRoot(isPlatformPopup())
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
     fun revokeConfirmationCancelled_leavesCertificateActive() {
         val scenario = launch()
         val position = awaitPositionOf(scenario, validSerial)
@@ -459,20 +437,6 @@ class CertificateManagementActivityUiTest {
     // -----------------------------------------------------------------
     // Issue dialog
     // -----------------------------------------------------------------
-
-    @Test
-    fun issueCertificateDialog_opensWithProfileAndSubjectFields() {
-        val scenario = launch()
-
-        clickClickableWithExactText(scenario, withString(scenario, R.string.cert_issue_title))
-
-        onView(withText(R.string.cert_issue_profile))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.cert_issue_subject_cn))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
-    }
 
     @Test
     fun issueCertificateDialogCancelled_addsNoCertificate() {

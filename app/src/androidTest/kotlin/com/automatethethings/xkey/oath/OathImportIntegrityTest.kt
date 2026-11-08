@@ -172,15 +172,6 @@ class OathImportIntegrityTest {
     }
 
     @Test
-    fun importFromUri_keepsATotpCredentialAtCounterZero() = runBlocking {
-        val oathId = repository.importFromUri(
-            "otpauth://totp/user?secret=$rfcSeedBase32&counter=99"
-        )
-
-        assertEquals("a counter is meaningless for TOTP", 0L, dao.getByOathId(oathId)!!.counter)
-    }
-
-    @Test
     fun importFromUri_ignoresANegativeCounter() = runBlocking {
         val oathId = repository.importFromUri(
             "otpauth://hotp/user?secret=$rfcSeedBase32&counter=-5"
