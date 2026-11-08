@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test build-image-test image-tag-test
+	reaper-test revert-red-main-test build-image-test image-tag-test fetch-test
 
 .DEFAULT_GOAL := help
 
@@ -110,7 +110,7 @@ lint: android-lint ## Android lint on the debug variant (the repository's own ga
 # of lint: CI's lint-gates job runs `make lint-gates` in parallel with the
 # image job's `make lint`, so nothing runs twice there. It runs without -k,
 # so the first failing gate ends the run.
-lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline)
+lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test fetch-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -139,6 +139,9 @@ build-image-test: ## Test two concurrent cold builds of one image tag (make dock
 
 image-tag-test: ## Test that the package index sums move the integration image tag and never the toolchain's, and scripts/apt-index-sum.sh against a stubbed docker (bash)
 	./scripts/image-tag-test.sh
+
+fetch-test: ## Test build/docker/devcontainer/fetch.sh, the image download helper, against a stubbed curl: the primary path, the GitHub API asset fallback among several assets, bad release JSON, API failures, checksum rejection, and redirects to a GitHub release (bash, offline)
+	./scripts/fetch-test.sh
 
 security: tools-check-trivy trivy-fs ## Security suite: trivy fs (vuln + secret, CRITICAL/HIGH blocking)
 
