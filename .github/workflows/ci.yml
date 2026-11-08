@@ -14,8 +14,8 @@
 # suite with coverage (the image job), the repository's own gates
 # (lint-gates) and the architecture gate (arch-gates). The full tier adds
 # integration, security and `trivy image`; it runs on a push to main, on
-# workflow_dispatch, on the nightly schedule and on a PR labelled ci:full.
-# Soak runs on the schedule and on workflow_dispatch only. A draft PR runs no
+# workflow_dispatch and on a PR labelled ci:full.
+# Soak runs on workflow_dispatch only. A draft PR runs no
 # CI, and CI Gate fails on a draft. A PR whose every changed file matches
 # DOCS_ONLY_PATTERN runs lint alone.
 #
@@ -25,7 +25,7 @@
 #
 # Concurrency. A newer push to a PR cancels that PR's older run. On main each
 # event and commit is its own group, so every merge keeps its run and a
-# dispatch or schedule run never cancels a push run. cancel-in-progress is a
+# dispatch run never cancels a push run. cancel-in-progress is a
 # literal `true`: an expression there once left a main run queued with no
 # task.
 #
@@ -80,13 +80,9 @@ on:
   workflow_dispatch:                    # re-fire a whole workflow; also the
                                         # only retry when a run was never
                                         # created
-  # main's full tier nightly as well as after every merge. Scheduled runs are
-  # on the default branch.
-  schedule:
-    - cron: '0 4 * * *'
 
 # On main the group is the event and the commit, so a newer push to main never
-# cancels an older main run (every merge keeps its run) and a schedule or
+# cancels an older main run (every merge keeps its run) and a
 # workflow_dispatch run never cancels a push run. Every other ref is one
 # group, so a PR's newer run cancels the older. No expression reaches
 # cancel-in-progress: a run after it was set to an expression was never
@@ -106,7 +102,7 @@ env:
   COVERAGE_THRESHOLD: ''
   # Gradle has no build tags; the variants are AGP build types, and CI builds
   # and tests debug.
-  # The full tier: every event but pull_request (push to main, schedule,
+  # The full tier: every event but pull_request (push to main,
   # workflow_dispatch), and a PR labelled ci:full.
   # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
   # the integration job repeats this expression. Keep them equal.
@@ -119,7 +115,7 @@ env:
   # and its docs-only step stay and run nothing.
   RELEASABILITY_TEST: ""
   # The devcontainer images' names and fresh trusted builds. A push to main and a
-  # schedule or dispatch on main are trusted; every other run is pr. Both come
+  # dispatch on main are trusted; every other run is pr. Both come
   # from the event and the ref, never from a name a PR picks, and every make
   # call reads them from here. IMAGE_NAMESPACE is a name only (trusted tags
   # <hash>, pr tags pr-<hash>; image-tag.sh) and protects nothing: a Docker
@@ -186,7 +182,7 @@ jobs:
   #
   # lint, deps-check, build and coverage are the PR tier and run on every
   # event. security and trivy image are full tier only (env.CI_FULL_TIER):
-  # main after every merge, nightly, dispatch, ci:full.
+  # main after every merge, dispatch, ci:full.
   #
   # The job reads the base image's package index into APT_INDEX_SUM, which
   # the integration image's tag hashes and its build takes as a build
@@ -207,10 +203,10 @@ jobs:
     timeout-minutes: 150      # two cold image builds and every stage on 4 cores
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
-      # The cache volumes' trust class. Only a push to main or the nightly
-      # schedule (which runs on main) writes the caches main's build reads;
-      # every other event, pull requests included, gets the `pr` set.
-      CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
+      # The cache volumes' trust class. Only a push to main writes the caches
+      # main's build reads; every other event, pull requests included, gets
+      # the `pr` set.
+      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
       # No cache volumes. Gradle reads every dependency from the image's read-only cache
       # (GRADLE_RO_DEP_CACHE) and each stage gets a fresh, writable Gradle home
       # that goes with its container (scripts/in-toolchain-image.sh), so no cache outlives a stage and trim-ci-caches.sh finds none.
@@ -388,7 +384,7 @@ jobs:
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       # The cache volumes' trust class (as in the image job).
-      CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
+      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
       CI_CACHE: 'off'         # as in the image job
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -619,11 +615,11 @@ jobs:
   # Soak: the integration suite looped in the
   # integration image until SOAK_MINUTES have passed, each iteration its own
   # compose stack, torn down before the next; the first red iteration fails
-  # the job. Nightly and workflow_dispatch only, off main pushes and off
-  # ci:full; the Gate marks it `nightly`.
+  # the job. workflow_dispatch only, off main pushes and off ci:full; the
+  # Gate marks it `dispatch`.
   soak:
     name: Soak [integration image]
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 150      # a cold image build, SOAK_MINUTES and one iteration
     env:
@@ -737,7 +733,7 @@ jobs:
   # that read only those left the job skipped unstarted on a pull_request.
   # Reading `needs.changes.outputs.*` in the same `if:` is fine:
   #   needs: [changes, image]
-  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.optee == 'true')) }}
+  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.optee == 'true')) }}
 
   # Architecture gate: the repository's layering rules, as source checks with
   # grep on the runner's shell, not a stage. A lint-class check, so it stays
@@ -781,8 +777,8 @@ jobs:
           # PR labelled ci:full. A job marked `full` may be skipped below only
           # when it is not selected; a `pr` job may never be skipped.
           FULL_TIER: ${{ env.CI_FULL_TIER }}
-          # A `nightly` job runs on schedule and workflow_dispatch only.
-          NIGHTLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          # A `dispatch` job runs on workflow_dispatch only.
+          DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
           # A draft PR runs no CI, so its gate fails rather than pass on skips.
           DRAFT: ${{ github.event.pull_request.draft == true }}
         run: |
@@ -791,15 +787,15 @@ jobs:
             exit 1
           fi
           BAD=0
-          echo "full tier selected: ${FULL_TIER}; nightly selected: ${NIGHTLY}"
-          check() { # <job> <result> <pr|full|nightly>
+          echo "full tier selected: ${FULL_TIER}; dispatch selected: ${DISPATCH}"
+          check() { # <job> <result> <pr|full|dispatch>
             case "$2" in
               success) echo "OK   $1";;
               skipped)
                 if [ "$3" = full ] && [ "${FULL_TIER}" != true ]; then
                   echo "SKIP $1 (full tier not selected)"
-                elif [ "$3" = nightly ] && [ "${NIGHTLY}" != true ]; then
-                  echo "SKIP $1 (nightly and dispatch only)"
+                elif [ "$3" = dispatch ] && [ "${DISPATCH}" != true ]; then
+                  echo "SKIP $1 (dispatch only)"
                 else
                   echo "FAIL $1 (skipped)"; BAD=1
                 fi;;
@@ -807,12 +803,12 @@ jobs:
             esac
           }
           # One line per job in needs above. A job gated to the
-          # full tier by its `if:` is marked full, one gated to schedule and
-          # workflow_dispatch is nightly; every other job is pr.
+          # full tier by its `if:` is marked full, one gated to
+          # workflow_dispatch is dispatch; every other job is pr.
           check changes     "${{ needs.changes.result }}" pr
           check image       "${{ needs.image.result }}" pr
           check lint-gates  "${{ needs.lint-gates.result }}" pr
           check integration "${{ needs.integration.result }}" full
-          check soak        "${{ needs.soak.result }}" nightly
+          check soak        "${{ needs.soak.result }}" dispatch
           check arch-gates  "${{ needs.arch-gates.result }}" pr
           exit $BAD
