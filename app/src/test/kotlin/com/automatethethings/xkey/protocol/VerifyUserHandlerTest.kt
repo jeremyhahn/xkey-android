@@ -69,7 +69,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * `local.verifyUser` on the real [RequestHandler] (#13, owner ruling 167).
+ * `local.verifyUser` on the real [RequestHandler] (#13).
  *
  * The UVK is a software P-256 key behind the [UserVerificationKey] seam and the
  * biometric prompt is a [UserVerificationPrompt] that signs with it, so each

@@ -418,14 +418,14 @@ class SSHCertificateEncoderTest {
         val parsed = parseBody(
             buildBody(
                 critical = linkedMapOf(
-                    "source-address" to "10.0.0.0/8",
+                    "source-address" to "192.0.2.0/24",
                     "force-command" to "/usr/bin/true"
                 )
             ),
             ec = true
         )
         assertEquals(
-            listOf("force-command" to "/usr/bin/true", "source-address" to "10.0.0.0/8"),
+            listOf("force-command" to "/usr/bin/true", "source-address" to "192.0.2.0/24"),
             parsed.criticalOptions
         )
     }
