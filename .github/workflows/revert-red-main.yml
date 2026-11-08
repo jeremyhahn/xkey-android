@@ -101,7 +101,6 @@ jobs:
           shopt -s inherit_errexit
           [ -n "${BOT:-}" ] || { echo "::error::AGENT_TOKEN is not set on this repository"; exit 1; }
           case "$REPOSITORY" in
-            */automatethethings) me=agent-company ;;
             *) me="agent-${REPOSITORY#*/}" ;;
           esac
           me_email="$me@$AGENT_DOMAIN"

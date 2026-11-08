@@ -52,3 +52,9 @@ DEPS_CHECK_PLUGIN_SHA256=1b02b5e7fab2dc052ae2f94753ee6db1ecda42813f7571b2729a944
 ACTIONLINT_VERSION=1.7.12
 ACTIONLINT_SHA256_X64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+
+# lz4-java, the fixed release of the copy lint's intellij-core 32.5.1 shades
+# (1.11.0, CVE-2026-106451); the Dockerfile's warm stage swaps its classes in.
+# https://repo1.maven.org/maven2/at/yawk/lz4/lz4-java/ (lz4-java-<v>.jar.sha256)
+LZ4_JAVA_VERSION=1.11.4
+LZ4_JAVA_SHA256=58c8e0b813960d2a248e050c353baea73139b48a2ffc55382d42c69707e17325

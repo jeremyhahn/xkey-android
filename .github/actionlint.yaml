@@ -1,10 +1,16 @@
 # Self-hosted runner labels for actionlint.
 #
 # Every job runs on GitHub-hosted ubuntu-latest, which actionlint knows,
-# except the code-review.yml review job, which runs on the self-hosted `codex`
-# runner. Without this file actionlint reports that label as an unknown
-# runner (runner-label); with it, a misspelled label is still caught. Adding
+# except the code-review.yml review jobs, which run on the self-hosted `codex`
+# and `qwen` runners. Without this file actionlint reports those labels as
+# unknown runners (runner-label); with it, a misspelled label is still caught. Adding
 # a self-hosted label to a workflow means adding it here in the same change.
 self-hosted-runner:
   labels:
     - codex
+    - qwen
+paths:
+  # code-review.yml is a template copied verbatim; SC2015 there is informational.
+  .github/workflows/code-review.yml:
+    ignore:
+      - 'SC2015:'

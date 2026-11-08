@@ -93,7 +93,7 @@ GET\ /commits/*/pull)
 	[ "$(cat "${FAKE}/fail-head" 2>/dev/null)" != "${head}" ] || reply 503
 	hsha=$(g rev-parse -q --verify "refs/heads/${head}") || reply 422
 	n=$(< "${FAKE}/next"); echo $((n + 1)) > "${FAKE}/next"
-	jq --argjson n "${n}" --arg s "${hsha}" '{number: $n, state: "open", merged: false, title, body, head: {ref: .head, sha: $s}, user: {login: "agent-xkey-android"}}' \
+	jq --argjson n "${n}" --arg s "${hsha}" '{number: $n, state: "open", merged: false, title, body, head: {ref: .head, sha: $s}, user: {login: "agent-example"}}' \
 		<<< "${data}" > "${FAKE}/pulls/${n}.json"
 	log "POST /pulls ${head} #${n}"
 	reply 201 "${FAKE}/pulls/${n}.json" ;;
@@ -170,8 +170,8 @@ setup() {
 # run -> the run script against the case; rc in RC, output in OUT.
 run() {
 	RC=0
-	OUT=$(cd "${T}" && PATH="${T}/bin:${PATH}" BOT=token REPO_API=https://forge.example.com/api/v1/repos/o/xkey-android \
-		GIT_URL="${BARE}" SERVER=https://forge.example.com REPOSITORY=o/xkey-android RED_RUN=1 \
+	OUT=$(cd "${T}" && PATH="${T}/bin:${PATH}" BOT=token REPO_API=https://forge.example.com/api/v1/repos/o/example \
+		GIT_URL="${BARE}" SERVER=https://forge.example.com REPOSITORY=o/example RED_RUN=1 \
 		AGENT_DOMAIN=example.com bash "${T}/run.sh" 2>&1) || RC=$?
 }
 
