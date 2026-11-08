@@ -100,6 +100,21 @@ class DaneVerifierTest {
         DaneVerifier.verifyPeerChain(listOf(cert), listOf(record), "kms.example.com")
     }
 
+    // The anchor is the leaf itself, so this takes the anchor == leaf fast path in
+    // verifyDaneTa; the hostname check must still reject a name the leaf does not carry.
+    @Test
+    fun daneTaSelfSignedAnchorWithWrongHostnameFails() {
+        val record = TlsaRecord(
+            usage = TlsaRecord.USAGE_DANE_TA,
+            selector = TlsaRecord.SELECTOR_FULL_CERT,
+            matchingType = TlsaRecord.MATCHING_SHA256,
+            certData = sha256(cert.encoded)
+        )
+        assertThrows(DaneTlsaException::class.java) {
+            DaneVerifier.verifyPeerChain(listOf(cert), listOf(record), "other.example.com")
+        }
+    }
+
     @Test
     fun pkixOnlyRecordsAreUnusable() {
         val record = TlsaRecord(

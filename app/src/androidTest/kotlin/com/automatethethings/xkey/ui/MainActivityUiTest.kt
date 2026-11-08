@@ -408,6 +408,7 @@ class MainActivityUiTest {
         // No BLE permissions are granted in the test, so the service is never
         // bound and the tap takes the "not connected" branch.
         onView(withId(R.id.nav_management)).perform(click())
+        onView(withText(R.string.sync_now_title)).check(matches(isDisplayed()))
         onView(withId(R.id.cardSyncNow)).perform(click())
 
         onView(withText(R.string.sync_not_connected))

@@ -576,7 +576,7 @@ class CertificateIssuanceFlowTest {
 
         private const val ORGANISATION = "Automate The Things"
         private const val DNS_SAN = "flow.example.test"
-        private const val IP_SAN = "10.11.12.13"
+        private const val IP_SAN = "198.51.100.13"
         private const val EMAIL_SAN = "flow@example.test"
 
         private const val EXPORT_CN = "UI Flow Export Cert"
