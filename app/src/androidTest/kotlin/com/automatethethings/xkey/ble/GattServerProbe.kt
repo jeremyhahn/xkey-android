@@ -16,10 +16,13 @@
 package com.automatethethings.xkey.ble
 
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.SystemClock
 import com.automatethethings.xkey.auth.SessionAuthManager
@@ -36,6 +39,7 @@ import java.security.SecureRandom
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Assume.assumeTrue
 
 /**
  * Reflective access to the half of [GattServer] that only the Bluetooth stack
@@ -124,6 +128,16 @@ class GattServerProbe(
             write("authenticatedPeerKeyHex", value)
         }
 
+    /**
+     * The open server handle every notification goes out on. Replacing it lets
+     * a test stand in for a stack that accepts notifications without a peer.
+     */
+    var gattServerHandle: BluetoothGattServer?
+        get() = read("gattServer") as BluetoothGattServer?
+        set(value) {
+            write("gattServer", value)
+        }
+
     @Suppress("UNCHECKED_CAST")
     val deviceMtu: Map<String, Int>
         get() = read("deviceMtu") as Map<String, Int>
@@ -181,9 +195,10 @@ class GattServerProbe(
 
     /**
      * Adopts [device] directly, on a fresh link with no CCCD write, outside
-     * any event queue. The callbacks still find no open queue for it and drop
-     * what it sends; a test that drives them connects through
-     * `onConnectionStateChange` on a started server instead.
+     * any event queue. Only for a test that then calls the server's methods
+     * directly: the callbacks find no open queue for the device and drop or
+     * refuse what it sends, so a test that drives [gattCallback] connects
+     * with [connectThroughTheCallback] instead.
      */
     suspend fun handleDeviceConnected(device: BluetoothDevice) {
         callSuspend(handleConnectedMethod, device, linkConstructor.newInstance())
@@ -191,6 +206,47 @@ class GattServerProbe(
 
     suspend fun handleDeviceDisconnected(device: BluetoothDevice) {
         callSuspend(handleDisconnectedMethod, device)
+    }
+
+    /**
+     * Whether the server holds an event queue for [device]: one a connect
+     * callback began and whose consumer has not yet finished.
+     */
+    fun hasEventQueue(device: BluetoothDevice): Boolean =
+        synchronized(read("eventQueuesLock")!!) {
+            (read("eventQueues") as Map<*, *>).containsKey(device.address)
+        }
+
+    /**
+     * Connects [device] the way the stack does, on a started server: the
+     * connect callback begins the device's event queue with the connect at its
+     * head, and every later callback is queued behind it or recorded on its
+     * link. A callback from a device without an open queue is dropped.
+     *
+     * Returns once the queue has handled the connect, so the device is adopted
+     * and its link published: from then on a CCCD write shows in
+     * [notificationEnabled] as it is made, and a queued MTU change is awaited
+     * with [awaitMtu]. Skips the test where the local stack will not open a
+     * GATT server.
+     */
+    fun connectThroughTheCallback(device: BluetoothDevice) {
+        assumeTrue("the local stack would not open a GATT server", server.start())
+        gattCallback.onConnectionStateChange(
+            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
+        )
+        awaitUntil("the device to be adopted") {
+            connectedDevice?.address == device.address &&
+                server.connectionState.value == ConnectionState.Connecting
+        }
+    }
+
+    /**
+     * Returns once [device]'s event queue has applied an MTU change to
+     * [expected]. The connect records the default MTU, so a test that awaits
+     * the default after a connect awaits it after another value.
+     */
+    fun awaitMtu(device: BluetoothDevice, expected: Int, why: String = "the negotiated MTU") {
+        awaitUntil("the MTU to become $expected: $why") { deviceMtu[device.address] == expected }
     }
 
     suspend fun processIncomingData(device: BluetoothDevice, data: ByteArray) {
@@ -237,6 +293,9 @@ class GattServerProbe(
         write("noiseSession", responder)
         write("identityExchangeComplete", true)
         authenticatedPeerKeyHex = responder.getRemoteStaticKey()?.toHex()
+        // Published last, as `handleHandshakeMessage` does once the handshake
+        // completes, so isSessionEstablished() reports this session.
+        write("establishedSession", responder)
         return initiator
     }
 
