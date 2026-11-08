@@ -1768,8 +1768,8 @@ data class LocalAttestDeviceResult(
 }
 
 /**
- * Parameters for `local.verifyUser` — on-demand user verification (owner ruling
- * 167, go-xkms `pkg/pairingproto/verify_user.go`).
+ * Parameters for `local.verifyUser` — on-demand user verification
+ * (go-xkms `pkg/pairingproto/verify_user.go`).
  *
  * The desktop asks for proof that this phone's user was verified **now**, before
  * it mints a CTAP 2.1 `pinUvAuthToken` "via UV". Like `local.attestDevice` the
@@ -1834,7 +1834,7 @@ data class LocalVerifyUserParams(
 }
 
 /**
- * Result of `local.verifyUser` — on-demand user verification (owner ruling 167).
+ * Result of `local.verifyUser` — on-demand user verification.
  *
  * @property protocolVersion Always [AttestTranscript.PROTOCOL_VERSION].
  * @property certificateChain Base64-encoded X.509 chain of the User Verification

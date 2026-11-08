@@ -178,7 +178,7 @@ class CertificateDaoTest {
     fun subjectsAreSearchedBySubstring() {
         runBlocking {
             dao.insert(certificate("0a", subject = "CN=api.example.com"))
-            dao.insert(certificate("0b", subject = "CN=db.internal"))
+            dao.insert(certificate("0b", subject = "CN=db.test"))
 
             assertEquals(listOf("0a"), dao.searchBySubject("example").map { it.serialNumber })
             assertEquals(2, dao.searchBySubject("CN=").size)

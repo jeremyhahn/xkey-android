@@ -24,14 +24,10 @@ RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";"
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy
 COPY scripts/tool-pins.sh /tmp/tool-pins.sh
-# fetch <url> <file> <sha256>: download over https and refuse a mismatch.
-RUN cat > /usr/local/bin/fetch <<'EOF'
-#!/bin/sh
-set -eu
-curl -fsSL --proto '=https' --tlsv1.2 -o "$2" "$1"
-echo "$3  $2" | sha256sum -c -
-EOF
-RUN chmod 0755 /usr/local/bin/fetch
+# fetch <url> <file> <sha256>: download over https with retries and refuse a
+# SHA-256 mismatch; a failed GitHub release download falls back to the API
+# asset endpoint (fetch.sh). The checksum is the only trust anchor.
+COPY --chmod=0755 build/docker/devcontainer/fetch.sh /usr/local/bin/fetch
 RUN . /tmp/tool-pins.sh; \
     case "${TARGETARCH}" in \
       amd64) jarch=x64 jsum=${JBR_SHA256_X64} tsum=${TRIVY_SHA256_X64} tarch=64bit asum=${ACTIONLINT_SHA256_X64} ;; \

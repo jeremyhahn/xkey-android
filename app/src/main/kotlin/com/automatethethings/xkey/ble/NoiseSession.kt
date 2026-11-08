@@ -29,7 +29,8 @@ import javax.crypto.spec.SecretKeySpec
  *
  * ## Key material on the heap (#6)
  *
- * Per the handbook's "Protected memory on Android/JVM" rule, the secret arrays
+ * So that key material does not outlive its use in process memory (a heap dump
+ * or a later allocation can otherwise expose it), the secret arrays
  * this class owns are overwritten with zeros (`fill(0)`) before their reference
  * is dropped or replaced:
  *
