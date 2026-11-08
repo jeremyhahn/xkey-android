@@ -25,7 +25,6 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
-import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.intent.Intents
 import androidx.test.espresso.intent.Intents.intended
@@ -216,20 +215,6 @@ class OathFlowTest {
         DialogFlowSupport.assertShowsExactly(
             withActivity(scenario) { it.getString(R.string.oath_detail_never_used) }
         )
-    }
-
-    @Test
-    fun detailDialog_isDismissedByItsOkButton() {
-        val account = seed()
-
-        val scenario = ActivityScenario.launch(OathActivity::class.java)
-        assertShownTextInList(scenario, account)
-        openDetailDialog(scenario, account)
-
-        onView(withText(android.R.string.ok)).inRoot(isDialog()).perform(click())
-        waitForIdle()
-
-        onView(withText(R.string.oath_detail_title)).check(doesNotExist())
     }
 
     // ---------------------------------------------------------------

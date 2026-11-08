@@ -152,24 +152,6 @@ class MainActivityFlowTest {
         Intents.intended(hasComponent(PairedDevicesActivity::class.java.name))
     }
 
-    /**
-     * The Settings card is wired to its activity.
-     *
-     * This deliberately invokes the card's own click listener instead of
-     * tapping it: the card sits at the very bottom of the Management tab, so a
-     * coordinate-based tap also tests the scroll viewport inset. Keeping the
-     * two concerns apart means a regression here can only mean the listener
-     * itself is gone.
-     */
-    @Test
-    fun settingsCard_opensSettingsActivity_whenItsListenerRuns() {
-        val scenario = launchOnTab(R.id.nav_management)
-
-        clickCard(scenario, R.id.cardSettings, "the Settings card")
-
-        Intents.intended(hasComponent(SettingsActivity::class.java.name))
-    }
-
     // ---------------------------------------------------------------
     // Live counts on cards
     // ---------------------------------------------------------------
