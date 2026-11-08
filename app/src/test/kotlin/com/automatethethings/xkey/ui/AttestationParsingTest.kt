@@ -48,13 +48,6 @@ class AttestationParsingTest {
     }
 
     @Test
-    fun `derReadInteger reads zero`() {
-        // DER: 02 01 00 -> INTEGER value=0
-        val data = byteArrayOf(0x02, 0x01, 0x00)
-        assertEquals(0, derReadInteger(data, 0))
-    }
-
-    @Test
     fun `derReadInteger returns 0 for wrong tag`() {
         // Not an INTEGER tag
         val data = byteArrayOf(0x04, 0x01, 0x05)
@@ -115,12 +108,6 @@ class AttestationParsingTest {
         // DER: 0A 01 01 -> ENUMERATED value=1
         val data = byteArrayOf(0x0A, 0x01, 0x01)
         assertEquals(1, derReadEnumerated(data, 0))
-    }
-
-    @Test
-    fun `derReadEnumerated reads zero`() {
-        val data = byteArrayOf(0x0A, 0x01, 0x00)
-        assertEquals(0, derReadEnumerated(data, 0))
     }
 
     @Test

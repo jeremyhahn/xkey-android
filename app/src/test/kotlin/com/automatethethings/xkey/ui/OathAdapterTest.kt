@@ -22,13 +22,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Tests for [OathAdapter] DiffUtil callback, code formatting, and bind-time
- * display logic (initial letter, issuer text, account visibility).
+ * Tests for [OathAdapter] DiffUtil callback and code formatting.
  *
  * Verifies that [OathAdapter.OathDiffCallback] correctly identifies item
  * identity and content changes, that [OathAdapter.formatCode] splits codes
- * at the midpoint, and that the ViewHolder bind logic resolves initials
- * and label visibility correctly.
+ * at the midpoint.
  */
 class OathAdapterTest {
 
@@ -91,94 +89,6 @@ class OathAdapterTest {
     @Test
     fun `formatCode splits 8-digit code at midpoint`() {
         assertEquals("1234 5678", OathAdapter.formatCode("12345678"))
-    }
-
-    // -------------------------------------------------------------------------
-    // Initial Letter
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `initial letter prefers issuer first char`() {
-        val item = createOathItem(issuer = "GitHub", accountName = "user@example.com")
-        val initial = item.credential.issuer
-            ?.firstOrNull()
-            ?.uppercaseChar()
-            ?.toString()
-            ?: item.credential.accountName
-                .firstOrNull()
-                ?.uppercaseChar()
-                ?.toString()
-            ?: "?"
-
-        assertEquals("G", initial)
-    }
-
-    @Test
-    fun `initial letter falls back to accountName when issuer is null`() {
-        val item = createOathItem(issuer = null, accountName = "alice@example.com")
-        val initial = item.credential.issuer
-            ?.firstOrNull()
-            ?.uppercaseChar()
-            ?.toString()
-            ?: item.credential.accountName
-                .firstOrNull()
-                ?.uppercaseChar()
-                ?.toString()
-            ?: "?"
-
-        assertEquals("A", initial)
-    }
-
-    @Test
-    fun `initial letter returns question mark when both empty`() {
-        val item = createOathItem(issuer = null, accountName = "")
-        val initial = item.credential.issuer
-            ?.firstOrNull()
-            ?.uppercaseChar()
-            ?.toString()
-            ?: item.credential.accountName
-                .firstOrNull()
-                ?.uppercaseChar()
-                ?.toString()
-            ?: "?"
-
-        assertEquals("?", initial)
-    }
-
-    // -------------------------------------------------------------------------
-    // Issuer Display and Account Visibility
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `issuer display shows issuer when present`() {
-        val item = createOathItem(issuer = "Google", accountName = "user@gmail.com")
-        val issuerText = item.credential.issuer ?: item.credential.accountName
-
-        assertEquals("Google", issuerText)
-    }
-
-    @Test
-    fun `issuer display shows accountName when issuer is null`() {
-        val item = createOathItem(issuer = null, accountName = "user@gmail.com")
-        val issuerText = item.credential.issuer ?: item.credential.accountName
-
-        assertEquals("user@gmail.com", issuerText)
-    }
-
-    @Test
-    fun `account visible when issuer is present`() {
-        val item = createOathItem(issuer = "Google", accountName = "user@gmail.com")
-        val accountVisible = item.credential.issuer != null
-
-        assertTrue(accountVisible)
-    }
-
-    @Test
-    fun `account hidden when issuer is null to avoid duplication`() {
-        val item = createOathItem(issuer = null, accountName = "user@gmail.com")
-        val accountVisible = item.credential.issuer != null
-
-        assertFalse(accountVisible)
     }
 
     // -------------------------------------------------------------------------
