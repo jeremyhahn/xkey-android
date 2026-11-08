@@ -14,7 +14,7 @@ x-limits: &limits
 
 services:
   # `make docker-run CMD=...`: the source bind-mounted, Gradle's writable
-  # user home on a named volume, HOME=/tmp as in lane-verify.
+  # user home on a named volume, HOME=/tmp.
   toolchain:
     image: ${TOOLCHAIN_IMAGE:-xkey-android-toolchain:set-by-make-docker-run}
     user: ${DOCKER_UID:-1000}:${DOCKER_GID:-1000}

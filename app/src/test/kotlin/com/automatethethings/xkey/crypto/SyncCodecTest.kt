@@ -11,6 +11,8 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.security.KeyPairGenerator
+import java.security.spec.ECGenParameterSpec
 
 /**
  * Unit tests for [SyncCodec], the stateless codec shared by the sync engine,
@@ -140,10 +142,13 @@ class SyncCodecTest {
     @Test
     fun `pemToDer tolerates a key-labelled block`() {
         // The header line is dropped by prefix, not by label, so any PEM type works.
-        val der = byteArrayOf(0x02, 0x01, 0x00)
-        val pem = "-----BEGIN PRIVATE KEY-----\n" +
+        // The key is generated here so no key material is checked in.
+        val der = KeyPairGenerator.getInstance("EC").apply {
+            initialize(ECGenParameterSpec("secp256r1"))
+        }.generateKeyPair().public.encoded
+        val pem = "-----BEGIN PUBLIC KEY-----\n" +
             java.util.Base64.getEncoder().encodeToString(der) + "\n" +
-            "-----END PRIVATE KEY-----\n"
+            "-----END PUBLIC KEY-----\n"
         assertArrayEquals(der, SyncCodec.pemToDer(pem))
     }
 

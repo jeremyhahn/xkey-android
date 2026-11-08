@@ -6,6 +6,9 @@
 .idea
 .serena
 .claude
+lane-records
+scheduled_tasks.lock
+**/*.log
 build
 !build/docker/devcontainer/fetch.sh
 app/build

@@ -29,6 +29,12 @@ keystore.properties
 # Logs
 *.log
 
+# Editor and tool state
+.serena/
+.claude/
+lane-records/
+scheduled_tasks.lock
+
 # Generated
 *.apk
 *.ap_
