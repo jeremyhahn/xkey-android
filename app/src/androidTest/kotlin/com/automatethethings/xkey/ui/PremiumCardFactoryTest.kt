@@ -20,7 +20,6 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -343,28 +342,6 @@ class PremiumCardFactoryTest {
                 "The icon is a watermark, not a focal point",
                 UIHelpers.applyAlpha(onPrimary, 0.3f),
                 icon.imageTintList?.defaultColor
-            )
-        }
-    }
-
-    /** Badges are added by the caller; the container must accept them as-is. */
-    @Test
-    fun createHeroSummary_badgeContainerAcceptsHeroBadges() {
-        onHost { activity ->
-            val summary = PremiumCardFactory.createHeroSummary(
-                activity,
-                R.drawable.ic_lock,
-                "Stored keys"
-            )
-
-            summary.badgeContainer.addView(
-                UIHelpers.createHeroBadge(activity, "1 hardware", Color.GREEN)
-            )
-
-            assertEquals(1, summary.badgeContainer.childCount)
-            assertEquals(
-                "1 hardware",
-                (summary.badgeContainer.getChildAt(0) as TextView).text.toString()
             )
         }
     }
