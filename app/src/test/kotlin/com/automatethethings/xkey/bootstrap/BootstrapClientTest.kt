@@ -14,24 +14,26 @@
  */
 package com.automatethethings.xkey.bootstrap
 
-import androidx.test.ext.junit.runners.AndroidJUnit4
+import android.util.Log
 import com.automatethethings.xkey.settings.BootstrapMethod
 import com.automatethethings.xkey.settings.BootstrapSettingsData
+import io.mockk.every
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
-import org.junit.runner.RunWith
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 
 /**
- * Instrumented tests for [BootstrapClient].
+ * Tests for [BootstrapClient] on the JVM.
  *
- * The certificate work needs a real `CertificateFactory` and the settings types
- * come from the Android side of the app, so this runs on a device.
  * `DaneVerifierTest` already covers TLSA matching in the JVM; nothing here
  * repeats it.
  *
@@ -41,8 +43,21 @@ import java.security.cert.X509Certificate
  * resolves TLSA records before it ever builds a request -- so only its
  * configuration guard is asserted here.
  */
-@RunWith(AndroidJUnit4::class)
 class BootstrapClientTest {
+
+    @Before
+    fun setUp() {
+        mockkStatic(Log::class)
+        every { Log.i(any(), any()) } returns 0
+        every { Log.d(any(), any()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.e(any(), any<String>()) } returns 0
+    }
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
 
     private val serverUrl = "https://bootstrap.example.test:8443"
     private val bootstrapPath = "/v1/ca/bootstrap"

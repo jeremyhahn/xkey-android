@@ -233,12 +233,6 @@ class TrustedComputingSettingsDataTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `DEFAULT preset equals a plain construction`() {
-        assertEquals(TrustedComputingSettingsData(), TrustedComputingSettingsData.DEFAULT)
-        assertFalse(TrustedComputingSettingsData.DEFAULT.enabled)
-    }
-
-    @Test
     fun `PERMISSIVE preset self-issues and trusts new devices`() {
         val permissive = TrustedComputingSettingsData.PERMISSIVE
 

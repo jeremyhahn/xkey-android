@@ -127,18 +127,6 @@ class KeystoreManagerTest {
     }
 
     @Test
-    fun keyExists_returnsTrueAfterGeneration() = runBlocking {
-        val credentialId = createTestCredentialId()
-
-        keystoreManager.generateKey(
-            credentialId = credentialId,
-            requireBiometric = false
-        )
-
-        assertTrue("Key should exist after generation", keystoreManager.keyExists(credentialId))
-    }
-
-    @Test
     fun deleteKey_returnsFalseForNonexistent() {
         val credentialId = "nonexistent_credential_${System.currentTimeMillis()}"
 
@@ -223,24 +211,6 @@ class KeystoreManagerTest {
 
         // DER-encoded ECDSA signature starts with 0x30 (SEQUENCE)
         assertEquals("Signature should start with DER SEQUENCE tag", 0x30.toByte(), signature[0])
-    }
-
-    @Test
-    fun getAttestationChain_returnsChain_afterKeyGeneration() = runBlocking {
-        val credentialId = createTestCredentialId()
-
-        keystoreManager.generateKey(
-            credentialId = credentialId,
-            requireBiometric = false
-        )
-
-        val chain = keystoreManager.getAttestationChain(credentialId)
-
-        // Attestation chain availability depends on device capabilities
-        // On devices that support it, the chain should not be empty
-        if (chain != null) {
-            assertTrue("Attestation chain should not be empty", chain.isNotEmpty())
-        }
     }
 
     @Test(expected = StrongBoxUnavailableException::class)

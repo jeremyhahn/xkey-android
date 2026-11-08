@@ -21,7 +21,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.SdkSuppress
 import com.automatethethings.xkey.audit.AuditLogger
-import com.automatethethings.xkey.credential.handler.CreateCredentialHandler
 import com.automatethethings.xkey.credential.handler.GetCredentialHandler
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -44,15 +43,10 @@ import java.security.SecureRandom
 /**
  * The corners of the credential provider that
  * [CreateCredentialHandlerTest] and [GetCredentialHandlerTest] leave alone:
- * a credential with no user name, a request missing its relying-party id, a
- * signing failure part-way through a ceremony, and the CBOR length prefix of
- * the attestation object.
- *
- * The CBOR check matters out of proportion to its size: the attestation object
- * is parsed by the relying party, not by this app, so a wrong byte-string
- * header is invisible here and fatal there. A registration's authenticator
- * data always lands in the 24..255 range, which is the only branch a ceremony
- * can reach — the other two are covered directly.
+ * a credential with no user name, a request missing its relying-party id and a
+ * signing failure part-way through a ceremony. The CBOR length prefix of the
+ * attestation object is checked in the unit test
+ * `AttestationObjectCborLengthTest`.
  *
  * Everything seeded here is removed in [tearDown].
  */
@@ -187,62 +181,6 @@ class CredentialHandlerResidueTest {
                 e.message!!.contains("sign", ignoreCase = true)
             )
         }
-    }
-
-    // ---------------------------------------------------------------------
-    // Attestation object encoding
-    // ---------------------------------------------------------------------
-
-    /**
-     * CBOR encodes a byte string's length in one of three ways depending on
-     * size, and the relying party's parser follows the header it is given. A
-     * registration only ever produces authenticator data in the middle range,
-     * so the short and long forms are checked directly.
-     *
-     * The encoder is private and has no other caller a test can steer; it is
-     * pure byte assembly, so it is reached reflectively rather than left
-     * unverified.
-     */
-    @Test
-    fun theAttestationObjectUsesTheRightCborLengthPrefixForEverySize() {
-        val encode = CreateCredentialHandler::class.java.getDeclaredMethod(
-            "buildAttestationObject", ByteArray::class.java
-        )
-        encode.isAccessible = true
-        val handler = CreateCredentialHandler(context)
-
-        // Every attestation object starts with the same 3-entry map header,
-        // "fmt": "none", "attStmt": {} and the "authData" key.
-        val prefixLength = 1 + 1 + 3 + 1 + 4 + 1 + 7 + 1 + 1 + 8
-
-        // <= 23 bytes: the length rides in the major-type byte.
-        val tiny = ByteArray(20) { 1 }
-        val tinyEncoded = encode.invoke(handler, tiny) as ByteArray
-        assertEquals(0x54.toByte(), tinyEncoded[prefixLength])
-        assertEquals(prefixLength + 1 + tiny.size, tinyEncoded.size)
-
-        // 24..255 bytes: one length byte after 0x58. This is what a real
-        // registration produces.
-        val medium = ByteArray(164) { 2 }
-        val mediumEncoded = encode.invoke(handler, medium) as ByteArray
-        assertEquals(0x58.toByte(), mediumEncoded[prefixLength])
-        assertEquals(164.toByte(), mediumEncoded[prefixLength + 1])
-        assertEquals(prefixLength + 2 + medium.size, mediumEncoded.size)
-
-        // > 255 bytes: two big-endian length bytes after 0x59.
-        val large = ByteArray(300) { 3 }
-        val largeEncoded = encode.invoke(handler, large) as ByteArray
-        assertEquals(0x59.toByte(), largeEncoded[prefixLength])
-        assertEquals(0x01.toByte(), largeEncoded[prefixLength + 1])
-        assertEquals(0x2C.toByte(), largeEncoded[prefixLength + 2])
-        assertEquals(prefixLength + 3 + large.size, largeEncoded.size)
-
-        // The fixed header really is the "none" attestation shape.
-        assertEquals(0xA3.toByte(), mediumEncoded[0])
-        assertEquals(
-            "fmt",
-            String(mediumEncoded.copyOfRange(2, 5))
-        )
     }
 
     // ---------------------------------------------------------------------

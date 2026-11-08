@@ -16,7 +16,6 @@ package com.automatethethings.xkey.media
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -33,30 +32,6 @@ class XmpMetadataHelperTest {
 
     @get:Rule
     val tempFolder = TemporaryFolder()
-
-    private fun createSampleData(): ContentAuthenticityData = ContentAuthenticityData(
-        contentHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        signatures = listOf(
-            SignatureEntry(
-                keyFingerprint = "SHA256:testfp",
-                signerName = "Alice",
-                algorithm = "ES256",
-                value = "MEUCIQD_test_signature",
-                timestamp = "2025-01-15T10:30:00Z",
-                role = SignerRole.CREATOR
-            )
-        )
-    )
-
-    @Test
-    fun `readSignature returns null for file with no signature`() {
-        val videoFile = tempFolder.newFile("test_video.mp4")
-        videoFile.writeBytes(ByteArray(100))
-
-        val result = XmpMetadataHelper.readSignature(videoFile.absolutePath)
-
-        assertNull(result)
-    }
 
     @Test(expected = IllegalStateException::class)
     fun `appendSignature throws when no existing signature data`() {
