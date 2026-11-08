@@ -33,7 +33,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 /**
  * Unit tests for the DANE branch of [BootstrapClient].
  *
- * The instrumented suite can only assert the configuration guard, because DANE
+ * `BootstrapClientTest` can only assert the configuration guard, because DANE
  * resolves TLSA records before it builds a request and there is no resolver to
  * answer it. Here a loopback DNS server supplies the records, and the HTTPS leg
  * is short-circuited by an interceptor -- which works precisely because

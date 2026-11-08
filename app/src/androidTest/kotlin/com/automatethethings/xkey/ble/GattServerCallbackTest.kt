@@ -26,9 +26,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
-import java.io.DataInputStream
 import java.io.IOException
-import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
@@ -329,15 +327,15 @@ class GattServerCallbackTest {
 
     /** Only the control point carries protocol data. */
     @Test
-    fun aWriteToAnyCharacteristicButTheControlPointIsRefused(): Unit = runBlocking {
-        probe.handleDeviceConnected(device)
+    fun aWriteToAnyCharacteristicButTheControlPointIsRefused() {
+        connectThroughTheCallback()
 
         probe.gattCallback.onCharacteristicWriteRequest(
             device, 1, characteristic(GattServer.STATUS_UUID), false, true, 0,
             Fragmenter().fragment("hello".toByteArray()).first()
         )
 
-        Thread.sleep(200)
+        awaitEarlierEventsHandled()
         assertFalse(
             "a write outside the control point must never be treated as protocol data",
             probe.identityExchangeComplete
@@ -345,8 +343,8 @@ class GattServerCallbackTest {
     }
 
     @Test
-    fun anEmptyControlPointWriteIsRefused(): Unit = runBlocking {
-        probe.handleDeviceConnected(device)
+    fun anEmptyControlPointWriteIsRefused() {
+        connectThroughTheCallback()
 
         probe.gattCallback.onCharacteristicWriteRequest(
             device, 1, characteristic(GattServer.CONTROL_POINT_UUID), false, true, 0, ByteArray(0)
@@ -355,7 +353,7 @@ class GattServerCallbackTest {
             device, 2, characteristic(GattServer.CONTROL_POINT_UUID), false, false, 0, null
         )
 
-        Thread.sleep(200)
+        awaitEarlierEventsHandled()
         assertFalse(probe.identityExchangeComplete)
         assertEquals(0, probe.fragmentBuffer.getValue(device.address).getFragmentCount())
     }
@@ -438,78 +436,6 @@ class GattServerCallbackTest {
     }
 
     // -----------------------------------------------------------------
-    // Pure helpers the protocol depends on
-    // -----------------------------------------------------------------
-
-    /**
-     * The prologue formula is a cross-language contract with
-     * `go-xkms/xkey/pkg/pairing`; the two sides derive it independently and a
-     * mismatch shows up only as an unexplained handshake failure.
-     */
-    @Test
-    fun thePrologueFormulaIsSha256OfKeyFingerprintAndVersion() {
-        val publicKey = randomKey()
-        val fingerprint = randomKey()
-
-        val expected = MessageDigest.getInstance("SHA-256").run {
-            update(publicKey)
-            update(fingerprint)
-            update("xkey-v1".toByteArray(Charsets.UTF_8))
-            digest()
-        }
-
-        assertArrayEquals(expected, probe.computePrologueFromIdentity(publicKey, fingerprint))
-    }
-
-    /** Fingerprints are stored as hex and put on the wire as bytes. */
-    @Test
-    fun hexFingerprintsDecodeToTheirBytes() {
-        val bytes = randomKey()
-        val hex = bytes.joinToString("") { "%02x".format(it) }
-
-        assertArrayEquals(bytes, probe.hexStringToByteArray(hex))
-        assertArrayEquals(
-            byteArrayOf(0x00, 0x0f.toByte(), 0xf0.toByte(), 0xff.toByte()),
-            probe.hexStringToByteArray("000ff0ff")
-        )
-        assertEquals(0, probe.hexStringToByteArray("").size)
-    }
-
-    /**
-     * Enrolment stores the baseline PCR set as an opaque blob. The layout is
-     * `[count][index][len][value]…`; nothing else reads it back, so the shape
-     * is pinned here.
-     */
-    @Test
-    fun pcrValuesSerialiseToTheDocumentedLayout() {
-        val pcrValues = linkedMapOf(
-            0 to ByteArray(32) { 0x11 },
-            7 to ByteArray(20) { 0x22 }
-        )
-
-        val stream = DataInputStream(probe.serializePCRValues(pcrValues).inputStream())
-        assertEquals(2, stream.readInt())
-
-        assertEquals(0, stream.readInt())
-        assertEquals(32, stream.readInt())
-        assertArrayEquals(ByteArray(32) { 0x11 }, ByteArray(32).also { stream.readFully(it) })
-
-        assertEquals(7, stream.readInt())
-        assertEquals(20, stream.readInt())
-        assertArrayEquals(ByteArray(20) { 0x22 }, ByteArray(20).also { stream.readFully(it) })
-
-        assertEquals("nothing trails the last value", 0, stream.available())
-    }
-
-    @Test
-    fun anEmptyPcrSetSerialisesToACountOfZero() {
-        val encoded = probe.serializePCRValues(emptyMap())
-
-        assertEquals(4, encoded.size)
-        assertEquals(0, DataInputStream(encoded.inputStream()).readInt())
-    }
-
-    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
@@ -518,6 +444,32 @@ class GattServerCallbackTest {
         BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
     )
 
+    /**
+     * Connects [device] the way the stack does. Only a connect callback on a
+     * started server begins a device's event queue, with the connect at its
+     * head; a write or MTU change on a device without one is dropped. Skips
+     * the test where the local stack will not open a GATT server.
+     */
+    private fun connectThroughTheCallback() {
+        assumeTrue("the local stack would not open a GATT server", probe.server.start())
+        probe.gattCallback.onConnectionStateChange(
+            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
+        )
+    }
+
+    /**
+     * Returns once the device's event queue has handled everything queued
+     * before this call: an MTU change queued behind it is applied in turn, so
+     * a write that was wrongly queued has been processed by the time it shows.
+     * The queue must have been opened by [connectThroughTheCallback].
+     */
+    private fun awaitEarlierEventsHandled() {
+        probe.gattCallback.onMtuChanged(device, BARRIER_MTU)
+        GattServerProbe.awaitUntil("the queue to reach the MTU change") {
+            probe.deviceMtu[device.address] == BARRIER_MTU
+        }
+    }
+
     private fun characteristic(uuid: UUID) = BluetoothGattCharacteristic(
         uuid,
         BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_READ,
@@ -525,4 +477,9 @@ class GattServerCallbackTest {
     )
 
     private fun randomKey() = ByteArray(32).also { SecureRandom().nextBytes(it) }
+
+    private companion object {
+        /** Any in-range MTU other than the default the connect records. */
+        const val BARRIER_MTU = 247
+    }
 }

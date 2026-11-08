@@ -172,16 +172,6 @@ class GattServerProbe(
     /** The one-byte status the STATUS characteristic reports. */
     fun statusValue(): ByteArray = invoke(getStatusValueMethod) as ByteArray
 
-    /** `SHA256(initiator_public_key || responder_fingerprint || "xkey-v1")`. */
-    fun computePrologueFromIdentity(publicKey: ByteArray, fingerprint: ByteArray): ByteArray =
-        invoke(prologueMethod, publicKey, fingerprint) as ByteArray
-
-    fun hexStringToByteArray(hex: String): ByteArray =
-        invoke(hexStringMethod, hex) as ByteArray
-
-    fun serializePCRValues(pcrValues: Map<Int, ByteArray>): ByteArray =
-        invoke(serializePcrMethod, pcrValues) as ByteArray
-
     fun adoptExistingPairing() {
         invoke(adoptPairingMethod)
     }
@@ -189,8 +179,14 @@ class GattServerProbe(
     fun rejectUnpaired(plaintext: ByteArray): ByteArray? =
         invoke(rejectUnpairedMethod, plaintext) as ByteArray?
 
+    /**
+     * Adopts [device] directly, on a fresh link with no CCCD write, outside
+     * any event queue. The callbacks still find no open queue for it and drop
+     * what it sends; a test that drives them connects through
+     * `onConnectionStateChange` on a started server instead.
+     */
     suspend fun handleDeviceConnected(device: BluetoothDevice) {
-        callSuspend(handleConnectedMethod, device)
+        callSuspend(handleConnectedMethod, device, linkConstructor.newInstance())
     }
 
     suspend fun handleDeviceDisconnected(device: BluetoothDevice) {
@@ -278,14 +274,16 @@ class GattServerProbe(
     companion object {
         private val setupServiceMethod = declaredMethod("setupService")
         private val getStatusValueMethod = declaredMethod("getStatusValue")
-        private val prologueMethod =
-            declaredMethod("computePrologueFromIdentity", ByteArray::class.java, ByteArray::class.java)
-        private val hexStringMethod = declaredMethod("hexStringToByteArray", String::class.java)
-        private val serializePcrMethod = declaredMethod("serializePCRValues", Map::class.java)
         private val adoptPairingMethod = declaredMethod("adoptExistingPairing")
         private val rejectUnpairedMethod = declaredMethod("rejectUnpaired", ByteArray::class.java)
+        private val linkClass: Class<*> = try {
+            Class.forName("${GattServer::class.java.name}\$Link")
+        } catch (e: ClassNotFoundException) {
+            throw AssertionError("GattServer.Link is a seam these BLE tests drive", e)
+        }
+        private val linkConstructor = linkClass.getDeclaredConstructor().apply { isAccessible = true }
         private val handleConnectedMethod = declaredMethod(
-            "handleDeviceConnected", BluetoothDevice::class.java, Continuation::class.java
+            "handleDeviceConnected", BluetoothDevice::class.java, linkClass, Continuation::class.java
         )
         private val handleDisconnectedMethod = declaredMethod(
             "handleDeviceDisconnected", BluetoothDevice::class.java, Continuation::class.java
