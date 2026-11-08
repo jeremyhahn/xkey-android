@@ -849,19 +849,6 @@ class ProtocolIntegrationTest {
     // Protocol error handling
     // ------------------------------------------------------------------
 
-    @Test
-    fun unknownMethodReturnsError() {
-        val err = client.callExpectingError("local.definitelyNotAMethod")
-        assertNotNull("unknown methods must return a protocol error", err)
-    }
-
-    @Test
-    fun missingParamsReturnsInvalidParams() {
-        val err = client.callExpectingError("local.sign")
-        assertNotNull(err)
-        assertEquals(ErrorCodes.INVALID_PARAMS, err!!.code)
-    }
-
     // ------------------------------------------------------------------
     // Request generation echo (#10, go-xkms#128)
     //

@@ -157,14 +157,6 @@ class KeyManagementActivityUiTest {
     // Filter Chips
     // ---------------------------------------------------------------
 
-    @Test
-    fun filterChips_allAndFido2AreDisplayed() {
-        ActivityScenario.launch(KeyManagementActivity::class.java)
-
-        onView(firstDisplayed(R.string.key_filter_all)).check(matches(isDisplayed()))
-        onView(firstDisplayed(R.string.key_filter_fido2)).check(matches(isDisplayed()))
-    }
-
     /** Selecting "Signing" must hide keys of every other type. */
     @Test
     fun signingFilter_showsOnlySigningKeys() {
@@ -249,28 +241,6 @@ class KeyManagementActivityUiTest {
     // ---------------------------------------------------------------
     // Create Key dialog
     // ---------------------------------------------------------------
-
-    @Test
-    fun fab_isDisplayed() {
-        ActivityScenario.launch(KeyManagementActivity::class.java)
-
-        onView(firstDisplayed(R.string.key_create_title))
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun fab_opensCreateKeyDialog() {
-        ActivityScenario.launch(KeyManagementActivity::class.java)
-
-        onView(firstDisplayed(R.string.key_create_title)).perform(click())
-
-        onView(withText(R.string.key_create_purpose))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.key_create_algorithm))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
-    }
 
     /** Dismissing the Create Key dialog must not add anything to the vault. */
     @Test

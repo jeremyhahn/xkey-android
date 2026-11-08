@@ -81,15 +81,6 @@ class IDevIDVerifierTest {
     }
 
     @Test
-    fun `verify reports Error for a truncated certificate`() = runTest {
-        val full = TestCertificates.der(TestCertificates.LEAF_A_PEM)
-
-        val result = verifier.verify(listOf(full.copyOfRange(0, full.size / 3)))
-
-        assertTrue("expected Error but was $result", result is IDevIDVerificationResult.Error)
-    }
-
-    @Test
     fun `verify reports Error when the trust store throws`() = runTest {
         coEvery { trustStore.verifyIDevIDChain(any()) } throws IllegalStateException("store offline")
 

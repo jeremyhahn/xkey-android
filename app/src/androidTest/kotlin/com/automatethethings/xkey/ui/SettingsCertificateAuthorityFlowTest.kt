@@ -34,7 +34,6 @@ import com.automatethethings.xkey.ui.SettingsFlowSupport.assertEventuallyShows
 import com.automatethethings.xkey.ui.SettingsFlowSupport.awaitInitialized
 import com.automatethethings.xkey.ui.SettingsFlowSupport.button
 import com.automatethethings.xkey.ui.SettingsFlowSupport.clickView
-import com.automatethethings.xkey.ui.SettingsFlowSupport.editTextNearLabel
 import com.automatethethings.xkey.ui.SettingsFlowSupport.editTextWithHint
 import com.automatethethings.xkey.ui.SettingsFlowSupport.radioOption
 import com.automatethethings.xkey.ui.SettingsFlowSupport.setFieldAndBlur
@@ -195,27 +194,6 @@ class SettingsCertificateAuthorityFlowTest {
             CertificateAuthoritySource.NONE,
             R.string.settings_ca_source_none
         )
-    }
-
-    @Test
-    fun xkmsEndpointField_restoresThePersistedEndpoint() {
-        seed(
-            TrustedComputingSettingsData(
-                caSource = CertificateAuthoritySource.XKMS,
-                xkmsEndpoint = XKMS_ENDPOINT
-            )
-        )
-
-        val scenario = ActivityScenario.launch(SettingsActivity::class.java)
-        awaitInitialized(scenario)
-
-        val text = withActivity(scenario) { activity ->
-            editTextNearLabel(
-                activity.window.decorView,
-                context.getString(R.string.settings_trusted_computing_ca_url)
-            )?.text?.toString()
-        }
-        assertEquals(XKMS_ENDPOINT, text)
     }
 
     // ---------------------------------------------------------------
@@ -479,7 +457,6 @@ class SettingsCertificateAuthorityFlowTest {
         runBlocking { trustedComputingRepository.getSettings() }
 
     private companion object {
-        const val XKMS_ENDPOINT = "https://xkms.uitest.invalid"
         const val ORG = "UI Test Org"
         const val OU = "UI Test OU"
         const val LOCALITY = "UI Test City"

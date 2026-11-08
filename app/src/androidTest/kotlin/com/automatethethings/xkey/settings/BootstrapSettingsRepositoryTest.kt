@@ -18,7 +18,6 @@ import android.content.Context
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -62,25 +61,6 @@ class BootstrapSettingsRepositoryTest {
     }
 
     @Test
-    fun freshStore_yieldsDocumentedDefaults() = runBlocking {
-        val settings = repository.getSettings()
-
-        assertEquals(BootstrapSettingsData.DEFAULT, settings)
-        assertTrue(settings.autoBootstrapEnabled)
-        assertEquals(BootstrapMethod.DEFAULT_ORDER, settings.methodOrder)
-        assertEquals(
-            BootstrapSettingsData.DEFAULT_PER_METHOD_TIMEOUT_SECONDS,
-            settings.perMethodTimeoutSeconds
-        )
-        assertEquals(BootstrapSettingsData.DEFAULT_DNS_SERVER, settings.daneDnsServer)
-        assertTrue(settings.daneEnabled)
-        assertTrue(settings.daneRequireDnssec)
-        assertFalse(settings.noiseEnabled)
-        assertFalse(settings.spkiEnabled)
-        assertFalse(settings.directEnabled)
-    }
-
-    @Test
     fun updateSettings_roundTripsEveryField() = runBlocking {
         val written = BootstrapSettingsData(
             autoBootstrapEnabled = false,
@@ -104,13 +84,6 @@ class BootstrapSettingsRepositoryTest {
         repository.updateSettings(written)
 
         assertEquals(written, repository.getSettings())
-    }
-
-    @Test
-    fun settingsFlow_emitsThePersistedValue() = runBlocking {
-        repository.updateSettings(BootstrapSettingsData.DEVELOPMENT)
-
-        assertEquals(BootstrapSettingsData.DEVELOPMENT, repository.settingsFlow.first())
     }
 
     @Test

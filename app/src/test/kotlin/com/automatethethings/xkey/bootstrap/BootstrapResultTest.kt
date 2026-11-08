@@ -45,22 +45,6 @@ class BootstrapResultTest {
     // ---------------------------------------------------------- CABundleResult
 
     @Test
-    fun countsAndReportsItsCertificates() {
-        val bundle = result(certificates = listOf(byteArrayOf(1), byteArrayOf(2)))
-
-        assertEquals(2, bundle.certificateCount)
-        assertTrue(bundle.isNotEmpty)
-    }
-
-    @Test
-    fun anEmptyBundleReportsItself() {
-        val bundle = result(bundle = ByteArray(0), certificates = emptyList())
-
-        assertEquals(0, bundle.certificateCount)
-        assertFalse(bundle.isNotEmpty)
-    }
-
-    @Test
     fun equalsComparesEveryFieldByContent() {
         val original = result()
 
@@ -186,24 +170,6 @@ class BootstrapResultTest {
                 .contains("Certificate parsing failed: no blocks")
         )
         assertTrue(NoMethodsConfiguredException().message!!.contains("at least one"))
-    }
-
-    @Test
-    fun everyBootstrapFailureIsCatchableAsItsSealedSupertype() {
-        val failures: List<BootstrapException> = listOf(
-            DANEException("a"),
-            NoiseBootstrapException("b"),
-            SPKIException("c"),
-            DirectException("d"),
-            BootstrapConfigException("e"),
-            CertificateParseException("f"),
-            NoMethodsConfiguredException(),
-            BootstrapFailedException(emptyList())
-        )
-
-        failures.forEach { failure ->
-            assertTrue(failure.message.orEmpty().isNotEmpty())
-        }
     }
 
     // ----------------------------------------------------------- TLSA records

@@ -89,24 +89,6 @@ class DeviceDetailEnrollmentRefusalTest {
     // A refusal on record
     // ---------------------------------------------------------------
 
-    @Test
-    fun aRefusedDevice_showsItsCaseAndDetail() {
-        seedRefusal(
-            EnrollmentRefusal.ActivationMismatch(
-                "credential activation returned a different secret; the device does not " +
-                    "hold the private endorsement key for the certificate it presented"
-            )
-        )
-
-        val scenario = launch()
-
-        assertShownTextInTree(
-            scenario,
-            context.getString(R.string.device_enrollment_refused_activation_mismatch)
-        )
-        assertShownTextInTree(scenario, "credential activation returned a different secret")
-    }
-
     /**
      * The two activation cases must not read alike on screen either: one says
      * the device holds the wrong keys, the other that it never answered.

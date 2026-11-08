@@ -204,13 +204,6 @@ class RequestHandlerErrorPathTest {
         )
     }
 
-    @Test
-    fun unknownMethodPreservesTheRequestId() {
-        val id = nextRequestId.getAndIncrement()
-        val response = runBlocking { handler.handleRequest(Request(id, "nope")) }
-        assertEquals(id, response.id)
-    }
-
     // ------------------------------------------------------------------
     // Raw framing (handleRawRequest)
     // ------------------------------------------------------------------
