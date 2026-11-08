@@ -1,6 +1,6 @@
 #!/bin/sh
-# Prints a devcontainer image tag named by its content (handbook ci-standard.md
-# section 9), for `make toolchain-image` and `make it-image`.
+# Prints a devcontainer image tag named by the content hash of the files that
+# build the image, for `make toolchain-image` and `make it-image`.
 #
 #   usage: image-tag.sh toolchain|it [trusted|pr]
 #

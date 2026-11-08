@@ -58,8 +58,8 @@ class AttestTranscriptTest {
             "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
 
     /**
-     * `local.verifyUser` (owner ruling 167, go-xkms `pkg/pairingproto`
-     * `attest_vectors_test.go` at 109f9c16f). The last field is the UVK's
+     * `local.verifyUser` (go-xkms `pkg/pairingproto` `attest_vectors_test.go`
+     * at 109f9c16f). The last field is the UVK's
      * fingerprint; the inputs are the same as for pair and reattest.
      */
     private val verifyUserTranscriptHex =
