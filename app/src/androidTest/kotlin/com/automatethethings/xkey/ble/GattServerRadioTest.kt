@@ -280,6 +280,8 @@ class GattServerRadioTest {
         probe.connectThroughTheCallback(device)
         val initiator = probe.establishSession(device)
         subscribe(mtu = 247)
+        // The send revalidates pairing, so the fresh peer must be trusted first.
+        adoptPairing()
 
         probe.server.sendEncryptedMessage("""{"id":1,"method":"remote.ping"}""".toByteArray())
 
