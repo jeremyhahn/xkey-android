@@ -293,6 +293,9 @@ class GattServerProbe(
         write("noiseSession", responder)
         write("identityExchangeComplete", true)
         authenticatedPeerKeyHex = responder.getRemoteStaticKey()?.toHex()
+        // Published last, as `handleHandshakeMessage` does once the handshake
+        // completes, so isSessionEstablished() reports this session.
+        write("establishedSession", responder)
         return initiator
     }
 
