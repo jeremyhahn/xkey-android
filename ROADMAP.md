@@ -1,6 +1,6 @@
 # xkey-android roadmap
 
-> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-24
+> **Status: REFERENCE** · Owner: xkey-android maintainers · Last verified: 2026-11-08
 > Changes are proposed by docs-only PR. Every item names its feature in [docs/SPEC.md](docs/SPEC.md), and the two agree.
 
 ## Mission
@@ -48,17 +48,24 @@ Wire-coupled to go-xkms through the pairing contract (Noise-XX + JSON-RPC), not 
 - **request-generation-echo** — pairing responses echo per-request generation — [#10](../../issues/10), PR #42 — done
 - **remote-backup-password** — password sent on remote backup create and restore ([go-xkms#690](../../../go-xkms/issues/690)) — [#11](../../issues/11), PR #61 — done
 - **fido2-built-in-uv** — biometric-gated verify-user RPC for FIDO2 built-in UV ([go-xkms#1716](../../../go-xkms/pulls/1716)) — [#13](../../issues/13) — done
+- **protected-memory** — Noise static, ephemeral and session keys zeroed with `fill(0)`, documented as best-effort hygiene on the managed heap — [#6](../../issues/6), PR #46 — done
+
+Release-readiness checklist for [Dev complete](../../milestone/23), done; none of these is a SPEC.md feature:
+
+- [x] `docs/` scrubbed for spec review — [#26](../../issues/26) — done
+- [x] SPEC.md feature names in kebab-case — [#32](../../issues/32) — done
+- [x] ROADMAP.md items in one item form — [#33](../../issues/33) — done
+- [x] `docs/` files moved into feature folders — [#34](../../issues/34) — done
+- [x] devcontainer image with JetBrains JDK 21 and the pinned Android platform and build-tools — [#35](../../issues/35) — done
+- [x] CI Gate job on the `ci-gate` runners — [#36](../../issues/36) — done
+- [x] image build downloads retried on transient errors — [#109](../../issues/109), PR #110 — done
 
 ## Now
 
 Release-readiness checklist for [Dev complete](../../milestone/23); none of these is a SPEC.md feature:
 
-- [ ] `docs/` scrubbed for spec review — [#26](../../issues/26) — blocked: waits for its slot in [dept-software#126](../../../dept-software/issues/126)
-- [ ] SPEC.md feature names in kebab-case — [#32](../../issues/32) — in review
-- [ ] ROADMAP.md items in the roadmap.md item form — [#33](../../issues/33) — in review
-- [ ] `docs/` files moved into feature folders — [#34](../../issues/34) — open
-- [ ] devcontainer image with JetBrains JDK 21, platforms;android-34 and build-tools;36.0.0 — [#35](../../issues/35) — open
-- [ ] CI Gate job on the `ci-gate` runners — [#36](../../issues/36) — in review
+- [ ] test-suite audit — [#84](../../issues/84) — in progress
+- [ ] plain technical text in comments and docs — [#103](../../issues/103) — in progress
 
 ## Next
 
@@ -66,15 +73,15 @@ None.
 
 ## Later
 
-- **password-vault-rpcs** — password store and seal store RPCs handled — [#55](../../issues/55) — blocked: go-xkms USB PasswordVault row; the desktop-sent `Password*`/`SealStore*` handlers shipped in PR #42 (#12)
-- **protected-memory** — Noise static and session keys under an Android protected-memory clause — [#6](../../issues/6) — blocked: owner ruling pending; Noise key zeroize shipped in PR #46 (#6)
+- **password-vault-rpcs** — password store and seal store RPCs handled — [#55](../../issues/55) — blocked: the USB PasswordVault verbs are not yet served by go-xkms; the desktop-sent `Password*`/`SealStore*` handlers shipped in PR #42 (#12)
+- nightly CI run — [#91](../../issues/91) — suspended; not a SPEC.md feature
 
 ## Future
 
-- **trusted-computing-enrollment** — Android initiators for the TCG IDevID, credential-activation and quote methods (handbook `software/docs/12-xkey-android-wire-contract.md` §The contract) — no issue — blocked: not scheduled, dormant on both sides
+- **trusted-computing-enrollment** — Android initiators for the TCG IDevID, credential-activation and quote methods of the go-xkms pairing wire contract — no issue — blocked: not scheduled, dormant on both sides
 
 ## Dependencies
 
-- Up: none pinned (not a Go module); wire contract with go-xkms per the handbook's xkey-android wire contract (software docs/12).
+- Up: none pinned (not a Go module); wire-compatible with the go-xkms pairing contract, `go-xkms/xkey/pkg/pairing`.
 - Up: go-xkms `local.verifyUser` wire (go-xkms#1716, main 109f9c16f); the desktop verifier and pinUvAuthToken via UV are go-xkms's.
 - Down: go-xkms xkmsd `phone` key backend, `xkey device *` pairing and `xkey fido2 --backend phone`.

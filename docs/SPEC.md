@@ -63,7 +63,7 @@ Never does:
 | phone-initiated-pairing | shipped | Answer `local.attestDevice` on sessions the phone opens and display the pairing SAS (go-xkms#1306) | none |
 | request-generation-echo | shipped | Echo a per-request `generation` in every pairing response, the phone half of the go-xkms#128 flag day | none |
 | fido2-built-in-uv | shipped | A biometric-gated, verifiable "verify user" RPC so the desktop authenticator can issue a pinUvAuthToken through UV `local.verifyUser` per go-xkms#1716 | none |
-| protected-memory | planned | Decide how far zeroing secrets after use can be enforced on Android's managed heap, and apply it to the Noise static and session keys | none |
+| protected-memory | shipped | `NoiseSession` zeroes the Noise static, ephemeral and session keys, and the handshake intermediates, with `fill(0)` once they are no longer needed; on Android's managed heap this is best-effort hygiene, not a guarantee, since the collector and the JCA objects may keep copies, and the class documentation states that limit | none |
 | trusted-computing-enrollment | future | Android initiators for `remote.getTCGCSRIDevID`, `remote.activateCredential` and `remote.getAttestationQuote` (needs a Kotlin TPM2 credential-activation flow), and the `local.*` IDevID and TCG family, dormant on both sides | none |
 
 ## Interfaces

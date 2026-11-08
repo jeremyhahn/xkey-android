@@ -2,7 +2,7 @@
 .gradle/
 .kotlin/
 build/
-# ...except the devcontainer image (handbook devcontainer.md section 1).
+# ...except build/docker/, which holds the devcontainer image sources.
 !/build/
 /build/*
 !/build/docker/
