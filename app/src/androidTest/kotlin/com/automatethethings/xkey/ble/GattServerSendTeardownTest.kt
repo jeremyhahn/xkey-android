@@ -33,6 +33,7 @@ import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import io.mockk.every
 import io.mockk.mockk
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -267,19 +268,22 @@ class GattServerSendTeardownTest {
  * A server handle that accepts response notifications until it is closed, the
  * way an open server does for a subscribed peer, and refuses them after.
  *
- * The first accepted fragment opens [firstFragment] and is then held until
- * [stopped] opens, so a test can tear the server down while the rest of the
- * message is still to be sent. Closing it closes [real], the handle the server
- * opened, so nothing outlives the test.
+ * The first accepted fragment opens [firstFragment] and, when
+ * [holdFirstFragment], is then held until [stopped] opens, so a test can tear
+ * the server down while the rest of the message is still to be sent. Every
+ * accepted response fragment is kept in [frames], in order. Closing it closes
+ * [real], the handle the server opened, so nothing outlives the test.
  */
-private class AcceptingServerHandle(
+internal class AcceptingServerHandle(
     private val real: BluetoothGattServer,
-    private val response: BluetoothGattCharacteristic
+    private val response: BluetoothGattCharacteristic,
+    private val holdFirstFragment: Boolean = true
 ) {
     val firstFragment = CountDownLatch(1)
     val stopped = CountDownLatch(1)
     val accepted = AtomicInteger()
     val refused = AtomicInteger()
+    val frames = CopyOnWriteArrayList<ByteArray>()
 
     @Volatile
     private var closed = false
@@ -293,7 +297,7 @@ private class AcceptingServerHandle(
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             every { server.notifyCharacteristicChanged(any(), any(), any(), any()) } answers {
-                if (notify(secondArg())) {
+                if (notify(secondArg(), arg(3))) {
                     BluetoothStatusCodes.SUCCESS
                 } else {
                     BluetoothStatusCodes.ERROR_PROFILE_SERVICE_NOT_BOUND
@@ -302,21 +306,24 @@ private class AcceptingServerHandle(
         } else {
             @Suppress("DEPRECATION")
             every { server.notifyCharacteristicChanged(any(), any(), any()) } answers {
-                notify(secondArg())
+                val characteristic = secondArg<BluetoothGattCharacteristic>()
+                @Suppress("DEPRECATION")
+                notify(characteristic, characteristic.value)
             }
         }
     }
 
-    /** Whether the stack takes a notification on [characteristic]. */
-    private fun notify(characteristic: BluetoothGattCharacteristic): Boolean {
+    /** Whether the stack takes a notification of [value] on [characteristic]. */
+    private fun notify(characteristic: BluetoothGattCharacteristic, value: ByteArray): Boolean {
         if (characteristic.uuid != response.uuid) return !closed
         if (closed) {
             refused.incrementAndGet()
             return false
         }
+        frames += value.copyOf()
         if (accepted.incrementAndGet() == 1) {
             firstFragment.countDown()
-            stopped.await(5, TimeUnit.SECONDS)
+            if (holdFirstFragment) stopped.await(5, TimeUnit.SECONDS)
         }
         return true
     }
