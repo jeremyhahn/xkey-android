@@ -219,6 +219,18 @@ class KeyEntityValueSemanticsTest {
         assertEquals(a.hashCode(), b.hashCode())
     }
 
+    @Test
+    fun `copy replaces only the named field`() {
+        val base = key()
+        val renamed = base.copy(label = "Renamed")
+
+        assertEquals("Renamed", renamed.label)
+        assertEquals(base.keyId, renamed.keyId)
+        assertEquals(base.algorithm, renamed.algorithm)
+        assertEquals(base.sharingPolicy, renamed.sharingPolicy)
+        assertTrue(base.publicKeyDer.contentEquals(renamed.publicKeyDer))
+    }
+
     // -------------------------------------------------------------------------
     // SharingPolicyType
     // -------------------------------------------------------------------------

@@ -138,4 +138,16 @@ class CredentialMetadataEntityTest {
         assertNotEquals(credential(byteArrayOf(1, 2, 3)), credential(byteArrayOf(1, 2, 3, 4)))
         assertNotEquals(credential(byteArrayOf()), credential(byteArrayOf(0)))
     }
+
+    @Test
+    fun `copy advances the signature counter without disturbing anything else`() {
+        val base = credential()
+        val advanced = base.copy(signCount = base.signCount + 1)
+
+        assertEquals(6L, advanced.signCount)
+        assertEquals(base.credentialId, advanced.credentialId)
+        assertEquals(base.rpId, advanced.rpId)
+        assertTrue(base.publicKeyCose.contentEquals(advanced.publicKeyCose))
+        assertNotEquals(base, advanced)
+    }
 }
