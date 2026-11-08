@@ -41,8 +41,7 @@ import java.security.MessageDigest
  * DataStore, [PinSettingsRepository], adapter and vault are opened on the
  * same file: the counter can only come back from disk.
  *
- * The device-only twin is the androidTest `PasswordVaultLockoutPersistenceTest`
- * on the real `Context` DataStore; CI does not run it, this test carries the proof.
+ * This is the one test that the unlock attempt counter survives a restart.
  */
 class PinSettingsVaultUnlockAttemptStoreTest {
 

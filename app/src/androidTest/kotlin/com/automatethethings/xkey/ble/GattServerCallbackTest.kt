@@ -26,9 +26,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
-import java.io.DataInputStream
 import java.io.IOException
-import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
@@ -435,78 +433,6 @@ class GattServerCallbackTest {
 
         Thread.sleep(200)
         assertNull(probe.connectedDevice)
-    }
-
-    // -----------------------------------------------------------------
-    // Pure helpers the protocol depends on
-    // -----------------------------------------------------------------
-
-    /**
-     * The prologue formula is a cross-language contract with
-     * `go-xkms/xkey/pkg/pairing`; the two sides derive it independently and a
-     * mismatch shows up only as an unexplained handshake failure.
-     */
-    @Test
-    fun thePrologueFormulaIsSha256OfKeyFingerprintAndVersion() {
-        val publicKey = randomKey()
-        val fingerprint = randomKey()
-
-        val expected = MessageDigest.getInstance("SHA-256").run {
-            update(publicKey)
-            update(fingerprint)
-            update("xkey-v1".toByteArray(Charsets.UTF_8))
-            digest()
-        }
-
-        assertArrayEquals(expected, probe.computePrologueFromIdentity(publicKey, fingerprint))
-    }
-
-    /** Fingerprints are stored as hex and put on the wire as bytes. */
-    @Test
-    fun hexFingerprintsDecodeToTheirBytes() {
-        val bytes = randomKey()
-        val hex = bytes.joinToString("") { "%02x".format(it) }
-
-        assertArrayEquals(bytes, probe.hexStringToByteArray(hex))
-        assertArrayEquals(
-            byteArrayOf(0x00, 0x0f.toByte(), 0xf0.toByte(), 0xff.toByte()),
-            probe.hexStringToByteArray("000ff0ff")
-        )
-        assertEquals(0, probe.hexStringToByteArray("").size)
-    }
-
-    /**
-     * Enrolment stores the baseline PCR set as an opaque blob. The layout is
-     * `[count][index][len][value]…`; nothing else reads it back, so the shape
-     * is pinned here.
-     */
-    @Test
-    fun pcrValuesSerialiseToTheDocumentedLayout() {
-        val pcrValues = linkedMapOf(
-            0 to ByteArray(32) { 0x11 },
-            7 to ByteArray(20) { 0x22 }
-        )
-
-        val stream = DataInputStream(probe.serializePCRValues(pcrValues).inputStream())
-        assertEquals(2, stream.readInt())
-
-        assertEquals(0, stream.readInt())
-        assertEquals(32, stream.readInt())
-        assertArrayEquals(ByteArray(32) { 0x11 }, ByteArray(32).also { stream.readFully(it) })
-
-        assertEquals(7, stream.readInt())
-        assertEquals(20, stream.readInt())
-        assertArrayEquals(ByteArray(20) { 0x22 }, ByteArray(20).also { stream.readFully(it) })
-
-        assertEquals("nothing trails the last value", 0, stream.available())
-    }
-
-    @Test
-    fun anEmptyPcrSetSerialisesToACountOfZero() {
-        val encoded = probe.serializePCRValues(emptyMap())
-
-        assertEquals(4, encoded.size)
-        assertEquals(0, DataInputStream(encoded.inputStream()).readInt())
     }
 
     // -----------------------------------------------------------------

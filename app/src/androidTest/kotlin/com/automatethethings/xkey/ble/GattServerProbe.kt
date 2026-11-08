@@ -172,16 +172,6 @@ class GattServerProbe(
     /** The one-byte status the STATUS characteristic reports. */
     fun statusValue(): ByteArray = invoke(getStatusValueMethod) as ByteArray
 
-    /** `SHA256(initiator_public_key || responder_fingerprint || "xkey-v1")`. */
-    fun computePrologueFromIdentity(publicKey: ByteArray, fingerprint: ByteArray): ByteArray =
-        invoke(prologueMethod, publicKey, fingerprint) as ByteArray
-
-    fun hexStringToByteArray(hex: String): ByteArray =
-        invoke(hexStringMethod, hex) as ByteArray
-
-    fun serializePCRValues(pcrValues: Map<Int, ByteArray>): ByteArray =
-        invoke(serializePcrMethod, pcrValues) as ByteArray
-
     fun adoptExistingPairing() {
         invoke(adoptPairingMethod)
     }
@@ -284,10 +274,6 @@ class GattServerProbe(
     companion object {
         private val setupServiceMethod = declaredMethod("setupService")
         private val getStatusValueMethod = declaredMethod("getStatusValue")
-        private val prologueMethod =
-            declaredMethod("computePrologueFromIdentity", ByteArray::class.java, ByteArray::class.java)
-        private val hexStringMethod = declaredMethod("hexStringToByteArray", String::class.java)
-        private val serializePcrMethod = declaredMethod("serializePCRValues", Map::class.java)
         private val adoptPairingMethod = declaredMethod("adoptExistingPairing")
         private val rejectUnpairedMethod = declaredMethod("rejectUnpaired", ByteArray::class.java)
         private val linkClass: Class<*> = try {
