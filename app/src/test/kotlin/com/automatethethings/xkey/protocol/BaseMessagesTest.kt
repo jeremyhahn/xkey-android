@@ -376,10 +376,10 @@ class BaseMessagesTest {
     @Test
     fun `PairingConfirmParams fromJson reads deviceName and publicKeyHex`() {
         val params = PairingConfirmParams.fromJson(
-            JSONObject("""{"deviceName":"jhahn-laptop","publicKeyHex":"deadbeef"}""")
+            JSONObject("""{"deviceName":"core-01","publicKeyHex":"deadbeef"}""")
         )
 
-        assertEquals("jhahn-laptop", params.deviceName)
+        assertEquals("core-01", params.deviceName)
         assertEquals("deadbeef", params.publicKeyHex)
     }
 

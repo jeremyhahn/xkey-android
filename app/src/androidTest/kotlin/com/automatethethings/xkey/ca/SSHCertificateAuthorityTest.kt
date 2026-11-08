@@ -298,7 +298,7 @@ class SSHCertificateAuthorityTest {
             principals = listOf("deploy"),
             extensions = mapOf("permit-pty" to ""),
             criticalOptions = mapOf(
-                "source-address" to "10.0.0.0/8",
+                "source-address" to "192.0.2.0/24",
                 "force-command" to "/usr/bin/true"
             ),
             signingAlias = caAlias
@@ -311,7 +311,7 @@ class SSHCertificateAuthorityTest {
             decoded.criticalOptions.keys.toList()
         )
         assertEquals("/usr/bin/true", decoded.criticalOptions["force-command"])
-        assertEquals("10.0.0.0/8", decoded.criticalOptions["source-address"])
+        assertEquals("192.0.2.0/24", decoded.criticalOptions["source-address"])
         assertTrue(signatureVerifies(decoded))
     }
 
