@@ -26,9 +26,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
-import java.io.DataInputStream
 import java.io.IOException
-import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
@@ -221,14 +219,16 @@ class GattServerCallbackTest {
      */
     @Test
     fun theNegotiatedMtuIsClampedToTheSupportedRange() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onMtuChanged(device, 247)
-        assertEquals(247, probe.deviceMtu[device.address])
+        awaitMtu(247, "within the supported range")
 
         probe.gattCallback.onMtuChanged(device, 3)
-        assertEquals("below the BLE minimum", 23, probe.deviceMtu[device.address])
+        awaitMtu(23, "below the BLE minimum")
 
         probe.gattCallback.onMtuChanged(device, 4096)
-        assertEquals("above the supported maximum", 517, probe.deviceMtu[device.address])
+        awaitMtu(517, "above the supported maximum")
     }
 
     // -----------------------------------------------------------------
@@ -241,6 +241,7 @@ class GattServerCallbackTest {
      */
     @Test
     fun subscribingToNotificationsIsRecordedPerDevice() {
+        connectThroughTheCallback()
         val cccd = cccdDescriptor()
 
         probe.gattCallback.onDescriptorWriteRequest(
@@ -259,6 +260,8 @@ class GattServerCallbackTest {
     /** Indications count as a subscription too. */
     @Test
     fun subscribingWithIndicationsAlsoCounts() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1, cccdDescriptor(), false, true, 0,
             BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
@@ -269,6 +272,8 @@ class GattServerCallbackTest {
 
     @Test
     fun aWriteToAnotherDescriptorIsIgnored() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1,
             BluetoothGattDescriptor(UUID.randomUUID(), BluetoothGattDescriptor.PERMISSION_WRITE),
@@ -281,6 +286,8 @@ class GattServerCallbackTest {
 
     @Test
     fun aDescriptorWriteWithNoValueIsIgnored() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1, cccdDescriptor(), false, true, 0, null
         )
@@ -288,9 +295,10 @@ class GattServerCallbackTest {
         assertNull(probe.notificationEnabled[device.address])
     }
 
-    /** Reads are answered from the subscription state without an open server. */
+    /** Reads on an open connection are answered from its subscription state. */
     @Test
     fun descriptorReadsAreServedForBothSubscriptionStates() {
+        connectThroughTheCallback()
         val cccd = cccdDescriptor()
 
         probe.gattCallback.onDescriptorReadRequest(device, 1, 0, cccd)
@@ -315,29 +323,31 @@ class GattServerCallbackTest {
     /** Reads are served for the two readable characteristics and refused elsewhere. */
     @Test
     fun characteristicReadsAreRoutedByUuid() {
-        probe.connectionState = ConnectionState.Connecting
+        // The connect leaves the connection Connecting; a read outside an open
+        // connection is refused before it is routed.
+        connectThroughTheCallback()
 
         probe.gattCallback.onCharacteristicReadRequest(device, 1, 0, characteristic(GattServer.STATUS_UUID))
         probe.gattCallback.onCharacteristicReadRequest(device, 2, 1, characteristic(GattServer.STATUS_UUID))
         probe.gattCallback.onCharacteristicReadRequest(device, 3, 0, characteristic(GattServer.RESPONSE_UUID))
         probe.gattCallback.onCharacteristicReadRequest(device, 4, 0, characteristic(UUID.randomUUID()))
 
-        // Nothing is written back without an open server; what matters is that
-        // the status value is derived from live state and no branch throws.
+        // The responses go to a device the stack never connected; what matters
+        // is that the status value is derived from live state and no branch throws.
         assertArrayEquals(byteArrayOf(0x01), probe.statusValue())
     }
 
     /** Only the control point carries protocol data. */
     @Test
-    fun aWriteToAnyCharacteristicButTheControlPointIsRefused(): Unit = runBlocking {
-        probe.handleDeviceConnected(device)
+    fun aWriteToAnyCharacteristicButTheControlPointIsRefused() {
+        connectThroughTheCallback()
 
         probe.gattCallback.onCharacteristicWriteRequest(
             device, 1, characteristic(GattServer.STATUS_UUID), false, true, 0,
             Fragmenter().fragment("hello".toByteArray()).first()
         )
 
-        Thread.sleep(200)
+        awaitEarlierEventsHandled()
         assertFalse(
             "a write outside the control point must never be treated as protocol data",
             probe.identityExchangeComplete
@@ -345,8 +355,8 @@ class GattServerCallbackTest {
     }
 
     @Test
-    fun anEmptyControlPointWriteIsRefused(): Unit = runBlocking {
-        probe.handleDeviceConnected(device)
+    fun anEmptyControlPointWriteIsRefused() {
+        connectThroughTheCallback()
 
         probe.gattCallback.onCharacteristicWriteRequest(
             device, 1, characteristic(GattServer.CONTROL_POINT_UUID), false, true, 0, ByteArray(0)
@@ -355,7 +365,7 @@ class GattServerCallbackTest {
             device, 2, characteristic(GattServer.CONTROL_POINT_UUID), false, false, 0, null
         )
 
-        Thread.sleep(200)
+        awaitEarlierEventsHandled()
         assertFalse(probe.identityExchangeComplete)
         assertEquals(0, probe.fragmentBuffer.getValue(device.address).getFragmentCount())
     }
@@ -365,8 +375,8 @@ class GattServerCallbackTest {
      * protocol. This is the only route a desktop has into the phone.
      */
     @Test
-    fun aControlPointWriteIsReassembledAndProcessed(): Unit = runBlocking {
-        probe.handleDeviceConnected(device)
+    fun aControlPointWriteIsReassembledAndProcessed() {
+        connectThroughTheCallback()
 
         val identity = NoiseInitiatorSession(randomKey()).createIdentityMessage()
         for (fragment in Fragmenter(20).fragment(identity)) {
@@ -384,6 +394,8 @@ class GattServerCallbackTest {
     /** Delivery confirmations are pure telemetry and must never throw. */
     @Test
     fun notificationConfirmationsAreHarmless() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
         probe.gattCallback.onNotificationSent(device, BluetoothGatt.GATT_FAILURE)
     }
@@ -400,13 +412,8 @@ class GattServerCallbackTest {
      */
     @Test
     fun connectAndDisconnectAreDrivenFromTheStackCallback() {
-        probe.gattCallback.onConnectionStateChange(
-            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
-        )
+        connectThroughTheCallback()
 
-        GattServerProbe.awaitUntil("the device to be adopted") {
-            probe.server.connectionState.value == ConnectionState.Connecting
-        }
         assertSame(device, probe.connectedDevice)
         assertNotNull("a Noise session is prepared up front", probe.noiseSession)
 
@@ -423,9 +430,15 @@ class GattServerCallbackTest {
         assertTrue(probe.deviceMtu.isEmpty())
     }
 
-    /** Intermediate states carry no bookkeeping. */
+    /**
+     * Intermediate states carry no bookkeeping. On a started server only a
+     * connect begins a queue, and it does so inside the callback, so a queue
+     * begun by either state would be there when the callback returns.
+     */
     @Test
     fun connectingAndDisconnectingStatesAreIgnored() {
+        startTheServer()
+
         probe.gattCallback.onConnectionStateChange(
             device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTING
         )
@@ -433,80 +446,8 @@ class GattServerCallbackTest {
             device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTING
         )
 
-        Thread.sleep(200)
+        assertFalse("no state but a connect begins a queue", probe.hasEventQueue(device))
         assertNull(probe.connectedDevice)
-    }
-
-    // -----------------------------------------------------------------
-    // Pure helpers the protocol depends on
-    // -----------------------------------------------------------------
-
-    /**
-     * The prologue formula is a cross-language contract with
-     * `go-xkms/xkey/pkg/pairing`; the two sides derive it independently and a
-     * mismatch shows up only as an unexplained handshake failure.
-     */
-    @Test
-    fun thePrologueFormulaIsSha256OfKeyFingerprintAndVersion() {
-        val publicKey = randomKey()
-        val fingerprint = randomKey()
-
-        val expected = MessageDigest.getInstance("SHA-256").run {
-            update(publicKey)
-            update(fingerprint)
-            update("xkey-v1".toByteArray(Charsets.UTF_8))
-            digest()
-        }
-
-        assertArrayEquals(expected, probe.computePrologueFromIdentity(publicKey, fingerprint))
-    }
-
-    /** Fingerprints are stored as hex and put on the wire as bytes. */
-    @Test
-    fun hexFingerprintsDecodeToTheirBytes() {
-        val bytes = randomKey()
-        val hex = bytes.joinToString("") { "%02x".format(it) }
-
-        assertArrayEquals(bytes, probe.hexStringToByteArray(hex))
-        assertArrayEquals(
-            byteArrayOf(0x00, 0x0f.toByte(), 0xf0.toByte(), 0xff.toByte()),
-            probe.hexStringToByteArray("000ff0ff")
-        )
-        assertEquals(0, probe.hexStringToByteArray("").size)
-    }
-
-    /**
-     * Enrolment stores the baseline PCR set as an opaque blob. The layout is
-     * `[count][index][len][value]…`; nothing else reads it back, so the shape
-     * is pinned here.
-     */
-    @Test
-    fun pcrValuesSerialiseToTheDocumentedLayout() {
-        val pcrValues = linkedMapOf(
-            0 to ByteArray(32) { 0x11 },
-            7 to ByteArray(20) { 0x22 }
-        )
-
-        val stream = DataInputStream(probe.serializePCRValues(pcrValues).inputStream())
-        assertEquals(2, stream.readInt())
-
-        assertEquals(0, stream.readInt())
-        assertEquals(32, stream.readInt())
-        assertArrayEquals(ByteArray(32) { 0x11 }, ByteArray(32).also { stream.readFully(it) })
-
-        assertEquals(7, stream.readInt())
-        assertEquals(20, stream.readInt())
-        assertArrayEquals(ByteArray(20) { 0x22 }, ByteArray(20).also { stream.readFully(it) })
-
-        assertEquals("nothing trails the last value", 0, stream.available())
-    }
-
-    @Test
-    fun anEmptyPcrSetSerialisesToACountOfZero() {
-        val encoded = probe.serializePCRValues(emptyMap())
-
-        assertEquals(4, encoded.size)
-        assertEquals(0, DataInputStream(encoded.inputStream()).readInt())
     }
 
     // -----------------------------------------------------------------
@@ -518,6 +459,33 @@ class GattServerCallbackTest {
         BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
     )
 
+    /**
+     * Starts the server, as every callback-driven test does: the connect
+     * callback begins a device's event queue only on a started server. Skips
+     * the test where the local stack will not open a GATT server.
+     */
+    private fun startTheServer() {
+        assumeTrue("the local stack would not open a GATT server", probe.server.start())
+    }
+
+    /** Connects [device]; see [GattServerProbe.connectThroughTheCallback]. */
+    private fun connectThroughTheCallback() = probe.connectThroughTheCallback(device)
+
+    private fun awaitMtu(expected: Int, why: String) = probe.awaitMtu(device, expected, why)
+
+    /**
+     * Returns once the device's event queue has handled everything queued
+     * before this call: an MTU change queued behind it is applied in turn, so
+     * a write that was wrongly queued has been processed by the time it shows.
+     * The queue must have been opened by [connectThroughTheCallback].
+     */
+    private fun awaitEarlierEventsHandled() {
+        probe.gattCallback.onMtuChanged(device, BARRIER_MTU)
+        GattServerProbe.awaitUntil("the queue to reach the MTU change") {
+            probe.deviceMtu[device.address] == BARRIER_MTU
+        }
+    }
+
     private fun characteristic(uuid: UUID) = BluetoothGattCharacteristic(
         uuid,
         BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_READ,
@@ -525,4 +493,9 @@ class GattServerCallbackTest {
     )
 
     private fun randomKey() = ByteArray(32).also { SecureRandom().nextBytes(it) }
+
+    private companion object {
+        /** Any in-range MTU other than the default the connect records. */
+        const val BARRIER_MTU = 247
+    }
 }

@@ -27,7 +27,6 @@ import com.automatethethings.xkey.ca.CertificateEntity
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -43,10 +42,9 @@ import org.junit.runner.RunWith
  * and then draws as nothing, so the subject, the status badge and the profile
  * badge all vanished on exactly the certificates with the least to show.
  *
- * `heroAlpha` is the arithmetic on its own, so the boundary can be asserted
- * directly rather than by trying to arrange an unscrollable app bar; the last
- * test then confirms the running screen never hands the hero a value the view
- * system cannot use.
+ * The arithmetic is asserted on its own in the unit test
+ * `CertificateDetailHeroAlphaArithmeticTest`; this test confirms the running
+ * screen never hands the hero a value the view system cannot use.
  */
 @RunWith(AndroidJUnit4::class)
 class CertificateDetailHeroAlphaTest {
@@ -70,36 +68,6 @@ class CertificateDetailHeroAlphaTest {
             seededSerials.forEach { dao.deleteBySerial(it) }
         }
         seededSerials.clear()
-    }
-
-    /** Nothing to scroll means fully expanded, not NaN. */
-    @Test
-    fun heroAlpha_withNothingToScroll_staysFullyOpaque() {
-        assertEquals(1f, CertificateDetailActivity.heroAlpha(0, 0), 0f)
-        assertEquals(1f, CertificateDetailActivity.heroAlpha(-120, 0), 0f)
-    }
-
-    /** A negative range is as meaningless as a zero one and is treated the same. */
-    @Test
-    fun heroAlpha_withANegativeRange_staysFullyOpaque() {
-        assertEquals(1f, CertificateDetailActivity.heroAlpha(-40, -1), 0f)
-    }
-
-    /** The fade itself still runs from opaque at the top to clear at the bottom. */
-    @Test
-    fun heroAlpha_fadesAcrossTheScrollRange() {
-        assertEquals(1f, CertificateDetailActivity.heroAlpha(0, 400), TOLERANCE)
-        assertEquals(0.5f, CertificateDetailActivity.heroAlpha(-200, 400), TOLERANCE)
-        assertEquals(0f, CertificateDetailActivity.heroAlpha(-400, 400), TOLERANCE)
-    }
-
-    /**
-     * An over-scrolled offset would otherwise drive the alpha negative, which the
-     * view system silently clamps — the coercion makes that explicit.
-     */
-    @Test
-    fun heroAlpha_isClampedToTheLegalRange() {
-        assertEquals(0f, CertificateDetailActivity.heroAlpha(-800, 400), TOLERANCE)
     }
 
     /** On the live screen the hero is drawable, whatever the app bar reports. */
@@ -169,7 +137,6 @@ class CertificateDetailHeroAlphaTest {
 
     private companion object {
         const val ONE_DAY_MS = 86_400_000L
-        const val TOLERANCE = 0.0001f
 
         /** The tag the app bar puts on the hero's emoji badge. */
         const val HERO_ICON_TAG = "hero_icon"

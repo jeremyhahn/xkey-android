@@ -18,13 +18,25 @@ package com.automatethethings.xkey.ble
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
+import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import io.mockk.every
+import io.mockk.mockk
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -62,7 +74,9 @@ import org.junit.runner.RunWith
  * Like [GattServerRadioTest] this needs the radio genuinely open — `sendResponse`
  * returns at its second line without a handle — but never a peer: notifications
  * to a device that never connected are reported undeliverable and are otherwise
- * inert.
+ * inert. Where a send must get past its first fragment, the test swaps in an
+ * [AcceptingServerHandle] that takes notifications as a subscribed peer's
+ * server would.
  */
 @RunWith(AndroidJUnit4::class)
 class GattServerSendTeardownTest {
@@ -114,8 +128,7 @@ class GattServerSendTeardownTest {
      */
     @Test
     fun aSendWhoseSubscriptionWaitIsCancelledGivesUpQuietly(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
-        probe.gattCallback.onMtuChanged(device, 247)
+        connectAtMtu247()
         // Subscribed, so nothing but the cancellation can decide this.
         outbound.notificationEnabled[device.address] = true
         outbound.notificationReady[device.address]!!.cancel()
@@ -130,9 +143,14 @@ class GattServerSendTeardownTest {
     /** A device that disconnected has no deferred at all; that is not an error. */
     @Test
     fun aSendToADeviceThatAlreadyDisconnectedGivesUpQuietly(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
-        probe.gattCallback.onMtuChanged(device, 247)
-        outbound.handleDeviceDisconnected(device)
+        connectAtMtu247()
+        // The disconnect ends the queue; its consumer then releases the device.
+        probe.gattCallback.onConnectionStateChange(
+            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
+        )
+        GattServerProbe.awaitUntil("the device to be released") {
+            probe.connectedDevice == null && outbound.notificationReady[device.address] == null
+        }
 
         outbound.sendResponse(device, ByteArray(64) { 0x42 })
 
@@ -146,8 +164,7 @@ class GattServerSendTeardownTest {
      */
     @Test
     fun aSendWaitsForASubscriptionThatArrivesLate(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
-        probe.gattCallback.onMtuChanged(device, 247)
+        connectAtMtu247()
 
         val send = async(Dispatchers.IO) { outbound.sendResponse(device, ByteArray(64) { 0x43 }) }
         delay(50)
@@ -166,26 +183,47 @@ class GattServerSendTeardownTest {
     /**
      * A `stop()` landing on a send in progress must end it, not fail it.
      *
-     * The handle the fragments go out on is captured once, so a teardown can no
-     * longer swap it midway and split a message across two of them — that part
-     * has no expression from outside the server, since it needs a peer to
-     * observe. What is checkable here is the consequence: the send terminates
-     * and nothing is thrown into the coroutine that was doing it.
+     * Without a peer the stack refuses the first notification, and the send
+     * would end before any teardown could reach it. So the open handle is
+     * replaced by [AcceptingServerHandle], which takes notifications until it
+     * is closed, as an open server does for a subscribed peer. Its first
+     * fragment is held until `stop()` has run, so the stop lands with every
+     * later fragment still pending; the send must then end at the closed
+     * handle rather than run the rest of the message into it.
      */
     @Test
     fun aStopBetweenFragmentsEndsTheSendWithoutThrowing(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
-        probe.gattCallback.onMtuChanged(device, 247)
+        assumeTrue(
+            "mocking the final server handle needs API 28",
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+        )
+        connectAtMtu247()
         writeCccd()
+        val handle = AcceptingServerHandle(probe.gattServerHandle!!, probe.responseCharacteristic!!)
+        probe.gattServerHandle = handle.server
 
         // Long enough to reach the paced branch, so the stop lands mid-message.
         val response = ByteArray(8192) { (it % 251).toByte() }
+        val fragments = Fragmenter(247 - 3 - FragmentReassembler.HEADER_SIZE).fragment(response).size
         val send = launch(Dispatchers.IO) { outbound.sendResponse(device, response) }
-        delay(20)
+
+        assertTrue(
+            "the first fragment never reached the stack",
+            handle.firstFragment.await(5, TimeUnit.SECONDS)
+        )
+        assertTrue("the send must still be running when stop lands", send.isActive)
         probe.server.stop()
+        handle.stopped.countDown()
 
         send.join()
 
+        val accepted = handle.accepted.get()
+        assertTrue("stop must land after a fragment was sent", accepted >= 1)
+        assertTrue(
+            "stop must end the send before its last fragment ($accepted of $fragments sent)",
+            accepted < fragments
+        )
+        assertTrue("the send must have tried the closed handle", handle.refused.get() >= 1)
         assertFalse(probe.server.isRunning())
     }
 
@@ -193,7 +231,21 @@ class GattServerSendTeardownTest {
     // Helpers
     // -----------------------------------------------------------------
 
-    /** Writes the CCCD the way a desktop does before it expects any reply. */
+    /**
+     * Connects [device] through the callback on the started server and
+     * negotiates an MTU large enough to carry a fragment, awaited because the
+     * change is queued behind the connect.
+     */
+    private fun connectAtMtu247() {
+        probe.connectThroughTheCallback(device)
+        probe.gattCallback.onMtuChanged(device, 247)
+        probe.awaitMtu(device, 247)
+    }
+
+    /**
+     * Writes the CCCD the way a desktop does before it expects any reply. On a
+     * connection [connectAtMtu247] opened, the write is recorded as it is made.
+     */
     private fun writeCccd() {
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1,
@@ -209,5 +261,70 @@ class GattServerSendTeardownTest {
 
     private companion object {
         const val DEVICE_ADDRESS = "AA:BB:CC:DD:EE:F7"
+    }
+}
+
+/**
+ * A server handle that accepts response notifications until it is closed, the
+ * way an open server does for a subscribed peer, and refuses them after.
+ *
+ * The first accepted fragment opens [firstFragment] and, when
+ * [holdFirstFragment], is then held until [stopped] opens, so a test can tear
+ * the server down while the rest of the message is still to be sent. Every
+ * accepted response fragment is kept in [frames], in order. Closing it closes
+ * [real], the handle the server opened, so nothing outlives the test.
+ */
+internal class AcceptingServerHandle(
+    private val real: BluetoothGattServer,
+    private val response: BluetoothGattCharacteristic,
+    private val holdFirstFragment: Boolean = true
+) {
+    val firstFragment = CountDownLatch(1)
+    val stopped = CountDownLatch(1)
+    val accepted = AtomicInteger()
+    val refused = AtomicInteger()
+    val frames = CopyOnWriteArrayList<ByteArray>()
+
+    @Volatile
+    private var closed = false
+
+    val server: BluetoothGattServer = mockk(relaxed = true)
+
+    init {
+        every { server.close() } answers {
+            closed = true
+            real.close()
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            every { server.notifyCharacteristicChanged(any(), any(), any(), any()) } answers {
+                if (notify(secondArg(), arg(3))) {
+                    BluetoothStatusCodes.SUCCESS
+                } else {
+                    BluetoothStatusCodes.ERROR_PROFILE_SERVICE_NOT_BOUND
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            every { server.notifyCharacteristicChanged(any(), any(), any()) } answers {
+                val characteristic = secondArg<BluetoothGattCharacteristic>()
+                @Suppress("DEPRECATION")
+                notify(characteristic, characteristic.value)
+            }
+        }
+    }
+
+    /** Whether the stack takes a notification of [value] on [characteristic]. */
+    private fun notify(characteristic: BluetoothGattCharacteristic, value: ByteArray): Boolean {
+        if (characteristic.uuid != response.uuid) return !closed
+        if (closed) {
+            refused.incrementAndGet()
+            return false
+        }
+        frames += value.copyOf()
+        if (accepted.incrementAndGet() == 1) {
+            firstFragment.countDown()
+            if (holdFirstFragment) stopped.await(5, TimeUnit.SECONDS)
+        }
+        return true
     }
 }

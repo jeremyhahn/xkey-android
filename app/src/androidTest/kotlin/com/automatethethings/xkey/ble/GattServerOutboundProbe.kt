@@ -165,8 +165,15 @@ class GattServerOutboundProbe(val server: GattServer) {
     // The inbound seams this probe's suites also need
     // -----------------------------------------------------------------
 
+    /**
+     * Adopts [device] directly, on a fresh link with no CCCD write, outside
+     * any event queue. Only for a test that then calls the server's methods
+     * directly: the callbacks find no open queue for the device and drop or
+     * refuse what it sends, so a test that drives the callback connects with
+     * [GattServerProbe.connectThroughTheCallback] instead.
+     */
     suspend fun handleDeviceConnected(device: BluetoothDevice) {
-        callSuspend(handleConnectedMethod, device)
+        callSuspend(handleConnectedMethod, device, linkConstructor.newInstance())
     }
 
     suspend fun handleDeviceDisconnected(device: BluetoothDevice) {
@@ -253,8 +260,14 @@ class GattServerOutboundProbe(val server: GattServer) {
             String::class.java,
             EnrollmentRefusal::class.java
         )
+        private val linkClass: Class<*> = try {
+            Class.forName("${GattServer::class.java.name}\$Link")
+        } catch (e: ClassNotFoundException) {
+            throw AssertionError("GattServer.Link is a seam these BLE tests drive", e)
+        }
+        private val linkConstructor = linkClass.getDeclaredConstructor().apply { isAccessible = true }
         private val handleConnectedMethod = declaredMethod(
-            "handleDeviceConnected", BluetoothDevice::class.java, Continuation::class.java
+            "handleDeviceConnected", BluetoothDevice::class.java, linkClass, Continuation::class.java
         )
         private val handleDisconnectedMethod = declaredMethod(
             "handleDeviceDisconnected", BluetoothDevice::class.java, Continuation::class.java

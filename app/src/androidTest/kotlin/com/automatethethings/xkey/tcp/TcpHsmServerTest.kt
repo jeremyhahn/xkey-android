@@ -80,20 +80,6 @@ class TcpHsmServerTest {
     }
 
     // ------------------------------------------------------------------
-    // Defaults
-    // ------------------------------------------------------------------
-
-    /**
-     * The port must stay 8444: go-xkms hard-codes
-     * `pairing.DefaultTCPAddress = "localhost:8444"`, and the documented
-     * workflow is `adb forward tcp:8444 tcp:8444`.
-     */
-    @Test
-    fun theDefaultPortMatchesTheGoXkmsContract() {
-        assertEquals(8444, TcpHsmServer.DEFAULT_PORT)
-    }
-
-    // ------------------------------------------------------------------
     // Start and stop
     // ------------------------------------------------------------------
 

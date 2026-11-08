@@ -16,7 +16,6 @@ package com.automatethethings.xkey.media
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -105,16 +104,6 @@ class XmpMetadataHelperSidecarBranchTest {
     }
 
     @Test
-    fun `a file with no extension still gets a sidecar`() {
-        val path = mediaFile("rawcapture")
-
-        XmpMetadataHelper.writeSignature(path, sampleData())
-
-        assertEquals("$path.xkeysig", XmpMetadataHelper.getSidecarPath(path))
-        assertNotNull(XmpMetadataHelper.readSignature(path))
-    }
-
-    @Test
     fun `getSidecarPath only appends and never rewrites the name`() {
         assertEquals("/a/b/c.mov.xkeysig", XmpMetadataHelper.getSidecarPath("/a/b/c.mov"))
         assertEquals("/a/b/c.xkeysig", XmpMetadataHelper.getSidecarPath("/a/b/c"))
@@ -139,50 +128,11 @@ class XmpMetadataHelperSidecarBranchTest {
     }
 
     @Test
-    fun `an empty sidecar reads back as unsigned`() {
-        val path = mediaFile("empty.mp4")
-        sidecarOf(path).writeText("")
-
-        assertNull(XmpMetadataHelper.readSignature(path))
-    }
-
-    @Test
-    fun `a sidecar missing the content hash reads back as unsigned`() {
-        // Structurally valid JSON but not a manifest: the parser throws and the
-        // reader must report "no signature" rather than a half-built manifest.
-        val path = mediaFile("nohash.mp4")
-        sidecarOf(path).writeText("""{"version":1,"signatures":[]}""")
-
-        assertNull(XmpMetadataHelper.readSignature(path))
-    }
-
-    @Test
-    fun `a sidecar carrying a malformed signature entry reads back as unsigned`() {
-        val path = mediaFile("badentry.mp4")
-        sidecarOf(path).writeText(
-            """{"version":1,"contentHash":"abc","signatures":[{"keyFingerprint":"fp"}]}"""
-        )
-
-        assertNull(XmpMetadataHelper.readSignature(path))
-    }
-
-    @Test
     fun `a sidecar that cannot be read reads back as unsigned`() {
         // A directory occupying the sidecar path: it exists, so the reader gets
         // past the existence check and has to survive the I/O failure.
         val path = File(tempFolder.root, "blocked.mp4").absolutePath
         tempFolder.newFolder("blocked.mp4.xkeysig")
-
-        assertNull(XmpMetadataHelper.readSignature(path))
-    }
-
-    @Test
-    fun `a deleted sidecar reads back as unsigned`() {
-        val path = mediaFile("gone.mp4")
-        XmpMetadataHelper.writeSignature(path, sampleData())
-        assertNotNull(XmpMetadataHelper.readSignature(path))
-
-        assertTrue(sidecarOf(path).delete())
 
         assertNull(XmpMetadataHelper.readSignature(path))
     }

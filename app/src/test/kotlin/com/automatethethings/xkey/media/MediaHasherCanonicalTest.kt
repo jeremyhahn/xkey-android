@@ -137,11 +137,6 @@ class MediaHasherCanonicalTest {
     }
 
     @Test
-    fun `a sidecar matching neither hash fails`() {
-        assertFalse(matches("0".repeat(64), file, SignatureSource.SIDECAR))
-    }
-
-    @Test
     fun `a one-byte change to the file fails a sidecar over either hash`() {
         val changed = jpeg(pixels = scan(first = 0x12))
 

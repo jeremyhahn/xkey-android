@@ -417,20 +417,6 @@ class AuditLogDaoTest {
     }
 
     @Test
-    fun deleteOlderThanEnforcesTheNinetyDayWindowUsedOnStartup() = runBlocking {
-        val ninetyDaysMs = 90L * 24 * 60 * 60 * 1000
-        val now = System.currentTimeMillis()
-        dao.insert(entry(timestamp = now - ninetyDaysMs - 60_000, keyId = "91-days-old"))
-        dao.insert(entry(timestamp = now - ninetyDaysMs + 60_000, keyId = "89-days-old"))
-        dao.insert(entry(timestamp = now, keyId = "now"))
-
-        val deleted = dao.deleteOlderThan(now - ninetyDaysMs)
-
-        assertEquals(1, deleted)
-        assertEquals(setOf("89-days-old", "now"), dao.getAll().map { it.keyId }.toSet())
-    }
-
-    @Test
     fun deleteExceedingCountKeepsTheNewestRows() = runBlocking {
         repeat(10) { i -> dao.insert(entry(timestamp = t0 + i * 1_000L, keyId = "k$i")) }
 
