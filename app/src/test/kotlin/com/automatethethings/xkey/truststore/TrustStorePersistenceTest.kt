@@ -82,6 +82,49 @@ class TrustStorePersistenceTest {
     )
 
     // -------------------------------------------------------------------------
+    // Escaping
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `labels and a source URL with JSON delimiters survive a reload`() = runTest {
+        // The metadata reader splits objects on braces, so a closing brace inside a
+        // value is the worst case for it; quotes, backslashes and control characters
+        // must be escaped rather than dropped. Every entry must come back exactly.
+        val labels = mapOf(
+            TestCertificates.LEAF_A_PEM to """Corp "Root" CA \ archive\path""",
+            TestCertificates.LEAF_B_PEM to "corp}team",
+            TestCertificates.LEAF_C_PEM to "line one\nline two\tcolumn\rreturn {\"über\"} 日本\\"
+        )
+        labels.forEach { (pem, label) ->
+            repository.importCertificate(TestCertificates.der(pem), label)
+        }
+        val url = """https://ca.example.com/"odd"/path"""
+        coEvery { caFetcher.fetchBundle(url) } returns bundleOf(TestCertificates.LEAF_D_PEM)
+        repository.importFromURL(url)
+        val before = repository.getAllCertificates().sortedBy { it.fingerprint }
+
+        val store = reloaded()
+        val after = store.getAllCertificates().sortedBy { it.fingerprint }
+
+        assertEquals(4, after.size)
+        assertEquals(before, after)
+        labels.forEach { (pem, label) ->
+            val fingerprint = TestCertificates.fingerprint(pem)
+            assertEquals(label, after.single { it.fingerprint == fingerprint }.label)
+            assertTrue(store.hasCertificate(fingerprint))
+        }
+        val leafA = after.single {
+            it.fingerprint == TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        }
+        assertTrue(leafA.subjectDN.startsWith(TestCertificates.LEAF_A_CN))
+        assertEquals(TestCertificates.LONG_LIVED_NOT_AFTER_MILLIS, leafA.notAfter)
+        assertEquals("manual", leafA.source)
+        val fromUrl = TestCertificates.fingerprint(TestCertificates.LEAF_D_PEM)
+        assertEquals("url:$url", after.single { it.fingerprint == fromUrl }.source)
+        assertTrue(store.hasCertificate(fromUrl))
+    }
+
+    // -------------------------------------------------------------------------
     // Full-file rewrites
     // -------------------------------------------------------------------------
 
