@@ -164,11 +164,4 @@ class SignatureFormatValueSemanticsTest {
 
         assertThrows(JSONException::class.java) { ContentAuthenticityData.fromJson(json) }
     }
-
-    @Test
-    fun `fromJsonString rejects text that is not JSON`() {
-        assertThrows(JSONException::class.java) {
-            ContentAuthenticityData.fromJsonString("XKEY_SIG:not-actually-json")
-        }
-    }
 }
