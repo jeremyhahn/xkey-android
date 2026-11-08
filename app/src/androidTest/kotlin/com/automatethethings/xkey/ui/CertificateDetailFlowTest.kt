@@ -179,7 +179,7 @@ class CertificateDetailFlowTest {
             certificate(
                 "SAN Cert",
                 dnsNames = listOf("xkey.example.test", "alt.example.test"),
-                ipAddresses = listOf("10.20.30.40"),
+                ipAddresses = listOf("203.0.113.40"),
                 emailAddresses = listOf("ops@example.test")
             )
         )
@@ -194,7 +194,7 @@ class CertificateDetailFlowTest {
         assertValueForLabel(
             scenario,
             string(R.string.cert_detail_ip_addresses),
-            "10.20.30.40"
+            "203.0.113.40"
         )
         assertValueForLabel(
             scenario,
