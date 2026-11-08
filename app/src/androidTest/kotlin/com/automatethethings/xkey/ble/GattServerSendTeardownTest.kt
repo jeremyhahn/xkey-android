@@ -18,8 +18,10 @@ package com.automatethethings.xkey.ble
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -114,8 +116,7 @@ class GattServerSendTeardownTest {
      */
     @Test
     fun aSendWhoseSubscriptionWaitIsCancelledGivesUpQuietly(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
-        probe.gattCallback.onMtuChanged(device, 247)
+        connectAtMtu247()
         // Subscribed, so nothing but the cancellation can decide this.
         outbound.notificationEnabled[device.address] = true
         outbound.notificationReady[device.address]!!.cancel()
@@ -130,9 +131,14 @@ class GattServerSendTeardownTest {
     /** A device that disconnected has no deferred at all; that is not an error. */
     @Test
     fun aSendToADeviceThatAlreadyDisconnectedGivesUpQuietly(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
-        probe.gattCallback.onMtuChanged(device, 247)
-        outbound.handleDeviceDisconnected(device)
+        connectAtMtu247()
+        // The disconnect ends the queue; its consumer then releases the device.
+        probe.gattCallback.onConnectionStateChange(
+            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
+        )
+        GattServerProbe.awaitUntil("the device to be released") {
+            probe.connectedDevice == null && outbound.notificationReady[device.address] == null
+        }
 
         outbound.sendResponse(device, ByteArray(64) { 0x42 })
 
@@ -146,8 +152,7 @@ class GattServerSendTeardownTest {
      */
     @Test
     fun aSendWaitsForASubscriptionThatArrivesLate(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
-        probe.gattCallback.onMtuChanged(device, 247)
+        connectAtMtu247()
 
         val send = async(Dispatchers.IO) { outbound.sendResponse(device, ByteArray(64) { 0x43 }) }
         delay(50)
@@ -174,8 +179,7 @@ class GattServerSendTeardownTest {
      */
     @Test
     fun aStopBetweenFragmentsEndsTheSendWithoutThrowing(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
-        probe.gattCallback.onMtuChanged(device, 247)
+        connectAtMtu247()
         writeCccd()
 
         // Long enough to reach the paced branch, so the stop lands mid-message.
@@ -193,7 +197,21 @@ class GattServerSendTeardownTest {
     // Helpers
     // -----------------------------------------------------------------
 
-    /** Writes the CCCD the way a desktop does before it expects any reply. */
+    /**
+     * Connects [device] through the callback on the started server and
+     * negotiates an MTU large enough to carry a fragment, awaited because the
+     * change is queued behind the connect.
+     */
+    private fun connectAtMtu247() {
+        probe.connectThroughTheCallback(device)
+        probe.gattCallback.onMtuChanged(device, 247)
+        probe.awaitMtu(device, 247)
+    }
+
+    /**
+     * Writes the CCCD the way a desktop does before it expects any reply. On a
+     * connection [connectAtMtu247] opened, the write is recorded as it is made.
+     */
     private fun writeCccd() {
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1,

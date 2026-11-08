@@ -277,7 +277,7 @@ class GattServerRadioTest {
      */
     @Test
     fun anOutboundMessageIsEncryptedAndLeavesTheSessionUsable(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
+        probe.connectThroughTheCallback(device)
         val initiator = probe.establishSession(device)
         subscribe(mtu = 247)
 
@@ -312,7 +312,7 @@ class GattServerRadioTest {
      */
     @Test
     fun aPairedRequestIsAnsweredOverTheRadio(): Unit = runBlocking {
-        outbound.handleDeviceConnected(device)
+        probe.connectThroughTheCallback(device)
         val initiator = probe.establishSession(device)
         subscribe(mtu = 247)
         adoptPairing()
@@ -339,14 +339,23 @@ class GattServerRadioTest {
     private fun payloadBudgetFor(mtu: Int) =
         minOf(mtu - 3, 512) - FragmentReassembler.HEADER_SIZE
 
-    private suspend fun connectAndSubscribe(mtu: Int? = null) {
-        outbound.handleDeviceConnected(device)
+    private fun connectAndSubscribe(mtu: Int? = null) {
+        probe.connectThroughTheCallback(device)
         subscribe(mtu)
     }
 
-    /** Writes the CCCD the way a desktop does before it expects any reply. */
+    /**
+     * Negotiates [mtu], when given, and writes the CCCD the way a desktop does
+     * before it expects any reply. [device] must have been connected with
+     * [GattServerProbe.connectThroughTheCallback]: the MTU change is queued
+     * behind the connect and awaited, and the CCCD write is recorded on the
+     * published link as it is made.
+     */
     private fun subscribe(mtu: Int? = null) {
-        if (mtu != null) probe.gattCallback.onMtuChanged(device, mtu)
+        if (mtu != null) {
+            probe.gattCallback.onMtuChanged(device, mtu)
+            probe.awaitMtu(device, mtu)
+        }
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1,
             BluetoothGattDescriptor(

@@ -468,37 +468,10 @@ class GattServerCallbackTest {
         assumeTrue("the local stack would not open a GATT server", probe.server.start())
     }
 
-    /**
-     * Connects [device] the way the stack does, on a started server: the
-     * connect callback begins the device's event queue with the connect at its
-     * head, and every later callback is queued behind it or recorded on its
-     * link. A callback from a device without an open queue is dropped.
-     *
-     * Returns once the queue has handled the connect, so the device is adopted
-     * and its link published: from then on a CCCD write shows in
-     * [GattServerProbe.notificationEnabled] as it is made, and a queued event
-     * is awaited with [awaitEarlierEventsHandled] or [awaitMtu].
-     */
-    private fun connectThroughTheCallback() {
-        startTheServer()
-        probe.gattCallback.onConnectionStateChange(
-            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
-        )
-        GattServerProbe.awaitUntil("the device to be adopted") {
-            probe.server.connectionState.value == ConnectionState.Connecting
-        }
-    }
+    /** Connects [device]; see [GattServerProbe.connectThroughTheCallback]. */
+    private fun connectThroughTheCallback() = probe.connectThroughTheCallback(device)
 
-    /**
-     * Returns once the device's event queue has applied an MTU change to
-     * [expected]. The connect records the default MTU, so a test that awaits
-     * the default awaits it after another value.
-     */
-    private fun awaitMtu(expected: Int, why: String) {
-        GattServerProbe.awaitUntil("the MTU to become $expected: $why") {
-            probe.deviceMtu[device.address] == expected
-        }
-    }
+    private fun awaitMtu(expected: Int, why: String) = probe.awaitMtu(device, expected, why)
 
     /**
      * Returns once the device's event queue has handled everything queued
