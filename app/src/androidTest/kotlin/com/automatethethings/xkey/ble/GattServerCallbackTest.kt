@@ -337,7 +337,7 @@ class GattServerCallbackTest {
             Fragmenter().fragment("hello".toByteArray()).first()
         )
 
-        Thread.sleep(200)
+        awaitEarlierEventsHandled()
         assertFalse(
             "a write outside the control point must never be treated as protocol data",
             probe.identityExchangeComplete
@@ -355,7 +355,7 @@ class GattServerCallbackTest {
             device, 2, characteristic(GattServer.CONTROL_POINT_UUID), false, false, 0, null
         )
 
-        Thread.sleep(200)
+        awaitEarlierEventsHandled()
         assertFalse(probe.identityExchangeComplete)
         assertEquals(0, probe.fragmentBuffer.getValue(device.address).getFragmentCount())
     }
@@ -518,6 +518,18 @@ class GattServerCallbackTest {
         BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
     )
 
+    /**
+     * Returns once the device's event queue has handled everything queued
+     * before this call: an MTU change queued behind it is applied in turn, so
+     * a write that was wrongly queued has been processed by the time it shows.
+     */
+    private fun awaitEarlierEventsHandled() {
+        probe.gattCallback.onMtuChanged(device, BARRIER_MTU)
+        GattServerProbe.awaitUntil("the queue to reach the MTU change") {
+            probe.deviceMtu[device.address] == BARRIER_MTU
+        }
+    }
+
     private fun characteristic(uuid: UUID) = BluetoothGattCharacteristic(
         uuid,
         BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_READ,
@@ -525,4 +537,9 @@ class GattServerCallbackTest {
     )
 
     private fun randomKey() = ByteArray(32).also { SecureRandom().nextBytes(it) }
+
+    private companion object {
+        /** Any in-range MTU other than the default the connect records. */
+        const val BARRIER_MTU = 247
+    }
 }
