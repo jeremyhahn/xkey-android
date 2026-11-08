@@ -155,7 +155,7 @@ class PasswordAdapterDiffTest {
     @Test
     fun contentsCoverEverythingTheRowRenders() {
         val callback = PasswordAdapter.PasswordDiffCallback()
-        val original = record("a", title = "GitHub", username = "jhahn", url = "github.com")
+        val original = record("a", title = "GitHub", username = "user-01", url = "github.com")
 
         assertTrue(callback.areContentsTheSame(original, original.copy()))
         assertFalse(callback.areContentsTheSame(original, original.copy(title = "GitLab")))
