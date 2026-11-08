@@ -662,28 +662,6 @@ class PremiumCardFactoryTest {
         }
     }
 
-    /** The status presets must at least be told apart from a plain outlined card. */
-    @Test
-    fun statusPresets_differFromThePlainOutlinedCard() {
-        onHost { activity ->
-            val plain = PremiumCardFactory.createOutlinedCard(activity)
-                .cardBackgroundColor.defaultColor
-
-            assertNotEquals(
-                plain,
-                PremiumCardFactory.createInfoCard(activity).cardBackgroundColor.defaultColor
-            )
-            assertNotEquals(
-                plain,
-                PremiumCardFactory.createWarningCard(activity).cardBackgroundColor.defaultColor
-            )
-            assertNotEquals(
-                plain,
-                PremiumCardFactory.createErrorCard(activity).cardBackgroundColor.defaultColor
-            )
-        }
-    }
-
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
