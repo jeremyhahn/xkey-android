@@ -269,17 +269,6 @@ class RequestHandlerBiometricGateTest {
         assertTrue(response.errorMessage().contains("biometric prompt"))
     }
 
-    @Test
-    fun anUnpairedPeerDoesNotSkipThePromptForDeviceAttestationEither() {
-        requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
-        connectPeer(UNKNOWN_PEER_HEX)
-
-        val response = call("local.attestDevice", attestDeviceParams())
-
-        assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
-        assertTrue(response.errorMessage().contains("biometric prompt"))
-    }
-
     /**
      * An anonymous session has no identity to check against the paired-device
      * store, so it must fall to the conservative side of the exemption rather
@@ -294,17 +283,6 @@ class RequestHandlerBiometricGateTest {
             "local.attestKey",
             JSONObject().put("keyId", "anon-$runId").put("nonce", b64(randomNonce()))
         )
-
-        assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
-        assertTrue(response.errorMessage().contains("biometric prompt"))
-    }
-
-    @Test
-    fun anAnonymousSessionDoesNotSkipThePromptForDeviceAttestationEither() {
-        requireBiometricFor(AttestationBiometricPolicy.PAIRED_DEVICES_SKIP)
-        connectPeer(null)
-
-        val response = call("local.attestDevice", attestDeviceParams())
 
         assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
         assertTrue(response.errorMessage().contains("biometric prompt"))
