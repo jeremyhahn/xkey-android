@@ -219,14 +219,16 @@ class GattServerCallbackTest {
      */
     @Test
     fun theNegotiatedMtuIsClampedToTheSupportedRange() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onMtuChanged(device, 247)
-        assertEquals(247, probe.deviceMtu[device.address])
+        awaitMtu(247, "within the supported range")
 
         probe.gattCallback.onMtuChanged(device, 3)
-        assertEquals("below the BLE minimum", 23, probe.deviceMtu[device.address])
+        awaitMtu(23, "below the BLE minimum")
 
         probe.gattCallback.onMtuChanged(device, 4096)
-        assertEquals("above the supported maximum", 517, probe.deviceMtu[device.address])
+        awaitMtu(517, "above the supported maximum")
     }
 
     // -----------------------------------------------------------------
@@ -239,6 +241,7 @@ class GattServerCallbackTest {
      */
     @Test
     fun subscribingToNotificationsIsRecordedPerDevice() {
+        connectThroughTheCallback()
         val cccd = cccdDescriptor()
 
         probe.gattCallback.onDescriptorWriteRequest(
@@ -257,6 +260,8 @@ class GattServerCallbackTest {
     /** Indications count as a subscription too. */
     @Test
     fun subscribingWithIndicationsAlsoCounts() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1, cccdDescriptor(), false, true, 0,
             BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
@@ -267,6 +272,8 @@ class GattServerCallbackTest {
 
     @Test
     fun aWriteToAnotherDescriptorIsIgnored() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1,
             BluetoothGattDescriptor(UUID.randomUUID(), BluetoothGattDescriptor.PERMISSION_WRITE),
@@ -279,6 +286,8 @@ class GattServerCallbackTest {
 
     @Test
     fun aDescriptorWriteWithNoValueIsIgnored() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1, cccdDescriptor(), false, true, 0, null
         )
@@ -286,9 +295,10 @@ class GattServerCallbackTest {
         assertNull(probe.notificationEnabled[device.address])
     }
 
-    /** Reads are answered from the subscription state without an open server. */
+    /** Reads on an open connection are answered from its subscription state. */
     @Test
     fun descriptorReadsAreServedForBothSubscriptionStates() {
+        connectThroughTheCallback()
         val cccd = cccdDescriptor()
 
         probe.gattCallback.onDescriptorReadRequest(device, 1, 0, cccd)
@@ -313,15 +323,17 @@ class GattServerCallbackTest {
     /** Reads are served for the two readable characteristics and refused elsewhere. */
     @Test
     fun characteristicReadsAreRoutedByUuid() {
-        probe.connectionState = ConnectionState.Connecting
+        // The connect leaves the connection Connecting; a read outside an open
+        // connection is refused before it is routed.
+        connectThroughTheCallback()
 
         probe.gattCallback.onCharacteristicReadRequest(device, 1, 0, characteristic(GattServer.STATUS_UUID))
         probe.gattCallback.onCharacteristicReadRequest(device, 2, 1, characteristic(GattServer.STATUS_UUID))
         probe.gattCallback.onCharacteristicReadRequest(device, 3, 0, characteristic(GattServer.RESPONSE_UUID))
         probe.gattCallback.onCharacteristicReadRequest(device, 4, 0, characteristic(UUID.randomUUID()))
 
-        // Nothing is written back without an open server; what matters is that
-        // the status value is derived from live state and no branch throws.
+        // The responses go to a device the stack never connected; what matters
+        // is that the status value is derived from live state and no branch throws.
         assertArrayEquals(byteArrayOf(0x01), probe.statusValue())
     }
 
@@ -363,8 +375,8 @@ class GattServerCallbackTest {
      * protocol. This is the only route a desktop has into the phone.
      */
     @Test
-    fun aControlPointWriteIsReassembledAndProcessed(): Unit = runBlocking {
-        probe.handleDeviceConnected(device)
+    fun aControlPointWriteIsReassembledAndProcessed() {
+        connectThroughTheCallback()
 
         val identity = NoiseInitiatorSession(randomKey()).createIdentityMessage()
         for (fragment in Fragmenter(20).fragment(identity)) {
@@ -382,6 +394,8 @@ class GattServerCallbackTest {
     /** Delivery confirmations are pure telemetry and must never throw. */
     @Test
     fun notificationConfirmationsAreHarmless() {
+        connectThroughTheCallback()
+
         probe.gattCallback.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
         probe.gattCallback.onNotificationSent(device, BluetoothGatt.GATT_FAILURE)
     }
@@ -398,13 +412,8 @@ class GattServerCallbackTest {
      */
     @Test
     fun connectAndDisconnectAreDrivenFromTheStackCallback() {
-        probe.gattCallback.onConnectionStateChange(
-            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
-        )
+        connectThroughTheCallback()
 
-        GattServerProbe.awaitUntil("the device to be adopted") {
-            probe.server.connectionState.value == ConnectionState.Connecting
-        }
         assertSame(device, probe.connectedDevice)
         assertNotNull("a Noise session is prepared up front", probe.noiseSession)
 
@@ -421,9 +430,15 @@ class GattServerCallbackTest {
         assertTrue(probe.deviceMtu.isEmpty())
     }
 
-    /** Intermediate states carry no bookkeeping. */
+    /**
+     * Intermediate states carry no bookkeeping. On a started server only a
+     * connect begins a queue, and it does so inside the callback, so a queue
+     * begun by either state would be there when the callback returns.
+     */
     @Test
     fun connectingAndDisconnectingStatesAreIgnored() {
+        startTheServer()
+
         probe.gattCallback.onConnectionStateChange(
             device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTING
         )
@@ -431,7 +446,7 @@ class GattServerCallbackTest {
             device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTING
         )
 
-        Thread.sleep(200)
+        assertFalse("no state but a connect begins a queue", probe.hasEventQueue(device))
         assertNull(probe.connectedDevice)
     }
 
@@ -445,16 +460,44 @@ class GattServerCallbackTest {
     )
 
     /**
-     * Connects [device] the way the stack does. Only a connect callback on a
-     * started server begins a device's event queue, with the connect at its
-     * head; a write or MTU change on a device without one is dropped. Skips
+     * Starts the server, as every callback-driven test does: the connect
+     * callback begins a device's event queue only on a started server. Skips
      * the test where the local stack will not open a GATT server.
      */
-    private fun connectThroughTheCallback() {
+    private fun startTheServer() {
         assumeTrue("the local stack would not open a GATT server", probe.server.start())
+    }
+
+    /**
+     * Connects [device] the way the stack does, on a started server: the
+     * connect callback begins the device's event queue with the connect at its
+     * head, and every later callback is queued behind it or recorded on its
+     * link. A callback from a device without an open queue is dropped.
+     *
+     * Returns once the queue has handled the connect, so the device is adopted
+     * and its link published: from then on a CCCD write shows in
+     * [GattServerProbe.notificationEnabled] as it is made, and a queued event
+     * is awaited with [awaitEarlierEventsHandled] or [awaitMtu].
+     */
+    private fun connectThroughTheCallback() {
+        startTheServer()
         probe.gattCallback.onConnectionStateChange(
             device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
         )
+        GattServerProbe.awaitUntil("the device to be adopted") {
+            probe.server.connectionState.value == ConnectionState.Connecting
+        }
+    }
+
+    /**
+     * Returns once the device's event queue has applied an MTU change to
+     * [expected]. The connect records the default MTU, so a test that awaits
+     * the default awaits it after another value.
+     */
+    private fun awaitMtu(expected: Int, why: String) {
+        GattServerProbe.awaitUntil("the MTU to become $expected: $why") {
+            probe.deviceMtu[device.address] == expected
+        }
     }
 
     /**

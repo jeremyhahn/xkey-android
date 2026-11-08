@@ -181,9 +181,10 @@ class GattServerProbe(
 
     /**
      * Adopts [device] directly, on a fresh link with no CCCD write, outside
-     * any event queue. The callbacks still find no open queue for it and drop
-     * what it sends; a test that drives them connects through
-     * `onConnectionStateChange` on a started server instead.
+     * any event queue. Only for a test that then calls the server's methods
+     * directly: the callbacks find no open queue for the device and drop or
+     * refuse what it sends, so a test that drives [gattCallback] connects
+     * through `onConnectionStateChange` on a started server instead.
      */
     suspend fun handleDeviceConnected(device: BluetoothDevice) {
         callSuspend(handleConnectedMethod, device, linkConstructor.newInstance())
@@ -192,6 +193,15 @@ class GattServerProbe(
     suspend fun handleDeviceDisconnected(device: BluetoothDevice) {
         callSuspend(handleDisconnectedMethod, device)
     }
+
+    /**
+     * Whether the server holds an event queue for [device]: one a connect
+     * callback began and whose consumer has not yet finished.
+     */
+    fun hasEventQueue(device: BluetoothDevice): Boolean =
+        synchronized(read("eventQueuesLock")!!) {
+            (read("eventQueues") as Map<*, *>).containsKey(device.address)
+        }
 
     suspend fun processIncomingData(device: BluetoothDevice, data: ByteArray) {
         callSuspend(processIncomingMethod, device, data)
