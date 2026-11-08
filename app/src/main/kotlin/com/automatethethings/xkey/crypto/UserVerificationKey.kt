@@ -33,7 +33,7 @@ import java.security.spec.ECGenParameterSpec
 
 /**
  * This device's **User Verification Key** — the key a `local.verifyUser`
- * answer is signed with (go-xkms#1712, owner ruling 167).
+ * answer is signed with (the desktop's `local.verifyUser` contract).
  *
  * The [DeviceAttestationKey] says *which handset* is answering and never
  * prompts, so an unattended reconnect stays possible. The UVK says *a person

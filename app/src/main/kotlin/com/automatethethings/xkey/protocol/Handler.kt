@@ -233,7 +233,7 @@ class RequestHandler(
     private val deviceAttestationKey by lazy { DeviceAttestationKey() }
 
     /**
-     * The key `local.verifyUser` signs with, never the DAK (ruling 167). Lazy
+     * The key `local.verifyUser` signs with, never the DAK. Lazy
      * for the same reason as [deviceAttestationKey].
      */
     private val uvk: UserVerificationKey by lazy {
@@ -2258,7 +2258,7 @@ class RequestHandler(
 
     /**
      * Handles `local.verifyUser` — on-demand user verification for a paired
-     * desktop (owner ruling 167, go-xkms#1712).
+     * desktop, as the desktop's pairing wire contract defines it.
      *
      * Signs `"xkey-attest-transcript-v1" || 0x0b || "verify-user" || nonce ||
      * channelBinding || SHA-256(UVK SPKI)` with the [UserVerificationKey], which

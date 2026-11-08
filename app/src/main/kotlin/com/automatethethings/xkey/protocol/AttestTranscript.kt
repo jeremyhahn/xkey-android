@@ -59,7 +59,7 @@ object AttestTranscript {
     const val PURPOSE_REATTEST = "reattest"
 
     /**
-     * On-demand user verification (`local.verifyUser`, owner ruling 167). Signed
+     * On-demand user verification (the desktop's `local.verifyUser`). Signed
      * by the User Verification Key, never by the DAK, and carries the UVK's own
      * fingerprint in the last field.
      */
