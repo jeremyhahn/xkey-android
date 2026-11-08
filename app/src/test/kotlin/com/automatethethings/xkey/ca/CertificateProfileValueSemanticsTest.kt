@@ -110,12 +110,12 @@ class CertificateProfileValueSemanticsTest {
 
         val withNames = base.copy(
             dnsNames = listOf("api.example.com"),
-            ipAddresses = listOf("10.0.0.7")
+            ipAddresses = listOf("192.0.2.7")
         )
 
         assertNotNull(withNames.san)
         assertEquals(listOf("api.example.com"), withNames.san!!.dnsNames)
-        assertEquals(listOf("10.0.0.7"), withNames.san!!.ipAddresses)
+        assertEquals(listOf("192.0.2.7"), withNames.san!!.ipAddresses)
         assertTrue(withNames.san!!.emailAddresses.isEmpty())
         // The original is untouched.
         assertNull(base.san)

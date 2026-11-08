@@ -30,7 +30,7 @@ import java.security.MessageDigest
  *
  * **A failure here is a wire break, never a test to update.** If the desktop
  * changes a byte, the fix is a coordinated change on both sides through
- * agent-company, not a new expected value in this file.
+ * the company account, not a new expected value in this file.
  */
 class AttestTranscriptTest {
 

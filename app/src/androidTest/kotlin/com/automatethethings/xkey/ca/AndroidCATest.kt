@@ -320,7 +320,7 @@ class AndroidCATest {
         val issued = issue(
             CertificateProfile.TLSServer(
                 dnsNames = listOf("api.example.com", "www.example.com"),
-                ipAddresses = listOf("10.0.0.7")
+                ipAddresses = listOf("192.0.2.7")
             ),
             subject = "CN=api.example.com"
         )
@@ -336,7 +336,7 @@ class AndroidCATest {
         val sans = cert.subjectAlternativeNames!!.map { it[0] as Int to it[1] as String }
         assertTrue(sans.contains(CaTestSupport.SAN_DNS to "api.example.com"))
         assertTrue(sans.contains(CaTestSupport.SAN_DNS to "www.example.com"))
-        assertTrue(sans.contains(CaTestSupport.SAN_IP to "10.0.0.7"))
+        assertTrue(sans.contains(CaTestSupport.SAN_IP to "192.0.2.7"))
 
         assertEquals(-1, cert.basicConstraints)
         assertTrue(cert.criticalExtensionOIDs.contains(CaTestSupport.OID_BASIC_CONSTRAINTS))
