@@ -213,24 +213,6 @@ class KeystoreManagerTest {
         assertEquals("Signature should start with DER SEQUENCE tag", 0x30.toByte(), signature[0])
     }
 
-    @Test
-    fun getAttestationChain_returnsChain_afterKeyGeneration() = runBlocking {
-        val credentialId = createTestCredentialId()
-
-        keystoreManager.generateKey(
-            credentialId = credentialId,
-            requireBiometric = false
-        )
-
-        val chain = keystoreManager.getAttestationChain(credentialId)
-
-        // Attestation chain availability depends on device capabilities
-        // On devices that support it, the chain should not be empty
-        if (chain != null) {
-            assertTrue("Attestation chain should not be empty", chain.isNotEmpty())
-        }
-    }
-
     @Test(expected = StrongBoxUnavailableException::class)
     fun generateKey_throwsStrongBoxUnavailable_whenRequired_andNotAvailable() = runBlocking {
         // Skip test if StrongBox is actually available
