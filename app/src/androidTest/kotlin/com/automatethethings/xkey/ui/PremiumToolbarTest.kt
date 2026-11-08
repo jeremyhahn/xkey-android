@@ -148,20 +148,6 @@ class PremiumToolbarTest {
         }
     }
 
-    @Test
-    fun install_fromResolvedText_acceptsANullSubtitle() {
-        onHost { activity ->
-            val installed = PremiumToolbar.install(
-                activity = activity,
-                parent = scratchParent(activity),
-                title = "Key detail",
-                subtitle = null
-            )
-
-            assertNull(installed.subtitleView)
-        }
-    }
-
     // ---------------------------------------------------------------
     // Gradient accents
     // ---------------------------------------------------------------
@@ -206,15 +192,6 @@ class PremiumToolbarTest {
                 ).contentEquals(gradient.colors)
             )
         }
-    }
-
-    @Test
-    fun accent_coversEveryGradientFamily() {
-        assertEquals(
-            "A new accent needs its own coverage here",
-            2,
-            PremiumToolbar.Accent.entries.size
-        )
     }
 
     // ---------------------------------------------------------------

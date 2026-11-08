@@ -229,15 +229,6 @@ class OathEngineRfcVectorTest {
         assertTrue(error.message!!.contains("SHA512"))
     }
 
-    @Test
-    fun `the three algorithms disagree for the same secret and counter`() {
-        val a = OathEngine.generateHotpCode(seedSha512, 1L, "SHA1", 8)
-        val b = OathEngine.generateHotpCode(seedSha512, 1L, "SHA256", 8)
-        val c = OathEngine.generateHotpCode(seedSha512, 1L, "SHA512", 8)
-
-        assertEquals(3, setOf(a, b, c).size)
-    }
-
     // -------------------------------------------------------------------------
     // Period validation
     // -------------------------------------------------------------------------

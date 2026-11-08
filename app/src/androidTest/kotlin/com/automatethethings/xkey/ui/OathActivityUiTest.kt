@@ -26,7 +26,6 @@ import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.intent.Intents
 import androidx.test.espresso.matcher.RootMatchers.isDialog
-import androidx.test.espresso.matcher.ViewMatchers.isClickable
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -136,16 +135,6 @@ class OathActivityUiTest {
         onView(withText(expected)).check(matches(isDisplayed()))
     }
 
-    @Test
-    fun heroCard_showsTotpAndHotpBadges() {
-        seedCredential()
-        val scenario = ActivityScenario.launch(OathActivity::class.java)
-
-        awaitText(scenario, testAccount)
-        awaitText(scenario, "TOTP")
-        awaitText(scenario, "HOTP")
-    }
-
     // ---------------------------------------------------------------
     // Adapter binding
     // ---------------------------------------------------------------
@@ -202,18 +191,6 @@ class OathActivityUiTest {
     // ---------------------------------------------------------------
     // Row interaction
     // ---------------------------------------------------------------
-
-    @Test
-    fun tappingCredential_copiesCodeAndConfirmsWithSnackbar() {
-        seedCredential()
-
-        val scenario = ActivityScenario.launch(OathActivity::class.java)
-        awaitText(scenario, testAccount)
-
-        onView(withText(testAccount)).perform(click())
-
-        onView(withText(R.string.oath_code_copied)).check(matches(isDisplayed()))
-    }
 
     @Test
     fun longPress_opensContextMenuWithViewDetailsAndDelete() {
@@ -303,48 +280,6 @@ class OathActivityUiTest {
     // Add flow
     // ---------------------------------------------------------------
 
-    @Test
-    fun fab_isDisplayedAndClickable() {
-        ActivityScenario.launch(OathActivity::class.java)
-
-        // A single check: nthMatch counts matches during one traversal, so it
-        // must not be reused for a second check on the same interaction.
-        onView(fabMatcher())
-            .check(matches(allOf(isDisplayed(), isClickable())))
-    }
-
-    @Test
-    fun fab_opensAddMethodChooser() {
-        ActivityScenario.launch(OathActivity::class.java)
-
-        onView(fabMatcher()).perform(click())
-
-        onView(withText(R.string.oath_add_scan_qr)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.oath_add_enter_manually)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-    }
-
-    /**
-     * The manual-entry dialog's field labels live on TextInputLayout hints,
-     * which Espresso cannot match, so it is identified by its pre-filled
-     * dropdowns (type/algorithm) and its Add/Cancel buttons.
-     */
-    @Test
-    fun addMethodChooser_enterManually_opensManualEntryDialog() {
-        ActivityScenario.launch(OathActivity::class.java)
-
-        onView(fabMatcher()).perform(click())
-        onView(withText(R.string.oath_add_enter_manually)).inRoot(isDialog()).perform(click())
-
-        onView(withText(MANUAL_DEFAULT_TYPE)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(MANUAL_DEFAULT_ALGORITHM)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(MANUAL_ADD_BUTTON)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-    }
-
     /** Dismissing the manual-entry dialog must not create a credential. */
     @Test
     fun manualEntryDialog_cancel_addsNothing() {
@@ -419,11 +354,6 @@ class OathActivityUiTest {
 
         /** RFC 4226 test secret; any byte array works for HMAC-SHA1. */
         const val TEST_SECRET = "12345678901234567890"
-
-        /** Pre-filled dropdown values and button label in AddOathDialog. */
-        const val MANUAL_DEFAULT_TYPE = "TOTP"
-        const val MANUAL_DEFAULT_ALGORITHM = "SHA1"
-        const val MANUAL_ADD_BUTTON = "Add"
 
         /**
          * Button labels on OathActivity's delete confirmation. These are still

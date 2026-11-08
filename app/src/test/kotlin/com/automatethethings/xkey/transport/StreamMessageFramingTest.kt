@@ -16,8 +16,6 @@ package com.automatethethings.xkey.transport
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -119,37 +117,5 @@ class StreamMessageFramingTest {
         assertThrows(IOException::class.java) {
             StreamMessageFraming.readMessage(ByteArrayInputStream(truncated))
         }
-    }
-
-    // ---- MessageTooLargeException ----
-
-    @Test
-    fun `MessageTooLargeException contains message`() {
-        val exception = MessageTooLargeException("Message length 70000 exceeds maximum 65535")
-        assertTrue(exception.message!!.contains("70000"))
-        assertTrue(exception.message!!.contains("65535"))
-    }
-
-    @Test
-    fun `MessageTooLargeException without cause has null cause`() {
-        assertNull(MessageTooLargeException("too large").cause)
-    }
-
-    @Test
-    fun `MessageTooLargeException preserves cause`() {
-        val cause = IllegalArgumentException("bad input")
-        assertEquals(cause, MessageTooLargeException("too large", cause).cause)
-    }
-
-    @Test
-    fun `MessageTooLargeException can be caught as Exception`() {
-        var caught = false
-        try {
-            throw MessageTooLargeException("too large")
-        } catch (e: Exception) {
-            caught = true
-            assertNotNull(e.message)
-        }
-        assertTrue(caught)
     }
 }

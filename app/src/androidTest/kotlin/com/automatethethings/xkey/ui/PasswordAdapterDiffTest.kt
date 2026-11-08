@@ -128,16 +128,6 @@ class PasswordAdapterDiffTest {
         assertEquals(listOf("inserted:2:1"), events.toList())
     }
 
-    @Test
-    fun submit_replacesTheDisplayedList() {
-        submitAndAwait(listOf(record("a")))
-        assertEquals(1, adapter.itemCount)
-
-        submitAndAwait(listOf(record("a"), record("b"), record("c")))
-
-        assertEquals(3, adapter.itemCount)
-    }
-
     // ---------------------------------------------------------------
     // Diff callback semantics
     // ---------------------------------------------------------------

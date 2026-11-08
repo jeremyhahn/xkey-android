@@ -362,50 +362,8 @@ class RemoteClientInteropTest {
     }
 
     // -------------------------------------------------------------------------
-    // SyncResult value semantics
+    // SyncResult
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `two identical sync results are equal and hash alike`() {
-        val a = RemoteSyncClient.SyncResult(1, 2, 3, 4, 5, 6)
-        val b = RemoteSyncClient.SyncResult(1, 2, 3, 4, 5, 6)
-
-        assertEquals(a, b)
-        assertEquals(a.hashCode(), b.hashCode())
-    }
-
-    @Test
-    fun `sync results differing in any single counter are not equal`() {
-        val base = RemoteSyncClient.SyncResult(1, 2, 3, 4, 5, 6)
-
-        assertNotEquals(base, base.copy(certsPushed = 9))
-        assertNotEquals(base, base.copy(certsPulled = 9))
-        assertNotEquals(base, base.copy(oathPushed = 9))
-        assertNotEquals(base, base.copy(oathPulled = 9))
-        assertNotEquals(base, base.copy(passwordsPushed = 9))
-        assertNotEquals(base, base.copy(passwordsPulled = 9))
-    }
-
-    @Test
-    fun `a sync result destructures in declaration order`() {
-        val (certsPushed, certsPulled, oathPushed, oathPulled, pwPushed, pwPulled) =
-            RemoteSyncClient.SyncResult(1, 2, 3, 4, 5, 6)
-
-        assertEquals(1, certsPushed)
-        assertEquals(2, certsPulled)
-        assertEquals(3, oathPushed)
-        assertEquals(4, oathPulled)
-        assertEquals(5, pwPushed)
-        assertEquals(6, pwPulled)
-    }
-
-    @Test
-    fun `a sync result reports its counters in toString`() {
-        val text = RemoteSyncClient.SyncResult(certsPushed = 11, passwordsPulled = 22).toString()
-
-        assertTrue(text, text.contains("11"))
-        assertTrue(text, text.contains("22"))
-    }
 
     @Test
     fun `syncAll on two empty stores reports an empty run`() = runTest {

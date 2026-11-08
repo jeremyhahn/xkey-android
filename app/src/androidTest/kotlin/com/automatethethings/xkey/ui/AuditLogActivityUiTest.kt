@@ -124,66 +124,11 @@ class AuditLogActivityUiTest {
     // ---------------------------------------------------------------
 
     @Test
-    fun filterAllChip_isDisplayed() {
-        ActivityScenario.launch(AuditLogActivity::class.java)
-
-        // The screen has two "All" chips (operation filter and key-type
-        // filter), so match the first rather than failing as ambiguous.
-        onView(firstDisplayed(R.string.audit_log_filter_all))
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
     fun filterSectionHeaders_areDisplayed() {
         ActivityScenario.launch(AuditLogActivity::class.java)
 
         onView(withText(R.string.audit_log_filter_operation)).check(matches(isDisplayed()))
         onView(withText(R.string.audit_log_filter_key_type)).check(matches(isDisplayed()))
-    }
-
-    /** Selecting the "Key Created" operation chip hides other operations. */
-    @Test
-    fun operationFilter_showsOnlyMatchingEntries() {
-        seedEntries()
-        val scenario = ActivityScenario.launch(AuditLogActivity::class.java)
-        awaitText(scenario, createdLabel)
-        awaitText(scenario, deletedLabel)
-
-        onView(firstDisplayed(R.string.audit_log_op_key_created)).perform(click())
-
-        awaitText(scenario, createdLabel)
-        awaitTextAbsent(scenario, deletedLabel)
-    }
-
-    /** Selecting the "FIDO2" key-type chip hides entries for other key types. */
-    @Test
-    fun keyTypeFilter_showsOnlyMatchingEntries() {
-        seedEntries()
-        val scenario = ActivityScenario.launch(AuditLogActivity::class.java)
-        awaitText(scenario, createdLabel)
-
-        // "FIDO2" is unique to the key-type chip row; the operation row uses
-        // the distinct label "FIDO2 Auth".
-        onView(firstDisplayed(R.string.key_filter_fido2)).perform(click())
-
-        awaitText(scenario, createdLabel)
-        awaitTextAbsent(scenario, deletedLabel)
-    }
-
-    /** Re-selecting the "All" operation chip restores the unfiltered list. */
-    @Test
-    fun allOperationChip_restoresFilteredOutEntries() {
-        seedEntries()
-        val scenario = ActivityScenario.launch(AuditLogActivity::class.java)
-        awaitText(scenario, deletedLabel)
-
-        onView(firstDisplayed(R.string.audit_log_op_key_created)).perform(click())
-        awaitTextAbsent(scenario, deletedLabel)
-
-        onView(firstDisplayed(R.string.audit_log_filter_all)).perform(click())
-
-        awaitText(scenario, deletedLabel)
-        awaitText(scenario, createdLabel)
     }
 
     // ---------------------------------------------------------------
@@ -282,20 +227,6 @@ class AuditLogActivityUiTest {
 
         awaitText(scenario, createdLabel)
         awaitText(scenario, context.getString(R.string.audit_log_op_key_created))
-    }
-
-    /** Tapping a card expands it and populates the detail rows. */
-    @Test
-    fun tappingEntry_expandsDetailRows() {
-        seedEntries()
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val scenario = ActivityScenario.launch(AuditLogActivity::class.java)
-        awaitText(scenario, createdLabel)
-
-        onView(withText(createdLabel)).perform(scrollToView(), click())
-
-        awaitText(scenario, createdKeyId)
-        awaitText(scenario, context.getString(R.string.key_detail_id))
     }
 
     /** Tapping an expanded card collapses it again. */

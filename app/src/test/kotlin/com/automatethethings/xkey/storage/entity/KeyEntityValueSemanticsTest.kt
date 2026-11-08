@@ -226,7 +226,9 @@ class KeyEntityValueSemanticsTest {
 
         assertEquals("Renamed", renamed.label)
         assertEquals(base.keyId, renamed.keyId)
+        assertEquals(base.keyType, renamed.keyType)
         assertEquals(base.algorithm, renamed.algorithm)
+        assertEquals(base.keySizeBits, renamed.keySizeBits)
         assertEquals(base.sharingPolicy, renamed.sharingPolicy)
         assertTrue(base.publicKeyDer.contentEquals(renamed.publicKeyDer))
     }

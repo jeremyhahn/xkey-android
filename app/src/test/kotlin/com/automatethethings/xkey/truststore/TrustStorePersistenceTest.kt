@@ -86,82 +86,42 @@ class TrustStorePersistenceTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `a label containing quotes and backslashes survives a reload`() = runTest {
-        val label = """Corp "Root" CA \ archive\path"""
-
-        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM), label)
-
-        val stored = reloaded().getCertificate(
-            TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+    fun `labels and a source URL with JSON delimiters survive a reload`() = runTest {
+        // The metadata reader splits objects on braces, so a closing brace inside a
+        // value is the worst case for it; quotes, backslashes and control characters
+        // must be escaped rather than dropped. Every entry must come back exactly.
+        val labels = mapOf(
+            TestCertificates.LEAF_A_PEM to """Corp "Root" CA \ archive\path""",
+            TestCertificates.LEAF_B_PEM to "corp}team",
+            TestCertificates.LEAF_C_PEM to "line one\nline two\tcolumn\rreturn {\"über\"} 日本\\"
         )
-        assertNotNull(stored)
-        assertEquals(label, stored!!.label)
-    }
-
-    @Test
-    fun `a label containing newlines tabs and carriage returns survives a reload`() = runTest {
-        val label = "line one\nline two\tcolumn\rreturn"
-
-        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM), label)
-
-        // A raw newline inside a JSON string would make the document unreadable,
-        // so this also proves the escape is applied rather than the value dropped.
-        assertFalse(metadataFile.readText().contains("line one\nline two"))
-        assertEquals(
-            label,
-            reloaded()
-                .getCertificate(TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM))!!
-                .label
-        )
-    }
-
-    @Test
-    fun `a source URL containing quotes survives a reload`() = runTest {
+        labels.forEach { (pem, label) ->
+            repository.importCertificate(TestCertificates.der(pem), label)
+        }
         val url = """https://ca.example.com/"odd"/path"""
-        coEvery { caFetcher.fetchBundle(url) } returns bundleOf(TestCertificates.LEAF_A_PEM)
-
+        coEvery { caFetcher.fetchBundle(url) } returns bundleOf(TestCertificates.LEAF_D_PEM)
         repository.importFromURL(url)
+        val before = repository.getAllCertificates().sortedBy { it.fingerprint }
 
-        assertEquals(
-            "url:$url",
-            reloaded()
-                .getCertificate(TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM))!!
-                .source
-        )
-    }
+        val store = reloaded()
+        val after = store.getAllCertificates().sortedBy { it.fingerprint }
 
-    @Test
-    fun `a unicode label survives a reload`() = runTest {
-        val label = "Zertifizierungsstelle über alles — 日本"
-
-        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM), label)
-
-        assertEquals(
-            label,
-            reloaded()
-                .getCertificate(TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM))!!
-                .label
-        )
-    }
-
-    @Test
-    fun `a label containing a closing brace does not lose the certificate`() = runTest {
-        // The metadata reader splits objects on braces, so a brace inside a value
-        // is the worst case for it. The entry -- and above all the fingerprint
-        // that identifies the trusted key -- must still come back.
-        repository.importCertificate(
-            TestCertificates.der(TestCertificates.LEAF_A_PEM),
-            label = "corp}team"
-        )
-        val fingerprint = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
-
-        val stored = reloaded().getAllCertificates()
-
-        assertEquals(1, stored.size)
-        assertEquals(fingerprint, stored[0].fingerprint)
-        assertTrue(stored[0].subjectDN.startsWith(TestCertificates.LEAF_A_CN))
-        assertEquals(TestCertificates.LONG_LIVED_NOT_AFTER_MILLIS, stored[0].notAfter)
-        assertTrue(reloaded().hasCertificate(fingerprint))
+        assertEquals(4, after.size)
+        assertEquals(before, after)
+        labels.forEach { (pem, label) ->
+            val fingerprint = TestCertificates.fingerprint(pem)
+            assertEquals(label, after.single { it.fingerprint == fingerprint }.label)
+            assertTrue(store.hasCertificate(fingerprint))
+        }
+        val leafA = after.single {
+            it.fingerprint == TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        }
+        assertTrue(leafA.subjectDN.startsWith(TestCertificates.LEAF_A_CN))
+        assertEquals(TestCertificates.LONG_LIVED_NOT_AFTER_MILLIS, leafA.notAfter)
+        assertEquals("manual", leafA.source)
+        val fromUrl = TestCertificates.fingerprint(TestCertificates.LEAF_D_PEM)
+        assertEquals("url:$url", after.single { it.fingerprint == fromUrl }.source)
+        assertTrue(store.hasCertificate(fromUrl))
     }
 
     // -------------------------------------------------------------------------

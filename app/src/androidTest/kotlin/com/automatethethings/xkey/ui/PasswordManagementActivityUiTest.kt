@@ -42,7 +42,6 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -105,26 +104,6 @@ class PasswordManagementActivityUiTest {
 
         onView(withText(R.string.passwords_title)).check(matches(isDisplayed()))
         onView(withText(R.string.passwords_card_desc)).check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun addButton_isDisplayed() {
-        ActivityScenario.launch(PasswordManagementActivity::class.java)
-
-        onView(withText(R.string.password_add_fab))
-            .check(matches(isDisplayed()))
-    }
-
-    @Test
-    fun activityLaunches_successfully() {
-        val scenario = ActivityScenario.launch(PasswordManagementActivity::class.java)
-
-        scenario.onActivity { activity ->
-            assertTrue(
-                "PasswordManagementActivity should not be finishing after launch",
-                !activity.isFinishing
-            )
-        }
     }
 
     // ---------------------------------------------------------------

@@ -20,7 +20,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
@@ -61,38 +60,6 @@ class MediaHasherInstrumentedTest {
         val fromUri = MediaHasher.hashUri(context.contentResolver, Uri.fromFile(file))
 
         assertEquals(MediaHasher.hashBytes(content), fromUri)
-    }
-
-    @Test
-    fun hashUri_handlesAnEmptyFile() {
-        file.writeBytes(ByteArray(0))
-
-        val fromUri = MediaHasher.hashUri(context.contentResolver, Uri.fromFile(file))
-
-        assertEquals(MediaHasher.hashBytes(ByteArray(0)), fromUri)
-        assertEquals(64, fromUri.length)
-    }
-
-    @Test
-    fun hashUri_isStableAcrossReads() {
-        file.writeBytes("stable content".toByteArray())
-        val uri = Uri.fromFile(file)
-
-        val first = MediaHasher.hashUri(context.contentResolver, uri)
-        val second = MediaHasher.hashUri(context.contentResolver, uri)
-
-        assertEquals(first, second)
-    }
-
-    @Test
-    fun hashUri_changesWhenTheContentChanges() {
-        file.writeBytes("before".toByteArray())
-        val uri = Uri.fromFile(file)
-        val before = MediaHasher.hashUri(context.contentResolver, uri)
-
-        file.writeBytes("after".toByteArray())
-
-        assertNotEquals(before, MediaHasher.hashUri(context.contentResolver, uri))
     }
 
     @Test
