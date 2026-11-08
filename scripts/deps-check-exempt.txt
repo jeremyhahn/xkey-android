@@ -1,5 +1,5 @@
-# Libraries `make deps-check` lets stay behind a release older than 7 days
-# (handbook devops.md section 9). One line each, read by scripts/deps-check.sh:
+# Libraries `make deps-check` lets stay behind a release older than 7 days.
+# One line each, read by scripts/deps-check.sh:
 #
 #   group:name  reason, who decided, YYYY-MM-DD
 #

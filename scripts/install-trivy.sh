@@ -3,19 +3,19 @@
 #
 #   usage: scripts/install-trivy.sh <install-dir>
 #
-# The ONE installer for trivy in this repo. Both `make install-tools` and the
-# Gitea path of .github/workflows/nightly.yml call it, so the scanner on a
+# The ONE installer for trivy in this repo. `make install-tools` calls it, and
+# so must any CI step that installs trivy outside the image, so the scanner on a
 # developer's machine and the scanner in CI are the same binary — and neither
 # can drift from the other by editing one of them.
 #
 # WHY NOT `curl .../install.sh | sh`
 # ---------------------------------
-# That is what this replaces, in both call sites. It fetched a script from a
+# That is what this replaces. It fetched a script from a
 # MUTABLE ref (contrib/install.sh on `main`) and executed it, unread and
 # unverified, as the build user. Anyone who could change that file — upstream
 # compromise, account takeover, a MITM on the fetch — would get arbitrary code
-# execution on the runner, and in nightly.yml that runner holds a token with
-# security-events: write. Pulling the security scanner itself through an
+# execution on the runner, which in CI can hold a token with write scopes.
+# Pulling the security scanner itself through an
 # unverified channel inverts the point of running it.
 #
 # WHAT THIS GUARANTEES, AND WHAT IT DOES NOT
@@ -42,8 +42,8 @@ if [ -z "${INSTALL_DIR}" ]; then
 	exit 2
 fi
 
-# Version and SHA-256 come from the one pin file (handbook devcontainer.md
-# section 2), the same pins the devcontainer image installs.
+# Version and SHA-256 come from the one pin file, the same pins the
+# devcontainer image installs.
 # shellcheck source-path=SCRIPTDIR source=tool-pins.sh
 . "${SCRIPT_DIR}/tool-pins.sh"
 VERSION=${TRIVY_VERSION:-}

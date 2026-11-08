@@ -1,6 +1,6 @@
 #!/bin/sh
-# Prints a devcontainer image tag named by its content (handbook ci-standard.md
-# section 9), for `make toolchain-image` and `make it-image`.
+# Prints a devcontainer image tag named by the content hash of the files that
+# build the image, for `make toolchain-image` and `make it-image`.
 #
 #   usage: image-tag.sh toolchain|it [trusted|pr]
 #
@@ -22,7 +22,7 @@
 #            scripts/image-tag-test.sh (make lint-gates) checks this.
 #
 # The namespace is the run's class, as a name (Codex review 6470). trusted,
-# the default, is a developer's own make and CI's push, schedule or dispatch
+# the default, is a developer's own make and CI's push or dispatch
 # on main; ci.yml passes pr for every other run, from the event, and a pr tag
 # is pr-<hash>. It protects nothing (Codex review 6544): a pull request's run
 # can write any tag on a daemon it shares with main, so a trusted run never

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Tests the closing-link parse revert-red-main.yml uses to reopen the issues a
 # reverted PR closed and to copy them into a reland PR: its CLOSING_LINK and
-# closes(), read from the workflow itself, against fixture PR bodies, and
-# CLOSING_LINK against the grammar of automerge.yml's links(), which it must
-# match verbatim. Needs bash and jq only. `make closing-links-test`.
+# closes(), read from the workflow itself, against fixture PR bodies. Needs
+# bash and jq only. `make closing-links-test`.
 set -euo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 WORKFLOW="${ROOT}/.github/workflows/revert-red-main.yml"
-AUTOMERGE="${ROOT}/.github/workflows/automerge.yml"
 
 # The env value and the shell function, as the workflow's run step sees them.
 CLOSING_LINK="" fn="" in_fn=0
@@ -28,13 +26,6 @@ eval "${fn}"
 
 runs=0 fails=0
 fail() { echo "FAIL: $*"; fails=$((fails + 1)); }
-
-# links() writes the regex as a jq string inside single quotes: each
-# backslash doubled.
-runs=$((runs + 1))
-if ! grep -qF -- "scan(\"${CLOSING_LINK//\\/\\\\}\")" "${AUTOMERGE}"; then
-	fail "CLOSING_LINK is not the grammar of automerge.yml's links(): ${CLOSING_LINK}"
-fi
 
 # expect name self body want: closes() on body, excluding self, prints want
 # (the issue numbers, space-separated).

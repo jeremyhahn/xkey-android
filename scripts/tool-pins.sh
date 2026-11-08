@@ -1,13 +1,12 @@
 # shellcheck shell=sh disable=SC2034  # sourced: every name is read by its caller
-# The one pin file (handbook devcontainer.md section 2): every tool version, with a
+# The one pin file: every tool version, with a
 # SHA-256 for each download. Read by build/docker/devcontainer/Dockerfile (sourced
 # in each fetch step), by the Makefile (`include`) and by scripts/install-trivy.sh.
 # Plain KEY=value lines only, no quotes or spaces, so make and sh both read it.
-# Next versions come from the Company Agent's versions.conf (devops.md section 9)
-# and from each upstream named on the line above its pin.
+# Next versions come from each upstream named on the line above its pin.
 
 # Debian stable slim, by index digest (docker.io/library/debian:trixie-slim).
-# Debian, not alpine (devops.md section 9a): aapt2 and the rest of the Android
+# Debian, not alpine: aapt2 and the rest of the Android
 # build-tools are glibc-only.
 BASE_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 

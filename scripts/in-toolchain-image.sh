@@ -2,14 +2,10 @@
 # Run a command in the toolchain image against a COPY of the checkout.
 #
 #   usage: scripts/in-toolchain-image.sh <image> <command...>
-#   e.g.   scripts/in-toolchain-image.sh go-enclave-toolchain:abc make build
+#   e.g.   scripts/in-toolchain-image.sh xkey-android-toolchain:abc make build
 #   <image> is a tag or an image ID (sha256:...); CI passes the ID.
 #
-# in-toolchain-template: v3 (ci-template v1.22.2). Ships beside ci.yml; copy it to
-# scripts/ with the workflow. From go-quicraft's scripts/in-toolchain-image.sh
-# (a141c3c), with the container prefix and uid taken from the environment.
-#
-# How CI runs a stage in the devcontainer image (handbook ci-standard.md §2). A
+# How CI runs a stage in the devcontainer image. A
 # CI runner reaches its Docker daemon through a socket, so a bind mount would
 # resolve on the daemon's host, where the checkout does not exist. This
 # creates the container, streams the checkout into it (`.git` included: the
@@ -28,11 +24,10 @@
 # releases, and `make security` fetches the vulnerability databases. Only then
 # are GOPROXY reopened, a writable module cache mounted (below; /tmp/gomodcache
 # with CI_CACHE=off), and the forge credentials passed through, by NAME from
-# this environment (the four variables dependency-resolution.md §6 has the
-# runner inject), so no token ever appears on a command line.
+# this environment (the four variables the runner injects), so no token ever
+# appears on a command line.
 #
-# v2 (ci-template v1.22, Company Agent m616 item 2): the caches live in named
-# volumes on the daemon's host (ci-standard.md §6), never in the container's
+# The caches live in named volumes on the daemon's host, never in the container's
 # writable layer or its 3 GB /tmp: GOCACHE at /cache/gobuild and
 # GOLANGCI_LINT_CACHE at /cache/golangci for every stage, and, for a bridge
 # stage, GOMODCACHE at /cache/gomod (a no-network stage keeps the image's own
@@ -42,20 +37,19 @@
 # (default pr) is `main` only for a push to main, so a pull request never
 # writes a cache that main's build reads. A new volume's root is given to
 # IN_IMAGE_UID by a helper container holding CHOWN and nothing else.
-# scripts/trim-ci-caches.sh bounds their size. CI_CACHE=off mounts none (v1).
+# scripts/trim-ci-caches.sh bounds their size. CI_CACHE=off mounts none.
 #
-# v3 (ci-template v1.22.2, Company Agent m641 item 2 and m646 item 3): the
-# stage runs in this sibling container, so the sibling holds the job slot's
+# The stage runs in this sibling container, so the sibling holds the job slot's
 # CPU bound. The job container's cgroup cpu.max gives it (rounded up; nproc
 # when the job has no quota; IN_IMAGE_CPUS overrides), and the sibling gets
 # --cpus N with GOMAXPROCS=N and GOFLAGS=-p=N. golangci-lint's default
 # concurrency follows the container CPU quota, so lint takes N with no flag.
-# A 4-CPU slot on the Dells gives 4; never a hardcoded number.
+# A 4-CPU runner gives 4; never a hardcoded number.
 #
 # The container is named <CI_STACK_PREFIX>tc-<pid>-<random>, under the prefix
 # scripts/reap-stale-ci-stacks.sh reaps (default <checkout dir>-ci-, which in CI
 # is <repo>-ci-), and is removed on every exit. IN_IMAGE_UID is the non-root
-# uid the command runs as (default 10001; devcontainer.md §5: any non-root uid).
+# uid the command runs as (any non-root uid; the default is below).
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -64,9 +58,8 @@ if [ "$#" -lt 2 ]; then
 fi
 image=$1
 shift
-# CUSTOMIZE (xkey-android): a trusted run runs its stages on the image ID its
-# own fresh build wrote (`make -s toolchain-image-id`, Makefile IMAGE_FRESH;
-# Codex review 6544), never on a tag, which a pull request's run sharing the
+# A trusted run runs its stages on the image ID its own fresh build wrote
+# (`make -s toolchain-image-id`, Makefile IMAGE_FRESH), never on a tag, which a pull request's run sharing the
 # daemon can point at any image. With IMAGE_FRESH=true (ci.yml, on a trusted
 # run) anything but a sha256: ID is refused. A developer passes a tag or an ID.
 if [ "${IMAGE_FRESH:-false}" = true ] && ! [[ $image =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -79,8 +72,7 @@ case $network in
   *) echo "IN_IMAGE_NETWORK must be none or bridge: $network" >&2; exit 2 ;;
 esac
 
-# CUSTOMIZE (xkey-android): run as the image's user, uid 1000 (builder), not
-# the template's 10001. The toolchain image's /src is the WORKDIR uid 1000
+# Run as the image's user, uid 1000 (builder). The toolchain image's /src is the WORKDIR uid 1000
 # creates (build/docker/devcontainer/Dockerfile), mode 755, and the copy-in
 # keeps its owner, so only uid 1000 can create Gradle's top-level entries in
 # it: .gradle (the project and configuration caches), build/ and .kotlin.
@@ -157,7 +149,7 @@ if [ "$network" = bridge ]; then
     if [ -n "${!v:-}" ]; then args+=(--env "$v"); fi
   done
 fi
-# CUSTOMIZE (xkey-android): Gradle and the Android tools. A fresh, writable
+# Gradle and the Android tools. A fresh, writable
 # GRADLE_USER_HOME per stage on an anonymous volume (removed with the container,
 # docker rm -v); dependencies come from the image's GRADLE_RO_DEP_CACHE. user.home
 # and ANDROID_USER_HOME go to /tmp: an IN_IMAGE_UID other than 1000 has no passwd

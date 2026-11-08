@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests that revert-red-main.yml resumes a partial run (Codex review 6549): its
-# run script, read from the workflow itself, against a fake Gitea (a curl stub
+# Tests that revert-red-main.yml resumes a partial run: its
+# run script, read from the workflow itself, against a fake forge (a curl stub
 # answering the API from files) and a bare repository standing in for the
 # remote (real git, behind a wrapper that logs every push). Each case starts
 # from a red merge of PR #7, which closes issue #3, and checks what the run
@@ -43,7 +43,7 @@ if [ "\${rc}" = 0 ]; then
 fi
 exit "\${rc}"
 EOF
-# curl: the Gitea API over files in FAKE; every write that succeeds is logged.
+# curl: the forge API over files in FAKE; every write that succeeds is logged.
 cat > "${T}/bin/curl" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -170,9 +170,9 @@ setup() {
 # run -> the run script against the case; rc in RC, output in OUT.
 run() {
 	RC=0
-	OUT=$(cd "${T}" && PATH="${T}/bin:${PATH}" BOT=token REPO_API=https://gitea/api/v1/repos/o/example \
-		GIT_URL="${BARE}" SERVER=https://gitea REPOSITORY=o/example RED_RUN=1 \
-		AGENT_DOMAIN=example.internal bash "${T}/run.sh" 2>&1) || RC=$?
+	OUT=$(cd "${T}" && PATH="${T}/bin:${PATH}" BOT=token REPO_API=https://forge.example.com/api/v1/repos/o/example \
+		GIT_URL="${BARE}" SERVER=https://forge.example.com REPOSITORY=o/example RED_RUN=1 \
+		AGENT_DOMAIN=example.com bash "${T}/run.sh" 2>&1) || RC=$?
 }
 
 runs=0 fails=0
@@ -214,7 +214,7 @@ expect pr-post "rerun exit" "${RC}" 0
 expect_fresh pr-post
 
 # 3. The reland POST failed: the first run finishes the rest and fails naming
-# it (Codex review 6560); the rerun opens it once and comments on the issue
+# it; the rerun opens it once and comments on the issue
 # once.
 setup reland; echo "reland/7" > "${FAKE}/fail-head"; run
 expect reland "first exit" "${RC}" 1
@@ -297,7 +297,7 @@ expect updated "exit" "${RC}" 0
 expect updated "new writes" "$(($(wc -l < "${FAKE}/writes.log") - before))" 0
 
 # 10. The reopen PATCH of a train-closed PR failed: the first run fails naming
-# it (Codex review 6560), and the rerun reopens it once without pushing its
+# it, and the rerun reopens it once without pushing its
 # branch again.
 train_setup reopen; echo /pulls/7 > "${FAKE}/fail-patch"; run
 expect reopen "first exit" "${RC}" 1
@@ -323,7 +323,7 @@ expect_fresh issue
 expect issue "rerun's writes" "$(($(wc -l < "${FAKE}/writes.log") - before))" 2
 expect issue "issue state" "$(jq -r '.state' "${FAKE}/issues/3.json")" open
 
-# 12. The PR read of a number the body closes failed (Codex review 6574): it is
+# 12. The PR read of a number the body closes failed: it is
 # not taken for an issue, so no issue PATCH or comment; the run fails naming
 # it, and the rerun reopens the issue and comments on it once.
 setup pr-read; echo /pulls/3 > "${FAKE}/fail-get"; run
@@ -382,7 +382,7 @@ rm "${FAKE}/fail-get"; run
 expect comment-read "rerun exit" "${RC}" 0
 expect_fresh comment-read
 
-# 18. Only `make lint-gates` failed (v1.27 lint split, Codex review 7474): it is a
+# 18. Only `make lint-gates` failed: it is a
 # deterministic stage, so the merge is reverted and relanded like any other.
 setup lint-gates
 jq -n '{jobs: [{id: 11, name: "Lint gates", conclusion: "failure", steps: [{name: "make lint-gates", conclusion: "failure"}]}]}' > "${FAKE}/jobs.json"

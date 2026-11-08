@@ -3,7 +3,7 @@
 # like any FROM, so it is pinned by digest too (docker/dockerfile:1's index,
 # 2026-10-22; Codex review 6544): a trusted build pulls it (--pull) and runs
 # that frontend, never one a pull request tagged on the daemon.
-# The project devcontainer (handbook software/conventions/devcontainer.md):
+# The project devcontainer, one image for development and CI, in three stages:
 # `base` (JDK, Android SDK, Gradle, the read-only dependency cache, a non-root
 # user), `toolchain` (base plus the Makefile's tools) and `integration` (base
 # plus the source, hardened by compose.yaml). Both finals are FROM base. Every

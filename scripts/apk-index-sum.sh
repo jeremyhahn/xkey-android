@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
-# apk-index-sum: v1 (ci-template v1.29, Company Agent ruling 220(5),
-# 2026-10-27) — one checksum of the Alpine package indexes the devcontainer
+# apk-index-sum: one checksum of the Alpine package indexes the devcontainer
 # build resolves against.
 #
 # Each ci.yml job that names the integration image puts the printed value in
 # APK_INDEX_SUM, which the integration image's content tag hashes (`make -s
-# it-image`, ci-standard.md §9) and which its build takes as a build argument
-# (devcontainer.md §6). A
-# new Alpine package release, a CVE fix among them, changes an index, so it
-# changes the tag, and the next run rebuilds the image instead of reusing the
-# cached one: before v1.29 a tree whose files had not changed kept its image,
-# and `trivy image` went red on a fixed CVE until some unrelated file moved
-# (go-enclave main fd83b79ce, CVE-2026-92392, libcurl 8.23.0-r0).
+# it-image`) and which its build takes as a build argument. A new Alpine
+# package release, a CVE fix among them, changes an index, so it changes the
+# tag, and the next run rebuilds the image instead of reusing the cached one.
+# Without it a tree whose files had not changed kept its image, and
+# `trivy image` stayed red on a fixed CVE until some unrelated file moved.
 #
 # Usage: scripts/apk-index-sum.sh [Dockerfile]
 #   The Dockerfile defaults to APK_DOCKERFILE, else
