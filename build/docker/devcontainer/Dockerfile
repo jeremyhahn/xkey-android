@@ -24,11 +24,12 @@ RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";"
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy
 COPY scripts/tool-pins.sh /tmp/tool-pins.sh
-# fetch <url> <file> <sha256>: download over https and refuse a mismatch.
+# fetch <url> <file> <sha256>: download over https, retrying transient errors
+# (5 retries, 10 s apart, 30 s connect timeout), and refuse a mismatch.
 RUN cat > /usr/local/bin/fetch <<'EOF'
 #!/bin/sh
 set -eu
-curl -fsSL --proto '=https' --tlsv1.2 -o "$2" "$1"
+curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 -o "$2" "$1"
 echo "$3  $2" | sha256sum -c -
 EOF
 RUN chmod 0755 /usr/local/bin/fetch
