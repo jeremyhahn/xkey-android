@@ -329,8 +329,8 @@ class GattServerCallbackTest {
 
     /** Only the control point carries protocol data. */
     @Test
-    fun aWriteToAnyCharacteristicButTheControlPointIsRefused(): Unit = runBlocking {
-        probe.handleDeviceConnected(device)
+    fun aWriteToAnyCharacteristicButTheControlPointIsRefused() {
+        connectThroughTheCallback()
 
         probe.gattCallback.onCharacteristicWriteRequest(
             device, 1, characteristic(GattServer.STATUS_UUID), false, true, 0,
@@ -345,8 +345,8 @@ class GattServerCallbackTest {
     }
 
     @Test
-    fun anEmptyControlPointWriteIsRefused(): Unit = runBlocking {
-        probe.handleDeviceConnected(device)
+    fun anEmptyControlPointWriteIsRefused() {
+        connectThroughTheCallback()
 
         probe.gattCallback.onCharacteristicWriteRequest(
             device, 1, characteristic(GattServer.CONTROL_POINT_UUID), false, true, 0, ByteArray(0)
@@ -519,9 +519,23 @@ class GattServerCallbackTest {
     )
 
     /**
+     * Connects [device] the way the stack does. Only a connect callback on a
+     * started server begins a device's event queue, with the connect at its
+     * head; a write or MTU change on a device without one is dropped. Skips
+     * the test where the local stack will not open a GATT server.
+     */
+    private fun connectThroughTheCallback() {
+        assumeTrue("the local stack would not open a GATT server", probe.server.start())
+        probe.gattCallback.onConnectionStateChange(
+            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
+        )
+    }
+
+    /**
      * Returns once the device's event queue has handled everything queued
      * before this call: an MTU change queued behind it is applied in turn, so
      * a write that was wrongly queued has been processed by the time it shows.
+     * The queue must have been opened by [connectThroughTheCallback].
      */
     private fun awaitEarlierEventsHandled() {
         probe.gattCallback.onMtuChanged(device, BARRIER_MTU)
