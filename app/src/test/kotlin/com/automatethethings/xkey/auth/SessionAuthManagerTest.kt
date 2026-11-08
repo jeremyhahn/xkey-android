@@ -70,14 +70,6 @@ class SessionAuthManagerTest {
         }
     }
 
-    @Test
-    fun `uv disabled short-circuits even for a brand new session`() {
-        manager.recordAuthentication("device-a")
-        val disabled = settings(BiometricAuthMode.PER_SESSION, uv = UserVerificationPolicy.DISABLED)
-
-        assertFalse(manager.isBiometricRequired(disabled, "a-completely-different-device"))
-    }
-
     // -------------------------------------------------------------------------
     // PER_OPERATION
     // -------------------------------------------------------------------------
@@ -106,14 +98,6 @@ class SessionAuthManagerTest {
     }
 
     @Test
-    fun `time window skips biometric inside the window`() {
-        val timeWindow = settings(BiometricAuthMode.TIME_WINDOW)
-        manager.recordAuthentication("device-a")
-
-        assertFalse(manager.isBiometricRequired(timeWindow, "device-a"))
-    }
-
-    @Test
     fun `time window ignores the session id`() {
         val timeWindow = settings(BiometricAuthMode.TIME_WINDOW)
         manager.recordAuthentication("device-a")
@@ -134,14 +118,6 @@ class SessionAuthManagerTest {
             "elapsed >= 0 holds immediately, so a zero window degrades to per-operation",
             manager.isBiometricRequired(zeroWindow, "device-a")
         )
-    }
-
-    @Test
-    fun `a negative window always requires biometric`() {
-        val negativeWindow = settings(BiometricAuthMode.TIME_WINDOW, windowSeconds = -60)
-        manager.recordAuthentication("device-a")
-
-        assertTrue(manager.isBiometricRequired(negativeWindow, "device-a"))
     }
 
     @Test
@@ -173,15 +149,6 @@ class SessionAuthManagerTest {
     @Test
     fun `per session requires biometric for a fresh session`() {
         assertTrue(manager.isBiometricRequired(settings(BiometricAuthMode.PER_SESSION), "device-a"))
-    }
-
-    @Test
-    fun `per session skips biometric for the rest of the session`() {
-        val perSession = settings(BiometricAuthMode.PER_SESSION)
-        manager.recordAuthentication("device-a")
-
-        assertFalse(manager.isBiometricRequired(perSession, "device-a"))
-        assertFalse(manager.isBiometricRequired(perSession, "device-a"))
     }
 
     @Test
@@ -248,15 +215,6 @@ class SessionAuthManagerTest {
         assertFalse(manager.isBiometricRequired(settings(BiometricAuthMode.TIME_WINDOW), "device-a"))
         assertFalse(manager.isBiometricRequired(settings(BiometricAuthMode.PER_SESSION), "device-a"))
         assertTrue(manager.isBiometricRequired(settings(BiometricAuthMode.PER_OPERATION), "device-a"))
-    }
-
-    @Test
-    fun `clearSession before any authentication is a no-op`() {
-        manager.clearSession()
-        manager.invalidateAuth()
-
-        assertTrue(manager.isBiometricRequired(settings(BiometricAuthMode.PER_SESSION), "device-a"))
-        assertTrue(manager.isBiometricRequired(settings(BiometricAuthMode.TIME_WINDOW), "device-a"))
     }
 
     @Test

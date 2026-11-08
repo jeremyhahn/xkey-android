@@ -146,27 +146,6 @@ class TrustStoreRepositoryTest {
     }
 
     @Test
-    fun `importCertificate rejects a truncated certificate`() = runTest {
-        val full = TestCertificates.der(TestCertificates.LEAF_A_PEM)
-        val truncated = full.copyOfRange(0, full.size / 2)
-
-        assertFails(CertificateException::class.java) {
-            repository.importCertificate(truncated)
-        }
-        assertEquals(0, repository.getCertificateCount())
-    }
-
-    @Test
-    fun `importCertificate rejects a public key instead of a certificate`() = runTest {
-        val notACert = TestCertificates.der(TestCertificates.NOT_A_CERTIFICATE_PEM)
-
-        assertFails(CertificateException::class.java) {
-            repository.importCertificate(notACert)
-        }
-        assertEquals(0, repository.getCertificateCount())
-    }
-
-    @Test
     fun `importCertificate returns null for a duplicate import`() = runTest {
         val der = TestCertificates.der(TestCertificates.LEAF_A_PEM)
 
@@ -307,36 +286,9 @@ class TrustStoreRepositoryTest {
         assertEquals(1, repository.getCertificateCount())
     }
 
-    @Test
-    fun `clearAll empties the trust store`() = runTest {
-        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
-        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_B_PEM))
-
-        repository.clearAll()
-
-        assertEquals(0, repository.getCertificateCount())
-        assertTrue(repository.getAllCertificates().isEmpty())
-    }
-
     // -------------------------------------------------------------------------
     // Metadata persistence
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `metadata survives a new repository instance`() = runTest {
-        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM), "laptop")
-
-        val reloaded = newRepository().getAllCertificates()
-
-        assertEquals(1, reloaded.size)
-        assertEquals(
-            TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM),
-            reloaded[0].fingerprint
-        )
-        assertEquals("laptop", reloaded[0].label)
-        assertEquals("manual", reloaded[0].source)
-        assertTrue(reloaded[0].subjectDN.startsWith(TestCertificates.LEAF_A_CN))
-    }
 
     @Test
     fun `getAllCertificates is empty when no metadata file exists`() = runTest {

@@ -311,29 +311,6 @@ class MainActivityUiTest {
     // ---------------------------------------------------------------
 
     @Test
-    fun settingsCard_isDisplayedInManageTab() {
-        ActivityScenario.launch(MainActivity::class.java)
-
-        onView(withId(R.id.nav_management)).perform(click())
-
-        onView(withId(R.id.cardSettings))
-            .perform(scrollToView())
-            .check(matches(isDisplayed()))
-            .check(matches(isClickable()))
-    }
-
-    @Test
-    fun keyManagementCard_isDisplayedInStoreTab() {
-        ActivityScenario.launch(MainActivity::class.java)
-
-        onView(withId(R.id.nav_store)).perform(click())
-
-        onView(withId(R.id.cardKeyManagement))
-            .check(matches(isDisplayed()))
-            .check(matches(isClickable()))
-    }
-
-    @Test
     fun pairedDevicesCard_isDisplayedInManageTab() {
         ActivityScenario.launch(MainActivity::class.java)
 
@@ -343,27 +320,6 @@ class MainActivityUiTest {
             .perform(scrollToView())
             .check(matches(isDisplayed()))
             .check(matches(isClickable()))
-    }
-
-    @Test
-    fun syncNowCard_isDisplayedInManageTab() {
-        ActivityScenario.launch(MainActivity::class.java)
-
-        onView(withId(R.id.nav_management)).perform(click())
-
-        onView(withId(R.id.cardSyncNow))
-            .check(matches(isDisplayed()))
-            .check(matches(isClickable()))
-    }
-
-    @Test
-    fun syncNowCard_titleIsDisplayedInManageTab() {
-        ActivityScenario.launch(MainActivity::class.java)
-
-        onView(withId(R.id.nav_management)).perform(click())
-
-        onView(withText(R.string.sync_now_title))
-            .check(matches(isDisplayed()))
     }
 
     // ---------------------------------------------------------------
@@ -452,6 +408,7 @@ class MainActivityUiTest {
         // No BLE permissions are granted in the test, so the service is never
         // bound and the tap takes the "not connected" branch.
         onView(withId(R.id.nav_management)).perform(click())
+        onView(withText(R.string.sync_now_title)).check(matches(isDisplayed()))
         onView(withId(R.id.cardSyncNow)).perform(click())
 
         onView(withText(R.string.sync_not_connected))

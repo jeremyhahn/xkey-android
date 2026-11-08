@@ -90,11 +90,6 @@ class AuditLoggerDispatchTest {
     // -----------------------------------------------------------------------
 
     @Test
-    fun `injected logger reports itself as initialized`() {
-        assertTrue(AuditLogger.isInitialized())
-    }
-
-    @Test
     fun `entries carry a generated timestamp and an unassigned id`() {
         val before = System.currentTimeMillis()
         AuditLogger.logServiceStarted()

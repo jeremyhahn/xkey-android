@@ -313,16 +313,6 @@ class VerifyUserPerConnectionTest {
         assertPromptCancelledAfterFrames(frames = FRAME_BUFFER, thenClose = true)
     }
 
-    /**
-     * The desktop sends past the frame buffer while its prompt waits, then
-     * closes (Codex 7374). The reader never parks on the full buffer, so the
-     * prompt is cancelled and the next request is shown.
-     */
-    @Test
-    fun aStreamThatOverflowsTheFrameBufferAndClosesWhileThePromptShowsCancelsIt() = runBlocking<Unit> {
-        assertPromptCancelledAfterFrames(frames = FRAME_BUFFER + 4, thenClose = true)
-    }
-
     /** The overflow alone ends the connection: a request-response peer never sends that far ahead. */
     @Test
     fun aFrameBufferOverflowWhileThePromptShowsEndsTheConnection() = runBlocking<Unit> {

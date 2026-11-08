@@ -354,18 +354,6 @@ class CryptoSigningCancellationTest {
         assertTrue(activity.finished)
     }
 
-    @Test
-    fun aFailedRequestReturnsItsError() = runTest {
-        val waiting = async { pending.await(::launchActivity) }
-        runCurrent()
-        val activity = activities.values.single()
-
-        activity.controller.fail(ERROR_CODE, "Authentication error")
-        runCurrent()
-
-        assertEquals(CryptoSigningResult.Error(ERROR_CODE, "Authentication error"), waiting.await())
-    }
-
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------

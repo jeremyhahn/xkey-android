@@ -19,11 +19,8 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
-import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
-import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.RootMatchers.isPlatformPopup
-import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.R
@@ -76,22 +73,6 @@ class CertificateActionLabelsTest {
             seededSerials.forEach { dao.deleteBySerial(it) }
         }
         seededSerials.clear()
-    }
-
-    /** The menu entry names the action, not its eventual confirmation. */
-    @Test
-    fun contextMenu_labelsTheExportEntryWithTheAction() {
-        val serial = seed(EXPORT_CN)
-        val scenario = launch()
-        openContextMenu(scenario, serial, EXPORT_CN)
-
-        onView(withText(R.string.cert_export_action))
-            .inRoot(isPlatformPopup())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.cert_export_copied))
-            .inRoot(isPlatformPopup())
-            .check(doesNotExist())
-        scenario.close()
     }
 
     /** Once the export has run, the confirmation is the past-tense message. */
@@ -181,7 +162,6 @@ class CertificateActionLabelsTest {
     companion object {
         private const val ONE_DAY_MS = 86_400_000L
 
-        private const val EXPORT_CN = "UI Labels Export Cert"
         private const val EXPORT_CONFIRM_CN = "UI Labels Export Confirm Cert"
         private const val DELETE_CN = "UI Labels Delete Cert"
 

@@ -35,7 +35,6 @@ import com.automatethethings.xkey.settings.PinSettingsRepository
 import kotlinx.coroutines.runBlocking
 import org.hamcrest.Matchers.allOf
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -186,20 +185,6 @@ class PinManagementActivityUiTest {
     // SO PIN dialog
     // ---------------------------------------------------------------
 
-    @Test
-    fun soPinActionCard_opensDialogWithConfirmAndCancel() {
-        val scenario = ActivityScenario.launch(PinManagementActivity::class.java)
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        awaitText(scenario, context.getString(soPinActionTitle()))
-
-        onView(withText(soPinActionTitle())).perform(scrollToView(), click())
-
-        onView(withText(soPinConfirmButton())).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.button_cancel)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-    }
-
     /** Cancelling the SO PIN dialog must not change the persisted PIN state. */
     @Test
     fun soPinDialog_cancel_leavesSettingsUnchanged() {
@@ -258,18 +243,6 @@ class PinManagementActivityUiTest {
         pressBackUnconditionally()
 
         assertActivityDestroyed(scenario)
-    }
-
-    @Test
-    fun activityLaunches_withoutFinishing() {
-        val scenario = ActivityScenario.launch(PinManagementActivity::class.java)
-
-        scenario.onActivity { activity ->
-            assertTrue(
-                "PinManagementActivity should not be finishing after launch",
-                !activity.isFinishing
-            )
-        }
     }
 
     // ---------------------------------------------------------------

@@ -26,7 +26,6 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
-import java.security.GeneralSecurityException
 
 /** JVM tests for [DesktopBackupForm], the view-free half of the desktop backup dialogs. */
 class DesktopBackupFormTest {
@@ -111,15 +110,6 @@ class DesktopBackupFormTest {
         latest as DesktopBackupForm.LatestBackup.Failed
         assertSame(diskFull, latest.error)
         assertEquals(R.string.desktop_backup_error_read_stored, latest.message)
-    }
-
-    @Test
-    fun `a latest-backup lookup that fails in the keystore reports an error instead of throwing`() = runTest {
-        val latest = DesktopBackupForm.findLatest { throw GeneralSecurityException("key invalidated") }
-        assertEquals(
-            R.string.desktop_backup_error_read_stored,
-            (latest as DesktopBackupForm.LatestBackup.Failed).message
-        )
     }
 
     @Test

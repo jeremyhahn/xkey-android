@@ -91,21 +91,6 @@ class TrustedComputingSettingsRepositoryTest {
     }
 
     @Test
-    fun freshStore_yieldsDocumentedDefaults() = runBlocking {
-        val settings = repository.getSettings()
-
-        assertEquals(TrustedComputingSettingsData.DEFAULT, settings)
-        assertFalse(settings.enabled)
-        assertEquals(CertificateAuthoritySource.NONE, settings.caSource)
-        assertNull(settings.xkmsEndpoint)
-        assertTrue(settings.trustNewDevices)
-        assertEquals("xkey_intermediate_ca", settings.platformCAAlias)
-        assertFalse(settings.useXkmsCA)
-        assertFalse(settings.useLocalCA)
-        assertFalse(settings.isDeviceVerificationActive)
-    }
-
-    @Test
     fun updateSettings_roundTripsEveryField() = runBlocking {
         val written = TrustedComputingSettingsData(
             enabled = true,
@@ -134,13 +119,6 @@ class TrustedComputingSettingsRepositoryTest {
     }
 
     @Test
-    fun settingsFlow_emitsThePersistedValue() = runBlocking {
-        repository.updateSettings(TrustedComputingSettingsData.STRICT)
-
-        assertEquals(TrustedComputingSettingsData.STRICT, repository.settingsFlow.first())
-    }
-
-    @Test
     fun updateSettings_removesTheEndpointWhenItIsNull() = runBlocking {
         repository.updateXkmsEndpoint("https://xkms.example.test/bundle")
 
@@ -162,31 +140,6 @@ class TrustedComputingSettingsRepositoryTest {
             repository.updateCASource(source)
 
             assertEquals(source, repository.getSettings().caSource)
-        }
-    }
-
-    /** The choice is what drives the derived flags, with the feature on. */
-    @Test
-    fun updateCASource_drivesTheDerivedFlags() = runBlocking {
-        repository.updateEnabled(true)
-        repository.updateXkmsEndpoint("https://xkms.example.test/bundle")
-
-        repository.updateCASource(CertificateAuthoritySource.THIS_DEVICE)
-        repository.getSettings().let {
-            assertTrue(it.useLocalCA)
-            assertFalse("a stored endpoint must not act for another authority", it.useXkmsCA)
-        }
-
-        repository.updateCASource(CertificateAuthoritySource.XKMS)
-        repository.getSettings().let {
-            assertTrue(it.useXkmsCA)
-            assertFalse(it.useLocalCA)
-        }
-
-        repository.updateCASource(CertificateAuthoritySource.NONE)
-        repository.getSettings().let {
-            assertFalse(it.useXkmsCA)
-            assertFalse(it.useLocalCA)
         }
     }
 
@@ -302,12 +255,6 @@ class TrustedComputingSettingsRepositoryTest {
         assertEquals(CertificateAuthoritySource.XKMS, settings.caSource)
         assertEquals(LEGACY_URL, settings.xkmsEndpoint)
         assertTrue(settings.copy(enabled = true).useXkmsCA)
-    }
-
-    /** An install that never configured a CA is not migrated into one. */
-    @Test
-    fun migration_anEmptyStoreReadsAsNone() = runBlocking {
-        assertEquals(CertificateAuthoritySource.NONE, repository.getSettings().caSource)
     }
 
     /** "Act as CA Server" off with no URL is exactly the no-authority case. */

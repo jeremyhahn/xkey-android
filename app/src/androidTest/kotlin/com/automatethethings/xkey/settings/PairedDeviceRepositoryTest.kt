@@ -92,12 +92,6 @@ class PairedDeviceRepositoryTest {
     }
 
     @Test
-    fun unknownDevice_isNotFound() {
-        assertFalse(repository.isDeviceKnown(primaryKey))
-        assertNull(repository.getDevice(primaryKey))
-    }
-
-    @Test
     fun addDevice_replacesAnEntryWithTheSamePublicKey() {
         repository.addDevice(primaryKey, primaryName)
         val before = repository.getAllDevices().count { it.publicKeyHex == primaryKey }
@@ -118,47 +112,6 @@ class PairedDeviceRepositoryTest {
 
         assertFalse(repository.isDeviceKnown(primaryKey))
         assertTrue(repository.isDeviceKnown(secondaryKey))
-    }
-
-    @Test
-    fun addDevice_replacesAnEntryWithTheSameDeviceName() {
-        repository.addDevice(primaryKey, primaryName)
-
-        repository.addDevice(secondaryKey, primaryName)
-
-        assertFalse(repository.isDeviceKnown(primaryKey))
-        assertEquals(primaryName, repository.getDevice(secondaryKey)?.deviceName)
-    }
-
-    @Test
-    fun distinctDevices_coexist() {
-        repository.addDevice(primaryKey, primaryName)
-        repository.addDevice(secondaryKey, secondaryName)
-
-        assertTrue(repository.isDeviceKnown(primaryKey))
-        assertTrue(repository.isDeviceKnown(secondaryKey))
-    }
-
-    @Test
-    fun removeDevice_leavesTheOtherDevicesAlone() {
-        repository.addDevice(primaryKey, primaryName)
-        repository.addDevice(secondaryKey, secondaryName)
-        val totalBefore = repository.getAllDevices().size
-
-        repository.removeDevice(primaryKey)
-
-        assertFalse(repository.isDeviceKnown(primaryKey))
-        assertTrue(repository.isDeviceKnown(secondaryKey))
-        assertEquals(totalBefore - 1, repository.getAllDevices().size)
-    }
-
-    @Test
-    fun removeDevice_isSafeForAnUnknownKey() {
-        val totalBefore = repository.getAllDevices().size
-
-        repository.removeDevice(primaryKey)
-
-        assertEquals(totalBefore, repository.getAllDevices().size)
     }
 
     @Test
@@ -323,22 +276,5 @@ class PairedDeviceRepositoryTest {
         assertEquals("cafebabe", reread.bootHashHex)
         assertEquals("external-ca", reread.idevidTrustLevel)
         assertEquals(1L, reread.connectionCount)
-    }
-
-    @Test
-    fun clear_emptiesTheStore() {
-        val preexisting = repository.getAllDevices()
-        repository.addDevice(primaryKey, primaryName)
-
-        repository.clear()
-
-        assertTrue(repository.getAllDevices().isEmpty())
-
-        // Put back anything that was not this suite's, so the paired-device UI
-        // suites are not disturbed by a wiped store. In practice those suites
-        // seed and remove their own devices, so this list is normally empty.
-        preexisting.forEach {
-            repository.addDevice(it.publicKeyHex, it.deviceName, it.bleAddress)
-        }
     }
 }

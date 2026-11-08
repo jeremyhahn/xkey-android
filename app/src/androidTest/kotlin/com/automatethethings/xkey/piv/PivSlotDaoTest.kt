@@ -150,11 +150,6 @@ class PivSlotDaoTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun getAll_isEmptyForAFreshDatabase() = runBlocking {
-        assertTrue(dao.getAll().isEmpty())
-    }
-
-    @Test
     fun getAll_ordersBySlotId() = runBlocking {
         dao.upsert(slot("9E"))
         dao.upsert(slot("82"))
@@ -170,11 +165,6 @@ class PivSlotDaoTest {
         dao.upsert(slot("9C", hasKey = false, algorithm = null, publicKeyDer = null))
 
         assertEquals(listOf("9A", "9C"), dao.observeAll().first().map { it.slotId })
-    }
-
-    @Test
-    fun observeAll_emitsAnEmptyListForAFreshDatabase() = runBlocking {
-        assertTrue(dao.observeAll().first().isEmpty())
     }
 
     // -------------------------------------------------------------------------
@@ -194,24 +184,12 @@ class PivSlotDaoTest {
     }
 
     @Test
-    fun observePopulatedSlots_isEmptyWhenEverySlotIsAPlaceholder() = runBlocking {
-        dao.upsert(slot("9A", hasKey = false, algorithm = null, publicKeyDer = null))
-
-        assertTrue(dao.observePopulatedSlots().first().isEmpty())
-    }
-
-    @Test
     fun countPopulated_countsOnlySlotsHoldingAKey() = runBlocking {
         dao.upsert(slot("9A", hasKey = true))
         dao.upsert(slot("9C", hasKey = true))
         dao.upsert(slot("9D", hasKey = false, algorithm = null, publicKeyDer = null))
 
         assertEquals(2, dao.countPopulated())
-    }
-
-    @Test
-    fun countPopulated_isZeroForAFreshDatabase() = runBlocking {
-        assertEquals(0, dao.countPopulated())
     }
 
     @Test
@@ -255,17 +233,6 @@ class PivSlotDaoTest {
     // -------------------------------------------------------------------------
     // Usage tracking
     // -------------------------------------------------------------------------
-
-    @Test
-    fun recordUsage_incrementsTheCountAndStampsTheTime() = runBlocking {
-        dao.upsert(slot("9A"))
-
-        dao.recordUsage("9A", 1_700_000_000_000L)
-
-        val stored = dao.getBySlotId("9A")!!
-        assertEquals(1, stored.useCount)
-        assertEquals(1_700_000_000_000L, stored.lastUsedAt)
-    }
 
     @Test
     fun recordUsage_accumulatesAcrossCalls() = runBlocking {

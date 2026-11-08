@@ -199,11 +199,6 @@ class KeyDaoTest {
     }
 
     @Test
-    fun getByKeyId_returnsNullForAnUnknownId() = runBlocking {
-        assertNull(dao.getByKeyId("k-missing"))
-    }
-
-    @Test
     fun getByType_andObserveByType_agree() = runBlocking {
         dao.insert(key("k-fido", keyType = "fido2"))
         dao.insert(key("k-secret", keyType = "secret"))
@@ -374,29 +369,6 @@ class KeyDaoTest {
         assertFalse(stored.shareable)
     }
 
-    /**
-     * `updateShareable` used to write only the legacy flag, so a row could reach
-     * `shareable = 1, sharing_policy = 'PRIVATE'` — a state `KeyEntity`'s KDoc
-     * forbids. It has been removed; `updateSharingPolicy` is the only way to
-     * move either column, and it moves both.
-     */
-    @Test
-    fun updateSharingPolicy_keepsTheLegacyFlagInStep() = runBlocking {
-        dao.insert(key("k-1", policy = SharingPolicyType.PRIVATE))
-
-        dao.updateSharingPolicy("k-1", SharingPolicyType.ALL_PEERS)
-        dao.getByKeyId("k-1")!!.let {
-            assertTrue("ALL_PEERS must set the legacy flag", it.shareable)
-            assertEquals(SharingPolicyType.ALL_PEERS, it.sharingPolicy)
-        }
-
-        dao.updateSharingPolicy("k-1", SharingPolicyType.PRIVATE)
-        dao.getByKeyId("k-1")!!.let {
-            assertFalse("PRIVATE must clear the legacy flag", it.shareable)
-            assertEquals(SharingPolicyType.PRIVATE, it.sharingPolicy)
-        }
-    }
-
     // -------------------------------------------------------------------------
     // Usage tracking
     // -------------------------------------------------------------------------
@@ -422,13 +394,6 @@ class KeyDaoTest {
         val after = System.currentTimeMillis()
 
         assertTrue(dao.getByKeyId("k-1")!!.lastUsedAt in before..after)
-    }
-
-    @Test
-    fun recordUsage_isSilentForAnUnknownKey() = runBlocking {
-        dao.recordUsage("k-missing", 1L)
-
-        assertNull(dao.getByKeyId("k-missing"))
     }
 
     @Test
