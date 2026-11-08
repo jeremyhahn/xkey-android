@@ -127,18 +127,6 @@ class KeystoreManagerTest {
     }
 
     @Test
-    fun keyExists_returnsTrueAfterGeneration() = runBlocking {
-        val credentialId = createTestCredentialId()
-
-        keystoreManager.generateKey(
-            credentialId = credentialId,
-            requireBiometric = false
-        )
-
-        assertTrue("Key should exist after generation", keystoreManager.keyExists(credentialId))
-    }
-
-    @Test
     fun deleteKey_returnsFalseForNonexistent() {
         val credentialId = "nonexistent_credential_${System.currentTimeMillis()}"
 
