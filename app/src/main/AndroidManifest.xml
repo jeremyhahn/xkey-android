@@ -194,7 +194,7 @@
              Standard launch mode: every request gets its own instance, which reads
              its request in onCreate. PendingCryptoSignatures shows one at a time;
              singleTop could hand a request to an instance that is finishing and
-             drop it (Codex 7369). -->
+             drop it. -->
         <activity
             android:name=".ui.CryptoSigningActivity"
             android:exported="false"
