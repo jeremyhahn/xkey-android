@@ -30,11 +30,11 @@ import kotlin.coroutines.resumeWithException
  * A request whose waiting coroutine is cancelled -- its session revoked or
  * unpaired, its transport gone, its handler timed out -- takes its prompt down
  * with it: [cancelPrompt] reaches the activity showing that request, and only
- * that one, which dismisses the prompt and signs nothing (Codex 7346).
+ * that one, which dismisses the prompt and signs nothing.
  * Leaving the prompt up would let a touch meant for nothing sign anyway.
  *
  * Requests take turns on screen through [prompts], one prompt at a time in
- * arrival order (Codex 7369): a request that arrives while another is
+ * arrival order: a request that arrives while another is
  * prompting waits for it to settle, and one cancelled while it waits is
  * never shown. Every request is settled exactly once: by its result, by the
  * failure to launch its prompt, or by its cancellation.
@@ -116,7 +116,7 @@ internal class PendingCryptoSignatures(
 
 /**
  * One crypto signing prompt on screen at a time, the rest waiting in arrival
- * order (Codex 7369, finding 1).
+ * order.
  *
  * [com.automatethethings.xkey.ui.CryptoSigningActivity] reads its request
  * when it is created and the system shows one biometric authentication at a

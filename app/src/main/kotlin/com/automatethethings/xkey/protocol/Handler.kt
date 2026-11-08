@@ -168,8 +168,8 @@ class RequestHandler(
          * One handler serves BLE, TCP and USB at once, so nothing about the
          * session a request arrived on may be read from handler-wide state: a
          * second transport's handshake would overwrite it, and a verifyUser or
-         * attestDevice answer would then commit to the other desktop's channel
-         * (Codex 7346). Unlike a [handleRawRequest] caller session, a served
+         * attestDevice answer would then commit to the other desktop's channel.
+         * Unlike a [handleRawRequest] caller session, a served
          * connection is the one the installed message sender reaches.
          *
          * @param binding the binding of the connection the request arrived on
@@ -2406,7 +2406,7 @@ class RequestHandler(
     private suspend fun deriveChannelBinding(): ByteArray {
         // The session the request arrived on, and only that. There is no
         // handler-wide fallback: with BLE, TCP and USB sharing this handler, any
-        // other session is another desktop's channel (Codex 7346).
+        // other session is another desktop's channel.
         val binding = currentCoroutineContext()[CallerSession]?.binding?.binding()
             ?: throw ProtocolException(
                 "Device attestation requires an established Noise session to bind to",

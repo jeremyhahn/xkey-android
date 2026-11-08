@@ -591,7 +591,7 @@ class GattServer(
             Log.i(TAG, "Connection state changed: device=$deviceAddress, status=$status, newState=$newState")
 
             when (newState) {
-                // Only a connect begins a queue (Codex 7527): every other
+                // Only a connect begins a queue: every other
                 // callback finds the one it began, or is dropped.
                 BluetoothProfile.STATE_CONNECTED -> synchronized(eventQueuesLock) {
                     if (beginQueue(device) == null) {
@@ -728,7 +728,7 @@ class GattServer(
             // The latest CCCD write of the open connection, from its link,
             // which takes each write before the consumer publishes it. The
             // published map can still hold the connection a reconnect
-            // replaced (Codex 7557). Null when no connection is open.
+            // replaced. Null when no connection is open.
             val enabled = synchronized(eventQueuesLock) { openLink(device)?.let { it.notifications == true } }
             if (enabled == null) {
                 Log.w(TAG, "Refusing a descriptor read from ${device.address}: its connection is not open")
@@ -771,9 +771,9 @@ class GattServer(
                 val enable = value.contentEquals(CCCD_ENABLE_NOTIFICATION) ||
                         value.contentEquals(CCCD_ENABLE_INDICATION)
                 // Recorded here, not by the consumer: a frame written before
-                // this write has the consumer waiting on it (Codex 7477), and
-                // the latest write decides that wait (Codex 7498). One
-                // outside an open connection is refused (Codex 7527).
+                // this write has the consumer waiting on it, and
+                // the latest write decides that wait. One
+                // outside an open connection is refused.
                 val recorded = notificationsWritten(device, enable)
                 if (recorded) {
                     Log.d(TAG, "Notifications ${if (enable) "enabled" else "disabled"} for ${device.address}")
@@ -835,7 +835,7 @@ class GattServer(
     /**
      * What the stack reports about one connection that a send waiting on the
      * consumer needs before the consumer can handle it: a send the consumer
-     * makes cannot wait for an event queued behind it (Codex 7477). Begun by
+     * makes cannot wait for an event queued behind it. Begun by
      * the connect callback and ended by the disconnect, so a callback outside
      * that span sets nothing on it.
      */
@@ -898,7 +898,7 @@ class GattServer(
     /**
      * Begins [device]'s connection: a queue of its own, holding the connect,
      * and the one consumer that handles it once the device's last consumer
-     * has finished. The only place a queue is made (Codex 7527): a callback
+     * has finished. The only place a queue is made: a callback
      * that finds none open is dropped, so no consumer outlives its
      * connection. A connect that finds the last connection's queue still
      * open ends it first, so a device has one open queue at a time.
@@ -949,7 +949,7 @@ class GattServer(
      * has published the link, in [notificationEnabled] and
      * [notificationReady], where a waiting send reads it. The latest write
      * decides: an enable after a disable releases a send waiting behind the
-     * frame the consumer is answering (Codex 7498). A write from an earlier
+     * frame the consumer is answering. A write from an earlier
      * connection, after a disconnect or after [destroy] finds no link and
      * changes nothing.
      *
@@ -999,8 +999,8 @@ class GattServer(
      *
      * Nothing is queued without an open queue: a callback that resumes after
      * the disconnect, an overflow, [stop] or [destroy] would otherwise leave
-     * a consumer waiting for a disconnect that has already been seen (Codex
-     * 7527). It is dropped until the next connect.
+     * a consumer waiting for a disconnect that has already been seen.
+     * It is dropped until the next connect.
      *
      * @return whether the event was queued
      */
@@ -1178,7 +1178,7 @@ class GattServer(
         }
 
         // A request the peer left waiting -- on a prompt nobody will answer --
-        // is cancelled with its prompt; it answers nothing (Codex 7369).
+        // is cancelled with its prompt; it answers nothing.
         if (ended != null) {
             requestJobs.forEach { (job, owner) -> if (owner === ended) job.cancel() }
         }
@@ -1625,7 +1625,7 @@ class GattServer(
         // The request carries this session's binding and peer, read once under
         // the Noise lock as the SAS reads them. The handler is shared with the
         // stream transports, so nothing handler-wide can say which session a
-        // request arrived on (Codex 7346); the router calls the handler in
+        // request arrived on; the router calls the handler in
         // this coroutine, so the element reaches it.
         val binding = noiseMutex.withLock { session?.takeIf { isCurrent(it) }?.sessionBinding() }
         val caller = RequestHandler.servedConnection(
@@ -2508,7 +2508,7 @@ class GattServer(
                         if (!isCurrent(session)) throw java.io.IOException("The session is no longer live")
                         // Its connection's disconnect was seen: the session
                         // still decrypts the replies queued before it, but
-                        // encrypts nothing more (Codex 7557).
+                        // encrypts nothing more.
                         if (sessionQueue?.inputEnded == true) {
                             throw java.io.IOException("The connection to ${device.address} is closing")
                         }
@@ -2545,7 +2545,7 @@ class GattServer(
             // A frame the stack refused while its connection drains ends nothing yet:
             // nothing more is sent on the session, and the replies queued
             // before the disconnect still decrypt on it. It ends with the
-            // drain (Codex 7557).
+            // drain.
             if (sessionQueue?.inputEnded == true) return
             endedSession = session
         }
@@ -2564,7 +2564,7 @@ class GattServer(
     private suspend fun sendResponse(device: BluetoothDevice, response: ByteArray) {
         val channel = openChannel(device) ?: return
         // Checked after the wait, which a disconnect can end with the
-        // readiness already complete (Codex 7557).
+        // readiness already complete.
         if (draining()) {
             Log.d(TAG, "Peer disconnected; the frame is not sent")
             return
@@ -2575,7 +2575,7 @@ class GattServer(
     /**
      * Whether the connection the caller handles events for has seen its
      * disconnect: what was queued before it still drains, but nothing more
-     * is sent on it (Codex 7557).
+     * is sent on it.
      */
     private suspend fun draining(): Boolean = currentCoroutineContext()[EventQueue]?.inputEnded == true
 
@@ -2616,7 +2616,7 @@ class GattServer(
         }
 
         // The MTU of the connection this send runs for, when it runs for one:
-        // its MTU event may be queued behind this frame's (Codex 7477).
+        // its MTU event may be queued behind this frame's.
         val link = currentCoroutineContext()[EventQueue]?.link
         val mtu = link?.mtu ?: deviceMtu[device.address] ?: DEFAULT_MTU
         // Max payload per fragment: ATT value limit (MTU-3) minus fragment header (7 bytes)
@@ -2639,7 +2639,7 @@ class GattServer(
     /**
      * Waits until [address]'s latest CCCD write is an enable. A disable after
      * the enable that completed the readiness has replaced it, so the wait
-     * goes on for the next enable (Codex 7498).
+     * goes on for the next enable.
      *
      * @return false when there is no readiness to wait for, or it was
      *   completed but its connection's notifications are not enabled
