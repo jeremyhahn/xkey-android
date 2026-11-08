@@ -374,6 +374,24 @@ class BootstrapSettingsDataTest {
         assertSame(original, original.deriveFromUrl("/just/a/path"))
     }
 
+    @Test
+    fun `deriveFromUrl keeps configured trust material and policy`() {
+        val original = BootstrapSettingsData(
+            autoBootstrapEnabled = false,
+            perMethodTimeoutSeconds = 60,
+            noiseServerStaticKey = "ab".repeat(32),
+            spkiPinSha256 = "cd".repeat(32)
+        )
+
+        val derived = original.deriveFromUrl("https://kms.example.com:8443")
+
+        assertEquals("https://kms.example.com:8443", derived.directServerUrl)
+        assertFalse(derived.autoBootstrapEnabled)
+        assertEquals(60, derived.perMethodTimeoutSeconds)
+        assertEquals("ab".repeat(32), derived.noiseServerStaticKey)
+        assertEquals("cd".repeat(32), derived.spkiPinSha256)
+    }
+
     // -------------------------------------------------------------------------
     // Timeout helpers and derived configs
     // -------------------------------------------------------------------------
