@@ -69,3 +69,8 @@ self-hosted-runner:
     - qwen
     - dells
     - release
+paths:
+  # code-review.yml is a template copied verbatim; SC2015 there is informational.
+  .github/workflows/code-review.yml:
+    ignore:
+      - 'SC2015:'

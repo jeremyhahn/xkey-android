@@ -23,7 +23,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 /**
- * The `local.verifyUser` wire messages (owner ruling 167): the request carries
+ * The `local.verifyUser` wire messages (the desktop's contract): the request carries
  * only a version and a 32-byte nonce, and anything else is INVALID_PARAMS.
  */
 class LocalVerifyUserMessagesTest {

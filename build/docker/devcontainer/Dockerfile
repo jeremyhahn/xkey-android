@@ -24,14 +24,10 @@ RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";"
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy
 COPY scripts/tool-pins.sh /tmp/tool-pins.sh
-# fetch <url> <file> <sha256>: download over https and refuse a mismatch.
-RUN cat > /usr/local/bin/fetch <<'EOF'
-#!/bin/sh
-set -eu
-curl -fsSL --proto '=https' --tlsv1.2 -o "$2" "$1"
-echo "$3  $2" | sha256sum -c -
-EOF
-RUN chmod 0755 /usr/local/bin/fetch
+# fetch <url> <file> <sha256>: download over https with retries and refuse a
+# SHA-256 mismatch; a failed GitHub release download falls back to the API
+# asset endpoint (fetch.sh). The checksum is the only trust anchor.
+COPY --chmod=0755 build/docker/devcontainer/fetch.sh /usr/local/bin/fetch
 RUN . /tmp/tool-pins.sh; \
     case "${TARGETARCH}" in \
       amd64) jarch=x64 jsum=${JBR_SHA256_X64} tsum=${TRIVY_SHA256_X64} tarch=64bit asum=${ACTIONLINT_SHA256_X64} ;; \
@@ -146,6 +142,27 @@ RUN gradle --no-daemon --console=plain assembleDebug testDebugUnitTest coverageR
     cp -a "${GRADLE_USER_HOME}/caches/modules-2" /opt/gradle-ro-cache/; \
     find /opt/gradle-ro-cache -name '*.lock' -delete; \
     rm -f /opt/gradle-ro-cache/modules-2/gc.properties
+# lint's intellij-core jar shades lz4-java 1.11.0 (CVE-2026-106451): its
+# classes, no native libraries. No newer lint ships a fixed copy, and a
+# shaded copy is not a dependency a constraint can raise, so the classes and
+# Maven metadata of the pinned fixed release replace it in the cache, at the
+# same entry names (1.11.0 and 1.11.4 have the same file list). A shaded
+# copy already at or past the pin is left alone. The proof below runs lint
+# on the patched jar.
+RUN . /tmp/tool-pins.sh; \
+    cd /tmp; \
+    fetch "https://repo1.maven.org/maven2/at/yawk/lz4/lz4-java/${LZ4_JAVA_VERSION}/lz4-java-${LZ4_JAVA_VERSION}.jar" lz4.jar "${LZ4_JAVA_SHA256}"; \
+    unzip -q lz4.jar 'net/jpountz/*.class' 'META-INF/maven/*' -d lz4; \
+    pom=META-INF/maven/at.yawk.lz4/lz4-java/pom.properties; \
+    find /opt/gradle-ro-cache -name 'intellij-core-*.jar' -print0 | while IFS= read -r -d '' j; do \
+      v=$(unzip -p "$j" "$pom" 2>/dev/null | sed -n 's/^version=//p' || true); \
+      [ -n "$v" ] || continue; \
+      [ "$(printf '%s\n%s\n' "$v" "${LZ4_JAVA_VERSION}" | sort -V | head -n 1)" != "${LZ4_JAVA_VERSION}" ] || continue; \
+      jar uf "$j" -C lz4 .; \
+      [ "$(unzip -p "$j" "$pom" | sed -n 's/^version=//p')" = "${LZ4_JAVA_VERSION}" ]; \
+      echo "lz4-java ${v} -> ${LZ4_JAVA_VERSION} in ${j##*/}"; \
+    done; \
+    rm -rf lz4 lz4.jar
 # The proof: the same tasks again, --offline, from clean outputs and a fresh
 # writable GRADLE_USER_HOME holding only a copy of that cache (no build cache,
 # no configuration cache, so every task resolves its dependencies again). A
