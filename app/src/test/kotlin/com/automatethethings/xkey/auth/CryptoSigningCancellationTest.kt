@@ -32,7 +32,7 @@ import java.util.concurrent.Executor
 
 /**
  * A cancelled signing request takes its prompt down, and a touch that lands
- * anyway signs nothing (Codex 7346, finding 1).
+ * anyway signs nothing.
  *
  * This drives the real [PendingCryptoSignatures], the real cancellation
  * registry and the real [CryptoSigningController] the activity runs on. Only
@@ -184,7 +184,7 @@ class CryptoSigningCancellationTest {
     }
 
     // -----------------------------------------------------------------
-    // Overlapping requests take turns (Codex 7369, finding 1)
+    // Overlapping requests take turns
     // -----------------------------------------------------------------
 
     /** Two requests at once: one prompt at a time, and both are answered. */

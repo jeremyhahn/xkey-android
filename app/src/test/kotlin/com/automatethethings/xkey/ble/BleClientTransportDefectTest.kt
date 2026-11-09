@@ -267,7 +267,7 @@ class BleClientTransportDefectTest {
     // -----------------------------------------------------------------
 
     /**
-     * PR #42, Codex review 6185, P1: the ack invoked the write's completion and
+     * PR #42: the ack invoked the write's completion and
      * only then cleared the slot. Invoking it resumes the writer, and the
      * writer's next fragment installs its own completion — so a callback still
      * running when that happened cleared the *next* write's completion, and the

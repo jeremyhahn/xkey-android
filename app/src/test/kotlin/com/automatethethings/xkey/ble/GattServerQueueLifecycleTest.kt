@@ -50,7 +50,7 @@ import org.junit.Test
 
 /**
  * A connection's event queue lives from its STATE_CONNECTED to its
- * disconnect, and no callback outlives it (Codex 7527 on #63).
+ * disconnect, and no callback outlives it.
  *
  * Only a connect opens a queue. A write, read, MTU or CCCD callback that
  * finds no open queue (after the disconnect, an overflow or `destroy()`) is
@@ -146,7 +146,7 @@ class GattServerQueueLifecycleTest {
     }
 
     /**
-     * The Codex 7527 regression: a write callback that resumes after the
+     * A write callback that resumes after the
      * disconnect callback, while the consumer is still settling it, opens no
      * queue. It is refused, and once the consumer has settled the disconnect
      * nothing is left.

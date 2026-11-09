@@ -13,18 +13,18 @@
 #            one a pull request changes is hashed, so it names another image.
 # it:        the whole build context: the commit's tree, and on a dirty
 #            checkout the diff and every untracked file .gitignore keeps.
-#            From ci-template v1.29 also APK_INDEX_SUM, the Alpine package
+#            Also APK_INDEX_SUM, the Alpine package
 #            index checksum (scripts/apk-index-sum.sh) CI passes; `none` here,
-#            whose base is Debian. CUSTOMIZE (xkey-android, Software comment
-#            158438): also APT_INDEX_SUM, the Debian package index checksum
+#            whose base is Debian. CUSTOMIZE (xkey-android): also
+#            APT_INDEX_SUM, the Debian package index checksum
 #            (scripts/apt-index-sum.sh). Each sum, unset or empty, leaves the
 #            tag alone; both unset, the tag is the tree's alone.
 #            scripts/image-tag-test.sh (make lint-gates) checks this.
 #
-# The namespace is the run's class, as a name (Codex review 6470). trusted,
+# The namespace is the run's class, as a name. trusted,
 # the default, is a developer's own make and CI's push or dispatch
 # on main; ci.yml passes pr for every other run, from the event, and a pr tag
-# is pr-<hash>. It protects nothing (Codex review 6544): a pull request's run
+# is pr-<hash>. It protects nothing: a pull request's run
 # can write any tag on a daemon it shares with main, so a trusted run never
 # looks a tag up. It builds fresh and runs by image ID (Makefile IMAGE_FRESH).
 set -eu

@@ -321,7 +321,7 @@ class GattServerEventOrderTest {
     /**
      * Installs a confirmed session with [keyHex]'s desktop, as a completed
      * connection leaves it, on a connection the stack's connect opened: only
-     * a connect opens the queue the writes go to (Codex 7527).
+     * a connect opens the queue the writes go to.
      */
     private fun install(session: NoiseSession) {
         callback.onConnectionStateChange(device, 0, BluetoothProfile.STATE_CONNECTED)
