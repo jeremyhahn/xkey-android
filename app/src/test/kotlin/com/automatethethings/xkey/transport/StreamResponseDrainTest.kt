@@ -65,7 +65,7 @@ import org.junit.Test
 
 /**
  * The desktop answers a phone-initiated `remote.*` request and then ends its
- * stream before the phone has dispatched the answer (Codex 7380). The frames
+ * stream before the phone has dispatched the answer. The frames
  * read before the end of the stream are still delivered: each caller gets the
  * desktop's own result or error, not "Connection lost". The main thread is
  * held while the reader reads the answer and the end of the stream, so the

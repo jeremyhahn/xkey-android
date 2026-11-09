@@ -1,8 +1,8 @@
 # One service per devcontainer image: the toolchain image and the integration-test image.
 # The Makefile sets both image tags (TOOLCHAIN_IMAGE, IT_IMAGE) on every call,
 # since Compose interpolates every service, and the user. TOOLCHAIN_IMAGE has a
-# placeholder default so that CI's tear down (`IT_IMAGE=... docker compose down`,
-# ci-template) interpolates; `make docker-run` always sets the real tag.
+# placeholder default so that CI's tear down (`IT_IMAGE=... docker compose down`)
+# interpolates; `make docker-run` always sets the real tag.
 x-limits: &limits
   ulimits:
     memlock:

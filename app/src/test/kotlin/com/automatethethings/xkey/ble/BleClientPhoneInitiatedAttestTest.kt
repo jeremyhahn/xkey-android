@@ -400,7 +400,7 @@ class BleClientPhoneInitiatedAttestTest {
     }
 
     /**
-     * Codex review 6601: the desktop answers the phone's request with an
+     * The desktop answers the phone's request with an
      * attestation, which waits for approval while the request waits for its
      * reply, holding stateMutex. The link's own disconnect cancels the worker
      * in the callback, not once the teardown gets that mutex, so nothing is

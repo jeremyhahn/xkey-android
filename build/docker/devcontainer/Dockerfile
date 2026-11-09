@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # The syntax line names the BuildKit frontend that parses this file, an image
 # like any FROM, so it is pinned by digest too (docker/dockerfile:1's index,
-# 2026-10-22; Codex review 6544): a trusted build pulls it (--pull) and runs
+# 2026-10-22): a trusted build pulls it (--pull) and runs
 # that frontend, never one a pull request tagged on the daemon.
 # The project devcontainer, one image for development and CI, in three stages:
 # `base` (JDK, Android SDK, Gradle, the read-only dependency cache, a non-root
@@ -67,13 +67,12 @@ RUN . /tmp/tool-pins.sh; \
 # read-only cache. Both runs are uid 1000, as at run time, so AGP cannot
 # install an SDK package into the root-owned SDK: one off its pin fails here.
 #
-# It runs nothing the toolchain tag does not hash (image-tag.sh, Codex review
-# 6470): the Gradle build files, copied in one by one (keep these COPY lines
+# It runs nothing the toolchain tag does not hash (image-tag.sh): the Gradle build files, copied in one by one (keep these COPY lines
 # equal to image-tag.sh's list), and a stub app this Dockerfile writes. The
 # checkout's sources and tests never enter it, so the tag names everything
 # that shapes the image, for the reuse a pull request's run and a developer's
 # make do. A trusted run reuses neither a tag nor the build cache (Makefile
-# IMAGE_FRESH, Codex review 6544). No RUN takes a --mount=type=cache: BuildKit
+# IMAGE_FRESH). No RUN takes a --mount=type=cache: BuildKit
 # shares such a cache by name, outside any tag and past --no-cache. ----
 FROM fetch AS warm
 RUN useradd --uid 1000 --create-home --shell /bin/bash builder \
@@ -217,18 +216,17 @@ USER 1000
 
 # ---- integration: base plus make and the source ----
 # The suites run through the Makefile with the image's Gradle, offline.
-# TODO(#35): how this stage reaches a device or emulator waits on Software; until then `make integration-test` stops at device-check.
+# TODO(#35): how this stage reaches a device or emulator is not decided yet; until then `make integration-test` stops at device-check.
 FROM base AS integration
 ARG APT_PROXY=
-# ci-template v1.29, CUSTOMIZE (xkey-android, Software comment 158438): the
-# Debian mirror of devcontainer.md section 6's `ARG APK_INDEX_SUM` and
-# `apk upgrade --no-cache`. APT_INDEX_SUM (scripts/apt-index-sum.sh) is the
+# CUSTOMIZE (xkey-android): the Debian counterpart of an Alpine image's
+# `ARG APK_INDEX_SUM` and `apk upgrade --no-cache`. APT_INDEX_SUM (scripts/apt-index-sum.sh) is the
 # package index checksum the image's tag hashes; a new one misses the cache
 # from this RUN on, so `apt-get upgrade` takes the fixed packages that base's
 # cached upgrade layer does not have. base and toolchain do not declare it.
 # APT::Update::Error-Mode=any, as apt-index-sum.sh's probe: an index that
 # cannot be refreshed fails the build, so a stale upgrade never caches under
-# the new tag (Codex 7845; scripts/image-tag-test.sh checks it).
+# the new tag (scripts/image-tag-test.sh checks it).
 ARG APT_INDEX_SUM=
 USER root
 RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \

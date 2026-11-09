@@ -167,7 +167,7 @@ class TcpHsmServerRevocationTest {
 
     /**
      * The desktop is unpaired while its `local.generateKey` waits for the
-     * user's approval (Codex 7155). The request is cancelled there: approving
+     * user's approval. The request is cancelled there: approving
      * afterwards runs nothing, the connection's teardown clears the handler's
      * identity, and the server accepts and serves the next connection.
      */
@@ -215,7 +215,7 @@ class TcpHsmServerRevocationTest {
 
     /**
      * The desktop's stream ends while its `local.verifyUser` waits on a prompt
-     * nobody answers (Codex 7369). The request is cancelled with no user
+     * nobody answers. The request is cancelled with no user
      * input, nothing is written, and the server goes back to listening and
      * serves the next connection.
      */
@@ -300,8 +300,8 @@ class TcpHsmServerRevocationTest {
     /**
      * The desktop stops reading, and an outbound write from the phone fills
      * the socket buffers until it blocks ([HoldingOutputStream]); then the
-     * desktop ends its stream
-     * (Codex 7162). The teardown closes the connection before it waits on
+     * desktop ends its stream.
+     * The teardown closes the connection before it waits on
      * the send lock: the blocked write fails, the connection ends, and the
      * server accepts and serves the next one.
      */
@@ -314,7 +314,7 @@ class TcpHsmServerRevocationTest {
      * As above, but an answer to the desktop's last request waits on the send
      * lock behind the blocked write when the stream ends, so the frames read
      * before the end cannot finish draining. The drain is bounded: the
-     * connection ends, and the next one is served (Codex 7380).
+     * connection ends, and the next one is served.
      */
     @Test
     fun anEofWhileAnAnswerWaitsBehindABlockedWriteEndsTheConnectionAndTheNextIsServed() = runBlocking<Unit> {

@@ -59,7 +59,7 @@ import org.junit.Test
 
 /**
  * A desktop unpaired while its BLE session is suspended or mid-handshake
- * leaves nothing behind (#59, Codex 7155): a request waiting for approval is
+ * leaves nothing behind (#59): a request waiting for approval is
  * cancelled, an approval answered after the peer was removed and replaced
  * changes nothing, and a handshake revoked after its transport keys were split
  * never installs them or publishes the connected state.

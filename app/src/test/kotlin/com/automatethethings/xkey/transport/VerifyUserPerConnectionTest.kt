@@ -100,7 +100,7 @@ import org.junit.Test
 
 /**
  * Each `local.verifyUser` request signs over the binding of the connection it
- * arrived on (Codex 7346, finding 2).
+ * arrived on.
  *
  * BLE, TCP and USB share one [RequestHandler]. Here desktop A is served over
  * a real [GattServer] and desktop B over a real [StreamPairingSession] on a
@@ -239,7 +239,7 @@ class VerifyUserPerConnectionTest {
     }
 
     // -----------------------------------------------------------------
-    // The peer goes away while the prompt shows (Codex 7369)
+    // The peer goes away while the prompt shows
     // -----------------------------------------------------------------
 
     /**
@@ -270,7 +270,7 @@ class VerifyUserPerConnectionTest {
      * The desktop answers the phone's `remote.*` request while its own
      * `local.verifyUser` waits on a prompt, then ends its stream. The prompt
      * is cancelled with no user input, and the answer, read before the end,
-     * still reaches its caller rather than "Connection lost" (Codex 7380).
+     * still reaches its caller rather than "Connection lost".
      */
     @Test
     fun aResultThatArrivesWhileThePromptShowsStillReachesItsCallerWhenTheStreamEnds() = runBlocking<Unit> {
