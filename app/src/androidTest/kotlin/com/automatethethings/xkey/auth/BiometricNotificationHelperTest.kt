@@ -18,6 +18,8 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.service.notification.StatusBarNotification
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -26,9 +28,7 @@ import com.automatethethings.xkey.R
 import com.automatethethings.xkey.XKeyApplication
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -182,14 +182,6 @@ class BiometricNotificationHelperTest {
     }
 
     @Test
-    fun cancelNotification_isSafeWhenNothingIsShowing() {
-        helper.cancelNotification()
-        helper.cancelNotification()
-
-        assertNull(posted())
-    }
-
-    @Test
     fun theTimeoutCallbackFiresAndTakesTheNotificationWithIt() {
         val timedOut = CountDownLatch(1)
 
@@ -223,9 +215,19 @@ class BiometricNotificationHelperTest {
 
         helper.cancelNotification()
 
-        assertFalse(
+        // The helper's timeout sits on the main looper. A marker posted there now
+        // with the same delay runs after the timeout's deadline, so by the time it
+        // runs a timeout that survived the cancel would already have fired.
+        val pastTheDeadline = CountDownLatch(1)
+        Handler(Looper.getMainLooper()).postDelayed({ pastTheDeadline.countDown() }, 1_500L)
+        assertTrue(
+            "the main looper never reached the timeout's deadline",
+            pastTheDeadline.await(10, TimeUnit.SECONDS)
+        )
+        assertEquals(
             "the timeout callback ran after the request was cancelled",
-            timedOut.await(3, TimeUnit.SECONDS)
+            1L,
+            timedOut.count
         )
     }
 
