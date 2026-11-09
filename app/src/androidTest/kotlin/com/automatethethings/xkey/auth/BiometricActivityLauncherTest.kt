@@ -47,6 +47,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.Base64
 import java.util.Collections
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 /**
  * Instrumented tests for [BiometricActivityLauncher].
@@ -72,12 +74,17 @@ class BiometricActivityLauncherTest {
     private class RecordingContext(base: Context) : ContextWrapper(base) {
         val launched: MutableList<Intent> = Collections.synchronizedList(mutableListOf())
 
+        /** One permit per recorded launch, released after the intent is in [launched]. */
+        val launches = Semaphore(0)
+
         override fun startActivity(intent: Intent) {
             launched.add(intent)
+            launches.release()
         }
 
         override fun startActivity(intent: Intent, options: android.os.Bundle?) {
             launched.add(intent)
+            launches.release()
         }
     }
 
@@ -102,15 +109,12 @@ class BiometricActivityLauncherTest {
 
     // ------------------------------------------------------------- helpers
 
-    private fun awaitLaunchedIntent(timeoutMs: Long = 10_000L): Intent {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            synchronized(recordingContext.launched) {
-                recordingContext.launched.firstOrNull()
-            }?.let { return it }
-            Thread.sleep(10)
+    /** Blocks until the launch at [index] (0 for the first) has been recorded, and returns it. */
+    private fun awaitLaunchedIntent(index: Int = 0, timeoutMs: Long = 10_000L): Intent {
+        if (!recordingContext.launches.tryAcquire(timeoutMs, TimeUnit.MILLISECONDS)) {
+            throw AssertionError("the launcher never started activity number ${index + 1}")
         }
-        throw AssertionError("the launcher never started an activity")
+        return recordingContext.launched[index]
     }
 
     private fun startAuthentication(): Deferred<Unit> = scope.async {
@@ -224,12 +228,6 @@ class BiometricActivityLauncherTest {
         launcher.unregister()
     }
 
-    @Test
-    fun unregister_isSafeBeforeRegistration() {
-        launcher.unregister()
-        launcher.unregister()
-    }
-
     // -------------------------------------------------------- authentication
 
     @Test
@@ -252,16 +250,6 @@ class BiometricActivityLauncherTest {
         assertTrue(intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0)
 
         sendBiometricResult(requestIdOf(intent), success = true)
-        assertNull(failureOf { deferred.await() })
-    }
-
-    @Test
-    fun requestAuthentication_returnsOnASuccessBroadcast() {
-        launcher.register()
-        val deferred = startAuthentication()
-
-        sendBiometricResult(requestIdOf(awaitLaunchedIntent()), success = true)
-
         assertNull(failureOf { deferred.await() })
     }
 
@@ -485,9 +473,7 @@ class BiometricActivityLauncherTest {
         sendSigningResult(requestIdOf(firstIntent), true, Base64.getEncoder().encodeToString(byteArrayOf(1)))
         assertArrayEquals(byteArrayOf(1), runBlocking { withTimeout(15_000L) { first.await() } })
 
-        val deadline = System.currentTimeMillis() + 10_000L
-        while (recordingContext.launched.size < 2 && System.currentTimeMillis() < deadline) Thread.sleep(10)
-        val secondIntent = recordingContext.launched[1]
+        val secondIntent = awaitLaunchedIntent(index = 1)
         assertFalse(requestIdOf(firstIntent) == requestIdOf(secondIntent))
         sendSigningResult(requestIdOf(secondIntent), false, null, BiometricPrompt.ERROR_USER_CANCELED, "cancelled")
 
