@@ -41,7 +41,7 @@ import org.junit.Test
 
 /**
  * A send the event consumer makes never waits for an event queued behind it
- * (Codex 7477 on #63). The peer may write its identity frame before it
+ * (#63). The peer may write its identity frame before it
  * enables notifications: the consumer handling that frame waits for the
  * enable, so the enable has to signal readiness from its callback, not from
  * the consumer. Only the connection that owns the address now is signalled.
@@ -130,7 +130,7 @@ class GattServerNotificationReadyTest {
     }
 
     /**
-     * The Codex 7477 regression: the identity frame, then the CCCD enable
+     * The regression: the identity frame, then the CCCD enable
      * within the wait. The acknowledgement goes out on the enable, not when
      * the wait expires, and the handshake goes on.
      */

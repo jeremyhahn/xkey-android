@@ -77,7 +77,7 @@ class BleClientStaleCallbackTest {
     private fun harness(): BleClientHarness = BleClientHarness().also { harness = it }
 
     /**
-     * Codex review 6592: the old link's disconnect has passed its identity
+     * The old link's disconnect has passed its identity
      * check -- it was still the connection's -- when the client disconnects
      * it and reconnects. By the time the callback goes on, the new connection
      * has a write outstanding. What the callback fails is what it took with
@@ -176,7 +176,7 @@ class BleClientStaleCallbackTest {
     }
 
     /**
-     * Codex review 6601: a request that has written and waits for its reply
+     * A request that has written and waits for its reply
      * holds stateMutex, which the teardown waits for, and has no write left
      * to fail. The connection's own disconnect wakes it in the callback, so
      * it fails at once rather than at the 60-second response timeout, and

@@ -50,7 +50,7 @@ import org.junit.Test
 
 /**
  * The attestation biometric policy answers to the peer of the session a
- * request arrived on (PR #42, Codex review 6174, P1 3).
+ * request arrived on (PR #42).
  *
  * A phone-initiated session passes its own peer through
  * [RequestHandler.handleRawRequest]; the transport-installed peer belongs to
@@ -127,7 +127,7 @@ class AttestationPolicyCallerPeerTest {
     // A caller session: the outgoing peer decides
     // -----------------------------------------------------------------
 
-    /** The case Codex found: a paired desktop, re-attested with nothing incoming. */
+    /** The regression case: a paired desktop, re-attested with nothing incoming. */
     @Test
     fun aPairedOutgoingPeerWithNoIncomingSessionIsNotPrompted() = runTest {
         handler.handleRawRequest(attestRequest(), outgoingBinding, PAIRED_PEER)
@@ -227,7 +227,7 @@ class AttestationPolicyCallerPeerTest {
 
     /**
      * The global served peer is whichever desktop connected last; a
-     * connection's own peer decides, never that one (Codex 7346).
+     * connection's own peer decides, never that one.
      */
     @Test
     fun anotherConnectionsPairedPeerDoesNotExemptThisOne() = runTest {

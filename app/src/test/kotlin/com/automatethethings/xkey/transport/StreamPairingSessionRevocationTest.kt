@@ -250,8 +250,8 @@ class StreamPairingSessionRevocationTest {
     }
 
     /**
-     * The peer ends its stream while a phone-initiated write is blocked on it
-     * (Codex 7162). The teardown closes the streams before it waits on the
+     * The peer ends its stream while a phone-initiated write is blocked on it.
+     * The teardown closes the streams before it waits on the
      * send lock, so the blocked write fails, serve returns, and the keys are
      * zeroed.
      */
@@ -378,7 +378,7 @@ class StreamPairingSessionRevocationTest {
 
     /**
      * The removal lands inside msg3 processing, after the transport keys are
-     * split and before the session is installed (Codex 7155). The keys are
+     * split and before the session is installed. The keys are
      * zero when msg3 returns, and the session never connects.
      */
     @Test
@@ -411,7 +411,7 @@ class StreamPairingSessionRevocationTest {
 
     /**
      * The user is asked to approve one desktop; it is removed and a new
-     * desktop connects before the user answers yes (Codex 7155, the stream
+     * desktop connects before the user answers yes (the stream
      * counterpart of the BLE guard). The removed peer is not re-added, and the
      * new connection stays gated.
      */

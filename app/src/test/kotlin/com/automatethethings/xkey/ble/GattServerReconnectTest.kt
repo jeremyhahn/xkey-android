@@ -60,10 +60,10 @@ import org.junit.Test
 /**
  * A desktop that is already paired is confirmed when its reconnect handshake
  * completes, so the replies to the phone's own requests reach the response
- * router instead of being refused as unpaired (#59, Codex 7176). An unknown
+ * router instead of being refused as unpaired (#59). An unknown
  * desktop stays gated until `pairing.confirm`, and a removal during the
  * handshake confirms nothing. A `pairing.confirm` on the adopted session is
- * answered confirmed without a prompt (Codex 7184); an unknown desktop's still
+ * answered confirmed without a prompt; an unknown desktop's still
  * asks the user, and a revoked session's is not answered.
  *
  * The handshake's last message is driven through the server's private
@@ -263,7 +263,7 @@ class GattServerReconnectTest {
     }
 
     /**
-     * Codex 7184: a paired desktop that reconnects is confirmed at handshake
+     * A paired desktop that reconnects is confirmed at handshake
      * completion, and a later `pairing.confirm` (rerunning `xkey device
      * pair`) is answered confirmed with its own id, as StreamPairingSession
      * answers it, instead of reaching RequestHandler and METHOD_NOT_FOUND.

@@ -64,8 +64,6 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Codex review 7557 on #63.
- *
  * Once a connection's disconnect is seen, its queued events still drain and
  * its session still decrypts the replies among them, but nothing more is
  * sent on it: a send is refused at admission, before anything is encrypted,
@@ -181,7 +179,7 @@ class GattServerDrainingTest {
     // ---------------------------------------------------------------------
 
     /**
-     * The Codex 7557 case: notifications enabled, the desktop's reply queued,
+     * The case: notifications enabled, the desktop's reply queued,
      * then the disconnect. A phone-initiated send while the reply drains is
      * refused at admission: it encrypts nothing and notifies nothing, and the
      * reply still reaches its caller.

@@ -42,8 +42,8 @@ import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 
 /**
- * The latest CCCD write decides a send that waits for notifications (Codex
- * 7498 on #63): every interleaving of up to three CCCD writes with the
+ * The latest CCCD write decides a send that waits for notifications
+ * (#63): every interleaving of up to three CCCD writes with the
  * identity frame, whose acknowledgement is the response, and a disconnect
  * at the points where one can change the outcome.
  *
@@ -112,7 +112,7 @@ class GattServerCccdOrderTest(private val row: String) {
             // Two, one before and one after
             "E *I E",
             "E *I D",
-            "D I *E", // the Codex 7498 case
+            "D I *E", // a disable before the frame: the ack waits for the later enable
             "D I D",
             // Two, both after
             "I *E E",

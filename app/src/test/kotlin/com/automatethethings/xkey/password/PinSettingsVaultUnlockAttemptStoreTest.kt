@@ -98,7 +98,7 @@ class PinSettingsVaultUnlockAttemptStoreTest {
         }
 
     /**
-     * Regression for Codex review 6650 P1 (PasswordVaultTest.kt:364): the
+     * Regression (PasswordVaultTest.kt:364): the
      * lockout must survive a reopened PIN settings DataStore, so neither a
      * reconnect nor a restart resets the guessing limit.
      *

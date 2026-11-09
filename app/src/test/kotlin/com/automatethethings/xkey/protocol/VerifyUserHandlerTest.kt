@@ -187,7 +187,7 @@ class VerifyUserHandlerTest {
         assertEquals(0, prompt.prompts)
     }
 
-    /** A request that names no connection has no binding of its own, and borrows none (Codex 7346). */
+    /** A request that names no connection has no binding of its own, and borrows none. */
     @Test
     fun aRequestOnNoConnectionIsARefusalWithoutAPrompt() = runTest {
         val response = Response.fromJson(handler.handleRawRequest(verifyUserRequest().toJson()))
