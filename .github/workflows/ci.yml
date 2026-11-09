@@ -12,7 +12,8 @@
 #
 # Tiers. A pull request runs the PR tier: lint, deps-check, build and the unit
 # suite with coverage (the image job), the repository's own gates
-# (lint-gates) and the architecture gate (arch-gates). The full tier adds
+# (lint-gates) and the changed-files detection with the architecture gate
+# (preflight). The full tier adds
 # integration, security and `trivy image`; it runs on a push to main, on
 # workflow_dispatch and on a PR labelled ci:full.
 # Soak runs on workflow_dispatch only. A draft PR runs no
@@ -132,8 +133,12 @@ jobs:
   # A PR whose every changed file matches DOCS_ONLY_PATTERN runs lint only; build and make coverage are skipped. Off pull_request, or
   # on a ci:full PR, docs_only is always false. Any doubt (a failed diff, an
   # empty list) reads as false, so the tier fails toward running the tests.
-  changes:
-    name: Changed files
+  # Preflight: the changed-files detection the image job reads (docs_only),
+  # then the architecture gate, the repository's layering rules as source
+  # checks with grep on the runner's shell, not a stage. Lint-class checks,
+  # so the job stays on the PR tier.
+  preflight:
+    name: Preflight [changed files, architecture gates]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -141,8 +146,9 @@ jobs:
     # A draft PR runs no CI; the image job needs this one and skips with it.
     if: ${{ !github.event.pull_request.draft }}
     steps:
+      # One checkout for every step: the diff step needs the history on a PR
+      # run, and the source checks need the tree on every event.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        if: ${{ github.event_name == 'pull_request' && env.CI_FULL_TIER != 'true' }}
         with:
           fetch-depth: 0
       - name: Is every changed file docs or markdown?
@@ -163,6 +169,17 @@ jobs:
           fi
           echo "docs only: $docs_only"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
+      # Coroutines for async work, never blocking (CLAUDE.md), so runBlocking is
+      # banned from production sources (tests may use it).
+      - name: No runBlocking in production sources
+        run: |
+          hits=$(grep -rn --include='*.kt' --include='*.java' -E '\brunBlocking\b' app/src/main || true)
+          if [ -n "$hits" ]; then
+            echo "runBlocking blocks its thread; use a coroutine scope (CLAUDE.md: no blocking):"
+            echo "$hits"; exit 1
+          fi
+          echo "OK: no runBlocking in app/src/main"
 
   # Every stage runs in the project's own devcontainer image and no other. One
   # image job builds the images once from build/docker/devcontainer/Dockerfile
@@ -199,7 +216,7 @@ jobs:
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
     runs-on: ubuntu-latest
-    needs: changes
+    needs: preflight
     timeout-minutes: 150      # two cold image builds and every stage on 4 cores
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -301,13 +318,13 @@ jobs:
       # alone; any other run gets it from make coverage. RELEASABILITY_TEST
       # names a make target; it is empty here (no such test), so this step is skipped.
       - name: Releasability test (docs-only PR)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.changes.outputs.docs_only == 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.preflight.outputs.docs_only == 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make $RELEASABILITY_TEST"
 
       # make build is the debug APK (assembleDebug).
       # A release build needs signing credentials, which CI is not given.
       - name: make build
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make build"
 
       # The test stage: make coverage is the JVM unit suite (testDebugUnitTest,
@@ -315,7 +332,7 @@ jobs:
       # suite runs once. There is no threshold (COVERAGE_THRESHOLD above). The
       # integration stage is its own job below.
       - name: make coverage (unit tests and the threshold)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make coverage COVERAGE_THRESHOLD=$COVERAGE_THRESHOLD"
 
       # make security is trivy fs, vuln and secret, blocking on CRITICAL/HIGH,
@@ -725,37 +742,16 @@ jobs:
   # joins CI Gate's needs list and check lines. Such a suite is full tier (the
   # integration job's `if:`, `full` in CI Gate) unless it is lint, build or
   # unit, which stay on the PR tier.
-  # A job that runs only when certain paths change (the changes job gains an
+  # A job that runs only when certain paths change (the preflight job gains an
   # output for them, `optee` here) needs the image job as well, and its `if:`
   # tests an image job output that its build step sets (here `built`, which
   # the image job declares in `outputs:` when such a job is added), never
-  # `needs.<job>.result` and never the changes job's outputs alone: an `if:`
+  # `needs.<job>.result` and never the preflight job's outputs alone: an `if:`
   # that read only those left the job skipped unstarted on a pull_request.
-  # Reading `needs.changes.outputs.*` in the same `if:` is fine:
-  #   needs: [changes, image]
-  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.optee == 'true')) }}
+  # Reading `needs.preflight.outputs.*` in the same `if:` is fine:
+  #   needs: [preflight, image]
+  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.preflight.outputs.optee == 'true')) }}
 
-  # Architecture gate: the repository's layering rules, as source checks with
-  # grep on the runner's shell, not a stage. A lint-class check, so it stays
-  # on the PR tier.
-  arch-gates:
-    name: Architecture Gates
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    if: ${{ !github.event.pull_request.draft }}
-    # Coroutines for async work, never blocking (CLAUDE.md), so runBlocking is
-    # banned from production sources (tests may use it).
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: No runBlocking in production sources
-        run: |
-          hits=$(grep -rn --include='*.kt' --include='*.java' -E '\brunBlocking\b' app/src/main || true)
-          if [ -n "$hits" ]; then
-            echo "runBlocking blocks its thread; use a coroutine scope (CLAUDE.md: no blocking):"
-            echo "$hits"; exit 1
-          fi
-          echo "OK: no runBlocking in app/src/main"
 
   # The single required check. Every job above must appear in
   # BOTH the needs list and the results check — a gate that can pass vacuously
@@ -769,7 +765,7 @@ jobs:
     timeout-minutes: 10
     if: always()
     # The job list. Add every new job here AND as a check line below.
-    needs: [changes, image, lint-gates, integration, soak, arch-gates]
+    needs: [preflight, image, lint-gates, integration, soak]
     steps:
       - name: Fail closed on any non-success
         env:
@@ -805,10 +801,9 @@ jobs:
           # One line per job in needs above. A job gated to the
           # full tier by its `if:` is marked full, one gated to
           # workflow_dispatch is dispatch; every other job is pr.
-          check changes     "${{ needs.changes.result }}" pr
+          check preflight   "${{ needs.preflight.result }}" pr
           check image       "${{ needs.image.result }}" pr
           check lint-gates  "${{ needs.lint-gates.result }}" pr
           check integration "${{ needs.integration.result }}" full
           check soak        "${{ needs.soak.result }}" dispatch
-          check arch-gates  "${{ needs.arch-gates.result }}" pr
           exit $BAD
