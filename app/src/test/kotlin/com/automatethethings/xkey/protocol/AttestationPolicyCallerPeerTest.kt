@@ -127,7 +127,7 @@ class AttestationPolicyCallerPeerTest {
     // A caller session: the outgoing peer decides
     // -----------------------------------------------------------------
 
-    /** The regression case: a paired desktop, re-attested with nothing incoming. */
+    /** A paired desktop, re-attested with nothing incoming. */
     @Test
     fun aPairedOutgoingPeerWithNoIncomingSessionIsNotPrompted() = runTest {
         handler.handleRawRequest(attestRequest(), outgoingBinding, PAIRED_PEER)

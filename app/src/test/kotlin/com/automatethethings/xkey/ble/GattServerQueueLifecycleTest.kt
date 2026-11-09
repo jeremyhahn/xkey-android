@@ -146,7 +146,7 @@ class GattServerQueueLifecycleTest {
     }
 
     /**
-     * The regression: a write callback that resumes after the
+     * A write callback that resumes after the
      * disconnect callback, while the consumer is still settling it, opens no
      * queue. It is refused, and once the consumer has settled the disconnect
      * nothing is left.

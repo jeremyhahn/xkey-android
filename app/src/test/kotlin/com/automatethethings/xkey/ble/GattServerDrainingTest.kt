@@ -179,7 +179,7 @@ class GattServerDrainingTest {
     // ---------------------------------------------------------------------
 
     /**
-     * The case: notifications enabled, the desktop's reply queued,
+     * Notifications enabled, the desktop's reply queued,
      * then the disconnect. A phone-initiated send while the reply drains is
      * refused at admission: it encrypts nothing and notifies nothing, and the
      * reply still reaches its caller.

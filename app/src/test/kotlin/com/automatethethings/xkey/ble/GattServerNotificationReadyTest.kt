@@ -130,7 +130,7 @@ class GattServerNotificationReadyTest {
     }
 
     /**
-     * The regression: the identity frame, then the CCCD enable
+     * The identity frame, then the CCCD enable
      * within the wait. The acknowledgement goes out on the enable, not when
      * the wait expires, and the handshake goes on.
      */
