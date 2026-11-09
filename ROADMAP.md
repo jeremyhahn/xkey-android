@@ -1,6 +1,6 @@
 # xkey-android roadmap
 
-> **Status: REFERENCE** · Owner: xkey-android maintainers · Last verified: 2026-11-08
+> **Status: REFERENCE** · Owner: xkey-android maintainers · Last verified: 2026-11-09
 > Changes are proposed by docs-only PR. Every item names its feature in [docs/SPEC.md](docs/SPEC.md), and the two agree.
 
 ## Mission
@@ -58,14 +58,15 @@ Release-readiness checklist for [Dev complete](../../milestone/23), done; none o
 - [x] `docs/` files moved into feature folders — [#34](../../issues/34) — done
 - [x] devcontainer image with JetBrains JDK 21 and the pinned Android platform and build-tools — [#35](../../issues/35) — done
 - [x] CI Gate job on the `ci-gate` runners — [#36](../../issues/36) — done
+- [x] test-suite audit — [#84](../../issues/84), PR #116 — done
+- [x] trivy flags of the lz4-java CVE in the integration image on main — [#98](../../issues/98) — done
+- [x] plain technical text in comments and docs — [#103](../../issues/103), PR #112, PR #117 — done
 - [x] image build downloads retried on transient errors — [#109](../../issues/109), PR #110 — done
+- [x] one preflight job for the changed-files detection and the architecture gates — [#114](../../issues/114), PR #115 — done
 
 ## Now
 
-Release-readiness checklist for [Dev complete](../../milestone/23); none of these is a SPEC.md feature:
-
-- [ ] test-suite audit — [#84](../../issues/84) — in progress
-- [ ] plain technical text in comments and docs — [#103](../../issues/103) — in progress
+None.
 
 ## Next
 
