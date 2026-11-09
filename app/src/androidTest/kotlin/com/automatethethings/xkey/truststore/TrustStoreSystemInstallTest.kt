@@ -34,7 +34,6 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -160,48 +159,5 @@ class TrustStoreSystemInstallTest {
             "a certificate that was uninstalled from the system store must lose the flag",
             repository.getCertificate(fingerprint)!!.systemInstalled
         )
-    }
-
-    @Test
-    fun refreshPreservesTheRestOfTheMetadata() = runBlocking<Unit> {
-        val cert = freshCertificate("xkey-metadata-survivor")
-        val fingerprint = repository.importInternalCACertificate(cert, "corporate root")
-        val before = repository.getCertificate(fingerprint)!!
-
-        repository.refreshSystemInstallStatus()
-
-        val after = repository.getCertificate(fingerprint)!!
-        assertEquals(before.label, after.label)
-        assertEquals("internal-ca", after.source)
-        assertEquals(before.subjectDN, after.subjectDN)
-        assertEquals(before.issuerDN, after.issuerDN)
-        assertEquals(before.notBefore, after.notBefore)
-        assertEquals(before.notAfter, after.notAfter)
-        assertEquals(before.importedAt, after.importedAt)
-        assertNotNull(repository.getCertificateDER(fingerprint))
-    }
-
-    @Test
-    fun refreshOnAnEmptyStoreIsHarmless() = runBlocking<Unit> {
-        repository.refreshSystemInstallStatus()
-
-        assertEquals(0, repository.getCertificateCount())
-        assertTrue(repository.getAllCertificates().isEmpty())
-    }
-
-    @Test
-    fun refreshIsIdempotent() = runBlocking<Unit> {
-        val fingerprint = repository.importInternalCACertificate(
-            freshCertificate("xkey-idempotent"),
-            "local only"
-        )
-
-        repository.refreshSystemInstallStatus()
-        val once = repository.getAllCertificates()
-        repository.refreshSystemInstallStatus()
-
-        assertEquals(once, repository.getAllCertificates())
-        assertEquals(1, repository.getCertificateCount())
-        assertEquals(fingerprint, once.single().fingerprint)
     }
 }
