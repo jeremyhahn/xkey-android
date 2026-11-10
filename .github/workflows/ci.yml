@@ -218,7 +218,7 @@ jobs:
   # builds (no layer cache survives a run) and the stages fit 150 minutes.
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight
     timeout-minutes: 150      # two cold image builds and every stage on 4 cores
     env:
@@ -398,7 +398,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     if: ${{ !github.event.pull_request.draft }}
     timeout-minutes: 75       # a cold toolchain image build, then gates of minutes
     env:
@@ -544,7 +544,7 @@ jobs:
     name: Integration [integration image]
     # Never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 120      # a cold integration image build and the JVM suite
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -640,7 +640,7 @@ jobs:
   soak:
     name: Soak [integration image]
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 150      # a cold image build, SOAK_MINUTES and one iteration
     env:
       SOAK_MINUTES: 30
