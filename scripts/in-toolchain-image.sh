@@ -22,7 +22,8 @@
 # IN_IMAGE_NETWORK=bridge gives the container a network, for the stages that
 # must reach one: `make deps-check` asks the module proxy for the newest
 # releases, and `make security` fetches the vulnerability databases. Only then
-# are GOPROXY reopened, a writable module cache mounted (below; /tmp/gomodcache
+# is GOPROXY set to the module proxy alone (no fallback to a module's origin
+# repository), a writable module cache mounted (below; /tmp/gomodcache
 # with CI_CACHE=off), and the forge credentials passed through, by NAME from
 # this environment (the four variables the runner injects), so no token ever
 # appears on a command line.
@@ -144,7 +145,10 @@ fi
 if [ "$network" = bridge ]; then
   # The baked module cache is read-only to the run's user and holds only the
   # root module's build list; the nested modules deps-check walks fetch more.
-  args+=(--env "GOPROXY=https://proxy.golang.org,direct" --env "GOMODCACHE=$modcache")
+  # They come from the proxy only: the list ends without `direct`, so a module
+  # the proxy cannot serve fails the stage instead of being fetched from its
+  # origin repository.
+  args+=(--env "GOPROXY=https://proxy.golang.org" --env "GOMODCACHE=$modcache")
   for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
     if [ -n "${!v:-}" ]; then args+=(--env "$v"); fi
   done
