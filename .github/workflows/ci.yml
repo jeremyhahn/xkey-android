@@ -77,7 +77,10 @@ on:
     # build, test and security skipped. To validate it in full before merge,
     # push to the PR or dispatch this workflow on its branch: a
     # workflow_dispatch run is never docs-only.
-    types: [opened, synchronize, reopened]
+    # `ready_for_review` is listed because every job is skipped on a draft:
+    # marking the PR ready must start a run on the same head, with no extra
+    # commit. That run joins the PR's `concurrency` group like any other.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:                    # re-fire a whole workflow; also the
                                         # only retry when a run was never
                                         # created
@@ -779,7 +782,7 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft == true }}
         run: |
           if [ "${DRAFT}" = true ]; then
-            echo "FAIL draft pull request: no CI runs on a draft. Mark it ready, then push an empty commit to start its run."
+            echo "FAIL draft pull request: no CI runs on a draft. Mark it ready: that starts its run on the same head."
             exit 1
           fi
           BAD=0
