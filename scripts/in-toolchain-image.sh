@@ -45,8 +45,7 @@
 # when the job has no quota; IN_IMAGE_CPUS overrides), and the sibling gets
 # --cpus N with GOMAXPROCS=N and GOFLAGS=-p=N. golangci-lint's default
 # concurrency follows the container CPU quota, so lint takes N with no flag.
-# A 4-CPU runner gives 4; never a hardcoded number. N is capped at the Docker
-# daemon's CPU count (docker info NCPU), since --cpus above it is refused.
+# A 4-CPU runner gives 4; never a hardcoded number.
 #
 # The container is named <CI_STACK_PREFIX>tc-<pid>-<random>, under the prefix
 # scripts/reap-stale-ci-stacks.sh reaps (default <checkout dir>-ci-, which in CI
@@ -108,10 +107,13 @@ fi
 case $cpus in
   "" | 0 | *[!0-9]*) echo "IN_IMAGE_CPUS must be a positive integer: $cpus" >&2; exit 2 ;;
 esac
-ncpu=$(docker info --format '{{.NCPU}}' 2>/dev/null || true)
-case $ncpu in
+# The daemon refuses --cpus above its own CPU count, and the job container can
+# see more CPUs than the daemon that runs the stage (a pooled runner host), so
+# the bound is capped at the daemon's NCPU when the daemon reports one.
+daemon_cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null || true)
+case $daemon_cpus in
   "" | 0 | *[!0-9]*) ;;
-  *) if [ "$ncpu" -lt "$cpus" ]; then cpus=$ncpu; fi ;;
+  *) if [ "$cpus" -gt "$daemon_cpus" ]; then cpus=$daemon_cpus; fi ;;
 esac
 args=(
   --name "$name"
