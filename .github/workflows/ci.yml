@@ -756,7 +756,7 @@ jobs:
   #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.preflight.outputs.optee == 'true')) }}
 
 
-  # Signatures (ci-template v1.35, 2026-11-11): every commit that reaches main
+  # Signatures (ci-template v1.35.1, 2026-11-11): every commit that reaches main
   # is signed by a registered identity. Each
   # agent keeps its own App identity (<repo>-agent[bot]) and its own SSH
   # signing key, and agent work is never attributed to the owner's account.
@@ -807,6 +807,17 @@ jobs:
           # reads it from the head.
           REG=""
           if [ "$EVENT" = pull_request ]; then REG="$BASE_SHA"; elif [ "$EVENT" = push ]; then REG="$BEFORE"; fi
+          # v1.35.1: a named base that is not in the clone (a push after a force
+          # push, a base the checkout did not bring) is fetched; if it still cannot
+          # be read the job fails, never falling back to the head's registry or to
+          # the head commit alone.
+          if [ "$EVENT" = pull_request ] && [ -z "$REG" ]; then
+            echo "FAIL a pull_request run with no base SHA"; exit 1
+          fi
+          if ! zero "$REG" && ! isrev "$REG"; then
+            git fetch -q --no-tags origin "$REG" 2>/dev/null || true
+            isrev "$REG" || { echo "FAIL the base ${REG:0:12} cannot be read, so neither the registry nor the range can be checked"; exit 1; }
+          fi
           if isrev "$REG" && git cat-file -e "$REG:.github/allowed_signers" 2>/dev/null; then
             git show "$REG:.github/allowed_signers" > "$ASF"
             echo "registry: .github/allowed_signers at ${REG:0:12}"
@@ -848,7 +859,9 @@ jobs:
               fi
               continue
             fi
-            if ! git cat-file commit "$c" | grep -q '^gpgsig'; then
+            # v1.35.1: grep reads the whole object (no -q), so under pipefail a
+            # long commit message never ends the pipeline with SIGPIPE.
+            if ! git cat-file commit "$c" | grep '^gpgsig' >/dev/null; then
               echo "FAIL ${c:0:12} unsigned, committer $(shown "$ce"): $s"; BAD=1; continue
             fi
             g() { git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$ASF" "$@"; }
