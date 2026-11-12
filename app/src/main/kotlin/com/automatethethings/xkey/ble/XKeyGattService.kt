@@ -712,10 +712,11 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 ),
                 SealStoreMethods(SealStore(java.io.File(filesDir, SEAL_STORE_DIR)))
             )
-            // A pulled cable drops this server, so the next attach builds a
-            // fresh one without a service restart (#134). The server is
-            // published before connect starts watching for the detach, so a
-            // detach that arrives at once finds it and clears it.
+            // A pulled cable, a session that ends by itself or a refused open
+            // drops this server, so the next attach builds a fresh one
+            // without a service restart (#134). The server is published
+            // before connect starts watching for the detach, so a close that
+            // comes at once finds it and clears it.
             var published: UsbAccessoryServer? = null
             val server = UsbAccessoryServer(
                 handler,
@@ -723,7 +724,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 this@XKeyGattService,
                 pairedDeviceRepository,
                 storeMethods,
-                onDetached = { published?.let { onUsbAccessoryServerDetached(it) } }
+                onClosed = { published?.let { onUsbAccessoryServerClosed(it) } }
             )
             published = server
             synchronized(usbServerLock) {
@@ -759,10 +760,11 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
-     * Drops [server] after its accessory detached. A detach of a server an
-     * attach has since replaced leaves the current one in place.
+     * Drops [server] after its accessory closed (detached, its session ended
+     * or the open was refused). A close of a server an attach has since
+     * replaced leaves the current one in place.
      */
-    private fun onUsbAccessoryServerDetached(server: UsbAccessoryServer) {
+    private fun onUsbAccessoryServerClosed(server: UsbAccessoryServer) {
         synchronized(usbServerLock) {
             if (usbAccessoryServer !== server) return
             usbAccessoryServer = null

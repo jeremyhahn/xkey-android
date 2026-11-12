@@ -54,16 +54,17 @@ import java.io.IOException
  *
  * Lifecycle:
  * 1. Android delivers a USB_ACCESSORY_ATTACHED intent.
- * 2. [connect] opens the file descriptor, starts the session and starts
- *    watching for the accessory's USB_ACCESSORY_DETACHED broadcast.
+ * 2. [connect] starts watching for the accessory's USB_ACCESSORY_DETACHED
+ *    broadcast, then opens the file descriptor and starts the session. The
+ *    watch comes first so a cable pulled during the open is not missed.
  * 3. [StreamPairingSession] performs the handshake and processes messages.
  * 4. On USB_ACCESSORY_DETACHED (the cable pulled) the server [disconnect]s:
  *    it closes the streams and descriptor, ends the session and tells its
- *    owner through `onDetached`. A later attach serves again.
+ *    owner through `onClosed`. A later attach serves again.
  *
- * A session that ends by itself (the host closed its end) closes the streams
- * and frees the connection slot too, so a later [connect] opens the accessory
- * again.
+ * A session that ends by itself (the host closed its end, or no broadcast
+ * came) and a refused open close everything too and tell the owner through
+ * `onClosed`, so a later [connect] opens the accessory again.
  *
  * @param requestHandler The shared request handler for processing JSON-RPC requests.
  * @param messageRouter Optional bidirectional message router for remote.* requests.
@@ -72,8 +73,10 @@ import java.io.IOException
  * @param storeMethods Method families served on USB only (the password and seal
  *   stores go-xkms proxies over this transport), ahead of [requestHandler].
  * @param detachWatcher Watches for the open accessory's detach.
- * @param onDetached Called after a detach has closed the accessory, so the
- *   owner can drop this server and build a fresh one on the next attach.
+ * @param onClosed Called when the accessory closes other than through
+ *   [disconnect]: a detach, a session that ended by itself, or a refused
+ *   open. The owner can drop this server and build a fresh one on the next
+ *   attach.
  */
 class UsbAccessoryServer(
     requestHandler: RequestHandler,
@@ -82,7 +85,7 @@ class UsbAccessoryServer(
     pairedDeviceRepository: com.automatethethings.xkey.settings.PairedDeviceRepository? = null,
     storeMethods: List<TransportMethods> = emptyList(),
     private val detachWatcher: AccessoryDetachWatcher = BroadcastAccessoryDetachWatcher(),
-    private val onDetached: () -> Unit = {},
+    private val onClosed: () -> Unit = {},
 ) : MessageSender {
     companion object {
         private const val TAG = "UsbAccessoryServer"
@@ -131,38 +134,58 @@ class UsbAccessoryServer(
      * @param accessory The USB accessory to connect to.
      */
     fun connect(context: Context, accessory: UsbAccessory) {
-        synchronized(lock) {
+        val opened = synchronized(lock) {
             if (serverScope != null) {
                 Log.w(TAG, "Already connected to an accessory")
                 return
             }
 
-            val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-            val fd = usbManager.openAccessory(accessory)
-            if (fd == null) {
-                Log.e(TAG, "Failed to open USB accessory")
-                _state.value = UsbAccessoryState.Error("Failed to open USB accessory")
-                return
-            }
-
-            fileDescriptor = fd
-            inputStream = FileInputStream(fd.fileDescriptor)
-            outputStream = FileOutputStream(fd.fileDescriptor)
+            // Watch before the open: the detach broadcast is not sticky, so a
+            // cable pulled during the open would otherwise go unseen. A detach
+            // on another thread waits on the lock and then closes what opened.
             this.accessory = accessory
-
             detachWatcher.stop()
             detachWatcher.start(context) { detached -> onAccessoryDetached(detached) }
 
-            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-            serverScope = scope
-            _state.value = UsbAccessoryState.Handshaking
+            val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            val fd = usbManager.openAccessory(accessory)
+            when {
+                this.accessory !== accessory -> {
+                    // Detached on this thread during the open, which has
+                    // already told the owner: the descriptor is for a gone
+                    // accessory.
+                    Log.w(TAG, "USB accessory detached while opening")
+                    closeQuietly(fd)
+                    return
+                }
+                fd == null -> {
+                    Log.e(TAG, "Failed to open USB accessory")
+                    detachWatcher.stop()
+                    this.accessory = null
+                    _state.value = UsbAccessoryState.Error("Failed to open USB accessory")
+                    false
+                }
+                else -> {
+                    fileDescriptor = fd
+                    inputStream = FileInputStream(fd.fileDescriptor)
+                    outputStream = FileOutputStream(fd.fileDescriptor)
 
-            connectionJob = scope.launch {
-                handleConnection(context, accessory.toString(), scope)
+                    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+                    serverScope = scope
+                    _state.value = UsbAccessoryState.Handshaking
+                    connectionJob = scope.launch {
+                        handleConnection(context, accessory.toString(), scope)
+                    }
+                    true
+                }
             }
         }
 
-        Log.i(TAG, "USB accessory opened: ${accessory.manufacturer} ${accessory.model}")
+        if (opened) {
+            Log.i(TAG, "USB accessory opened: ${accessory.manufacturer} ${accessory.model}")
+        } else {
+            onClosed()
+        }
     }
 
     /**
@@ -185,7 +208,7 @@ class UsbAccessoryServer(
     /**
      * Handles USB_ACCESSORY_DETACHED for [detached] (null when the broadcast
      * names none): when it is the accessory this server opened, closes it and
-     * its session and calls `onDetached`. A detach of another accessory is
+     * its session and calls `onClosed`. A detach of another accessory is
      * ignored.
      */
     internal fun onAccessoryDetached(detached: UsbAccessory?) {
@@ -198,7 +221,7 @@ class UsbAccessoryServer(
         }
         Log.i(TAG, "USB accessory detached")
         disconnect()
-        onDetached()
+        onClosed()
     }
 
     /**
@@ -234,19 +257,23 @@ class UsbAccessoryServer(
     }
 
     /**
-     * Frees the connection slot when the session of [scope] ends by itself.
-     * A session a [disconnect] already ended, or one a later [connect] has
-     * replaced, leaves the current connection alone.
+     * Frees the connection slot when the session of [scope] ends by itself,
+     * with or without a detach broadcast, and tells the owner through
+     * `onClosed`. A session a [disconnect] already ended, or one a later
+     * [connect] has replaced, leaves the current connection alone.
      */
     private fun releaseSession(scope: CoroutineScope) {
         synchronized(lock) {
             if (serverScope !== scope) return
+            detachWatcher.stop()
+            accessory = null
             closeStreams()
             serverScope = null
             connectionJob = null
             _state.value = UsbAccessoryState.Disconnected
         }
         scope.cancel()
+        onClosed()
     }
 
     /**
@@ -262,6 +289,15 @@ class UsbAccessoryServer(
      */
     override suspend fun sendEncryptedMessage(data: ByteArray) {
         pairingSession.sendEncryptedMessage(data)
+    }
+
+    /** Closes [fd], which no stream wraps yet. */
+    private fun closeQuietly(fd: ParcelFileDescriptor?) {
+        try {
+            fd?.close()
+        } catch (e: IOException) {
+            Log.w(TAG, "Error closing USB file descriptor", e)
+        }
     }
 
     /** Closes the streams and the descriptor; the caller holds [lock]. */
