@@ -246,8 +246,12 @@ class DesktopKeysActivity : AppCompatActivity() {
             R.string.desktop_keys_field_exportable to (if (info.exportable) yes else no)
         ).joinToString("\n") { (field, value) -> getString(R.string.desktop_keys_detail_value, getString(field), value) }
 
-        publicKeyHeader.text = getString(R.string.desktop_keys_detail_public_key, state.publicKey.format)
-        publicKeyText.text = state.publicKey.publicKey
+        val publicKey = state.publicKey
+        publicKeyHeader.text = getString(
+            R.string.desktop_keys_detail_public_key,
+            publicKey?.format ?: state.info.algorithm
+        )
+        publicKeyText.text = publicKey?.publicKey ?: state.publicKeyUnavailable?.let(::errorText).orEmpty()
 
         signTestButton.visibility = if (state.backend.signing) View.VISIBLE else View.GONE
         signTestText.visibility = if (state.signTest != null) View.VISIBLE else View.GONE

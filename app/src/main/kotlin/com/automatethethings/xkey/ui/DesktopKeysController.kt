@@ -166,12 +166,18 @@ sealed class DesktopKeysState {
 
     data class Keys(val backend: RemoteBackendInfo, val keys: List<RemoteKeyInfo>) : DesktopKeysState()
 
+    /**
+     * One key's detail. [publicKey] is null when the desktop has no public
+     * half to export, as for AES or HMAC keys; [publicKeyUnavailable] then
+     * says why.
+     */
     data class Detail(
         val backend: RemoteBackendInfo,
         val info: RemoteGetKeyInfoResult,
-        val publicKey: RemoteGetPublicKeyResult,
+        val publicKey: RemoteGetPublicKeyResult?,
         val signTest: SignTestResult? = null,
-        val attestation: AttestationSummary? = null
+        val attestation: AttestationSummary? = null,
+        val publicKeyUnavailable: DesktopKeyError? = null
     ) : DesktopKeysState()
 
     /** The last request failed with [error]; [previous] is still on screen. */
@@ -209,6 +215,14 @@ class DesktopKeysController(
 
         private val encoder = Base64.getEncoder()
         val TEST_MESSAGE_BASE64: String = encoder.encodeToString(TEST_MESSAGE.toByteArray(Charsets.UTF_8))
+
+        /** Desktop refusals of `remote.getPublicKey` that mean the key has no public half to show. */
+        private val NO_PUBLIC_EXPORT = setOf(
+            ErrorCodes.UNSUPPORTED_FORMAT,
+            ErrorCodes.EXPORT_FAILED,
+            ErrorCodes.INVALID_ALGORITHM,
+            ErrorCodes.OPERATION_DENIED
+        )
     }
 
     /** The state on screen now. */
@@ -239,15 +253,22 @@ class DesktopKeysController(
         DesktopKeysState.Keys(backend, client.listKeys(backend.name)).also { keys = it }
     }
 
-    /** Shows [key]: its info and public key (`remote.getKeyInfo`, `remote.getPublicKey`). */
+    /**
+     * Shows [key]: its info and public key (`remote.getKeyInfo`,
+     * `remote.getPublicKey`). A desktop that refuses to export a public key,
+     * as for a symmetric key, still opens the detail without one; a link
+     * failure or any other error fails the step.
+     */
     suspend fun chooseKey(key: RemoteKeyInfo): DesktopKeysState {
         val backend = keys?.backend ?: return state
         return run { client ->
-            DesktopKeysState.Detail(
-                backend = backend,
-                info = client.getKeyInfo(backend.name, key.keyId),
-                publicKey = client.getPublicKey(backend.name, key.keyId)
-            )
+            val info = client.getKeyInfo(backend.name, key.keyId)
+            try {
+                DesktopKeysState.Detail(backend, info, client.getPublicKey(backend.name, key.keyId))
+            } catch (e: ProtocolException) {
+                if (e.errorCode !in NO_PUBLIC_EXPORT) throw e
+                DesktopKeysState.Detail(backend, info, publicKey = null, publicKeyUnavailable = DesktopKeyError.from(e))
+            }
         }
     }
 
