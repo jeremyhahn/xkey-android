@@ -787,6 +787,15 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
+     * A [com.automatethethings.xkey.remote.RemoteOathClient] on the active
+     * transport, or null if no desktop is connected.
+     */
+    fun remoteOathClient(): com.automatethethings.xkey.remote.RemoteOathClient? =
+        activeTransport()?.let { (sender, router) ->
+            com.automatethethings.xkey.remote.RemoteOathClient(sender, router)
+        }
+
+    /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)
      * with the connected desktop over the active transport.
      *

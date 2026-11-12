@@ -32,4 +32,15 @@
     <string name="oath_account_required">Enter the account this credential belongs to</string>
     <string name="oath_secret_required">Enter the Base32 secret key from the service</string>
 
+
+    <!-- Desktop OATH (remote.oathAdd / remote.oathGenerate) -->
+    <string name="oath_context_copy_to_desktop">Copy to desktop</string>
+    <string name="oath_context_desktop_code">Show desktop code</string>
+    <string name="oath_desktop_copied">Copied to desktop</string>
+    <string name="oath_desktop_code_title">Desktop code</string>
+    <string name="oath_desktop_code_expires">Expires in %1$d s</string>
+    <string name="oath_desktop_code_no_expiry">Counter-based code (no expiry)</string>
+    <string name="oath_desktop_not_connected">No desktop connected</string>
+    <string name="oath_desktop_not_linked">This credential is not on the desktop</string>
+    <string name="oath_desktop_failed">Desktop: %1$s</string>
 </resources>
