@@ -615,7 +615,7 @@ public class TrustStoreRepository(
          * are dropped. Characters a URI never allows (quotes, spaces, braces)
          * are percent-encoded before parsing and the path is recorded decoded.
          * A URL that still does not parse as a hierarchical URL with a
-         * server-based authority is recorded without its text.
+         * server-based authority and a host is recorded without its text.
          */
         fun redactedUrl(url: String): String {
             val escaped = buildString {
@@ -634,13 +634,11 @@ public class TrustStoreRepository(
             }
             val scheme = uri.scheme
             if (uri.isOpaque || scheme == null) return UNPARSEABLE_URL
-            val host = uri.host
-            if (host == null) {
-                // A registry-based authority (e.g. a host with "_") keeps the
-                // userinfo in its raw text: record nothing of it.
-                if (uri.rawAuthority != null) return UNPARSEABLE_URL
-                return "$scheme:${uri.path.orEmpty()}"
-            }
+            // No host: a registry-based authority (e.g. a host with "_") keeps
+            // the userinfo in its raw text, and a hostless URI such as
+            // "https:///user:secret@host/" puts it in the path, which OkHttp
+            // still fetches from that host. Record nothing of either.
+            val host = uri.host ?: return UNPARSEABLE_URL
             val port = if (uri.port != -1) ":${uri.port}" else ""
             return "$scheme://$host$port${uri.path.orEmpty()}"
         }
