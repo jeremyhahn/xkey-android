@@ -170,8 +170,14 @@ Detection is performed via `PackageManager.FEATURE_STRONGBOX_KEYSTORE` on API 28
 
 The `securityLevel` that `generateKey` and `local.generateKey` report, and the
 `strongBoxBacked` flag stored with the key, come from the generated key's own
-`KeyInfo` (`KeystoreManager.keySecurityLevel`), not from whether the device has
-StrongBox. A key generated with `preferStrongBox = false`, a StrongBox request
+`KeyInfo`, not from whether the device has StrongBox. Each handler reads the
+exact alias it just generated: `generateKey` its credential
+(`KeystoreManager.credentialSecurityLevel`), `local.generateKey` its general key
+(`KeystoreManager.generalKeySecurityLevel`), never a credential that shares the
+general key's id. Both results carry `securityLevel`; the base result keeps
+`strongBoxBacked` for older clients. A `KeyInfo` read that fails is an error
+(`KeyInfoUnavailableException`): the key is discarded and nothing is reported or
+stored as `software`. A key generated with `preferStrongBox = false`, a StrongBox request
 that fell back to the TEE (P-384, P-521, RSA-4096) and every AES or HMAC key
 therefore report `tee` on a StrongBox device.
 

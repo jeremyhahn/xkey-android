@@ -22,13 +22,16 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.annotation.RequiresApi
+import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricPrompt
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.automatethethings.xkey.audit.AuditLogger
+import java.security.Key
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.KeyStoreException
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.Signature
@@ -36,6 +39,7 @@ import java.security.cert.Certificate
 import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
 import java.security.spec.ECGenParameterSpec
+import java.security.spec.InvalidKeySpecException
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
@@ -56,6 +60,13 @@ enum class KeySecurityLevel(val wire: String) {
     TEE("tee"),
     STRONGBOX("strongbox")
 }
+
+/**
+ * The Keystore entry [alias] exists but its [KeyInfo] cannot be read, so its
+ * security level is unknown. Never reported as [KeySecurityLevel.SOFTWARE].
+ */
+class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
+    KeyStoreException("Cannot read the KeyInfo of $alias", cause)
 
 /**
  * Manages cryptographic keys in Android Keystore for FIDO2 operations.
@@ -186,7 +197,9 @@ class KeystoreManager(private val context: Context) {
 
             val keyPair = keyPairGenerator.generateKeyPair()
             markStrongBoxSpec(alias, Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable())
-            val strongBoxBacked = aliasSecurityLevel(alias) == KeySecurityLevel.STRONGBOX
+            // The audit line only; callers read the level themselves and see a failure.
+            val strongBoxBacked =
+                runCatching { credentialSecurityLevel(credentialId) }.getOrNull() == KeySecurityLevel.STRONGBOX
 
             // Log key creation
             AuditLogger.logKeyCreated(
@@ -656,34 +669,84 @@ class KeystoreManager(private val context: Context) {
         keySecurityLevel(credentialId) == KeySecurityLevel.STRONGBOX
 
     /**
-     * The security level of a generated key, read from its [KeyInfo].
+     * The security level of a key, read from its [KeyInfo].
      *
-     * Resolves [keyId] as [resolveKeystoreAlias] does. A key with no Keystore
-     * entry (an Ed25519 key in EncryptedSharedPreferences) is
-     * [KeySecurityLevel.SOFTWARE].
+     * Resolves [keyId] as [resolveKeystoreAlias] does, so a credential wins
+     * over a general key of the same id: callers that know which namespace
+     * they generated in use [credentialSecurityLevel] or
+     * [generalKeySecurityLevel]. A key with no Keystore entry (an Ed25519 key
+     * in EncryptedSharedPreferences) is [KeySecurityLevel.SOFTWARE].
      *
      * @param keyId Credential ID, general key ID or raw alias.
      * @return The key's level, or null if no such key exists.
+     * @throws KeyInfoUnavailableException if a Keystore entry exists but its
+     *         KeyInfo cannot be read.
      */
     fun keySecurityLevel(keyId: String): KeySecurityLevel? {
         val alias = resolveKeystoreAlias(keyId) ?: return null
-        return aliasSecurityLevel(alias) ?: KeySecurityLevel.SOFTWARE
+        if (!keyStore.containsAlias(alias)) return KeySecurityLevel.SOFTWARE
+        return aliasSecurityLevel(alias)
     }
 
     /**
-     * The security level of the Keystore entry [alias], or null when the
-     * alias holds no key or its [KeyInfo] cannot be read.
+     * The security level of the FIDO2 credential [credentialId]
+     * (`xkey_credential_<id>`), or null if it does not exist.
+     *
+     * @throws KeyInfoUnavailableException if its KeyInfo cannot be read.
      */
-    private fun aliasSecurityLevel(alias: String): KeySecurityLevel? {
-        val info = runCatching {
-            when (val key = keyStore.getKey(alias, null)) {
-                is PrivateKey -> KeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
-                    .getKeySpec(key, KeyInfo::class.java)
-                is SecretKey -> SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
-                    .getKeySpec(key, KeyInfo::class.java) as KeyInfo
-                else -> null
-            }
-        }.getOrNull() ?: return null
+    fun credentialSecurityLevel(credentialId: String): KeySecurityLevel? {
+        val alias = buildAlias(credentialId)
+        if (!keyStore.containsAlias(alias)) return null
+        return aliasSecurityLevel(alias)
+    }
+
+    /**
+     * The security level of the general key [keyId] (`xkey_key_<id>`, or its
+     * Ed25519 entry in EncryptedSharedPreferences, which is software), or null
+     * if it does not exist. Never consults a credential of the same id.
+     *
+     * @throws KeyInfoUnavailableException if its KeyInfo cannot be read.
+     */
+    fun generalKeySecurityLevel(keyId: String): KeySecurityLevel? {
+        val alias = buildGeneralAlias(keyId)
+        if (keyStore.containsAlias(alias)) return aliasSecurityLevel(alias)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)) {
+            return KeySecurityLevel.SOFTWARE
+        }
+        return null
+    }
+
+    /**
+     * Reads the [KeyInfo] of the Keystore key held at an alias. Replaceable
+     * so tests can make the read fail.
+     */
+    @VisibleForTesting
+    internal var keyInfoReader: (alias: String, key: Key) -> KeyInfo = { _, key ->
+        when (key) {
+            is PrivateKey -> KeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
+                .getKeySpec(key, KeyInfo::class.java)
+            is SecretKey -> SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
+                .getKeySpec(key, KeyInfo::class.java) as KeyInfo
+            else -> throw InvalidKeySpecException("no KeyInfo for a ${key.javaClass.name}")
+        }
+    }
+
+    /**
+     * The security level of the existing Keystore entry [alias].
+     *
+     * @throws KeyInfoUnavailableException if the entry holds no key or its
+     *         [KeyInfo] cannot be read: a failed read is never software.
+     */
+    private fun aliasSecurityLevel(alias: String): KeySecurityLevel {
+        val info = try {
+            val key = keyStore.getKey(alias, null)
+                ?: throw KeyInfoUnavailableException(alias, null)
+            keyInfoReader(alias, key)
+        } catch (e: KeyInfoUnavailableException) {
+            throw e
+        } catch (e: Exception) {
+            throw KeyInfoUnavailableException(alias, e)
+        }
 
         val keyInfoLevel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             info.securityLevel
@@ -757,8 +820,10 @@ class KeystoreManager(private val context: Context) {
                 else -> generateRSAKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
             }
 
-            // Log key creation
-            val strongBoxBacked = aliasSecurityLevel(alias) == KeySecurityLevel.STRONGBOX
+            // Log key creation. The audit line only; callers read the level
+            // themselves and see a failure.
+            val strongBoxBacked =
+                runCatching { generalKeySecurityLevel(keyId) }.getOrNull() == KeySecurityLevel.STRONGBOX
             AuditLogger.logKeyCreated(
                 keyId = keyId,
                 keyLabel = keyId,

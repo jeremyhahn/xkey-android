@@ -491,12 +491,16 @@ data class GenerateKeyParams(
  *
  * @property publicKey Base64-encoded COSE public key
  * @property attestation Base64-encoded attestation (optional)
- * @property strongBoxBacked Whether the key is backed by StrongBox
+ * @property strongBoxBacked Whether the key is backed by StrongBox, kept
+ *           for clients that predate [securityLevel]
+ * @property securityLevel The key's own level from its KeyInfo, serialized
+ *           as `securityLevel` ("software", "tee", "strongbox") when known
  */
 data class GenerateKeyResult(
     val publicKey: String,
     val attestation: String? = null,
-    val strongBoxBacked: Boolean = false
+    val strongBoxBacked: Boolean = false,
+    val securityLevel: KeySecurityLevel? = null
 ) {
     fun toJson(): JSONObject {
         return JSONObject().apply {
@@ -505,15 +509,28 @@ data class GenerateKeyResult(
                 put("attestation", attestation)
             }
             put("strongBoxBacked", strongBoxBacked)
+            securityLevel?.let { put("securityLevel", it.wire) }
         }
     }
 
     companion object {
+        /** Builds the result for a key whose own KeyInfo reports [level]. */
+        fun withLevel(publicKey: String, attestation: String?, level: KeySecurityLevel) =
+            GenerateKeyResult(
+                publicKey = publicKey,
+                attestation = attestation,
+                strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
+                securityLevel = level
+            )
+
         fun fromJson(obj: JSONObject): GenerateKeyResult {
             return GenerateKeyResult(
                 publicKey = obj.getString("publicKey"),
                 attestation = obj.getStringOrNull("attestation"),
-                strongBoxBacked = obj.optBoolean("strongBoxBacked", false)
+                strongBoxBacked = obj.optBoolean("strongBoxBacked", false),
+                securityLevel = obj.getStringOrNull("securityLevel")?.let { wire ->
+                    KeySecurityLevel.entries.firstOrNull { it.wire == wire }
+                }
             )
         }
     }

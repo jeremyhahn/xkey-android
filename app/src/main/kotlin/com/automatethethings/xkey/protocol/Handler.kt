@@ -32,6 +32,7 @@ import com.automatethethings.xkey.crypto.HMACException
 import com.automatethethings.xkey.crypto.KeyGenerationException
 import com.automatethethings.xkey.crypto.KeyInvalidatedException
 import com.automatethethings.xkey.crypto.KeyNotFoundException
+import com.automatethethings.xkey.crypto.KeyInfoUnavailableException
 import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
@@ -641,7 +642,13 @@ class RequestHandler(
         )
 
         val publicKeyBase64 = Base64.getEncoder().encodeToString(cosePublicKey)
-        val isStrongBoxBacked = keystoreManager.isKeyStrongBoxBacked(generateParams.credentialId)
+        // The credential just generated, read by its exact alias; a KeyInfo
+        // read that fails is an error, never a software-backed key.
+        val level = generatedKeyLevel(
+            generateParams.credentialId,
+            read = { keystoreManager.credentialSecurityLevel(generateParams.credentialId) },
+            discard = { keystoreManager.deleteKey(generateParams.credentialId) }
+        )
 
         // The leaf of the Keystore chain is the key attestation certificate; the
         // issuing chain is served by local.attestKey. Devices without hardware
@@ -653,14 +660,14 @@ class RequestHandler(
                 ?.let { Base64.getEncoder().encodeToString(it) }
         }.getOrNull()
 
-        val result = GenerateKeyResult(
+        val result = GenerateKeyResult.withLevel(
             publicKey = publicKeyBase64,
             attestation = attestationBase64,
-            strongBoxBacked = isStrongBoxBacked
+            level = level
         )
 
         Log.i(TAG, "Generated key for credential: ${generateParams.credentialId}, " +
-                "strongBox=$isStrongBoxBacked, authDuration=$authDurationSeconds")
+                "securityLevel=${level.wire}, authDuration=$authDurationSeconds")
         Response.success(request.id, result.toJson())
     }
 
@@ -1199,7 +1206,13 @@ class RequestHandler(
                 keySizeBits = if (algorithmName.contains("512")) 512 else 256
             }
             publicKeyDer = ByteArray(0) // No public key for symmetric/HMAC
-            val level = keystoreManager.keySecurityLevel(genParams.keyId) ?: KeySecurityLevel.TEE
+            // The exact alias just generated (xkey_key_<id>), never a
+            // credential that shares the id.
+            val level = generatedKeyLevel(
+                genParams.keyId,
+                read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
+                discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
+            )
 
             // Store in unified key store
             keyDao.insert(
@@ -1244,7 +1257,11 @@ class RequestHandler(
             preferStrongBox = genParams.preferStrongBox
         )
         keySizeBits = CoseAlgorithms.getKeySizeBits(genParams.algorithm)
-        val level = keystoreManager.keySecurityLevel(genParams.keyId) ?: KeySecurityLevel.TEE
+        val level = generatedKeyLevel(
+            genParams.keyId,
+            read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
+            discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
+        )
         val isStrongBoxBacked = level == KeySecurityLevel.STRONGBOX
 
         // Get COSE-encoded public key for FIDO2 keys
@@ -1311,6 +1328,32 @@ class RequestHandler(
         }
 
         Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The security level of the key generateKey or local.generateKey just
+     * made, read by [read] from its exact alias. A missing key or a KeyInfo
+     * read that fails is an error, never a software-backed key: the key is
+     * discarded so nothing is reported or persisted with a level it may not
+     * have, and the caller can retry under the same id.
+     */
+    private fun generatedKeyLevel(
+        keyId: String,
+        read: () -> KeySecurityLevel?,
+        discard: () -> Unit
+    ): KeySecurityLevel {
+        val failure = try {
+            read()?.let { return it }
+            null
+        } catch (e: KeyInfoUnavailableException) {
+            e
+        }
+        runCatching { discard() }
+        Log.e(TAG, "Cannot read the security level of generated key $keyId", failure)
+        throw ProtocolException(
+            "Cannot read the security level of generated key $keyId",
+            errorCode = ErrorCodes.INTERNAL_ERROR
+        )
     }
 
     /**
