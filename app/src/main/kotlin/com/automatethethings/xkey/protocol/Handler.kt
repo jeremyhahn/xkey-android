@@ -61,6 +61,7 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import java.util.Base64
 import com.automatethethings.xkey.pin.PinManager
+import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinType
 import com.automatethethings.xkey.pin.PinException
 import com.automatethethings.xkey.pin.PinLockedException
@@ -3635,6 +3636,7 @@ class RequestHandler(
         val currentPin = params.optString("currentPin", "").ifEmpty { null }
         val newPin = params.optString("newPin", "")
         if (newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "New PIN is required")
+        newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
                 "SO_PIN" -> pm.setSOPIN(currentPin, newPin)
@@ -3662,6 +3664,7 @@ class RequestHandler(
         val currentPin = params.optString("currentPin", "")
         val newPin = params.optString("newPin", "")
         if (currentPin.isEmpty() || newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Current and new PINs required")
+        newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
                 "SO_PIN" -> pm.changeSOPIN(currentPin, newPin)
@@ -3694,6 +3697,19 @@ class RequestHandler(
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "Reset error")
         }
     }
+
+    /**
+     * INVALID_PARAMS when [newPin] is outside the allowed
+     * [PinHasher.MIN_PIN_LENGTH]..[PinHasher.MAX_PIN_LENGTH] UTF-8 bytes,
+     * checked before the [PinManager] is asked to store it; null when it fits.
+     */
+    private fun newPinLengthError(request: Request, newPin: String): Response? =
+        try {
+            PinHasher.validatePinLength(newPin)
+            null
+        } catch (e: IllegalArgumentException) {
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, e.message ?: "Invalid PIN length")
+        }
 
     // -------------------------------------------------------------------------
     // PIV Handlers
