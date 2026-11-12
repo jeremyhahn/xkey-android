@@ -65,6 +65,7 @@ import com.automatethethings.xkey.truststore.CABundleFetchException
 import com.automatethethings.xkey.truststore.TrustStoreRepository
 import com.automatethethings.xkey.truststore.TrustedCA
 import com.automatethethings.xkey.truststore.clearTrustStore
+import com.automatethethings.xkey.truststore.removeTrustedCertificate
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
@@ -2079,7 +2080,8 @@ private class TrustedCertificateAdapter(
 }
 
 /**
- * Deletes one certificate for the trust-store screen's confirmation.
+ * Deletes one certificate for the trust-store screen's confirmation, shows
+ * whether it was removed, and refreshes the list either way.
  *
  * @param deleteRow deletes the certificate's database row
  * @param showResult shows whether the certificate was removed
@@ -2092,9 +2094,9 @@ internal suspend fun deleteFromTrustStoreScreen(
     showResult: (removed: Boolean) -> Unit,
     refresh: () -> Unit
 ) {
-    if (repository.deleteCertificate(fingerprint)) {
-        deleteRow()
-        showResult(true)
-        refresh()
-    }
+    // The row goes only once the trust store has removed the certificate;
+    // one that stays trusted stays listed, and the list shows either state.
+    val removed = removeTrustedCertificate(repository, fingerprint, deleteRow)
+    showResult(removed)
+    refresh()
 }
