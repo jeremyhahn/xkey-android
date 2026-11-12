@@ -15,7 +15,6 @@
 package com.automatethethings.xkey.remote
 
 import com.automatethethings.xkey.protocol.RemoteAttestDeviceResult
-import java.io.IOException
 import java.lang.ref.WeakReference
 import java.util.Base64
 import java.util.WeakHashMap
@@ -47,48 +46,69 @@ class DesktopPeerSession(val peerPublicKeyHex: String, val client: RemoteKeyClie
  * confirmed it, never with the request handler's peer, which BLE, TCP and USB
  * share and which a stopped transport can leave behind.
  *
- * A session's client sends only while that transport still carries the
- * desktop it was checked for: right before each send it reads the transports
- * again and refuses with an [IOException] when the connection is gone or now
- * carries another desktop, so a request checked for one desktop never goes
- * out on a replacement connection.
+ * A session's client is bound to the connection its peer was checked on:
+ * [session] captures that connection's [ConfirmedConnection] and the client
+ * sends only through [MessageSender.sendEncryptedMessageOn] with it. The
+ * transport refuses, at the admission that consumes the nonce, any send whose
+ * connection is no longer its current one confirmed for the same peer, so a
+ * request checked for one desktop never goes out on a later connection, even
+ * the same desktop's.
  *
  * @param transports the transports with a connection, in priority order
  */
 class DesktopSessions(
     private val transports: () -> List<DesktopTransport>
 ) {
-    /** A router's client and the peer its sends are bound to, or null when unbound. */
-    private class Entry(val peer: String?, val client: WeakReference<RemoteKeyClient>)
+    /**
+     * A router's client and the connection its sends are bound to, or none
+     * when unbound. Both are held weakly: the client holds its router, and a
+     * transport's connection may too, and the router is this map's key.
+     */
+    private class Entry(bound: ConfirmedConnection?, client: RemoteKeyClient) {
+        private val unbound = bound == null
+        private val bound = bound?.let { WeakReference(it) }
+        private val client = WeakReference(client)
+
+        /** The client when it is bound to [wanted]'s connection, or unbound and [wanted] is null. */
+        fun clientFor(wanted: ConfirmedConnection?): RemoteKeyClient? {
+            val held = client.get() ?: return null
+            if (wanted == null) return held.takeIf { unbound }
+            return held.takeIf { bound?.get()?.sameAs(wanted) == true }
+        }
+    }
 
     /**
-     * One client per router and peer, so a switch to another desktop and back
-     * reuses the first client while the peer is unchanged. Routers do not
-     * override equals, so the map keys by identity. The client is held weakly
-     * too, since it holds its router; the request id counter lives on the
-     * router, so a client rebuilt after a collection continues its numbering.
+     * One client per router and connection, so the screen reuses one client
+     * while the connection is unchanged. Routers do not override equals, so
+     * the map keys by identity. The request id counter lives on the router,
+     * so a client rebuilt for a new connection continues its numbering.
      */
     private val clients = WeakHashMap<BidirectionalMessageRouter, Entry>()
 
     /**
      * The key client of the first transport with an established session, or
-     * null when there is none. With a confirmed peer it is that session's
-     * peer-bound client.
+     * null when there is none or its confirmed peer is not the one on its
+     * live connection. With a confirmed peer it is bound to that connection;
+     * before confirmation it is unbound.
      */
     @Synchronized
-    fun client(): RemoteKeyClient? =
-        transports().firstOrNull { it.established }?.let { clientFor(it, it.confirmedPeer) }
+    fun client(): RemoteKeyClient? {
+        val active = transports().firstOrNull { it.established } ?: return null
+        val peer = active.confirmedPeer ?: return clientFor(active, null)
+        return clientFor(active, confirmed(active, peer) ?: return null)
+    }
 
     /**
-     * The first established transport's confirmed peer and its client, read
-     * from one snapshot, or null while that transport has no confirmed peer.
-     * The client sends only while that transport still carries that peer.
+     * The first established transport's confirmed peer and a client bound to
+     * the connection that peer is confirmed on, read from one snapshot, or
+     * null while that transport has no confirmed peer.
      */
     @Synchronized
     fun session(): DesktopPeerSession? {
         val active = transports().firstOrNull { it.established } ?: return null
         val peer = active.confirmedPeer ?: return null
-        return DesktopPeerSession(peer, clientFor(active, peer))
+        val connection = confirmed(active, peer) ?: return null
+        return DesktopPeerSession(peer, clientFor(active, connection))
     }
 
     /**
@@ -100,30 +120,27 @@ class DesktopSessions(
         return session.client.attestDevice(Base64.getEncoder().encodeToString(nonce))
     }
 
-    private fun clientFor(transport: DesktopTransport, peer: String?): RemoteKeyClient {
-        clients[transport.router]?.takeIf { it.peer == peer }?.client?.get()?.let { return it }
-        val sender = peer?.let { PeerBoundSender(transport.sender, transport.router, it) } ?: transport.sender
+    /** [transport]'s live connection when it is confirmed for [peer], else null. */
+    private fun confirmed(transport: DesktopTransport, peer: String): ConfirmedConnection? =
+        transport.sender.confirmedConnection()?.takeIf { it.peerPublicKeyHex == peer }
+
+    private fun clientFor(transport: DesktopTransport, bound: ConfirmedConnection?): RemoteKeyClient {
+        clients[transport.router]?.clientFor(bound)?.let { return it }
+        val sender = bound?.let { ConnectionBoundSender(transport.sender, it) } ?: transport.sender
         return RemoteKeyClient(sender, transport.router)
-            .also { clients[transport.router] = Entry(peer, WeakReference(it)) }
+            .also { clients[transport.router] = Entry(bound, it) }
     }
 
     /**
-     * Sends through [sender] only while the transport on [router] is still
-     * established, still sends through [sender] and still names [peer].
+     * Sends only on [connection], through [sender]'s connection-scoped send,
+     * which refuses with [ConnectionChangedException] once [connection] is no
+     * longer the transport's current, confirmed one.
      */
-    private inner class PeerBoundSender(
+    private class ConnectionBoundSender(
         private val sender: MessageSender,
-        private val router: BidirectionalMessageRouter,
-        private val peer: String
+        private val connection: ConfirmedConnection
     ) : MessageSender {
-        override suspend fun sendEncryptedMessage(data: ByteArray) {
-            val current = transports().firstOrNull { it.router === router }
-            if (current == null || !current.established || current.sender !== sender ||
-                current.confirmedPeer != peer
-            ) {
-                throw IOException("desktop session changed; request not sent")
-            }
-            sender.sendEncryptedMessage(data)
-        }
+        override suspend fun sendEncryptedMessage(data: ByteArray) =
+            sender.sendEncryptedMessageOn(connection, data)
     }
 }
