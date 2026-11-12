@@ -21,6 +21,7 @@ import com.automatethethings.xkey.truststore.TrustStoreRepository
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URLEncoder
 
 /**
  * Single source of truth for bidirectional store synchronization. Owns the
@@ -227,7 +228,9 @@ class SyncEngine(
 /**
  * The `otpauth://` URI ([Key Uri Format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format))
  * that [SyncEngine.mergeOath] hands to `OathRepository.importFromUri` for a
- * synced OATH credential. [counter] is written for HOTP only (non-null).
+ * synced OATH credential. The issuer and account are percent-encoded
+ * (RFC 3986, a space as `%20`) in the label and the `issuer` parameter.
+ * [counter] is written for HOTP only (non-null).
  */
 internal fun otpauthUri(
     type: String,
@@ -239,13 +242,17 @@ internal fun otpauthUri(
     period: Int,
     counter: Long?
 ): String = buildString {
+    val encodedIssuer = issuer?.let(::percentEncode)
     append("otpauth://$type/")
-    if (issuer != null) append("$issuer:")
-    append(accountName)
+    if (encodedIssuer != null) append("$encodedIssuer:")
+    append(percentEncode(accountName))
     append("?secret=$secret")
-    if (issuer != null) append("&issuer=$issuer")
+    if (encodedIssuer != null) append("&issuer=$encodedIssuer")
     append("&algorithm=$algorithm")
     append("&digits=$digits")
     append("&period=$period")
     if (counter != null) append("&counter=$counter")
 }
+
+private fun percentEncode(value: String): String =
+    URLEncoder.encode(value, Charsets.UTF_8).replace("+", "%20")
