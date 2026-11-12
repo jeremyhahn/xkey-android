@@ -32,6 +32,7 @@ import com.automatethethings.xkey.credential.UserVerificationCompliance
 import com.automatethethings.xkey.credential.UvRequirement
 import com.automatethethings.xkey.settings.BiometricSettingsRepository
 import com.automatethethings.xkey.credential.InvalidRequestException
+import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.credential.RelyingPartyOrigin
 import com.automatethethings.xkey.credential.NoCredentialsFoundException
 import com.automatethethings.xkey.crypto.BiometricHelper
@@ -63,6 +64,7 @@ class GetCredentialHandler(
     private val database = XKeyDatabase.getInstance(context)
     private val credentialDao = database.credentialMetadataDao()
     private val keyDao = database.keyDao()
+    private val signCounter = PasskeySignCounter(credentialDao, keyDao)
     private val settingsRepository = BiometricSettingsRepository(context)
 
     /**
@@ -288,9 +290,14 @@ class GetCredentialHandler(
             )
         }
 
+        // The phone backend serves this passkey too, so the counter comes from
+        // the one both paths share. It advances before signing: a failed
+        // signature leaves a gap, never a reused value.
+        val signCount = signCounter.next(credentialId)
+
         val authData = buildAuthenticatorData(
             rpId = rpId,
-            signCount = credential.signCount + 1,
+            signCount = signCount,
             userVerified = willVerify
         )
         Log.d(TAG, "authData size: ${authData.size}, userVerified=$willVerify")
@@ -345,12 +352,8 @@ class GetCredentialHandler(
         }
         Log.d(TAG, "Signature generated, size=${signature.size}")
 
-        // Update sign count
-        credentialDao.updateSignCount(credentialId, credential.signCount + 1)
-
-        // Sync sign count and record usage in unified key store
+        // Record usage in unified key store
         try {
-            keyDao.updateSignCount(credentialId, credential.signCount + 1)
             keyDao.recordUsage(credentialId)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to sync to unified key store: ${e.message}")
