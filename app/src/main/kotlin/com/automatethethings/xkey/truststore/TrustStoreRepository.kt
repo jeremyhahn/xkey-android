@@ -29,6 +29,7 @@ import java.security.cert.CertificateFactory
 import java.security.cert.PKIXParameters
 import java.security.cert.TrustAnchor
 import java.security.cert.X509Certificate
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -100,6 +101,14 @@ public class TrustStoreRepository(
         context.getDir("trust_store", Context.MODE_PRIVATE)
     }
 
+    private val storeLock: Any by lazy { lockFor(trustStoreDir) }
+
+    /**
+     * Run [block], which reads, modifies or writes the trust store, as the
+     * only writer of this directory in the process. [block] must not suspend.
+     */
+    private inline fun <T> withStoreLock(block: () -> T): T = synchronized(storeLock, block)
+
     private val certFactory: CertificateFactory by lazy {
         CertificateFactory.getInstance("X.509")
     }
@@ -125,15 +134,12 @@ public class TrustStoreRepository(
                     continue
                 }
 
-                val fingerprint = computeFingerprint(cert)
-                if (getCertificateFile(fingerprint).exists()) {
-                    skipped++
-                    continue
-                }
-
                 try {
-                    storeCertificate(cert, label, "url:$url")
-                    imported++
+                    if (storeIfAbsent(cert, label, "url:$url") != null) {
+                        imported++
+                    } else {
+                        skipped++
+                    }
                 } catch (e: Exception) {
                     errors.add("Failed to store certificate: ${e.message}")
                 }
@@ -160,12 +166,7 @@ public class TrustStoreRepository(
                 throw IllegalArgumentException("Self-signed certificates are not accepted")
             }
 
-            val fingerprint = computeFingerprint(cert)
-            if (getCertificateFile(fingerprint).exists()) {
-                return@withContext null
-            }
-
-            storeCertificate(cert, label, "manual")
+            storeIfAbsent(cert, label, "manual")
         }
 
     /**
@@ -284,35 +285,37 @@ public class TrustStoreRepository(
      * @return true if deleted, false if not found or it could not be removed
      */
     public suspend fun deleteCertificate(fingerprint: String): Boolean =
-        withContext(Dispatchers.IO) {
-            val certFile = getCertificateFile(fingerprint)
-            val all = readMetadataSync()
-            val entry = all.firstOrNull { it.fingerprint == fingerprint }
-            val fileExisted = certFile.exists()
+        withContext(Dispatchers.IO) { withStoreLock { deleteCertificateLocked(fingerprint) } }
 
-            // The DER file may already be gone while the metadata row survives.
-            // Returning early there would strand the row: it stays listed
-            // forever and only clearAll() can remove it.
-            if (!fileExisted && entry == null) {
-                return@withContext false
-            }
-            val subject = entry?.subjectDN ?: ""
+    private fun deleteCertificateLocked(fingerprint: String): Boolean {
+        val certFile = getCertificateFile(fingerprint)
+        val all = readMetadataSync()
+        val entry = all.firstOrNull { it.fingerprint == fingerprint }
+        val fileExisted = certFile.exists()
 
-            if (fileExisted && !removeFile(certFile)) {
-                auditDelete(subject, fingerprint, FILE_NOT_DELETED)
-                return@withContext false
-            }
-            if (entry != null) {
-                try {
-                    saveMetadataSync(all.filter { it.fingerprint != fingerprint })
-                } catch (e: IOException) {
-                    auditDelete(subject, fingerprint, "$METADATA_NOT_UPDATED: ${e.message}")
-                    return@withContext false
-                }
-            }
-            auditDelete(subject, fingerprint)
-            true
+        // The DER file may already be gone while the metadata row survives.
+        // Returning early there would strand the row: it stays listed
+        // forever and only clearAll() can remove it.
+        if (!fileExisted && entry == null) {
+            return false
         }
+        val subject = entry?.subjectDN ?: ""
+
+        if (fileExisted && !removeFile(certFile)) {
+            auditDelete(subject, fingerprint, FILE_NOT_DELETED)
+            return false
+        }
+        if (entry != null) {
+            try {
+                saveMetadataSync(all.filter { it.fingerprint != fingerprint })
+            } catch (e: IOException) {
+                auditDelete(subject, fingerprint, "$METADATA_NOT_UPDATED: ${e.message}")
+                return false
+            }
+        }
+        auditDelete(subject, fingerprint)
+        return true
+    }
 
     /**
      * Clear all certificates from the trust store.
@@ -323,7 +326,10 @@ public class TrustStoreRepository(
      * listed and trusted, is recorded as a failure, and is returned in
      * [ClearResult.failed].
      */
-    public suspend fun clearAll(): ClearResult = withContext(Dispatchers.IO) {
+    public suspend fun clearAll(): ClearResult =
+        withContext(Dispatchers.IO) { withStoreLock { clearAllLocked() } }
+
+    private fun clearAllLocked(): ClearResult {
         val entries = readMetadataSync()
         val filesRemoved = entries.filter { removeFile(getCertificateFile(it.fingerprint)) }
         val kept = entries.filter { it !in filesRemoved }
@@ -364,7 +370,7 @@ public class TrustStoreRepository(
         strayRemoved.forEach { auditDelete("", it) }
         strayFailed.forEach { auditDelete("", it, FILE_NOT_DELETED) }
 
-        ClearResult(
+        return ClearResult(
             removed = removed.map { it.fingerprint } + strayRemoved,
             failed = (entries - removed.toSet()).map { it.fingerprint } + strayFailed,
             unlisted = listing == null
@@ -434,12 +440,8 @@ public class TrustStoreRepository(
         cert: X509Certificate,
         label: String
     ): String = withContext(Dispatchers.IO) {
-        val fingerprint = computeFingerprint(cert)
-        if (getCertificateFile(fingerprint).exists()) {
-            return@withContext fingerprint
-        }
-        storeCertificate(cert, label, "internal-ca")
-        fingerprint
+        storeIfAbsent(cert, label, "internal-ca")
+        computeFingerprint(cert)
     }
 
     /**
@@ -471,17 +473,19 @@ public class TrustStoreRepository(
             return@withContext
         }
 
-        val certs = getAllCertificates()
-        val updated = certs.map { cert ->
-            val isInstalled = systemFingerprints.contains(cert.fingerprint)
-            if (cert.systemInstalled != isInstalled) {
-                cert.copy(systemInstalled = isInstalled)
-            } else {
-                cert
+        withStoreLock {
+            val certs = readMetadataSync()
+            val updated = certs.map { cert ->
+                val isInstalled = systemFingerprints.contains(cert.fingerprint)
+                if (cert.systemInstalled != isInstalled) {
+                    cert.copy(systemInstalled = isInstalled)
+                } else {
+                    cert
+                }
             }
-        }
-        if (updated != certs) {
-            saveMetadata(updated)
+            if (updated != certs) {
+                saveMetadataSync(updated)
+            }
         }
     }
 
@@ -495,15 +499,16 @@ public class TrustStoreRepository(
         fingerprint: String,
         installed: Boolean
     ): Unit = withContext(Dispatchers.IO) {
-        val certs = getAllCertificates()
-        val updated = certs.map { cert ->
-            if (cert.fingerprint == fingerprint) {
-                cert.copy(systemInstalled = installed)
-            } else {
-                cert
+        withStoreLock {
+            val updated = readMetadataSync().map { cert ->
+                if (cert.fingerprint == fingerprint) {
+                    cert.copy(systemInstalled = installed)
+                } else {
+                    cert
+                }
             }
+            saveMetadataSync(updated)
         }
-        saveMetadata(updated)
     }
 
     private fun isSelfSigned(cert: X509Certificate): Boolean {
@@ -519,6 +524,21 @@ public class TrustStoreRepository(
     private fun getCertificateFile(fingerprint: String): File {
         return File(trustStoreDir, "$fingerprint.der")
     }
+
+/**
+     * Store [cert] unless its file is already present, deciding and writing
+     * under the store lock so two imports of one certificate store it once.
+     *
+     * @return the stored entry, or null if the certificate was already present
+     */
+    private fun storeIfAbsent(cert: X509Certificate, label: String?, source: String): TrustedCA? =
+        withStoreLock {
+            if (getCertificateFile(computeFingerprint(cert)).exists()) {
+                null
+            } else {
+                storeCertificate(cert, label, source)
+            }
+        }
 
     private fun storeCertificate(
         cert: X509Certificate,
@@ -573,6 +593,15 @@ public class TrustStoreRepository(
     private companion object {
         const val FILE_NOT_DELETED = "could not delete the certificate file"
         const val METADATA_NOT_UPDATED = "could not update the trust store metadata"
+
+        /**
+         * One lock per trust store directory, shared by every repository
+         * instance in the process: SyncEngine and the screens each create
+         * their own, and their metadata read/modify/writes must not interleave.
+         */
+        private val storeLocks = ConcurrentHashMap<String, Any>()
+
+        fun lockFor(dir: File): Any = storeLocks.computeIfAbsent(dir.canonicalPath) { Any() }
     }
 
     private fun saveMetadataSync(certs: List<TrustedCA>) {
@@ -593,9 +622,12 @@ public class TrustStoreRepository(
             )
         }
         // Write a temp file and rename it over the metadata, so a write that
-        // fails part-way leaves the previous document in place.
+        // fails part-way leaves the previous document in place. The temp file
+        // is this writer's own: created exclusively under a unique name, it is
+        // written, renamed and removed by this call alone. Callers hold the
+        // store lock, so no other writer reads or replaces the metadata between.
         val metadataFile = File(trustStoreDir, "metadata.json")
-        val tempFile = File(trustStoreDir, "metadata.json.tmp")
+        val tempFile = File.createTempFile("metadata.json.", ".tmp", trustStoreDir)
         try {
             fileWriter(tempFile, array.toString())
             if (!tempFile.renameTo(metadataFile)) {
@@ -604,10 +636,6 @@ public class TrustStoreRepository(
         } finally {
             tempFile.delete()
         }
-    }
-
-    private suspend fun saveMetadata(certs: List<TrustedCA>): Unit = withContext(Dispatchers.IO) {
-        saveMetadataSync(certs)
     }
 
     /**
