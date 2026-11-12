@@ -57,10 +57,10 @@ class DesktopSessions(
 ) {
     /**
      * One client per router, so a switch to another desktop and back reuses
-     * the first client and its id counter. Routers do not override equals,
-     * so the map keys by identity. The client is held weakly too, since it
-     * holds its router: a call still waiting on a reply keeps its client
-     * alive, and a client nobody holds has no reply left to collide with.
+     * the first client. Routers do not override equals, so the map keys by
+     * identity. The client is held weakly too, since it holds its router; the
+     * request id counter lives on the router, so a client rebuilt after a
+     * collection continues its numbering.
      */
     private val clients = WeakHashMap<BidirectionalMessageRouter, WeakReference<RemoteKeyClient>>()
 

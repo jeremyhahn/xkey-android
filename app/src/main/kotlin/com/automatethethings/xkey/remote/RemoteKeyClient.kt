@@ -91,7 +91,8 @@ class RemoteKeyClient(
         private val knownAttestationFormats = setOf("tpm2", "pkcs11", "software")
     }
 
-    private val nextRequestId = AtomicLong(BASE_REQUEST_ID)
+    /** Held by the router, not this client, so a replacement client never reuses an id. */
+    private val nextRequestId = messageRouter.requestIds(BASE_REQUEST_ID)
 
     /**
      * Sends a JSON-RPC request and waits for the response.
