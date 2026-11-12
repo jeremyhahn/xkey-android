@@ -104,6 +104,19 @@ class DesktopSessionsTest {
     }
 
     @Test
+    fun `A on TCP, B on BLE, then a BLE stop never yields B with A's TCP client`() {
+        live = listOf(tcp.transport(), ble.transport())
+        confirmed = desktopB
+        // GattServer.stop() drops BLE without clearing the handler's shared peer field.
+        live = listOf(tcp.transport())
+        val session = sessions.session()
+        assertTrue(
+            "B named on A's TCP client",
+            session == null || session.peerPublicKeyHex == desktopA
+        )
+    }
+
+    @Test
     fun `A then B then A keeps the reply of A's outstanding request`() = runTest {
         val first = async { sessions.client()!!.listBackends() }
         runCurrent()
