@@ -24,11 +24,13 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
+import io.mockk.spyk
 import io.mockk.unmockkAll
 import io.mockk.verify
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -109,5 +111,36 @@ class KeystoreManagerPivAliasTest {
         assertEquals(generalAlias, alias)
         assertTrue(keystoreManager.deleteByAlias(alias!!))
         verify { fake.keyStore.deleteEntry(generalAlias) }
+    }
+
+    /**
+     * On API 33+ a general Ed25519 key with logical id `xkey_piv_9A` lives in
+     * the Ed25519 preferences under `xkey_key_xkey_piv_9A`. Resolving that id
+     * must not hand back slot 9A's raw Keystore alias, or `deleteKey` removes
+     * the slot key behind `piv_slots` and outside the slot lock.
+     */
+    @Test
+    fun `an Ed25519 key whose id is a PIV slot alias never resolves to the slot key`() {
+        val manager = spyk(keystoreManager)
+        every { manager.hasSoftwareEd25519Key(any()) } returns false
+        every { manager.hasSoftwareEd25519Key("xkey_key_$pivAlias") } returns true
+
+        assertNotEquals(pivAlias, manager.resolveKeystoreAlias(pivAlias))
+        assertFalse(manager.keyExists(pivAlias))
+        manager.deleteKey(pivAlias)
+        assertNotNull(fake.live)
+        verify(exactly = 0) { fake.keyStore.deleteEntry(pivAlias) }
+    }
+
+    @Test
+    fun `an Ed25519 key stored under a raw PIV slot alias does not resolve`() {
+        val manager = spyk(keystoreManager)
+        every { manager.hasSoftwareEd25519Key(any()) } returns false
+        every { manager.hasSoftwareEd25519Key(pivAlias) } returns true
+
+        assertNull(manager.resolveKeystoreAlias(pivAlias))
+        assertFalse(manager.deleteKey(pivAlias))
+        assertNotNull(fake.live)
+        verify(exactly = 0) { fake.keyStore.deleteEntry(pivAlias) }
     }
 }

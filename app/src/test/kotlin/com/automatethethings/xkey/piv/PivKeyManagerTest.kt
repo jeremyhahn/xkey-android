@@ -27,6 +27,7 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -281,6 +282,45 @@ class PivKeyManagerTest {
             "the row was left naming the replaced key",
             stored?.publicKeyDer.contentEquals(newKey.public.encoded)
         )
+    }
+
+    /**
+     * Another manager regenerates slot 9A from ES256 (key A, with a
+     * certificate) to RS2048 (key B) while a listing runs: the listing has
+     * read A's row, and the Keystore already holds B. The listing must
+     * describe one generation, never B's key with A's algorithm and
+     * certificate.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `listSlots during a regenerate lists one generation of the slot`() = runTest(StandardTestDispatcher()) {
+        val oldRow = PivTestCertificates.slotRow(slotKey.public.encoded, PivTestCertificates.selfSigned(slotKey))
+        var row = oldRow
+        coEvery { pivSlotDao.getAll() } answers { listOf(oldRow) }
+        coEvery { pivSlotDao.getBySlotId("9A") } answers { row }
+        val newKey = PivTestCertificates.ecKeyPair()
+        keystore.generatesOnNextCall(newKey)
+        val upsertGate = CompletableDeferred<Unit>()
+        coEvery { pivSlotDao.upsert(any()) } coAnswers {
+            upsertGate.await()
+            row = firstArg()
+            1L
+        }
+
+        val generate = launch { PivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.RS2048) }
+        runCurrent()
+        assertTrue("generate did not reach its upsert", keystore.live === newKey)
+        val listing = async { PivKeyManager(pivSlotDao).listSlots() }
+        runCurrent()
+        upsertGate.complete(Unit)
+        generate.join()
+        val info = listing.await().single()
+
+        val oldGeneration = info.algorithm == PivAlgorithm.ES256 && info.hasCertificate &&
+            info.publicKeyDer.contentEquals(slotKey.public.encoded)
+        val newGeneration = info.algorithm == PivAlgorithm.RS2048 && !info.hasCertificate &&
+            info.publicKeyDer.contentEquals(newKey.public.encoded)
+        assertTrue("listing mixed two generations: $info", oldGeneration || newGeneration)
     }
 
     @Test

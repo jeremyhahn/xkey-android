@@ -1491,12 +1491,14 @@ class KeystoreManager(private val context: Context) {
         if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return keyId
 
         // Check Ed25519 software-backed keys
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (hasEd25519Key(generalAlias) || hasEd25519Key(keyId)) return keyId
-        }
+        if (hasSoftwareEd25519Key(generalAlias) || hasSoftwareEd25519Key(keyId)) return keyId
 
         return null
     }
+
+    /** True if an Ed25519 software key is stored under [alias] (API 33+ only). */
+    internal fun hasSoftwareEd25519Key(alias: String): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)
 
     /**
      * List all key aliases managed by xKey.
