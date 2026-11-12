@@ -31,8 +31,14 @@ import java.util.concurrent.atomic.AtomicLong
  * with the inbound `local.sync*` handlers so neither direction duplicates the
  * reconciliation logic.
  *
- * Wire contract: go-xkms `pkg/pairing/protocol_sync.go` (RemoteSync*Params /
- * RemoteSync*Result), handled on the desktop by the pairing Bridge.
+ * Wire contract: go-xkms `pkg/pairingproto/protocol_sync.go` (RemoteSync*Params /
+ * RemoteSync*Result, pinned at tag `xkey/v0.64.2-alpha`), handled on the
+ * desktop by the pairing Bridge.
+ *
+ * `remote.syncAll` is never sent: its params carry only include flags and no
+ * phone items, so the desktop could not merge the phone's stores from it.
+ * [syncAll] runs the three per-store calls instead, each of which pushes the
+ * phone's items and pulls the desktop's in one round trip.
  *
  * Requires an active paired connection: [messageSender] and [messageRouter]
  * come from the live transport (BLE / USB-AOA / TCP) for the connected desktop.
@@ -44,7 +50,6 @@ class RemoteSyncClient(
     private val requestTimeoutMs: Long = 30_000L
 ) {
     private val engine = SyncEngine(context.applicationContext)
-    private val nextRequestId = AtomicLong(BASE_REQUEST_ID)
 
     /** Aggregate result of a sync run (items pushed to / pulled from the laptop). */
     data class SyncResult(
@@ -58,6 +63,18 @@ class RemoteSyncClient(
         val totalPulled: Int get() = certsPulled + oathPulled + passwordsPulled
         val totalPushed: Int get() = certsPushed + oathPushed + passwordsPushed
     }
+
+    /**
+     * The desktop's view of sync, from `remote.syncStatus` (go-xkms
+     * `RemoteSyncStatusResult`). [lastSync] is the desktop's RFC 3339 time of
+     * its last sync, or null when it has never synced; [storeChecksums] maps a
+     * store name to the desktop's digest of it.
+     */
+    data class DesktopSyncStatus(
+        val lastSync: String?,
+        val deviceId: String,
+        val storeChecksums: Map<String, String>
+    )
 
     /** Runs a full bidirectional sync of all stores and records the sync time. */
     suspend fun syncAll(): SyncResult {
@@ -106,6 +123,43 @@ class RemoteSyncClient(
     }
 
     /**
+     * Asks the desktop for its sync status (`remote.syncStatus`, empty
+     * params). Reads nothing from and writes nothing to the phone's stores.
+     * A missing `last_sync` (omitempty) is null; a `null` `store_checksums`
+     * (a nil Go map) is empty. A missing `device_id`, or any field of the
+     * wrong type, throws [ProtocolException].
+     */
+    suspend fun syncStatus(): DesktopSyncStatus {
+        val result = sendRequest(MethodNames.REMOTE_SYNC_STATUS, JSONObject()).result
+            ?: throw malformedStatus("no result")
+        return decodeStatus(result)
+    }
+
+    private fun decodeStatus(result: JSONObject): DesktopSyncStatus {
+        val deviceId = result.opt("device_id") as? String
+            ?: throw malformedStatus("device_id is not a string")
+        val lastSync = when (val v = result.opt("last_sync")) {
+            null, JSONObject.NULL -> null
+            is String -> v.ifEmpty { null }
+            else -> throw malformedStatus("last_sync is not a string")
+        }
+        val checksums = when (val v = result.opt("store_checksums")) {
+            null, JSONObject.NULL -> emptyMap()
+            is JSONObject -> v.keys().asSequence().associateWith { store ->
+                v.opt(store) as? String
+                    ?: throw malformedStatus("store_checksums[$store] is not a string")
+            }
+            else -> throw malformedStatus("store_checksums is not an object")
+        }
+        return DesktopSyncStatus(lastSync = lastSync, deviceId = deviceId, storeChecksums = checksums)
+    }
+
+    private fun malformedStatus(why: String) = ProtocolException(
+        "Malformed ${MethodNames.REMOTE_SYNC_STATUS} reply: $why",
+        errorCode = ErrorCodes.INTERNAL_ERROR
+    )
+
+    /**
      * How many of the offered items the desktop actually took, from the
      * `added`/`updated` counts every `remote.sync*` result carries. Counting
      * what was offered instead would report a push of items the desktop
@@ -137,11 +191,19 @@ class RemoteSyncClient(
         }
     }
 
-    private companion object {
-        const val TAG = "RemoteSyncClient"
+    internal companion object {
+        private const val TAG = "RemoteSyncClient"
 
         // Distinct from RemoteKeyClient's 1_000_000 base so outbound request IDs
         // from the two clients sharing one router never collide.
         const val BASE_REQUEST_ID = 2_000_000L
+
+        /**
+         * One counter for every instance: XKeyGattService builds a client per
+         * call, so a status request can be pending beside a sync from another
+         * client on the same router, and per-instance counters would give
+         * both the same id.
+         */
+        private val nextRequestId = AtomicLong(BASE_REQUEST_ID)
     }
 }
