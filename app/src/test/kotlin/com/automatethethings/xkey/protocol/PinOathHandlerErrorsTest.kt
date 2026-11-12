@@ -151,32 +151,29 @@ class PinOathHandlerErrorsTest {
 
     @Test
     fun `pinSet with a new PIN shorter than 6 returns INVALID_PARAMS`() = runTest {
-        coEvery { pinManager.setSOPIN(any(), any()) } throws IllegalArgumentException("PIN must be 6-63 UTF-8 bytes, got 5")
-
         val response = call(MethodNames.LOCAL_PIN_SET, """{"pinType":"SO_PIN","newPin":"12345"}""")
 
         assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        assertPinManagerNotCalled()
     }
 
     @Test
     fun `pinSet with a new PIN longer than 63 returns INVALID_PARAMS`() = runTest {
-        coEvery { pinManager.setUserPIN(any(), any()) } throws IllegalArgumentException("PIN must be 6-63 UTF-8 bytes, got 64")
-
         val response = call(
             MethodNames.LOCAL_PIN_SET,
             """{"pinType":"USER_PIN","soPin":"123456","newPin":"${"7".repeat(64)}"}"""
         )
 
         assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        assertPinManagerNotCalled()
     }
 
     @Test
     fun `pinChange with a new PIN of the wrong length returns INVALID_PARAMS`() = runTest {
-        coEvery { pinManager.changeUserPIN(any(), any()) } throws IllegalArgumentException("PIN must be 6-63 UTF-8 bytes, got 3")
-
         val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"USER_PIN","currentPin":"654321","newPin":"123"}""")
 
         assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        assertPinManagerNotCalled()
     }
 
     @Test
@@ -218,6 +215,19 @@ class PinOathHandlerErrorsTest {
     private suspend fun call(method: String, params: String): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
         return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
+    }
+
+    /**
+     * The length check comes before any [PinManager] call, so a bad new PIN
+     * never verifies the current or SO PIN or moves an attempt counter.
+     */
+    private fun assertPinManagerNotCalled() {
+        coVerify(exactly = 0) { pinManager.setSOPIN(any(), any()) }
+        coVerify(exactly = 0) { pinManager.changeSOPIN(any(), any()) }
+        coVerify(exactly = 0) { pinManager.verifySOPIN(any()) }
+        coVerify(exactly = 0) { pinManager.setUserPIN(any(), any()) }
+        coVerify(exactly = 0) { pinManager.changeUserPIN(any(), any()) }
+        coVerify(exactly = 0) { pinManager.verifyUserPIN(any()) }
     }
 
     private fun errorCode(response: JSONObject): Int = response.getJSONObject("error").getInt("code")
