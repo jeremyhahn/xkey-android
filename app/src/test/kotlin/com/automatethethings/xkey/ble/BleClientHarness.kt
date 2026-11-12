@@ -72,7 +72,12 @@ class BleClientHarness(
     val address: String = "AA:BB:CC:DD:EE:F0",
     val deviceName: String = "xKey Desktop",
     /** What the client answers the desktop's own requests with. */
-    inboundRequests: PhoneInitiatedRequestHandler? = null
+    inboundRequests: PhoneInitiatedRequestHandler? = null,
+    /**
+     * Who confirms the session's SAS. Confirms by default, so the tests that
+     * are not about the SAS see a session the user accepted.
+     */
+    pairingConfirmation: PairingConfirmationCallback? = CONFIRMS
 ) {
 
     // -----------------------------------------------------------------
@@ -239,7 +244,7 @@ class BleClientHarness(
     val statusCharacteristic: BluetoothGattCharacteristic = mockk(relaxed = true)
     val cccd: BluetoothGattDescriptor = mockk(relaxed = true)
 
-    val client = BleClient(context, inboundRequests)
+    val client = BleClient(context, inboundRequests, pairingConfirmation)
     val probe = BleClientProbe(client)
 
     /** The desktop's Noise responder, so tests can assert on its identity. */
@@ -584,6 +589,14 @@ class BleClientHarness(
     }
 
     companion object {
+        /** A user who confirms every SAS the client shows. */
+        val CONFIRMS: PairingConfirmationCallback = object : PairingConfirmationCallback {
+            override suspend fun onPairingConfirmationRequired(
+                deviceName: String,
+                publicKeyFingerprint: String
+            ): Boolean = true
+        }
+
         /** The prologue formula the phone, the desktop and `go-xkms` all share. */
         fun prologueOf(publicKey: ByteArray, fingerprint: ByteArray): ByteArray =
             MessageDigest.getInstance("SHA-256").run {
