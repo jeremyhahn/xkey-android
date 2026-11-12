@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Key sharing sheet: sending a key to the paired desktop (remote.sharePublicKey). -->
+<resources>
+    <string name="sharing_desktop_title">Paired desktop</string>
+    <string name="sharing_desktop_send_public">Send public key to desktop</string>
+    <string name="sharing_desktop_ready">Sends this key\'s public key to the connected desktop. The private key stays on this phone.</string>
+    <string name="sharing_desktop_sending">Sending to the desktop…</string>
+    <string name="sharing_desktop_sent">The desktop imported the public key as %1$s.</string>
+    <string name="sharing_desktop_failed">The desktop did not import the key: %1$s</string>
+    <string name="sharing_desktop_no_peer">The connected desktop has no confirmed pairing identity, so no key can be sent to it.</string>
+    <string name="sharing_desktop_policy_denied">This key\'s sharing policy does not include the connected desktop.</string>
+    <string name="sharing_desktop_no_public_key">This key has no public key to send.</string>
+    <string name="sharing_desktop_not_exportable">This key is not marked exportable and shareable, so it stays on this phone.</string>
+    <string name="sharing_desktop_no_wrap_path">Symmetric keys cannot be sent to the desktop yet: it imports only key material wrapped under its own import key, and the pairing channel does not provide that key. Only public keys can be sent.</string>
+</resources>

@@ -787,6 +787,13 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
+     * Outbound key-sharing client (`remote.sharePublicKey` and the rest) on
+     * the active transport, or null when no desktop is connected.
+     */
+    fun remoteShareClient(): com.automatethethings.xkey.remote.RemoteShareClient? =
+        activeTransport()?.let { (sender, router) -> com.automatethethings.xkey.remote.RemoteShareClient(sender, router) }
+
+    /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)
      * with the connected desktop over the active transport.
      *
