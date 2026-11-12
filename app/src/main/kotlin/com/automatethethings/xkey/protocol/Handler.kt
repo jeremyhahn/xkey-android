@@ -757,13 +757,9 @@ class RequestHandler(
         signParams: SignParams,
         dataHash: ByteArray
     ): Response {
-        // Show notification if screen is locked to wake the user
-        val requestId = "sign-${request.id}"
-        showBiometricNotificationIfLocked(
-            operationType = "sign",
-            rpName = null, // Could be enhanced to extract RP name from credential metadata
-            requestId = requestId
-        )
+        // On a locked phone the notification opens the launcher's own prompt
+        // (lockScreenPrompt), so its result completes this request.
+        val onLockScreen = lockScreenPrompt(operationType = "sign", rpName = null)
 
         try {
             // Check if we're in PER_OPERATION mode (requires crypto-bound biometric every time)
@@ -781,7 +777,8 @@ class RequestHandler(
                         dataHash = dataHash,
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
-                        showOnLockScreen = keyguardManager.isKeyguardLocked
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = onLockScreen
                     )
 
                     // Record successful authentication for session tracking
@@ -831,7 +828,8 @@ class RequestHandler(
                     biometricLauncher.requestAuthentication(
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
-                        showOnLockScreen = keyguardManager.isKeyguardLocked
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = onLockScreen
                     )
 
                     // Record successful authentication for session tracking
@@ -862,6 +860,13 @@ class RequestHandler(
                     errorCode = ErrorCodes.INTERNAL_ERROR
                 )
 
+            // The activity's own prompt answers no launcher request; the
+            // notification only wakes the phone for it.
+            showBiometricNotificationIfLocked(
+                operationType = "sign",
+                rpName = null,
+                requestId = "sign-${request.id}"
+            )
             val signature = keystoreManager.sign(
                 credentialId = signParams.credentialId,
                 dataHash = dataHash,
@@ -901,13 +906,17 @@ class RequestHandler(
      * @param onTimeout Callback invoked if the notification times out without user action
      * @param notifyLaptop Whether the installed [messageSender]'s laptop is the
      *   one waiting on this prompt, and so should hear that it is pending
+     * @param promptIntent The launcher prompt the notification opens, so that
+     *   its result completes the launcher's request [requestId]; null for a
+     *   prompt no launcher request waits on
      */
     private fun showBiometricNotificationIfLocked(
         operationType: String,
         rpName: String?,
         requestId: String,
         onTimeout: () -> Unit = {},
-        notifyLaptop: Boolean = true
+        notifyLaptop: Boolean = true,
+        promptIntent: android.content.Intent? = null
     ) {
         if (keyguardManager.isKeyguardLocked) {
             Log.d(TAG, "Screen is locked, showing biometric notification")
@@ -915,13 +924,36 @@ class RequestHandler(
                 operationType = operationType,
                 rpName = rpName,
                 requestId = requestId,
-                onTimeout = onTimeout
+                onTimeout = onTimeout,
+                promptIntent = promptIntent
             )
             // Also notify the laptop that biometric is pending
             if (notifyLaptop) {
                 sendBiometricPendingNotification(operationType, rpName)
             }
         }
+    }
+
+    /**
+     * The `onLaunch` hook for a [BiometricActivityLauncher] prompt: on a locked
+     * phone it shows the notification for the launcher's own request id and
+     * prompt intent, so approving or cancelling from the lock screen
+     * completes the request that waits on it. Every launcher prompt goes
+     * through this; a notification shown with an id of its own would open a
+     * prompt whose result nobody waits on.
+     */
+    private fun lockScreenPrompt(
+        operationType: String,
+        rpName: String?,
+        notifyLaptop: Boolean = true
+    ): (String, android.content.Intent) -> Unit = { requestId, prompt ->
+        showBiometricNotificationIfLocked(
+            operationType = operationType,
+            rpName = rpName,
+            requestId = requestId,
+            notifyLaptop = notifyLaptop,
+            promptIntent = prompt
+        )
     }
 
     /**
@@ -1430,19 +1462,12 @@ class RequestHandler(
         }
 
         if (biometricRequired && biometricLauncher != null) {
-            // Show notification if screen is locked
-            val requestId = "local-sign-${request.id}"
-            showBiometricNotificationIfLocked(
-                operationType = "sign",
-                rpName = null,
-                requestId = requestId
-            )
-
             try {
                 biometricLauncher.requestAuthentication(
                     title = "Signing Request",
                     subtitle = "Verify your identity to sign data",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
+                    showOnLockScreen = keyguardManager.isKeyguardLocked,
+                    onLaunch = lockScreenPrompt(operationType = "sign", rpName = null)
                 )
                 sessionAuthManager?.recordAuthentication(currentSessionId)
             } finally {
@@ -1889,10 +1914,12 @@ class RequestHandler(
         }
 
         // The compare-and-set, like updateSharingPolicy, keeps `shareable` and
-        // `sharing_policy` in step, which KeyEntity requires. It returns true
+        // `sharing_policy` in step, which KeyEntity requires. It is bound to
+        // the row read above (its immutable id), so a key deleted and
+        // re-created under the same key id is never written. It returns true
         // only when it changed the row, and audits exactly that change.
         suspend fun setPolicyFrom(expected: SharingPolicyType, policy: SharingPolicyType): Boolean {
-            if (keyDao.compareAndSetSharingPolicy(entity.keyId, expected, policy) == 0) return false
+            if (keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, expected, policy) == 0) return false
             AuditLogger.logKeySharingChanged(
                 keyId = entity.keyId,
                 keyLabel = entity.label,
@@ -1903,9 +1930,20 @@ class RequestHandler(
             return true
         }
 
-        suspend fun storedPolicy(): SharingPolicyType =
-            keyDao.getByKeyId(entity.keyId)?.sharingPolicy
+        // The policy the read row holds now. A different row under the same
+        // key id is another key: the request, and any approval for it, named
+        // the one read above.
+        suspend fun storedPolicy(): SharingPolicyType {
+            val current = keyDao.getByKeyId(entity.keyId)
                 ?: throw ProtocolException("Key not found: ${entity.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
+            if (current.id != entity.id) {
+                throw ProtocolException(
+                    "Key ${entity.keyId} was replaced while the request was in flight; retry",
+                    errorCode = ErrorCodes.OPERATION_DENIED
+                )
+            }
+            return current.sharingPolicy
+        }
 
         if (newPolicy == SharingPolicyType.ALL_PEERS && entity.sharingPolicy != SharingPolicyType.ALL_PEERS) {
             requireConfirmedPeer("Sharing a key with all peers")
@@ -1915,16 +1953,14 @@ class RequestHandler(
                 errorCode = ErrorCodes.BIOMETRIC_FAILED
             )
             withContext(Dispatchers.Main) {
-                showBiometricNotificationIfLocked(
-                    operationType = "share",
-                    rpName = keyName,
-                    requestId = "set-key-policy-${request.id}"
-                )
                 try {
+                    // One launcher-owned request: on a locked phone the
+                    // notification opens this same prompt.
                     launcher.requestAuthentication(
                         title = "Share key with all devices",
                         subtitle = "Allow every paired device to use \"$keyName\"",
-                        showOnLockScreen = keyguardManager.isKeyguardLocked
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = lockScreenPrompt(operationType = "share", rpName = keyName)
                     )
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -2087,23 +2123,27 @@ class RequestHandler(
         }
 
         val isLocked = keyguardManager.isKeyguardLocked
-        showBiometricNotificationIfLocked(
-            operationType = operationType,
-            rpName = null,
-            requestId = "$operationType-${request.id}",
-            // The installed sender reaches the desktop this phone is serving,
-            // which is not the one waiting on a phone-initiated request.
-            notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
-        )
+        // The installed sender reaches the desktop this phone is serving,
+        // which is not the one waiting on a phone-initiated request.
+        val notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
 
         try {
             if (biometricLauncher != null) {
                 biometricLauncher.requestAuthentication(
                     title = title,
                     subtitle = subtitle,
-                    showOnLockScreen = isLocked
+                    showOnLockScreen = isLocked,
+                    onLaunch = lockScreenPrompt(operationType, rpName = null, notifyLaptop = notifyLaptop)
                 )
             } else {
+                // The activity's own prompt answers no launcher request; the
+                // notification only wakes the phone for it.
+                showBiometricNotificationIfLocked(
+                    operationType = operationType,
+                    rpName = null,
+                    requestId = "$operationType-${request.id}",
+                    notifyLaptop = notifyLaptop
+                )
                 val helper = biometricHelper
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
@@ -2874,19 +2914,12 @@ class RequestHandler(
         var userVerified = false
 
         if (biometricRequired && biometricLauncher != null) {
-            // Show notification if screen is locked
-            val requestId = "fido2-assertion-${request.id}"
-            showBiometricNotificationIfLocked(
-                operationType = "sign",
-                rpName = entity.rpName,
-                requestId = requestId
-            )
-
             try {
                 biometricLauncher.requestAuthentication(
                     title = "xKey Authentication",
                     subtitle = "Verify your identity to use this passkey",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
+                    showOnLockScreen = keyguardManager.isKeyguardLocked,
+                    onLaunch = lockScreenPrompt(operationType = "sign", rpName = entity.rpName)
                 )
                 sessionAuthManager?.recordAuthentication(currentSessionId)
                 userVerified = true

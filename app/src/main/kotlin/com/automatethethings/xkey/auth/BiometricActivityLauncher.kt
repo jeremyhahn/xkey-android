@@ -35,6 +35,7 @@ import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Launches [TransparentBiometricActivity] from background services and handles results.
@@ -45,8 +46,9 @@ import kotlin.coroutines.resume
  * to typed exceptions.
  *
  * Thread Safety:
- * - Uses [AtomicLong] for request ID generation
- * - Uses [ConcurrentHashMap] for pending request storage
+ * - Request ids are process-wide ([PendingAuthentications]), so a result
+ *   broadcast reaches only the launcher, and the request, that issued it
+ * - Pending requests live in a [ConcurrentHashMap]
  * - Safe to call from multiple coroutines concurrently
  *
  * Lifecycle:
@@ -126,15 +128,10 @@ class BiometricActivityLauncher(
     }
 
     /**
-     * Atomic counter for generating unique request IDs.
+     * Pending authentication requests, each resumed by the result broadcast
+     * carrying its id.
      */
-    private val requestIdGenerator = AtomicLong(0L)
-
-    /**
-     * Map of pending authentication requests, keyed by request ID.
-     * Values are continuations that will be resumed when results arrive.
-     */
-    private val pendingRequests = ConcurrentHashMap<Long, CancellableContinuation<BiometricResult>>()
+    private val pendingRequests = PendingAuthentications()
 
     /**
      * Pending crypto signing requests. A request cancelled while it waits
@@ -157,13 +154,9 @@ class BiometricActivityLauncher(
                 return
             }
 
-            val requestIdString = intent.getStringExtra(
+            val requestId = intent.getStringExtra(
                 TransparentBiometricActivity.EXTRA_REQUEST_ID
             ) ?: return
-
-            val requestId = requestIdString.toLongOrNull() ?: return
-
-            val continuation = pendingRequests.remove(requestId) ?: return
 
             val success = intent.getBooleanExtra(
                 TransparentBiometricActivity.EXTRA_SUCCESS,
@@ -184,7 +177,8 @@ class BiometricActivityLauncher(
                 BiometricResult.Error(errorCode, errorMessage)
             }
 
-            continuation.resume(result)
+            // An id this launcher never issued answers nothing.
+            pendingRequests.complete(requestId, result)
         }
     }
 
@@ -292,11 +286,7 @@ class BiometricActivityLauncher(
         isRegistered = false
 
         // Cancel all pending authentication requests
-        val pendingIds = pendingRequests.keys.toList()
-        for (requestId in pendingIds) {
-            val continuation = pendingRequests.remove(requestId)
-            continuation?.cancel()
-        }
+        pendingRequests.cancelAll()
 
         // Cancel all pending crypto signing requests, and their prompts
         pendingCryptoRequests.cancelAll()
@@ -313,6 +303,10 @@ class BiometricActivityLauncher(
      * @param subtitle The subtitle providing context (e.g., relying party name).
      * @param description Optional additional description text.
      * @param showOnLockScreen Whether to show the prompt over the lock screen.
+     * @param onLaunch Called with this request's id and prompt intent just
+     *   before the prompt starts. Anything else that presents the prompt, such
+     *   as the lock-screen notification, must open that same intent, so its
+     *   result completes this request rather than one nobody waits on.
      *
      * @throws UserCancelledException If the user cancelled authentication.
      * @throws BiometricLockoutException If authentication is locked due to failed attempts.
@@ -323,24 +317,17 @@ class BiometricActivityLauncher(
         title: String,
         subtitle: String,
         description: String? = null,
-        showOnLockScreen: Boolean = false
+        showOnLockScreen: Boolean = false,
+        onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> }
     ) {
         check(isRegistered) {
             "BiometricActivityLauncher must be registered before requesting authentication"
         }
 
-        val result = suspendCancellableCoroutine { continuation ->
-            val requestId = requestIdGenerator.incrementAndGet()
-
-            pendingRequests[requestId] = continuation
-
-            continuation.invokeOnCancellation {
-                pendingRequests.remove(requestId)
-            }
-
+        val result = pendingRequests.await { requestId ->
             val intent = TransparentBiometricActivity.createIntent(
                 context = context,
-                requestId = requestId.toString(),
+                requestId = requestId,
                 title = title,
                 subtitle = subtitle,
                 description = description,
@@ -349,6 +336,7 @@ class BiometricActivityLauncher(
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
+            onLaunch(requestId, intent)
             context.startActivity(intent)
         }
 
@@ -382,6 +370,8 @@ class BiometricActivityLauncher(
      * @param showOnLockScreen Whether to show the prompt over the lock screen.
      * @param keyAlias A full Keystore alias to sign with instead of the
      *   credential's (the user verification key); null for a credential key.
+     * @param onLaunch As for [requestAuthentication]: called with this
+     *   request's id and prompt intent just before the prompt starts.
      *
      * @return The DER-encoded ECDSA signature bytes.
      *
@@ -398,7 +388,8 @@ class BiometricActivityLauncher(
         title: String,
         subtitle: String,
         showOnLockScreen: Boolean = false,
-        keyAlias: String? = null
+        keyAlias: String? = null,
+        onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> }
     ): ByteArray {
         check(isRegistered) {
             "BiometricActivityLauncher must be registered before requesting crypto signature"
@@ -421,6 +412,7 @@ class BiometricActivityLauncher(
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
+            onLaunch(requestId, intent)
             context.startActivity(intent)
         }
 
@@ -516,5 +508,57 @@ class BiometricActivityLauncher(
         } else {
             "unknown"
         }
+    }
+}
+
+/**
+ * The authentication requests a [BiometricActivityLauncher] is waiting on.
+ *
+ * Each request gets an id here, and only here; whatever presents its prompt
+ * (the launcher's activity start or the lock-screen notification) carries that
+ * id, and the result broadcast carrying it is what completes the request. Ids
+ * are process-wide, so a result never completes another launcher's request.
+ * Every request is settled exactly once: by its result, by the failure to
+ * launch its prompt, or by its cancellation.
+ */
+internal class PendingAuthentications {
+    private val pending =
+        ConcurrentHashMap<Long, CancellableContinuation<BiometricActivityLauncher.BiometricResult>>()
+
+    /**
+     * Allocates a request id, [launch]es the prompt for it and waits for its
+     * result. A failure to launch fails the request; cancelling the caller
+     * withdraws it.
+     */
+    suspend fun await(launch: (requestId: String) -> Unit): BiometricActivityLauncher.BiometricResult =
+        suspendCancellableCoroutine { continuation ->
+            val id = nextRequestId.incrementAndGet()
+            pending[id] = continuation
+            continuation.invokeOnCancellation { pending.remove(id, continuation) }
+            try {
+                launch(id.toString())
+            } catch (e: Exception) {
+                if (pending.remove(id, continuation)) continuation.resumeWithException(e)
+            }
+        }
+
+    /** Resumes [requestId]'s caller with [result]; false when nothing waits on that id. */
+    fun complete(requestId: String, result: BiometricActivityLauncher.BiometricResult): Boolean {
+        val id = requestId.toLongOrNull() ?: return false
+        val continuation = pending.remove(id) ?: return false
+        continuation.resume(result)
+        return true
+    }
+
+    /** Cancels every waiting request. */
+    fun cancelAll() {
+        for (id in pending.keys.toList()) {
+            pending.remove(id)?.cancel()
+        }
+    }
+
+    private companion object {
+        /** Process-wide, so ids from two launchers never name the same request. */
+        val nextRequestId = AtomicLong(0L)
     }
 }

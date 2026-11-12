@@ -229,20 +229,30 @@ interface KeyDao {
      * overwriting it. Keeps the legacy [shareable] field in step, as
      * [updateSharingPolicy] does.
      *
+     * The write is bound to the row the caller read, not only to its key id:
+     * a key deleted and re-created under the same id is a new row with a new
+     * [KeyEntity.id] (AUTOINCREMENT never reuses one), so it is not written.
+     *
+     * @param id The immutable row id of the key the caller read.
      * @param keyId The unique key identifier.
      * @param expected The policy the caller read and decided on.
      * @param policy The new sharing policy type.
-     * @return The number of rows changed: 1 when the policy was [expected], else 0.
+     * @return The number of rows changed: 1 when that row still holds [expected], else 0.
      */
     @Query(
         """
         UPDATE keys SET
             sharing_policy = :policy,
             shareable = CASE WHEN :policy = 'PRIVATE' THEN 0 ELSE 1 END
-        WHERE key_id = :keyId AND sharing_policy = :expected
+        WHERE id = :id AND key_id = :keyId AND sharing_policy = :expected
         """
     )
-    suspend fun compareAndSetSharingPolicy(keyId: String, expected: SharingPolicyType, policy: SharingPolicyType): Int
+    suspend fun compareAndSetSharingPolicy(
+        id: Long,
+        keyId: String,
+        expected: SharingPolicyType,
+        policy: SharingPolicyType
+    ): Int
 
     /**
      * Get all keys with a specific sharing policy.

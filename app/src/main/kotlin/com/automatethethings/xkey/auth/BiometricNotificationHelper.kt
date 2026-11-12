@@ -75,18 +75,27 @@ class BiometricNotificationHelper(private val context: Context) {
      * @param requestId A unique identifier for the biometric request
      * @param timeoutMs Timeout in milliseconds before auto-dismissing (default 30s)
      * @param onTimeout Callback invoked when the notification times out without user action
+     * @param promptIntent The prompt a [BiometricActivityLauncher] request opened
+     *   for [requestId] (see its `onLaunch`). Opening that same intent lets an
+     *   approval or a cancel on the lock screen complete the waiting request;
+     *   without one, the notification opens a generic prompt that answers no
+     *   launcher request.
      */
     fun showBiometricRequiredNotification(
         operationType: String,
         rpName: String?,
         requestId: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
-        onTimeout: () -> Unit = {}
+        onTimeout: () -> Unit = {},
+        promptIntent: Intent? = null
     ) {
         Log.d(TAG, "Showing biometric notification: operation=$operationType, rpName=$rpName")
 
-        // Create the full-screen intent for TransparentBiometricActivity
-        val fullScreenIntent = Intent(context, TransparentBiometricActivity::class.java).apply {
+        // The full-screen intent: the launcher's own prompt when there is one,
+        // else a generic TransparentBiometricActivity.
+        val fullScreenIntent = promptIntent?.let { Intent(it) }?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        } ?: Intent(context, TransparentBiometricActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(TransparentBiometricActivity.EXTRA_REQUEST_ID, requestId)
             putExtra(TransparentBiometricActivity.EXTRA_TITLE, context.getString(R.string.biometric_prompt_title))
