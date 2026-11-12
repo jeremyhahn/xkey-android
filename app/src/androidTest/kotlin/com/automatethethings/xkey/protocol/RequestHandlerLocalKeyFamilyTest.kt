@@ -132,13 +132,18 @@ class RequestHandlerLocalKeyFamilyTest {
         handler.setSessionId(null)
         handler.setMessageSender(null)
         handler.setActivity(null)
-        handler.updateSettings(
-            BiometricSettingsData(
-                uvPolicy = UserVerificationPolicy.DISABLED,
-                attestationBiometricPolicy = AttestationBiometricPolicy.NEVER
-            )
-        )
+        handler.updateSettings(headlessSettings())
     }
+
+    /**
+     * No user verification and no auth-bound keys: a handler built with the
+     * REQUIRED/PER_OPERATION defaults makes AES/EC generation need enrolled
+     * biometrics, which a headless device does not have.
+     */
+    private fun headlessSettings() = BiometricSettingsData(
+        uvPolicy = UserVerificationPolicy.DISABLED,
+        attestationBiometricPolicy = AttestationBiometricPolicy.NEVER
+    )
 
     // ------------------------------------------------------------------
     // Handler wiring
@@ -601,6 +606,7 @@ class RequestHandlerLocalKeyFamilyTest {
             biometricLauncher = null,
             sessionAuthManager = SessionAuthManager()
         )
+        collidingHandler.updateSettings(headlessSettings())
         listOf(
             Pair(KeyTypes.SECRET, "AES256"),
             Pair(KeyTypes.HMAC, "HMAC-SHA256"),
@@ -659,6 +665,7 @@ class RequestHandlerLocalKeyFamilyTest {
             biometricLauncher = null,
             sessionAuthManager = SessionAuthManager()
         )
+        failingHandler.updateSettings(headlessSettings())
         listOf(
             Pair(KeyTypes.SECRET, "AES256"),
             Pair(KeyTypes.SIGNING, "ES256")
