@@ -444,7 +444,7 @@ class StreamPairingSessionRevocationTest {
 
         assertEquals("the old approval answers nothing", null, withTimeout(TIMEOUT_MS) { pending.await() })
         assertFalse("the removed peer must not be re-added", repo.isDeviceKnown(old.desktop.publicKeyHex))
-        verify(exactly = 0) { requestHandler.setConnectedDevicePublicKeyHex(old.desktop.publicKeyHex) }
+        verify(exactly = 0) { requestHandler.setConnectedDevicePublicKeyHex(old.desktop.publicKeyHex, any()) }
         val reply = replacement.desktop.request("system.ping")
         assertEquals(ErrorCodes.PAIRING_REQUIRED, reply.getJSONObject("error").getInt("code"))
     }

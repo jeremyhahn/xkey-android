@@ -384,7 +384,10 @@ class StreamPairingSession(
                 if (activeConnection === connection) {
                     activeConnection = null
                     messageRouter?.cancelAllPending()
-                    requestHandler.setConnectedDevicePublicKeyHex(null)
+                    // Only if this connection still owns the identity: a
+                    // replacement session (a USB reattach, #134) may have set
+                    // its own before this teardown ran.
+                    requestHandler.clearConnectedDevicePublicKeyHex(owner = connection)
                 }
             }
         }
@@ -703,7 +706,7 @@ class StreamPairingSession(
     private fun confirm(connection: Connection, peerKeyHex: String): Boolean = synchronized(connection.state) {
         if (!connection.isCurrent) return false
         connection.confirmed = true
-        requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex, owner = connection)
         true
     }
 

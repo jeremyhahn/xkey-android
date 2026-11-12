@@ -224,6 +224,16 @@ class RequestHandler(
     private var connectedDevicePublicKeyHex: String? = null
 
     /**
+     * The session that set [connectedDevicePublicKeyHex], or null when its
+     * setter named none. Only that session's teardown clears the identity, so
+     * a session ending late (a USB detach followed by a reattach, #134) does
+     * not clear the identity of the one that replaced it. Guarded by
+     * [connectedPeerLock].
+     */
+    private var connectedPeerOwner: Any? = null
+    private val connectedPeerLock = Any()
+
+    /**
      * This device's persistent attested identity (go-xkms#129).
      *
      * Built from nothing but the Keystore, so it is created here rather than
@@ -356,7 +366,10 @@ class RequestHandler(
         currentSessionId = sessionId
         if (sessionId == null) {
             sessionAuthManager?.clearSession()
-            connectedDevicePublicKeyHex = null
+            synchronized(connectedPeerLock) {
+                connectedDevicePublicKeyHex = null
+                connectedPeerOwner = null
+            }
         }
         Log.d(TAG, "Session ID updated: $sessionId")
     }
@@ -368,10 +381,31 @@ class RequestHandler(
      * PAIRED_DEVICES_SKIP attestation policy can check if the device is known.
      *
      * @param publicKeyHex The hex-encoded Noise static public key, or null on disconnect.
+     * @param owner The session setting it; pass the same object to
+     *   [clearConnectedDevicePublicKeyHex] when that session ends.
      */
-    fun setConnectedDevicePublicKeyHex(publicKeyHex: String?) {
-        connectedDevicePublicKeyHex = publicKeyHex
+    fun setConnectedDevicePublicKeyHex(publicKeyHex: String?, owner: Any? = null) {
+        synchronized(connectedPeerLock) {
+            connectedDevicePublicKeyHex = publicKeyHex
+            connectedPeerOwner = if (publicKeyHex == null) null else owner
+        }
         Log.d(TAG, "Connected device public key updated: ${publicKeyHex?.take(16) ?: "null"}")
+    }
+
+    /**
+     * Clears the connected device's public key if [owner] set it and no
+     * session has set one since.
+     *
+     * @return whether the key was cleared.
+     */
+    fun clearConnectedDevicePublicKeyHex(owner: Any): Boolean {
+        synchronized(connectedPeerLock) {
+            if (connectedPeerOwner !== owner) return false
+            connectedDevicePublicKeyHex = null
+            connectedPeerOwner = null
+        }
+        Log.d(TAG, "Connected device public key cleared by its session")
+        return true
     }
 
     /**
