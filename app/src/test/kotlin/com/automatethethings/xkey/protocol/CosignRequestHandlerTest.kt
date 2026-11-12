@@ -23,6 +23,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -42,6 +43,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -265,6 +267,69 @@ class CosignRequestHandlerTest {
             ErrorCodes.INVALID_PARAMS,
             handler().handleRequest(request(hashAlgorithm = "MD5"))
         )
+        assertNothingSigned()
+    }
+
+    private val blePeerHex = "b1".repeat(32)
+    private val usbPeerHex = "cc".repeat(32)
+    private val strangerHex = "dd".repeat(32)
+
+    /** A handler whose paired-device store knows [paired]. */
+    private fun pairedHandler(vararg paired: String): RequestHandler {
+        val repo = mockk<PairedDeviceRepository>()
+        every { repo.isDeviceKnown(any()) } answers { firstArg<String>() in paired }
+        return RequestHandler(
+            context = context,
+            keystoreManager = keystoreManager,
+            biometricLauncher = launcher,
+            sessionAuthManager = null,
+            pairedDeviceRepository = repo
+        )
+    }
+
+    /** Handles [request] as if it arrived on the served connection of [peer]. */
+    private suspend fun RequestHandler.onConnection(peer: String?, request: Request): Response =
+        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer)) {
+            handleRequest(request)
+        }
+
+    @Test
+    fun `tearing down a USB connection leaves a confirmed BLE peer co-signing`() = runTest {
+        val handler = pairedHandler(blePeerHex, usbPeerHex)
+        // BLE confirms its peer, then USB confirms a different one: the
+        // handler-wide identity is the last one confirmed.
+        handler.setConnectedDevicePublicKeyHex(blePeerHex)
+        handler.setConnectedDevicePublicKeyHex(usbPeerHex)
+        // USB tears down and clears the handler-wide identity.
+        handler.setConnectedDevicePublicKeyHex(null)
+
+        val response = handler.onConnection(blePeerHex, request())
+
+        assertNull("BLE co-sign still answers: ${response.error?.message}", response.error)
+        coVerify(exactly = 1) {
+            keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256")
+        }
+    }
+
+    @Test
+    fun `an unconfirmed caller peer is denied though another connection is confirmed`() = runTest {
+        val handler = pairedHandler(blePeerHex)
+        handler.setConnectedDevicePublicKeyHex(blePeerHex)
+
+        assertError(
+            ErrorCodes.OPERATION_DENIED,
+            handler.onConnection(strangerHex, request())
+        )
+        assertNothingSigned()
+        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `a caller session with no peer is denied though another connection is confirmed`() = runTest {
+        val handler = pairedHandler(blePeerHex)
+        handler.setConnectedDevicePublicKeyHex(blePeerHex)
+
+        assertError(ErrorCodes.OPERATION_DENIED, handler.onConnection(null, request()))
         assertNothingSigned()
     }
 }
