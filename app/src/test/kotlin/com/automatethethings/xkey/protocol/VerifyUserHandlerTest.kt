@@ -318,7 +318,7 @@ class VerifyUserHandlerTest {
     fun verifyUserNeverUsesTheAttestationPresencePrompt() = runTest {
         onConnection { handler.handleRequest(verifyUserRequest()) }
 
-        coVerify(exactly = 0) { biometricLauncher.requestAuthentication(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { biometricLauncher.requestAuthentication(any(), any(), any(), any(), any()) }
     }
 
     // -----------------------------------------------------------------

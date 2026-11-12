@@ -17,10 +17,12 @@ package com.automatethethings.xkey.protocol
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -32,6 +34,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.runs
@@ -78,6 +81,7 @@ class SetKeyPolicyHandlerTest {
     private lateinit var keyDao: KeyDao
     private lateinit var context: Context
     private lateinit var launcher: BiometricActivityLauncher
+    private lateinit var keyguard: KeyguardManager
 
     private val keyId = "key-178"
     private val peer = "ab".repeat(32)
@@ -86,6 +90,12 @@ class SetKeyPolicyHandlerTest {
     /** The stored sharing policy, or null when the key does not exist. */
     private var stored: SharingPolicyType? = null
     private var storedLabel = "Work key"
+
+    /**
+     * The stored row's immutable id. A delete and re-create under the same
+     * key id gives the new row a new one.
+     */
+    private var storedRowId = 1L
 
     /** Every policy the fake store was asked to write, by any DAO call. */
     private val writes = mutableListOf<SharingPolicyType>()
@@ -118,10 +128,11 @@ class SetKeyPolicyHandlerTest {
             writes += policy
             if (stored != null) stored = policy
         }
-        coEvery { keyDao.compareAndSetSharingPolicy(keyId, any(), any()) } answers {
-            val expected = secondArg<SharingPolicyType>()
-            val policy = thirdArg<SharingPolicyType>()
-            if (stored != null && stored == expected) {
+        coEvery { keyDao.compareAndSetSharingPolicy(any(), keyId, any(), any()) } answers {
+            val rowId = firstArg<Long>()
+            val expected = thirdArg<SharingPolicyType>()
+            val policy = arg<SharingPolicyType>(3)
+            if (stored != null && rowId == storedRowId && stored == expected) {
                 writes += policy
                 stored = policy
                 1
@@ -140,13 +151,22 @@ class SetKeyPolicyHandlerTest {
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
         context = mockk(relaxed = true)
-        val keyguard = mockk<KeyguardManager>(relaxed = true)
+        keyguard = mockk(relaxed = true)
         every { keyguard.isKeyguardLocked } returns false
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns keyguard
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
 
         launcher = mockk(relaxed = true)
+
+        // The lock-screen notification is the one Android edge these tests
+        // watch: it must carry the launcher's own request.
+        mockkConstructor(BiometricNotificationHelper::class)
+        every {
+            anyConstructed<BiometricNotificationHelper>()
+                .showBiometricRequiredNotification(any(), any(), any(), any(), any(), any())
+        } just runs
+        every { anyConstructed<BiometricNotificationHelper>().cancelNotification() } just runs
     }
 
     @After
@@ -166,6 +186,7 @@ class SetKeyPolicyHandlerTest {
     ).also { it.setConnectedDevicePublicKeyHex(confirmedPeer) }
 
     private fun key(policy: SharingPolicyType, label: String = "Work key") = KeyEntity(
+        id = storedRowId,
         keyId = keyId,
         keyType = "aes",
         algorithm = "AES-256-GCM",
@@ -196,7 +217,7 @@ class SetKeyPolicyHandlerTest {
     }
 
     private fun assertNoPrompt() {
-        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any(), any()) }
     }
 
     private fun assertNothingWrittenOrAudited() {
@@ -219,7 +240,7 @@ class SetKeyPolicyHandlerTest {
 
         assertUpdated(response)
         coVerify(exactly = 1) {
-            launcher.requestAuthentication(any(), match { it.contains("Work key") }, any(), any())
+            launcher.requestAuthentication(any(), match { it.contains("Work key") }, any(), any(), any())
         }
         assertEquals(SharingPolicyType.ALL_PEERS, stored)
         assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
@@ -233,14 +254,14 @@ class SetKeyPolicyHandlerTest {
         assertUpdated(handler().handleRequest(request(shareable = true)))
 
         coVerify(exactly = 1) {
-            launcher.requestAuthentication(any(), match { it.contains(keyId) }, any(), any())
+            launcher.requestAuthentication(any(), match { it.contains(keyId) }, any(), any(), any())
         }
     }
 
     @Test
     fun `widening the owner cancels answers BIOMETRIC_FAILED and stores nothing`() = runTest {
         stored = SharingPolicyType.PRIVATE
-        coEvery { launcher.requestAuthentication(any(), any(), any(), any()) } throws UserCancelledException()
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } throws UserCancelledException()
 
         val response = handler().handleRequest(request(shareable = true))
 
@@ -314,7 +335,7 @@ class SetKeyPolicyHandlerTest {
     fun `a change during the approval prompt refuses the widening it was not approved for`() = runTest {
         stored = SharingPolicyType.PRIVATE
         // While the owner is looking at the prompt, the key moves to selected peers.
-        coEvery { launcher.requestAuthentication(any(), any(), any(), any()) } answers {
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } answers {
             stored = SharingPolicyType.SELECTED_PEERS
         }
 
@@ -337,6 +358,104 @@ class SetKeyPolicyHandlerTest {
         assertUpdated(response)
         assertEquals(SharingPolicyType.PRIVATE, stored)
         assertAudited(SharingPolicyType.SELECTED_PEERS, SharingPolicyType.PRIVATE)
+    }
+
+    @Test
+    fun `a key deleted and re-created under the same id during the prompt gets no policy change`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        // While the owner approves sharing "Work key", it is deleted and a
+        // different key is created under the same id, with the same policy.
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } answers {
+            storedRowId = 2L
+            storedLabel = "Someone else's key"
+        }
+
+        val response = handler().handleRequest(request(shareable = true))
+
+        assertNull(response.result)
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertNothingWrittenOrAudited()
+    }
+
+    @Test
+    fun `a narrowing never writes a key re-created under the same id after the read`() = runTest {
+        stored = SharingPolicyType.ALL_PEERS
+        afterNextRead = { storedRowId = 2L }
+
+        val response = handler().handleRequest(request(shareable = false))
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertEquals(SharingPolicyType.ALL_PEERS, stored)
+        assertNothingWrittenOrAudited()
+    }
+
+    /**
+     * Has the launcher open its approval request [requestId] for [prompt], as
+     * it does when it shows the prompt, then answer as the owner does:
+     * approve, or [refusal].
+     */
+    private fun launcherOpensRequest(requestId: String, prompt: Intent, refusal: Exception? = null) {
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } answers {
+            arg<(String, Intent) -> Unit>(4).invoke(requestId, prompt)
+            if (refusal != null) throw refusal
+        }
+    }
+
+    private fun verifyNotificationOpens(requestId: String, prompt: Intent) {
+        verify(exactly = 1) {
+            anyConstructed<BiometricNotificationHelper>()
+                .showBiometricRequiredNotification(any(), any(), any(), any(), any(), any())
+        }
+        verify(exactly = 1) {
+            anyConstructed<BiometricNotificationHelper>()
+                .showBiometricRequiredNotification("share", "Work key", requestId, any(), any(), prompt)
+        }
+        verify { anyConstructed<BiometricNotificationHelper>().cancelNotification() }
+    }
+
+    @Test
+    fun `on a locked phone the notification opens the launcher's own approval request`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        every { keyguard.isKeyguardLocked } returns true
+        val prompt = mockk<Intent>()
+        launcherOpensRequest("41", prompt)
+
+        val response = handler().handleRequest(request(shareable = true))
+
+        assertUpdated(response)
+        coVerify(exactly = 1) { launcher.requestAuthentication(any(), any(), any(), true, any()) }
+        verifyNotificationOpens("41", prompt)
+        assertEquals(SharingPolicyType.ALL_PEERS, stored)
+        assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
+    }
+
+    @Test
+    fun `a cancel through the lock-screen notification answers BIOMETRIC_FAILED`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        every { keyguard.isKeyguardLocked } returns true
+        val prompt = mockk<Intent>()
+        launcherOpensRequest("42", prompt, refusal = UserCancelledException())
+
+        val response = handler().handleRequest(request(shareable = true))
+
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, response.error?.code)
+        verifyNotificationOpens("42", prompt)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertNothingWrittenOrAudited()
+    }
+
+    @Test
+    fun `an unlocked phone shows no notification`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        launcherOpensRequest("43", mockk())
+
+        assertUpdated(handler().handleRequest(request(shareable = true)))
+
+        verify(exactly = 0) {
+            anyConstructed<BiometricNotificationHelper>()
+                .showBiometricRequiredNotification(any(), any(), any(), any(), any(), any())
+        }
     }
 
     @Test
@@ -369,7 +488,7 @@ class SetKeyPolicyHandlerTest {
         val response = handler.handleFromCaller(request(shareable = true), callerPeer = peer)
 
         assertUpdated(response)
-        coVerify(exactly = 1) { launcher.requestAuthentication(any(), any(), any(), any()) }
+        coVerify(exactly = 1) { launcher.requestAuthentication(any(), any(), any(), any(), any()) }
         assertEquals(SharingPolicyType.ALL_PEERS, stored)
     }
 
