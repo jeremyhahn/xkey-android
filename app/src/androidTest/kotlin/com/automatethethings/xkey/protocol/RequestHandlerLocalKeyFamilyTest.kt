@@ -32,6 +32,7 @@ import org.junit.AfterClass
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -546,6 +547,82 @@ class RequestHandlerLocalKeyFamilyTest {
         val stored = storedKey(keyId)
         assertFalse(stored.shareable)
         assertEquals(SharingPolicyType.PRIVATE, stored.sharingPolicy)
+    }
+
+    // ------------------------------------------------------------------
+    // local.generateKey security level
+    // ------------------------------------------------------------------
+
+    /**
+     * `securityLevel` and the stored `strongBoxBacked` are the generated key's
+     * own level, read back from its KeyInfo: with `preferStrongBox = false`
+     * neither an EC, an AES nor an HMAC key is StrongBox, even on a device
+     * that has StrongBox.
+     */
+    @Test
+    fun generateKeyReportsTheLevelOfTheKeyItMadeNotTheDevice() {
+        val keystoreManager = KeystoreManager(context)
+        listOf(
+            Triple("level-ec-$runId", KeyTypes.SIGNING, "ES256"),
+            Triple("level-aes-$runId", KeyTypes.SECRET, "AES256"),
+            Triple("level-hmac-$runId", KeyTypes.HMAC, "HMAC-SHA256")
+        ).forEach { (keyId, keyType, algorithm) ->
+            createdKeyIds.add(keyId)
+            val result = call(
+                "local.generateKey",
+                JSONObject()
+                    .put("keyId", keyId)
+                    .put("keyType", keyType)
+                    .put("algorithm", algorithm)
+                    .put("requireUserVerification", false)
+                    .put("preferStrongBox", false)
+            ).ok()
+
+            val level = keystoreManager.keySecurityLevel(keyId)
+                ?: throw AssertionError("$algorithm: the generated key must have a level")
+            assertEquals(algorithm, level.wire, result.getString("securityLevel"))
+            assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
+            assertFalse(algorithm, storedKey(keyId).strongBoxBacked)
+        }
+    }
+
+    /** A hardware HMAC-SHA512 key reports 512 bits, like its software twin. */
+    @Test
+    fun aHardwareSha512HmacKeyReports512Bits() {
+        val keyId = "hmac-hw-512-$runId"
+        createdKeyIds.add(keyId)
+        val result = call(
+            "local.generateKey",
+            JSONObject()
+                .put("keyId", keyId)
+                .put("keyType", KeyTypes.HMAC)
+                .put("algorithm", "HMAC-SHA512")
+                .put("requireUserVerification", false)
+                .put("preferStrongBox", false)
+        ).ok()
+
+        assertEquals(512, result.getInt("keySizeBits"))
+        assertEquals(512, storedKey(keyId).keySizeBits)
+    }
+
+    /** An exportable key lives in app memory and stays "software". */
+    @Test
+    fun anExportableKeyReportsSoftware() {
+        val keyId = "level-sw-$runId"
+        createdKeyIds.add(keyId)
+        val result = call(
+            "local.generateKey",
+            JSONObject()
+                .put("keyId", keyId)
+                .put("keyType", KeyTypes.SECRET)
+                .put("algorithm", "AES256")
+                .put("exportable", true)
+                .put("requireUserVerification", false)
+                .put("preferStrongBox", false)
+        ).ok()
+
+        assertEquals("software", result.getString("securityLevel"))
+        assertFalse(storedKey(keyId).strongBoxBacked)
     }
 
     // ------------------------------------------------------------------

@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.protocol
 
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -326,6 +327,24 @@ class LocalMessagesTest {
         ).toJson()
 
         assertEquals("software", json.getString("securityLevel"))
+    }
+
+    @Test
+    fun `LocalGenerateKeyResult withLevel maps each key security level to its wire value`() {
+        val expected = mapOf(
+            KeySecurityLevel.SOFTWARE to "software",
+            KeySecurityLevel.TEE to "tee",
+            KeySecurityLevel.STRONGBOX to "strongbox"
+        )
+        assertEquals(KeySecurityLevel.entries.toSet(), expected.keys)
+
+        expected.forEach { (level, wire) ->
+            val result = LocalGenerateKeyResult.withLevel("k", helloB64, null, "ES256", 256, level)
+
+            assertEquals(level.name, wire, result.toJson().getString("securityLevel"))
+            assertEquals(level.name, level == KeySecurityLevel.STRONGBOX, result.strongBoxBacked)
+            assertEquals(level.name, level == KeySecurityLevel.SOFTWARE, result.softwareBacked)
+        }
     }
 
     @Test
