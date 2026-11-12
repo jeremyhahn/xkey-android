@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.media
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -32,9 +33,12 @@ import java.io.File
  * / EXIF half lives in `XmpMetadataHelperInstrumentedTest` because it needs a
  * real encoder. What is left, and what this suite covers, is:
  *
- *  - every extension the internal mime-type table knows (`.webp`, `.mkv`,
- *    `.mov`) plus the unknown-extension fallback, since an unrecognised file
- *    must still get a sidecar rather than being silently dropped;
+ *  - every extension the internal mime-type table knows plus the
+ *    unknown-extension fallback, since an unrecognised file, or an `.mp4`,
+ *    `.mov`, `.png` or `.webp` whose bytes do not parse, must still get a
+ *    sidecar rather than being silently dropped;
+ *  - a real MP4, MOV, PNG or WebP carrying its signature as embedded XMP, a
+ *    co-signer appended in that form, and a legacy sidecar still reading;
  *  - extension matching being case-insensitive, so a `.MOV` from a camera app
  *    is routed the same way as a `.mov`;
  *  - the reader's swallow-and-return-null branches: a truncated, corrupt, empty
@@ -76,7 +80,9 @@ class XmpMetadataHelperSidecarBranchTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `every non-JPEG media type round-trips through a sidecar`() {
+    fun `every file that cannot embed round-trips through a sidecar`() {
+        // HEIC, MKV and unknown types never embed; an mp4, mov, png or webp
+        // whose bytes do not parse as that container falls back too.
         val names = listOf(
             "clip.webp", "clip.mkv", "clip.mov", "clip.mp4", "clip.png",
             "clip.heic", "clip", "clip.tar.gz"
@@ -91,6 +97,92 @@ class XmpMetadataHelperSidecarBranchTest {
             assertTrue("$name must be signed via a sidecar", sidecarOf(path).exists())
             assertEquals(name, data.contentHash, XmpMetadataHelper.readSignature(path)!!.contentHash)
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Embedded XMP
+    // -------------------------------------------------------------------------
+
+    /** A real container of [mime] under [name], from [XmpFixtures]. */
+    private fun fixtureFile(name: String, mime: String): String {
+        val file = tempFolder.newFile(name)
+        file.writeBytes(XmpFixtures.all.getValue(mime))
+        return file.absolutePath
+    }
+
+    private val embeddedNames = mapOf(
+        "clip.mp4" to "video/mp4",
+        "CLIP.MOV" to "video/quicktime",
+        "still.png" to "image/png",
+        "still.webp" to "image/webp"
+    )
+
+    @Test
+    fun `an mp4, mov, png or webp carries its signature in the file and writes no sidecar`() {
+        for ((name, mime) in embeddedNames) {
+            val path = fixtureFile(name, mime)
+            val data = sampleData(hash = name.hashCode().toString().padStart(64, '0'))
+
+            XmpMetadataHelper.writeSignature(path, data)
+
+            assertFalse("$name must not get a sidecar", sidecarOf(path).exists())
+            assertEquals(name, data, XmpMetadataHelper.readSignature(path))
+            assertEquals(
+                name,
+                data.toJsonString(),
+                XmpContainers.extract(File(path).readBytes(), XmpContainers.formatOf(mime)!!)
+            )
+        }
+    }
+
+    @Test
+    fun `appendSignature adds a second entry in the embedded form`() {
+        for ((name, mime) in embeddedNames) {
+            val path = fixtureFile("append-$name", mime)
+            XmpMetadataHelper.writeSignature(path, sampleData(hash = "d".repeat(64)))
+
+            XmpMetadataHelper.appendSignature(
+                path,
+                SignatureEntry("fp-w", "Bob", "ES256", "sig-w", "2026-01-02T00:00:00Z", SignerRole.WITNESS)
+            )
+
+            assertFalse(name, sidecarOf(path).exists())
+            val embedded = ContentAuthenticityData.fromJsonString(
+                XmpContainers.extract(File(path).readBytes(), XmpContainers.formatOf(mime)!!)!!
+            )
+            assertEquals(name, "d".repeat(64), embedded.contentHash)
+            assertEquals(name, listOf("SHA256:testfp", "fp-w"), embedded.signatures.map { it.keyFingerprint })
+        }
+    }
+
+    @Test
+    fun `a legacy sidecar beside a real container still reads and an append stays in it`() {
+        for ((name, mime) in embeddedNames) {
+            val path = fixtureFile("legacy-$name", mime)
+            val original = File(path).readBytes()
+            sidecarOf(path).writeText(sampleData(hash = "e".repeat(64)).toJsonString())
+
+            assertEquals(name, "e".repeat(64), XmpMetadataHelper.readSignature(path)!!.contentHash)
+
+            XmpMetadataHelper.appendSignature(
+                path,
+                SignatureEntry("fp-w", "Bob", "ES256", "sig-w", "2026-01-02T00:00:00Z", SignerRole.WITNESS)
+            )
+
+            assertArrayEquals("$name: the media file is untouched", original, File(path).readBytes())
+            val sidecar = ContentAuthenticityData.fromJsonString(sidecarOf(path).readText())
+            assertEquals(name, 2, sidecar.signatures.size)
+        }
+    }
+
+    @Test
+    fun `an embedded signature wins over a stale sidecar`() {
+        val path = fixtureFile("both.mp4", "video/mp4")
+        sidecarOf(path).writeText(sampleData(hash = "1".repeat(64)).toJsonString())
+
+        XmpMetadataHelper.writeSignature(path, sampleData(hash = "2".repeat(64)))
+
+        assertEquals("2".repeat(64), XmpMetadataHelper.readSignature(path)!!.contentHash)
     }
 
     @Test
