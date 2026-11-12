@@ -132,4 +132,4 @@ sequenceDiagram
 - [tcp-pairing](../tcp-pairing/architecture.md): the same `StreamPairingSession` over a loopback socket.
 - [device-attestation](../device-attestation/architecture.md): the `deviceFingerprint` the identity exchange returns.
 - [request-generation-echo](../request-generation-echo/architecture.md): the `generation` every response echoes.
-- [password-vault](../password-vault/) and [store-sync](../store-sync/): the USB-only method families.
+- [password-vault](../password-vault/): the password store behind the USB-only `Password*` methods.
