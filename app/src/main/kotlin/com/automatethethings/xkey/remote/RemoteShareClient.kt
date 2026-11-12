@@ -286,6 +286,18 @@ object DesktopShareGate {
      */
     const val SYMMETRIC_WRAP_PATH_MATCHES = false
 
+    /**
+     * The SELECTED_PEERS grant check an outbound share passes to [decide]
+     * and [DesktopKeyShare.send], built from the grant rows
+     * ([isKeySharedWithPeer]) and the pairing record ([isRevocationPending]).
+     */
+    fun peerGrant(
+        isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean,
+        isRevocationPending: (peerPublicKeyHex: String) -> Boolean
+    ): suspend (keyId: String, peerPublicKeyHex: String) -> Boolean = { keyId, peer ->
+        isKeySharedWithPeer(keyId, peer)
+    }
+
     suspend fun decide(
         entity: KeyEntity?,
         software: SoftwareKey?,

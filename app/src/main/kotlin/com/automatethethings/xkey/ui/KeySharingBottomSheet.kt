@@ -711,7 +711,9 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     }
 
     private suspend fun isSharedWithPeer(key: String, peer: String): Boolean =
-        keySharingPolicyDao.isKeySharedWithPeer(key, peer)
+        DesktopShareGate.peerGrant(keySharingPolicyDao::isKeySharedWithPeer, pairedDeviceRepository::isRevocationPending)(
+            key, peer
+        )
 
     /**
      * Shows the desktop section when a desktop is connected, with the send

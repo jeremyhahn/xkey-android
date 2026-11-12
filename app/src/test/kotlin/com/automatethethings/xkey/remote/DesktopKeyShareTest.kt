@@ -14,6 +14,8 @@
  */
 package com.automatethethings.xkey.remote
 
+import com.automatethethings.xkey.ca.DeviceIdentity
+import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -339,6 +341,46 @@ class DesktopKeyShareTest {
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
         assertTrue("nothing reaches the wire after the revoke", sender.sent.isEmpty())
         assertTrue("the revoke landed while the share was pending", checks >= 2)
+    }
+
+    /**
+     * DeviceIdentity's enrollment keys and the user-verification key are
+     * replaced outside [SharePermissionLedger] (storeCredential retires the
+     * previous generation, regenerate deletes and remints): nothing the share
+     * checks changes, so the cached PEM of the retired key would pass both
+     * the metadata recheck and requireUnchanged. A share of either alias is
+     * refused, even when the replacement lands while it waits before admission.
+     */
+    @Test
+    fun `a share of an untracked identity key replaced while it waits before admission sends nothing`() = runTest {
+        for (alias in listOf(DeviceIdentity.ALIAS_PREFIX + "1", KeystoreUserVerificationKey.ALIAS)) {
+            val e = KeyEntity(
+                keyId = alias,
+                keyType = "signing",
+                algorithm = "EC",
+                label = alias,
+                keySizeBits = 256,
+                sharingPolicy = SharingPolicyType.ALL_PEERS,
+                source = "keystore"
+            ).also { stored[it.keyId] = it }
+            var checks = 0
+            val s = ScriptedMessageSender(router).also { it.succeedWith(accepted) }
+            val waiting = DesktopKeyShare(
+                session(s, router, peer) {
+                    // At the second check the writer replaces the key's
+                    // material; its row and the ledger are untouched, so
+                    // nothing here changes but the Keystore entry.
+                    checks++
+                    true
+                },
+                200
+            )
+
+            val out = waiting.send(e, null, pem, null, isShared, current)
+
+            assertEquals("$alias: $out", DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
+            assertTrue("$alias: the retired public key never reaches the wire", s.sent.isEmpty())
+        }
     }
 
     @Test

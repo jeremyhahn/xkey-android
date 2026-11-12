@@ -23,6 +23,14 @@ import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.DesktopKeyShare
+import com.automatethethings.xkey.remote.DesktopShareDecision
+import com.automatethethings.xkey.remote.DesktopShareGate
+import com.automatethethings.xkey.remote.ScriptedMessageSender
+import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.remote.ShareSession
+import com.automatethethings.xkey.remote.stubAndroidLog
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -50,6 +58,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import org.junit.After
@@ -439,6 +448,66 @@ class PairedDeviceGrantCleanupTest {
 
         scheduler.advanceUntilIdle()
         assertFalse(canShareKeyWithPeer(handler, key, PEER_A))
+    }
+
+    /**
+     * The desktop share mirrors the local rule: the peer is unpaired and
+     * re-paired with the same static key while its grant cleanup is held, so
+     * its old SELECTED_PEERS row is still in the table and the new connection
+     * is confirmed. Both outbound gate checks refuse the obsolete grant and
+     * no public key is sent; B's grant still lets a share reach B.
+     */
+    @Test
+    fun aRePairedPeerIsRefusedADesktopShareWhileItsRevocationIsPending() = runBlocking<Unit> {
+        stubAndroidLog()
+        heldCleanup(repo)
+        repo.removeDevice(PEER_A)
+        repo.addDevice(PEER_A, "desktop-a")
+        assertTrue("the old grant is still in the table", grantsOf(PEER_A).any { it.keyId == "k-1" })
+        assertTrue("the revocation is pending", repo.isRevocationPending(PEER_A))
+
+        val rows: suspend (String, String) -> Boolean = { k, p -> table.any { it.keyId == k && it.peerPublicKeyHex == p } }
+        val grant = DesktopShareGate.peerGrant(rows, repo::isRevocationPending)
+        val key = KeyEntity(
+            keyId = "k-1",
+            keyType = "signing",
+            algorithm = "ES256",
+            label = "L",
+            keySizeBits = 256,
+            source = "local",
+            sharingPolicy = SharingPolicyType.SELECTED_PEERS
+        )
+        val pem = "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"
+
+        assertEquals(DesktopShareDecision.POLICY_DENIED, DesktopShareGate.decide(key, null, pem, PEER_A, grant))
+        // The admission check alone: the snapshot passes the early check, so
+        // only the recheck at the transport's door stands between the
+        // obsolete grant and the wire.
+        var checks = 0
+        val earlyPasses: suspend (String, String) -> Boolean = { k, p -> checks++ == 0 || grant(k, p) }
+        val toA = desktopShare(PEER_A)
+        val out = toA.first.send(SharePermissionLedger.baseline(key.keyId), key, null, pem, null, earlyPasses) { key }
+        assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
+        assertTrue("no public key reaches the re-paired peer", toA.second.sent.isEmpty())
+        assertEquals(
+            DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
+            desktopShare(PEER_A).first.send(SharePermissionLedger.baseline(key.keyId), key, null, pem, null, grant) { key }
+        )
+
+        // Control: B's grant still authorizes B.
+        val toB = desktopShare(PEER_B)
+        val sent = toB.first.send(SharePermissionLedger.baseline(key.keyId), key, null, pem, null, grant) { key }
+        assertTrue("B's grant still admits B, got $sent", sent is DesktopKeyShare.Outcome.Sent)
+    }
+
+    /** A desktop share to [peer] confirmed on its own connection, and its sender. */
+    private fun desktopShare(peer: String): Pair<DesktopKeyShare, ScriptedMessageSender> {
+        val router = BidirectionalMessageRouter(mockk<RequestHandler>())
+        val sender = ScriptedMessageSender(router)
+        sender.succeedWith("""{"accepted":true,"import_id":"shared-k","backend":"software"}""")
+        sender.confirmedPeer = peer
+        val session = ShareSession.of(listOf(ShareSession.Transport(sender, router))) { true }!!
+        return DesktopKeyShare(session, 200) to sender
     }
 
     private fun requestHandlerOver(paired: PairedDeviceRepository): RequestHandler {
