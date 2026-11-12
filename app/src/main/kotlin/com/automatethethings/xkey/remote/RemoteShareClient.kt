@@ -350,13 +350,22 @@ class ShareSession private constructor(
      * ([MessageSender.sendEncryptedMessageOn]): the transport refuses it at
      * encryption admission if another connection, even another peer, has
      * replaced that one since the check.
+     *
+     * [beforeSend] runs on every send after the wait for the session check
+     * and immediately before the bytes are handed over for encryption; it
+     * re-reads whatever must still hold (the key's sharing permission) and
+     * throws to stop the send. A revoke that lands while the send is pending
+     * therefore wins.
      */
-    internal fun client(requestTimeoutMs: Long): RemoteShareClient =
-        RemoteShareClient(GuardedSender(), router, requestTimeoutMs)
+    internal fun client(requestTimeoutMs: Long, beforeSend: suspend () -> Unit = {}): RemoteShareClient =
+        RemoteShareClient(GuardedSender(beforeSend), router, requestTimeoutMs)
 
-    private inner class GuardedSender : MessageSender {
+    private inner class GuardedSender(private val beforeSend: suspend () -> Unit) : MessageSender {
         override suspend fun sendEncryptedMessage(data: ByteArray) {
             val on = confirmed ?: throw SessionChangedException()
+            if (!isCurrent()) throw SessionChangedException()
+            beforeSend()
+            // The re-read suspends: the session may have changed meanwhile.
             if (!isCurrent()) throw SessionChangedException()
             sender.sendEncryptedMessageOn(on, data)
         }
@@ -382,11 +391,21 @@ class ShareSession private constructor(
 /** The session a share was authorized on was replaced before the send. */
 internal class SessionChangedException : ConnectionChangedException("the desktop session changed before the send")
 
+/** The key's sharing permission, re-read from the store just before the send, no longer admits the peer. */
+internal class SharePermissionRevokedException(keyId: String) :
+    SecurityException("the sharing permission for key $keyId was revoked before the send")
+
 /**
  * Sends one of the phone's keys to the paired desktop on [session], after
  * [DesktopShareGate] has checked it against the peer confirmed on that
  * session. Nothing reaches the wire unless the gate answers
  * [DesktopShareDecision.PUBLIC_KEY] and the session is still current.
+ *
+ * The gate runs twice: once on the caller's snapshot, and again immediately
+ * before encryption on the key as the store holds it then
+ * ([currentEntity][send]) and the peer grants as they stand then. A
+ * permission revoked while the share was pending refuses it with
+ * [DesktopShareDecision.POLICY_DENIED] and nothing is sent.
  */
 class DesktopKeyShare(
     private val session: ShareSession,
@@ -405,13 +424,17 @@ class DesktopKeyShare(
         data object SessionChanged : Outcome()
     }
 
-    /** [software]'s material is zeroed before this returns, whatever the outcome. */
+    /**
+     * [software]'s material is zeroed before this returns, whatever the outcome.
+     * [currentEntity] reads the key's record from the store, not a snapshot.
+     */
     suspend fun send(
         entity: KeyEntity?,
         software: SoftwareKey?,
         publicKeyPem: String?,
         certificatePem: String?,
-        isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean
+        isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean,
+        currentEntity: suspend (keyId: String) -> KeyEntity?
     ): Outcome {
         try {
             val decision = DesktopShareGate.decide(
@@ -421,8 +444,14 @@ class DesktopKeyShare(
             if (decision != DesktopShareDecision.PUBLIC_KEY || entity == null || publicKeyPem == null) {
                 return Outcome.Refused(decision)
             }
+            val peer = session.peerPublicKeyHex
             val result = try {
-                session.client(requestTimeoutMs).sharePublicKey(
+                session.client(requestTimeoutMs) {
+                    val now = DesktopShareGate.decide(
+                        currentEntity(entity.keyId), null, publicKeyPem, peer, isKeySharedWithPeer
+                    )
+                    if (now != DesktopShareDecision.PUBLIC_KEY) throw SharePermissionRevokedException(entity.keyId)
+                }.sharePublicKey(
                     RemoteShareClient.PublicKeyShare(
                         keyId = entity.keyId,
                         publicKeyPem = publicKeyPem,
@@ -434,6 +463,8 @@ class DesktopKeyShare(
                 )
             } catch (e: ConnectionChangedException) {
                 return Outcome.SessionChanged
+            } catch (e: SharePermissionRevokedException) {
+                return Outcome.Refused(DesktopShareDecision.POLICY_DENIED)
             }
             return if (result.accepted) Outcome.Sent(result) else Outcome.Declined(result)
         } finally {

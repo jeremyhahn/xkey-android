@@ -772,8 +772,11 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         lifecycleScope.launch {
             val message: String? = try {
                 val inputs = loadShareInputs()
+                // The permission is read again from the store just before the
+                // send, so a revoke made while the share was pending wins.
                 when (val out = DesktopKeyShare(session).send(
-                    inputs.entity, inputs.software, inputs.publicKeyPem, null, ::isSharedWithPeer
+                    inputs.entity, inputs.software, inputs.publicKeyPem, null, ::isSharedWithPeer,
+                    { id -> keyDao.getByKeyId(id) }
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->
                         getString(R.string.sharing_desktop_sent, out.result.importId)

@@ -48,6 +48,10 @@ class DesktopKeyShareTest {
     private val pem = "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"
     private val listed = mutableSetOf<Pair<String, String>>()
     private val isShared: suspend (String, String) -> Boolean = { k, p -> (k to p) in listed }
+
+    /** The key store as it stands now; [entity] records every key it builds. */
+    private val stored = mutableMapOf<String, KeyEntity>()
+    private val current: suspend (String) -> KeyEntity? = { stored[it] }
     private val accepted = """{"accepted":true,"import_id":"shared-k","backend":"software"}"""
 
     @Before
@@ -89,7 +93,7 @@ class DesktopKeyShareTest {
         shareable = shareable,
         sharingPolicy = policy,
         source = "local"
-    )
+    ).also { stored[it.keyId] = it }
 
     private fun software(exportable: Boolean, shareable: Boolean) = SoftwareKey(
         keyId = "k",
@@ -103,7 +107,7 @@ class DesktopKeyShareTest {
 
     @Test
     fun `hardware key with an admitting policy sends only the public half`() = runTest {
-        val out = share.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+        val out = share.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared, current)
         assertTrue(out is DesktopKeyShare.Outcome.Sent)
         assertEquals(1, sender.sent.size)
         assertEquals(MethodNames.REMOTE_SHARE_PUBLIC_KEY, sender.lastRequest.method)
@@ -112,7 +116,7 @@ class DesktopKeyShareTest {
 
     @Test
     fun `private key never reaches the wire`() = runTest {
-        val out = share.send(entity(SharingPolicyType.PRIVATE), null, pem, null, isShared)
+        val out = share.send(entity(SharingPolicyType.PRIVATE), null, pem, null, isShared, current)
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
         assertTrue(sender.sent.isEmpty())
     }
@@ -122,11 +126,11 @@ class DesktopKeyShareTest {
         val e = entity(SharingPolicyType.SELECTED_PEERS)
         assertEquals(
             DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
-            share.send(e, null, pem, null, isShared)
+            share.send(e, null, pem, null, isShared, current)
         )
         assertTrue(sender.sent.isEmpty())
         listed += "k" to peer
-        assertTrue(share.send(e, null, pem, null, isShared) is DesktopKeyShare.Outcome.Sent)
+        assertTrue(share.send(e, null, pem, null, isShared, current) is DesktopKeyShare.Outcome.Sent)
     }
 
     @Test
@@ -135,11 +139,11 @@ class DesktopKeyShareTest {
         val unconfirmed = DesktopKeyShare(session(ScriptedMessageSender(router), router, null), 200)
         assertEquals(
             DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NO_PEER),
-            unconfirmed.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+            unconfirmed.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared, current)
         )
         assertEquals(
             DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
-            share.send(null, null, pem, null, isShared)
+            share.send(null, null, pem, null, isShared, current)
         )
         assertTrue(sender.sent.isEmpty())
     }
@@ -152,7 +156,7 @@ class DesktopKeyShareTest {
             entity(SharingPolicyType.ALL_PEERS, exportable = true, shareable = true) to software(false, true),
             entity(SharingPolicyType.ALL_PEERS, exportable = true, shareable = true) to software(true, false)
         )) {
-            assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NOT_EXPORTABLE), share.send(e, s, null, null, isShared))
+            assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NOT_EXPORTABLE), share.send(e, s, null, null, isShared, current))
             assertTrue(s.material.all { it == 0.toByte() })
         }
         assertTrue(sender.sent.isEmpty())
@@ -161,7 +165,7 @@ class DesktopKeyShareTest {
     @Test
     fun `exportable symmetric key is held back while no wrap path matches the desktop`() = runTest {
         val s = software(true, true)
-        val out = share.send(entity(SharingPolicyType.ALL_PEERS, true, true), s, null, null, isShared)
+        val out = share.send(entity(SharingPolicyType.ALL_PEERS, true, true), s, null, null, isShared, current)
         assertFalse(DesktopShareGate.SYMMETRIC_WRAP_PATH_MATCHES)
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.SYMMETRIC_NO_WRAP_PATH), out)
         assertTrue(sender.sent.isEmpty())
@@ -172,7 +176,7 @@ class DesktopKeyShareTest {
     fun `hardware key without a public half is not sent`() = runTest {
         assertEquals(
             DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NOT_FOUND),
-            share.send(entity(SharingPolicyType.ALL_PEERS), null, null, null, isShared)
+            share.send(entity(SharingPolicyType.ALL_PEERS), null, null, null, isShared, current)
         )
         assertTrue(sender.sent.isEmpty())
     }
@@ -196,7 +200,7 @@ class DesktopKeyShareTest {
         assertSame(senderA, s.sender)
         assertNull(s.peerPublicKeyHex)
 
-        val out = DesktopKeyShare(s, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared)
+        val out = DesktopKeyShare(s, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared, current)
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NO_PEER), out)
         assertTrue(senderA.sent.isEmpty())
         assertTrue(senderB.sent.isEmpty())
@@ -220,7 +224,7 @@ class DesktopKeyShareTest {
         assertSame(tcp, s.sender)
         assertEquals(peerA, s.peerPublicKeyHex)
 
-        val out = DesktopKeyShare(s, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared)
+        val out = DesktopKeyShare(s, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared, current)
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
         assertTrue(tcp.sent.isEmpty())
         assertTrue(ble.sent.isEmpty())
@@ -230,7 +234,7 @@ class DesktopKeyShareTest {
         val unconfirmed = ShareSession.of(listOf(ShareSession.Transport(tcp, tcpRouter))) { true }!!
         assertEquals(
             DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NO_PEER),
-            DesktopKeyShare(unconfirmed, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared)
+            DesktopKeyShare(unconfirmed, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared, current)
         )
         assertTrue(tcp.sent.isEmpty())
     }
@@ -248,7 +252,7 @@ class DesktopKeyShareTest {
         sender.confirmedPeer = null
         assertEquals(
             DesktopKeyShare.Outcome.SessionChanged,
-            DesktopKeyShare(held, 200).send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+            DesktopKeyShare(held, 200).send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared, current)
         )
         assertTrue(sender.sent.isEmpty())
     }
@@ -259,7 +263,7 @@ class DesktopKeyShareTest {
         listed += "k" to peerB
         val s = session(sender, router, peerB)
         assertEquals(peerB, s.peerPublicKeyHex)
-        val out = DesktopKeyShare(s, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared)
+        val out = DesktopKeyShare(s, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared, current)
         assertTrue(out is DesktopKeyShare.Outcome.Sent)
         assertEquals(1, sender.sent.size)
     }
@@ -275,11 +279,11 @@ class DesktopKeyShareTest {
         val replaced = DesktopKeyShare(session(sender, router, peer) { false }, 200)
         assertEquals(
             DesktopKeyShare.Outcome.SessionChanged,
-            replaced.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+            replaced.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared, current)
         )
         assertEquals(
             DesktopKeyShare.Outcome.SessionChanged,
-            replaced.send(entity(SharingPolicyType.ALL_PEERS, true, true), s, null, null, isShared)
+            replaced.send(entity(SharingPolicyType.ALL_PEERS, true, true), s, null, null, isShared, current)
         )
         assertTrue(sender.sent.isEmpty())
         assertTrue(s.material.all { it == 0.toByte() })
@@ -293,7 +297,7 @@ class DesktopKeyShareTest {
         val racing = DesktopKeyShare(session(sender, router, peer) { checks++ == 0 }, 200)
         assertEquals(
             DesktopKeyShare.Outcome.SessionChanged,
-            racing.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+            racing.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared, current)
         )
         assertTrue(sender.sent.isEmpty())
     }
@@ -314,11 +318,61 @@ class DesktopKeyShareTest {
             200
         )
 
-        val out = waiting.send(e, null, pem, null, isShared)
+        val out = waiting.send(e, null, pem, null, isShared, current)
 
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
         assertTrue("nothing reaches the wire after the revoke", sender.sent.isEmpty())
         assertTrue("the revoke landed while the share was pending", checks >= 2)
+    }
+
+    @Test
+    fun `a key narrowed to private while the share waits before admission sends nothing`() = runTest {
+        val e = entity(SharingPolicyType.ALL_PEERS)
+        var checks = 0
+        val waiting = DesktopKeyShare(
+            session(sender, router, peer) {
+                // The store now holds the key as private; the caller's
+                // snapshot still says all peers.
+                if (checks++ == 1) entity(SharingPolicyType.PRIVATE)
+                true
+            },
+            200
+        )
+
+        val out = waiting.send(e, null, pem, null, isShared, current)
+
+        assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
+        assertTrue("nothing reaches the wire after the revoke", sender.sent.isEmpty())
+    }
+
+    @Test
+    fun `a key deleted while the share waits before admission sends nothing`() = runTest {
+        val e = entity(SharingPolicyType.ALL_PEERS)
+        var checks = 0
+        val waiting = DesktopKeyShare(
+            session(sender, router, peer) {
+                if (checks++ == 1) stored.remove(e.keyId)
+                true
+            },
+            200
+        )
+
+        val out = waiting.send(e, null, pem, null, isShared, current)
+
+        assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
+        assertTrue(sender.sent.isEmpty())
+    }
+
+    @Test
+    fun `a session replaced while the permission is re-read sends nothing`() = runTest {
+        // Current through the re-read's start; replaced once it returns.
+        var checks = 0
+        val racing = DesktopKeyShare(session(sender, router, peer) { checks++ < 2 }, 200)
+        assertEquals(
+            DesktopKeyShare.Outcome.SessionChanged,
+            racing.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared, current)
+        )
+        assertTrue(sender.sent.isEmpty())
     }
 
     @Test
@@ -336,7 +390,7 @@ class DesktopKeyShareTest {
     @Test
     fun `a reply with accepted false is a declined import, never sent`() = runTest {
         sender.succeedWith("""{"accepted":false,"import_id":"","backend":"software"}""")
-        val out = share.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+        val out = share.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared, current)
         assertFalse(out is DesktopKeyShare.Outcome.Sent)
         assertEquals(
             DesktopKeyShare.Outcome.Declined(RemoteShareClient.ShareResult(false, "", "software")),
@@ -346,7 +400,7 @@ class DesktopKeyShareTest {
 
     @Test
     fun `a reply with accepted true is sent`() = runTest {
-        val out = share.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+        val out = share.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared, current)
         assertEquals(DesktopKeyShare.Outcome.Sent(RemoteShareClient.ShareResult(true, "shared-k", "software")), out)
     }
 }
