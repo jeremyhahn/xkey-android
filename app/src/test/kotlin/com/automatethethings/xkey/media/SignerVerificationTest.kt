@@ -168,4 +168,26 @@ class SignerVerificationTest {
         assertEquals(SignerVerification.Status.UNKNOWN, result.status)
         assertEquals("Mallory", result.displayName)
     }
+
+    /** A copied block from a signer nobody knows still fails on another file. */
+    @Test
+    fun `a content hash mismatch fails even when no signer matches`() {
+        val stranger = newKeyPair()
+        val result = verify(entryFor(stranger), contentHashMatches = false)
+        assertEquals(SignerVerification.Status.FAILED, result.status)
+    }
+
+    /** The null-public-key row neither matches nor hides the mismatch. */
+    @Test
+    fun `a content hash mismatch fails for a signer whose local key has no public key`() {
+        val attacker = newKeyPair()
+        val entry = entryFor(attacker, fingerprint = "key-without-public-material")
+        val result = verify(
+            entry,
+            contentHashMatches = false,
+            localKeys = listOf(SignerVerification.LocalKey("key-without-public-material", "My key", null))
+        )
+        assertEquals(SignerVerification.Status.FAILED, result.status)
+        assertEquals("key-without-publ...", result.displayName)
+    }
 }
