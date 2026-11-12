@@ -16,17 +16,21 @@ package com.automatethethings.xkey.protocol
 
 import android.app.KeyguardManager
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
 import android.os.Looper
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.crypto.KeystoreManager
-import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -37,18 +41,24 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -67,6 +77,41 @@ class CosignRequestHandlerTest {
     private lateinit var keystoreManager: KeystoreManager
     private lateinit var launcher: BiometricActivityLauncher
     private lateinit var context: Context
+    private lateinit var surface: FakeSurface
+    private lateinit var prompts: CosignApprovalPrompts
+
+    /**
+     * A prompt surface that records each prompt. It answers at once with
+     * [autoAnswer], or leaves the prompt open when that is null.
+     */
+    private class FakeSurface : CosignPromptSurface {
+        class Shown(
+            val requestId: String,
+            val subtitle: String,
+            val onResult: (String, CosignPromptOutcome) -> Unit
+        ) {
+            fun answer(outcome: CosignPromptOutcome) = onResult(requestId, outcome)
+        }
+
+        val shown = mutableListOf<Shown>()
+        val dismissed = mutableListOf<String>()
+        var autoAnswer: CosignPromptOutcome? = CosignPromptOutcome.Approved
+
+        override fun show(
+            requestId: String,
+            title: String,
+            subtitle: String,
+            locked: Boolean,
+            onResult: (requestId: String, outcome: CosignPromptOutcome) -> Unit
+        ) {
+            shown += Shown(requestId, subtitle, onResult)
+            autoAnswer?.let { onResult(requestId, it) }
+        }
+
+        override fun dismiss(requestId: String) {
+            dismissed += requestId
+        }
+    }
 
     private val peerHex = "ab".repeat(32)
     private val hashHex = "0123456789abcdef".repeat(4)
@@ -112,7 +157,8 @@ class CosignRequestHandlerTest {
         every { keystoreManager.getPublicKeyDER(any()) } returns publicKeyDer
 
         launcher = mockk(relaxed = true)
-        coEvery { launcher.requestAuthentication(any(), any(), any(), any()) } just Runs
+        surface = FakeSurface()
+        prompts = CosignApprovalPrompts(surface, timeoutMs = PROMPT_TIMEOUT_MS)
 
         coEvery { keyDao.getByKeyId(signingKey.keyId) } returns signingKey
         coEvery { keyDao.getByKeyId(fido2Key.keyId) } returns fido2Key
@@ -139,15 +185,17 @@ class CosignRequestHandlerTest {
             context = context,
             keystoreManager = keystoreManager,
             biometricLauncher = if (withLauncher) launcher else null,
-            sessionAuthManager = null
+            sessionAuthManager = null,
+            cosignApprovalPrompts = if (withLauncher) prompts else null
         ).also { it.setConnectedDevicePublicKeyHex(peer) }
 
     private fun request(
         hash: String = hashHex,
         keyId: String? = signingKey.keyId,
-        hashAlgorithm: String? = "SHA-256"
+        hashAlgorithm: String? = "SHA-256",
+        id: Long = 177L
     ) = Request(
-        id = 177L,
+        id = id,
         method = MethodNames.COSIGN_REQUEST,
         params = JSONObject().apply {
             put("hash", hash)
@@ -168,11 +216,6 @@ class CosignRequestHandlerTest {
 
     @Test
     fun `an approved prompt signs the hash with the named key`() = runTest {
-        val subtitle = slot<String>()
-        coEvery {
-            launcher.requestAuthentication(any(), capture(subtitle), any(), any())
-        } just Runs
-
         val response = handler().handleRequest(request())
 
         assertNull(response.error)
@@ -182,9 +225,10 @@ class CosignRequestHandlerTest {
         assertEquals("ES256", result.getString("algorithm"))
         assertEquals(signingKey.keyId, result.getString("signerName"))
         assertTrue(result.getString("keyFingerprint").isNotEmpty())
+        val subtitle = surface.shown.single().subtitle
         assertTrue(
-            "the prompt names the hash: ${subtitle.captured}",
-            subtitle.captured.contains(hashHex.take(8))
+            "the prompt names the hash: $subtitle",
+            subtitle.contains(hashHex.take(8))
         )
         coVerify(exactly = 1) {
             keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256")
@@ -193,9 +237,7 @@ class CosignRequestHandlerTest {
 
     @Test
     fun `a cancelled prompt answers BIOMETRIC_FAILED and signs nothing`() = runTest {
-        coEvery {
-            launcher.requestAuthentication(any(), any(), any(), any())
-        } throws UserCancelledException()
+        surface.autoAnswer = CosignPromptOutcome.Refused("Authentication cancelled")
 
         assertError(ErrorCodes.BIOMETRIC_FAILED, handler().handleRequest(request()))
         assertNothingSigned()
@@ -214,7 +256,7 @@ class CosignRequestHandlerTest {
     fun `no confirmed peer answers OPERATION_DENIED`() = runTest {
         assertError(ErrorCodes.OPERATION_DENIED, handler(peer = null).handleRequest(request()))
         assertNothingSigned()
-        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any()) }
+        assertTrue("no prompt for a refused peer", surface.shown.isEmpty())
     }
 
     @Test
@@ -283,7 +325,8 @@ class CosignRequestHandlerTest {
             keystoreManager = keystoreManager,
             biometricLauncher = launcher,
             sessionAuthManager = null,
-            pairedDeviceRepository = repo
+            pairedDeviceRepository = repo,
+            cosignApprovalPrompts = prompts
         )
     }
 
@@ -321,7 +364,7 @@ class CosignRequestHandlerTest {
             handler.onConnection(strangerHex, request())
         )
         assertNothingSigned()
-        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any()) }
+        assertTrue("no prompt for a refused peer", surface.shown.isEmpty())
     }
 
     @Test
@@ -331,5 +374,164 @@ class CosignRequestHandlerTest {
 
         assertError(ErrorCodes.OPERATION_DENIED, handler.onConnection(null, request()))
         assertNothingSigned()
+    }
+
+    // r3: one prompt at a time, each settled only by its own answer.
+
+    @Test
+    fun `a second co-sign waits for the first prompt, then gets its own`() = runTest {
+        surface.autoAnswer = null
+        val handler = handler()
+        val first = async { handler.handleRequest(request(id = 1L)) }
+        val second = async { handler.handleRequest(request(id = 2L)) }
+        runCurrent()
+        assertEquals("the second waits while the first prompt is up", 1, surface.shown.size)
+
+        surface.shown[0].answer(CosignPromptOutcome.Approved)
+        runCurrent()
+        assertEquals("the second gets its own prompt", 2, surface.shown.size)
+        assertNotEquals(surface.shown[0].requestId, surface.shown[1].requestId)
+
+        // A late answer to the first prompt settles nothing.
+        surface.shown[0].answer(CosignPromptOutcome.Approved)
+        runCurrent()
+        assertTrue("the second still waits for its own answer", second.isActive)
+
+        surface.shown[1].answer(CosignPromptOutcome.Refused("Authentication cancelled"))
+        assertNull(first.await().error)
+        assertEquals(1L, first.await().id)
+        assertError(ErrorCodes.BIOMETRIC_FAILED, second.await())
+        assertEquals(2L, second.await().id)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+        assertEquals(surface.shown.map { it.requestId }, surface.dismissed)
+    }
+
+    @Test
+    fun `a prompt that never settles fails at its timeout and releases the next`() = runTest {
+        surface.autoAnswer = null
+        val handler = handler()
+        val first = async { handler.handleRequest(request(id = 1L)) }
+        val second = async { handler.handleRequest(request(id = 2L)) }
+        runCurrent()
+
+        advanceTimeBy(PROMPT_TIMEOUT_MS + 1)
+        runCurrent()
+        assertError(ErrorCodes.BIOMETRIC_FAILED, first.await())
+        assertEquals(listOf(surface.shown[0].requestId), surface.dismissed)
+        assertEquals("the timeout releases the next prompt", 2, surface.shown.size)
+
+        surface.shown[1].answer(CosignPromptOutcome.Approved)
+        assertNull(second.await().error)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+    }
+
+    @Test
+    fun `a cancelled caller takes its prompt down and releases the next`() = runTest {
+        surface.autoAnswer = null
+        val handler = handler()
+        val first = async { handler.handleRequest(request(id = 1L)) }
+        val second = async { handler.handleRequest(request(id = 2L)) }
+        runCurrent()
+
+        first.cancel()
+        runCurrent()
+        assertEquals(listOf(surface.shown[0].requestId), surface.dismissed)
+        assertEquals(2, surface.shown.size)
+
+        surface.shown[1].answer(CosignPromptOutcome.Approved)
+        assertNull(second.await().error)
+    }
+
+    private val promptIntent = mockk<Intent>(relaxed = true)
+    private val resultReceiver = slot<BroadcastReceiver>()
+    private val launchedId = slot<String>()
+    private val notifiedId = slot<String>()
+    private val notifiedIntents = mutableListOf<Intent?>()
+    private val notificationHelper = mockk<BiometricNotificationHelper>(relaxed = true)
+
+    /** A handler on a locked phone whose prompts go through the real activity surface. */
+    private fun lockedPhoneHandler(): RequestHandler {
+        val keyguard = mockk<KeyguardManager>()
+        every { keyguard.isKeyguardLocked } returns true
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns keyguard
+
+        mockkStatic(ContextCompat::class)
+        every {
+            ContextCompat.registerReceiver(any(), capture(resultReceiver), any(), any<Int>())
+        } returns null
+        mockkObject(TransparentBiometricActivity.Companion)
+        every {
+            TransparentBiometricActivity.createIntent(
+                any(), capture(launchedId), any(), any(), any(), any()
+            )
+        } returns promptIntent
+        every {
+            notificationHelper.showBiometricRequiredNotification(
+                any(), any(), capture(notifiedId), any(), any(), captureNullable(notifiedIntents)
+            )
+        } just Runs
+
+        return RequestHandler(
+            context = context,
+            keystoreManager = keystoreManager,
+            biometricLauncher = launcher,
+            sessionAuthManager = null,
+            cosignApprovalPrompts = CosignApprovalPrompts(
+                ActivityCosignPromptSurface(context, notificationHelper),
+                timeoutMs = PROMPT_TIMEOUT_MS
+            )
+        ).also { it.setConnectedDevicePublicKeyHex(peerHex) }
+    }
+
+    /** The broadcast the prompt activity sends when the owner answers [requestId]. */
+    private fun promptResult(requestId: String, approved: Boolean): Intent {
+        val intent = mockk<Intent>()
+        every { intent.action } returns TransparentBiometricActivity.ACTION_BIOMETRIC_RESULT
+        every {
+            intent.getStringExtra(TransparentBiometricActivity.EXTRA_REQUEST_ID)
+        } returns requestId
+        every {
+            intent.getBooleanExtra(TransparentBiometricActivity.EXTRA_SUCCESS, false)
+        } returns approved
+        every {
+            intent.getStringExtra(TransparentBiometricActivity.EXTRA_ERROR_MESSAGE)
+        } returns "Authentication cancelled"
+        return intent
+    }
+
+    @Test
+    fun `the lock-screen notification opens the co-sign's own prompt`() = runTest {
+        val response = async { lockedPhoneHandler().handleRequest(request()) }
+        runCurrent()
+
+        assertEquals("one request id for both launches", launchedId.captured, notifiedId.captured)
+        assertSame("the notification carries the prompt's intent", promptIntent, notifiedIntents.single())
+        verify { context.startActivity(promptIntent) }
+
+        // An answer to another prompt (the launcher's numeric ids) settles nothing.
+        resultReceiver.captured.onReceive(context, promptResult("1", approved = true))
+        runCurrent()
+        assertTrue(response.isActive)
+
+        // The owner approves the prompt the notification opened.
+        resultReceiver.captured.onReceive(context, promptResult(notifiedId.captured, approved = true))
+        assertNull(response.await().error)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256") }
+        verify { context.unregisterReceiver(resultReceiver.captured) }
+        verify { notificationHelper.cancelNotification() }
+    }
+
+    @Test
+    fun `cancelling the lock-screen prompt answers BIOMETRIC_FAILED`() = runTest {
+        val response = async { lockedPhoneHandler().handleRequest(request()) }
+        runCurrent()
+
+        resultReceiver.captured.onReceive(context, promptResult(notifiedId.captured, approved = false))
+        assertError(ErrorCodes.BIOMETRIC_FAILED, response.await())
+        assertNothingSigned()
+    }
+
+    private companion object {
+        const val PROMPT_TIMEOUT_MS = 60_000L
     }
 }
