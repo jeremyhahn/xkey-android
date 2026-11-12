@@ -1468,13 +1468,13 @@ class RequestHandler(
         keyDao.recordUsage(signParams.keyId)
 
         // Log signing request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logSigningRequest(
             keyId = signParams.keyId,
             keyLabel = signParams.keyId,
             keyType = "signing",
             algorithm = signAlgorithm,
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = currentPeerPublicKeyHex(),
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1513,13 +1513,13 @@ class RequestHandler(
         keyDao.recordUsage(decryptParams.keyId)
 
         // Log decryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logDecryptionRequest(
             keyId = decryptParams.keyId,
             keyLabel = decryptParams.keyId,
             keyType = "rsa",
             algorithm = "RSA-OAEP",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = currentPeerPublicKeyHex(),
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1569,13 +1569,13 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log encryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logEncryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
             keyType = "symmetric",
             algorithm = "AES-GCM",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = currentPeerPublicKeyHex(),
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1626,13 +1626,13 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log decryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logDecryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
             keyType = "symmetric",
             algorithm = "AES-GCM",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = currentPeerPublicKeyHex(),
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1864,6 +1864,14 @@ class RequestHandler(
      * cancelled or fails, the request answers BIOMETRIC_FAILED and the stored
      * policy is unchanged. Narrowing needs neither. Every stored change is
      * audited.
+     *
+     * The write is a compare-and-set against the policy the decision was
+     * taken on, so a change that lands while the prompt is up, or between
+     * the read and the write, is never overwritten: a widening whose starting
+     * policy moved is refused (OPERATION_DENIED) rather than applied without
+     * an approval for it, and a narrowing re-reads and retries. A key already
+     * at the requested policy is not written. The audit records only a write
+     * that changed the row, with the policy it replaced.
      */
     private suspend fun handleLocalSetKeyPolicy(request: Request): Response {
         val params = request.params
@@ -1874,56 +1882,86 @@ class RequestHandler(
         val entity = keyDao.getByKeyId(policyParams.keyId)
             ?: throw ProtocolException("Key not found: ${policyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
-        if (policyParams.shareable != null) {
-            val newPolicy = if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
-            val widening = newPolicy == SharingPolicyType.ALL_PEERS &&
-                entity.sharingPolicy != SharingPolicyType.ALL_PEERS
+        val newPolicy = when (policyParams.shareable) {
+            null -> null
+            true -> SharingPolicyType.ALL_PEERS
+            false -> SharingPolicyType.PRIVATE
+        }
 
-            if (widening) {
-                requireConfirmedPeer("Sharing a key with all peers")
-                val keyName = entity.label.ifBlank { entity.keyId }
-                val launcher = biometricLauncher ?: throw ProtocolException(
-                    "Sharing a key with all peers needs the owner's approval, and no biometric prompt is available",
-                    errorCode = ErrorCodes.BIOMETRIC_FAILED
+        // The compare-and-set, like updateSharingPolicy, keeps `shareable` and
+        // `sharing_policy` in step, which KeyEntity requires. It returns true
+        // only when it changed the row, and audits exactly that change.
+        suspend fun setPolicyFrom(expected: SharingPolicyType, policy: SharingPolicyType): Boolean {
+            if (keyDao.compareAndSetSharingPolicy(entity.keyId, expected, policy) == 0) return false
+            AuditLogger.logKeySharingChanged(
+                keyId = entity.keyId,
+                keyLabel = entity.label,
+                keyType = entity.keyType,
+                oldPolicy = expected.name,
+                newPolicy = policy.name
+            )
+            return true
+        }
+
+        suspend fun storedPolicy(): SharingPolicyType =
+            keyDao.getByKeyId(entity.keyId)?.sharingPolicy
+                ?: throw ProtocolException("Key not found: ${entity.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
+
+        if (newPolicy == SharingPolicyType.ALL_PEERS && entity.sharingPolicy != SharingPolicyType.ALL_PEERS) {
+            requireConfirmedPeer("Sharing a key with all peers")
+            val keyName = entity.label.ifBlank { entity.keyId }
+            val launcher = biometricLauncher ?: throw ProtocolException(
+                "Sharing a key with all peers needs the owner's approval, and no biometric prompt is available",
+                errorCode = ErrorCodes.BIOMETRIC_FAILED
+            )
+            withContext(Dispatchers.Main) {
+                showBiometricNotificationIfLocked(
+                    operationType = "share",
+                    rpName = keyName,
+                    requestId = "set-key-policy-${request.id}"
                 )
-                withContext(Dispatchers.Main) {
-                    showBiometricNotificationIfLocked(
-                        operationType = "share",
-                        rpName = keyName,
-                        requestId = "set-key-policy-${request.id}"
+                try {
+                    launcher.requestAuthentication(
+                        title = "Share key with all devices",
+                        subtitle = "Allow every paired device to use \"$keyName\"",
+                        showOnLockScreen = keyguardManager.isKeyguardLocked
                     )
-                    try {
-                        launcher.requestAuthentication(
-                            title = "Share key with all devices",
-                            subtitle = "Allow every paired device to use \"$keyName\"",
-                            showOnLockScreen = keyguardManager.isKeyguardLocked
-                        )
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        throw ProtocolException(
-                            "Owner did not approve sharing the key with all peers: ${e.message}",
-                            errorCode = ErrorCodes.BIOMETRIC_FAILED
-                        )
-                    } finally {
-                        cancelBiometricNotification()
-                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    throw ProtocolException(
+                        "Owner did not approve sharing the key with all peers: ${e.message}",
+                        errorCode = ErrorCodes.BIOMETRIC_FAILED
+                    )
+                } finally {
+                    cancelBiometricNotification()
                 }
             }
-
-            // updateSharingPolicy, not updateShareable: it keeps `shareable` and
-            // `sharing_policy` in step, which KeyEntity requires. Writing the
-            // legacy flag alone could leave shareable=1 with policy=PRIVATE.
-            keyDao.updateSharingPolicy(policyParams.keyId, newPolicy)
-
-            if (entity.sharingPolicy != newPolicy) {
-                AuditLogger.logKeySharingChanged(
-                    keyId = entity.keyId,
-                    keyLabel = entity.label,
-                    keyType = entity.keyType,
-                    oldPolicy = entity.sharingPolicy.name,
-                    newPolicy = newPolicy.name
+            // The owner approved widening from the policy read above. If that
+            // changed while the prompt was up, the approval does not cover
+            // the new state: write nothing unless the key is already open.
+            if (!setPolicyFrom(entity.sharingPolicy, SharingPolicyType.ALL_PEERS) &&
+                storedPolicy() != SharingPolicyType.ALL_PEERS
+            ) {
+                throw ProtocolException(
+                    "Sharing policy of ${entity.keyId} changed while waiting for approval; retry",
+                    errorCode = ErrorCodes.OPERATION_DENIED
                 )
+            }
+        } else if (newPolicy == SharingPolicyType.PRIVATE) {
+            // Narrowing needs no approval from any starting policy, so a
+            // change that lands first is re-read and narrowed in turn.
+            var current = entity.sharingPolicy
+            var attempts = 0
+            val maxAttempts = 3
+            while (current != SharingPolicyType.PRIVATE && !setPolicyFrom(current, SharingPolicyType.PRIVATE)) {
+                if (++attempts >= maxAttempts) {
+                    throw ProtocolException(
+                        "Sharing policy of ${entity.keyId} kept changing; retry",
+                        errorCode = ErrorCodes.OPERATION_DENIED
+                    )
+                }
+                current = storedPolicy()
             }
         }
 
@@ -2732,7 +2770,7 @@ class RequestHandler(
         val listParams = LocalListFido2CredentialsParams.fromJson(params)
 
         // Get connected device's public key for per-key policy checks
-        val peerPublicKeyHex = connectedDevicePublicKeyHex
+        val peerPublicKeyHex = currentPeerPublicKeyHex()
 
         // Query all FIDO2 credentials for this rpId
         val allEntities = keyDao.getFido2ByRpId(listParams.rpId)
@@ -2819,7 +2857,7 @@ class RequestHandler(
         }
 
         // Check per-key sharing policy
-        val peerPublicKeyHex = connectedDevicePublicKeyHex
+        val peerPublicKeyHex = currentPeerPublicKeyHex()
         if (!canShareKeyWithPeer(entity, peerPublicKeyHex)) {
             throw ProtocolException("Credential is not shareable with this peer", errorCode = ErrorCodes.OPERATION_DENIED)
         }
@@ -3384,11 +3422,28 @@ class RequestHandler(
      * session has no confirmed peer, since no sharing decision can be made
      * about an anonymous peer.
      */
-    private fun requireConfirmedPeer(operation: String): String {
-        return connectedDevicePublicKeyHex ?: throw ProtocolException(
+    private suspend fun requireConfirmedPeer(operation: String): String {
+        return currentPeerPublicKeyHex() ?: throw ProtocolException(
             "$operation requires a confirmed peer identity",
             errorCode = ErrorCodes.OPERATION_DENIED
         )
+    }
+
+    /**
+     * The confirmed peer of the connection this request arrived on.
+     *
+     * One handler serves BLE, TCP and USB at once, and a transport's teardown
+     * clears the handler-wide peer, so a request decides on its own
+     * [CallerSession]'s peer. The handler-wide peer answers only for a
+     * request that names no connection at all. A caller session is never
+     * backfilled from it, as in [attestingPeerPublicKeyHex].
+     *
+     * @return the peer's static key hex, or null when the request's connection
+     *   authenticated no peer, or names no connection and none is confirmed
+     */
+    private suspend fun currentPeerPublicKeyHex(): String? {
+        val caller = currentCoroutineContext()[CallerSession] ?: return connectedDevicePublicKeyHex
+        return caller.peerPublicKeyHex?.takeIf { it.isNotEmpty() }
     }
 
     /**

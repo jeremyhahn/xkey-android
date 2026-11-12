@@ -221,6 +221,30 @@ interface KeyDao {
     suspend fun updateSharingPolicy(keyId: String, policy: SharingPolicyType)
 
     /**
+     * Set the sharing policy for a key only while it is still [expected].
+     *
+     * A compare-and-set for a caller that decided on the transition from a
+     * policy it read earlier: a change that landed since that read makes this
+     * write nothing, so the caller can re-read and decide again instead of
+     * overwriting it. Keeps the legacy [shareable] field in step, as
+     * [updateSharingPolicy] does.
+     *
+     * @param keyId The unique key identifier.
+     * @param expected The policy the caller read and decided on.
+     * @param policy The new sharing policy type.
+     * @return The number of rows changed: 1 when the policy was [expected], else 0.
+     */
+    @Query(
+        """
+        UPDATE keys SET
+            sharing_policy = :policy,
+            shareable = CASE WHEN :policy = 'PRIVATE' THEN 0 ELSE 1 END
+        WHERE key_id = :keyId AND sharing_policy = :expected
+        """
+    )
+    suspend fun compareAndSetSharingPolicy(keyId: String, expected: SharingPolicyType, policy: SharingPolicyType): Int
+
+    /**
      * Get all keys with a specific sharing policy.
      *
      * @param policy The sharing policy type to filter by.
