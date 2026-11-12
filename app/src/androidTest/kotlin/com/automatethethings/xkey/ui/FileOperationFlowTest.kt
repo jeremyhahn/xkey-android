@@ -703,9 +703,12 @@ class FileOperationFlowTest {
     private fun scratchFile(name: String): File =
         File(context.cacheDir, name).also { scratch.add(it) }
 
-    /** Embeds signature metadata into [file] the way a signed photo carries it. */
+    /**
+     * Embeds signature metadata into [file] the way a signed photo carries it:
+     * an in-band block records the canonical hash, the only one Verify accepts.
+     */
     private fun embedSignature(file: File, fingerprint: String, signerName: String?) {
-        val contentHash = MediaHasher.hashBytes(file.readBytes())
+        val contentHash = MediaHasher.hashCanonical(file.readBytes(), "image/jpeg")
         XmpMetadataHelper.writeSignature(
             file.path,
             ContentAuthenticityData(

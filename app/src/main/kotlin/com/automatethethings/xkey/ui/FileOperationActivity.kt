@@ -1017,7 +1017,14 @@ class FileOperationActivity : AppCompatActivity() {
                     val hashMatches = MediaHasher.contentHashMatchesUri(
                         contentResolver, uri, embeddedData.contentHash, MediaHasher.SignatureSource.IN_BAND
                     )
-                    val result = verifySignatures(embeddedData, hashMatches)
+                    // On a mismatch the block's own line says why, as the
+                    // sidecar path does, so the result fails even with no
+                    // signature entries.
+                    val result = if (hashMatches) {
+                        verifySignatures(embeddedData, hashMatches)
+                    } else {
+                        listOf("Content hash mismatch" to "failed") + verifySignatures(embeddedData, hashMatches)
+                    }
 
                     val fileName = getFileName(uri)
                     AuditLogger.logFileVerified(

@@ -56,7 +56,8 @@ object SignerVerification {
      * @param entry the signature entry read from the file.
      * @param storedContentHash the content hash recorded with the signatures;
      *        this is what each signer signed.
-     * @param contentHashMatches whether [storedContentHash] matches the file.
+     * @param contentHashMatches whether [storedContentHash] matches the file;
+     *        when it does not, the signer fails before any lookup.
      * @param contact the contact whose fingerprint equals the entry's, if any.
      * @param localKeys the local key store.
      */
@@ -68,6 +69,13 @@ object SignerVerification {
         localKeys: List<LocalKey>
     ): Result {
         val fallbackName = entry.signerName ?: (entry.keyFingerprint.take(16) + "...")
+        // The content hash comes first: on a mismatch the signatures cover
+        // other content, so every signer fails, known or not. Returning
+        // UNKNOWN here would let a copied block read as merely unrecognised.
+        if (!contentHashMatches) {
+            Log.w(TAG, "Content hash mismatch: stored=$storedContentHash")
+            return Result(Status.FAILED, entry.signerName ?: contact?.name ?: fallbackName)
+        }
         return try {
             if (contact != null) {
                 val ok = checkSignature(contact.publicKeyDer, entry, storedContentHash, contentHashMatches)
