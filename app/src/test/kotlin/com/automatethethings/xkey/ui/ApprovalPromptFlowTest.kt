@@ -583,6 +583,93 @@ class ApprovalPromptFlowTest {
             assertEquals(listOf(approval to true), results())
         }
 
+    /**
+     * Answers one approval on screen ([answer]: approve or cancel), takes its
+     * activity down, and returns the intents that started it: the launcher's
+     * own start and its notification's tap, either of which Android may
+     * deliver again later.
+     */
+    private fun TestScope.answerAndDestroy(
+        approval: Deferred<Response>,
+        answer: ActivityController<TransparentBiometricActivity>.() -> Unit,
+    ): List<Intent> {
+        val prompt = directStart()
+        val tap = tapNotification(prompt.requestId()!!)
+        val screen = open(prompt)
+        screen.answer()
+        settle()
+        assertTrue(approval.isCompleted)
+        screen.pause().stop().destroy()
+        return listOf(prompt, tap)
+    }
+
+    /** A late start of [intent] in a fresh activity: it shows no prompt and hands nothing on. */
+    private fun TestScope.assertRefusedFresh(intent: Intent) {
+        val late = open(intent)
+        settle()
+        assertTrue("the late start finishes", late.get().isFinishing)
+        assertNull("and shows no prompt", late.get().promptCallback)
+        assertNull("nothing is handed on", shadowOf(app).nextStartedActivity)
+        late.pause().stop().destroy()
+    }
+
+    @Test
+    fun `a settled approval's launch or tap reaching a fresh activity shows no prompt`() = runTest {
+        // Denied first, so the policy is still private for the second request.
+        val denied = shareWithAllPeers()
+        runCurrent()
+        val deniedId = shadowOf(app).peekNextStartedActivity().requestId()!!
+        val deniedIntents = answerAndDestroy(denied) { cancel() }
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, denied.await().error?.code)
+
+        val approved = shareWithAllPeers()
+        runCurrent()
+        val approvedId = shadowOf(app).peekNextStartedActivity().requestId()!!
+        val approvedIntents = answerAndDestroy(approved) { approve() }
+        assertUpdated(approved.await())
+
+        for (intent in approvedIntents + deniedIntents) assertRefusedFresh(intent)
+
+        assertEquals("nothing more was answered", listOf(deniedId to false, approvedId to true), results())
+        assertEquals(SharingPolicyType.ALL_PEERS, stored)
+    }
+
+    @Test
+    fun `a settled approval's intent arriving while another prompts leaves that prompt alone`() = runTest {
+        val first = shareWithAllPeers()
+        runCurrent()
+        val firstId = shadowOf(app).peekNextStartedActivity().requestId()!!
+        val stale = answerAndDestroy(first) { cancel() }
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, first.await().error?.code)
+
+        val second = shareWithAllPeers()
+        runCurrent()
+        val secondPrompt = directStart()
+        val secondId = secondPrompt.requestId()!!
+        val screen = open(secondPrompt)
+        val callback = screen.get().promptCallback
+
+        for (intent in stale) {
+            assertRefusedFresh(intent)
+            screen.newIntent(intent)
+        }
+        // An id newer than the one on screen that the owner does not hold
+        // ACTIVE is no hand-off either.
+        screen.newIntent(TransparentBiometricActivity.createIntent(app, (secondId.toLong() + 1).toString()))
+        settle()
+
+        assertFalse("the prompt on screen stays up", screen.get().isFinishing)
+        assertTrue("with its own prompt", callback === screen.get().promptCallback)
+        assertNull("nothing is handed on", shadowOf(app).nextStartedActivity)
+        assertTrue(second.isActive)
+
+        screen.approve()
+        settle()
+
+        assertUpdated(second.await())
+        assertEquals(listOf(firstId to false, secondId to true), results())
+    }
+
     private companion object {
         /** The id every lock-screen approval notification is posted under, with its own tag. */
         const val NOTIFICATION_ID = 2001

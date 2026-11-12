@@ -129,6 +129,56 @@ class PendingAuthenticationsTest {
     }
 
     @Test
+    fun aResultReachingTheLauncherThatDidNotIssueItFirstStillCompletesItsOwnersCaller() = runTest {
+        // Both launchers prompt on one screen, and both receivers hear every result.
+        val expiredByOther = mutableListOf<String>()
+        val other = PendingAuthentications(screen, expirePrompt = { expiredByOther += it; true })
+        val waiting = async { pending.await { launched += it } }
+        runCurrent()
+        val id = launched.single()
+        val key = NotificationKeys.approval(id)
+
+        assertFalse(other.complete(id, BiometricResult.Success))
+        assertFalse(other.expireUnshown(id))
+        assertFalse(other.expireUnshown(id, PromptOwnership.Event.DEADLINE))
+        assertEquals("the other launcher leaves the request ACTIVE", PromptOwnership.State.ACTIVE, screen.state(key))
+        assertEquals("nor ends its prompt", emptyList<String>(), expiredByOther)
+
+        assertTrue(pending.complete(id, BiometricResult.Success))
+        assertEquals(BiometricResult.Success, waiting.await())
+        assertEquals(PromptOwnership.Outcome.APPROVED, screen.outcome(key))
+        assertEquals(0, screen.entries)
+        assertFalse("settled once", pending.complete(id, BiometricResult.Success))
+    }
+
+    @Test
+    fun aSignatureReachingTheLauncherThatDidNotIssueItFirstStillCompletesItsOwnersCaller() = runTest {
+        val expiredByOther = mutableListOf<String>()
+        val mine = PendingCryptoSignatures(cancelPrompt = {}, prompts = screen, expirePrompt = { true })
+        val other = PendingCryptoSignatures(
+            cancelPrompt = {},
+            prompts = screen,
+            expirePrompt = { expiredByOther += it; true },
+        )
+        val waiting = async { mine.await { launched += it } }
+        runCurrent()
+        val id = launched.single()
+        val key = NotificationKeys.signature(id)
+        val signed = BiometricActivityLauncher.CryptoSigningResult.Success("c2ln")
+
+        assertFalse(other.complete(id.toLong(), signed))
+        assertFalse(other.expireUnshown(id))
+        assertEquals("the other launcher leaves the request ACTIVE", PromptOwnership.State.ACTIVE, screen.state(key))
+        assertEquals("nor ends its prompt", emptyList<String>(), expiredByOther)
+
+        assertTrue(mine.complete(id.toLong(), signed))
+        assertEquals(signed, waiting.await())
+        assertEquals(PromptOwnership.Outcome.APPROVED, screen.outcome(key))
+        assertEquals(0, screen.entries)
+        assertFalse("settled once", mine.complete(id.toLong(), signed))
+    }
+
+    @Test
     fun aCancelledCallerWithdrawsItsRequest() = runTest {
         val waiting = async { pending.await { launched += it } }
         runCurrent()
