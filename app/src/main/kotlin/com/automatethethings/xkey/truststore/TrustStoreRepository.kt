@@ -302,7 +302,10 @@ public class TrustStoreRepository(
         }
         val subject = entry?.subjectDN ?: ""
 
-        if (fileExisted && !removeFile(certFile)) {
+        // Read the DER before deleting it, so a failed metadata rewrite can
+        // write it back. A file that exists but cannot be read is kept.
+        val der = if (fileExisted) readOrNull(certFile) else null
+        if (fileExisted && (der == null || !removeFile(certFile))) {
             auditDelete(subject, fingerprint, FILE_NOT_DELETED)
             return false
         }
@@ -310,8 +313,17 @@ public class TrustStoreRepository(
             try {
                 saveMetadataSync(all.filter { it.fingerprint != fingerprint })
             } catch (e: IOException) {
-                auditDelete(subject, fingerprint, "$METADATA_NOT_UPDATED: ${e.message}")
-                return false
+                val error = "$METADATA_NOT_UPDATED: ${e.message}"
+                // The row is still in the metadata: with its file written back
+                // the CA stays trusted everywhere (listed and a chain anchor).
+                if (der != null && restoreFile(certFile, der)) {
+                    auditDelete(subject, fingerprint, error)
+                    return false
+                }
+                // No file on disk: no chain verifies against this CA, so it
+                // is removed; its stale row is left for a later delete or clear.
+                auditDelete(subject, fingerprint, "$error; $METADATA_ROW_LEFT", removed = true)
+                return true
             }
         }
         auditDelete(subject, fingerprint)
@@ -332,7 +344,13 @@ public class TrustStoreRepository(
 
     private fun clearAllLocked(): ClearResult {
         val entries = readMetadataSync()
-        val filesRemoved = entries.filter { removeFile(getCertificateFile(it.fingerprint)) }
+        // Read each DER before deleting it, so a failed metadata rewrite can
+        // write it back. A file that exists but cannot be read is kept.
+        val backups = entries.associate { it.fingerprint to readOrNull(getCertificateFile(it.fingerprint)) }
+        val filesRemoved = entries.filter {
+            val file = getCertificateFile(it.fingerprint)
+            (!file.exists() || backups[it.fingerprint] != null) && removeFile(file)
+        }
         val kept = entries.filter { it !in filesRemoved }
 
         val metadataFile = File(trustStoreDir, "metadata.json")
@@ -347,9 +365,25 @@ public class TrustStoreRepository(
             "$METADATA_NOT_UPDATED: ${e.message}"
         }
 
+        // The failed rewrite left the previous metadata, rows of the removed
+        // certificates included: write their files back so they stay trusted
+        // everywhere (listed and chain anchors). One whose file is not on disk
+        // anchors no chain, so it counts as removed; its stale row is left
+        // for a later delete or clear.
+        val restored = if (metadataError == null) {
+            emptyList()
+        } else {
+            filesRemoved.filter { entry ->
+                backups[entry.fingerprint]?.let { restoreFile(getCertificateFile(entry.fingerprint), it) } == true
+            }
+        }
+        val removed = filesRemoved - restored.toSet()
+
         // Files no metadata row names (strays): remove them too, except the
-        // ones kept above. A directory that cannot be listed is a failure.
-        val keepNames = kept.map { getCertificateFile(it.fingerprint).name }.toSet() + metadataFile.name
+        // ones kept or restored above. A directory that cannot be listed is a
+        // failure.
+        val keepNames = (kept + restored).map { getCertificateFile(it.fingerprint).name }.toSet() +
+            metadataFile.name
         val listing = trustStoreDir.listFiles()
         val (strays, strayLeft) = listing.orEmpty()
             .filter { it.name !in keepNames }
@@ -359,14 +393,14 @@ public class TrustStoreRepository(
         val strayRemoved = strays.filter { it.name.endsWith(".der") }.map { it.name.removeSuffix(".der") }
         val strayFailed = strayLeft.map { it.name.removeSuffix(".der") }
 
-        val removed = if (metadataError == null) filesRemoved else emptyList()
-        filesRemoved.forEach {
+        removed.forEach {
             if (metadataError == null) {
                 auditDelete(it.subjectDN, it.fingerprint)
             } else {
-                auditDelete(it.subjectDN, it.fingerprint, metadataError)
+                auditDelete(it.subjectDN, it.fingerprint, "$metadataError; $METADATA_ROW_LEFT", removed = true)
             }
         }
+        restored.forEach { auditDelete(it.subjectDN, it.fingerprint, metadataError) }
         kept.forEach { auditDelete(it.subjectDN, it.fingerprint, FILE_NOT_DELETED) }
         strayRemoved.forEach { auditDelete("", it) }
         strayFailed.forEach { auditDelete("", it, FILE_NOT_DELETED) }
@@ -575,13 +609,19 @@ public class TrustStoreRepository(
 
     /**
      * Record a trust store deletion: a success when [error] is null, else a
-     * failure carrying it. Only when the audit logger is initialized: its
-     * drop path calls `Log.w`, which callers that never initialize it (JVM
-     * tests, sync) must not reach.
+     * failure carrying it; [removed] records a success that carries [error]
+     * (a certificate gone from disk whose metadata row was left). Only when
+     * the audit logger is initialized: its drop path calls `Log.w`, which
+     * callers that never initialize it (JVM tests, sync) must not reach.
      */
-    private fun auditDelete(subject: String, fingerprint: String, error: String? = null) {
+    private fun auditDelete(
+        subject: String,
+        fingerprint: String,
+        error: String? = null,
+        removed: Boolean = error == null
+    ) {
         if (AuditLogger.isInitialized()) {
-            AuditLogger.logTrustStoreDelete(subject, fingerprint, error == null, error)
+            AuditLogger.logTrustStoreDelete(subject, fingerprint, removed, error)
         }
     }
 
@@ -591,9 +631,26 @@ public class TrustStoreRepository(
         return !file.exists()
     }
 
+    /** The bytes of [file], or null when it is missing or cannot be read. */
+    private fun readOrNull(file: File): ByteArray? = try {
+        file.readBytes()
+    } catch (e: IOException) {
+        null
+    }
+
+    /** Write [bytes] back to [file]; true only if it holds them again. */
+    private fun restoreFile(file: File, bytes: ByteArray): Boolean = try {
+        file.writeBytes(bytes)
+        true
+    } catch (e: IOException) {
+        file.delete()
+        false
+    }
+
     private companion object {
         const val FILE_NOT_DELETED = "could not delete the certificate file"
         const val METADATA_NOT_UPDATED = "could not update the trust store metadata"
+        const val METADATA_ROW_LEFT = "certificate file removed, its metadata row left"
 
         /**
          * One lock per trust store directory, shared by every repository
