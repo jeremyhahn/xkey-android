@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.protocol
 
+import android.app.Application
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
@@ -55,6 +56,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -539,12 +541,24 @@ class CosignRequestHandlerTest {
      * visible prompt is dropped (the activity reads its request only when
      * created), a cancel finishes it only for its own request id, and the
      * owner answers whatever prompt is visible.
+     *
+     * With [delayedCreation], startActivity only queues the launch, as on the
+     * phone: the activity comes up at [createNext], after the application's
+     * lifecycle callbacks see it, and only then registers its cancel receiver.
+     * A cancel sent before that reaches nothing.
      */
-    private inner class FakeScreen {
+    private inner class FakeScreen(private val delayedCreation: Boolean = false) {
         var visible: String? = null
         val receivers = mutableListOf<BroadcastReceiver>()
+        /** Every prompt that came up on the screen, in order. */
+        val shown = mutableListOf<String>()
         private val launchIds = mutableMapOf<Intent, String>()
         private val cancelIds = mutableMapOf<Intent, String>()
+        private val launching = ArrayDeque<Intent>()
+        private val lifecycleCallbacks = mutableListOf<Application.ActivityLifecycleCallbacks>()
+
+        /** The launched prompts whose activities are not created yet. */
+        val launchingIds: List<String> get() = launching.map { launchIds.getValue(it) }
 
         init {
             mockkStatic(ContextCompat::class)
@@ -562,11 +576,47 @@ class CosignRequestHandlerTest {
                 mockk<Intent>(relaxed = true).also { cancelIds[it] = secondArg() }
             }
             every { context.startActivity(any()) } answers {
-                if (visible == null) visible = launchIds[firstArg()]
+                if (delayedCreation) {
+                    launching.addLast(firstArg())
+                } else {
+                    val requestId = launchIds.getValue(firstArg())
+                    if (visible == null) {
+                        visible = requestId
+                        shown += requestId
+                    }
+                }
             }
             every { context.sendBroadcast(any()) } answers {
                 val cancelled = cancelIds[firstArg()]
                 if (cancelled != null && cancelled == visible) finish(approved = false)
+            }
+            val application = mockk<Application>(relaxed = true)
+            every { context.applicationContext } returns application
+            every {
+                application.registerActivityLifecycleCallbacks(capture(lifecycleCallbacks))
+            } just Runs
+        }
+
+        /**
+         * The oldest queued launch's activity is created: the lifecycle
+         * callbacks see it first, then it reads its request id (none: it
+         * finishes without prompting), registers its cancel receiver and
+         * prompts, unless a visible prompt swallows the launch.
+         */
+        fun createNext() {
+            val requestIdExtra = TransparentBiometricActivity.EXTRA_REQUEST_ID
+            var requestId: String? = launchIds.getValue(launching.removeFirst())
+            val activityIntent = mockk<Intent>(relaxed = true)
+            every { activityIntent.getStringExtra(requestIdExtra) } answers { requestId }
+            every { activityIntent.removeExtra(requestIdExtra) } answers { requestId = null }
+            val activity = mockk<TransparentBiometricActivity>(relaxed = true)
+            every { activity.intent } returns activityIntent
+            lifecycleCallbacks.toList().forEach { it.onActivityCreated(activity, null) }
+
+            val created = requestId ?: return
+            if (visible == null) {
+                visible = created
+                shown += created
             }
         }
 
@@ -631,6 +681,42 @@ class CosignRequestHandlerTest {
         assertNotNull("the next co-sign's prompt is up", screen.visible)
         assertNotEquals("the timed-out prompt is gone", firstPrompt, screen.visible)
 
+        screen.answer(approved = true)
+        assertNull(second.await().error)
+        assertEquals(2L, second.await().id)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+    }
+
+    // r5: a withdrawal is remembered until the prompt's activity comes up.
+
+    @Test
+    fun `a prompt cancelled before its activity comes up never shows`() = runTest {
+        val screen = FakeScreen(delayedCreation = true)
+        val handler = activityHandler()
+        val first = async { handler.handleRequest(request(id = 1L)) }
+        val second = async { handler.handleRequest(request(id = 2L)) }
+        runCurrent()
+        val firstPrompt = screen.launchingIds.single()
+
+        // The caller goes away after startActivity, before the activity has a cancel receiver.
+        first.cancel()
+        runCurrent()
+        advanceTimeBy(ActivityCosignPromptSurface.DISMISS_WAIT_MS + 1)
+        runCurrent()
+        assertEquals(
+            "the next co-sign waits while the cancelled prompt can still come up",
+            listOf(firstPrompt),
+            screen.launchingIds
+        )
+
+        screen.createNext()
+        runCurrent()
+        assertFalse("the cancelled prompt never shows", firstPrompt in screen.shown)
+        val secondPrompt = screen.launchingIds.single()
+        assertNotEquals(firstPrompt, secondPrompt)
+
+        screen.createNext()
+        assertEquals("the next co-sign's prompt is its own", secondPrompt, screen.visible)
         screen.answer(approved = true)
         assertNull(second.await().error)
         assertEquals(2L, second.await().id)
