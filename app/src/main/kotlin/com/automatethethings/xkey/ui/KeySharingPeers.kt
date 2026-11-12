@@ -20,8 +20,10 @@ import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.sync.Mutex
@@ -50,6 +52,9 @@ import kotlinx.coroutines.withContext
  * before that switch, so they land in the order the user made them: a later
  * withdrawal or clear always follows an earlier grant. A grant carries the
  * pairing generation read when the user acted, before that wait.
+ *
+ * Those edits run in [editScope], which outlives the sheet: one queued
+ * behind another sheet's grant still lands when its sheet is dismissed.
  */
 class KeySharingPeers(
     private val keyId: String,
@@ -94,7 +99,7 @@ class KeySharingPeers(
             // still queued when that pairing ends is refused, never written
             // for a later pairing of the same key.
             val pairing = repository.pairingOf(peerPublicKeyHex) ?: return false
-            return edits.withLock {
+            return accepted {
                 withContext(ioDispatcher) {
                     repository.writeGrant(peerPublicKeyHex, pairing) {
                         policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
@@ -102,7 +107,7 @@ class KeySharingPeers(
                 }
             }
         }
-        edits.withLock { policyDao.removePolicy(keyId, peerPublicKeyHex) }
+        accepted { policyDao.removePolicy(keyId, peerPublicKeyHex) }
         return true
     }
 
@@ -113,13 +118,23 @@ class KeySharingPeers(
      * made earlier lands first and is cleared, never after the clear.
      */
     suspend fun setKeyPolicy(policy: SharingPolicyType, persist: suspend () -> Unit) {
-        edits.withLock {
+        accepted {
             persist()
             if (policy != SharingPolicyType.SELECTED_PEERS) {
                 policyDao.clearPoliciesForKey(keyId)
             }
         }
     }
+
+    /**
+     * Runs [edit] under the edits lock in [editScope], not the caller's
+     * scope: a sheet dismissed while its edit waits behind another grant
+     * stops waiting for the answer, but the edit still lands. Started
+     * undispatched, so it joins the lock's queue before this call returns
+     * to its caller, in the order the user acted.
+     */
+    private suspend fun <T> accepted(edit: suspend () -> T): T =
+        editScope.async(start = CoroutineStart.UNDISPATCHED) { edits.withLock { edit() } }.await()
 
     private companion object {
         /** Orders every grant and withdrawal, across all sheets. */

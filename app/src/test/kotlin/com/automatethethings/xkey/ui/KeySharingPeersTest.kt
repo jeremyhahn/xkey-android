@@ -282,7 +282,8 @@ class KeySharingPeersTest {
                     override fun putLong(key: String, value: Long) = also { inner.putLong(key, value) }
                     override fun remove(key: String) = also { inner.remove(key) }
                     override fun commit(): Boolean {
-                        synchronized(commits) { commits += Thread.currentThread().name }
+                        // Without the " @coroutine#n" suffix debug mode adds.
+                        synchronized(commits) { commits += Thread.currentThread().name.substringBefore(" @") }
                         return inner.commit()
                     }
                 }
