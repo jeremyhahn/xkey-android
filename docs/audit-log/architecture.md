@@ -11,6 +11,14 @@ Comprehensive security event log with 35+ operation types covering key lifecycle
 cryptographic operations, FIDO2 events, connection events, certificate operations,
 file/media operations, contact management, and co-signing.
 
+Key attestation is among the recorded events: every `local.attestKey` the
+phone answers writes one `KEY_ATTESTED` entry with the key id, label, type,
+the attestation security level and the duration, and a keystore that returns
+no certificate chain writes one failed `KEY_ATTESTED` entry before the
+`ATTESTATION_FAILED` reply. A request refused before the keystore is asked
+(missing parameters, a stale device attestation, a refused user-presence
+check) records none.
+
 ## Index Strategy
 
 ### audit_logs
