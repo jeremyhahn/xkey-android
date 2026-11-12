@@ -65,7 +65,8 @@ class UsbAccessoryServerSlot(
     /**
      * Builds a server for [accessory], publishes it with [router] and connects
      * it, once the session of the server before it has ended. Returns the
-     * server, or null when one is already active.
+     * server, or null when one is already active. A connect that throws
+     * leaves the slot empty and rethrows.
      */
     suspend fun open(
         context: Context,
@@ -100,7 +101,21 @@ class UsbAccessoryServerSlot(
             this.server = server
             this.router = router
         }
-        server.connect(context, accessory)
+        try {
+            server.connect(context, accessory)
+        } catch (e: Throwable) {
+            // A connect that throws (a refused USB permission, a failure after
+            // the open) never reaches onClosed: unpublish the server, then stop
+            // its detach watcher and close what it opened.
+            synchronized(lock) {
+                if (this.server === server) {
+                    this.server = null
+                    this.router = null
+                }
+            }
+            server.disconnect()
+            throw e
+        }
         return server
     }
 
