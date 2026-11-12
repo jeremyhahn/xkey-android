@@ -19,10 +19,12 @@ import com.automatethethings.xkey.crypto.SyncCodec
 import io.mockk.every
 import io.mockk.mockk
 import java.io.File
+import java.io.IOException
 import java.nio.ByteBuffer
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -176,6 +178,88 @@ class BackupStoreIdTest {
         assertEquals("backup-1680000000000", s.latestId())
         assertEquals(1_680_000_000_000L, s.createdAtMillis("backup-1680000000000"))
         assertTrue(!legacy.exists())
+    }
+
+    // -----------------------------------------------------------------
+    // A fixed clock: every store lands in the same millisecond
+    // -----------------------------------------------------------------
+
+    private val fixedMillis = 1_700_000_000_000L
+
+    private fun fixedClockStore() = BackupStore(context) { fixedMillis }
+
+    @Test
+    fun `generated ids in one millisecond are distinct across two instances and keep every payload`() {
+        val first = fixedClockStore()
+        val second = fixedClockStore()
+        val stored = mutableListOf<Pair<String, ByteArray>>()
+        repeat(3) { i -> stored += first.store("", byteArrayOf(1, i.toByte())) to byteArrayOf(1, i.toByte()) }
+        repeat(3) { i -> stored += second.store("", byteArrayOf(2, i.toByte())) to byteArrayOf(2, i.toByte()) }
+        stored += first.store("", byteArrayOf(3)) to byteArrayOf(3)
+
+        val ids = stored.map { it.first }
+        assertEquals(ids.toString(), ids.size, ids.toSet().size)
+        ids.forEach { assertTrue(it, it.startsWith("backup-$fixedMillis")) }
+        val reader = fixedClockStore()
+        stored.forEach { (id, payload) -> assertArrayEquals(id, payload, reader.load(id)) }
+        assertEquals(ids.size, backupDir().listFiles()!!.size)
+    }
+
+    @Test
+    fun `in one millisecond the latest is the last stored and createdAt is that millisecond`() {
+        val ids = (0 until 4).map { fixedClockStore().store("", byteArrayOf(it.toByte())) }
+        backupDir().listFiles()!!.forEach { it.setLastModified(fixedMillis) }
+
+        assertEquals(ids.last(), fixedClockStore().latestId())
+        ids.forEach { assertEquals(fixedMillis, fixedClockStore().createdAtMillis(it)) }
+    }
+
+    // -----------------------------------------------------------------
+    // Storage failures surface; only malformed headers are skipped
+    // -----------------------------------------------------------------
+
+    /** Replaces the record of [id] with a directory: present, but unreadable. */
+    private fun makeUnreadable(id: String) {
+        val file = recordFile(id)
+        assertTrue(file.delete())
+        assertTrue(file.mkdir())
+    }
+
+    @Test
+    fun `an unreadable newest record makes latestId fail instead of picking an older backup`() {
+        val s = store()
+        s.store("older", byteArrayOf(1))
+        s.store("newest", byteArrayOf(2))
+        makeUnreadable("newest")
+
+        assertThrows(IOException::class.java) { store().latestId() }
+    }
+
+    @Test
+    fun `an unreadable record makes store fail instead of reusing its sequence`() {
+        val s = store()
+        s.store("older", byteArrayOf(1))
+        s.store("newest", byteArrayOf(2))
+        makeUnreadable("newest")
+
+        assertThrows(IOException::class.java) { store().store("", byteArrayOf(3)) }
+    }
+
+    @Test
+    fun `a truncated or malformed record header is skipped`() {
+        val s = store()
+        val good = s.store("good", byteArrayOf(1))
+        val dir = backupDir()
+        // XKB2 magic, then only 3 of the 16 header bytes.
+        File(dir, "${"a".repeat(64)}.backup").writeBytes("XKB2".toByteArray() + byteArrayOf(0, 0, 0))
+        // Shorter than a magic.
+        File(dir, "${"b".repeat(64)}.backup").writeBytes(byteArrayOf(1, 2))
+        // An unknown magic.
+        File(dir, "${"c".repeat(64)}.backup").writeBytes("ZZZZ".toByteArray() + ByteArray(32))
+
+        assertEquals(good, store().latestId())
+        val next = store().store("", byteArrayOf(2))
+        assertEquals(next, store().latestId())
     }
 
     private fun recordFile(id: String) =
