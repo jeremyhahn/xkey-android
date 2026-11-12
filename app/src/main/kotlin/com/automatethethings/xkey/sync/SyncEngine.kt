@@ -139,17 +139,16 @@ class SyncEngine(
             val existed = db.oathCredentialDao().getByOathId(id) != null
             val type = obj.optString("type", "totp").lowercase()
             val issuer = obj.optString("issuer", "").ifBlank { null }
-            val uri = buildString {
-                append("otpauth://$type/")
-                if (issuer != null) append("$issuer:")
-                append(accountName)
-                append("?secret=$secret")
-                if (issuer != null) append("&issuer=$issuer")
-                append("&algorithm=${obj.optString("algorithm", "SHA1")}")
-                append("&digits=${obj.optInt("digits", 6)}")
-                append("&period=${obj.optInt("period", 30)}")
-                if (type == "hotp") append("&counter=${obj.optLong("counter", 0)}")
-            }
+            val uri = otpauthUri(
+                type = type,
+                issuer = issuer,
+                accountName = accountName,
+                secret = secret,
+                algorithm = obj.optString("algorithm", "SHA1"),
+                digits = obj.optInt("digits", 6),
+                period = obj.optInt("period", 30),
+                counter = if (type == "hotp") obj.optLong("counter", 0) else null
+            )
             oathRepo.importFromUri(uri)
             if (existed) updated++ else added++
         }
@@ -223,4 +222,30 @@ class SyncEngine(
     private companion object {
         const val TAG = "SyncEngine"
     }
+}
+
+/**
+ * The `otpauth://` URI ([Key Uri Format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format))
+ * that [SyncEngine.mergeOath] hands to `OathRepository.importFromUri` for a
+ * synced OATH credential. [counter] is written for HOTP only (non-null).
+ */
+internal fun otpauthUri(
+    type: String,
+    issuer: String?,
+    accountName: String,
+    secret: String,
+    algorithm: String,
+    digits: Int,
+    period: Int,
+    counter: Long?
+): String = buildString {
+    append("otpauth://$type/")
+    if (issuer != null) append("$issuer:")
+    append(accountName)
+    append("?secret=$secret")
+    if (issuer != null) append("&issuer=$issuer")
+    append("&algorithm=$algorithm")
+    append("&digits=$digits")
+    append("&period=$period")
+    if (counter != null) append("&counter=$counter")
 }
