@@ -15,11 +15,15 @@
 
 package com.automatethethings.xkey.transport
 
+import android.app.KeyguardManager
+import android.app.NotificationManager
 import android.content.Context
+import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
+import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -35,6 +39,8 @@ import com.automatethethings.xkey.remote.SharedKeyStore
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
+import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.KeyDao
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -642,6 +648,47 @@ class StreamPairingSessionRevocationTest {
         }
         assertEquals("nothing may reach the stream", writes, gate.writes.get())
         assertEquals("a refused send must not consume a nonce", nonce, phone.noise.sendNonceForTest())
+    }
+
+    /**
+     * The legacy `deleteKey` RPC is a revoke like every other key delete: a
+     * share of the key paused before admission when the real handler deletes
+     * the key is refused there, with nothing written and no nonce consumed,
+     * and the key's metadata row goes with its Keystore entry.
+     */
+    @Test
+    fun aShareWhoseKeyIsDeletedByTheLegacyDeleteKeyRpcWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val deleter = realDeleteHandler(keyDao)
+        var deletedKeyId: String? = null
+        assertRevokedAtAdmission { store ->
+            deletedKeyId = store.keyId
+            val request = JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "deleteKey")
+                .put("params", JSONObject().put("credentialId", store.keyId))
+            val response = JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
+            assertTrue(
+                "the delete must succeed, got $response",
+                response.optJSONObject("result")?.optBoolean("deleted") == true
+            )
+        }
+        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+    }
+
+    /** The real [RequestHandler] with only its Android and storage edges mocked. */
+    private fun realDeleteHandler(keyDao: KeyDao): RequestHandler {
+        mockkStatic(Looper::class)
+        every { Looper.getMainLooper() } returns mockk(relaxed = true)
+        val database = mockk<XKeyDatabase>(relaxed = true)
+        every { database.keyDao() } returns keyDao
+        mockkObject(XKeyDatabase.Companion)
+        every { XKeyDatabase.getInstance(any()) } returns database
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)
+        every { context.getSystemService(NotificationManager::class.java) } returns
+            mockk<NotificationManager>(relaxed = true)
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.keyExists(any()) } returns true
+        every { keystore.deleteKey(any()) } returns true
+        return RequestHandler(context, keystore, biometricLauncher = null, sessionAuthManager = null)
     }
 
     private suspend fun assertRevokedAtAdmission(revoke: suspend (SharedKeyStore) -> Unit) {
