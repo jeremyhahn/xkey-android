@@ -739,6 +739,41 @@ class TrustStoreRepositoryTest {
     }
 
     @Test
+    fun `importFromURL keeps url credentials, query and fragment out of the audit log`() = runTest {
+        coEvery { caFetcher.fetchBundle(any()) } returns bundleOf(TestCertificates.LEAF_A_PEM)
+        captureAudit()
+
+        repository.importFromURL("https://user:secret@example.com/ca.pem?token=abc&sig=xyz#frag")
+
+        val imports = auditedOf(AuditOperationType.TRUST_STORE_IMPORT)
+        assertEquals(1, imports.size)
+        val source = details(imports[0]).getString("source")
+        assertEquals("url:https://example.com/ca.pem", source)
+        listOf("user", "secret", "abc", "xyz", "frag").forEach {
+            assertFalse("source leaks $it: $source", source.contains(it))
+        }
+        assertFalse(imports[0].details!!.contains("secret"))
+        val stored = repository.getCertificate(TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM))
+        assertEquals(source, stored!!.source)
+    }
+
+    @Test
+    fun `importFromURL logs a malformed url without its raw text`() = runTest {
+        coEvery { caFetcher.fetchBundle(any()) } returns bundleOf(TestCertificates.LEAF_A_PEM)
+        captureAudit()
+
+        repository.importFromURL("https://user:secret@exa mple.com/ca.pem?token=abc#frag")
+
+        val imports = auditedOf(AuditOperationType.TRUST_STORE_IMPORT)
+        assertEquals(1, imports.size)
+        val source = details(imports[0]).getString("source")
+        assertTrue(source.startsWith("url:"))
+        listOf("user", "secret", "exa mple", "abc", "frag").forEach {
+            assertFalse("source leaks $it: $source", source.contains(it))
+        }
+    }
+
+    @Test
     fun `importInternalCACertificate records source internal-ca`() = runTest {
         captureAudit()
 
