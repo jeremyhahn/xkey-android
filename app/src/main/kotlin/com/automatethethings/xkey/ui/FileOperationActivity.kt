@@ -48,6 +48,7 @@ import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.SignerVerification
+import com.automatethethings.xkey.media.XmpContainers
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.ContactDao
@@ -62,6 +63,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.time.Instant
 
 /**
@@ -947,6 +949,13 @@ class FileOperationActivity : AppCompatActivity() {
                     withContext(Dispatchers.Main) {
                         showResult(getString(R.string.file_operation_sign_success))
                     }
+                } else if (embedInPlace(uri, mimeType, cad)) {
+                    keyDao.recordUsage(key.keyId)
+                    AuditLogger.logFileSigned(key.keyId, key.label, fileName)
+
+                    withContext(Dispatchers.Main) {
+                        showResult(getString(R.string.file_operation_sign_success))
+                    }
                 } else {
                     // Save as sidecar: prompt user for output location
                     pendingSignatureJson = cad.toJsonString()
@@ -962,6 +971,22 @@ class FileOperationActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) { showError(e) }
             }
         }
+    }
+
+    /**
+     * Embeds [cad] in the shared MP4/MOV, PNG or WebP at [uri], replacing any
+     * signature already there (an auto-signed file carries one, and readers
+     * prefer it to a sidecar). False when the file keeps a sidecar instead.
+     */
+    private fun embedInPlace(uri: Uri, mimeType: String, cad: ContentAuthenticityData): Boolean {
+        val format = XmpContainers.formatOf(mimeType) ?: return false
+        return XmpMetadataHelper.replaceEmbeddedSignature(
+            open = { contentResolver.openInputStream(uri) ?: throw IOException("Cannot open $uri") },
+            openOutput = { contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Cannot write $uri") },
+            format = format,
+            data = cad,
+            workDir = cacheDir
+        )
     }
 
     /**

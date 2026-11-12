@@ -125,7 +125,8 @@ object XmpMetadataHelper {
      */
     fun appendSignature(filePath: String, entry: SignatureEntry): Unit = synchronized(lockFor(filePath)) {
         val format = XmpContainers.formatOf(getMimeType(filePath))
-        val embedded = format?.let { readEmbeddedSignature(filePath, it) }
+        // Not the swallowing reader: a failed read must not route the append to a sidecar.
+        val embedded = format?.let { probeEmbeddedSignature(filePath, it) }
         val existing = embedded ?: readSignature(filePath)
             ?: throw IllegalStateException("No existing signature data found to append to")
         val updated = existing.copy(signatures = existing.signatures + entry)
@@ -136,13 +137,54 @@ object XmpMetadataHelper {
         }
     }
 
+    /**
+     * Signs MP4/MOV, PNG or WebP the caller can only stream, such as a
+     * shared content URI, in place: [open] is copied into a working file
+     * under [workDir] (at most [maxEmbedBytes]), [data] is embedded there,
+     * replacing any earlier signature, and the result is written to
+     * [openOutput]. False, with nothing written, when the media cannot carry
+     * an embedded signature and carries none, so a detached sidecar is what
+     * verifies. Throws when it carries one that cannot be replaced, or a read
+     * fails: a sidecar would then be shadowed by the old embedded signer.
+     */
     fun replaceEmbeddedSignature(
         open: () -> InputStream,
         openOutput: () -> OutputStream,
         format: XmpContainers.Format,
         data: ContentAuthenticityData,
         workDir: File
-    ): Boolean = TODO("fix round")
+    ): Boolean {
+        val work = File.createTempFile(".xkey-sign.", ".xkeytmp", workDir)
+        try {
+            val whole = open().use { input -> work.outputStream().use { copyAtMost(input, it, maxEmbedBytes.toLong()) } }
+            if (!whole) {
+                val carried = open().use { XmpContainers.read(it.buffered(), format) }
+                if (carried != null) {
+                    throw IOException("media is larger than $maxEmbedBytes bytes and carries an embedded signature")
+                }
+                return false
+            }
+            val embedded = synchronized(lockFor(work.path)) { writeEmbeddedSignature(work.path, format, data) }
+            if (!embedded) return false
+            openOutput().use { output -> work.inputStream().use { it.copyTo(output) } }
+            return true
+        } finally {
+            work.delete()
+        }
+    }
+
+    /** Copies [input] to [output]; false as soon as it passes [limit] bytes. */
+    private fun copyAtMost(input: InputStream, output: OutputStream, limit: Long): Boolean {
+        val buffer = ByteArray(8192)
+        var total = 0L
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) return true
+            total += n
+            if (total > limit) return false
+            output.write(buffer, 0, n)
+        }
+    }
 
     fun getSidecarPath(filePath: String): String = "$filePath.xkeysig"
 
@@ -192,25 +234,21 @@ object XmpMetadataHelper {
         data: ContentAuthenticityData
     ): Boolean {
         val file = File(filePath)
+        // A failed read propagates (no catch): it has not shown the file
+        // unsigned, and a sidecar beside a signed file would be shadowed.
         if (file.length() > maxEmbedBytes) {
-            val carried = try {
-                file.inputStream().use { XmpContainers.read(it.buffered(), format) }
-            } catch (_: IOException) {
-                null
-            }
+            val carried = file.inputStream().use { XmpContainers.read(it.buffered(), format) }
             if (carried != null) {
                 throw IOException("$filePath is larger than $maxEmbedBytes bytes and carries an embedded signature")
             }
             return false
         }
-        val bytes = try {
-            file.readBytes()
-        } catch (_: IOException) {
-            return false
-        }
+        val bytes = file.readBytes()
         val embedded = XmpContainers.embed(bytes, format, data.toJsonString())
         if (embedded == null) {
-            if (XmpContainers.extract(bytes, format) != null) {
+            // The readers' view: a file embed refuses, such as one with too
+            // many boxes to parse, may still read as signed.
+            if (XmpContainers.read(bytes.inputStream(), format) != null) {
                 throw IOException("$filePath carries an embedded signature that cannot be rewritten")
             }
             return false
@@ -223,6 +261,16 @@ object XmpMetadataHelper {
             temp.delete()
         }
         return true
+    }
+
+/** The embedded signature, or null when the file carries none; an [IOException] reading it propagates. */
+    private fun probeEmbeddedSignature(filePath: String, format: XmpContainers.Format): ContentAuthenticityData? {
+        val json = File(filePath).inputStream().use { XmpContainers.read(it.buffered(), format) } ?: return null
+        return try {
+            ContentAuthenticityData.fromJsonString(json)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun readEmbeddedSignature(filePath: String, format: XmpContainers.Format): ContentAuthenticityData? {

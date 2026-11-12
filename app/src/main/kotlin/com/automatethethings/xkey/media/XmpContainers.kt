@@ -37,7 +37,7 @@ import java.util.zip.CRC32
  * [embed] refuses (returns null) whenever that cannot hold: a foreign XMP
  * packet, an MP4 whose last box runs to the end of the file, a VP8X [strip]
  * would take for the one [embed] adds, a packet larger than [read] loads,
- * or bytes that do not parse.
+ * or bytes that do not parse (more than [MAX_PARTS] boxes or chunks among them).
  */
 object XmpContainers {
 
@@ -56,6 +56,15 @@ object XmpContainers {
 
     /** The largest packet the stream reader loads; ours are a few KB. */
     private const val MAX_PACKET = 1 shl 20
+
+    /**
+     * The most top-level boxes or chunks [parse] keeps. Each costs an object
+     * and a string, so a file of millions of empty chunks, small on disk,
+     * would otherwise fill the heap; a file with more is refused as if it did
+     * not parse. Real media has a few, a fragmented video or an animation
+     * some thousands.
+     */
+    private const val MAX_PARTS = 1 shl 16
 
     private const val WEBP_XMP_FLAG = 0x04
     private const val WEBP_ALPHA_FLAG = 0x10
@@ -197,16 +206,13 @@ object XmpContainers {
     /**
      * The JSON our box/chunk holds, read from [input] by walking the box or
      * chunk headers and skipping every payload but an XMP one. Null when there
-     * is none or the stream does not parse.
+     * is none or the stream does not parse. An [java.io.IOException] from
+     * [input] propagates: a read that failed has not shown the file unsigned.
      */
-    fun read(input: InputStream, format: Format): String? = try {
-        when (format) {
-            Format.ISO_BMFF -> readBmff(input)
-            Format.PNG -> readPng(input)
-            Format.WEBP -> readWebp(input)
-        }
-    } catch (_: java.io.IOException) {
-        null
+    fun read(input: InputStream, format: Format): String? = when (format) {
+        Format.ISO_BMFF -> readBmff(input)
+        Format.PNG -> readPng(input)
+        Format.WEBP -> readWebp(input)
     }
 
     // -------------------------------------------------------------------------
@@ -247,6 +253,7 @@ object XmpContainers {
             }
             if (size < header || size > data.size - i) return null
             val end = i + size.toInt()
+            if (parts.size == MAX_PARTS) return null
             parts += Part(i, end, fourcc(data, i + 4), i + header, end, openEnded = size32 == 0L)
             i = end
         }
@@ -261,6 +268,7 @@ object XmpContainers {
             val length = u32be(data, i)
             if (length > data.size - i - 12) return null
             val end = i + 12 + length.toInt()
+            if (parts.size == MAX_PARTS) return null
             val type = fourcc(data, i + 4)
             parts += Part(i, end, type, i + 8, end - 4)
             i = end
@@ -280,6 +288,7 @@ object XmpContainers {
             val padded = size + (size and 1)
             if (padded > data.size - i - 8) return null
             val end = i + 8 + padded.toInt()
+            if (parts.size == MAX_PARTS) return null
             parts += Part(i, end, fourcc(data, i), i + 8, i + 8 + size.toInt())
             i = end
         }
