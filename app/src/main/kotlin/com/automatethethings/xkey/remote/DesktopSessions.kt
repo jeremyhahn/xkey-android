@@ -15,7 +15,9 @@
 package com.automatethethings.xkey.remote
 
 import com.automatethethings.xkey.protocol.RemoteAttestDeviceResult
+import java.lang.ref.WeakReference
 import java.util.Base64
+import java.util.WeakHashMap
 
 /**
  * A desktop transport with a connection on it: what sends to the desktop and
@@ -54,7 +56,14 @@ class DesktopSessions(
     private val transports: () -> List<DesktopTransport>,
     private val confirmedPeer: () -> String?
 ) {
-    private var cached: Pair<BidirectionalMessageRouter, RemoteKeyClient>? = null
+    /**
+     * One client per router, so a switch to another desktop and back reuses
+     * the first client and its id counter. Routers do not override equals,
+     * so the map keys by identity. The client is held weakly too, since it
+     * holds its router: a call still waiting on a reply keeps its client
+     * alive, and a client nobody holds has no reply left to collide with.
+     */
+    private val clients = WeakHashMap<BidirectionalMessageRouter, WeakReference<RemoteKeyClient>>()
 
     /** The key client of the first transport with an established session, or null when there is none. */
     @Synchronized
@@ -81,8 +90,8 @@ class DesktopSessions(
         return session.client.attestDevice(Base64.getEncoder().encodeToString(nonce))
     }
 
-    private fun clientFor(transport: DesktopTransport): RemoteKeyClient {
-        cached?.let { (router, client) -> if (router === transport.router) return client }
-        return RemoteKeyClient(transport.sender, transport.router).also { cached = transport.router to it }
-    }
+    private fun clientFor(transport: DesktopTransport): RemoteKeyClient =
+        clients[transport.router]?.get()
+            ?: RemoteKeyClient(transport.sender, transport.router)
+                .also { clients[transport.router] = WeakReference(it) }
 }
