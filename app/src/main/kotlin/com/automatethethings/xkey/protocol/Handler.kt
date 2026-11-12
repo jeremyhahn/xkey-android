@@ -2724,7 +2724,9 @@ class RequestHandler(
             Log.w(TAG, "Key sharing refused: withdrawal pending persistence")
             return false
         }
-        return when (entity.sharingPolicy) {
+        // A policy change not yet stored is enforced over the stored one, so
+        // a narrowing from All Peers to Selected Peers denies at once.
+        return when (KeySharingPeers.enforcedPolicy(entity.keyId) ?: entity.sharingPolicy) {
             SharingPolicyType.PRIVATE -> false
             SharingPolicyType.ALL_PEERS -> true
             SharingPolicyType.SELECTED_PEERS -> {
