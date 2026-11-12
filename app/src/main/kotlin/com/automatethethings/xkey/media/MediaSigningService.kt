@@ -50,8 +50,25 @@ import java.time.Instant
 /**
  * The content hash the automatic signer signs, kept apart from the service so
  * the signing-to-verification round trip can be tested on the JVM.
+ *
+ * Memory stays bounded for every capture: media other than JPEG is hashed by
+ * streaming, and a JPEG is read into memory only up to
+ * [MAX_CANONICAL_JPEG_BYTES].
  */
 internal object AutoSignHash {
+
+    /**
+     * Largest JPEG the automatic signer canonicalises: 32 MiB, above any
+     * phone camera's JPEG output. Canonicalising needs the file in memory
+     * (about three times this at peak: the read buffer, its copy and the
+     * canonical bytes), so a larger JPEG is refused with
+     * [TooLargeException] rather than risking the app heap.
+     */
+    const val MAX_CANONICAL_JPEG_BYTES = 32 * 1024 * 1024
+
+    /** A JPEG above [limit] bytes, which the automatic signer refuses to sign. */
+    class TooLargeException(val limit: Int) :
+        java.io.IOException("JPEG is larger than $limit bytes, the most the automatic signer canonicalises")
 
     /**
      * The stored `contentHash` for [data], typed by [mimeType]: the canonical
@@ -63,10 +80,36 @@ internal object AutoSignHash {
     fun contentHash(data: ByteArray, mimeType: String?): String =
         MediaHasher.hashCanonical(data, mimeType)
 
-    fun contentHashUri(contentResolver: ContentResolver, uri: Uri): String {
-        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+    /**
+     * [contentHash] over the content at [uri], typed by the resolver. Media
+     * other than JPEG is hashed whole by streaming ([MediaHasher.hashUri]):
+     * its signature goes to a sidecar, and for it the canonical hash is the
+     * whole-file hash. A JPEG above [limit] bytes throws [TooLargeException].
+     */
+    fun contentHashUri(
+        contentResolver: ContentResolver,
+        uri: Uri,
+        limit: Int = MAX_CANONICAL_JPEG_BYTES
+    ): String {
+        val mimeType = contentResolver.getType(uri)
+        if (!MediaHasher.isCanonicalisedJpeg(mimeType)) return MediaHasher.hashUri(contentResolver, uri)
+        val bytes = contentResolver.openInputStream(uri)?.use { readAtMost(it, limit) }
             ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        return contentHash(bytes, contentResolver.getType(uri))
+        return contentHash(bytes, mimeType)
+    }
+
+    /** All of [input], or [TooLargeException] as soon as it passes [limit] bytes. */
+    private fun readAtMost(input: java.io.InputStream, limit: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        var total = 0L
+        while (true) {
+            val n = input.read(buffer)
+            if (n == -1) return out.toByteArray()
+            total += n
+            if (total > limit) throw TooLargeException(limit)
+            out.write(buffer, 0, n)
+        }
     }
 }
 
@@ -201,7 +244,23 @@ class MediaSigningService : Service() {
                 }
 
                 // Hash the media content
-                val contentHash = AutoSignHash.contentHashUri(contentResolver, uri)
+                val contentHash = try {
+                    AutoSignHash.contentHashUri(contentResolver, uri)
+                } catch (e: AutoSignHash.TooLargeException) {
+                    // Refused, not failed: record it once so a repeated
+                    // MediaStore event does not audit it again.
+                    Log.w(TAG, "Not auto-signing $uri: ${e.message}")
+                    AuditLogger.logKeyUsed(
+                        keyId = keyId,
+                        keyLabel = keyEntity.label,
+                        keyType = keyEntity.keyType,
+                        operation = "media_auto_sign",
+                        success = false,
+                        errorMessage = e.message
+                    )
+                    processedUris.add(uriString)
+                    return@launch
+                }
                 val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
                 // Sign with the configured key
@@ -250,6 +309,10 @@ class MediaSigningService : Service() {
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to auto-sign media: $uri", e)
+            } catch (e: OutOfMemoryError) {
+                // Hashing is bounded, so this is a backstop: one capture
+                // that cannot be signed must not take the process down.
+                Log.e(TAG, "Out of memory auto-signing media: $uri", e)
             }
         }
         signingJobs += job

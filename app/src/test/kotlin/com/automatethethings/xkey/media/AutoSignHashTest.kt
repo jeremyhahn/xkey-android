@@ -19,6 +19,7 @@ import android.net.Uri
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.io.InputStream
 
@@ -61,5 +62,30 @@ class AutoSignHashTest {
             MediaHasher.hashStream(ZeroStream(size)),
             AutoSignHash.contentHashUri(resolver, uri)
         )
+    }
+
+    @Test
+    fun `a JPEG above the bound is refused, never read whole`() {
+        val (resolver, uri) = resolverFor("image/jpeg", 1025)
+
+        val refused = assertThrows(AutoSignHash.TooLargeException::class.java) {
+            AutoSignHash.contentHashUri(resolver, uri, limit = 1024)
+        }
+        assertEquals(1024, refused.limit)
+    }
+
+    @Test
+    fun `a JPEG at the bound gets the canonical hash`() {
+        val (resolver, uri) = resolverFor("image/jpeg", 1024)
+
+        assertEquals(
+            MediaHasher.hashCanonical(ByteArray(1024), "image/jpeg"),
+            AutoSignHash.contentHashUri(resolver, uri, limit = 1024)
+        )
+    }
+
+    @Test
+    fun `the default bound is 32 MiB`() {
+        assertEquals(32 * 1024 * 1024, AutoSignHash.MAX_CANONICAL_JPEG_BYTES)
     }
 }
