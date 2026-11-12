@@ -264,13 +264,17 @@ class KeySharingPendingIntentHandlerTest {
         val key = "k-pending-selected"
         table.value = listOf(KeySharingPolicy(key, PEER_B))
         store(key, SharingPolicyType.ALL_PEERS)
+        var failing = true
         val peers = KeySharingPeers(key, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
         assertTrue(exports(key, PEER_A))
 
         // All Peers -> Selected Peers fails to persist; the old rows are
         // cleared, then PEER_B is granted again.
         detached {
-            peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS) { throw IllegalStateException("disk I/O error") }
+            peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS) {
+                if (failing) throw IllegalStateException("disk I/O error")
+                store(key, SharingPolicyType.SELECTED_PEERS)
+            }
         }
         assertTrue(peers.setAllowed(PEER_B, true))
         assertEquals(SharingPolicyType.ALL_PEERS, keys.getValue(key).sharingPolicy)
@@ -279,6 +283,13 @@ class KeySharingPendingIntentHandlerTest {
         assertFalse("an ungranted desktop could list or sign through stored All Peers", shares(key, SharingPolicyType.ALL_PEERS, PEER_A))
         assertFalse("an ungranted desktop could export through stored All Peers", exports(key, PEER_A))
         assertTrue(shares(key, SharingPolicyType.ALL_PEERS, PEER_B))
+        assertTrue(exports(key, PEER_B))
+
+        failing = false
+        advanceUntilIdle()
+
+        assertEquals(SharingPolicyType.SELECTED_PEERS, keys.getValue(key).sharingPolicy)
+        assertFalse(exports(key, PEER_A))
         assertTrue(exports(key, PEER_B))
     }
 

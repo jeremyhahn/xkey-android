@@ -448,7 +448,7 @@ class PairedDeviceGrantCleanupTest {
         every { Log.e(any(), any<String>()) } returns 0
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
-        coEvery { dao.isKeySharedWithPeer(any(), any()) } answers {
+        coEvery { dao.isPeerGranted(any(), any()) } answers {
             val keyId = firstArg<String>()
             val peer = secondArg<String>()
             table.any { it.keyId == keyId && it.peerPublicKeyHex == peer }

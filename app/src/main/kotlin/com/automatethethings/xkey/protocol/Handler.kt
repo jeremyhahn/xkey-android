@@ -2740,7 +2740,10 @@ class RequestHandler(
                     Log.w(TAG, "SELECTED_PEERS refused: grant revocation pending for peer")
                     false
                 } else {
-                    keySharingPolicyDao.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
+                    // The grant row alone, never isKeySharedWithPeer: it reads
+                    // the stored policy, which may still be All Peers while a
+                    // Selected Peers change of it is pending (#174).
+                    keySharingPolicyDao.isPeerGranted(entity.keyId, peerPublicKeyHex)
                 }
             }
         }
