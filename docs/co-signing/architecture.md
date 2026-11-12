@@ -1,6 +1,6 @@
 # Co-signing architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
+> **Status: REFERENCE** · Last verified: 2026-11-12
 > As-built description of the co-sign message extension and the co-sign flows in xKey.
 
 ## Message Types
@@ -9,8 +9,41 @@
 
 | Method | Description | Parameters |
 |--------|-------------|------------|
-| `cosign.request` | Request co-signature from connected device | `hash`, `hashAlgorithm`, `initiatorFingerprint` |
+| `cosign.request` | Request co-signature from connected device | `hash` (hex), `hashAlgorithm` (default `SHA-256`), `keyId` (optional), `from` |
 | `cosign.response` | Return co-signature to initiator | `signature` (base64), `keyFingerprint`, `signerName`, `algorithm` |
+
+### Handling `cosign.request` on the phone
+
+`cosign.request` is in the shared dispatch map, so every transport reaches the
+same handler (`RequestHandler.handleCosignRequest`). It signs only after these
+checks, in this order:
+
+1. **Confirmed peer.** The session must have a confirmed peer identity; an
+   anonymous session cannot ask the owner to vouch for anything.
+2. **Whole digest.** `hashAlgorithm` must be `SHA-256`, `SHA-384` or
+   `SHA-512`, and `hash` must decode to exactly its digest length (32, 48 or
+   64 bytes). A truncated or padded value is refused, never signed as
+   whatever it decodes to.
+3. **Signing keys only.** A named `keyId` must be a `signing` key; any other
+   type, a FIDO2 credential included, is refused. Without `keyId` the phone
+   takes the first stored `signing` key and never falls back to a FIDO2 key.
+4. **Owner approval.** The phone shows a biometric prompt (with a
+   notification when the screen is locked) whose subtitle names the first 8
+   hex characters of the hash. It signs only when the owner approves; every
+   co-signature prompts, with no session cache.
+
+The success result is unchanged: `signature` (base64), `keyFingerprint`,
+`algorithm` and `signerName`.
+
+| Condition | Error |
+|-----------|-------|
+| No params, or empty `hash` | `INVALID_PARAMS` |
+| No confirmed peer for the session | `OPERATION_DENIED` |
+| Unknown `hashAlgorithm`, `hash` not hex, or wrong digest length | `INVALID_PARAMS` |
+| Named `keyId` not found, or no stored signing key | `KEY_NOT_FOUND` |
+| Named `keyId` is not a `signing` key (FIDO2 included) | `OPERATION_DENIED` |
+| No approval prompt available, owner cancels, or authentication fails | `BIOMETRIC_FAILED` |
+| Keystore signing fails after approval | `SIGNING_FAILED` |
 
 ## Data Flow: Co-Sign via BLE
 
