@@ -61,6 +61,8 @@ class DesktopKeysControllerTest {
             RemoteAttestKeyResult("tpm2", listOf("A", "B"), Base64.getEncoder().encodeToString(ByteArray(5)), nonce)
         }
         var lastVerify: List<String> = emptyList()
+        /** Runs when sign is called, before it answers. */
+        var onSign: () -> Unit = {}
 
         private fun call(name: String) {
             calls += name
@@ -76,7 +78,7 @@ class DesktopKeysControllerTest {
             call("getPublicKey:$backend:$keyId"); return publicKey
         }
         override suspend fun sign(backend: String, keyId: String, data: String): RemoteSignResult {
-            call("sign:$backend:$keyId"); return RemoteSignResult("c2ln", "ecdsa-p256-sha256")
+            call("sign:$backend:$keyId"); onSign(); return RemoteSignResult("c2ln", "ecdsa-p256-sha256")
         }
         override suspend fun verify(
             backend: String, keyId: String, data: String, signature: String, algorithm: String
@@ -88,11 +90,13 @@ class DesktopKeysControllerTest {
         }
     }
 
+    private val desktopA = "aa".repeat(32)
+    private val desktopB = "bb".repeat(32)
     private val fake = FakeSource()
-    private var connected: DesktopKeysSource? = fake
+    private var connected: DesktopSession? = DesktopSession(desktopA, fake)
     private val published = mutableListOf<DesktopKeysState>()
     private val fixedNonce = ByteArray(32) { it.toByte() }
-    private val controller = DesktopKeysController({ connected }, { fixedNonce }, { published += it })
+    private val controller = DesktopKeysController(desktopA, { connected }, { fixedNonce }, { published += it })
 
     private suspend fun openDetail(): DesktopKeysState.Detail {
         controller.open()
@@ -229,6 +233,52 @@ class DesktopKeysControllerTest {
         assertFalse(controller.back())
     }
 
+    @Test
+    fun `a session with another desktop at open sends nothing`() = runTest {
+        connected = DesktopSession(desktopB, fake)
+        assertEquals(DesktopKeysState.NoSession, controller.open())
+        assertTrue(fake.calls.isEmpty())
+    }
+
+    @Test
+    fun `another desktop taking the session gets no request and clears the screen`() = runTest {
+        openDetail()
+        val other = FakeSource()
+        connected = DesktopSession(desktopB, other)
+        assertEquals(DesktopKeysState.NoSession, controller.signTest())
+        assertTrue(other.calls.isEmpty())
+        assertTrue(fake.calls.none { it.startsWith("sign") })
+        assertFalse("nothing left to go back to", controller.back())
+    }
+
+    @Test
+    fun `the client is captured once and a new one is refused`() = runTest {
+        controller.open()
+        val other = FakeSource()
+        connected = DesktopSession(desktopA, other)
+        assertEquals(DesktopKeysState.NoSession, controller.chooseBackend(tpm))
+        assertTrue(other.calls.isEmpty())
+        assertEquals(listOf("listBackends"), fake.calls)
+    }
+
+    @Test
+    fun `the peer changing between sign and verify stops the verify`() = runTest {
+        openDetail()
+        fake.onSign = { connected = DesktopSession(desktopB, fake) }
+        assertEquals(DesktopKeysState.NoSession, controller.signTest())
+        assertTrue(fake.calls.none { it.startsWith("verify") })
+        assertEquals(DesktopKeysState.NoSession, controller.state)
+    }
+
+    @Test
+    fun `the session ending clears the screen`() = runTest {
+        controller.open()
+        controller.chooseBackend(tpm)
+        connected = null
+        assertEquals(DesktopKeysState.NoSession, controller.chooseKey(key))
+        assertFalse(controller.back())
+    }
+
     /** Over the real client: the screen's first two steps put these methods on the wire. */
     @Test
     fun `opening sends remote listBackends and choosing a backend sends remote listKeys`() = runTest {
@@ -236,7 +286,8 @@ class DesktopKeysControllerTest {
         try {
             val router = BidirectionalMessageRouter(mockk<RequestHandler>())
             val sender = ScriptedMessageSender(router)
-            val wire = DesktopKeysController({ DesktopKeysSource.of(RemoteKeyClient(sender, router, 5_000L)) })
+            val session = DesktopSession(desktopA, DesktopKeysSource.of(RemoteKeyClient(sender, router, 5_000L)))
+            val wire = DesktopKeysController(desktopA, { session })
             sender.succeedWith(
                 """{"backends":[{"name":"tpm2","type":"tpm2","hardwareBacked":true,"signing":true,""" +
                     """"decryption":false,"symmetricCrypto":false,"keyAgreement":false,"attestation":true}]}"""
