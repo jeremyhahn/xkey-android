@@ -344,9 +344,13 @@ public class TrustStoreRepository(
         // ones kept above. A directory that cannot be listed is a failure.
         val keepNames = kept.map { getCertificateFile(it.fingerprint).name }.toSet() + metadataFile.name
         val listing = trustStoreDir.listFiles()
-        val strayFailed = listing.orEmpty()
-            .filter { it.name !in keepNames && !removeFile(it) }
-            .map { it.name.removeSuffix(".der") }
+        val (strays, strayLeft) = listing.orEmpty()
+            .filter { it.name !in keepNames }
+            .partition { removeFile(it) }
+        // A removed certificate file is a removed certificate even when its
+        // metadata row was lost: audit it, with no subject to name.
+        val strayRemoved = strays.filter { it.name.endsWith(".der") }.map { it.name.removeSuffix(".der") }
+        val strayFailed = strayLeft.map { it.name.removeSuffix(".der") }
 
         val removed = if (metadataError == null) filesRemoved else emptyList()
         filesRemoved.forEach {
@@ -357,10 +361,11 @@ public class TrustStoreRepository(
             }
         }
         kept.forEach { auditDelete(it.subjectDN, it.fingerprint, FILE_NOT_DELETED) }
+        strayRemoved.forEach { auditDelete("", it) }
         strayFailed.forEach { auditDelete("", it, FILE_NOT_DELETED) }
 
         ClearResult(
-            removed = removed.map { it.fingerprint },
+            removed = removed.map { it.fingerprint } + strayRemoved,
             failed = (entries - removed.toSet()).map { it.fingerprint } + strayFailed,
             unlisted = listing == null
         )
@@ -587,7 +592,18 @@ public class TrustStoreRepository(
                 }
             )
         }
-        fileWriter(File(trustStoreDir, "metadata.json"), array.toString())
+        // Write a temp file and rename it over the metadata, so a write that
+        // fails part-way leaves the previous document in place.
+        val metadataFile = File(trustStoreDir, "metadata.json")
+        val tempFile = File(trustStoreDir, "metadata.json.tmp")
+        try {
+            fileWriter(tempFile, array.toString())
+            if (!tempFile.renameTo(metadataFile)) {
+                throw IOException("cannot replace ${metadataFile.name}")
+            }
+        } finally {
+            tempFile.delete()
+        }
     }
 
     private suspend fun saveMetadata(certs: List<TrustedCA>): Unit = withContext(Dispatchers.IO) {

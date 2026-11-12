@@ -64,6 +64,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.truststore.CABundleFetchException
 import com.automatethethings.xkey.truststore.TrustStoreRepository
 import com.automatethethings.xkey.truststore.TrustedCA
+import com.automatethethings.xkey.truststore.clearTrustStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
@@ -1776,16 +1777,22 @@ class TrustStoreActivity : AppCompatActivity() {
             .setPositiveButton(R.string.trust_store_clear_all) { _, _ ->
                 lifecycleScope.launch {
                     val certDao = XKeyDatabase.getInstance(this@TrustStoreActivity).certificateDao()
-                    val allCerts = trustStoreRepository.getAllCertificates()
-                    for (cert in allCerts) {
-                        certDao.deleteByFingerprint(cert.fingerprint)
+                    // Rows go only for the certificates the trust store removed.
+                    val result = clearTrustStore(trustStoreRepository) { certDao.deleteByFingerprint(it) }
+                    if (result.complete) {
+                        Snackbar.make(
+                            rootLayout,
+                            R.string.trust_store_cleared,
+                            Snackbar.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        Snackbar.make(
+                            rootLayout,
+                            "Trust store only partly cleared: ${result.failed.size} " +
+                                "certificate(s) could not be removed and are still trusted",
+                            Snackbar.LENGTH_LONG
+                        ).show()
                     }
-                    trustStoreRepository.clearAll()
-                    Snackbar.make(
-                        rootLayout,
-                        R.string.trust_store_cleared,
-                        Snackbar.LENGTH_SHORT
-                    ).show()
                     loadCertificates()
                 }
             }
