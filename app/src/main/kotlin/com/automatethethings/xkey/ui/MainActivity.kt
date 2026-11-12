@@ -50,6 +50,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.time.Clock
 import java.time.ZoneId
 import java.util.Locale
 
@@ -295,6 +296,7 @@ class MainActivity : AppCompatActivity() {
             animateCardPress(it)
             startActivity(Intent(this, AuditLogActivity::class.java))
         }
+        observeRecentActivity()
 
         // PIV Smart Card card
         binding.cardPivSmartCard.setOnClickListener {
@@ -756,6 +758,51 @@ class MainActivity : AppCompatActivity() {
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 gattService?.serviceState?.collectLatest { state ->
                     handleServiceStateChange(state)
+                }
+            }
+        }
+    }
+
+    /**
+     * Shows the newest audit entries in the Audit Log card's Recent Activity
+     * section; tapping the card opens the full audit screen.
+     */
+    private fun observeRecentActivity() {
+        val dao = XKeyDatabase.getInstance(this).auditLogDao()
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                dao.observeRecent(RecentActivityRows.DEFAULT_LIMIT).collectLatest { entries ->
+                    renderRecentActivity(RecentActivityRows.build(entries, Clock.systemDefaultZone()))
+                }
+            }
+        }
+    }
+
+    private fun renderRecentActivity(rows: List<RecentActivityRow>) {
+        val container = binding.layoutRecentActivityRows
+        container.removeAllViews()
+        val secondary = UIHelpers.resolveThemeColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant)
+        val error = UIHelpers.resolveThemeColor(this, androidx.appcompat.R.attr.colorError)
+        rows.forEach { row ->
+            when (row) {
+                is RecentActivityRow.Empty -> container.addView(TextView(this).apply {
+                    text = getString(row.messageRes)
+                    textSize = 13f
+                    setTextColor(secondary)
+                })
+                is RecentActivityRow.Entry -> {
+                    val label = getString(row.labelRes)
+                    val time = getString(row.timeRes, row.timeCount)
+                    container.addView(TextView(this).apply {
+                        text = row.keyLabel?.let { getString(R.string.recent_activity_pair, label, it) } ?: label
+                        textSize = 14f
+                        setPadding(0, UIHelpers.dpToPxInt(this@MainActivity, 6), 0, 0)
+                    })
+                    container.addView(TextView(this).apply {
+                        text = getString(R.string.recent_activity_pair, getString(row.outcomeRes), time)
+                        textSize = 12f
+                        setTextColor(if (row.success) secondary else error)
+                    })
                 }
             }
         }
