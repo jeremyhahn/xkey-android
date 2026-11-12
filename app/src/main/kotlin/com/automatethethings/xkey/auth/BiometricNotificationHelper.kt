@@ -71,7 +71,8 @@ class BiometricNotificationHelper(private val context: Context) {
 
         /**
          * The data a notification's full-screen intent for [key] carries, so
-         * each key has a pending intent of its own. The prompt activities are
+         * each key has a pending intent of its own; [BiometricActivityLauncher]
+         * sets it on its direct start as well. The prompt activities are
          * started by component and read nothing from it.
          */
         internal fun intentData(key: String): Uri = Uri.Builder().scheme(INTENT_SCHEME).opaquePart(key).build()
@@ -133,7 +134,10 @@ class BiometricNotificationHelper(private val context: Context) {
         }
         // The key, whole, in the intent's data: extras do not tell two pending
         // intents apart, and two keys' hashCode() can be equal, so without it
-        // posting one request would rewrite another's pending intent.
+        // posting one request would rewrite another's pending intent. A
+        // launcher prompt already carries it (BiometricActivityLauncher sets
+        // it before the direct start), so the copy stays the same intent as
+        // the live prompt and Android routes it there (onNewIntent).
         fullScreenIntent.data = intentData(requestId)
 
         val fullScreenPendingIntent = PendingIntent.getActivity(

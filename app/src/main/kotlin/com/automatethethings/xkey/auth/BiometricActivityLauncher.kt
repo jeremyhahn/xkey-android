@@ -346,11 +346,14 @@ class BiometricActivityLauncher(
                 subtitle = subtitle,
                 description = description,
                 showOnLockScreen = showOnLockScreen
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
+            )
+            val key = NotificationKeys.approval(requestId)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // The notification's data on the direct start too, so a
+            // notification launch is the same intent and reaches this prompt.
+            intent.data = BiometricNotificationHelper.intentData(key)
 
-            onLaunch(NotificationKeys.approval(requestId), intent)
+            onLaunch(key, intent)
             context.startActivity(intent)
         }
 
@@ -427,11 +430,14 @@ class BiometricActivityLauncher(
                 subtitle = subtitle,
                 showOnLockScreen = showOnLockScreen,
                 keyAlias = keyAlias
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
+            )
+            val key = NotificationKeys.signature(requestId)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // As for requestAuthentication: one intent identity for the
+            // direct start and the notification.
+            intent.data = BiometricNotificationHelper.intentData(key)
 
-            onLaunch(NotificationKeys.signature(requestId), intent)
+            onLaunch(key, intent)
             context.startActivity(intent)
         }
 
