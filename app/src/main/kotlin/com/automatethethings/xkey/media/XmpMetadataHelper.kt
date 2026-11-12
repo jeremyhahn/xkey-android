@@ -18,18 +18,33 @@ import android.content.ContentResolver
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 
+/**
+ * Where a media file's signature lives:
+ *
+ * - JPEG: EXIF `UserComment`.
+ * - MP4/MOV, PNG and WebP: an XMP box or chunk ([XmpContainers]), so the
+ *   signature travels with the file.
+ * - Anything else (HEIC, MKV, unknown), and an MP4/MOV, PNG or WebP that
+ *   [XmpContainers.embed] refuses: a `<name>.xkeysig` sidecar.
+ *
+ * Readers try the embedded form first and fall back to a sidecar, so a file
+ * signed before embedding existed still reads.
+ */
 object XmpMetadataHelper {
 
     private const val XKEY_SIGNATURE_PREFIX = "XKEY_SIG:"
 
     fun writeSignature(filePath: String, data: ContentAuthenticityData) {
         val mimeType = getMimeType(filePath)
+        val format = XmpContainers.formatOf(mimeType)
         when {
             mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg") -> {
                 writeExifSignature(filePath, data)
             }
+            format != null && writeEmbeddedSignature(filePath, format, data) -> Unit
             else -> {
                 writeSidecarSignature(filePath, data)
             }
@@ -38,9 +53,13 @@ object XmpMetadataHelper {
 
     fun readSignature(filePath: String): ContentAuthenticityData? {
         val mimeType = getMimeType(filePath)
+        val format = XmpContainers.formatOf(mimeType)
         return when {
             mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg") -> {
                 readExifSignature(filePath) ?: readSidecarSignature(filePath)
+            }
+            format != null -> {
+                readEmbeddedSignature(filePath, format) ?: readSidecarSignature(filePath)
             }
             else -> {
                 readSidecarSignature(filePath)
@@ -48,6 +67,12 @@ object XmpMetadataHelper {
         }
     }
 
+    /**
+     * The signature embedded in the content at [uri], typed by [mimeType]:
+     * EXIF for JPEG, the XMP box or chunk for MP4/MOV, PNG and WebP (read by
+     * walking the container's headers, so a video is never loaded whole). A
+     * URI has no sidecar beside it, so anything else reads as unsigned.
+     */
     fun readSignatureFromUri(contentResolver: ContentResolver, uri: Uri, mimeType: String?): ContentAuthenticityData? {
         val type = mimeType ?: ""
         if (type.startsWith("image/jpeg") || type.startsWith("image/jpg")) {
@@ -56,17 +81,32 @@ object XmpMetadataHelper {
                     return readExifSignatureFromStream(inputStream)
                 }
             } catch (_: Exception) { }
+            return null
         }
+        val format = XmpContainers.formatOf(type) ?: return null
+        try {
+            contentResolver.openInputStream(uri)?.use { inputStream ->
+                return readEmbeddedSignatureFromStream(inputStream, format)
+            }
+        } catch (_: Exception) { }
         return null
     }
 
+    /**
+     * Adds [entry] to the file's signature, written back where it was read
+     * from: an embedded signature stays embedded, and a legacy sidecar beside
+     * an MP4/MOV, PNG or WebP stays a sidecar, so the media file is untouched.
+     */
     fun appendSignature(filePath: String, entry: SignatureEntry) {
-        val existing = readSignature(filePath)
-        if (existing != null) {
-            val updated = existing.copy(signatures = existing.signatures + entry)
-            writeSignature(filePath, updated)
+        val format = XmpContainers.formatOf(getMimeType(filePath))
+        val embedded = format?.let { readEmbeddedSignature(filePath, it) }
+        val existing = embedded ?: readSignature(filePath)
+            ?: throw IllegalStateException("No existing signature data found to append to")
+        val updated = existing.copy(signatures = existing.signatures + entry)
+        if (format != null && embedded == null) {
+            writeSidecarSignature(filePath, updated)
         } else {
-            throw IllegalStateException("No existing signature data found to append to")
+            writeSignature(filePath, updated)
         }
     }
 
@@ -95,6 +135,62 @@ object XmpMetadataHelper {
             val comment = exif.getAttribute(ExifInterface.TAG_USER_COMMENT) ?: return null
             if (!comment.startsWith(XKEY_SIGNATURE_PREFIX)) return null
             ContentAuthenticityData.fromJsonString(comment.removePrefix(XKEY_SIGNATURE_PREFIX))
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Embeds [data] in the file as XMP. False when the file cannot carry it
+     * (see [XmpContainers.embed]), so the caller writes a sidecar instead. A
+     * file that already carries an embedded signature it cannot rewrite
+     * throws: a sidecar would be shadowed by the stale embedded one.
+     *
+     * The new bytes go to a temporary file beside the media and replace it by
+     * rename, so a failed write never leaves half a video.
+     */
+    private fun writeEmbeddedSignature(
+        filePath: String,
+        format: XmpContainers.Format,
+        data: ContentAuthenticityData
+    ): Boolean {
+        val file = File(filePath)
+        val bytes = try {
+            file.readBytes()
+        } catch (_: IOException) {
+            return false
+        }
+        val embedded = XmpContainers.embed(bytes, format, data.toJsonString())
+        if (embedded == null) {
+            if (XmpContainers.extract(bytes, format) != null) {
+                throw IOException("$filePath carries an embedded signature that cannot be rewritten")
+            }
+            return false
+        }
+        val temp = File(file.absoluteFile.parentFile, ".${file.name}.xkeytmp")
+        try {
+            temp.writeBytes(embedded)
+            if (!temp.renameTo(file)) throw IOException("cannot replace $filePath")
+        } finally {
+            temp.delete()
+        }
+        return true
+    }
+
+    private fun readEmbeddedSignature(filePath: String, format: XmpContainers.Format): ContentAuthenticityData? {
+        return try {
+            File(filePath).inputStream().use { readEmbeddedSignatureFromStream(it, format) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun readEmbeddedSignatureFromStream(
+        inputStream: InputStream,
+        format: XmpContainers.Format
+    ): ContentAuthenticityData? {
+        return try {
+            XmpContainers.read(inputStream.buffered(), format)?.let(ContentAuthenticityData::fromJsonString)
         } catch (_: Exception) {
             null
         }
