@@ -42,8 +42,17 @@ class DesktopSessionsTest {
     private class Link {
         val router = BidirectionalMessageRouter(mockk<RequestHandler>())
         val sender = ScriptedMessageSender(router)
-        fun transport(established: Boolean = true, peer: String? = null) =
-            DesktopTransport(sender, router, established, peer)
+        /** A snapshot of this transport; its live connection confirms [peer] too. */
+        fun transport(established: Boolean = true, peer: String? = null): DesktopTransport {
+            sender.confirmedPeer = peer
+            return DesktopTransport(sender, router, established, peer)
+        }
+
+        /** The server's live connection is replaced by a new one confirming [peer]. */
+        fun reconnect(peer: String) {
+            sender.connection = Any()
+            sender.confirmedPeer = peer
+        }
     }
 
     private val ble = Link()
@@ -133,6 +142,33 @@ class DesktopSessionsTest {
         live = emptyList()
         assertTrue(runCatching { session.client.listBackends() }.isFailure)
         assertTrue(ble.sender.sent.isEmpty())
+    }
+
+    @Test
+    fun `A disconnecting and B reconnecting between the check and the send never reaches B`() = runTest {
+        val session = sessions.session()!!
+        assertEquals(desktopA, session.peerPublicKeyHex)
+
+        // The transport list still names A, as when the check read it, but the
+        // server's live connection is now B's.
+        ble.reconnect(desktopB)
+        ble.sender.succeedWith(backendsReply)
+        val refused = runCatching { session.client.listBackends() }
+        assertTrue("sent to B: $refused", refused.isFailure)
+        assertTrue(ble.sender.sent.isEmpty())
+    }
+
+    @Test
+    fun `a request checked on A's connection never goes out on A's next connection`() = runTest {
+        val session = sessions.session()!!
+        ble.reconnect(desktopA)
+        ble.sender.succeedWith(backendsReply)
+        assertTrue(runCatching { session.client.listBackends() }.isFailure)
+        assertTrue(ble.sender.sent.isEmpty())
+
+        // A fresh session on the new connection sends.
+        sessions.session()!!.client.listBackends()
+        assertEquals(1, ble.sender.sent.size)
     }
 
     @Test
