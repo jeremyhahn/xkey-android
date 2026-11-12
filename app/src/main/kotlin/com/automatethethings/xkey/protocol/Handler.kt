@@ -1154,8 +1154,15 @@ class RequestHandler(
         val genParams = LocalGenerateKeyParams.fromJson(params)
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
-        // Check if key already exists
-        if (keystoreManager.generalKeyExists(genParams.keyId)) {
+        // Refuse an ID that exists in any key store: the general and
+        // credential Keystore namespaces, the software store, and the
+        // metadata table. (A row that appears after this check is still
+        // replaced only as a SharePermissionLedger revoke, in KeyDao.insert.)
+        if (keystoreManager.generalKeyExists(genParams.keyId) ||
+            keystoreManager.keyExists(genParams.keyId) ||
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).contains(genParams.keyId) ||
+            keyDao.exists(genParams.keyId)
+        ) {
             throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
         }
 
