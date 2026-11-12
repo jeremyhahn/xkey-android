@@ -109,7 +109,7 @@ class CosignRequestHandlerTest {
             autoAnswer?.let { onResult(requestId, it) }
         }
 
-        override fun dismiss(requestId: String) {
+        override suspend fun dismiss(requestId: String) {
             dismissed += requestId
         }
     }
@@ -553,7 +553,6 @@ class CosignRequestHandlerTest {
             } returns null
             every { context.unregisterReceiver(any()) } answers {
                 receivers.remove(firstArg<BroadcastReceiver>())
-                Unit
             }
             mockkObject(TransparentBiometricActivity.Companion)
             every {

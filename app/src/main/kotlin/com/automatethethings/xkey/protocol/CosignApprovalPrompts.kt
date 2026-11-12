@@ -22,8 +22,10 @@ import androidx.core.content.ContextCompat
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -44,7 +46,8 @@ class CosignNotApprovedException(message: String) : Exception(message)
 /**
  * Where a co-sign prompt is shown. [show] puts up the prompt for [requestId]
  * and calls [onResult] when the owner answers it; [dismiss] takes down what
- * [show] put up once the request settles, times out or is cancelled.
+ * [show] put up once the request settles, times out or is cancelled, and
+ * returns only when that prompt is off the screen.
  */
 interface CosignPromptSurface {
     fun show(
@@ -55,7 +58,7 @@ interface CosignPromptSurface {
         onResult: (requestId: String, outcome: CosignPromptOutcome) -> Unit
     )
 
-    fun dismiss(requestId: String)
+    suspend fun dismiss(requestId: String)
 }
 
 /**
@@ -97,7 +100,9 @@ class CosignApprovalPrompts(
                 }
             } finally {
                 pending.remove(requestId)
-                surface.dismiss(requestId)
+                // The prompt leaves the screen before the lock lets the next one up,
+                // even when the caller was cancelled.
+                withContext(NonCancellable) { surface.dismiss(requestId) }
             }
         }
     }
@@ -122,14 +127,23 @@ class CosignApprovalPrompts(
  * Shows a co-sign prompt as [TransparentBiometricActivity]. On a locked phone
  * the lock-screen notification carries the same intent, so whichever starts
  * the activity, its answer has the prompt's own request id.
+ *
+ * The activity is single-top: a prompt still on screen would swallow the
+ * next launch. [dismiss] therefore withdraws an unanswered prompt by its own
+ * request id and waits, up to [dismissWaitMs], for the activity's result,
+ * which it sends as it finishes.
  */
 class ActivityCosignPromptSurface(
     private val context: Context,
     private val notificationHelper: BiometricNotificationHelper,
-    private val notificationTimeoutMs: Long = CosignApprovalPrompts.DEFAULT_TIMEOUT_MS
+    private val notificationTimeoutMs: Long = CosignApprovalPrompts.DEFAULT_TIMEOUT_MS,
+    private val dismissWaitMs: Long = DISMISS_WAIT_MS
 ) : CosignPromptSurface {
 
-    private val receivers = ConcurrentHashMap<String, BroadcastReceiver>()
+    /** One shown prompt: its result receiver, and whether its activity has answered. */
+    private class Shown(val receiver: BroadcastReceiver, val ended: CompletableDeferred<Unit>)
+
+    private val shown = ConcurrentHashMap<String, Shown>()
 
     override fun show(
         requestId: String,
@@ -138,13 +152,15 @@ class ActivityCosignPromptSurface(
         locked: Boolean,
         onResult: (requestId: String, outcome: CosignPromptOutcome) -> Unit
     ) {
+        val ended = CompletableDeferred<Unit>()
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 val outcome = outcomeOf(requestId, intent) ?: return
+                ended.complete(Unit)
                 onResult(requestId, outcome)
             }
         }
-        receivers[requestId] = receiver
+        shown[requestId] = Shown(receiver, ended)
         ContextCompat.registerReceiver(
             context,
             receiver,
@@ -174,10 +190,15 @@ class ActivityCosignPromptSurface(
         context.startActivity(intent)
     }
 
-    override fun dismiss(requestId: String) {
-        receivers.remove(requestId)?.let { receiver ->
+    override suspend fun dismiss(requestId: String) {
+        shown.remove(requestId)?.let { prompt ->
+            if (!prompt.ended.isCompleted) {
+                // Unanswered (caller gone or timed out): finish this request's activity
+                context.sendBroadcast(TransparentBiometricActivity.createCancelIntent(context, requestId))
+                withTimeoutOrNull(dismissWaitMs) { prompt.ended.await() }
+            }
             try {
-                context.unregisterReceiver(receiver)
+                context.unregisterReceiver(prompt.receiver)
             } catch (e: IllegalArgumentException) {
                 // Already unregistered
             }
@@ -186,6 +207,9 @@ class ActivityCosignPromptSurface(
     }
 
     companion object {
+        /** How long [dismiss] waits for a withdrawn prompt's activity to finish. */
+        const val DISMISS_WAIT_MS = 2_000L
+
         /**
          * The outcome a result broadcast carries for [requestId], or null when
          * it answers another prompt.
