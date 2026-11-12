@@ -53,6 +53,7 @@ import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.settings.UserVerificationPolicy
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -1955,20 +1956,24 @@ class RequestHandler(
         // re-created under the same key id is never written, and to the
         // policy revision [from] was read at, so a policy that changed and
         // changed back since is not written either. It returns true only
-        // when it changed the row, and audits exactly that change.
+        // when it changed the row, and audits exactly that change. The write
+        // and the audit are one non-cancellable step: a request cancelled
+        // after the commit and before its result arrives still audits it.
         suspend fun setPolicyFrom(from: KeyEntity, policy: SharingPolicyType): Boolean {
             val expected = from.sharingPolicy
-            if (keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy) == 0) {
-                return false
+            return withContext(NonCancellable) {
+                if (keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy) == 0) {
+                    return@withContext false
+                }
+                AuditLogger.logKeySharingChanged(
+                    keyId = entity.keyId,
+                    keyLabel = entity.label,
+                    keyType = entity.keyType,
+                    oldPolicy = expected.name,
+                    newPolicy = policy.name
+                )
+                true
             }
-            AuditLogger.logKeySharingChanged(
-                keyId = entity.keyId,
-                keyLabel = entity.label,
-                keyType = entity.keyType,
-                oldPolicy = expected.name,
-                newPolicy = policy.name
-            )
-            return true
         }
 
         // The read row as it is now. A different row under the same key id
