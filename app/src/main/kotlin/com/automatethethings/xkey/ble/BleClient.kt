@@ -248,6 +248,16 @@ class BleClient(
     @Volatile
     internal var sasTrustHook: (() -> Unit)? = null
 
+    /**
+     * Test seam: called inside the SAS trust step, under [connectionLock],
+     * once the connection's ownership has been checked and before its trust
+     * is published, with that connection. A test can try to drop the link
+     * from another thread here and see the drop wait for the publication.
+     * Always null in production.
+     */
+    @Volatile
+    internal var sasPublishHook: ((Any) -> Unit)? = null
+
     // Negotiated MTU
     @Volatile
     private var negotiatedMtu: Int = DEFAULT_MTU
@@ -988,6 +998,7 @@ class BleClient(
             sasTrustHook?.invoke()
             val trusted = synchronized(connectionLock) {
                 if (connection === current && current.requests.isActive) {
+                    sasPublishHook?.invoke(current)
                     current.trusted = true
                     true
                 } else {
