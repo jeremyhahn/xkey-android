@@ -25,10 +25,15 @@ import io.mockk.mockk
 import io.mockk.unmockkAll
 import java.io.File
 import java.security.cert.CertificateException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -921,6 +926,131 @@ class TrustStoreRepositoryTest {
         repository.clearAll()
 
         assertEquals(0, repository.getCertificateCount())
+    }
+
+    // -------------------------------------------------------------------------
+    // Writers on separate repository instances
+    // -------------------------------------------------------------------------
+
+    /**
+     * A repository whose metadata writes stop, after writing, until [release]
+     * opens; [entered] opens once the first write is held.
+     */
+    private fun repositoryHoldingWrite(entered: CountDownLatch, release: CountDownLatch) =
+        TrustStoreRepository(
+            context,
+            caFetcher,
+            fileWriter = { file, text ->
+                file.writeText(text)
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+        )
+
+    private fun <T> startCall(block: suspend () -> T): CompletableFuture<Result<T>> =
+        CompletableFuture.supplyAsync { runBlocking { runCatching { block() } } }
+
+    /**
+     * Run [held] until its metadata write is held, start [overlapping], give it
+     * time to finish inside the held write, then let [held] go.
+     */
+    private fun <A, B> overlap(
+        entered: CountDownLatch,
+        release: CountDownLatch,
+        held: suspend () -> A,
+        overlapping: suspend () -> B
+    ): Pair<Result<A>, Result<B>> {
+        val first = startCall(held)
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        val second = startCall(overlapping)
+        // Without one writer at a time the second call completes here,
+        // between the first call's write and its rename.
+        runCatching { second.get(500, TimeUnit.MILLISECONDS) }
+        release.countDown()
+        return first.get(10, TimeUnit.SECONDS) to second.get(10, TimeUnit.SECONDS)
+    }
+
+    private fun metadataFingerprints(): Set<String> {
+        val array = JSONArray(File(storeDir, "metadata.json").readText())
+        return (0 until array.length()).map { array.getJSONObject(it).getString("fingerprint") }.toSet()
+    }
+
+    private fun tempFiles(): List<String> =
+        storeDir.listFiles().orEmpty().map { it.name }.filter { it.endsWith(".tmp") }
+
+    @Test
+    fun `two repositories importing at once both keep their certificate`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holding = repositoryHoldingWrite(entered, release)
+        val other = newRepository()
+
+        val (first, second) = overlap(
+            entered,
+            release,
+            { holding.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM)) },
+            { other.importCertificate(TestCertificates.der(TestCertificates.LEAF_B_PEM)) }
+        )
+
+        assertNotNull(first.getOrThrow())
+        assertNotNull(second.getOrThrow())
+        assertEquals(
+            setOf(
+                TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM),
+                TestCertificates.fingerprint(TestCertificates.LEAF_B_PEM)
+            ),
+            metadataFingerprints()
+        )
+        assertEquals(emptyList<String>(), tempFiles())
+    }
+
+    @Test
+    fun `a delete on another repository during an import keeps the imported certificate`() {
+        val fingerprintA = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        val fingerprintB = TestCertificates.fingerprint(TestCertificates.LEAF_B_PEM)
+        runBlocking { repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM)) }
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holding = repositoryHoldingWrite(entered, release)
+        val other = newRepository()
+
+        val (imported, deleted) = overlap(
+            entered,
+            release,
+            { holding.importCertificate(TestCertificates.der(TestCertificates.LEAF_B_PEM)) },
+            { other.deleteCertificate(fingerprintA) }
+        )
+
+        assertNotNull(imported.getOrThrow())
+        assertTrue(deleted.getOrThrow())
+        assertEquals(setOf(fingerprintB), metadataFingerprints())
+        assertFalse(File(storeDir, "$fingerprintA.der").exists())
+        assertTrue(File(storeDir, "$fingerprintB.der").exists())
+        assertEquals(emptyList<String>(), tempFiles())
+    }
+
+    @Test
+    fun `an import on another repository during a delete is kept`() {
+        val fingerprintA = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        val fingerprintB = TestCertificates.fingerprint(TestCertificates.LEAF_B_PEM)
+        runBlocking { repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM)) }
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holding = repositoryHoldingWrite(entered, release)
+        val other = newRepository()
+
+        val (deleted, imported) = overlap(
+            entered,
+            release,
+            { holding.deleteCertificate(fingerprintA) },
+            { other.importCertificate(TestCertificates.der(TestCertificates.LEAF_B_PEM)) }
+        )
+
+        assertTrue(deleted.getOrThrow())
+        assertNotNull(imported.getOrThrow())
+        assertEquals(setOf(fingerprintB), metadataFingerprints())
+        assertEquals(listOf(fingerprintB), runBlocking { newRepository().getAllCertificates() }.map { it.fingerprint })
+        assertEquals(emptyList<String>(), tempFiles())
     }
 
     // -------------------------------------------------------------------------
