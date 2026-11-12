@@ -699,34 +699,45 @@ class PairedDeviceGrantCleanup(
     private suspend fun drain(publicKeyHex: String, job: Job) {
         var failures = 0
         while (true) {
-            val generation = try {
-                // The read and the release are one step, so a removal that
-                // lands after the read always finds no job and starts one.
-                synchronized(inFlight) {
-                    job.requested = false
-                    job.wake.tryReceive()
-                    repository().pendingRevocationGeneration(publicKeyHex).also {
-                        if (it == null) release(publicKeyHex, job)
-                    }
+            // Each exit decision and the job's release are one step under
+            // inFlight's lock, the lock revoke() takes: a request that lands
+            // after it finds no job and starts one.
+            val generation = synchronized(inFlight) {
+                job.requested = false
+                job.wake.tryReceive()
+                val pending = try {
+                    repository().pendingRevocationGeneration(publicKeyHex)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Reading a pending grant revocation failed", e)
+                    null
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Reading a pending grant revocation failed", e)
-                return
-            } ?: return
+                if (pending == null) {
+                    release(publicKeyHex, job)
+                    return
+                }
+                pending
+            }
             try {
                 val dropped = policyDao().clearPoliciesForPeer(publicKeyHex)
-                repository().completeRevocation(publicKeyHex, generation)
-                failures = 0
+                // Audited as soon as the rows are gone: a failed acknowledgment
+                // is retried, and the retry deletes nothing.
                 if (dropped > 0) {
                     AuditLogger.logPeerGrantsDropped(deviceId = publicKeyHex, droppedGrants = dropped)
                 }
+                repository().completeRevocation(publicKeyHex, generation)
+                failures = 0
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Dropping sharing grants for a removed device failed", e)
-                val requested = synchronized(inFlight) { job.requested }
-                failures = if (requested) 1 else failures + 1
-                if (failures > MAX_FAILURES) return
+                val requested = synchronized(inFlight) {
+                    failures = if (job.requested) 1 else failures + 1
+                    if (failures > MAX_FAILURES) {
+                        release(publicKeyHex, job)
+                        return
+                    }
+                    job.requested
+                }
                 val backoff = (BASE_BACKOFF_MS shl (failures - 1)).coerceAtMost(MAX_BACKOFF_MS)
                 if (!requested) withTimeoutOrNull(backoff) { job.wake.receive() }
             }
