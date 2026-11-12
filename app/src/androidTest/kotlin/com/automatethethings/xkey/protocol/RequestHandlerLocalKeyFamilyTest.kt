@@ -205,6 +205,33 @@ class RequestHandlerLocalKeyFamilyTest {
         }
     }
 
+    /**
+     * The capability contract: a client may pick any advertised algorithm, so
+     * local.generateKey must create it and an asymmetric one must sign.
+     */
+    @Test
+    fun everyAdvertisedAlgorithmCanBeGeneratedAndUsed() {
+        val algorithms = call("local.getCapabilities").ok().getJSONArray("algorithms")
+        assertTrue("capabilities list at least one algorithm", algorithms.length() > 0)
+        for (i in 0 until algorithms.length()) {
+            val algorithm = algorithms.getString(i)
+            val keyType = when {
+                algorithm.startsWith("AES") -> KeyTypes.SECRET
+                algorithm.startsWith("HMAC") -> KeyTypes.HMAC
+                else -> KeyTypes.SIGNING
+            }
+            val keyId = generateKey("advertised-${algorithm.lowercase()}-$runId", keyType, algorithm)
+            if (keyType == KeyTypes.SIGNING) {
+                val response = call(
+                    "local.sign",
+                    JSONObject().put("keyId", keyId).put("data", b64("advertised".toByteArray()))
+                        .put("algorithm", algorithm)
+                )
+                assertTrue("$algorithm must sign: " + response.toJsonString(), response.isSuccess())
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // local.listKeys filters
     // ------------------------------------------------------------------

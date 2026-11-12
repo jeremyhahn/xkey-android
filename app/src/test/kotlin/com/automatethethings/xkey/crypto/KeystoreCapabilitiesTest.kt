@@ -22,8 +22,8 @@ import org.junit.Test
 
 /**
  * API floors of [KeystoreCapabilities]: Keystore key agreement
- * (`PURPOSE_AGREE_KEY`) exists only from API 31, Ed25519 generation from 33,
- * and minSdk is 28.
+ * (`PURPOSE_AGREE_KEY`) exists only from API 31, Ed25519 is not advertised
+ * until the protocol can create it, and minSdk is 28.
  */
 class KeystoreCapabilitiesTest {
 
@@ -49,19 +49,15 @@ class KeystoreCapabilitiesTest {
     }
 
     @Test
-    fun `Ed25519 is left out below API 33`() {
-        for (sdk in 28..32) {
+    fun `Ed25519 is never advertised`() {
+        // local.generateKey parses names through CoseAlgorithms.fromName,
+        // which has no Ed25519, so no release can create one over the protocol.
+        for (sdk in 28..37) {
             assertFalse(
-                "API $sdk cannot generate Ed25519",
+                "API $sdk must not advertise Ed25519",
                 KeystoreCapabilities.supportedAlgorithms(sdk).contains("Ed25519")
             )
         }
-    }
-
-    @Test
-    fun `Ed25519 is listed from API 33`() {
-        assertTrue(KeystoreCapabilities.supportedAlgorithms(33).contains("Ed25519"))
-        assertTrue(KeystoreCapabilities.supportedAlgorithms(37).contains("Ed25519"))
     }
 
     @Test
@@ -73,6 +69,8 @@ class KeystoreCapabilitiesTest {
                 algorithms.containsAll(KeystoreCapabilities.BASE_ALGORITHMS)
             )
         }
-        assertEquals(KeystoreCapabilities.BASE_ALGORITHMS, KeystoreCapabilities.supportedAlgorithms(28))
+        for (sdk in 28..37) {
+            assertEquals(KeystoreCapabilities.BASE_ALGORITHMS, KeystoreCapabilities.supportedAlgorithms(sdk))
+        }
     }
 }
