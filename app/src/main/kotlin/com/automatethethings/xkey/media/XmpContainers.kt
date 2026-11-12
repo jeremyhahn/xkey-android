@@ -28,14 +28,16 @@ import java.util.zip.CRC32
  * - PNG: an uncompressed `iTXt` chunk with keyword [PNG_XMP_KEYWORD], just
  *   before `IEND`.
  * - WebP: a RIFF `XMP ` chunk at the end, the VP8X XMP flag set; a simple
- *   (VP8/VP8L-only) file gets a VP8X carrying only that flag.
+ *   (VP8/VP8L-only) file gets a VP8X carrying that flag, the alpha flag a
+ *   `VP8L` bitstream declares, and the bitstream's canvas.
  *
  * A packet is "ours" when it declares [XKEY_NAMESPACE]. [strip] removes our
  * box/chunk and undoes exactly what [embed] changed, so
  * `strip(embed(x)) == x` and a file without our packet is returned as is.
  * [embed] refuses (returns null) whenever that cannot hold: a foreign XMP
- * packet, an MP4 whose last box runs to the end of the file, a VP8X with no
- * flags, or bytes that do not parse.
+ * packet, an MP4 whose last box runs to the end of the file, a VP8X [strip]
+ * would take for the one [embed] adds, a packet larger than [read] loads,
+ * or bytes that do not parse.
  */
 object XmpContainers {
 
@@ -56,6 +58,7 @@ object XmpContainers {
     private const val MAX_PACKET = 1 shl 20
 
     private const val WEBP_XMP_FLAG = 0x04
+    private const val WEBP_ALPHA_FLAG = 0x10
 
     private val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
 
@@ -135,8 +138,10 @@ object XmpContainers {
             Format.WEBP -> {
                 for (part in kept) {
                     if (part.type == "VP8X" && part.payloadEnd > part.payloadStart) {
+                        val header = data.copyOfRange(part.payloadStart, part.payloadEnd)
+                        if (isAddedVp8x(header, data, kept)) continue // the VP8X embed added to a simple file
+                        // Any other VP8X stays, so an edited header is hashed.
                         val flags = (data[part.payloadStart].toInt() and 0xFF) and WEBP_XMP_FLAG.inv()
-                        if (flags == 0) continue // the VP8X embed added to a simple file
                         val chunk = data.copyOfRange(part.start, part.end)
                         chunk[part.payloadStart - part.start] = flags.toByte()
                         out.write(chunk)
@@ -167,6 +172,12 @@ object XmpContainers {
         val base = strip(data, format)
         val baseParts = parse(base, format) ?: return null
         val packet = packet(json)
+        // The payload [read] would load: a larger one would read back as unsigned.
+        val readerPayload = when (format) {
+            Format.ISO_BMFF, Format.WEBP -> packet.size
+            Format.PNG -> PNG_XMP_KEYWORD.length + 5 + packet.size
+        }
+        if (readerPayload > MAX_PACKET) return null
         return when (format) {
             Format.ISO_BMFF -> {
                 if (baseParts.any { it.openEnded }) return null
@@ -325,22 +336,49 @@ object XmpContainers {
         if (vp8x != null) {
             if (vp8x.payloadEnd - vp8x.payloadStart < 10) return null
             val flags = base[vp8x.payloadStart].toInt() and 0xFF
-            if (flags == 0) return null // strip would drop a VP8X the file came with
+            val header = base.copyOfRange(vp8x.payloadStart, vp8x.payloadEnd)
+            header[0] = (flags or WEBP_XMP_FLAG).toByte()
+            // strip would take it for the VP8X embed adds and drop the one the file came with.
+            if (isAddedVp8x(header, base, parts)) return null
             for (part in parts) {
                 val chunk = base.copyOfRange(part.start, part.end)
-                if (part === vp8x) chunk[8] = (flags or WEBP_XMP_FLAG).toByte()
+                if (part === vp8x) chunk[8] = header[0]
                 out.write(chunk)
             }
         } else {
-            val image = parts.first()
-            val canvas = canvasOf(base.copyOfRange(image.payloadStart, image.payloadEnd), image.type) ?: return null
-            val (width, height) = canvas
-            out.write(riffChunk("VP8X", byteArrayOf(WEBP_XMP_FLAG.toByte(), 0, 0, 0) + le24(width - 1) + le24(height - 1)))
+            // strip leaves out an added VP8X only beside a lone image chunk.
+            if (parts.size != 1) return null
+            val header = addedVp8xPayload(base, parts.first()) ?: return null
+            out.write(riffChunk("VP8X", header))
             parts.forEach { out.write(base, it.start, it.end - it.start) }
         }
         out.write(riffChunk("XMP ", packet))
         return riff(out.toByteArray())
     }
+
+    /**
+     * The VP8X payload [embedWebp] adds to a simple file whose one image
+     * chunk is [image]: the XMP flag, the alpha flag when a `VP8L` bitstream
+     * declares alpha, and the canvas from the bitstream header. Null when
+     * the bitstream header does not parse.
+     */
+    private fun addedVp8xPayload(data: ByteArray, image: Part): ByteArray? {
+        val payload = data.copyOfRange(image.payloadStart, image.payloadEnd)
+        val (width, height) = canvasOf(payload, image.type) ?: return null
+        val alpha = image.type == "VP8L" && ((u32le(payload, 1) shr 28) and 1L) == 1L
+        val flags = WEBP_XMP_FLAG or (if (alpha) WEBP_ALPHA_FLAG else 0)
+        return byteArrayOf(flags.toByte(), 0, 0, 0) + le24(width - 1) + le24(height - 1)
+    }
+
+    /**
+     * Whether [header], the VP8X payload of the first of [parts], is exactly
+     * the one [embedWebp] adds to the simple file the other part makes up.
+     * Only such a VP8X is left out of the canonical bytes, so an edited
+     * canvas or flag stays in the hash.
+     */
+    private fun isAddedVp8x(header: ByteArray, data: ByteArray, parts: List<Part>): Boolean =
+        parts.size == 2 && parts[0].type == "VP8X" &&
+            header.contentEquals(addedVp8xPayload(data, parts[1]) ?: return false)
 
     /** Width and height from a simple file's `VP8 ` or `VP8L` bitstream header. */
     private fun canvasOf(payload: ByteArray, type: String): Pair<Int, Int>? = when (type) {
