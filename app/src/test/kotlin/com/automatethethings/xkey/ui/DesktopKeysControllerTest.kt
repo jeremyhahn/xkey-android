@@ -30,6 +30,9 @@ import com.automatethethings.xkey.remote.stubAndroidLog
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -277,6 +280,24 @@ class DesktopKeysControllerTest {
         connected = null
         assertEquals(DesktopKeysState.NoSession, controller.chooseKey(key))
         assertFalse(controller.back())
+    }
+
+    @Test
+    fun `the entry follows this desktop's session through connect, confirm and end`() = runTest {
+        var current: String? = null
+        val seen = mutableListOf<Boolean>()
+        backgroundScope.launch { desktopSessionUp(desktopA, { current }, periodMillis = 1_000L).collect { seen += it } }
+        runCurrent()
+        fun step(peer: String?) {
+            current = peer
+            advanceTimeBy(1_000L)
+            runCurrent()
+        }
+        step(desktopA) // connected and confirmed
+        step(desktopB) // another desktop has the session
+        step(null) // session ended
+        step(desktopA) // this desktop again
+        assertEquals(listOf(false, true, false, true), seen)
     }
 
     /** Over the real client: the screen's first two steps put these methods on the wire. */
