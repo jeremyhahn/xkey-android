@@ -261,7 +261,11 @@ class PendingAuthenticationsTest {
         assertFalse("a repeat delivery keeps its prompt", TransparentBiometricActivity.isNewer("7", "7"))
         assertFalse("a late older delivery is dropped", TransparentBiometricActivity.isNewer("6", "7"))
         assertFalse(TransparentBiometricActivity.isNewer("set-key-policy", "7"))
-        assertFalse(TransparentBiometricActivity.isNewer("8", ""))
+        assertTrue(
+            "a launcher request displaces a wake-only prompt that answers none",
+            TransparentBiometricActivity.isNewer("8", "verifyUser-3")
+        )
+        assertFalse(TransparentBiometricActivity.isNewer("verifyUser-9", "verifyUser-3"))
     }
 
     @Test

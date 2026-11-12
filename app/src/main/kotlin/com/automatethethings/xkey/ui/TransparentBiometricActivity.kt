@@ -286,12 +286,14 @@ class TransparentBiometricActivity : FragmentActivity() {
 
     companion object {
         /**
-         * Whether [candidate] names a request issued after [current]. Ids are
-         * the launcher's increasing numbers; anything else is never newer.
+         * Whether [candidate] names a request issued after [current]. Launcher
+         * ids are increasing numbers; any other id (a wake-only notification's
+         * `verifyUser-…`, `sign-…`) answers no launcher request, so it never
+         * displaces a prompt, and a launcher request always displaces it.
          */
         internal fun isNewer(candidate: String, current: String): Boolean {
             val next = candidate.toLongOrNull() ?: return false
-            val shown = current.toLongOrNull() ?: return false
+            val shown = current.toLongOrNull() ?: return true
             return next > shown
         }
 
