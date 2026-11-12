@@ -36,16 +36,19 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.snackbar.Snackbar
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.BleClient
 import com.automatethethings.xkey.ble.NoiseSession
+import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.AttestationHelper
 import com.automatethethings.xkey.ble.XKeyGattService
 import com.automatethethings.xkey.ca.EnrolledDeviceRepository
@@ -55,12 +58,17 @@ import com.automatethethings.xkey.settings.PairedDeviceRepository
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1406,8 +1414,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         )
         snackbar.show()
 
-        activityScope.launch {
-            try {
+        launchPhoneInitiatedReattest(snackbar) step@{
                 val keyPair = NoiseSession.getStoredStaticKeyPair(this@DeviceDetailActivity)
                 if (keyPair == null) {
                     snackbar.dismiss()
@@ -1416,7 +1423,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                         getString(R.string.device_reattest_no_keys),
                         Snackbar.LENGTH_LONG
                     ).show()
-                    return@launch
+                    return@step
                 }
 
                 val expectedRemoteKey = try {
@@ -1431,7 +1438,8 @@ class DeviceDetailActivity : AppCompatActivity() {
                 // completes and drops a session that cannot answer it.
                 val client = BleClient(
                     this@DeviceDetailActivity,
-                    gattService?.phoneInitiatedRequestHandler()
+                    gattService?.phoneInitiatedRequestHandler(),
+                    sasConfirmation()
                 )
                 val connected = client.connect(
                     address = bleAddress,
@@ -1441,9 +1449,10 @@ class DeviceDetailActivity : AppCompatActivity() {
 
                 if (!connected) {
                     snackbar.dismiss()
+                    if (isFinishing || isDestroyed) return@step
                     gattService?.let { ensureAdvertisingAndShowInstructions(it) }
                         ?: showReattestInstructions()
-                    return@launch
+                    return@step
                 }
 
                 snackbar.dismiss()
@@ -1487,8 +1496,24 @@ class DeviceDetailActivity : AppCompatActivity() {
                         ).show()
                     }
                 }
-            } catch (e: Exception) {
-                snackbar.dismiss()
+        }
+    }
+
+    /**
+     * Runs one phone-initiated re-attest [step] in this activity's scope, which
+     * [onDestroy] cancels. A failure falls back to the advertise-and-wait
+     * instructions; leaving the screen, which cancels a pending SAS prompt,
+     * ends the step quietly.
+     */
+    @VisibleForTesting
+    internal fun launchPhoneInitiatedReattest(
+        snackbar: Snackbar?,
+        step: suspend () -> Unit
+    ): Job = activityScope.launch {
+        runPhoneInitiatedReattest(
+            activityGone = { isFinishing || isDestroyed },
+            onFailure = {
+                snackbar?.dismiss()
                 Snackbar.make(
                     rootLayout,
                     getString(R.string.device_reattest_connection_failed),
@@ -1496,6 +1521,44 @@ class DeviceDetailActivity : AppCompatActivity() {
                 ).show()
                 gattService?.let { ensureAdvertisingAndShowInstructions(it) }
                     ?: showReattestInstructions()
+            },
+            step = step
+        )
+    }
+
+    /**
+     * Asks the user to compare this session's SAS with the code the desktop
+     * shows, in the same dialog the sessions the phone accepts use. The session
+     * is trusted, and the attestation recorded, only on Allow (#137).
+     */
+    @VisibleForTesting
+    internal fun sasConfirmation(): PairingConfirmationCallback = object : PairingConfirmationCallback {
+        override suspend fun onPairingConfirmationRequired(
+            deviceName: String,
+            publicKeyFingerprint: String
+        ): Boolean = false
+
+        override suspend fun onPairingConfirmationRequired(
+            deviceName: String,
+            publicKeyFingerprint: String,
+            shortAuthString: String
+        ): Boolean = withContext(Dispatchers.Main) {
+            if (isFinishing || isDestroyed) return@withContext false
+            suspendCancellableCoroutine { continuation ->
+                val dialog = MaterialAlertDialogBuilder(this@DeviceDetailActivity)
+                    .setTitle(getString(R.string.pairing_dialog_title))
+                    .setMessage(
+                        getString(R.string.pairing_dialog_message_sas, deviceName, publicKeyFingerprint, shortAuthString)
+                    )
+                    .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ ->
+                        if (continuation.isActive) continuation.resume(true)
+                    }
+                    .setNegativeButton(getString(R.string.pairing_dialog_deny)) { _, _ ->
+                        if (continuation.isActive) continuation.resume(false)
+                    }
+                    .setCancelable(false)
+                    .show()
+                continuation.invokeOnCancellation { dialog.dismiss() }
             }
         }
     }
@@ -1687,5 +1750,27 @@ class DeviceDetailActivity : AppCompatActivity() {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         val hash = digest.digest(certDER)
         return hash.take(8).joinToString(":") { "%02X".format(it) } + "..."
+    }
+}
+
+/**
+ * Runs a phone-initiated re-attest [step] and hands a failure to [onFailure].
+ *
+ * [activityGone] reports whether the screen that would show the fallback has
+ * been finished or destroyed; it then gets no fallback. Cancellation, which is
+ * how leaving the screen ends a pending SAS prompt, is not a failure: it is
+ * rethrown, never handed to [onFailure] (#137).
+ */
+internal suspend fun runPhoneInitiatedReattest(
+    activityGone: () -> Boolean,
+    onFailure: (Exception) -> Unit,
+    step: suspend () -> Unit
+) {
+    try {
+        step()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        if (!activityGone()) onFailure(e)
     }
 }
