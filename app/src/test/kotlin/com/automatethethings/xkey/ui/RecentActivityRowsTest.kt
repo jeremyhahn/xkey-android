@@ -1,0 +1,156 @@
+/*
+ * Copyright (c) 2025 Jeremy Hahn
+ * Copyright (c) 2025 Automate The Things, LLC
+ *
+ * This file is part of xKey.
+ *
+ * xKey is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+package com.automatethethings.xkey.ui
+
+import com.automatethethings.xkey.R
+import com.automatethethings.xkey.audit.AuditLogEntity
+import com.automatethethings.xkey.audit.AuditOperationType
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
+
+/**
+ * JVM tests for [RecentActivityRows], the home screen's Recent Activity rows,
+ * and [AuditOperationLabels], the labels it shares with the audit screen.
+ */
+class RecentActivityRowsTest {
+
+    private val now = Instant.parse("2026-11-12T12:00:00Z")
+    private val clock = Clock.fixed(now, ZoneOffset.UTC)
+
+    private fun entry(
+        type: AuditOperationType = AuditOperationType.KEY_CREATED,
+        agoMillis: Long = 0,
+        success: Boolean = true,
+        keyId: String? = null,
+        keyLabel: String? = null,
+        details: String? = null
+    ) = AuditLogEntity(
+        timestamp = now.toEpochMilli() - agoMillis,
+        operationType = type,
+        keyId = keyId,
+        keyLabel = keyLabel,
+        success = success,
+        details = details
+    )
+
+    private fun entries(vararg e: AuditLogEntity) =
+        RecentActivityRows.build(e.toList(), clock).map { it as RecentActivityRow.Entry }
+
+    @Test
+    fun `the audit screen's labels name each operation`() {
+        assertEquals(R.string.audit_log_op_key_created, AuditOperationLabels.labelRes(AuditOperationType.KEY_CREATED))
+        assertEquals(R.string.audit_log_op_signing, AuditOperationLabels.labelRes(AuditOperationType.SIGNING_REQUEST))
+        assertEquals(R.string.audit_log_op_fido2, AuditOperationLabels.labelRes(AuditOperationType.FIDO2_AUTHENTICATION))
+        assertEquals(R.string.audit_log_op_piv_key_deleted, AuditOperationLabels.labelRes(AuditOperationType.PIV_KEY_DELETED))
+    }
+
+    @Test
+    fun `every operation type has a label`() {
+        AuditOperationType.entries.forEach {
+            assertNotEquals("no label for $it", 0, AuditOperationLabels.labelRes(it))
+        }
+    }
+
+    @Test
+    fun `a row uses the audit screen's label for its operation`() {
+        AuditOperationType.entries.forEach { type ->
+            val row = entries(entry(type = type)).single()
+            assertEquals(AuditOperationLabels.labelRes(type), row.labelRes)
+        }
+    }
+
+    @Test
+    fun `success and failure render differently`() {
+        val (ok, failed) = entries(entry(success = true, agoMillis = 1), entry(success = false, agoMillis = 2))
+
+        assertEquals(true, ok.success)
+        assertEquals(R.string.recent_activity_succeeded, ok.outcomeRes)
+        assertEquals(false, failed.success)
+        assertEquals(R.string.recent_activity_failed, failed.outcomeRes)
+    }
+
+    @Test
+    fun `relative time is computed from the injected clock`() {
+        val rows = entries(
+            entry(agoMillis = 30_000),
+            entry(agoMillis = 5 * MINUTE),
+            entry(agoMillis = 3 * HOUR + 10 * MINUTE),
+            entry(agoMillis = 2 * DAY + HOUR)
+        )
+
+        assertEquals(R.string.recent_activity_just_now, rows[0].timeRes)
+        assertEquals(R.string.recent_activity_minutes_ago, rows[1].timeRes)
+        assertEquals(5L, rows[1].timeCount)
+        assertEquals(R.string.recent_activity_hours_ago, rows[2].timeRes)
+        assertEquals(3L, rows[2].timeCount)
+        assertEquals(R.string.recent_activity_days_ago, rows[3].timeRes)
+        assertEquals(2L, rows[3].timeCount)
+    }
+
+    @Test
+    fun `a timestamp ahead of the clock reads just now`() {
+        val row = entries(entry(agoMillis = -10 * MINUTE)).single()
+
+        assertEquals(R.string.recent_activity_just_now, row.timeRes)
+    }
+
+    @Test
+    fun `at most N rows, newest first`() {
+        val input = (1..8).map { entry(agoMillis = it * MINUTE, keyLabel = "k$it") }.shuffled()
+
+        val rows = RecentActivityRows.build(input, clock, limit = 3).map { it as RecentActivityRow.Entry }
+
+        assertEquals(listOf("k1", "k2", "k3"), rows.map { it.keyLabel })
+    }
+
+    @Test
+    fun `an empty list gives the empty-state row`() {
+        assertEquals(listOf(RecentActivityRow.Empty), RecentActivityRows.build(emptyList(), clock))
+        assertEquals(R.string.recent_activity_empty, RecentActivityRow.Empty.messageRes)
+    }
+
+    @Test
+    fun `no row carries the details JSON or a raw key id`() {
+        val details = """{"rpId":"example.com","algorithm":"ES256"}"""
+        val rows = entries(
+            entry(keyId = "key-0123456789abcdef", keyLabel = "Work key", details = details),
+            entry(keyId = "key-fedcba9876543210", keyLabel = null, details = details, agoMillis = 1)
+        )
+
+        assertEquals("Work key", rows[0].keyLabel)
+        assertNull(rows[1].keyLabel)
+        rows.forEach { row ->
+            assertFalse(row.toString().contains("key-0123456789abcdef"))
+            assertFalse(row.toString().contains("key-fedcba9876543210"))
+            assertFalse(row.toString().contains("rpId"))
+        }
+        assertEquals(
+            setOf("labelRes", "keyLabel", "success", "outcomeRes", "timeRes", "timeCount"),
+            RecentActivityRow.Entry::class.java.declaredFields.map { it.name }.filterNot { it.startsWith("$") }.toSet()
+        )
+    }
+
+    private companion object {
+        const val MINUTE = 60_000L
+        const val HOUR = 60 * MINUTE
+        const val DAY = 24 * HOUR
+    }
+}
