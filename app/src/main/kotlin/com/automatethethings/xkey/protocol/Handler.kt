@@ -1041,8 +1041,14 @@ class RequestHandler(
             )
         }
 
-        // Delete the key
-        val deleted = keystoreManager.deleteKey(deleteParams.credentialId)
+        // Delete the key and its metadata row as one revoke, like every other
+        // key delete: a share of the key pending at a transport is refused at
+        // admission.
+        val deleted = SharePermissionLedger.revoking(deleteParams.credentialId) {
+            keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
+                if (removed) keyDao.deleteByKeyId(deleteParams.credentialId)
+            }
+        }
         if (!deleted) {
             throw ProtocolException(
                 "Failed to delete credential",
