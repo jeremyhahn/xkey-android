@@ -779,6 +779,157 @@ class StreamPairingSessionRevocationTest {
         coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
     }
 
+    /**
+     * A delete through the alias form of a key's ID is a revoke of the key
+     * itself: the legacy `deleteKey` RPC with `credentialId = xkey_key_<id>`
+     * removes the same Keystore entry as `<id>`, so a share of `<id>` waiting
+     * at admission is refused, and `<id>`'s metadata row goes too.
+     */
+    @Test
+    fun aShareOfAKeyDeletedThroughItsAliasFormWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.keyExists(any()) } returns true
+        every { keystore.deleteKey(any()) } returns true
+        // The raw alias resolves to itself, as KeystoreManager does for it.
+        every { keystore.resolveKeystoreAlias(any()) } answers {
+            firstArg<String>().takeIf { it.startsWith("xkey_key_") }
+        }
+        val deleter = realHandler(keyDao, keystore)
+        var deletedKeyId: String? = null
+        assertRevokedAtAdmission { store ->
+            deletedKeyId = store.keyId
+            val request = JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", "deleteKey")
+                .put("params", JSONObject().put("credentialId", "xkey_key_" + store.keyId))
+            val response = JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
+            assertTrue(
+                "the delete must succeed, got $response",
+                response.optJSONObject("result")?.optBoolean("deleted") == true
+            )
+        }
+        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+    }
+
+    /**
+     * A share is bound to the revision it captured before loading its
+     * inputs: a key deleted and recreated under the same ID after the share
+     * loaded its record and public half, and before admission, is refused
+     * there, though the recreated key is shared with the same peer.
+     */
+    @Test
+    fun aKeyDeletedAndRecreatedAfterTheShareLoadedItsInputsIsRefusedAtAdmission() = runBlocking<Unit> {
+        val gate = GatedOutputStream()
+        val phone = connectPaired(gate)
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) { true }!!
+        val store = SharedKeyStore(phone.desktop.publicKeyHex)
+        // The DAO's own writes run; only the Room writes under them are mocked.
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.deleteByKeyId(any()) } coAnswers { callOriginal() }
+        coEvery { keyDao.insert(any()) } coAnswers { callOriginal() }
+
+        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val loadedEntity = store.entity!!
+        val loadedPem = PEM
+        // Deleted and recreated, still shared with the peer, after the load.
+        keyDao.deleteByKeyId(store.keyId)
+        keyDao.insert(loadedEntity.copy(label = "recreated"))
+        val writes = gate.writes.get()
+        val nonce = phone.noise.sendNonceForTest()
+
+        val outcome = runCatching {
+            DesktopKeyShare(session, SHARE_TIMEOUT_MS)
+                .send(baseline, loadedEntity, null, loadedPem, null, store.isShared, store.current)
+        }
+        assertEquals(
+            "the share must be refused by policy, got $outcome",
+            DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
+            outcome.getOrNull()
+        )
+        assertEquals("nothing may reach the stream", writes, gate.writes.get())
+        assertEquals("a refused send must not consume a nonce", nonce, phone.noise.sendNonceForTest())
+    }
+
+    /**
+     * `local.generateKey` opens its revoke before it touches key material: a
+     * generation that replaces an ID its existence checks did not see pauses
+     * right after the old Keystore entry is removed, a share of that ID
+     * waiting at admission resumes in that window, and it is refused.
+     */
+    @Test
+    fun aShareResumedAfterGenerateKeyRemovedTheOldKeystoreEntryWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        val removed = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        // The old entry goes, then the generation pauses there.
+        coEvery { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) } coAnswers {
+            removed.complete(Unit)
+            withTimeout(TIMEOUT_MS) { finish.await() }
+            ByteArray(91) { 4 }
+        }
+        val generator = realHandler(keyDao, keystore)
+        var response: JSONObject? = null
+        assertRevokedAtAdmissionDuring { store, resumeShare ->
+            val generating = scope.async(Dispatchers.IO) { generate(generator, store.keyId) }
+            try {
+                withTimeout(TIMEOUT_MS) { removed.await() }
+                resumeShare()
+            } finally {
+                finish.complete(Unit)
+            }
+            response = withTimeout(TIMEOUT_MS) { generating.await() }
+        }
+        assertTrue(
+            "the generation must succeed, got $response",
+            response?.optJSONObject("result")?.optString("keyId")?.isNotEmpty() == true
+        )
+    }
+
+    /**
+     * `local.generateKey` reserves its ID until it ends: a second generation
+     * of the same ID while the first is pending (here, paused inside the
+     * generation) is refused with `KEY_EXISTS` and generates nothing.
+     */
+    @Test
+    fun aSecondGenerateKeyOfAnIdIsRefusedWhileTheFirstIsPending() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) } coAnswers {
+            if (calls.incrementAndGet() == 1) {
+                started.complete(Unit)
+                withTimeout(TIMEOUT_MS) { finish.await() }
+            }
+            ByteArray(91) { 4 }
+        }
+        val generator = realHandler(keyDao, keystore)
+        val first = scope.async(Dispatchers.IO) { generate(generator, "pending-generation") }
+        val second = try {
+            withTimeout(TIMEOUT_MS) { started.await() }
+            generate(generator, "pending-generation")
+        } finally {
+            finish.complete(Unit)
+        }
+        assertEquals(
+            "a second generation of a pending ID must be refused, got $second",
+            ErrorCodes.KEY_EXISTS,
+            second.optJSONObject("error")?.optInt("code")
+        )
+        assertEquals("the second generation must generate nothing", 1, calls.get())
+        val firstResponse = withTimeout(TIMEOUT_MS) { first.await() }
+        assertTrue(
+            "the first generation must succeed, got $firstResponse",
+            firstResponse.optJSONObject("result")?.optString("keyId")?.isNotEmpty() == true
+        )
+    }
+
     private suspend fun generate(handler: RequestHandler, keyId: String): JSONObject {
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 2).put("method", "local.generateKey")
             .put(

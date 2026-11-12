@@ -426,6 +426,15 @@ internal object SharePermissionLedger {
     fun revision(keyId: String): Long = synchronized(lock) { revisions[keyId] ?: 0L }
 
     /**
+     * A key's revision taken before any of its share inputs (record, public
+     * half, software material) were read. A share carries it to admission.
+     */
+    class Baseline internal constructor(val keyId: String, val revision: Long)
+
+    /** Takes [keyId]'s [Baseline]; call before loading anything a share of it sends. */
+    fun baseline(keyId: String): Baseline = Baseline(keyId, revision(keyId))
+
+    /**
      * Admission check: no revoke of [keyId] is in flight and none has
      * committed since [revision] was taken. Synchronous, for the transport's
      * admission critical section.
@@ -483,6 +492,17 @@ class DesktopKeyShare(
         /** The session was replaced before the key was sent; nothing left the phone. */
         data object SessionChanged : Outcome()
     }
+
+    /** Scaffold for the r14 regression tests: [baseline] is not yet enforced. */
+    internal suspend fun send(
+        baseline: SharePermissionLedger.Baseline,
+        entity: KeyEntity?,
+        software: SoftwareKey?,
+        publicKeyPem: String?,
+        certificatePem: String?,
+        isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean,
+        currentEntity: suspend (keyId: String) -> KeyEntity?
+    ): Outcome = send(entity, software, publicKeyPem, certificatePem, isKeySharedWithPeer, currentEntity)
 
     /**
      * [software]'s material is zeroed before this returns, whatever the outcome.
