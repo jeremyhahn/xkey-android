@@ -48,6 +48,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.remote.DesktopKeyShare
+import com.automatethethings.xkey.remote.DesktopSectionRefresh
 import com.automatethethings.xkey.remote.DesktopShareDecision
 import com.automatethethings.xkey.remote.DesktopShareGate
 import com.automatethethings.xkey.remote.loadZeroedOnCancel
@@ -222,6 +223,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     override fun onStop() {
         desktopWatch?.cancel()
         desktopWatch = null
+        desktopRefresh.cancel()
         if (serviceBound) {
             requireContext().unbindService(serviceConnection)
             serviceBound = false
@@ -699,31 +701,42 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
      * Shows the desktop section when a desktop is connected, with the send
      * button only for a key [DesktopShareGate] lets go; otherwise the reason.
      * The decision is taken against the peer confirmed on the session the
-     * key would go out on.
+     * key would go out on, and only the latest refresh may apply one: a
+     * disconnect or a new session that overtakes a refresh still deciding
+     * always wins.
      */
     private fun refreshDesktopSection() {
         if (!::desktopContainer.isInitialized || !isAdded) return
-        val session = gattService?.shareSession()
-        if (session == null || keyEntity == null) {
-            desktopContainer.visibility = View.GONE
-            return
-        }
-        lifecycleScope.launch {
-            val inputs = loadShareInputs()
-            val decision = try {
-                DesktopShareGate.decide(
-                    inputs.entity, inputs.software, inputs.publicKeyPem,
-                    session.peerPublicKeyHex, ::isSharedWithPeer
-                )
-            } finally {
-                inputs.software?.material.let { it?.fill(0) }
+        desktopRefresh.refresh()
+    }
+
+    private val desktopRefresh by lazy {
+        DesktopSectionRefresh(
+            scope = lifecycleScope,
+            currentSession = { if (keyEntity == null) null else gattService?.shareSession() },
+            decide = { session ->
+                val inputs = loadShareInputs()
+                try {
+                    DesktopShareGate.decide(
+                        inputs.entity, inputs.software, inputs.publicKeyPem,
+                        session.peerPublicKeyHex, ::isSharedWithPeer
+                    )
+                } finally {
+                    inputs.software?.material?.fill(0)
+                }
+            },
+            show = show@{ decision ->
+                if (!isAdded || !::desktopContainer.isInitialized) return@show
+                if (decision == null) {
+                    desktopContainer.visibility = View.GONE
+                    return@show
+                }
+                desktopContainer.visibility = View.VISIBLE
+                desktopSendButton.visibility =
+                    if (decision == DesktopShareDecision.PUBLIC_KEY) View.VISIBLE else View.GONE
+                desktopStatusText.text = getString(desktopStatusFor(decision))
             }
-            if (!isAdded) return@launch
-            desktopContainer.visibility = View.VISIBLE
-            desktopSendButton.visibility =
-                if (decision == DesktopShareDecision.PUBLIC_KEY) View.VISIBLE else View.GONE
-            desktopStatusText.text = getString(desktopStatusFor(decision))
-        }
+        )
     }
 
     /**
