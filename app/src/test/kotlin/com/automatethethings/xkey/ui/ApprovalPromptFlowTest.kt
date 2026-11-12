@@ -26,6 +26,7 @@ import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.PendingAuthentications
 import com.automatethethings.xkey.auth.PendingCryptoSignatures
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
@@ -142,6 +143,7 @@ class ApprovalPromptFlowTest {
         // Settles whatever a failed test left waiting, so the process-wide
         // prompt queue is free for the next one.
         launcher.unregister()
+        assertEquals("every approval let go of its queue entry", 0, PromptOwnership.process.entries)
         Dispatchers.resetMain()
         unmockkAll()
     }
@@ -224,6 +226,8 @@ class ApprovalPromptFlowTest {
             val counter = family.getDeclaredField("nextRequestId").apply { isAccessible = true }
             (counter.get(null) as AtomicLong).set(0L)
         }
+        // Keys start over too, so the owner forgets the ones that settled.
+        PromptOwnership.process.forgetSettled()
     }
 
     /** Delivers what the prompts broadcast, and resumes whoever it settled. */

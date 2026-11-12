@@ -16,6 +16,7 @@
 package com.automatethethings.xkey.auth
 
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 
 /**
  * The owner of the one prompt queue: every approval, of either prompt family,
@@ -168,6 +169,11 @@ internal class PromptOwnership(
         next?.onActive()
         return true
     }
+
+    /** Forgets the settled keys, as a freshly started process has none; open entries stay. */
+    @VisibleForTesting
+    @Synchronized
+    fun forgetSettled() = settled.clear()
 
     private fun stateLocked(key: String): State? = when {
         active?.key == key -> State.ACTIVE

@@ -551,8 +551,9 @@ class BiometricActivityLauncher(
  * id, and the result broadcast carrying it is what completes the request. Ids
  * are process-wide, so a result never completes another launcher's request.
  *
- * Requests take turns on screen through [prompts], one prompt at a time in
- * arrival order, sharing the line with the crypto signing prompts: there is
+ * Requests take turns on screen through [prompts], which owns each request's
+ * one queue entry (`approval-<id>`) from enqueue to settle, one prompt at a
+ * time in arrival order, sharing the line with the crypto signing prompts: there is
  * one screen, the system shows one biometric authentication at a time, and
  * [com.automatethethings.xkey.ui.TransparentBiometricActivity] is singleTop, so
  * a request launched while another prompts would reach the activity already
@@ -575,7 +576,7 @@ class BiometricActivityLauncher(
  *   prompts for nothing; false while the prompt is up
  */
 internal class PendingAuthentications(
-    private val prompts: SigningPromptQueue = SigningPromptQueue.process,
+    private val prompts: PromptOwnership = PromptOwnership.process,
     private val expirePrompt: (requestId: String) -> Boolean = TransparentBiometricActivity::expireUnshown,
 ) {
     private val pending =
@@ -597,29 +598,33 @@ internal class PendingAuthentications(
     suspend fun await(
         queueDeadlineMillis: Long = QUEUE_DEADLINE_MILLIS,
         activeDeadlineMillis: Long = ACTIVE_DEADLINE_MILLIS,
+        kind: PromptOwnership.Kind = PromptOwnership.Kind.GENERIC,
         launch: (requestId: String) -> Unit
     ): BiometricActivityLauncher.BiometricResult {
         val id = nextRequestId.incrementAndGet()
+        val key = NotificationKeys.approval(id.toString())
         val turnCame = CompletableDeferred<Unit>()
-        // The turn only wakes this caller; the launch runs here, after the
-        // deadline check, so a turn that comes as the deadline passes is
-        // handed straight on.
-        val turn = SigningPromptQueue.Turn { turnCame.complete(Unit) }
         queued[id] = turnCame
-        prompts.join(turn)
+        // Becoming ACTIVE only wakes this caller; the launch runs here, after
+        // the deadline check, so a turn that comes as the deadline passes is
+        // handed straight on.
+        prompts.enqueue(key, kind) { turnCame.complete(Unit) }
         try {
             withTimeoutOrNull(queueDeadlineMillis) { turnCame.await() }
-                ?: return BiometricActivityLauncher.BiometricResult.Error(
-                    BiometricPrompt.ERROR_TIMEOUT,
-                    "Another approval prompt held the screen past this request's deadline"
-                )
+                ?: run {
+                    prompts.settle(key, PromptOwnership.Outcome.EXPIRED)
+                    return BiometricActivityLauncher.BiometricResult.Error(
+                        BiometricPrompt.ERROR_TIMEOUT,
+                        "Another approval prompt held the screen past this request's deadline"
+                    )
+                }
             return coroutineScope {
                 // Its own clock, started with the launch: no notification or
                 // other callback has to exist for an unseen request to let go.
                 // (`this.launch` is the coroutine builder, not the parameter.)
                 val activeDeadline = this.launch {
                     delay(activeDeadlineMillis)
-                    expireUnshown(id.toString())
+                    expireUnshown(id.toString(), PromptOwnership.Event.DEADLINE)
                 }
                 try {
                     suspendCancellableCoroutine { continuation ->
@@ -629,7 +634,11 @@ internal class PendingAuthentications(
                         try {
                             launch(id.toString())
                         } catch (e: Exception) {
-                            if (pending.remove(id, continuation)) continuation.resumeWithException(e)
+                            if (prompts.settle(key, PromptOwnership.Outcome.FAILED) &&
+                                pending.remove(id, continuation)
+                            ) {
+                                continuation.resumeWithException(e)
+                            }
                         }
                     }
                 } finally {
@@ -638,17 +647,25 @@ internal class PendingAuthentications(
             }
         } finally {
             queued.remove(id, turnCame)
-            // Off the screen or out of the line. A request withdrawn while its
-            // prompt is up hands the screen on; the prompt activity gives way
-            // to the next request it is started for.
-            prompts.leave(turn)
+            // Withdrawn, if it has not settled: off the screen or out of the
+            // line. One withdrawn on screen has its prompt ended unshown, so a
+            // late tap on its notification prompts for nothing; the prompt
+            // activity gives way to the next request it is started for.
+            prompts.end(key) { wasActive -> if (wasActive) expirePrompt(id.toString()) }
         }
     }
 
-    /** Resumes [requestId]'s caller with [result]; false when nothing waits on that id. */
+    /**
+     * Resumes [requestId]'s caller with [result]; false when nothing waits on
+     * that id. Only the ACTIVE request accepts a result: one for a request
+     * still queued or already settled is refused.
+     */
     fun complete(requestId: String, result: BiometricActivityLauncher.BiometricResult): Boolean {
-        val id = requestId.toLongOrNull() ?: return false
-        val continuation = pending.remove(id) ?: return false
+        val outcome = promptOutcome((result as? BiometricActivityLauncher.BiometricResult.Error)?.code)
+        if (!prompts.settle(NotificationKeys.approval(requestId), outcome, PromptOwnership.Event.ACTIVITY_RESULT)) {
+            return false
+        }
+        val continuation = requestId.toLongOrNull()?.let { pending.remove(it) } ?: return false
         continuation.resume(result)
         return true
     }
@@ -659,16 +676,21 @@ internal class PendingAuthentications(
      * waits on that id. Called when its notification expires and when its
      * active deadline passes, whichever comes first.
      */
-    fun expireUnshown(requestId: String): Boolean {
-        val id = requestId.toLongOrNull() ?: return false
-        if (!pending.containsKey(id) || !expirePrompt(requestId)) return false
-        return complete(
-            requestId,
+    fun expireUnshown(
+        requestId: String,
+        event: PromptOwnership.Event = PromptOwnership.Event.NOTIFICATION_EXPIRY,
+    ): Boolean {
+        val key = NotificationKeys.approval(requestId)
+        if (!prompts.accept(key, event) || !expirePrompt(requestId)) return false
+        if (!prompts.expire(key, event)) return false
+        val continuation = requestId.toLongOrNull()?.let { pending.remove(it) } ?: return false
+        continuation.resume(
             BiometricActivityLauncher.BiometricResult.Error(
                 BiometricPrompt.ERROR_TIMEOUT,
                 "The approval's prompt was never shown before its deadline"
             )
         )
+        return true
     }
 
     /** Cancels every waiting request, those still waiting for their turn first. */
@@ -701,4 +723,16 @@ internal class PendingAuthentications(
         /** Process-wide, so ids from two launchers never name the same request. */
         private val nextRequestId = AtomicLong(0L)
     }
+}
+
+/**
+ * How a prompt result settles its approval: no error code approved, the
+ * owner's cancel or negative button denied, anything else failed.
+ */
+internal fun promptOutcome(errorCode: Int?): PromptOwnership.Outcome = when (errorCode) {
+    null -> PromptOwnership.Outcome.APPROVED
+    BiometricPrompt.ERROR_USER_CANCELED,
+    BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+    BiometricPrompt.ERROR_CANCELED -> PromptOwnership.Outcome.DENIED
+    else -> PromptOwnership.Outcome.FAILED
 }

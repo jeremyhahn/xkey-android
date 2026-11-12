@@ -26,7 +26,7 @@ import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.BiometricActivityLauncher.BiometricResult
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.PendingAuthentications
-import com.automatethethings.xkey.auth.SigningPromptQueue
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
@@ -239,7 +239,7 @@ class SetKeyPolicyHandlerTest {
     private fun promptsTakeTurns(): PendingAuthentications {
         // Each launched prompt is up, as the owner answers it: none is
         // expired at the active deadline.
-        val approvals = PendingAuthentications(SigningPromptQueue(), expirePrompt = { false })
+        val approvals = PendingAuthentications(PromptOwnership(), expirePrompt = { false })
         coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } coAnswers {
             val onLaunch = arg<(String, Intent) -> Unit>(4)
             val launch = { requestId: String ->

@@ -44,7 +44,7 @@ import java.util.concurrent.Executor
 class CryptoSigningCancellationTest {
 
     /** Its own line of prompts, so no other test's request can hold the screen. */
-    private val pending = PendingCryptoSignatures(prompts = SigningPromptQueue())
+    private val pending = PendingCryptoSignatures(prompts = PromptOwnership())
 
     /** The activities launched, by request id. */
     private val activities = LinkedHashMap<String, FakeActivity>()

@@ -44,7 +44,7 @@ import org.junit.Test
 class PendingAuthenticationsTest {
 
     /** The screen these requests take turns on; each test gets its own. */
-    private val screen = SigningPromptQueue()
+    private val screen = PromptOwnership()
 
     private val pending = PendingAuthentications(screen)
 
@@ -74,6 +74,32 @@ class PendingAuthenticationsTest {
     }
 
     @Test
+    fun aLateResultExpiryOrDeadlineForASettledRequestIsRefusedByItsOwner() = runTest {
+        val refused = mutableListOf<PromptOwnership.Refusal>()
+        val owner = PromptOwnership(report = { refused += it })
+        val requests = PendingAuthentications(owner, expirePrompt = { true })
+        val waiting = async { requests.await { launched += it } }
+        runCurrent()
+        val id = launched.single()
+        assertTrue(requests.complete(id, BiometricResult.Success))
+        assertEquals(BiometricResult.Success, waiting.await())
+
+        assertFalse(requests.complete(id, BiometricResult.Success))
+        assertFalse(requests.expireUnshown(id))
+        assertFalse(requests.expireUnshown(id, PromptOwnership.Event.DEADLINE))
+
+        assertEquals(0, owner.entries)
+        assertEquals(
+            listOf(
+                PromptOwnership.Event.ACTIVITY_RESULT,
+                PromptOwnership.Event.NOTIFICATION_EXPIRY,
+                PromptOwnership.Event.DEADLINE,
+            ).map { PromptOwnership.Refusal(NotificationKeys.approval(id), it, PromptOwnership.State.SETTLED) },
+            refused
+        )
+    }
+
+    @Test
     fun aResultForAnIdTheLauncherNeverIssuedCompletesNothing() = runTest {
         val waiting = async { pending.await { launched += it } }
         runCurrent()
@@ -88,7 +114,7 @@ class PendingAuthenticationsTest {
 
     @Test
     fun twoLaunchersNeverIssueTheSameId() = runTest {
-        val other = PendingAuthentications(SigningPromptQueue())
+        val other = PendingAuthentications(PromptOwnership())
         val first = async { pending.await { launched += it } }
         val second = async { other.await { launched += it } }
         runCurrent()
