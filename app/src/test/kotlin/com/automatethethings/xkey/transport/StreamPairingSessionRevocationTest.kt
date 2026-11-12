@@ -24,6 +24,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -46,6 +47,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.runs
@@ -56,6 +58,8 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.nio.file.Files
+import java.security.KeyStore
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -659,7 +663,7 @@ class StreamPairingSessionRevocationTest {
     @Test
     fun aShareWhoseKeyIsDeletedByTheLegacyDeleteKeyRpcWhileItWaitsWritesNothing() = runBlocking<Unit> {
         val keyDao = mockk<KeyDao>(relaxed = true)
-        val deleter = realDeleteHandler(keyDao)
+        val deleter = realHandler(keyDao)
         var deletedKeyId: String? = null
         assertRevokedAtAdmission { store ->
             deletedKeyId = store.keyId
@@ -674,8 +678,81 @@ class StreamPairingSessionRevocationTest {
         coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
     }
 
+    /**
+     * A key row replaced under a pending share is a revoke: the real
+     * `local.generateKey` writes a new PRIVATE row under the shared key's ID
+     * while the share waits at admission (a row the handler's existence check
+     * did not see, as when it appears during the generation's prompt), and
+     * the share is refused, with nothing written and no nonce consumed.
+     */
+    @Test
+    fun aShareWhoseKeyRowGenerateKeyReplacesWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        // The DAO's own insert runs; only the Room write under it is mocked.
+        coEvery { keyDao.insert(any()) } coAnswers { callOriginal() }
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) } returns ByteArray(91) { 4 }
+        val generator = realHandler(keyDao, keystore)
+        var response: JSONObject? = null
+        assertRevokedAtAdmission { store ->
+            response = generate(generator, store.keyId)
+        }
+        assertTrue(
+            "the generation must succeed, got $response",
+            response?.optJSONObject("result")?.optString("keyId")?.isNotEmpty() == true
+        )
+    }
+
+    /**
+     * `local.generateKey` refuses an ID that exists in any key store (the
+     * general or credential Keystore namespace, the software store, or the
+     * metadata table) and writes no row.
+     */
+    @Test
+    fun generateKeyRefusesAnIdThatExistsInAnyKeyStore() = runBlocking<Unit> {
+        mockkConstructor(SoftwareKeyStore::class)
+        val stores = listOf<(KeystoreManager, KeyDao, String) -> Unit>(
+            { keystore, _, id -> every { keystore.generalKeyExists(id) } returns true },
+            { keystore, _, id -> every { keystore.keyExists(id) } returns true },
+            { _, _, id -> every { anyConstructed<SoftwareKeyStore>().contains(id) } returns true },
+            { _, dao, id -> coEvery { dao.exists(id) } returns true },
+        )
+        stores.forEachIndexed { i, holds ->
+            val keyDao = mockk<KeyDao>(relaxed = true)
+            val keystore = mockk<KeystoreManager>(relaxed = true)
+            every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+            val id = "existing-$i"
+            holds(keystore, keyDao, id)
+            val response = generate(realHandler(keyDao, keystore), id)
+            assertEquals(
+                "store $i: an existing ID must be refused, got $response",
+                ErrorCodes.KEY_EXISTS,
+                response.optJSONObject("error")?.optInt("code")
+            )
+            coVerify(exactly = 0) { keyDao.insert(any()) }
+        }
+    }
+
+    private suspend fun generate(handler: RequestHandler, keyId: String): JSONObject {
+        val request = JSONObject().put("jsonrpc", "2.0").put("id", 2).put("method", "local.generateKey")
+            .put(
+                "params",
+                JSONObject().put("keyId", keyId).put("algorithm", "ES256").put("label", keyId)
+                    .put("requireUserVerification", false).put("shareable", false)
+            )
+        return JSONObject(String(handler.handleRawRequest(request.toString().toByteArray())))
+    }
+
     /** The real [RequestHandler] with only its Android and storage edges mocked. */
-    private fun realDeleteHandler(keyDao: KeyDao): RequestHandler {
+    private fun realHandler(
+        keyDao: KeyDao,
+        keystore: KeystoreManager = mockk<KeystoreManager>(relaxed = true).also {
+            every { it.keyExists(any()) } returns true
+            every { it.deleteKey(any()) } returns true
+        },
+    ): RequestHandler {
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
@@ -683,11 +760,12 @@ class StreamPairingSessionRevocationTest {
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)
+        // The software key store opens the Keystore and its directory when built.
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
+        every { context.filesDir } returns Files.createTempDirectory("xkey-files").toFile().apply { deleteOnExit() }
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.keyExists(any()) } returns true
-        every { keystore.deleteKey(any()) } returns true
         return RequestHandler(context, keystore, biometricLauncher = null, sessionAuthManager = null)
     }
 
