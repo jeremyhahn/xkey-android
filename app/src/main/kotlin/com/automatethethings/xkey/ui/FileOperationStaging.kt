@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.ui
 
 import java.io.File
+import java.io.OutputStream
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -80,6 +81,13 @@ class FileOperationStaging(cacheDir: File) {
         }
     }
 
+    /** Copy a staged file to the stream [openTarget] opens, then delete it whether the copy throws or not. */
+    fun deliverTo(file: File, openTarget: () -> OutputStream?) = deliver(file) { staged ->
+        (openTarget() ?: throw IllegalStateException(NO_TARGET)).use { output ->
+            staged.inputStream().use { it.copyTo(output) }
+        }
+    }
+
     /** Create an empty staging file under a generated name and own it; refused after [shutdown]. */
     @PublishedApi
     internal fun create(displayName: String?): File = synchronized(lock) {
@@ -133,6 +141,7 @@ class FileOperationStaging(cacheDir: File) {
         private const val PREFIX = "stage-"
         private const val SESSION_LENGTH = 16
         private const val CLOSED = "file operation staging is shut down"
+        private const val NO_TARGET = "Cannot open output file"
         private val EXTENSION = Regex("[A-Za-z0-9]{1,10}")
 
         /** Sessions of the instances in this process not yet [shutdown]. */

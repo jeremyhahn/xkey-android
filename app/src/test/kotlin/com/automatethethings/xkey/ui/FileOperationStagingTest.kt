@@ -205,4 +205,37 @@ class FileOperationStagingTest {
         }
         assertTrue(staging.directory.list().isNullOrEmpty())
     }
+
+    @Test
+    fun `a destination open paused across teardown still completes from the staged file`() {
+        val staging = staging()
+        val target = temp.newFile("original.jpg").apply { writeText("original") }
+        val file = staging.stage("photo.jpg") { it.writeText("signed") }
+        val entered = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        var failure: Throwable? = null
+        val worker = thread {
+            try {
+                staging.deliverTo(file) {
+                    // openOutputStream blocks in the provider, then truncates the original
+                    entered.countDown()
+                    resume.await()
+                    FileOutputStream(target)
+                }
+            } catch (e: Throwable) {
+                failure = e
+            }
+        }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+        staging.shutdown()
+
+        resume.countDown()
+        worker.join(5_000)
+        assertFalse(worker.isAlive)
+
+        assertEquals("delivery should complete, got $failure", null, failure)
+        assertEquals("signed", target.readText())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
 }
