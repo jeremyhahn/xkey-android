@@ -3646,6 +3646,8 @@ class RequestHandler(
                 else -> return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid pinType: $pinType")
             }
             Response.success(request.id, JSONObject().apply { put("success", true) })
+        } catch (e: PinLockedException) {
+            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
         } catch (e: PinException) {
             Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN set failed")
         } catch (e: Exception) {
@@ -3684,6 +3686,8 @@ class RequestHandler(
         return try {
             pm.resetLockout(soPin)
             Response.success(request.id, JSONObject().apply { put("success", true) })
+        } catch (e: PinLockedException) {
+            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
         } catch (e: PinException) {
             Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "Reset failed")
         } catch (e: Exception) {
