@@ -53,6 +53,9 @@ espresso = "3.7.0"
 testRules = "1.7.0"
 mockk = "1.14.11"
 robolectric = "4.17"
+# The framework jar Robolectric 4.17 runs targetSdk 34's tests on
+# (DefaultSdkProvider); raise it with robolectric or targetSdk.
+robolectricAndroidAll = "14-robolectric-10818077-i7"
 uiautomator = "2.4.1"
 
 # Coverage: the JaCoCo plugin's tool and AGP's coverage instrumentation
@@ -146,6 +149,7 @@ androidx-espresso-intents = { group = "androidx.test.espresso", name = "espresso
 mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
 mockk-android = { group = "io.mockk", name = "mockk-android", version.ref = "mockk" }
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+robolectric-android-all = { group = "org.robolectric", name = "android-all-instrumented", version.ref = "robolectricAndroidAll" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 androidx-test-uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }
 androidx-test-rules = { group = "androidx.test", name = "rules", version.ref = "testRules" }
