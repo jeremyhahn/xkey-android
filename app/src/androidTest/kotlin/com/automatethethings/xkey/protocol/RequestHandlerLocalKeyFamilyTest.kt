@@ -648,7 +648,9 @@ class RequestHandlerLocalKeyFamilyTest {
     @Test
     fun aKeyInfoReadFailureDuringGenerateKeyIsAnErrorNotSoftware() {
         val keystoreManager = KeystoreManager(context)
+        val readAliases = mutableListOf<String>()
         keystoreManager.keyInfoReader = { alias, _ ->
+            readAliases.add(alias)
             throw java.security.spec.InvalidKeySpecException("KeyInfo unreadable: $alias")
         }
         val failingHandler = RequestHandler(
@@ -673,9 +675,17 @@ class RequestHandlerLocalKeyFamilyTest {
                     .put("requireUserVerification", false)
                     .put("preferStrongBox", false)
             )
+            readAliases.clear()
             val response = runBlocking { failingHandler.handleRequest(request) }
 
             assertFalse(algorithm + ": " + response.toJsonString(), response.isSuccess())
+            // The key was generated and its KeyInfo read was attempted: the
+            // error is the read failure, not a generation refusal.
+            assertTrue(
+                "$algorithm: the injected KeyInfo reader must be reached, got: " + response.toJsonString(),
+                readAliases.isNotEmpty()
+            )
+            assertEquals(algorithm + ": " + response.toJsonString(), ErrorCodes.INTERNAL_ERROR, response.errorCode())
             assertNull(
                 algorithm,
                 runBlocking { XKeyDatabase.getInstance(context).keyDao().getByKeyId(keyId) }
