@@ -259,6 +259,50 @@ class BleClientPhoneInitiatedSasTest {
         assertTrue("nothing may be answered on a retired session", h.receivedResponses.isEmpty())
     }
 
+    /**
+     * The link drops after the user said yes, between the ownership check and
+     * the trust publication: the retired connection is not trusted, its
+     * desktop request is never served, and connect() reports no session.
+     */
+    @Test
+    fun aDisconnectAtTheTrustPublicationTrustsNothing(): Unit = runBlocking {
+        val handler = RecordingHandler()
+        lateinit var h: BleClientHarness
+        val confirmation = RecordingConfirmation {
+            h.desktopSends(attestRequest(id = 13))
+            delay(200)
+            true
+        }
+        h = harness(handler, confirmation)
+        var dropped: Any? = null
+        h.client.sasTrustHook = {
+            h.client.sasTrustHook = null
+            dropped = connectionOf(h.client)
+            h.probe.gattCallback.onConnectionStateChange(
+                h.gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
+            )
+        }
+
+        val connected = withTimeout(5_000) { h.client.connect(h.address, randomKey()) }
+
+        assertFalse("connect() must not report a dropped link as up", connected)
+        val retired = dropped ?: throw AssertionError("the seam was never reached")
+        assertFalse("a retired connection must not be trusted", fieldOf(retired, "trusted") as Boolean)
+        val answer = fieldOf(retired, "sasConfirmed") as CompletableDeferred<*>
+        assertTrue(answer.isCompleted)
+        assertEquals(false, answer.await())
+        delay(300)
+        assertFalse(h.client.isConnected())
+        assertTrue("nothing may be served on a retired session", handler.requests.isEmpty())
+        assertTrue("nothing may be answered on a retired session", h.receivedResponses.isEmpty())
+    }
+
+    private fun connectionOf(client: BleClient): Any? =
+        BleClient::class.java.getDeclaredField("connection").apply { isAccessible = true }.get(client)
+
+    private fun fieldOf(target: Any, name: String): Any? =
+        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+
     /** A prompt that stays open until it is cancelled, and says whether it was. */
     private class PendingPrompt {
         private val shown = CompletableDeferred<Unit>()

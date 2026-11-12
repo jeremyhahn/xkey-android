@@ -239,6 +239,15 @@ class BleClient(
     @Volatile
     internal var stateChangeHook: ((Int) -> Unit)? = null
 
+    /**
+     * Test seam: called in the SAS confirmation once the user has said yes
+     * and the connection's ownership is about to be checked and its trust
+     * published, so a test can drop the link there. Always null in
+     * production.
+     */
+    @Volatile
+    internal var sasTrustHook: (() -> Unit)? = null
+
     // Negotiated MTU
     @Volatile
     private var negotiatedMtu: Int = DEFAULT_MTU
@@ -975,6 +984,7 @@ class BleClient(
                 Log.w(TAG, "SAS confirmed for a session that has ended; not trusted")
                 false
             } else {
+                sasTrustHook?.invoke()
                 current.trusted = true
                 current.sasConfirmed.complete(true)
                 _connectionState.value = ClientConnectionState.Connected(deviceName, address)
