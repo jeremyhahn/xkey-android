@@ -31,8 +31,14 @@ import java.util.concurrent.atomic.AtomicLong
  * with the inbound `local.sync*` handlers so neither direction duplicates the
  * reconciliation logic.
  *
- * Wire contract: go-xkms `pkg/pairing/protocol_sync.go` (RemoteSync*Params /
- * RemoteSync*Result), handled on the desktop by the pairing Bridge.
+ * Wire contract: go-xkms `pkg/pairingproto/protocol_sync.go` (RemoteSync*Params /
+ * RemoteSync*Result, pinned at tag `xkey/v0.64.2-alpha`), handled on the
+ * desktop by the pairing Bridge.
+ *
+ * `remote.syncAll` is never sent: its params carry only include flags and no
+ * phone items, so the desktop could not merge the phone's stores from it.
+ * [syncAll] runs the three per-store calls instead, each of which pushes the
+ * phone's items and pulls the desktop's in one round trip.
  *
  * Requires an active paired connection: [messageSender] and [messageRouter]
  * come from the live transport (BLE / USB-AOA / TCP) for the connected desktop.
@@ -58,6 +64,18 @@ class RemoteSyncClient(
         val totalPulled: Int get() = certsPulled + oathPulled + passwordsPulled
         val totalPushed: Int get() = certsPushed + oathPushed + passwordsPushed
     }
+
+    /**
+     * The desktop's view of sync, from `remote.syncStatus` (go-xkms
+     * `RemoteSyncStatusResult`). [lastSync] is the desktop's RFC 3339 time of
+     * its last sync, or null when it has never synced; [storeChecksums] maps a
+     * store name to the desktop's digest of it.
+     */
+    data class DesktopSyncStatus(
+        val lastSync: String?,
+        val deviceId: String,
+        val storeChecksums: Map<String, String>
+    )
 
     /** Runs a full bidirectional sync of all stores and records the sync time. */
     suspend fun syncAll(): SyncResult {
@@ -103,6 +121,24 @@ class RemoteSyncClient(
         val resp = sendRequest(MethodNames.REMOTE_SYNC_PASSWORDS, JSONObject().put("passwords", mine))
         val merged = engine.mergePasswords(resp.result?.optJSONArray("local") ?: JSONArray())
         return acceptedByPeer(resp) to (merged.added + merged.updated)
+    }
+
+    /**
+     * Asks the desktop for its sync status (`remote.syncStatus`, empty
+     * params). Reads nothing from and writes nothing to the phone's stores.
+     * A missing `last_sync` (omitempty) is null; a `null` `store_checksums`
+     * (a nil Go map) is empty.
+     */
+    suspend fun syncStatus(): DesktopSyncStatus {
+        val result = sendRequest(MethodNames.REMOTE_SYNC_STATUS, JSONObject()).result ?: JSONObject()
+        val checksums = result.optJSONObject("store_checksums")
+        return DesktopSyncStatus(
+            lastSync = result.optString("last_sync", "").ifEmpty { null },
+            deviceId = result.optString("device_id", ""),
+            storeChecksums = checksums?.keys()?.asSequence()
+                ?.associateWith { checksums.optString(it, "") }
+                ?: emptyMap()
+        )
     }
 
     /**
