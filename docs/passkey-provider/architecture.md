@@ -32,14 +32,31 @@ Data was migrated from this table in MIGRATION_1_2.
 | `user_name` | TEXT | |
 | `user_display_name` | TEXT | |
 | `public_key_cose` | BLOB | COSE-encoded public key |
-| `sign_count` | INTEGER | Default `0` |
+| `sign_count` | INTEGER | Entity default `0` |
 | `created_at` | INTEGER | Epoch milliseconds |
 | `last_used_at` | INTEGER | Epoch milliseconds |
-| `is_discoverable` | INTEGER (boolean) | Default true |
+| `is_discoverable` | INTEGER (boolean) | Entity default true |
+
+Every `credential_metadata` column is NOT NULL. The defaults are those of the
+Kotlin entity; the v12 schema sets no SQL default on these columns.
+
+### Passkey columns in `keys` (`KeyEntity`)
 
 The FIDO2 rows in `keys` (`key_type = 'fido2'`) carry the same relying party
-and user columns (`rp_id`, `rp_name`, `user_id`, `user_name`,
-`user_display_name`, `is_discoverable`, `sign_count`), all nullable there.
+and user columns:
+
+| Column | Type | Null | Notes |
+|--------|------|------|-------|
+| `rp_id` | TEXT | Nullable | Relying party ID; null for non-FIDO2 keys |
+| `rp_name` | TEXT | Nullable | Relying party name |
+| `user_id` | TEXT | Nullable | |
+| `user_name` | TEXT | Nullable | |
+| `user_display_name` | TEXT | Nullable | |
+| `is_discoverable` | INTEGER (boolean) | NOT NULL | Entity default false |
+| `sign_count` | INTEGER | NOT NULL | Entity default `0` |
+
+As in `credential_metadata`, the defaults are the Kotlin entity's; the v12
+schema sets no SQL default on `is_discoverable` or `sign_count`.
 
 ## Index Strategy
 
