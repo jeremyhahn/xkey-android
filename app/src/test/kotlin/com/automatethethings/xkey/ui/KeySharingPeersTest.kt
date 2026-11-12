@@ -550,6 +550,43 @@ class KeySharingPeersTest {
         assertTrue(peers.peers().first().of(PEER_A).allowed)
     }
 
+    /**
+     * The Private write fails while the stored policy stays Selected Peers,
+     * so the reopened sheet shows Selected Peers. A grant then is refused
+     * (the plan's choice) until the Private intent resolves, so the older
+     * retry never deletes an approved grant.
+     */
+    @Test
+    fun aGrantUnderAPendingPrivateIsRefusedAndNotErasedByItsRetry() = runTest {
+        val key = "k-pending-private"
+        table.value = listOf(KeySharingPolicy(key, PEER_A))
+        var failing = true
+        val stored = mutableListOf<SharingPolicyType>()
+        val peers = KeySharingPeers(key, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        peers.setKeyPolicy(SharingPolicyType.PRIVATE) {
+            if (failing) throw IllegalStateException("disk I/O error")
+            stored += SharingPolicyType.PRIVATE
+        }
+        runCurrent()
+
+        assertFalse("a grant was accepted under a pending Private", peers.setAllowed(PEER_B, true))
+        assertTrue(table.value.none { it.keyId == key && it.peerPublicKeyHex == PEER_B })
+        assertTrue(peers.peers().first().none { it.selectable || it.allowed })
+
+        failing = false
+        advanceUntilIdle()
+        assertEquals(listOf(SharingPolicyType.PRIVATE), stored)
+        assertTrue(table.value.none { it.keyId == key })
+
+        // Once the user chooses Selected Peers again, a grant stands and survives.
+        peers.setKeyPolicy(SharingPolicyType.SELECTED_PEERS) {}
+        assertTrue(peers.setAllowed(PEER_B, true))
+        advanceUntilIdle()
+        assertTrue(table.value.any { it.keyId == key && it.peerPublicKeyHex == PEER_B })
+        assertTrue(peers.peers().first().of(PEER_B).allowed)
+    }
+
     /** Holds every grant before its insert until the returned gate completes. */
     private fun holdGrants(): CompletableDeferred<Unit> {
         val gate = CompletableDeferred<Unit>()
