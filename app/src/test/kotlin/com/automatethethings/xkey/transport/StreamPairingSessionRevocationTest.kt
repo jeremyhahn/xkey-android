@@ -735,6 +735,50 @@ class StreamPairingSessionRevocationTest {
         }
     }
 
+    /**
+     * `local.deleteKey` is one revoke from its first removal: the real handler
+     * pauses right after the key's Keystore entry is gone, before its metadata
+     * row goes, and a share of the key waiting at admission resumes in that
+     * window. The share is refused, with nothing written and no nonce
+     * consumed, and the delete then completes.
+     */
+    @Test
+    fun aShareResumedAfterLocalDeleteKeyRemovedTheKeystoreEntryWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val removed = CompletableDeferred<Unit>()
+        val finish = CountDownLatch(1)
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        // The Keystore entry goes, then the delete pauses there.
+        every { keystore.deleteGeneralKey(any()) } answers {
+            removed.complete(Unit)
+            finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            true
+        }
+        val deleter = realHandler(keyDao, keystore)
+        var response: JSONObject? = null
+        var deletedKeyId: String? = null
+        assertRevokedAtAdmissionDuring { store, resumeShare ->
+            deletedKeyId = store.keyId
+            val request = JSONObject().put("jsonrpc", "2.0").put("id", 3).put("method", "local.deleteKey")
+                .put("params", JSONObject().put("keyId", store.keyId))
+            val deleting = scope.async(Dispatchers.IO) {
+                JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
+            }
+            try {
+                withTimeout(TIMEOUT_MS) { removed.await() }
+                resumeShare()
+            } finally {
+                finish.countDown()
+            }
+            response = withTimeout(TIMEOUT_MS) { deleting.await() }
+        }
+        assertTrue(
+            "the delete must succeed, got $response",
+            response?.optJSONObject("result")?.optBoolean("deleted") == true
+        )
+        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+    }
+
     private suspend fun generate(handler: RequestHandler, keyId: String): JSONObject {
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 2).put("method", "local.generateKey")
             .put(
@@ -769,7 +813,20 @@ class StreamPairingSessionRevocationTest {
         return RequestHandler(context, keystore, biometricLauncher = null, sessionAuthManager = null)
     }
 
-    private suspend fun assertRevokedAtAdmission(revoke: suspend (SharedKeyStore) -> Unit) {
+    private suspend fun assertRevokedAtAdmission(revoke: suspend (SharedKeyStore) -> Unit) =
+        assertRevokedAtAdmissionDuring { store, resumeShare ->
+            revoke(store)
+            resumeShare()
+        }
+
+    /**
+     * As [assertRevokedAtAdmission], with [revoke] choosing when the share
+     * waiting at admission resumes: `resumeShare` lets it go and returns once
+     * the share has finished.
+     */
+    private suspend fun assertRevokedAtAdmissionDuring(
+        revoke: suspend (store: SharedKeyStore, resumeShare: suspend () -> Unit) -> Unit
+    ) {
         val gate = GatedOutputStream()
         val phone = connectPaired(gate)
         val router = BidirectionalMessageRouter(requestHandler)
@@ -791,7 +848,10 @@ class StreamPairingSessionRevocationTest {
         val writes = gate.writes.get()
         val nonce = phone.noise.sendNonceForTest()
 
-        revoke(store)
+        revoke(store) {
+            resume.complete(Unit)
+            withTimeout(TIMEOUT_MS) { sending.join() }
+        }
         resume.complete(Unit)
 
         val outcome = withTimeout(TIMEOUT_MS) { sending.await() }
