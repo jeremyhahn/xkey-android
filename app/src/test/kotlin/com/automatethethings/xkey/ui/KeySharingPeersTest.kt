@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.ui
 
+import android.content.SharedPreferences
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
@@ -31,14 +32,17 @@ import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -53,7 +57,7 @@ import org.junit.Test
  * selectable, a grant for it is refused, and once the revocation completes
  * the list updates on its own and the peer can be granted again.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
+@OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
 class KeySharingPeersTest {
 
     private companion object {
@@ -129,7 +133,7 @@ class KeySharingPeersTest {
         repo.addDevice(PEER_A, "desktop-a")
         assertTrue(repo.isRevocationPending(PEER_A))
 
-        val peers = KeySharingPeers(KEY, dao, repo)
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler))
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
 
@@ -168,7 +172,7 @@ class KeySharingPeersTest {
                 it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
             } + row
         }
-        val peers = KeySharingPeers(KEY, dao, repo)
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler))
 
         // The grant passes its pending check and stops before its insert.
         val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true) }
@@ -201,7 +205,7 @@ class KeySharingPeersTest {
         // The sheet subscribes when it opens, whatever the key's policy (PRIVATE
         // here: nothing in the table changes below), and shows this list as soon
         // as SELECTED_PEERS is chosen.
-        val peers = KeySharingPeers(KEY, dao, repo)
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler))
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
         assertEquals(setOf(PEER_A, PEER_B), seen.last().map { it.device.publicKeyHex }.toSet())
@@ -238,7 +242,7 @@ class KeySharingPeersTest {
                 it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
             } + row
         }
-        val peers = KeySharingPeers(KEY, dao, repo)
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler))
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
 
@@ -252,5 +256,42 @@ class KeySharingPeersTest {
         val after = seen.last().of(PEER_A)
         assertTrue("the sheet keeps the peer selectable", after.selectable)
         assertTrue(after.allowed)
+    }
+
+    @Test
+    fun aGrantFromTheMainThreadCommitsOnTheIoDispatcher() = runTest {
+        // Every prefs commit, with the thread it ran on.
+        val commits = mutableListOf<String>()
+        val store = InMemorySharedPreferences()
+        val prefs = object : SharedPreferences by store {
+            override fun edit(): SharedPreferences.Editor {
+                val inner = store.edit()
+                return object : SharedPreferences.Editor by inner {
+                    override fun putString(key: String, value: String?) = also { inner.putString(key, value) }
+                    override fun putStringSet(key: String, values: Set<String>?) = also { inner.putStringSet(key, values) }
+                    override fun putLong(key: String, value: Long) = also { inner.putLong(key, value) }
+                    override fun remove(key: String) = also { inner.remove(key) }
+                    override fun commit(): Boolean {
+                        synchronized(commits) { commits += Thread.currentThread().name }
+                        return inner.commit()
+                    }
+                }
+            }
+        }
+        repo = PairedDeviceRepository(prefs)
+        repo.addDevice(PEER_A, "desktop-a")
+        synchronized(commits) { commits.clear() }
+
+        newSingleThreadContext("ui-main").use { main ->
+            newSingleThreadContext("grant-io").use { io ->
+                val peers = KeySharingPeers(KEY, dao, repo, io)
+                // The sheet calls setAllowed from lifecycleScope, on Main.
+                assertTrue(withContext(main) { peers.setAllowed(PEER_A, true) })
+            }
+        }
+
+        // The marker commit and finishGrantWrite's commit, both off the caller's thread.
+        assertEquals(listOf("grant-io", "grant-io"), synchronized(commits) { commits.toList() })
+        assertTrue(hasAccess(PEER_A))
     }
 }
