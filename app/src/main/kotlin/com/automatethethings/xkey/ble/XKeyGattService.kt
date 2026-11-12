@@ -906,12 +906,11 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         }
 
         // Determine which transport is active and has a message router.
-        val (messageSender, messageRouter) = activeTransport() ?: run {
+        // The shared client: its requests draw ids from the router's counter.
+        val remoteClient = remoteKeyClient() ?: run {
             Log.e(TAG, "No active transport for device attestation")
             return false
         }
-
-        val remoteClient = RemoteKeyClient(messageSender, messageRouter)
 
         return try {
             // Generate random nonce

@@ -54,6 +54,7 @@ import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.security.cert.CertificateFactory
 import java.util.Base64
+import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -67,7 +68,9 @@ import java.util.concurrent.atomic.AtomicLong
  * All methods are suspend functions and block until the laptop responds or
  * the request times out.
  *
- * Thread safety: Request IDs use [AtomicLong] for lock-free generation.
+ * Thread safety: Request IDs use [AtomicLong] for lock-free generation, one
+ * counter per [BidirectionalMessageRouter]: every client on a router draws
+ * from the same counter, so no two of them register the same pending id.
  * Pending requests are tracked by [BidirectionalMessageRouter].
  *
  * @param messageSender Transport for sending encrypted messages to the laptop.
@@ -90,9 +93,22 @@ class RemoteKeyClient(
 
         /** Known attestation formats for sanity-check validation. */
         private val knownAttestationFormats = setOf("tpm2", "pkcs11", "software")
+
+        /** The request-id counter of each live router (weak keys). */
+        private val routerCounters = WeakHashMap<BidirectionalMessageRouter, AtomicLong>()
+
+        /** The shared request-id counter for [router], made on first use. */
+        private fun counterFor(router: BidirectionalMessageRouter): AtomicLong =
+            synchronized(routerCounters) {
+                routerCounters.getOrPut(router) { AtomicLong(BASE_REQUEST_ID) }
+            }
     }
 
-    private val nextRequestId = AtomicLong(BASE_REQUEST_ID)
+    /**
+     * This router's request-id counter, shared with every other
+     * [RemoteKeyClient] on it.
+     */
+    private val nextRequestId = counterFor(messageRouter)
 
     /**
      * Sends a JSON-RPC request and waits for the response.
