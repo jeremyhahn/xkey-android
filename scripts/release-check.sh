@@ -11,11 +11,16 @@
 #   GRADLE              the Gradle command (default ./gradlew)
 #   APKSIGNER           apksigner to run (default: $ANDROID_HOME, else
 #                       $ANDROID_SDK_ROOT, /build-tools/$ANDROID_BUILD_TOOLS)
-#   RELEASE_CHECK_OMIT  one XKEY_* name to leave unset: the check then
-#                       passes only when assembleRelease exits nonzero with
-#                       the release guard's "Release signing is not
-#                       configured." message, and fails when Gradle succeeds
-#                       (an unsigned APK) or fails for any other reason
+#   RELEASE_CHECK_OMIT  one XKEY_* name to leave unset. The check then
+#                       fails either way: exit 1 ("release build refused")
+#                       when assembleRelease exits nonzero with the release
+#                       guard's "Release signing is not configured." message,
+#                       the expected outcome; exit 2 ("GUARD BROKEN") when
+#                       Gradle succeeds (an unsigned APK) or fails for any
+#                       other reason
+#
+# Exit status: 0 the release verifies; 1 the check failed (or, with
+# RELEASE_CHECK_OMIT, the guard refused the build as it must); 2 GUARD BROKEN.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -78,12 +83,13 @@ set -e
 if [ -n "${RELEASE_CHECK_OMIT:-}" ]; then
 	# The guard's message (app/build.gradle.kts, the release task doFirst).
 	guard="Release signing is not configured."
+	broken() { echo "release-check: GUARD BROKEN: $*" >&2; exit 2; }
 	[ "$status" -ne 0 ] \
-		|| fail "assembleRelease succeeded without $RELEASE_CHECK_OMIT: the release guard did not refuse the build"
+		|| broken "assembleRelease succeeded without $RELEASE_CHECK_OMIT: the release guard did not refuse the build"
 	[[ $(< "$out/gradle.log") == *"$guard"* ]] \
-		|| fail "assembleRelease failed without $RELEASE_CHECK_OMIT, but not with the release guard's \"$guard\" (see $out/gradle.log)"
-	echo "release-check: assembleRelease refused the build without $RELEASE_CHECK_OMIT, as required"
-	exit 0
+		|| broken "assembleRelease failed without $RELEASE_CHECK_OMIT, but not with the release guard's \"$guard\" (see $out/gradle.log)"
+	echo "release-check: release build refused without $RELEASE_CHECK_OMIT, as the guard requires" >&2
+	exit 1
 fi
 
 [ "$status" -eq 0 ] || fail "assembleRelease failed (exit $status)"
