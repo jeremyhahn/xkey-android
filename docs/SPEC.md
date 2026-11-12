@@ -45,7 +45,7 @@ Never does:
 | oath | shipped | `local.oathAdd`, `oathGenerate`, `oathList`, `oathRemove`; TOTP codes match the desktop's | `docs/oath/` |
 | passkey-provider | shipped | Android Credential Provider service handling create and get credential requests from the system credential manager, with an enable setting; real ceremonies pass against the go-xkms relying party | `docs/passkey-provider/` |
 | fido2-phone-backend | shipped | CTAP2 over BLE so `xkey fido2 --backend phone` authenticates with keys on the phone after a biometric prompt there | `docs/fido2-phone-backend/` |
-| store-sync | shipped | One `SyncEngine` gathers and merges the trust store, OATH and passwords, inbound through `local.sync*` and outbound through `remote.sync*` and `RemoteSyncClient` | `docs/store-sync/` |
+| store-sync | shipped | One `SyncEngine` gathers and merges the trust store, OATH and passwords, inbound through `local.sync*` and outbound through `remote.sync*` and `RemoteSyncClient`; the Sync with Desktop result shows the desktop's `remote.syncStatus`; `remote.syncAll` is not sent (its params carry no phone items) | `docs/store-sync/` |
 | desktop-backup-store | shipped | `local.createBackup` and `local.restoreBackup` hold a paired desktop's backups; backups round-trip | `docs/desktop-backup-store/` |
 | remote-key-access | shipped | `remote.*` from phone to desktop reaches xkmsd backends through the desktop `Bridge`: key operations, sync and PIV; a router sends `remote.*` to the desktop and `local.*` to the phone | `docs/remote-key-access/` |
 | trust-store-bootstrap | shipped | Fetches the platform CA bundle by the configured bootstrap methods from `/v1/ca/bootstrap` or `/acme/ca-bundle`; verifies IDevID certificates; trusted-CA screen | `docs/trust-store-bootstrap/` |
@@ -58,7 +58,7 @@ Never does:
 | verified-media-viewer | shipped | Shows media with signature verification badges | `docs/verified-media-viewer/` |
 | audit-log | shipped | Records security events in Room; audit screen and recent activity on the home screen | `docs/audit-log/` |
 | release-signing | shipped | `assembleRelease` and `bundleRelease` sign with credentials outside version control and fail with a message when they are missing | `docs/release-signing/` |
-| remote-backup-password | shipped | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690) | `docs/remote-backup-password/` |
+| remote-backup-password | shipped | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690); the restore flow lists the desktop's backups (`remote.listBackups`, no password) before it restores | `docs/remote-backup-password/` |
 | password-vault-rpcs | planned | Answer the `Password*` and `SealStore*` methods the desktop sends over USB (go-xkms#692), including the per-user vault's new unlock body | none |
 | phone-initiated-pairing | shipped | Answer `local.attestDevice` on sessions the phone opens and display the pairing SAS (go-xkms#1306) | `docs/phone-initiated-pairing/` |
 | request-generation-echo | shipped | Echo a per-request `generation` in every pairing response, the phone half of the go-xkms#128 flag day | `docs/request-generation-echo/` |
