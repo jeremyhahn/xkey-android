@@ -54,6 +54,8 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import org.junit.After
 import org.junit.Assert.assertEquals
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -710,5 +712,71 @@ class PairedDeviceGrantCleanupTest {
         method.isAccessible = true
         val noResume = Continuation<Any?>(EmptyCoroutineContext) { error("suspended") }
         return method.invoke(handler, key, peer, noResume) as Boolean
+    }
+
+    // --- r8: grant writes a previous process left unfinished. ---
+
+    /** Persists a grant-write marker as an ended process left it: none of this process's writes holds it. */
+    private fun seedGrantWrite(peer: String, generation: Long) {
+        prefs.edit().putStringSet("grant_writes", setOf("$peer@$generation")).commit()
+    }
+
+    /**
+     * The process died after a grant's insert committed and before its marker
+     * was cleared, and the pairing that grant was checked against had ended.
+     * The replay at the next start revokes the key, so the stale row goes.
+     */
+    @Test
+    fun anInterruptedGrantWriteForAnEndedPairingIsRevokedAtRestart() {
+        val ended = repo.pairingGeneration(PEER_A)!!
+        repo.removeDevice(PEER_A)
+        assertTrue(grantsOf(PEER_A).isEmpty())
+        repo.addDevice(PEER_A, "desktop-a")
+        assertNotEquals(ended, repo.pairingGeneration(PEER_A))
+        // The insert of the interrupted write, and its marker.
+        table += KeySharingPolicy("k-9", PEER_A)
+        seedGrantWrite(PEER_A, ended)
+
+        val restarted = restart()
+
+        assertTrue("the stale grant is removed", grantsOf(PEER_A).isEmpty())
+        assertFalse(PEER_A in restarted.pendingRevocations())
+        assertTrue(prefs.getStringSet("grant_writes", null).isNullOrEmpty())
+        assertEquals(listOf("k-1" to PEER_B), peersWithGrants())
+    }
+
+    /** The same, but the pairing is still the one the write was checked against: the grant stands. */
+    @Test
+    fun anInterruptedGrantWriteForTheCurrentPairingStandsAtRestart() {
+        val current = repo.pairingGeneration(PEER_A)!!
+        table += KeySharingPolicy("k-9", PEER_A)
+        seedGrantWrite(PEER_A, current)
+
+        val restarted = restart()
+
+        assertEquals(listOf("k-1", "k-2", "k-9"), grantsOf(PEER_A).map { it.keyId }.sorted())
+        assertFalse(PEER_A in restarted.pendingRevocations())
+        assertTrue(prefs.getStringSet("grant_writes", null).isNullOrEmpty())
+    }
+
+    /** The marker never reached disk: the grant is not written, and nothing is left for a restart. */
+    @Test
+    fun aFailedGrantMarkerPersistenceLeavesNoGrant() = runTest {
+        val disk = DiskPrefs()
+        val paired = PairedDeviceRepository(disk)
+        paired.addDevice(PEER_C, "desktop-c")
+        disk.flush()
+        disk.failCommits = 1
+        var wrote = false
+
+        assertFalse(paired.writeGrant(PEER_C) { wrote = true; table += KeySharingPolicy("k-9", PEER_C) })
+
+        assertFalse(wrote)
+        assertTrue(grantsOf(PEER_C).isEmpty())
+        assertFalse(paired.isRevocationPending(PEER_C))
+        val after = PairedDeviceRepository(disk.afterCrash())
+        after.recoverInterruptedGrantWrites()
+        assertFalse(after.isRevocationPending(PEER_C))
+        assertTrue(after.pendingRevocations().isEmpty())
     }
 }

@@ -214,4 +214,43 @@ class KeySharingPeersTest {
         assertFalse(added.allowed)
         assertTrue(added.selectable)
     }
+
+    @Test
+    fun aPeerPairedBeforePairingGenerationsIsNotRevokingDuringItsOwnGrant() = runTest {
+        // Upgrade state: A and B are in paired_devices, but no pairing_generations
+        // entry exists yet (they were paired by a build before #174).
+        val legacy = InMemorySharedPreferences()
+        PairedDeviceRepository(legacy).apply {
+            addDevice(PEER_A, "desktop-a")
+            addDevice(PEER_B, "desktop-b")
+        }
+        legacy.edit().remove("pairing_generations").commit()
+        repo = PairedDeviceRepository(legacy)
+        table.value = listOf(KeySharingPolicy(KEY, PEER_B))
+
+        val gate = CompletableDeferred<Unit>()
+        var revokingDuringWrite: Boolean? = null
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            revokingDuringWrite = repo.isRevocationPending(PEER_A)
+            gate.await()
+            val row = firstArg<KeySharingPolicy>()
+            table.value = table.value.filterNot {
+                it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
+            } + row
+        }
+        val peers = KeySharingPeers(KEY, dao, repo)
+        val seen = mutableListOf<List<KeySharingPeers.Peer>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
+
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true) }
+        assertEquals("the write is under way", false, revokingDuringWrite)
+        assertFalse("SELECTED_PEERS refused during the peer's own grant write", repo.isRevocationPending(PEER_A))
+
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        assertTrue(hasAccess(PEER_A))
+        val after = seen.last().of(PEER_A)
+        assertTrue("the sheet keeps the peer selectable", after.selectable)
+        assertTrue(after.allowed)
+    }
 }
