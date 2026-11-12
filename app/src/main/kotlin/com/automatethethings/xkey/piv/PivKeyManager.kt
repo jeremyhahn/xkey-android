@@ -18,9 +18,12 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import java.io.ByteArrayInputStream
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.Signature
+import java.security.cert.CertificateException
+import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 
 /**
@@ -109,7 +112,10 @@ private fun ByteArray?.contentEquals(other: ByteArray?): Boolean {
  */
 class PivKeyManager(private val pivSlotDao: PivSlotDao) {
 
-    private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    // Opened on first use: a certificate import for a slot whose row holds
+    // the public key never touches the Keystore, so it also runs in JVM
+    // unit tests, where the AndroidKeyStore provider does not exist.
+    private val keyStore: KeyStore by lazy { KeyStore.getInstance("AndroidKeyStore").apply { load(null) } }
 
     companion object {
         private const val TAG = "PivKeyManager"
@@ -208,22 +214,61 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
     /**
      * Import an X.509 certificate for an existing PIV slot.
      *
-     * Stores the DER-encoded certificate in the Room database. The slot must
-     * already contain a generated key whose public key matches the certificate's
-     * subject public key.
+     * Parses [certDer] as exactly one DER-encoded X.509 certificate and stores
+     * it in the Room database only when its SubjectPublicKeyInfo equals the
+     * slot key's public key ([getPublicKey]). A refused import stores nothing:
+     * a certificate imported earlier stays.
      *
      * @param slot The PIV slot to import the certificate into.
      * @param certDer DER-encoded X.509 certificate bytes.
-     * @throws IllegalStateException If the slot does not contain a key.
+     * @throws PivSlotEmptyException If the slot does not contain a key.
+     * @throws PivCertificateNotParseableException If [certDer] is not one DER certificate.
+     * @throws PivCertificateKeyMismatchException If the certificate is for another key.
      */
     suspend fun importCertificate(slot: PivSlot, certDer: ByteArray) {
         val existing = pivSlotDao.getBySlotId(slot.hexId)
-            ?: throw IllegalStateException("No key exists in PIV slot ${slot.hexId} (${slot.label})")
+            ?: throw PivSlotEmptyException(slot)
+        if (!existing.hasKey) throw PivSlotEmptyException(slot)
+        val slotPublicKey = existing.publicKeyDer ?: getPublicKey(slot)
+            ?: throw PivSlotEmptyException(slot)
+
+        val certificate = parseCertificate(certDer)
+        if (!certificate.publicKey.encoded.contentEquals(slotPublicKey)) {
+            Log.w(TAG, "Refused certificate for PIV slot ${slot.hexId}: its key is not the slot's key")
+            throw PivCertificateKeyMismatchException(slot)
+        }
 
         val updated = existing.copy(certificateDer = certDer)
         pivSlotDao.upsert(updated)
 
         Log.i(TAG, "Imported certificate for PIV slot ${slot.hexId} (${slot.label})")
+    }
+
+    /**
+     * Parse [certDer] as one X.509 certificate in DER. PEM text, a chain and
+     * trailing bytes are refused: the parsed certificate must re-encode to
+     * exactly the input.
+     */
+    private fun parseCertificate(certDer: ByteArray): X509Certificate {
+        val certificate = try {
+            CertificateFactory.getInstance("X.509")
+                .generateCertificate(ByteArrayInputStream(certDer)) as? X509Certificate
+        } catch (e: CertificateException) {
+            throw PivCertificateNotParseableException("Not an X.509 certificate: ${e.message}", e)
+        } catch (e: IllegalArgumentException) {
+            // Some providers throw this on malformed ASN.1 rather than a CertificateException.
+            throw PivCertificateNotParseableException("Not an X.509 certificate: ${e.message}", e)
+        } ?: throw PivCertificateNotParseableException("Not an X.509 certificate")
+
+        val reencoded = try {
+            certificate.encoded
+        } catch (e: CertificateException) {
+            throw PivCertificateNotParseableException("Not an X.509 certificate: ${e.message}", e)
+        }
+        if (!java.util.Arrays.equals(reencoded, certDer)) {
+            throw PivCertificateNotParseableException("Certificate is not a single DER-encoded X.509 certificate")
+        }
+        return certificate
     }
 
     /**
@@ -384,3 +429,27 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
         Log.i(TAG, "Deleted key from PIV slot ${slot.hexId} (${slot.label})")
     }
 }
+
+/**
+ * The PIV slot holds no key, so there is nothing a certificate could belong to.
+ * The handler reports it as `PIV_SLOT_NOT_FOUND`.
+ */
+class PivSlotEmptyException(slot: PivSlot) :
+    IllegalStateException("No key exists in PIV slot ${slot.hexId} (${slot.label})")
+
+/**
+ * A certificate offered for a PIV slot was refused and nothing was stored.
+ * The handler reports every subclass as `INVALID_PARAMS`.
+ */
+sealed class PivCertificateRejectedException(message: String, cause: Throwable? = null) :
+    IllegalArgumentException(message, cause)
+
+/** The bytes are not exactly one DER-encoded X.509 certificate. */
+class PivCertificateNotParseableException(message: String, cause: Throwable? = null) :
+    PivCertificateRejectedException(message, cause)
+
+/** The certificate's SubjectPublicKeyInfo is not the slot key's public key. */
+class PivCertificateKeyMismatchException(slot: PivSlot) :
+    PivCertificateRejectedException(
+        "Certificate public key does not match the key in PIV slot ${slot.hexId} (${slot.label})"
+    )
