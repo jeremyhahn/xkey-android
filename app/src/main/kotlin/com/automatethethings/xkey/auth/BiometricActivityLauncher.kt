@@ -371,7 +371,11 @@ class BiometricActivityLauncher(
      * @param keyAlias A full Keystore alias to sign with instead of the
      *   credential's (the user verification key); null for a credential key.
      * @param onLaunch As for [requestAuthentication]: called with this
-     *   request's id and prompt intent just before the prompt starts.
+     *   request's id and prompt intent just before the prompt starts. The
+     *   request has one owner, the first activity started for it: a repeat
+     *   delivery of the same intent (the notification's full-screen intent,
+     *   or a tap on it) finishes without prompting and answers nothing
+     *   (CryptoSigningCancellations), so the live request is never failed by it.
      *
      * @return The DER-encoded ECDSA signature bytes.
      *

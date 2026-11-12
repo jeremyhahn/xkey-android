@@ -1890,9 +1890,11 @@ class RequestHandler(
      * policy is unchanged. Narrowing needs neither. Every stored change is
      * audited.
      *
-     * The write is a compare-and-set against the policy the decision was
-     * taken on, so a change that lands while the prompt is up, or between
-     * the read and the write, is never overwritten: a widening whose starting
+     * The write is a compare-and-set against the policy revision the
+     * decision was taken on (every policy write moves it forward, so a
+     * policy changed away and back is a new revision), so a change that
+     * lands while the prompt is up, or between the read and the write, is
+     * never overwritten: a widening whose starting
      * policy moved is refused (OPERATION_DENIED) rather than applied without
      * an approval for it, and a narrowing re-reads and retries. A key already
      * at the requested policy is not written. The audit records only a write
@@ -1916,10 +1918,15 @@ class RequestHandler(
         // The compare-and-set, like updateSharingPolicy, keeps `shareable` and
         // `sharing_policy` in step, which KeyEntity requires. It is bound to
         // the row read above (its immutable id), so a key deleted and
-        // re-created under the same key id is never written. It returns true
-        // only when it changed the row, and audits exactly that change.
-        suspend fun setPolicyFrom(expected: SharingPolicyType, policy: SharingPolicyType): Boolean {
-            if (keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, expected, policy) == 0) return false
+        // re-created under the same key id is never written, and to the
+        // policy revision [from] was read at, so a policy that changed and
+        // changed back since is not written either. It returns true only
+        // when it changed the row, and audits exactly that change.
+        suspend fun setPolicyFrom(from: KeyEntity, policy: SharingPolicyType): Boolean {
+            val expected = from.sharingPolicy
+            if (keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy) == 0) {
+                return false
+            }
             AuditLogger.logKeySharingChanged(
                 keyId = entity.keyId,
                 keyLabel = entity.label,
@@ -1930,10 +1937,10 @@ class RequestHandler(
             return true
         }
 
-        // The policy the read row holds now. A different row under the same
-        // key id is another key: the request, and any approval for it, named
-        // the one read above.
-        suspend fun storedPolicy(): SharingPolicyType {
+        // The read row as it is now. A different row under the same key id
+        // is another key: the request, and any approval for it, named the
+        // one read above.
+        suspend fun storedRow(): KeyEntity {
             val current = keyDao.getByKeyId(entity.keyId)
                 ?: throw ProtocolException("Key not found: ${entity.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
             if (current.id != entity.id) {
@@ -1942,7 +1949,7 @@ class RequestHandler(
                     errorCode = ErrorCodes.OPERATION_DENIED
                 )
             }
-            return current.sharingPolicy
+            return current
         }
 
         if (newPolicy == SharingPolicyType.ALL_PEERS && entity.sharingPolicy != SharingPolicyType.ALL_PEERS) {
@@ -1973,11 +1980,12 @@ class RequestHandler(
                     cancelBiometricNotification()
                 }
             }
-            // The owner approved widening from the policy read above. If that
-            // changed while the prompt was up, the approval does not cover
+            // The owner approved widening from the policy revision read
+            // above. If any policy write landed while the prompt was up, even
+            // one that changed the policy back, the approval does not cover
             // the new state: write nothing unless the key is already open.
-            if (!setPolicyFrom(entity.sharingPolicy, SharingPolicyType.ALL_PEERS) &&
-                storedPolicy() != SharingPolicyType.ALL_PEERS
+            if (!setPolicyFrom(entity, SharingPolicyType.ALL_PEERS) &&
+                storedRow().sharingPolicy != SharingPolicyType.ALL_PEERS
             ) {
                 throw ProtocolException(
                     "Sharing policy of ${entity.keyId} changed while waiting for approval; retry",
@@ -1987,17 +1995,19 @@ class RequestHandler(
         } else if (newPolicy == SharingPolicyType.PRIVATE) {
             // Narrowing needs no approval from any starting policy, so a
             // change that lands first is re-read and narrowed in turn.
-            var current = entity.sharingPolicy
+            var current = entity
             var attempts = 0
             val maxAttempts = 3
-            while (current != SharingPolicyType.PRIVATE && !setPolicyFrom(current, SharingPolicyType.PRIVATE)) {
+            while (current.sharingPolicy != SharingPolicyType.PRIVATE &&
+                !setPolicyFrom(current, SharingPolicyType.PRIVATE)
+            ) {
                 if (++attempts >= maxAttempts) {
                     throw ProtocolException(
                         "Sharing policy of ${entity.keyId} kept changing; retry",
                         errorCode = ErrorCodes.OPERATION_DENIED
                     )
                 }
-                current = storedPolicy()
+                current = storedRow()
             }
         }
 

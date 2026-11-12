@@ -93,8 +93,14 @@ class BiometricNotificationHelper(private val context: Context) {
 
         // The full-screen intent: the launcher's own prompt when there is one,
         // else a generic TransparentBiometricActivity.
+        // The launcher has already started its prompt, so the copy carries no
+        // CLEAR_TOP: that would destroy the live prompt and recreate it,
+        // answering the request as closed. A repeat delivery of the copy is
+        // refused by the prompt that owns the request (for signing,
+        // CryptoSigningCancellations; TransparentBiometricActivity is
+        // singleTop and on top while it prompts).
         val fullScreenIntent = promptIntent?.let { Intent(it) }?.apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         } ?: Intent(context, TransparentBiometricActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(TransparentBiometricActivity.EXTRA_REQUEST_ID, requestId)
