@@ -16,6 +16,7 @@ package com.automatethethings.xkey.auth
 
 import androidx.biometric.BiometricPrompt
 import com.automatethethings.xkey.auth.BiometricActivityLauncher.BiometricResult
+import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceTimeBy
@@ -252,6 +253,15 @@ class PendingAuthenticationsTest {
         assertEquals(2, launched.size)
         assertTrue(pending.complete(launched[1], BiometricResult.Success))
         next.await()
+    }
+
+    @Test
+    fun onlyANewerRequestDisplacesThePromptOnScreen() {
+        assertTrue(TransparentBiometricActivity.isNewer("8", "7"))
+        assertFalse("a repeat delivery keeps its prompt", TransparentBiometricActivity.isNewer("7", "7"))
+        assertFalse("a late older delivery is dropped", TransparentBiometricActivity.isNewer("6", "7"))
+        assertFalse(TransparentBiometricActivity.isNewer("set-key-policy", "7"))
+        assertFalse(TransparentBiometricActivity.isNewer("8", ""))
     }
 
     @Test

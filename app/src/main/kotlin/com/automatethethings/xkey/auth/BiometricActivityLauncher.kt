@@ -30,7 +30,9 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.ui.CryptoSigningActivity
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -49,6 +51,8 @@ import kotlin.coroutines.resumeWithException
  * - Request ids are process-wide ([PendingAuthentications]), so a result
  *   broadcast reaches only the launcher, and the request, that issued it
  * - Pending requests live in a [ConcurrentHashMap]
+ * - Prompts take turns on the one screen, process-wide: a request is
+ *   launched only after the one before it settles ([PendingAuthentications])
  * - Safe to call from multiple coroutines concurrently
  *
  * Lifecycle:
@@ -304,7 +308,10 @@ class BiometricActivityLauncher(
      * @param description Optional additional description text.
      * @param showOnLockScreen Whether to show the prompt over the lock screen.
      * @param onLaunch Called with this request's id and prompt intent just
-     *   before the prompt starts. Anything else that presents the prompt, such
+     *   before the prompt starts, which is when its turn on screen comes: a
+     *   request arriving while another prompts waits for it to settle, and
+     *   one still waiting at [PendingAuthentications.QUEUE_DEADLINE_MILLIS]
+     *   fails with a [BiometricException] without being shown. Anything else that presents the prompt, such
      *   as the lock-screen notification, must open that same intent, so its
      *   result completes this request rather than one nobody waits on.
      *
@@ -522,29 +529,76 @@ class BiometricActivityLauncher(
  * (the launcher's activity start or the lock-screen notification) carries that
  * id, and the result broadcast carrying it is what completes the request. Ids
  * are process-wide, so a result never completes another launcher's request.
+ *
+ * Requests take turns on screen through [prompts], one prompt at a time in
+ * arrival order, sharing the line with the crypto signing prompts: there is
+ * one screen, the system shows one biometric authentication at a time, and
+ * [com.automatethethings.xkey.ui.TransparentBiometricActivity] is singleTop, so
+ * a request launched while another prompts would reach the activity already
+ * showing and never get a prompt of its own. A request is launched only when
+ * the one before it has settled; one whose caller goes away while it waits is
+ * never shown, and one still waiting when its queue deadline passes settles
+ * with [BiometricPrompt.ERROR_TIMEOUT] rather than waiting forever.
+ *
  * Every request is settled exactly once: by its result, by the failure to
- * launch its prompt, or by its cancellation.
+ * launch its prompt, by its queue deadline, or by its cancellation; and
+ * however it settles, it hands the screen to the next.
+ *
+ * @param prompts the turns the requests take on screen; process-wide, since
+ *   there is one screen whichever launcher a request came through
  */
-internal class PendingAuthentications {
+internal class PendingAuthentications(
+    private val prompts: SigningPromptQueue = SigningPromptQueue.process,
+) {
     private val pending =
         ConcurrentHashMap<Long, CancellableContinuation<BiometricActivityLauncher.BiometricResult>>()
 
+    /** Requests still waiting for their turn on screen, by id. */
+    private val queued = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
+
     /**
-     * Allocates a request id, [launch]es the prompt for it and waits for its
-     * result. A failure to launch fails the request; cancelling the caller
-     * withdraws it.
+     * Allocates a request id, [launch]es the prompt for it when its turn on
+     * screen comes, and waits for its result. A failure to launch fails the
+     * request; cancelling the caller withdraws it. A request whose turn has
+     * not come within [queueDeadlineMillis] settles with
+     * [BiometricPrompt.ERROR_TIMEOUT] and is never shown.
      */
-    suspend fun await(launch: (requestId: String) -> Unit): BiometricActivityLauncher.BiometricResult =
-        suspendCancellableCoroutine { continuation ->
-            val id = nextRequestId.incrementAndGet()
-            pending[id] = continuation
-            continuation.invokeOnCancellation { pending.remove(id, continuation) }
-            try {
-                launch(id.toString())
-            } catch (e: Exception) {
-                if (pending.remove(id, continuation)) continuation.resumeWithException(e)
+    suspend fun await(
+        queueDeadlineMillis: Long = QUEUE_DEADLINE_MILLIS,
+        launch: (requestId: String) -> Unit
+    ): BiometricActivityLauncher.BiometricResult {
+        val id = nextRequestId.incrementAndGet()
+        val turnCame = CompletableDeferred<Unit>()
+        // The turn only wakes this caller; the launch runs here, after the
+        // deadline check, so a turn that comes as the deadline passes is
+        // handed straight on.
+        val turn = SigningPromptQueue.Turn { turnCame.complete(Unit) }
+        queued[id] = turnCame
+        prompts.join(turn)
+        try {
+            withTimeoutOrNull(queueDeadlineMillis) { turnCame.await() }
+                ?: return BiometricActivityLauncher.BiometricResult.Error(
+                    BiometricPrompt.ERROR_TIMEOUT,
+                    "Another approval prompt held the screen past this request's deadline"
+                )
+            return suspendCancellableCoroutine { continuation ->
+                pending[id] = continuation
+                queued.remove(id, turnCame)
+                continuation.invokeOnCancellation { pending.remove(id, continuation) }
+                try {
+                    launch(id.toString())
+                } catch (e: Exception) {
+                    if (pending.remove(id, continuation)) continuation.resumeWithException(e)
+                }
             }
+        } finally {
+            queued.remove(id, turnCame)
+            // Off the screen or out of the line. A request withdrawn while its
+            // prompt is up hands the screen on; the prompt activity gives way
+            // to the next request it is started for.
+            prompts.leave(turn)
         }
+    }
 
     /** Resumes [requestId]'s caller with [result]; false when nothing waits on that id. */
     fun complete(requestId: String, result: BiometricActivityLauncher.BiometricResult): Boolean {
@@ -554,15 +608,25 @@ internal class PendingAuthentications {
         return true
     }
 
-    /** Cancels every waiting request. */
+    /** Cancels every waiting request, those still waiting for their turn first. */
     fun cancelAll() {
+        for (id in queued.keys.toList()) {
+            queued.remove(id)?.cancel()
+        }
         for (id in pending.keys.toList()) {
             pending.remove(id)?.cancel()
         }
     }
 
-    private companion object {
+    companion object {
+        /**
+         * How long a request waits for its turn on screen before it settles
+         * with a timeout. Longer than the lock-screen notification's own 30 s,
+         * so a request behind one unanswered prompt still gets its turn.
+         */
+        const val QUEUE_DEADLINE_MILLIS = 120_000L
+
         /** Process-wide, so ids from two launchers never name the same request. */
-        val nextRequestId = AtomicLong(0L)
+        private val nextRequestId = AtomicLong(0L)
     }
 }
