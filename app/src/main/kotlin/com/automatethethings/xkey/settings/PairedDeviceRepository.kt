@@ -21,9 +21,12 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.util.getStringOrNull
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArraySet
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -496,6 +499,43 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
  */
 fun interface PairedDeviceRemovalListener {
     fun onDeviceRemoved(publicKeyHex: String)
+}
+
+/**
+ * Drops the per-key sharing grants of every device that stops being paired
+ * (#174). Without it a desktop that re-pairs under the same static key would
+ * get its old `SELECTED_PEERS` grants back, since access control reads
+ * `key_sharing_policies` by peer key alone.
+ *
+ * Registered once at app start ([com.automatethethings.xkey.XKeyApplication]).
+ * The repository holds no database handle, so the delete runs here, on
+ * [scope] (the app passes an IO scope): [onDeviceRemoved] must not block the
+ * thread that changed the store. Only the peer's policy rows go; keys and
+ * their sharing policy (`ALL_PEERS`, `PRIVATE`, `SELECTED_PEERS`) are
+ * untouched. [policyDao] is resolved on [scope], so registering the listener
+ * does not open the database.
+ */
+class PairedDeviceGrantCleanup(
+    private val policyDao: () -> KeySharingPolicyDao,
+    private val scope: CoroutineScope
+) : PairedDeviceRemovalListener {
+
+    override fun onDeviceRemoved(publicKeyHex: String) {
+        scope.launch {
+            try {
+                val dropped = policyDao().clearPoliciesForPeer(publicKeyHex)
+                if (dropped > 0) {
+                    AuditLogger.logPeerGrantsDropped(deviceId = publicKeyHex, droppedGrants = dropped)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Dropping sharing grants for a removed device failed", e)
+            }
+        }
+    }
+
+    private companion object {
+        const val TAG = "PairedDeviceGrantCleanup"
+    }
 }
 
 /**

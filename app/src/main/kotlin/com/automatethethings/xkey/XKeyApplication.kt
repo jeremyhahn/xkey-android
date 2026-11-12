@@ -6,6 +6,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.settings.PairedDeviceGrantCleanup
+import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.storage.XKeyDatabase
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 /**
  * xKey Application class.
@@ -19,6 +25,7 @@ class XKeyApplication : Application() {
         super.onCreate()
         createNotificationChannels()
         initializeAuditLogger()
+        registerGrantCleanup()
     }
 
     /**
@@ -26,6 +33,22 @@ class XKeyApplication : Application() {
      */
     private fun initializeAuditLogger() {
         AuditLogger.initialize(this)
+    }
+
+    /**
+     * A device that stops being paired loses its per-key sharing grants
+     * (#174). Registered here, once per process, because the Activity that
+     * unpairs and the services that evict each build their own repository;
+     * its removal listeners are process-wide.
+     */
+    private fun registerGrantCleanup() {
+        val app = this
+        PairedDeviceRepository.addRemovalListener(
+            PairedDeviceGrantCleanup(
+                policyDao = { XKeyDatabase.getInstance(app).keySharingPolicyDao() },
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            )
+        )
     }
 
     /**
