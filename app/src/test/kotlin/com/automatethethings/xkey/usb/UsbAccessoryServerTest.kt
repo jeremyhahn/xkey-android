@@ -258,6 +258,9 @@ class UsbAccessoryServerTest {
 
     @Test
     fun `an open accessory registers a detach receiver until it disconnects`() {
+        // A session that ended by itself would stop the watcher before the
+        // assertions run; hold it open so only the disconnect stops it.
+        holdSessionsOpen()
         every { usbManager.openAccessory(accessory) } returns openableDescriptor()
 
         attach()
