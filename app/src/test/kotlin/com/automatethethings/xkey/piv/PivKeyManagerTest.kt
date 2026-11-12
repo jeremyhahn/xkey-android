@@ -15,24 +15,34 @@
 package com.automatethethings.xkey.piv
 
 import android.util.Log
+import com.automatethethings.xkey.audit.AuditLogger
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.coVerifyOrder
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.KeyStore
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
 
@@ -126,6 +136,47 @@ class PivKeyManagerTest {
 
         assertTrue("got $error", error is IllegalStateException)
         coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
+
+    /**
+     * Two managers (the GATT service and a PIV screen each build one) work on
+     * slot 9A at once. The import has read key A's row and is suspended before
+     * its check and upsert when the other manager deletes the key. The delete
+     * must wait for the import, or the import's upsert would bring back key
+     * A's row, with the certificate, after the delete.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `deleteKey on another manager waits for an import of the same slot`() = runTest(StandardTestDispatcher()) {
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
+        mockkObject(AuditLogger)
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
+
+        val readGate = CompletableDeferred<Unit>()
+        coEvery { pivSlotDao.getBySlotId("9A") } coAnswers {
+            readGate.await()
+            PivTestCertificates.slotRow(slotKey.public.encoded)
+        }
+        val importer = PivKeyManager(pivSlotDao)
+        val deleter = PivKeyManager(pivSlotDao)
+        val cert = PivTestCertificates.selfSigned(slotKey)
+
+        val import = launch { importer.importCertificate(PivSlot.AUTHENTICATION, cert) }
+        runCurrent()
+        val delete = launch { deleter.deleteKey(PivSlot.AUTHENTICATION) }
+        runCurrent()
+
+        assertFalse("deleteKey ran while the import held a snapshot of the slot", delete.isCompleted)
+
+        readGate.complete(Unit)
+        import.join()
+        delete.join()
+
+        coVerifyOrder {
+            pivSlotDao.upsert(match { it.slotId == "9A" })
+            pivSlotDao.deleteBySlotId("9A")
+        }
     }
 
     @Test
