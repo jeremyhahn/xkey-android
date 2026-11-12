@@ -61,6 +61,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Test
 import java.util.Base64
 
@@ -529,6 +530,137 @@ class CosignRequestHandlerTest {
         resultReceiver.captured.onReceive(context, promptResult(notifiedId.captured, approved = false))
         assertError(ErrorCodes.BIOMETRIC_FAILED, response.await())
         assertNothingSigned()
+    }
+
+    // r4: a co-sign's prompt is gone before the next one launches.
+
+    /**
+     * The single-top prompt activity as the phone shows it. A launch over a
+     * visible prompt is dropped (the activity reads its request only when
+     * created), a cancel finishes it only for its own request id, and the
+     * owner answers whatever prompt is visible.
+     */
+    private inner class FakeScreen {
+        var visible: String? = null
+        val receivers = mutableListOf<BroadcastReceiver>()
+        private val launchIds = mutableMapOf<Intent, String>()
+        private val cancelIds = mutableMapOf<Intent, String>()
+
+        init {
+            mockkStatic(ContextCompat::class)
+            every {
+                ContextCompat.registerReceiver(any(), capture(receivers), any(), any<Int>())
+            } returns null
+            every { context.unregisterReceiver(any()) } answers {
+                receivers.remove(firstArg<BroadcastReceiver>())
+                Unit
+            }
+            mockkObject(TransparentBiometricActivity.Companion)
+            every {
+                TransparentBiometricActivity.createIntent(any(), any(), any(), any(), any(), any())
+            } answers { mockk<Intent>(relaxed = true).also { launchIds[it] = secondArg() } }
+            every { TransparentBiometricActivity.createCancelIntent(any(), any()) } answers {
+                mockk<Intent>(relaxed = true).also { cancelIds[it] = secondArg() }
+            }
+            every { context.startActivity(any()) } answers {
+                if (visible == null) visible = launchIds[firstArg()]
+            }
+            every { context.sendBroadcast(any()) } answers {
+                val cancelled = cancelIds[firstArg()]
+                if (cancelled != null && cancelled == visible) finish(approved = false)
+            }
+        }
+
+        /** The owner answers the visible prompt. */
+        fun answer(approved: Boolean) = finish(approved)
+
+        private fun finish(approved: Boolean) {
+            val requestId = checkNotNull(visible) { "no prompt is visible" }
+            visible = null
+            val result = promptResult(requestId, approved)
+            receivers.toList().forEach { it.onReceive(context, result) }
+        }
+    }
+
+    /** A handler on an unlocked phone whose prompts go through the real activity surface. */
+    private fun activityHandler(biometricLauncher: BiometricActivityLauncher = launcher) =
+        RequestHandler(
+            context = context,
+            keystoreManager = keystoreManager,
+            biometricLauncher = biometricLauncher,
+            sessionAuthManager = null,
+            cosignApprovalPrompts = CosignApprovalPrompts(
+                ActivityCosignPromptSurface(context, notificationHelper),
+                timeoutMs = PROMPT_TIMEOUT_MS
+            )
+        ).also { it.setConnectedDevicePublicKeyHex(peerHex) }
+
+    @Test
+    fun `a cancelled caller's prompt is gone before the next co-sign shows its own`() = runTest {
+        val screen = FakeScreen()
+        val handler = activityHandler()
+        val first = async { handler.handleRequest(request(id = 1L)) }
+        val second = async { handler.handleRequest(request(id = 2L)) }
+        runCurrent()
+        val firstPrompt = screen.visible
+        assertNotNull(firstPrompt)
+
+        first.cancel()
+        runCurrent()
+        assertNotNull("the next co-sign's prompt is up", screen.visible)
+        assertNotEquals("the cancelled prompt is gone", firstPrompt, screen.visible)
+
+        screen.answer(approved = true)
+        assertNull(second.await().error)
+        assertEquals(2L, second.await().id)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+    }
+
+    @Test
+    fun `a timed-out prompt is gone before the next co-sign shows its own`() = runTest {
+        val screen = FakeScreen()
+        val handler = activityHandler()
+        val first = async { handler.handleRequest(request(id = 1L)) }
+        val second = async { handler.handleRequest(request(id = 2L)) }
+        runCurrent()
+        val firstPrompt = screen.visible
+        assertNotNull(firstPrompt)
+
+        advanceTimeBy(PROMPT_TIMEOUT_MS + 1)
+        runCurrent()
+        assertError(ErrorCodes.BIOMETRIC_FAILED, first.await())
+        assertNotNull("the next co-sign's prompt is up", screen.visible)
+        assertNotEquals("the timed-out prompt is gone", firstPrompt, screen.visible)
+
+        screen.answer(approved = true)
+        assertNull(second.await().error)
+        assertEquals(2L, second.await().id)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+    }
+
+    @Ignore("serialized with the launcher's prompt queue in issue #178")
+    @Test
+    fun `a co-sign prompt and a launcher prompt each settle by their own prompt`() = runTest {
+        val screen = FakeScreen()
+        every { AuditLogger.logBiometricSuccess(any()) } just Runs
+        val sharedLauncher = BiometricActivityLauncher(context).also { it.register() }
+        val handler = activityHandler(sharedLauncher)
+        val cosign = async { handler.handleRequest(request(id = 1L)) }
+        runCurrent()
+        // The prompt local.signFido2Assertion asks for when verification is required.
+        val assertion = async {
+            runCatching { sharedLauncher.requestAuthentication("xKey", "Sign in to example.com") }
+        }
+        runCurrent()
+
+        screen.answer(approved = true)
+        runCurrent()
+        assertNull("the co-sign settles by its own prompt", cosign.await().error)
+        assertNotNull("the launcher's prompt follows the co-sign's", screen.visible)
+
+        screen.answer(approved = true)
+        runCurrent()
+        assertTrue("the assertion settles by its own prompt", assertion.await().isSuccess)
     }
 
     private companion object {
