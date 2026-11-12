@@ -20,6 +20,7 @@ import android.content.Context
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.piv.FakePivKeystore
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlotDao
 import com.automatethethings.xkey.piv.PivTestCertificates
@@ -84,6 +85,8 @@ class PivHandlerTest {
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
         pivSlotDao = mockk(relaxed = true)
+        // The slot key lives in the Keystore; the row only caches it.
+        FakePivKeystore(slotKey).install()
     }
 
     @After

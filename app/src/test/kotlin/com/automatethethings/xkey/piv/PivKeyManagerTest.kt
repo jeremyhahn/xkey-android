@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.piv
 
+import android.security.keystore.KeyGenParameterSpec
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import io.mockk.coEvery
@@ -21,10 +22,12 @@ import io.mockk.coVerify
 import io.mockk.coVerifyOrder
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -36,6 +39,7 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -43,6 +47,9 @@ import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.cert.Certificate
+import java.security.cert.CertificateFactory
+import java.security.spec.AlgorithmParameterSpec
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
 
@@ -54,14 +61,17 @@ import java.util.Date
  * each use through [PivSlotDao.recordUsage] without a timestamp; this pins that
  * the omitted timestamp is the current time.
  *
- * [PivKeyManager.importCertificate] reads the slot key from the `piv_slots`
- * row, so it is tested over a mocked [PivSlotDao] whose row carries a
- * JDK-generated P-256 key standing in for the Keystore key (#173).
+ * [PivKeyManager.importCertificate] checks a certificate against the slot's
+ * live Keystore key, so it is tested over a mocked [PivSlotDao] and a
+ * [FakePivKeystore] holding a JDK-generated P-256 key in place of the
+ * AndroidKeyStore entry (#173). The `piv_slots` row is only a cache: tests
+ * where it disagrees with the Keystore pin that the Keystore decides.
  */
 class PivKeyManagerTest {
 
     private lateinit var pivSlotDao: PivSlotDao
     private val slotKey = PivTestCertificates.ecKeyPair()
+    private lateinit var keystore: FakePivKeystore
 
     @Before
     fun setUp() {
@@ -70,6 +80,10 @@ class PivKeyManagerTest {
         every { Log.w(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
         pivSlotDao = mockk(relaxed = true)
+        keystore = FakePivKeystore(slotKey).also { it.install() }
+        mockkObject(AuditLogger)
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
+        every { AuditLogger.logKeyCreated(any(), any(), any(), any()) } returns Unit
     }
 
     @After
@@ -148,11 +162,6 @@ class PivKeyManagerTest {
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
     fun `deleteKey on another manager waits for an import of the same slot`() = runTest(StandardTestDispatcher()) {
-        mockkStatic(KeyStore::class)
-        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
-        mockkObject(AuditLogger)
-        every { AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
-
         val readGate = CompletableDeferred<Unit>()
         coEvery { pivSlotDao.getBySlotId("9A") } coAnswers {
             readGate.await()
@@ -180,6 +189,101 @@ class PivKeyManagerTest {
     }
 
     @Test
+    fun `importCertificate refuses a slot whose row has a key but whose Keystore alias is gone`() = runTest {
+        // The general key screen or a failed generate removed xkey_piv_9A
+        // without touching piv_slots: the row still says hasKey with key A.
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+        keystore.live = null
+
+        val error = importError(PivTestCertificates.selfSigned(slotKey))
+
+        assertTrue("got $error", error is PivSlotEmptyException)
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
+
+    @Test
+    fun `importCertificate refuses a certificate for the row's stale key when the Keystore holds another`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+        keystore.live = PivTestCertificates.ecKeyPair()
+
+        val error = importError(PivTestCertificates.selfSigned(slotKey))
+
+        assertTrue("got $error", error is PivCertificateKeyMismatchException)
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
+
+    @Test
+    fun `importCertificate accepts a certificate for the Keystore key when the row is stale`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+        val liveKey = PivTestCertificates.ecKeyPair()
+        keystore.live = liveKey
+        val cert = PivTestCertificates.selfSigned(liveKey)
+
+        PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, cert)
+
+        coVerify {
+            pivSlotDao.upsert(match {
+                it.certificateDer.contentEquals(cert) && it.publicKeyDer.contentEquals(liveKey.public.encoded)
+            })
+        }
+    }
+
+    /**
+     * generateKey replaces xkey_piv_9A with key B, then its upsert fails. The
+     * row still names key A; a certificate for A must not be accepted, and
+     * the slot must not be left holding a key its row does not describe.
+     */
+    @Test
+    fun `generateKey whose upsert fails leaves no slot that accepts the old key's certificate`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+        val newKey = PivTestCertificates.ecKeyPair()
+        keystore.generatesOnNextCall(newKey)
+        coEvery { pivSlotDao.upsert(match { it.publicKeyDer.contentEquals(newKey.public.encoded) }) } throws
+            IllegalStateException("database is closed")
+        val manager = PivKeyManager(pivSlotDao)
+
+        val generateError = runCatching { manager.generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ES256) }
+            .exceptionOrNull()
+        val importOld = importError(PivTestCertificates.selfSigned(slotKey))
+
+        assertTrue("generate must report the failure, got $generateError", generateError is IllegalStateException)
+        assertTrue("a certificate for the replaced key was accepted: $importOld", importOld != null)
+        assertNull("the Keystore kept a key the row does not describe", keystore.live)
+        coVerify { pivSlotDao.deleteBySlotId("9A") }
+    }
+
+    /**
+     * generateKey is cancelled after it replaced xkey_piv_9A and while its
+     * upsert runs. The upsert must still finish, so the row describes the
+     * Keystore key rather than the replaced one.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `generateKey cancelled after the Keystore replace still records the new key`() = runTest(StandardTestDispatcher()) {
+        val newKey = PivTestCertificates.ecKeyPair()
+        keystore.generatesOnNextCall(newKey)
+        val upsertGate = CompletableDeferred<Unit>()
+        var stored: PivSlotEntity? = null
+        coEvery { pivSlotDao.upsert(any()) } coAnswers {
+            upsertGate.await()
+            stored = firstArg()
+            1L
+        }
+
+        val generate = launch { PivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ES256) }
+        runCurrent()
+        assertTrue("generate did not reach its upsert", keystore.live === newKey)
+        generate.cancel()
+        upsertGate.complete(Unit)
+        generate.join()
+
+        assertTrue(
+            "the row was left naming the replaced key",
+            stored?.publicKeyDer.contentEquals(newKey.public.encoded)
+        )
+    }
+
+    @Test
     fun `test certificate carries the slot key as its SubjectPublicKeyInfo`() {
         val cert = PivTestCertificates.selfSigned(slotKey)
         val parsed = java.security.cert.CertificateFactory.getInstance("X.509")
@@ -191,6 +295,54 @@ class PivKeyManagerTest {
     private suspend fun importError(certDer: ByteArray): Throwable? =
         runCatching { PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, certDer) }
             .exceptionOrNull()
+}
+
+/**
+ * A stand-in for the AndroidKeyStore that holds at most the slot 9A key,
+ * [live], and serves it the way the provider does: as the public key of the
+ * alias's self-signed certificate. [install] routes
+ * `KeyStore.getInstance("AndroidKeyStore")` to it; [generatesOnNextCall]
+ * routes the Keystore key generator in [PivKeyManager.generateKey] to it.
+ */
+internal class FakePivKeystore(@Volatile var live: KeyPair?) {
+    private val alias = PivSlot.AUTHENTICATION.keystoreAlias
+    private val certificates = HashMap<KeyPair, Certificate>()
+    val keyStore: KeyStore = mockk(relaxed = true)
+
+    init {
+        every { keyStore.containsAlias(any()) } returns false
+        every { keyStore.getCertificate(any()) } returns null
+        every { keyStore.getKey(any(), any()) } returns null
+        every { keyStore.containsAlias(alias) } answers { live != null }
+        every { keyStore.getCertificate(alias) } answers { live?.let(::certificateOf) }
+        every { keyStore.getKey(alias, any()) } answers { live?.private }
+        every { keyStore.deleteEntry(alias) } answers { live = null }
+    }
+
+    fun install() {
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
+    }
+
+    /** The next AndroidKeyStore key generation replaces [live] with [next]. */
+    fun generatesOnNextCall(next: KeyPair) {
+        mockkConstructor(KeyGenParameterSpec.Builder::class)
+        val spec = mockk<KeyGenParameterSpec>()
+        every { anyConstructed<KeyGenParameterSpec.Builder>().setDigests(*anyVararg()) } answers { self as KeyGenParameterSpec.Builder }
+        every { anyConstructed<KeyGenParameterSpec.Builder>().setKeySize(any()) } answers { self as KeyGenParameterSpec.Builder }
+        every { anyConstructed<KeyGenParameterSpec.Builder>().setSignaturePaddings(*anyVararg()) } answers { self as KeyGenParameterSpec.Builder }
+        every { anyConstructed<KeyGenParameterSpec.Builder>().build() } returns spec
+        val generator = mockk<KeyPairGenerator>(relaxed = true)
+        every { generator.initialize(any<AlgorithmParameterSpec>()) } returns Unit
+        every { generator.generateKeyPair() } answers { live = next; next }
+        mockkStatic(KeyPairGenerator::class)
+        every { KeyPairGenerator.getInstance(any<String>(), "AndroidKeyStore") } returns generator
+    }
+
+    private fun certificateOf(keyPair: KeyPair): Certificate = certificates.getOrPut(keyPair) {
+        CertificateFactory.getInstance("X.509")
+            .generateCertificate(PivTestCertificates.selfSigned(keyPair).inputStream())
+    }
 }
 
 /**
