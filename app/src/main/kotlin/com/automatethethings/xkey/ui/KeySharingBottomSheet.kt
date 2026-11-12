@@ -50,6 +50,7 @@ import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopSectionRefresh
 import com.automatethethings.xkey.remote.DesktopShareDecision
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.remote.DesktopShareGate
 import com.automatethethings.xkey.remote.loadZeroedOnCancel
 import com.automatethethings.xkey.remote.shareSessionChanges
@@ -912,10 +913,14 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             SharingPolicyType.ALL_PEERS -> EntitySharingPolicyType.ALL_PEERS
             SharingPolicyType.SELECTED_PEERS -> EntitySharingPolicyType.SELECTED_PEERS
         }
-        keyDao.updateSharingPolicy(keyId, entityPolicy)
+        // A revoke for any pending desktop share of the key: it is refused at
+        // the transport's admission unless admitted before this started.
+        SharePermissionLedger.revoking(keyId) {
+            keyDao.updateSharingPolicy(keyId, entityPolicy)
+            if (policy != SharingPolicyType.SELECTED_PEERS) keySharingPolicyDao.clearPoliciesForKey(keyId)
+        }
 
         if (policy != SharingPolicyType.SELECTED_PEERS) {
-            keySharingPolicyDao.clearPoliciesForKey(keyId)
             allowedPeersFlow.emit(emptySet())
         }
         refreshDesktopSection()
@@ -938,7 +943,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             currentAllowed.add(peerPublicKeyHex)
             allowedPeersFlow.emit(currentAllowed)
         } else {
-            keySharingPolicyDao.removePolicy(keyId, peerPublicKeyHex)
+            SharePermissionLedger.revoking(keyId) { keySharingPolicyDao.removePolicy(keyId, peerPublicKeyHex) }
 
             // Update local state
             val currentAllowed = allowedPeersFlow.value.toMutableSet()

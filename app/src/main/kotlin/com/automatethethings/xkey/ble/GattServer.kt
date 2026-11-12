@@ -2498,12 +2498,16 @@ class GattServer(
      * @throws ConnectionChangedException if [connection] is not current;
      *   nothing is encrypted.
      */
-    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+    override suspend fun sendEncryptedMessageOn(
+        connection: ConfirmedConnection,
+        data: ByteArray,
+        admit: () -> Unit
+    ) {
         val session = connection.connection as? NoiseSession ?: throw ConnectionChangedException()
         if (!connection.sameAs(confirmedConnection())) throw ConnectionChangedException()
         val device = connectedDevice
             ?: throw java.io.IOException("No connected device")
-        sendOnSession(session, device, data, revalidatePeer = true, expected = connection)
+        sendOnSession(session, device, data, revalidatePeer = true, expected = connection, check = admit)
     }
 
     /**
@@ -2517,7 +2521,10 @@ class GattServer(
      * refused send writes nothing and consumes no nonce, and once a nonce is
      * consumed the frame is delivered or the session is torn down.
      * A send scoped to [expected] is admitted only while [session] is still
-     * that confirmed connection.
+     * that confirmed connection. [check], the caller's own authorization,
+     * runs last in admission, under [revocationLock] after the notification
+     * channel and [sendMutex] waits, just before the nonce is consumed;
+     * whatever it throws refuses the send.
      *
      * @throws PeerNotPairedException if the session was revoked or its peer is no longer paired
      * @throws java.io.IOException if the session is gone, its connection is
@@ -2528,7 +2535,8 @@ class GattServer(
         device: BluetoothDevice,
         plaintext: ByteArray,
         revalidatePeer: Boolean,
-        expected: ConfirmedConnection? = null
+        expected: ConfirmedConnection? = null,
+        check: () -> Unit = {}
     ) {
         val channel = openChannel(device)
             ?: throw java.io.IOException("No notification channel to ${device.address}")
@@ -2562,6 +2570,7 @@ class GattServer(
                             // session: its reply would be refused as unpaired.
                             if (pairingEnforced && !pairingConfirmed) throw PeerNotPairedException(peerKeyHex)
                         }
+                        check()
                         session.encrypt(plaintext)
                     }
                 }

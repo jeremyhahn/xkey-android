@@ -41,6 +41,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -1848,7 +1849,7 @@ class RequestHandler(
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
 
         // Delete from unified key store
-        keyDao.deleteByKeyId(keyId)
+        SharePermissionLedger.revoking(keyId) { keyDao.deleteByKeyId(keyId) }
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
@@ -1870,10 +1871,13 @@ class RequestHandler(
             // updateSharingPolicy, not updateShareable: it keeps `shareable` and
             // `sharing_policy` in step, which KeyEntity requires. Writing the
             // legacy flag alone could leave shareable=1 with policy=PRIVATE.
-            keyDao.updateSharingPolicy(
-                policyParams.keyId,
-                if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
-            )
+            // A revoke: a share of the key pending at a transport is refused at admission.
+            SharePermissionLedger.revoking(policyParams.keyId) {
+                keyDao.updateSharingPolicy(
+                    policyParams.keyId,
+                    if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
+                )
+            }
         }
 
         Log.i(TAG, "Updated policy for key: ${policyParams.keyId}, shareable=${policyParams.shareable}")

@@ -28,6 +28,8 @@ import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopShareDecision
 import com.automatethethings.xkey.remote.RemoteShareClient
+import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.remote.SharePermissionRevokedException
 import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.remote.SharedKeyStore
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
@@ -602,6 +604,44 @@ class StreamPairingSessionRevocationTest {
     @Test
     fun aShareWhosePeerGrantIsRemovedWhileItWaitsForAdmissionWritesNothing() = runBlocking<Unit> {
         assertRevokedAtAdmission { it.removeGrant() }
+    }
+
+    /**
+     * Every send of a share client meets the same admission check: a public
+     * key, a symmetric key and an import request alike are refused at the
+     * transport's admission when the key was revoked after the client
+     * authorized the send, with nothing written and no nonce consumed.
+     */
+    @Test
+    fun everyShareClientSendIsRefusedAtAdmissionAfterARevoke() = runBlocking<Unit> {
+        val gate = GatedOutputStream()
+        val phone = connectPaired(gate)
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) { true }!!
+        val store = SharedKeyStore(phone.desktop.publicKeyHex)
+        val client = session.client(SHARE_TIMEOUT_MS) {
+            val revision = SharePermissionLedger.revision(store.keyId)
+            return@client { SharePermissionLedger.requireUnchanged(store.keyId, revision) }
+        }
+        // The revoke lands while each send waits inside the transport.
+        pairing.beforeAdmissionForTest = { store.makePrivate() }
+        val writes = gate.writes.get()
+        val nonce = phone.noise.sendNonceForTest()
+
+        val sends = listOf(
+            runCatching {
+                client.sharePublicKey(RemoteShareClient.PublicKeyShare(store.keyId, PEM, null, "EC", null, null))
+            },
+            runCatching { client.shareSymmetric(store.keyId, ByteArray(32) { 7 }, "AES", 256, null, null) },
+            runCatching { client.importSharedKey("software", store.keyId, null) }
+        )
+        pairing.beforeAdmissionForTest = null
+
+        sends.forEach {
+            assertTrue("refused at admission, got $it", it.exceptionOrNull() is SharePermissionRevokedException)
+        }
+        assertEquals("nothing may reach the stream", writes, gate.writes.get())
+        assertEquals("a refused send must not consume a nonce", nonce, phone.noise.sendNonceForTest())
     }
 
     private suspend fun assertRevokedAtAdmission(revoke: suspend (SharedKeyStore) -> Unit) {

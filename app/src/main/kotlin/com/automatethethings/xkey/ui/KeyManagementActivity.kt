@@ -55,6 +55,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -1263,7 +1264,7 @@ class KeyManagementActivity : AppCompatActivity() {
                     keystoreManager.deleteByAlias(alias)
                 }
             }
-            keyDao.deleteByKeyId(key.keyId)
+            SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
             Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
         }
     }

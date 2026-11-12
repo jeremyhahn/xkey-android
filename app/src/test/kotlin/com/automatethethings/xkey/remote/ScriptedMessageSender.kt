@@ -82,9 +82,17 @@ class ScriptedMessageSender(
         script(request)?.let { router.processMessage(it.toByteArray(Charsets.UTF_8)) }
     }
 
-    /** Sends on [connection] only while it is still this transport's confirmed one. */
-    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+    /**
+     * Sends on [connection] only while it is still this transport's confirmed
+     * one, and only once [admit] passes, as a real transport's admission does.
+     */
+    override suspend fun sendEncryptedMessageOn(
+        connection: ConfirmedConnection,
+        data: ByteArray,
+        admit: () -> Unit
+    ) {
         if (!connection.sameAs(confirmedConnection())) throw ConnectionChangedException()
+        admit()
         sendEncryptedMessage(data)
     }
 }
@@ -126,7 +134,7 @@ class SharedKeyStore(private val peerPublicKeyHex: String) {
     suspend fun removeGrant() = revoke { grants.remove(keyId to peerPublicKeyHex) }
 
     private suspend fun revoke(change: () -> Unit) {
-        change()
+        SharePermissionLedger.revoking(keyId) { change() }
     }
 
     private companion object {

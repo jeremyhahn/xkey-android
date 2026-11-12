@@ -56,6 +56,7 @@ import com.automatethethings.xkey.ca.AndroidCA
 import com.automatethethings.xkey.ca.CertificateEntity
 import com.automatethethings.xkey.ca.CertificateProfile
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.truststore.TrustStoreRepository
@@ -1295,7 +1296,7 @@ class CertificateManagementActivity : AppCompatActivity() {
     private suspend fun discardIssuanceKey(keyId: String, keystoreAlias: String) {
         try {
             withContext(Dispatchers.IO) {
-                keyDao.deleteByKeyId(keyId)
+                SharePermissionLedger.revoking(keyId) { keyDao.deleteByKeyId(keyId) }
                 keystoreManager.deleteByAlias(keystoreAlias)
             }
         } catch (e: Exception) {

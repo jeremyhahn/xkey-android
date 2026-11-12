@@ -351,23 +351,27 @@ class ShareSession private constructor(
      * encryption admission if another connection, even another peer, has
      * replaced that one since the check.
      *
-     * [beforeSend] runs on every send after the wait for the session check
-     * and immediately before the bytes are handed over for encryption; it
-     * re-reads whatever must still hold (the key's sharing permission) and
-     * throws to stop the send. A revoke that lands while the send is pending
-     * therefore wins.
+     * [authorize] applies to every send of the client (`sharePublicKey`,
+     * `shareSymmetric`, `importSharedKey`). It runs before the send enters the
+     * transport and may suspend (it re-reads the store), and throws to stop
+     * the send. It returns the admission check the transport runs inside its
+     * admission critical section, after every wait and immediately before the
+     * nonce is consumed ([MessageSender.sendEncryptedMessageOn]); that check
+     * is what makes a revoke committed while the send waited win.
      */
-    internal fun client(requestTimeoutMs: Long, beforeSend: suspend () -> Unit = {}): RemoteShareClient =
-        RemoteShareClient(GuardedSender(beforeSend), router, requestTimeoutMs)
+    internal fun client(
+        requestTimeoutMs: Long,
+        authorize: suspend () -> (() -> Unit) = { {} }
+    ): RemoteShareClient = RemoteShareClient(GuardedSender(authorize), router, requestTimeoutMs)
 
-    private inner class GuardedSender(private val beforeSend: suspend () -> Unit) : MessageSender {
+    private inner class GuardedSender(private val authorize: suspend () -> (() -> Unit)) : MessageSender {
         override suspend fun sendEncryptedMessage(data: ByteArray) {
             val on = confirmed ?: throw SessionChangedException()
             if (!isCurrent()) throw SessionChangedException()
-            beforeSend()
+            val admit = authorize()
             // The re-read suspends: the session may have changed meanwhile.
             if (!isCurrent()) throw SessionChangedException()
-            sender.sendEncryptedMessageOn(on, data)
+            sender.sendEncryptedMessageOn(on, data, admit)
         }
     }
 
@@ -391,9 +395,63 @@ class ShareSession private constructor(
 /** The session a share was authorized on was replaced before the send. */
 internal class SessionChangedException : ConnectionChangedException("the desktop session changed before the send")
 
-/** The key's sharing permission, re-read from the store just before the send, no longer admits the peer. */
+/** The key's sharing permission no longer admits the peer: it was revoked before the send was admitted. */
 internal class SharePermissionRevokedException(keyId: String) :
     SecurityException("the sharing permission for key $keyId was revoked before the send")
+
+/**
+ * Orders every revoke of a key's sharing permission with the transport
+ * admission of a pending share of that key.
+ *
+ * The store cannot be read at admission: the transport admits a send under
+ * its own lock, where nothing may suspend. So a share reads the store before
+ * it enters the transport, after taking a [revision] of the key, and the
+ * transport's admission calls [requireUnchanged] with that revision. Every
+ * writer that narrows what a key may be shared with (its policy, a peer
+ * grant, the key itself) commits through [revoking], which marks the key
+ * under this ledger's lock before the write and moves its revision after it.
+ * Admission and the revoke writers meet on that one lock:
+ * - a revoke that started before admission refuses the send, whether its
+ *   write has committed yet or not;
+ * - a revoke that starts after admission is ordered after the send, whose
+ *   nonce is already consumed.
+ */
+internal object SharePermissionLedger {
+
+    private val lock = Any()
+    private val revisions = HashMap<String, Long>()
+    private val inFlight = HashMap<String, Int>()
+
+    /** The key's revision now; take it before reading the key's permission from the store. */
+    fun revision(keyId: String): Long = synchronized(lock) { revisions[keyId] ?: 0L }
+
+    /**
+     * Admission check: no revoke of [keyId] is in flight and none has
+     * committed since [revision] was taken. Synchronous, for the transport's
+     * admission critical section.
+     *
+     * @throws SharePermissionRevokedException otherwise
+     */
+    fun requireUnchanged(keyId: String, revision: Long) = synchronized(lock) {
+        if ((inFlight[keyId] ?: 0) > 0 || (revisions[keyId] ?: 0L) != revision) {
+            throw SharePermissionRevokedException(keyId)
+        }
+    }
+
+    /** Runs [write], a change that narrows or removes [keyId]'s sharing permission, as a revoke. */
+    suspend fun <T> revoking(keyId: String, write: suspend () -> T): T {
+        synchronized(lock) { inFlight[keyId] = (inFlight[keyId] ?: 0) + 1 }
+        try {
+            return write()
+        } finally {
+            synchronized(lock) {
+                revisions[keyId] = (revisions[keyId] ?: 0L) + 1
+                val left = (inFlight[keyId] ?: 1) - 1
+                if (left == 0) inFlight.remove(keyId) else inFlight[keyId] = left
+            }
+        }
+    }
+}
 
 /**
  * Sends one of the phone's keys to the paired desktop on [session], after
@@ -401,10 +459,12 @@ internal class SharePermissionRevokedException(keyId: String) :
  * session. Nothing reaches the wire unless the gate answers
  * [DesktopShareDecision.PUBLIC_KEY] and the session is still current.
  *
- * The gate runs twice: once on the caller's snapshot, and again immediately
- * before encryption on the key as the store holds it then
- * ([currentEntity][send]) and the peer grants as they stand then. A
- * permission revoked while the share was pending refuses it with
+ * The gate runs twice: once on the caller's snapshot, and again just before
+ * the share enters the transport, on the key as the store holds it then
+ * ([currentEntity][send]) and the peer grants as they stand then. The
+ * transport's admission then checks [SharePermissionLedger] for a revoke
+ * since that re-read. A permission revoked while the share was pending,
+ * including while it waited inside the transport, refuses it with
  * [DesktopShareDecision.POLICY_DENIED] and nothing is sent.
  */
 class DesktopKeyShare(
@@ -447,10 +507,13 @@ class DesktopKeyShare(
             val peer = session.peerPublicKeyHex
             val result = try {
                 session.client(requestTimeoutMs) {
+                    // The revision first: a revoke committed after it is caught at admission.
+                    val revision = SharePermissionLedger.revision(entity.keyId)
                     val now = DesktopShareGate.decide(
                         currentEntity(entity.keyId), null, publicKeyPem, peer, isKeySharedWithPeer
                     )
                     if (now != DesktopShareDecision.PUBLIC_KEY) throw SharePermissionRevokedException(entity.keyId)
+                    return@client { SharePermissionLedger.requireUnchanged(entity.keyId, revision) }
                 }.sharePublicKey(
                     RemoteShareClient.PublicKeyShare(
                         keyId = entity.keyId,

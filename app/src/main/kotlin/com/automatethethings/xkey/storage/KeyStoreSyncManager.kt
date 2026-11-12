@@ -16,6 +16,7 @@ package com.automatethethings.xkey.storage
 
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
@@ -180,7 +181,7 @@ class KeyStoreSyncManager(
         for (key in localKeys) {
             val alias = keystoreManager.resolveKeystoreAlias(key.keyId)
             if (alias == null) {
-                keyDao.deleteByKeyId(key.keyId)
+                SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
                 removed++
                 Log.d(TAG, "Removed stale key entry: ${key.keyId}")
             }

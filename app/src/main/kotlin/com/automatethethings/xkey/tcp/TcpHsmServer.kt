@@ -204,12 +204,14 @@ class TcpHsmServer(
 
     /**
      * Sends on [connection] alone, refused unless it is still the current TCP
-     * connection (see [StreamPairingSession.sendEncryptedMessageOn]).
+     * connection (see [StreamPairingSession.sendEncryptedMessageOn]), with
+     * [admit] run at its admission.
      */
     override suspend fun sendEncryptedMessageOn(
         connection: com.automatethethings.xkey.remote.ConfirmedConnection,
-        data: ByteArray
-    ) = pairingSession.sendEncryptedMessageOn(connection, data)
+        data: ByteArray,
+        admit: () -> Unit
+    ) = pairingSession.sendEncryptedMessageOn(connection, data, admit)
 
     /** The TCP connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
     override fun confirmedConnection() = pairingSession.confirmedConnection()

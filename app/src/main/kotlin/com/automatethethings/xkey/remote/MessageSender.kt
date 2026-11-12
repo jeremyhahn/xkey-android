@@ -48,14 +48,24 @@ interface MessageSender {
      * and writes nothing and throws [ConnectionChangedException]. It never
      * falls back to whatever connection is current at send time.
      *
+     * [admit] is the caller's own authorization (for a share, the key's
+     * sharing permission). The transport runs it inside that same admission
+     * critical section, after every wait (notification channel, send lock,
+     * dispatcher) and immediately before the nonce is consumed; whatever it
+     * throws refuses the send, with nothing encrypted or written. It runs
+     * under the transport's lock, so it must not suspend or block.
+     *
      * A transport that cannot scope a send to one connection keeps this
      * default, which fails closed.
      *
      * @throws ConnectionChangedException if [connection] is no longer current
      * @throws java.io.IOException if the message could not be sent
      */
-    suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray): Unit =
-        throw ConnectionChangedException()
+    suspend fun sendEncryptedMessageOn(
+        connection: ConfirmedConnection,
+        data: ByteArray,
+        admit: () -> Unit = {}
+    ): Unit = throw ConnectionChangedException()
 }
 
 /**
