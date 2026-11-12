@@ -181,6 +181,42 @@ class LocalDeleteKeyExactIdTest {
         assertTrue("the general key must survive a second delete, left $aliases", general in aliases)
     }
 
+    /**
+     * Canonical ID `k` with both a credential `xkey_credential_k` and a general
+     * key `xkey_key_k` names the general key, as `local.deleteKey` always did:
+     * deleting `k` deletes `xkey_key_k` and leaves the credential usable.
+     */
+    @Test
+    fun aCanonicalIdWithBothAliasesDeletesTheGeneralKeyAndLeavesTheCredential() = runBlocking<Unit> {
+        val credential = "xkey_credential_k"
+        val general = "xkey_key_k"
+        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.exists("k") } returns true
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.resolveKeystoreAlias(any()) } answers {
+            val id = firstArg<String>()
+            listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
+        }
+        every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
+        every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
+
+        val request = JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", MethodNames.LOCAL_DELETE_KEY)
+            .put("params", JSONObject().put("keyId", "k"))
+        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
+
+        assertTrue("the general key must be deleted, left $aliases", general !in aliases)
+        assertTrue("the credential must survive, left $aliases", credential in aliases)
+        assertTrue(
+            "the delete must succeed once the general key is gone, got $response",
+            response.optJSONObject("result")?.optBoolean("deleted") == true
+        )
+        verify(exactly = 0) { keystore.deleteByAlias(credential) }
+    }
+
     /** The real [RequestHandler] with only its Android and storage edges mocked. */
     private fun realHandler(keyDao: KeyDao, keystore: KeystoreManager): RequestHandler {
         mockkStatic(Looper::class)

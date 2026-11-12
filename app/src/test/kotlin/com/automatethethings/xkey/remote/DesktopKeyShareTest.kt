@@ -132,6 +132,28 @@ class DesktopKeyShareTest {
         assertFalse(sender.lastRequest.params!!.has("wrapped_key"))
     }
 
+    /**
+     * A PIV slot that held an RSA key was replaced with an EC key: the keys
+     * row still records RS256, but the share labels the PEM it sends by the
+     * key it is, never by the stale row.
+     */
+    @Test
+    fun `share labels the loaded key's algorithm, not a stale row's`() = runTest {
+        val ec = java.security.KeyPairGenerator.getInstance("EC")
+            .apply { initialize(java.security.spec.ECGenParameterSpec("secp256r1")) }
+            .generateKeyPair().public
+        val ecPem = "-----BEGIN PUBLIC KEY-----\n" +
+            java.util.Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(ec.encoded) +
+            "\n-----END PUBLIC KEY-----\n"
+        val stale = entity(SharingPolicyType.ALL_PEERS).copy(algorithm = "RS256", keySizeBits = 2048)
+            .also { stored[it.keyId] = it }
+
+        val out = share.send(stale, null, ecPem, null, isShared, current)
+
+        assertTrue(out is DesktopKeyShare.Outcome.Sent)
+        assertEquals("ES256", sender.lastRequest.params!!.getString("algorithm"))
+    }
+
     @Test
     fun `private key never reaches the wire`() = runTest {
         val out = share.send(entity(SharingPolicyType.PRIVATE), null, pem, null, isShared, current)
