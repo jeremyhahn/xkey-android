@@ -28,6 +28,9 @@ import com.automatethethings.xkey.ui.MainActivity
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.remote.RemoteKeyClient
+import com.automatethethings.xkey.remote.DesktopPeerSession
+import com.automatethethings.xkey.remote.DesktopSessions
+import com.automatethethings.xkey.remote.DesktopTransport
 import com.automatethethings.xkey.remote.RemoteBackupClient
 import com.automatethethings.xkey.backup.BackupStore
 import com.automatethethings.xkey.usb.PasswordStoreMethods
@@ -786,21 +789,59 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         return null
     }
 
-    /** The one [RemoteKeyClient] per active router; every `remote.*` key call goes through it. */
-    private val remoteKeyClients = RemoteKeyClientCache(::activeTransport)
+    /**
+     * Every transport with a desktop connection, established or still
+     * handshaking, in the priority order of [activeTransport].
+     */
+    private fun desktopTransports(): List<DesktopTransport> = buildList {
+        gattServer?.let { server ->
+            val router = bleMessageRouter ?: return@let
+            val established = server.isSessionEstablished()
+            if (established || server.connectionState.value is ConnectionState.Connected) {
+                add(DesktopTransport(server, router, established))
+            }
+        }
+        tcpHsmServer?.let { server ->
+            val router = tcpMessageRouter ?: return@let
+            when (server.state.value) {
+                is com.automatethethings.xkey.tcp.TcpHsmState.Connected -> add(DesktopTransport(server, router, true))
+                is com.automatethethings.xkey.tcp.TcpHsmState.Handshaking -> add(DesktopTransport(server, router, false))
+                else -> Unit
+            }
+        }
+        usbAccessoryServer?.let { server ->
+            val router = usbMessageRouter ?: return@let
+            when (server.state.value) {
+                is com.automatethethings.xkey.usb.UsbAccessoryState.Connected -> add(DesktopTransport(server, router, true))
+                is com.automatethethings.xkey.usb.UsbAccessoryState.Handshaking -> add(DesktopTransport(server, router, false))
+                else -> Unit
+            }
+        }
+    }
+
+    /** The key clients per router, and which desktop each reaches; every `remote.*` key call goes through it. */
+    private val desktopSessions = DesktopSessions(::desktopTransports, ::getConnectedDevicePublicKeyHex)
 
     /**
      * The `remote.*` key client for the active desktop session, or null when
-     * no desktop is connected. One client is cached per active router, so a
-     * new session (or a switch of transport) gets a fresh client.
+     * no desktop is connected. One client is kept per router, so every key
+     * call on a router numbers its requests from one counter.
      */
-    fun remoteKeyClient(): RemoteKeyClient? = remoteKeyClients.client()
+    fun remoteKeyClient(): RemoteKeyClient? = desktopSessions.client()
+
+    /**
+     * The confirmed desktop and the key client of its own transport, read in
+     * one snapshot, or null while no single desktop session is up and
+     * confirmed. Use this, never [getConnectedDevicePublicKeyHex] beside
+     * [remoteKeyClient]: with two transports up those can name two desktops.
+     */
+    fun desktopSession(): DesktopPeerSession? = desktopSessions.session()
 
     /**
      * The confirmed peer public key hex of the desktop session that is up, or
-     * null while no session is up or its peer is not yet confirmed.
+     * null while no single session is up or its peer is not yet confirmed.
      */
-    fun desktopSessionPeer(): String? = activeTransport()?.let { getConnectedDevicePublicKeyHex() }
+    fun desktopSessionPeer(): String? = desktopSession()?.peerPublicKeyHex
 
     /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)
@@ -907,9 +948,10 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             java.security.SecureRandom().nextBytes(nonce)
 
             Log.d(TAG, "Requesting device attestation for $publicKeyHex")
-            // The router's shared client: a second client would reuse its request ids.
-            val result = remoteKeyClients.attestDevice(nonce) ?: run {
-                Log.e(TAG, "No active transport for device attestation")
+            // The confirmed peer and its own transport's client, read together;
+            // that router's one client, since a second would reuse its request ids.
+            val result = desktopSessions.attestDevice(publicKeyHex, nonce) ?: run {
+                Log.e(TAG, "No single confirmed session with $publicKeyHex for device attestation")
                 return false
             }
 
@@ -1008,35 +1050,4 @@ sealed class ServiceState {
 
     /** An error occurred */
     data class Error(val message: String) : ServiceState()
-}
-
-/**
- * Hands out one [RemoteKeyClient] per desktop router, built over what
- * [transport] reports as active.
- *
- * Each client numbers its own requests and the router matches replies by id,
- * so two clients on one router would send the same ids and take each other's
- * replies. Every outbound `remote.*` key call on a router, the device
- * attestation included, must go through the client cached here.
- */
-internal class RemoteKeyClientCache(
-    private val transport: () -> Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>?
-) {
-    private var cached: Pair<BidirectionalMessageRouter, RemoteKeyClient>? = null
-
-    /** The client for the active router, or null when no desktop is connected. */
-    @Synchronized
-    fun client(): RemoteKeyClient? {
-        val (sender, router) = transport() ?: return null
-        cached?.let { (cachedRouter, client) -> if (cachedRouter === router) return client }
-        return RemoteKeyClient(sender, router).also { cached = router to it }
-    }
-
-    /**
-     * Asks the connected desktop for its device attestation
-     * (`remote.attestDevice`) over [nonce], or returns null when no desktop is
-     * connected.
-     */
-    suspend fun attestDevice(nonce: ByteArray): com.automatethethings.xkey.protocol.RemoteAttestDeviceResult? =
-        client()?.attestDevice(java.util.Base64.getEncoder().encodeToString(nonce))
 }

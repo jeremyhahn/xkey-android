@@ -74,13 +74,13 @@ class DesktopKeysActivity : AppCompatActivity() {
         )
     }
 
-    /** The service's desktop session now: its confirmed peer and its client. */
+    /** The service's desktop session now: its confirmed peer and that peer's own client, in one snapshot. */
     private fun currentSession(): DesktopSession? {
-        val service = gattService ?: return null
-        val client = service.remoteKeyClient() ?: return null
+        val session = gattService?.desktopSession() ?: return null
+        val client = session.client
         val source = adapted?.takeIf { it.first === client }?.second
             ?: DesktopKeysSource.of(client).also { adapted = client to it }
-        return DesktopSession(service.getConnectedDevicePublicKeyHex(), source)
+        return DesktopSession(session.peerPublicKeyHex, source)
     }
 
     private lateinit var root: View
