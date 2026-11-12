@@ -40,6 +40,7 @@ import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -290,10 +291,46 @@ class GetCredentialHandler(
             )
         }
 
+        // We are asserting UV=1, so verification must actually occur: sign
+        // through the biometric-bound path, never the silent one. Refusals and
+        // the explicit verification come before the counter advances, so a
+        // refused ceremony never consumes a value.
+        val verifyingHelper = if (willVerify) {
+            val helper = biometricHelper
+                ?: throw CredentialAssertionException(
+                    "User verification is required but no biometric prompt is available"
+                )
+            if (!keyRequiresAuth) {
+                // Keystore only demands a prompt for an auth-bound key, so for
+                // any other key sign() would take its silent path and we would
+                // assert UV=1 without anyone being verified. Verify explicitly.
+                try {
+                    helper.authenticateWithoutCrypto(
+                        title = "Sign In",
+                        subtitle = "Authenticate to $rpId"
+                    )
+                } catch (bioEx: Exception) {
+                    Log.e(TAG, "Verification failed", bioEx)
+                    throw CredentialAssertionException("Biometric signing failed", bioEx)
+                }
+            }
+            helper
+        } else {
+            null
+        }
+
         // The phone backend serves this passkey too, so the counter comes from
         // the one both paths share. It advances before signing: a failed
-        // signature leaves a gap, never a reused value.
-        val signCount = signCounter.next(credentialId)
+        // signature leaves a gap, never a reused value. A counter that cannot
+        // be persisted refuses the assertion before anything is signed.
+        val signCount = try {
+            signCounter.next(credentialId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not persist the signature counter", e)
+            throw CredentialAssertionException("Could not persist the signature counter", e)
+        }
 
         val authData = buildAuthenticatorData(
             rpId = rpId,
@@ -306,26 +343,11 @@ class GetCredentialHandler(
         // SHA256withECDSA hashes internally, so pass raw concatenation
         val dataToSign = authData + clientDataHash
 
-        val signature = if (willVerify) {
-            // We are asserting UV=1, so verification must actually occur:
-            // sign through the biometric-bound path, never the silent one.
-            val helper = biometricHelper
-                ?: throw CredentialAssertionException(
-                    "User verification is required but no biometric prompt is available"
-                )
+        val signature = if (verifyingHelper != null) {
             try {
                 Log.d(TAG, "Signing with verification, credentialId=$credentialId")
-                if (!keyRequiresAuth) {
-                    // Keystore only demands a prompt for an auth-bound key, so for
-                    // any other key sign() would take its silent path and we would
-                    // assert UV=1 without anyone being verified. Verify explicitly.
-                    helper.authenticateWithoutCrypto(
-                        title = "Sign In",
-                        subtitle = "Authenticate to $rpId"
-                    )
-                }
                 keystoreManager.sign(
-                    credentialId, dataToSign, helper,
+                    credentialId, dataToSign, verifyingHelper,
                     title = "Sign In",
                     subtitle = "Authenticate to $rpId"
                 )
