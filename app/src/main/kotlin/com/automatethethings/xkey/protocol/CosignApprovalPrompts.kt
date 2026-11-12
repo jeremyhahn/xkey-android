@@ -14,10 +14,13 @@
  */
 package com.automatethethings.xkey.protocol
 
+import android.app.Activity
+import android.app.Application
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Bundle
 import androidx.core.content.ContextCompat
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
@@ -28,6 +31,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -132,6 +136,14 @@ class CosignApprovalPrompts(
  * next launch. [dismiss] therefore withdraws an unanswered prompt by its own
  * request id and waits, up to [dismissWaitMs], for the activity's result,
  * which it sends as it finishes.
+ *
+ * startActivity returns before the activity registers its cancel receiver,
+ * so a cancel sent in between reaches nothing. A withdrawal is therefore
+ * remembered by request id, and an activity created for a withdrawn id (seen
+ * through the application's activity lifecycle callbacks, before its
+ * onCreate reads the request) loses the id and finishes without prompting.
+ * [dismissWaitMs] spans a prompt's whole life, so the next prompt is not
+ * released while the withdrawn one can still come up.
  */
 class ActivityCosignPromptSurface(
     private val context: Context,
@@ -145,6 +157,42 @@ class ActivityCosignPromptSurface(
 
     private val shown = ConcurrentHashMap<String, Shown>()
 
+    /** Withdrawn request ids, oldest first; ids are never reused in a process. */
+    private val withdrawn = LinkedHashSet<String>()
+    private val watchingActivities = AtomicBoolean(false)
+
+    private val activityCreations = object : Application.ActivityLifecycleCallbacks {
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            if (activity !is TransparentBiometricActivity) return
+            val requestId = activity.intent?.getStringExtra(TransparentBiometricActivity.EXTRA_REQUEST_ID)
+                ?: return
+            if (!isWithdrawn(requestId)) return
+            // Without its request id the activity finishes in onCreate, before prompting
+            activity.intent.removeExtra(TransparentBiometricActivity.EXTRA_REQUEST_ID)
+            activity.finish()
+            shown[requestId]?.ended?.complete(Unit)
+        }
+
+        override fun onActivityStarted(activity: Activity) = Unit
+        override fun onActivityResumed(activity: Activity) = Unit
+        override fun onActivityPaused(activity: Activity) = Unit
+        override fun onActivityStopped(activity: Activity) = Unit
+        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+        override fun onActivityDestroyed(activity: Activity) = Unit
+    }
+
+    private fun watchActivities() {
+        if (!watchingActivities.compareAndSet(false, true)) return
+        (context.applicationContext as? Application)?.registerActivityLifecycleCallbacks(activityCreations)
+    }
+
+    private fun withdraw(requestId: String) = synchronized(withdrawn) {
+        withdrawn.add(requestId)
+        while (withdrawn.size > MAX_WITHDRAWN) withdrawn.remove(withdrawn.first())
+    }
+
+    private fun isWithdrawn(requestId: String) = synchronized(withdrawn) { requestId in withdrawn }
+
     override fun show(
         requestId: String,
         title: String,
@@ -152,6 +200,7 @@ class ActivityCosignPromptSurface(
         locked: Boolean,
         onResult: (requestId: String, outcome: CosignPromptOutcome) -> Unit
     ) {
+        watchActivities()
         val ended = CompletableDeferred<Unit>()
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -191,12 +240,15 @@ class ActivityCosignPromptSurface(
     }
 
     override suspend fun dismiss(requestId: String) {
-        shown.remove(requestId)?.let { prompt ->
+        shown[requestId]?.let { prompt ->
             if (!prompt.ended.isCompleted) {
-                // Unanswered (caller gone or timed out): finish this request's activity
+                // Unanswered (caller gone or timed out): an activity not yet up finishes
+                // as it comes up; one already up finishes on this request's cancel
+                withdraw(requestId)
                 context.sendBroadcast(TransparentBiometricActivity.createCancelIntent(context, requestId))
                 withTimeoutOrNull(dismissWaitMs) { prompt.ended.await() }
             }
+            shown.remove(requestId)
             try {
                 context.unregisterReceiver(prompt.receiver)
             } catch (e: IllegalArgumentException) {
@@ -207,8 +259,14 @@ class ActivityCosignPromptSurface(
     }
 
     companion object {
-        /** How long [dismiss] waits for a withdrawn prompt's activity to finish. */
-        const val DISMISS_WAIT_MS = 2_000L
+        /**
+         * How long [dismiss] waits for a withdrawn prompt's activity to finish or,
+         * when it is not up yet, to come up and finish: a prompt's whole life.
+         */
+        const val DISMISS_WAIT_MS = CosignApprovalPrompts.DEFAULT_TIMEOUT_MS
+
+        /** Withdrawn request ids remembered; ids are never reused in a process. */
+        private const val MAX_WITHDRAWN = 64
 
         /**
          * The outcome a result broadcast carries for [requestId], or null when
