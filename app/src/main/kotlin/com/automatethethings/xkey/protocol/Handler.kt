@@ -3128,9 +3128,13 @@ class RequestHandler(
         return try {
             val db = XKeyDatabase.getInstance(context)
             val cred = db.oathCredentialDao().getByOathId(credentialId)
+            if (cred == null) {
+                // Nothing has that id: say so rather than claim a deletion.
+                return Response.success(request.id, JSONObject().apply { put("deleted", false) })
+            }
             db.oathCredentialDao().deleteByOathId(credentialId)
 
-            AuditLogger.logOathCredentialDeleted(credentialId, cred?.issuer, cred?.accountName ?: "")
+            AuditLogger.logOathCredentialDeleted(credentialId, cred.issuer, cred.accountName)
 
             val result = JSONObject().apply { put("deleted", true) }
             Response.success(request.id, result)
