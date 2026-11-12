@@ -211,6 +211,38 @@ class PinOathHandlerErrorsTest {
     }
 
     @Test
+    fun `pinChange of the User PIN without currentPin returns PIN_REQUIRED`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"USER_PIN","newPin":"654321"}""")
+
+        assertEquals(ErrorCodes.PIN_REQUIRED, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
+    fun `pinChange of the SO PIN without currentPin returns PIN_REQUIRED`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"SO_PIN","newPin":"654321"}""")
+
+        assertEquals(ErrorCodes.PIN_REQUIRED, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
+    fun `pinChange of the User PIN without newPin returns INVALID_PARAMS`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"USER_PIN","currentPin":"654321"}""")
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
+    fun `pinChange of the SO PIN without newPin returns INVALID_PARAMS`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"SO_PIN","currentPin":"654321"}""")
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
     fun `pinSet with a 6 and a 63 character new PIN succeeds`() = runTest {
         for (pin in listOf("123456", "8".repeat(63))) {
             val response = call(MethodNames.LOCAL_PIN_SET, """{"pinType":"SO_PIN","newPin":"$pin"}""")
