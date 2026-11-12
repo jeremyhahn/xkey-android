@@ -598,13 +598,38 @@ class RequestHandler(
             )
         }
 
-        // Check if key already exists
-        if (keystoreManager.keyExists(generateParams.credentialId)) {
+        // The credential ID is the key ID discovery gives the entry, so this
+        // generator holds local.generateKey's rules: the ID is reserved across
+        // the prompt (a second generation of it meanwhile, on any transport,
+        // is refused), existence is checked again after approval, and the
+        // entry is generated inside a revoke of the ID.
+        val credentialId = generateParams.credentialId
+        if (!KeyGenerationReservations.reserve(credentialId)) {
+            throw ProtocolException(
+                "Credential generation already pending",
+                errorCode = ErrorCodes.INVALID_PARAMS
+            )
+        }
+        try {
+            generateLegacyKey(request, generateParams)
+        } finally {
+            KeyGenerationReservations.release(credentialId)
+        }
+    }
+
+    /** Refuses a credential ID with a Keystore entry, for [handleGenerateKey]. */
+    private fun refuseExistingCredential(credentialId: String) {
+        if (keystoreManager.keyExists(credentialId)) {
             throw ProtocolException(
                 "Credential already exists",
                 errorCode = ErrorCodes.INVALID_PARAMS
             )
         }
+    }
+
+    /** Generates the key for [handleGenerateKey], inside its reservation of the credential ID. */
+    private suspend fun generateLegacyKey(request: Request, generateParams: GenerateKeyParams): Response {
+        refuseExistingCredential(generateParams.credentialId)
 
         // Determine authentication duration based on settings
         val authDurationSeconds = calculateAuthDuration(currentSettings)
@@ -634,12 +659,20 @@ class RequestHandler(
             }
         }
 
-        // Generate the key with appropriate authentication duration
-        val cosePublicKey = keystoreManager.generateKeyWithAuthDuration(
-            credentialId = generateParams.credentialId,
-            authDurationSeconds = authDurationSeconds,
-            requireStrongBox = false // Don't require, just prefer
-        )
+        // Generated inside a revoke of the ID, after existence is checked
+        // again: a credential that appeared during the prompt is refused, not
+        // deleted and regenerated, and a share of the ID waiting at admission
+        // is refused from the revoke's start (this path writes no key row, so
+        // the ledger is the only record of the change).
+        val cosePublicKey = SharePermissionLedger.revoking(generateParams.credentialId) {
+            refuseExistingCredential(generateParams.credentialId)
+            // Generate the key with appropriate authentication duration
+            keystoreManager.generateKeyWithAuthDuration(
+                credentialId = generateParams.credentialId,
+                authDurationSeconds = authDurationSeconds,
+                requireStrongBox = false // Don't require, just prefer
+            )
+        }
 
         val publicKeyBase64 = Base64.getEncoder().encodeToString(cosePublicKey)
         val isStrongBoxBacked = keystoreManager.isKeyStrongBoxBacked(generateParams.credentialId)
@@ -662,7 +695,7 @@ class RequestHandler(
 
         Log.i(TAG, "Generated key for credential: ${generateParams.credentialId}, " +
                 "strongBox=$isStrongBoxBacked, authDuration=$authDurationSeconds")
-        Response.success(request.id, result.toJson())
+        return Response.success(request.id, result.toJson())
     }
 
     /**
@@ -1924,16 +1957,46 @@ class RequestHandler(
         // as a raw Keystore alias. Software key `xkey_key_a` and hardware key
         // `a` (alias `xkey_key_a`) can both exist, and deleting the first must
         // never delete the second.
+        //
+        // Only the one key the ID names loses its material. A raw alias
+        // (`xkey_credential_k`, `xkey_key_k`) is that Keystore entry itself;
+        // a canonical ID is its software key if the store holds one, else the
+        // Keystore entry discovery maps to it, by the rules
+        // `KeyDao.deleteKeyRow` uses. A credential `xkey_credential_k` and a
+        // general key `xkey_key_k` can both exist, and deleting one must leave
+        // the other.
         val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
         val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
-        keyDao.deleteKeyAndMaterial(canonicalId) {
-            keystoreManager.deleteGeneralKey(canonicalId)
-            softwareKeys.delete(canonicalId)
+        var materialRemoved = false
+        val rowsDeleted = keyDao.deleteKeyAndMaterial(canonicalId) {
+            materialRemoved = when {
+                canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
+                softwareKeys.contains(canonicalId) -> {
+                    softwareKeys.delete(canonicalId)
+                    true
+                }
+                else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
+                    .any { deleteKeystoreAlias(canonicalId, it) }
+            }
         }
 
-        Log.i(TAG, "Deleted key: $keyId")
-        return Response.success(request.id, JSONObject().put("deleted", true))
+        // Deleted only when the key's material or its row was removed.
+        val deleted = materialRemoved || rowsDeleted > 0
+        Log.i(TAG, "Deleted key: $keyId ($deleted)")
+        return Response.success(request.id, JSONObject().put("deleted", deleted))
     }
+
+    /**
+     * Deletes Keystore entry [alias] of key [keyId] for [handleLocalDeleteKey];
+     * the general alias goes through [KeystoreManager.deleteGeneralKey], which
+     * audits the deletion. False when no such entry exists.
+     */
+    private fun deleteKeystoreAlias(keyId: String, alias: String): Boolean =
+        if (alias == "xkey_key_$keyId") {
+            keystoreManager.deleteGeneralKey(keyId)
+        } else {
+            keystoreManager.deleteByAlias(alias)
+        }
 
     /**
      * Handles local.setKeyPolicy - update key sharing policy.
