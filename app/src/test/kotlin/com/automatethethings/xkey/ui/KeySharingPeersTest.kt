@@ -46,6 +46,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.After
@@ -450,6 +451,103 @@ class KeySharingPeersTest {
         assertEquals("the Private policy accepted before dismissal was dropped", listOf(SharingPolicyType.PRIVATE), stored)
         assertFalse(hasAccess(PEER_A))
         assertTrue(table.value.none { it.keyId == KEY })
+    }
+
+    @Test
+    fun aDetachedWithdrawalThatFailsDeniesThePeerAndIsRetried() = runTest {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_A))
+        val gate = holdGrants()
+        var failing = true
+        coEvery { dao.removePolicy(any(), any()) } answers {
+            if (failing) throw IllegalStateException("disk I/O error")
+            val before = table.value
+            table.value = before.filterNot { it.keyId == firstArg<String>() && it.peerPublicKeyHex == secondArg<String>() }
+            before.size - table.value.size
+        }
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true) }
+        val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
+        sheet.launch { peers.setAllowed(PEER_A, false) }
+        sheet.cancel()
+
+        // The queued withdrawal runs with nobody awaiting it, and fails.
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        runCurrent()
+
+        assertTrue("the failed withdrawal's row is still stored", table.value.any { it.peerPublicKeyHex == PEER_A })
+        assertFalse("a failed withdrawal left the peer authorized", hasAccess(PEER_A))
+        assertFalse(peers.peers().first().of(PEER_A).allowed)
+
+        // The store recovers: a retry lands the withdrawal.
+        failing = false
+        advanceUntilIdle()
+
+        assertTrue("the withdrawal was not retried", table.value.none { it.peerPublicKeyHex == PEER_A })
+        assertFalse(hasAccess(PEER_A))
+        assertTrue(hasAccess(PEER_B))
+        coVerify(atLeast = 2) { dao.removePolicy(KEY, PEER_A) }
+    }
+
+    @Test
+    fun aDetachedPrivatePolicyThatFailsDeniesEveryPeerAndIsRetried() = runTest {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_A))
+        val gate = holdGrants()
+        var failing = true
+        val stored = mutableListOf<SharingPolicyType>()
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true) }
+        val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
+        sheet.launch {
+            peers.setKeyPolicy(SharingPolicyType.PRIVATE) {
+                if (failing) throw IllegalStateException("disk I/O error")
+                stored += SharingPolicyType.PRIVATE
+            }
+        }
+        sheet.cancel()
+
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        runCurrent()
+
+        assertTrue(stored.isEmpty())
+        assertFalse("a failed Private policy left a peer authorized", hasAccess(PEER_A))
+        assertFalse(hasAccess(PEER_B))
+        assertTrue(peers.peers().first().none { it.allowed })
+
+        failing = false
+        advanceUntilIdle()
+
+        assertEquals("the Private policy was not retried", listOf(SharingPolicyType.PRIVATE), stored)
+        assertTrue(table.value.none { it.keyId == KEY })
+        assertFalse(hasAccess(PEER_A))
+    }
+
+    @Test
+    fun aGrantAfterAFailedWithdrawalIsNotUndoneByItsRetry() = runTest {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_A))
+        var failing = true
+        coEvery { dao.removePolicy(any(), any()) } answers {
+            if (failing) throw IllegalStateException("disk I/O error")
+            val before = table.value
+            table.value = before.filterNot { it.keyId == firstArg<String>() && it.peerPublicKeyHex == secondArg<String>() }
+            before.size - table.value.size
+        }
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        assertTrue(peers.setAllowed(PEER_A, false))
+        runCurrent()
+        assertFalse(hasAccess(PEER_A))
+
+        // The user grants A again before any retry: that later choice stands.
+        assertTrue(peers.setAllowed(PEER_A, true))
+        failing = false
+        advanceUntilIdle()
+
+        assertTrue("a retry undid the later grant", hasAccess(PEER_A))
+        assertTrue(peers.peers().first().of(PEER_A).allowed)
     }
 
     /** Holds every grant before its insert until the returned gate completes. */
