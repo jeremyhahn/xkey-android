@@ -120,6 +120,9 @@ class UsbAccessoryServer(
     /** The accessory opened last, until it detaches or [disconnect] runs. */
     private var accessory: UsbAccessory? = null
 
+    /** Set by [retire]: this server never connects again. */
+    private var retired = false
+
     /** True while an accessory's streams are open and its session runs. */
     internal val isOpen: Boolean
         get() = synchronized(lock) { serverScope != null }
@@ -146,6 +149,11 @@ class UsbAccessoryServer(
      */
     fun connect(context: Context, accessory: UsbAccessory) {
         val opened = synchronized(lock) {
+            if (retired) {
+                // Its owner discarded it before this connect ran: open nothing.
+                Log.w(TAG, "Not connecting a retired USB accessory server")
+                return
+            }
             if (serverScope != null) {
                 Log.w(TAG, "Already connected to an accessory")
                 return
@@ -220,6 +228,19 @@ class UsbAccessoryServer(
             serverScope = null
             connectionJob = null
             _state.value = UsbAccessoryState.Disconnected
+        }
+    }
+
+    /**
+     * Disconnects for good: a [connect] that has not yet run opens nothing.
+     * The flag and the disconnect share [lock] with [connect], so a connect
+     * either finishes first and is torn down here, or finds the server
+     * retired.
+     */
+    fun retire() {
+        synchronized(lock) {
+            retired = true
+            disconnect()
         }
     }
 

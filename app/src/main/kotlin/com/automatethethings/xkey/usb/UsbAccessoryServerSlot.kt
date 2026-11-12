@@ -68,7 +68,8 @@ class UsbAccessoryServerSlot(
     /**
      * Builds a server for [accessory], publishes it with [router] and connects
      * it, once the session of the server before it has ended. Returns the
-     * server, or null when one is already active. A connect that throws
+     * server, or null when one is already active or the new one left the slot
+     * (cleared or closed) before the connect returned. A connect that throws
      * leaves the slot empty and rethrows.
      */
     suspend fun open(
@@ -120,10 +121,16 @@ class UsbAccessoryServerSlot(
             server.disconnect()
             throw e
         }
-        return server
+        // A clear() after the publish retired the server, so the connect
+        // opened nothing (or was torn down after it): report no server.
+        return synchronized(lock) { server.takeIf { this.server === it } }
     }
 
-    /** Drops the active server, if any, and disconnects it. */
+    /**
+     * Drops the active server, if any, and retires it: a connect that open()
+     * has not yet run on it opens nothing, so no session or receiver outlives
+     * the clear.
+     */
     fun clear() {
         val active = synchronized(lock) {
             server.also {
@@ -132,7 +139,7 @@ class UsbAccessoryServerSlot(
                 router = null
             }
         }
-        active?.disconnect()
+        active?.retire()
     }
 
     /** Drops [closedServer] unless an attach has since replaced it. */
