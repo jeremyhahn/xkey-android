@@ -31,6 +31,9 @@ import com.automatethethings.xkey.ui.CryptoSigningActivity
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Base64
@@ -559,8 +562,11 @@ class BiometricActivityLauncher(
  *
  * Every request is settled exactly once: by its result, by the failure to
  * launch its prompt, by its queue deadline, by its notification expiring with
- * its prompt never up ([expireUnshown]), or by its cancellation; and however
- * it settles, it hands the screen to the next.
+ * its prompt never up ([expireUnshown]), by its active deadline passing with
+ * its prompt never up, or by its cancellation; and however it settles, it
+ * hands the screen to the next. The active deadline needs nothing but the
+ * launch: a request whose start Android blocked silently, with no
+ * notification to expire, still lets go of the screen.
  *
  * @param prompts the turns the requests take on screen; process-wide, since
  *   there is one screen whichever launcher a request came through
@@ -582,10 +588,14 @@ internal class PendingAuthentications(
      * screen comes, and waits for its result. A failure to launch fails the
      * request; cancelling the caller withdraws it. A request whose turn has
      * not come within [queueDeadlineMillis] settles with
-     * [BiometricPrompt.ERROR_TIMEOUT] and is never shown.
+     * [BiometricPrompt.ERROR_TIMEOUT] and is never shown. A launched request
+     * whose prompt is still not up [activeDeadlineMillis] after its launch
+     * settles the same way ([expireUnshown]); one the owner is answering
+     * keeps waiting, since its prompt answers when it goes away.
      */
     suspend fun await(
         queueDeadlineMillis: Long = QUEUE_DEADLINE_MILLIS,
+        activeDeadlineMillis: Long = ACTIVE_DEADLINE_MILLIS,
         launch: (requestId: String) -> Unit
     ): BiometricActivityLauncher.BiometricResult {
         val id = nextRequestId.incrementAndGet()
@@ -602,14 +612,27 @@ internal class PendingAuthentications(
                     BiometricPrompt.ERROR_TIMEOUT,
                     "Another approval prompt held the screen past this request's deadline"
                 )
-            return suspendCancellableCoroutine { continuation ->
-                pending[id] = continuation
-                queued.remove(id, turnCame)
-                continuation.invokeOnCancellation { pending.remove(id, continuation) }
+            return coroutineScope {
+                // Its own clock, started with the launch: no notification or
+                // other callback has to exist for an unseen request to let go.
+                // (`this.launch` is the coroutine builder, not the parameter.)
+                val activeDeadline = this.launch {
+                    delay(activeDeadlineMillis)
+                    expireUnshown(id.toString())
+                }
                 try {
-                    launch(id.toString())
-                } catch (e: Exception) {
-                    if (pending.remove(id, continuation)) continuation.resumeWithException(e)
+                    suspendCancellableCoroutine { continuation ->
+                        pending[id] = continuation
+                        queued.remove(id, turnCame)
+                        continuation.invokeOnCancellation { pending.remove(id, continuation) }
+                        try {
+                            launch(id.toString())
+                        } catch (e: Exception) {
+                            if (pending.remove(id, continuation)) continuation.resumeWithException(e)
+                        }
+                    }
+                } finally {
+                    activeDeadline.cancel()
                 }
             }
         } finally {
@@ -632,7 +655,8 @@ internal class PendingAuthentications(
     /**
      * Settles launched request [requestId] with [BiometricPrompt.ERROR_TIMEOUT]
      * unless its prompt is up; false when it was left waiting, or nothing
-     * waits on that id.
+     * waits on that id. Called when its notification expires and when its
+     * active deadline passes, whichever comes first.
      */
     fun expireUnshown(requestId: String): Boolean {
         val id = requestId.toLongOrNull() ?: return false
@@ -641,7 +665,7 @@ internal class PendingAuthentications(
             requestId,
             BiometricActivityLauncher.BiometricResult.Error(
                 BiometricPrompt.ERROR_TIMEOUT,
-                "The approval's notification expired with its prompt never shown"
+                "The approval's prompt was never shown before its deadline"
             )
         )
     }
@@ -663,6 +687,15 @@ internal class PendingAuthentications(
          * so a request behind one unanswered prompt still gets its turn.
          */
         const val QUEUE_DEADLINE_MILLIS = 120_000L
+
+        /**
+         * How long a launched request waits for its prompt to come up before
+         * it settles with a timeout. Longer than the lock-screen
+         * notification's 30 s, so the owner has the whole notification to
+         * open it; shorter than [QUEUE_DEADLINE_MILLIS], so a request queued
+         * behind an unseen one still gets its turn.
+         */
+        const val ACTIVE_DEADLINE_MILLIS = 60_000L
 
         /** Process-wide, so ids from two launchers never name the same request. */
         private val nextRequestId = AtomicLong(0L)

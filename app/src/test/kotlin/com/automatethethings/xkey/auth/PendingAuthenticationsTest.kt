@@ -194,6 +194,12 @@ class PendingAuthenticationsTest {
     }
 
     @Test
+    fun theActiveDeadlineOutlastsTheNotificationAndFallsInsideTheQueueDeadline() {
+        assertTrue(PendingAuthentications.ACTIVE_DEADLINE_MILLIS in 30_001L until UNSEEN_MILLIS)
+        assertTrue(UNSEEN_MILLIS < PendingAuthentications.QUEUE_DEADLINE_MILLIS)
+    }
+
+    @Test
     fun aCallerCancelledWhileQueuedNeverPromptsAndKeepsItsPlaceForNobody() = runTest {
         val first = async { pending.await { launched += it } }
         val withdrawn = async { pending.await { launched += it } }

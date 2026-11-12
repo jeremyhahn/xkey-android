@@ -613,11 +613,19 @@ class RequestHandler(
         if (generateParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
             // Try BiometricActivityLauncher first (for service context)
             if (biometricLauncher != null) {
-                biometricLauncher.requestAuthentication(
-                    title = "xKey Registration",
-                    subtitle = "Verify your identity to create a new passkey",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
-                )
+                // On a locked phone the notification opens this same prompt;
+                // the request takes down only its own notification.
+                val notice = OwnNotifications(operationType = "register", rpName = null)
+                try {
+                    biometricLauncher.requestAuthentication(
+                        title = "xKey Registration",
+                        subtitle = "Verify your identity to create a new passkey",
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = notice.onLaunch
+                    )
+                } finally {
+                    notice.close()
+                }
             } else {
                 // Fall back to BiometricHelper (for activity context)
                 val helper = biometricHelper
@@ -1206,11 +1214,19 @@ class RequestHandler(
         // Biometric verification before key generation
         if (genParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
             if (biometricLauncher != null) {
-                biometricLauncher.requestAuthentication(
-                    title = "Key Generation",
-                    subtitle = "Verify your identity to create a new key",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
-                )
+                // On a locked phone the notification opens this same prompt;
+                // the request takes down only its own notification.
+                val notice = OwnNotifications(operationType = "generateKey", rpName = null)
+                try {
+                    biometricLauncher.requestAuthentication(
+                        title = "Key Generation",
+                        subtitle = "Verify your identity to create a new key",
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = notice.onLaunch
+                    )
+                } finally {
+                    notice.close()
+                }
             } else {
                 val helper = biometricHelper
                     ?: throw ProtocolException(

@@ -237,7 +237,9 @@ class SetKeyPolicyHandlerTest {
      * as the launcher does.
      */
     private fun promptsTakeTurns(): PendingAuthentications {
-        val approvals = PendingAuthentications(SigningPromptQueue())
+        // Each launched prompt is up, as the owner answers it: none is
+        // expired at the active deadline.
+        val approvals = PendingAuthentications(SigningPromptQueue(), expirePrompt = { false })
         coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } coAnswers {
             val onLaunch = arg<(String, Intent) -> Unit>(4)
             val launch = { requestId: String ->
