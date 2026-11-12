@@ -779,4 +779,29 @@ class PairedDeviceGrantCleanupTest {
         assertFalse(after.isRevocationPending(PEER_C))
         assertTrue(after.pendingRevocations().isEmpty())
     }
+
+    /** The compatibility overload binds the grant to the current pairing and answers as the three-argument one. */
+    @Test
+    fun theCompatibilityWriteGrantWritesForAPairedKey() = runTest {
+        var wrote = false
+
+        val result = repo.writeGrant(PEER_A) { wrote = true; table += KeySharingPolicy("k-9", PEER_A) }
+
+        assertTrue(result)
+        assertTrue(wrote)
+        assertEquals(listOf("k-1", "k-2", "k-9"), grantsOf(PEER_A).map { it.keyId }.sorted())
+        assertEquals(result, repo.writeGrant(PEER_A, repo.pairingOf(PEER_A)!!) {})
+    }
+
+    /** An unknown key has no pairing: the compatibility overload refuses without running the write. */
+    @Test
+    fun theCompatibilityWriteGrantRefusesAnUnknownKey() = runTest {
+        var wrote = false
+
+        assertFalse(repo.writeGrant(PEER_C) { wrote = true; table += KeySharingPolicy("k-9", PEER_C) })
+
+        assertFalse(wrote)
+        assertTrue(grantsOf(PEER_C).isEmpty())
+        assertTrue(prefs.getStringSet("grant_writes", null).isNullOrEmpty())
+    }
 }
