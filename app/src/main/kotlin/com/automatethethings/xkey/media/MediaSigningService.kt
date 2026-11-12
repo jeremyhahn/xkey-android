@@ -53,9 +53,15 @@ import java.time.Instant
  */
 internal object AutoSignHash {
 
-    /** The stored `contentHash` for [data], typed by [mimeType]. */
-    fun contentHash(data: ByteArray, @Suppress("UNUSED_PARAMETER") mimeType: String?): String =
-        MediaHasher.hashBytes(data)
+    /**
+     * The stored `contentHash` for [data], typed by [mimeType]: the canonical
+     * hash ([MediaHasher.hashCanonical]). The signature is embedded in the
+     * file after hashing, so a whole-file hash would never match again, and
+     * the in-band check ([MediaHasher.contentHashMatches]) accepts only the
+     * canonical one.
+     */
+    fun contentHash(data: ByteArray, mimeType: String?): String =
+        MediaHasher.hashCanonical(data, mimeType)
 
     fun contentHashUri(contentResolver: ContentResolver, uri: Uri): String {
         val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
