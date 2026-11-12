@@ -302,8 +302,100 @@ class BackupStoreIdTest {
         assertEquals(next, store().latestId())
     }
 
+    // -----------------------------------------------------------------
+    // A whole header over a cut-short body is a failure, not an absent backup
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `a newest XKB2 record cut short after its header makes latestId fail instead of picking an older backup`() {
+        store().store("older", byteArrayOf(1))
+        recordFile("newest").writeBytes(xkb2CutShort("newest", sequence = 99))
+
+        assertThrows(IOException::class.java) { store().latestId() }
+    }
+
+    @Test
+    fun `load of an XKB2 record cut short after its header fails instead of returning null`() {
+        store().store("older", byteArrayOf(1))
+        recordFile("newest").writeBytes(xkb2CutShort("newest", sequence = 99))
+
+        assertThrows(IOException::class.java) { store().load("newest") }
+    }
+
+    @Test
+    fun `a newest XKB1 record cut short after its header makes latestId fail instead of picking an older backup`() {
+        backupDir().mkdirs()
+        recordFile("older").apply {
+            writeBytes(xkb1("older", byteArrayOf(1)))
+            setLastModified(1_690_000_000_000L)
+        }
+        recordFile("newest").apply {
+            writeBytes(xkb1CutShort("newest"))
+            setLastModified(1_700_000_000_000L)
+        }
+
+        assertThrows(IOException::class.java) { store().latestId() }
+    }
+
+    @Test
+    fun `load of an XKB1 record cut short after its header fails instead of returning null`() {
+        backupDir().mkdirs()
+        recordFile("newest").writeBytes(xkb1CutShort("newest"))
+
+        assertThrows(IOException::class.java) { store().load("newest") }
+    }
+
+    @Test
+    fun `a store whose write fails partway keeps the earlier record and leaves no temp file`() {
+        store().store("a", byteArrayOf(1, 2, 3))
+        val failing = store().apply {
+            writeFile = { file, bytes ->
+                file.writeBytes(bytes.copyOfRange(0, bytes.size / 2))
+                throw IOException("disk full")
+            }
+        }
+
+        assertThrows(IOException::class.java) { failing.store("a", ByteArray(64) { 7 }) }
+
+        assertArrayEquals(byteArrayOf(1, 2, 3), store().load("a"))
+        assertEquals("a", store().latestId())
+        assertEquals(listOf(recordFile("a").name), backupDir().list()!!.toList())
+    }
+
+    @Test
+    fun `a temp file left by a crashed store is removed, not migrated as a legacy backup`() {
+        val dir = backupDir().apply { mkdirs() }
+        val stray = File(dir, ".${SyncCodec.sha256Hex("a".toByteArray())}.backup.tmp")
+        stray.writeBytes(xkb2CutShort("a", sequence = 1))
+
+        assertEquals(null, store().latestId())
+        assertTrue(dir.list()!!.isEmpty())
+    }
+
     private fun recordFile(id: String) =
         File(backupDir(), "${SyncCodec.sha256Hex(id.toByteArray(Charsets.UTF_8))}.backup")
+
+    /** An `XKB2` record whose header is whole but whose id length runs past the end. */
+    private fun xkb2CutShort(id: String, sequence: Long): ByteArray {
+        val idBytes = id.toByteArray(Charsets.UTF_8)
+        return ByteBuffer.allocate(4 + 8 + 8 + 4 + idBytes.size)
+            .put("XKB2".toByteArray(Charsets.US_ASCII))
+            .putLong(sequence)
+            .putLong(1_700_000_000_000L)
+            .putInt(idBytes.size + 1000)
+            .put(idBytes)
+            .array()
+    }
+
+    /** An `XKB1` record whose header is whole but whose id length runs past the end. */
+    private fun xkb1CutShort(id: String): ByteArray {
+        val idBytes = id.toByteArray(Charsets.UTF_8)
+        return ByteBuffer.allocate(4 + 4 + idBytes.size)
+            .put("XKB1".toByteArray(Charsets.US_ASCII))
+            .putInt(idBytes.size + 1000)
+            .put(idBytes)
+            .array()
+    }
 
     private fun xkb1(id: String, blob: ByteArray): ByteArray {
         val idBytes = id.toByteArray(Charsets.UTF_8)

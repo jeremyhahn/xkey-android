@@ -83,6 +83,9 @@ class BackupStore(context: Context, private val clock: () -> Long = System::curr
 
     private var migrated = false
 
+    /** Writes bytes to a file; a seam for tests that fail a write partway. */
+    internal var writeFile: (File, ByteArray) -> Unit = { file, bytes -> file.writeBytes(bytes) }
+
     /**
      * Store a backup blob. If [backupId] is blank a unique id is generated.
      * Returns the id under which the blob was stored. Storing an existing id
@@ -102,7 +105,7 @@ class BackupStore(context: Context, private val clock: () -> Long = System::curr
             }
             generated
         }
-        recordFile(id).writeBytes(encodeRecord(Header(sequence, now), id, data))
+        writeFile(recordFile(id), encodeRecord(Header(sequence, now), id, data))
         id
     }
 
