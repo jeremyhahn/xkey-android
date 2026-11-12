@@ -2541,17 +2541,20 @@ class GattServer(
                     synchronized(revocationLock) {
                         val peerKeyHex = session.getRemoteStaticKey()?.toHexString()
                         if (session === revokedSession) throw PeerNotPairedException(peerKeyHex)
+                        // A scoped send whose connection was replaced or ended
+                        // fails as a changed connection, so the caller decides
+                        // again on whatever session is current now.
+                        if (expected != null &&
+                            (expected.connection !== session || !expected.sameAs(confirmedConnection()))
+                        ) {
+                            throw ConnectionChangedException()
+                        }
                         if (!isCurrent(session)) throw java.io.IOException("The session is no longer live")
                         // Its connection's disconnect was seen: the session
                         // still decrypts the replies queued before it, but
                         // encrypts nothing more.
                         if (sessionQueue?.inputEnded == true) {
                             throw java.io.IOException("The connection to ${device.address} is closing")
-                        }
-                        if (expected != null &&
-                            (expected.connection !== session || !expected.sameAs(confirmedConnection()))
-                        ) {
-                            throw ConnectionChangedException()
                         }
                         if (revalidatePeer) {
                             pairedDeviceRepository?.requirePaired(peerKeyHex)
