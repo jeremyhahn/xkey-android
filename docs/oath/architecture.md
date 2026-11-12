@@ -41,12 +41,14 @@ covered by the sync feature, not here.
 | `local.oathRemove` | `LOCAL_OATH_REMOVE` | `credential_id` | `deleted: true` |
 
 `local.oathAdd` builds an `otpauth://<type>/<issuer>:<account>?secret=...`
-URI from the fields and passes it to `OathRepository.importFromUri`, which
-stores the credential under a new random UUID. The handler returns the
-caller's `name` as `credential_id`, not that UUID; the id that
-`local.oathGenerate` and `local.oathRemove` accept is the `name` field that
-`local.oathList` returns. The URI is built without percent-encoding the issuer
-or account name.
+URI from the fields with `sync.otpauthUri`, the builder `SyncEngine` uses
+(#133): the issuer and account name are percent-encoded in the label and the
+`issuer` parameter, so a space, `:`, `&`, `?`, `#` or `/` in them reaches the
+store as sent, and only a HOTP add carries `counter`. The handler passes the
+URI to `OathRepository.importFromUri`, which stores the credential under a
+new random UUID, and returns that stored id as `credential_id`: the same id
+`local.oathList` reports as `name` and `local.oathGenerate` and
+`local.oathRemove` accept. The caller's `name` is not stored.
 
 ## Main flow
 
@@ -64,7 +66,7 @@ sequenceDiagram
     R->>R: parse label and params, base32Decode(secret)
     R->>SM: encryptSecret(secret)
     R->>DB: insert(OathCredentialEntity oathId = UUID)
-    H-->>D: {success, credential_id = name}
+    H-->>D: {success, credential_id = oathId}
 
     D->>H: local.oathList
     H->>DB: getAll()
