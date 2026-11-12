@@ -177,7 +177,8 @@ class KeyStoreSyncManager(
      * Removes keys table entries for local keys whose Keystore entries no longer exist.
      *
      * Only removes entries with local sources (not "xkmsd" remote references).
-     * A PIV slot alias listed by an earlier sync is removed as well.
+     * A PIV slot alias listed by an earlier sync is removed as well, because
+     * [KeystoreManager.resolveKeystoreAlias] never resolves a raw PIV alias.
      *
      * @return Number of stale entries removed.
      */
@@ -186,8 +187,10 @@ class KeyStoreSyncManager(
         var removed = 0
 
         for (key in localKeys) {
-            val isPivSlotKey = key.keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)
-            if (isPivSlotKey || keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
+            // Classify by the resolved alias, never the logical id: a general
+            // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
+            // a raw PIV slot alias row never resolves and so is removed here.
+            if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
                 keyDao.deleteByKeyId(key.keyId)
                 removed++
                 Log.d(TAG, "Removed stale key entry: ${key.keyId}")
