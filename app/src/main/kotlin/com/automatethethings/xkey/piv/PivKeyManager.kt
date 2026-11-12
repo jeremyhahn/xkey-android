@@ -18,6 +18,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayInputStream
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -139,7 +141,10 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
      * @return [PivSlotInfo] describing the newly generated key.
      * @throws java.security.GeneralSecurityException If key generation fails.
      */
-    suspend fun generateKey(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
+    suspend fun generateKey(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo =
+        PivSlotLocks.withSlot(slot) { generateKeyLocked(slot, algorithm) }
+
+    private suspend fun generateKeyLocked(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
         val alias = slot.keystoreAlias
 
         // Build key generation parameters based on the algorithm
@@ -225,7 +230,10 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
      * @throws PivCertificateNotParseableException If [certDer] is not one DER certificate.
      * @throws PivCertificateKeyMismatchException If the certificate is for another key.
      */
-    suspend fun importCertificate(slot: PivSlot, certDer: ByteArray) {
+    suspend fun importCertificate(slot: PivSlot, certDer: ByteArray) =
+        PivSlotLocks.withSlot(slot) { importCertificateLocked(slot, certDer) }
+
+    private suspend fun importCertificateLocked(slot: PivSlot, certDer: ByteArray) {
         val existing = pivSlotDao.getBySlotId(slot.hexId)
             ?: throw PivSlotEmptyException(slot)
         if (!existing.hasKey) throw PivSlotEmptyException(slot)
@@ -408,7 +416,10 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
      *
      * @param slot The PIV slot to clear.
      */
-    suspend fun deleteKey(slot: PivSlot) {
+    suspend fun deleteKey(slot: PivSlot) =
+        PivSlotLocks.withSlot(slot) { deleteKeyLocked(slot) }
+
+    private suspend fun deleteKeyLocked(slot: PivSlot) {
         val alias = slot.keystoreAlias
 
         // Remove from Android Keystore
@@ -428,6 +439,25 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
 
         Log.i(TAG, "Deleted key from PIV slot ${slot.hexId} (${slot.label})")
     }
+}
+
+/**
+ * One lock per PIV slot for the whole process.
+ *
+ * [PivKeyManager.generateKey], [PivKeyManager.deleteKey] and
+ * [PivKeyManager.importCertificate] each read and then write a slot's
+ * Keystore entry and `piv_slots` row. The GATT service and the PIV screens
+ * build their own [PivKeyManager], and GATT requests run concurrently, so the
+ * lock lives here rather than on an instance: an import that has checked a
+ * certificate against key A must finish before another caller can replace or
+ * delete A, or its upsert would bring A's row back. Different slots do not
+ * wait for each other; signing, listing and reads take no lock.
+ */
+internal object PivSlotLocks {
+    private val locks: Map<PivSlot, Mutex> = PivSlot.entries.associateWith { Mutex() }
+
+    suspend fun <T> withSlot(slot: PivSlot, block: suspend () -> T): T =
+        locks.getValue(slot).withLock { block() }
 }
 
 /**
