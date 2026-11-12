@@ -6,7 +6,9 @@ import org.junit.Test
 /**
  * The otpauth label split of [parseOathLabel]: the label is split on its
  * first literal `:` before percent-decoding, so an encoded `%3A` in either
- * part stays in that part (#156).
+ * part stays in that part (#156). With no literal `:`, an imported label
+ * splits on an encoded one, as third-party codes write it; a structured label
+ * (manual entry, sync) does not.
  */
 class OathLabelTest {
 
@@ -40,8 +42,23 @@ class OathLabelTest {
     }
 
     @Test
-    fun `a label with only an encoded colon has no issuer`() {
-        assertEquals(OathLabel(null, "host:user"), parseOathLabel("host%3Auser"))
+    fun `an imported label with only an encoded colon splits there`() {
+        assertEquals(OathLabel("GitHub", "alice"), parseOathLabel("GitHub%3Aalice"))
+    }
+
+    @Test
+    fun `an imported label with a literal colon and no issuer parameter splits there`() {
+        assertEquals(OathLabel("GitHub", "alice"), parseOathLabel("GitHub:alice"))
+    }
+
+    @Test
+    fun `a structured label with only an encoded colon has no issuer`() {
+        assertEquals(OathLabel(null, "host:user"), parseStructuredOathLabel("host%3Auser"))
+    }
+
+    @Test
+    fun `a structured label splits on a literal colon`() {
+        assertEquals(OathLabel("Corp:EU", "host:user"), parseStructuredOathLabel("Corp%3AEU:host%3Auser"))
     }
 
     @Test
@@ -85,8 +102,9 @@ class OathLabelTest {
     }
 
     @Test
-    fun `an encoded colon not after the issuer parameter stays in the account`() {
-        assertEquals(OathLabel(null, "host:user"), parseOathLabel("host%3Auser", issuerParam = "Other"))
+    fun `an imported label prefix that differs from the issuer parameter is still split off`() {
+        // importFromUri keeps the parameter as the issuer, as main did.
+        assertEquals(OathLabel("Other", "alice"), parseOathLabel("Other%3Aalice", issuerParam = "GitHub"))
     }
 
     @Test

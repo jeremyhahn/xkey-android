@@ -48,6 +48,12 @@ internal fun parseOathLabel(encodedLabel: String, issuerParam: String? = null): 
     return OathLabel(null, decodeLabelPart(encodedLabel).trim())
 }
 
+/**
+ * Parse a label the app wrote from separate issuer and account fields
+ * (manual entry, sync): only a literal `:` separates them.
+ */
+internal fun parseStructuredOathLabel(encodedLabel: String): OathLabel = parseOathLabel(encodedLabel)
+
 /** Split [label] around the [length]-char separator at [index], then decode. */
 private fun splitLabel(label: String, index: Int, length: Int): OathLabel {
     val issuer = decodeLabelPart(label.substring(0, index)).trim()

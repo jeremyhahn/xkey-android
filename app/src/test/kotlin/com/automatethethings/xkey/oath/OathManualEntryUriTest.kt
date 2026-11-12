@@ -7,8 +7,9 @@ import org.junit.Test
 
 /**
  * The manual-entry round trip: [manualOtpauthUri] writes the label the way
- * [parseOathLabel] reads it back, so the persisted issuer and account are the
- * values typed in (#156).
+ * [parseStructuredOathLabel] reads it back, so the persisted issuer and
+ * account are the values typed in (#156); an external import keeps the
+ * separator split of third-party labels.
  */
 class OathManualEntryUriTest {
 
@@ -55,18 +56,59 @@ class OathManualEntryUriTest {
         assertEquals("/Corp%3AEU:alice", URI(uri).rawPath)
     }
 
+    @Test
+    fun `an imported encoded separator with no issuer parameter keeps the issuer`() {
+        assertEquals(
+            OathLabel("GitHub", "alice"),
+            read("otpauth://totp/GitHub%3Aalice?secret=JBSWY3DPEHPK3PXP", structured = false)
+        )
+    }
+
+    @Test
+    fun `an imported literal separator with no issuer parameter keeps the issuer`() {
+        assertEquals(
+            OathLabel("GitHub", "alice"),
+            read("otpauth://totp/GitHub:alice?secret=JBSWY3DPEHPK3PXP", structured = false)
+        )
+    }
+
+    @Test
+    fun `an imported issuer parameter matching the label prefix strips it`() {
+        assertEquals(
+            OathLabel("GitHub", "alice"),
+            read("otpauth://totp/GitHub%3Aalice?secret=JBSWY3DPEHPK3PXP&issuer=GitHub", structured = false)
+        )
+    }
+
+    @Test
+    fun `an imported issuer parameter differing from the label prefix is kept as given`() {
+        assertEquals(
+            OathLabel("GitHub", "alice"),
+            read("otpauth://totp/Other%3Aalice?secret=JBSWY3DPEHPK3PXP&issuer=GitHub", structured = false)
+        )
+    }
+
+    /** Build the manual-entry URI, then read it back on the structured path. */
+    private fun roundTrip(issuer: String?, account: String): OathLabel =
+        read(manualOtpauthUri(issuer, account, "JBSWY3DPEHPK3PXP", "TOTP", "SHA1", 6, 30), structured = true)
+
     /**
-     * Build the URI, then read it as `OathRepository.importFromUri` does: the
-     * still-encoded path through [parseOathLabel], with the `issuer`
-     * parameter winning for the issuer.
+     * Read [uriString] as `OathRepository.importFromUri` does: the
+     * still-encoded path through [parseStructuredOathLabel] or
+     * [parseOathLabel], with the `issuer` parameter winning for the issuer.
      */
-    private fun roundTrip(issuer: String?, account: String): OathLabel {
-        val uri = URI(manualOtpauthUri(issuer, account, "JBSWY3DPEHPK3PXP", "TOTP", "SHA1", 6, 30))
+    private fun read(uriString: String, structured: Boolean): OathLabel {
+        val uri = URI(uriString)
         val issuerParam = uri.rawQuery.split("&")
             .map { it.split("=", limit = 2) }
             .firstOrNull { it[0] == "issuer" }
             ?.let { URLDecoder.decode(it[1], Charsets.UTF_8.name()) }
-        val label = parseOathLabel(uri.rawPath.removePrefix("/"), issuerParam)
+        val encodedLabel = uri.rawPath.removePrefix("/")
+        val label = if (structured) {
+            parseStructuredOathLabel(encodedLabel)
+        } else {
+            parseOathLabel(encodedLabel, issuerParam)
+        }
         return OathLabel(issuerParam ?: label.issuer, label.account)
     }
 }
