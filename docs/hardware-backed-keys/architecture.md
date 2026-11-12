@@ -763,7 +763,14 @@ and the write is never overwritten. A key already at the requested policy is
 not written or audited. If the policy moves while the approval prompt is up,
 the widening is refused with `OPERATION_DENIED`, since the approval covered
 the old state; a narrowing re-reads and narrows the new state. The audit
-entry names the policy the write actually replaced.
+entry names the policy the write actually replaced. The write is also bound to
+the row the request read (its immutable id): a key deleted and re-created under
+the same `keyId` meanwhile is another key, so it is not written and the
+request answers `OPERATION_DENIED`.
+
+On a locked phone the lock-screen notification opens the same prompt the
+biometric launcher is waiting on, under the launcher's own request id, so
+approving or cancelling from the lock screen completes the request.
 
 The confirmed peer is the one of the connection the request arrived on (its
 caller session); the handler-wide peer of the last served connection answers
@@ -773,5 +780,5 @@ only for a request that names no connection.
 |-------|------|
 | `INVALID_PARAMS` | Params or `keyId` missing |
 | `KEY_NOT_FOUND` | No key with that `keyId` |
-| `OPERATION_DENIED` | Widening on a session with no confirmed peer, or the policy changed while the prompt was up |
+| `OPERATION_DENIED` | Widening on a session with no confirmed peer, the policy changed while the prompt was up, or the key was replaced under the same `keyId` |
 | `BIOMETRIC_FAILED` | Widening with no biometric prompt available, or the owner cancels or fails it; the stored policy is unchanged |
