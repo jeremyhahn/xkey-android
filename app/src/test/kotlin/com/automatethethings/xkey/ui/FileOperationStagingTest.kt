@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.ui
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -23,7 +24,12 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
+import kotlin.coroutines.cancellation.CancellationException
 
 /** JVM tests for [FileOperationStaging], the staging files behind sign, encrypt and decrypt. */
 class FileOperationStagingTest {
@@ -143,5 +149,60 @@ class FileOperationStagingTest {
         assertTrue(directory.list().isNullOrEmpty())
         assertTrue(sibling.exists())
         assertTrue(otherCache.exists())
+    }
+
+    @Test
+    fun `a second instance's sweep keeps the first instance's staged output`() {
+        val first = staging()
+        val file = first.stageBytes("report.pdf")
+
+        // A second share opens while the first waits on its save picker
+        val second = staging()
+        second.sweep()
+        second.stageBytes("other.pdf")
+
+        assertTrue(file.exists())
+        val target = File(temp.newFolder("picked"), "report.pdf")
+        first.deliver(file) { it.copyTo(target) }
+        assertArrayEquals(byteArrayOf(1, 2, 3), target.readBytes())
+        assertFalse(file.exists())
+    }
+
+    @Test
+    fun `a writer blocked in input at teardown leaves no staged file`() {
+        val staging = staging()
+        val entered = CountDownLatch(1)
+        val inputReady = CountDownLatch(1)
+        var failure: Throwable? = null
+        val worker = thread {
+            try {
+                staging.stage("secret.txt") { staged ->
+                    // openInputStream blocks in the provider
+                    entered.countDown()
+                    inputReady.await()
+                    FileOutputStream(staged).use { it.write("plaintext".toByteArray()) }
+                }
+            } catch (e: Throwable) {
+                failure = e
+            }
+        }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+        staging.shutdown()
+        assertTrue(staging.directory.list().isNullOrEmpty())
+
+        inputReady.countDown()
+        worker.join(5_000)
+        assertFalse(worker.isAlive)
+
+        assertTrue(staging.directory.list().isNullOrEmpty())
+        assertTrue("stage should end cancelled, got $failure", failure is CancellationException)
+        try {
+            staging.stageBytes("late.txt")
+            fail("stage after shutdown should be refused")
+        } catch (e: CancellationException) {
+            // refused
+        }
+        assertTrue(staging.directory.list().isNullOrEmpty())
     }
 }

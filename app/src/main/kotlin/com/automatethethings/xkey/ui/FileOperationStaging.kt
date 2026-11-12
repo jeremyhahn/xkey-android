@@ -81,6 +81,9 @@ class FileOperationStaging(cacheDir: File) {
         files.forEach { it.delete() }
     }
 
+    /** Stub: replaced by the writer fence. */
+    fun shutdown() = releaseAll()
+
     /** Delete whatever an earlier run left in [directory], and nothing outside it. */
     fun sweep() {
         directory.listFiles()?.forEach { it.deleteRecursively() }
