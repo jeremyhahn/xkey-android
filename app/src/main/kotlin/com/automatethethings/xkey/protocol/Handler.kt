@@ -3086,25 +3086,27 @@ class RequestHandler(
 
             val type = credential.optString("type", "totp").lowercase()
             val issuer = credential.optString("issuer", null)
-            // Build an otpauth:// URI and import it (handles Base32 decoding).
-            val uri = buildString {
-                append("otpauth://$type/")
-                if (issuer != null) append("$issuer:")
-                append(accountName)
-                append("?secret=$secret")
-                if (issuer != null) append("&issuer=$issuer")
-                append("&algorithm=${credential.optString("algorithm", "SHA1")}")
-                append("&digits=${credential.optInt("digits", 6)}")
-                append("&period=${credential.optInt("period", 30)}")
-                if (type == "hotp") append("&counter=${credential.optLong("counter", 0)}")
-            }
-            oathRepository.importFromUri(uri)
+            // Build an otpauth:// URI with a percent-encoded label and import
+            // it (handles Base32 decoding), as SyncEngine does (#133).
+            val uri = com.automatethethings.xkey.sync.otpauthUri(
+                type = type,
+                issuer = issuer,
+                accountName = accountName,
+                secret = secret,
+                algorithm = credential.optString("algorithm", "SHA1"),
+                digits = credential.optInt("digits", 6),
+                period = credential.optInt("period", 30),
+                counter = if (type == "hotp") credential.optLong("counter", 0) else null
+            )
+            // The phone stores the credential under the id importFromUri
+            // returns; oathList, oathGenerate and oathRemove key on it.
+            val credentialId = oathRepository.importFromUri(uri)
 
-            AuditLogger.logOathCredentialCreated(name, issuer, accountName, type.uppercase())
+            AuditLogger.logOathCredentialCreated(credentialId, issuer, accountName, type.uppercase())
 
             val result = JSONObject().apply {
                 put("success", true)
-                put("credential_id", name)
+                put("credential_id", credentialId)
             }
             Response.success(request.id, result)
         } catch (e: Exception) {
