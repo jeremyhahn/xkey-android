@@ -797,6 +797,70 @@ class TrustStoreRepositoryTest {
         assertEquals(0, repository.getCertificateCount())
     }
 
+    /** A repository whose file deleter refuses the DER file of [pem]. */
+    private fun repositoryRefusingToDelete(pem: String): TrustStoreRepository {
+        val refused = "${TestCertificates.fingerprint(pem)}.der"
+        return TrustStoreRepository(context, caFetcher, fileDeleter = { file ->
+            if (file.name == refused) false else file.delete()
+        })
+    }
+
+    @Test
+    fun `clearAll records a failed delete for a certificate it cannot remove`() = runTest {
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_B_PEM))
+        val fingerprintA = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        val fingerprintB = TestCertificates.fingerprint(TestCertificates.LEAF_B_PEM)
+        val stubborn = repositoryRefusingToDelete(TestCertificates.LEAF_B_PEM)
+        captureAudit()
+
+        val result = stubborn.clearAll()
+
+        assertEquals(listOf(fingerprintA), result.removed)
+        assertEquals(listOf(fingerprintB), result.failed)
+        assertFalse(result.complete)
+        val deletes = auditedOf(AuditOperationType.TRUST_STORE_DELETE)
+        assertEquals(2, deletes.size)
+        val succeeded = deletes.filter { it.success }
+        val failed = deletes.filter { !it.success }
+        assertEquals(listOf(fingerprintA), succeeded.map { details(it).getString("fingerprint") })
+        assertEquals(listOf(fingerprintB), failed.map { details(it).getString("fingerprint") })
+        assertNotNull(failed[0].errorMessage)
+        // B is still trusted and still listed; A is gone.
+        assertTrue(newRepository().hasCertificate(fingerprintB))
+        assertNotNull(newRepository().getCertificate(fingerprintB))
+        assertNull(newRepository().getCertificate(fingerprintA))
+        assertFalse(newRepository().hasCertificate(fingerprintA))
+    }
+
+    @Test
+    fun `clearAll reports a complete clear when every certificate is removed`() = runTest {
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+        captureAudit()
+
+        val result = repository.clearAll()
+
+        assertTrue(result.complete)
+        assertTrue(result.failed.isEmpty())
+        assertTrue(auditedOf(AuditOperationType.TRUST_STORE_DELETE).all { it.success })
+    }
+
+    @Test
+    fun `deleteCertificate records a failure and keeps the entry when the file cannot be removed`() = runTest {
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+        val fingerprint = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        val stubborn = repositoryRefusingToDelete(TestCertificates.LEAF_A_PEM)
+        captureAudit()
+
+        assertFalse(stubborn.deleteCertificate(fingerprint))
+
+        val delete = auditedOf(AuditOperationType.TRUST_STORE_DELETE).single()
+        assertFalse(delete.success)
+        assertEquals(fingerprint, details(delete).getString("fingerprint"))
+        assertTrue(newRepository().hasCertificate(fingerprint))
+        assertNotNull(newRepository().getCertificate(fingerprint))
+    }
+
     @Test
     fun `imports and deletes still succeed with the audit logger uninitialized`() = runTest {
         assertFalse(AuditLogger.isInitialized())
