@@ -136,9 +136,22 @@ data class CACertificateInfo(
  *   - Intermediate CA (5 year validity, StrongBox-backed)
  *     - IDevID certificates (1 year validity)
  */
-class AndroidCA(private val context: Context) {
+class AndroidCA internal constructor(
+    private val context: Context,
+    /**
+     * Opens the KeyStore holding the CA keys. Production always uses the
+     * Android Keystore (the public constructor); JVM tests pass an in-memory
+     * store so issuance can run without StrongBox/TEE.
+     */
+    private val openKeyStore: () -> KeyStore
+) {
+    constructor(context: Context) : this(context, ::openAndroidKeyStore)
+
     companion object {
         private const val TAG = "AndroidCA"
+
+        private fun openAndroidKeyStore(): KeyStore =
+            KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
         const val ROOT_CA_ALIAS = "xkey_root_ca"
         const val INTERMEDIATE_CA_ALIAS = "xkey_intermediate_ca"
@@ -177,9 +190,7 @@ class AndroidCA(private val context: Context) {
     /** Optional CertificateDao for auto-persisting issued certs. */
     var certificateDao: CertificateDao? = null
 
-    private val keyStore: KeyStore by lazy {
-        KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    }
+    private val keyStore: KeyStore by lazy { openKeyStore() }
 
     /**
      * Check if the Root CA has been generated.
@@ -905,7 +916,8 @@ class AndroidCA(private val context: Context) {
         return JcaX509CertificateConverter().getCertificate(certHolder)
     }
 
-    private fun generateIntermediateCertificate(
+    /** Internal, not private, so JVM tests can sign an intermediate under a given root. */
+    internal fun generateIntermediateCertificate(
         rootCert: X509Certificate,
         rootKey: PrivateKey,
         subject: X500Name
