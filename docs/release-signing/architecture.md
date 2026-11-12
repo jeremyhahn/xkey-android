@@ -84,8 +84,12 @@ variables for it, and runs `assembleRelease`. It then runs
 unless the APK has exactly one signer whose certificate SHA-256 digest is
 the throwaway certificate's. It refuses to run while `keystore.properties`
 exists, since the file would override the throwaway key.
-`RELEASE_CHECK_OMIT=<one XKEY_* name>` leaves that variable unset, so the
-release guard's refusal can be seen: the target then fails.
+`RELEASE_CHECK_OMIT=<one XKEY_* name>` leaves that variable unset and tests
+the release guard instead: the target passes only when `assembleRelease`
+exits nonzero and its output carries the guard's "Release signing is not
+configured." message. It fails when Gradle succeeds (an unsigned APK) or
+fails for any other reason. Gradle's output is kept in
+`build/release-check/gradle.log`.
 
 No CI workflow on main runs the target, `assembleRelease` or
 `bundleRelease`, or sets the `XKEY_*` variables. `bundleRelease` is not

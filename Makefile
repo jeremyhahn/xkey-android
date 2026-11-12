@@ -84,7 +84,8 @@ build: ## Build debug APK
 # A throwaway keystore in build/release-check/ (deleted on exit, never
 # committed) signs the release; the check fails unless apksigner reports that
 # one certificate. RELEASE_CHECK_OMIT=XKEY_KEY_ALIAS (any of the four) builds
-# without that variable, to show the release guard refusing the build.
+# without that variable and passes only when the release guard refuses the
+# build with its own message.
 release-check: ## Build a release APK signed with a throwaway key and verify its signer with apksigner
 	GRADLE="$(GRADLE)" ./scripts/release-check.sh
 

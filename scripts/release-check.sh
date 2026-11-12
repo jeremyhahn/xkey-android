@@ -11,8 +11,11 @@
 #   GRADLE              the Gradle command (default ./gradlew)
 #   APKSIGNER           apksigner to run (default: $ANDROID_HOME, else
 #                       $ANDROID_SDK_ROOT, /build-tools/$ANDROID_BUILD_TOOLS)
-#   RELEASE_CHECK_OMIT  one XKEY_* name to leave unset, to show the release
-#                       guard refusing the build (the check then fails)
+#   RELEASE_CHECK_OMIT  one XKEY_* name to leave unset: the check then
+#                       passes only when assembleRelease exits nonzero with
+#                       the release guard's "Release signing is not
+#                       configured." message, and fails when Gradle succeeds
+#                       (an unsigned APK) or fails for any other reason
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -66,8 +69,24 @@ fi
 
 apk=app/build/outputs/apk/release/app-release.apk
 rm -f "$apk"
+set +e
 # shellcheck disable=SC2086 # GRADLE may carry flags (--offline)
-${GRADLE:-./gradlew} assembleRelease || fail "assembleRelease failed"
+${GRADLE:-./gradlew} assembleRelease 2>&1 | tee "$out/gradle.log"
+status=${PIPESTATUS[0]}
+set -e
+
+if [ -n "${RELEASE_CHECK_OMIT:-}" ]; then
+	# The guard's message (app/build.gradle.kts, the release task doFirst).
+	guard="Release signing is not configured."
+	[ "$status" -ne 0 ] \
+		|| fail "assembleRelease succeeded without $RELEASE_CHECK_OMIT: the release guard did not refuse the build"
+	[[ $(< "$out/gradle.log") == *"$guard"* ]] \
+		|| fail "assembleRelease failed without $RELEASE_CHECK_OMIT, but not with the release guard's \"$guard\" (see $out/gradle.log)"
+	echo "release-check: assembleRelease refused the build without $RELEASE_CHECK_OMIT, as required"
+	exit 0
+fi
+
+[ "$status" -eq 0 ] || fail "assembleRelease failed (exit $status)"
 [ -f "$apk" ] || fail "$apk was not built"
 
 "$apksigner" verify --print-certs "$apk" > "$out/apksigner.txt" 2>&1 \
