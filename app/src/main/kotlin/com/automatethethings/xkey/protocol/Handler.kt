@@ -797,7 +797,13 @@ class RequestHandler(
                     // biometric auth. They require a GENERIC biometric prompt to authenticate the user,
                     // and then signWithoutBiometric() will work within the auth duration window.
                     // Only PER_OPERATION keys (authDuration = 0) support CryptoObject-bound signing.
-                    try {
+                    //
+                    // A PER_SESSION session that has not been approved yet always prompts: the
+                    // Keystore window may still be open from an earlier session (a USB detach and
+                    // reattach, #134), and that approval does not carry over.
+                    val sessionUnapproved = currentSettings.authMode == BiometricAuthMode.PER_SESSION &&
+                        sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) != false
+                    if (!sessionUnapproved) try {
                         Log.d(TAG, "Trying signWithoutBiometric (optimistic for TIME_WINDOW/PER_SESSION)")
                         val signature = keystoreManager.signWithoutBiometric(
                             credentialId = signParams.credentialId,
