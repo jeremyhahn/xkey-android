@@ -460,9 +460,11 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * finished and its revocation recorded ([writeGrant]).
      */
     fun pendingRevocations(): Set<String> = synchronized(storeLock) {
-        val pairings = readPairings()
+        // currentPairing, not the raw pairings map: a key paired before #174
+        // has no entry there but is paired at generation 0, and an unpaired
+        // key (null) never matches a marker.
         readPending().keys + readGrantWrites()
-            .filter { (key, generation) -> pairings[key] != generation }
+            .filter { (key, generation) -> currentPairing(key) != generation }
             .map { it.first }
     }
 
