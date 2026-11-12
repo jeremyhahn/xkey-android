@@ -82,6 +82,7 @@ class LocalAttestKeyAuditTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
         val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.getByKeyId(any()) } returns null
         coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity()
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao

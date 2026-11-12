@@ -1907,12 +1907,26 @@ class RequestHandler(
             subtitle = "Verify your identity to prove key ownership"
         )
 
+        val key = keyDao.getByKeyId(attestParams.keyId)
+        val keyLabel = key?.label ?: attestParams.keyId
+        val keyType = key?.keyType ?: "unknown"
+
+        val startTime = System.currentTimeMillis()
         val certChain = keystoreManager.getKeyAttestationWithChallenge(
             attestParams.keyId, attestParams.getNonceBytes()
-        ) ?: throw ProtocolException(
-            "Attestation not available for key: ${attestParams.keyId}",
-            errorCode = ErrorCodes.ATTESTATION_FAILED
         )
+        if (certChain == null) {
+            val message = "Attestation not available for key: ${attestParams.keyId}"
+            AuditLogger.logKeyAttested(
+                keyId = attestParams.keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                success = false,
+                errorMessage = message,
+                durationMs = System.currentTimeMillis() - startTime
+            )
+            throw ProtocolException(message, errorCode = ErrorCodes.ATTESTATION_FAILED)
+        }
 
         val certsBase64 = certChain.map { cert ->
             Base64.getEncoder().encodeToString(cert.encoded)
@@ -1920,6 +1934,15 @@ class RequestHandler(
 
         val leafCert = certChain[0] as java.security.cert.X509Certificate
         val securityLevel = parseAttestationSecurityLevel(leafCert)
+
+        AuditLogger.logKeyAttested(
+            keyId = attestParams.keyId,
+            keyLabel = keyLabel,
+            keyType = keyType,
+            securityLevel = securityLevel,
+            success = true,
+            durationMs = System.currentTimeMillis() - startTime
+        )
 
         val result = LocalAttestKeyResult(
             certificateChain = certsBase64,
