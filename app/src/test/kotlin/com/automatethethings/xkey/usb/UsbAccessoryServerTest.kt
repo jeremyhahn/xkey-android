@@ -19,13 +19,17 @@ import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
@@ -266,6 +270,31 @@ class UsbAccessoryServerTest {
         assertEquals(UsbAccessoryState.Disconnected, server.state.value)
         assertEquals(1, detachedCalls)
         assertEquals(null, watcher.onDetach)
+    }
+
+    @Test
+    fun `a detach cancels a session that is still running`() {
+        // The session waits in its key load until it is cancelled, so it is
+        // alive when the detach arrives and only the detach can end it.
+        mockkConstructor(NoiseSession::class)
+        coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers { awaitCancellation() }
+        val pfd = openableDescriptor()
+        every { usbManager.openAccessory(accessory) } returns pfd
+
+        attach()
+        val job = server.sessionJob
+        assertNotNull(job)
+        Thread.sleep(100)
+        assertTrue("the session ended before the detach", job!!.isActive && server.isOpen)
+
+        watcher.detach(accessory)
+
+        assertTrue("the detach did not cancel the session", awaitTrue { job.isCancelled })
+        assertTrue("the session never ended", awaitTrue { job.isCompleted })
+        verify { pfd.close() }
+        assertFalse(server.isOpen)
+        assertEquals(UsbAccessoryState.Disconnected, server.state.value)
+        assertEquals(1, detachedCalls)
     }
 
     @Test
