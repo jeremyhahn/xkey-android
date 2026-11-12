@@ -96,6 +96,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     // Coroutine scope for service operations
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** Guards [usbAccessoryServer] and [usbMessageRouter]: attach runs on a worker, detach on main. */
+    private val usbServerLock = Any()
+
     // Bluetooth components
     private var bluetoothManager: BluetoothManager? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -109,6 +112,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private var keystoreManager: KeystoreManager? = null
     private var bleMessageRouter: BidirectionalMessageRouter? = null
 
+    @Volatile
     private var usbMessageRouter: BidirectionalMessageRouter? = null
 
     private var tcpMessageRouter: BidirectionalMessageRouter? = null
@@ -120,6 +124,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private var currentSettings: BiometricSettingsData = BiometricSettingsData()
 
     // USB HSM components
+    @Volatile
     private var usbAccessoryServer: UsbAccessoryServer? = null
     private var usbHsmSettingsRepository: UsbHsmSettingsRepository? = null
     private var tcpHsmServer: TcpHsmServer? = null
@@ -692,7 +697,6 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             }
 
             val usbRouter = BidirectionalMessageRouter(handler)
-            usbMessageRouter = usbRouter
             // The password and seal stores are served over USB only, so their
             // methods go to this session rather than the RequestHandler BLE and
             // TCP share. A vault per session: every new USB connection starts
@@ -708,18 +712,29 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 ),
                 SealStoreMethods(SealStore(java.io.File(filesDir, SEAL_STORE_DIR)))
             )
-            usbAccessoryServer = UsbAccessoryServer(
+            // A pulled cable drops this server, so the next attach builds a
+            // fresh one without a service restart (#134). The server is
+            // published before connect starts watching for the detach, so a
+            // detach that arrives at once finds it and clears it.
+            var published: UsbAccessoryServer? = null
+            val server = UsbAccessoryServer(
                 handler,
                 usbRouter,
                 this@XKeyGattService,
                 pairedDeviceRepository,
                 storeMethods,
-                // A pulled cable drops this server, so the next attach
-                // builds a fresh one without a service restart (#134).
-                onDetached = { onUsbAccessoryDetached() }
-            ).also { server ->
-                server.connect(this@XKeyGattService, accessory)
+                onDetached = { published?.let { onUsbAccessoryServerDetached(it) } }
+            )
+            published = server
+            synchronized(usbServerLock) {
+                if (usbAccessoryServer != null) {
+                    Log.w(TAG, "USB accessory server already active, ignoring attach")
+                    return@launch
+                }
+                usbAccessoryServer = server
+                usbMessageRouter = usbRouter
             }
+            server.connect(this@XKeyGattService, accessory)
             Log.i(TAG, "USB accessory server started")
             AuditLogger.logConnectionEstablished(
                 deviceId = accessory.toString(),
@@ -733,9 +748,26 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * Called when the USB accessory is detached.
      */
     fun onUsbAccessoryDetached() {
-        usbAccessoryServer?.disconnect()
-        usbAccessoryServer = null
-        usbMessageRouter = null
+        val server = synchronized(usbServerLock) {
+            usbAccessoryServer.also {
+                usbAccessoryServer = null
+                usbMessageRouter = null
+            }
+        }
+        server?.disconnect()
+        Log.i(TAG, "USB accessory server stopped")
+    }
+
+    /**
+     * Drops [server] after its accessory detached. A detach of a server an
+     * attach has since replaced leaves the current one in place.
+     */
+    private fun onUsbAccessoryServerDetached(server: UsbAccessoryServer) {
+        synchronized(usbServerLock) {
+            if (usbAccessoryServer !== server) return
+            usbAccessoryServer = null
+            usbMessageRouter = null
+        }
         Log.i(TAG, "USB accessory server stopped")
     }
 
