@@ -379,6 +379,50 @@ class KeySharingPeersTest {
     }
 
     @Test
+    fun aRefusedGrantDoesNotRedrawASheetDismissedWhileItWaited() = runTest {
+        table.value = emptyList()
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            if (firstArg<KeySharingPolicy>().peerPublicKeyHex == PEER_B) gate.await()
+            insert(firstArg())
+        }
+        val peers = peersOf()
+        var attached = true
+        var redraws = 0
+
+        // B's grant is being written when the user taps A: A's grant waits its turn.
+        val first = async(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B))
+        }
+        val tapped = repo.pairingGeneration(PEER_A)
+        val tap = launch(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowedOrRedraw(
+                PEER_A,
+                true,
+                tapped,
+                attached = { attached },
+                // What requireContext() does once the sheet is detached.
+                redraw = { check(attached) { "redrew a detached sheet" }; redraws++ }
+            )
+        }
+        assertFalse(tap.isCompleted)
+
+        // A is unpaired, then the sheet is dismissed, before the queue drains.
+        repo.removeDevice(PEER_A)
+        attached = false
+        tap.cancel()
+
+        gate.complete(Unit)
+        assertTrue(first.await())
+        tap.join()
+        assertEquals("a detached sheet was redrawn", 0, redraws)
+        assertTrue(table.value.none { it.peerPublicKeyHex == PEER_A })
+        assertFalse(hasAccess(PEER_A))
+        // The refused grant left the queue: the next edit of the key runs at once.
+        assertTrue(peers.setAllowed(PEER_B, false, null))
+    }
+
+    @Test
     fun theGrantWriteDoesNotRunOnTheCallingDispatcher() = runTest {
         table.value = emptyList()
         val caller = Thread.currentThread()

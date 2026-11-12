@@ -681,15 +681,14 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         }
     }
 
-    /**
-     * Updates the sharing policy for a specific peer, for the [pairing] the
-     * user tapped. The list follows the policy rows; a refused change redraws
-     * it from the stored state.
-     */
     private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?) {
-        if (!sharingPeers.setAllowed(peerPublicKeyHex, allowed, pairing)) {
-            populatePeerList(peersFlow.value)
-        }
+        sharingPeers.setAllowedOrRedraw(
+            peerPublicKeyHex,
+            allowed,
+            pairing,
+            attached = { isAdded && view != null },
+            redraw = { populatePeerList(peersFlow.value) }
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -735,5 +734,21 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             }
             fragment.show(fragmentManager, TAG)
         }
+    }
+}
+
+/**
+ * The sheet's peer tap: [KeySharingPeers.setAllowed], then, if the change was
+ * refused, [redraw] of the list from the stored state.
+ */
+internal suspend fun KeySharingPeers.setAllowedOrRedraw(
+    peerPublicKeyHex: String,
+    allowed: Boolean,
+    pairing: Long?,
+    attached: () -> Boolean,
+    redraw: () -> Unit
+) {
+    if (!setAllowed(peerPublicKeyHex, allowed, pairing)) {
+        redraw()
     }
 }
