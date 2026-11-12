@@ -49,7 +49,7 @@ Method names are constants in `MethodNames` (`protocol/Messages.kt`).
 | `remote.syncTrustStore` | phone to desktop | `certificates` | `local`, `added`, `updated` |
 | `remote.syncOATH` | phone to desktop | `credentials` | `local`, `added`, `updated` |
 | `remote.syncPasswords` | phone to desktop | `passwords` | `local`, `added`, `updated` |
-| `remote.syncStatus` | phone to desktop | none (`{}`) | `last_sync` (RFC 3339, omitted when never synced), `device_id`, `store_checksums` (map; `null` read as empty) |
+| `remote.syncStatus` | phone to desktop | none (`{}`) | `last_sync` (RFC 3339, omitted when never synced), `device_id` (required), `store_checksums` (map of strings; `null` read as empty) |
 
 `RemoteSyncClient.syncAll()` runs the three `remote.sync*` legs in turn.
 
@@ -119,8 +119,9 @@ sequenceDiagram
 ```
 
 The status request runs after the store legs and touches no phone store. A
-failure there (`SyncStatusText.fetch` turns it into no status) leaves the
-completed sync reported, with the desktop's status shown as unavailable. The
+failure there, including an unreadable reply (a missing `device_id` or a
+wrongly typed field), is turned into no status by `SyncStatusText.fetch`: the
+completed sync is still reported, with the desktop's status shown as unavailable. The
 phone does not compare `store_checksums` with its own digests: the two sides'
 digest inputs are not pinned to match.
 
@@ -133,7 +134,11 @@ the counts and the `remote` array.
 - `syncNow()` throws `IllegalStateException` when no desktop is connected.
 - `RemoteSyncClient` throws `ProtocolException` when the desktop returns an
   error, or with `ErrorCodes.INTERNAL_ERROR` when no reply arrives within
-  `requestTimeoutMs` (30 s by default).
+  `requestTimeoutMs` (30 s by default) or a `remote.syncStatus` reply is
+  malformed.
+- Request ids come from one counter shared by every `RemoteSyncClient`, so a
+  status request from `desktopSyncStatus()` never reuses the id of a store leg
+  still pending on the same router.
 - A locked password vault throws `PasswordStoreLockedException` before anything
   is read or written. `syncAll()` catches it, logs it and still syncs the other
   stores. `handleSyncPasswords` answers `ErrorCodes.PASSWORD_STORE_LOCKED`
@@ -146,7 +151,7 @@ the counts and the `remote` array.
 
 | Test class | Covers |
 |------------|--------|
-| `RemoteSyncClientTest` (`app/src/test/.../remote/`) | Outbound legs and push counts; `remote.syncStatus` params and result parsing |
+| `RemoteSyncClientTest` (`app/src/test/.../remote/`) | Outbound legs and push counts; `remote.syncStatus` params, result parsing and malformed replies; distinct ids for a status request beside a store leg |
 | `RemoteClientInteropTest` (`app/src/test/.../remote/`) | Outbound client wire interop |
 | `SyncEngineStatusTest`, `SyncEngineTrustStoreTest`, `PasswordSyncTest` (`app/src/test/.../sync/`) | Status checksums, certificate merge, password gather and merge |
 | `SyncCodecTest` (`app/src/test/.../crypto/`) | Codec helpers |
