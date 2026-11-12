@@ -535,6 +535,7 @@ class StreamPairingSessionRevocationTest {
                     input = accepted.getInputStream(),
                     output = output,
                     noiseSession = noise,
+                    connectionId = "test:${java.util.UUID.randomUUID()}",
                     isActive = { !accepted.isClosed },
                     onConnected = { connected.complete(Unit) },
                 )

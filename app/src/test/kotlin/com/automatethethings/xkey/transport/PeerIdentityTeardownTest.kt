@@ -157,6 +157,7 @@ class PeerIdentityTeardownTest {
                     input = accepted.getInputStream(),
                     output = accepted.getOutputStream(),
                     noiseSession = noise,
+                    connectionId = "test:${java.util.UUID.randomUUID()}",
                     isActive = { !accepted.isClosed },
                     onConnected = { connected.complete(Unit) },
                 )

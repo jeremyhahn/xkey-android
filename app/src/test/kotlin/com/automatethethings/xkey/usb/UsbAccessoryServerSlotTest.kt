@@ -79,7 +79,6 @@ class UsbAccessoryServerSlotTest {
 
     /** One handler shared by every attach, as the service shares its RequestHandler. */
     private lateinit var handler: RequestHandler
-    @Volatile private var sessionId: String? = null
     @Volatile private var peerKeyHex: String? = null
 
     @Before
@@ -108,7 +107,6 @@ class UsbAccessoryServerSlotTest {
         every { accessory.model } returns "xKey"
 
         handler = mockk(relaxed = true)
-        every { handler.setSessionId(any()) } answers { sessionId = firstArg() }
         every { handler.setConnectedDevicePublicKeyHex(any()) } answers { peerKeyHex = firstArg() }
 
         slot = UsbAccessoryServerSlot(
@@ -199,18 +197,20 @@ class UsbAccessoryServerSlotTest {
             authMode = BiometricAuthMode.PER_SESSION,
         )
 
-        assertNotNull(attach())
+        val first = attach()?.connectionId
+        assertNotNull(first)
         // The user approves once in this USB session, as a local.sign prompt does.
-        assertTrue(auth.isBiometricRequired(perSession, sessionId))
-        auth.recordAuthentication(sessionId)
-        assertFalse(auth.isBiometricRequired(perSession, sessionId))
+        assertTrue(auth.isBiometricRequired(perSession, first))
+        auth.recordAuthentication(first)
+        assertFalse(auth.isBiometricRequired(perSession, first))
 
         broadcastDetach(accessory)
-        assertNotNull(attach())
+        val second = attach()?.connectionId
+        assertNotNull(second)
 
         assertTrue(
             "the approval of the detached USB session was reused",
-            auth.isBiometricRequired(perSession, sessionId),
+            auth.isBiometricRequired(perSession, second),
         )
     }
 
@@ -276,9 +276,14 @@ class UsbAccessoryServerSlotTest {
     @Test
     fun `a connect that throws after the open closes the descriptor`() {
         val descriptors = mutableListOf<ParcelFileDescriptor>()
-        every { usbManager.openAccessory(any()) } answers { openableDescriptor().also { descriptors += it } }
-        every { handler.setSessionId(any()) } throws IllegalStateException("session id refused") andThenAnswer {
-            sessionId = firstArg()
+        every { usbManager.openAccessory(any()) } answers {
+            openableDescriptor().also { pfd ->
+                // The first descriptor refuses its streams, after the open.
+                if (descriptors.isEmpty()) {
+                    every { pfd.fileDescriptor } throws IllegalStateException("descriptor refused")
+                }
+                descriptors += pfd
+            }
         }
 
         val thrown = runCatching { attach() }.exceptionOrNull()

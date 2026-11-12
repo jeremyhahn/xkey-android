@@ -53,10 +53,11 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * A PER_SESSION approval belongs to the USB session it was given in (#134).
+ * A PER_SESSION approval belongs to the connection it was given on (#134).
  *
- * A detach and reattach gives the handler a new session id, as
- * `UsbAccessoryServer` sets one per opened connection. The Keystore's own
+ * Each transport assigns a connection its id at connect and routes every
+ * request on it with that id, so a detach and reattach gives USB a new one,
+ * and BLE, TCP and USB never share one. The Keystore's own
  * auth window (300 s) may still be open then, so a `signWithoutBiometric`
  * would succeed: the handler must prompt anyway, because the new session has
  * not been approved.

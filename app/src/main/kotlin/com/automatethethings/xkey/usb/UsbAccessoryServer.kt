@@ -131,6 +131,13 @@ class UsbAccessoryServer(
     internal val sessionJob: Job?
         get() = synchronized(lock) { lastSessionJob }
 
+    /** The id assigned at the last connect, kept after it ends. */
+    private var lastConnectionId: String? = null
+
+    /** The last connection's id, for tests of the approval it keys. */
+    internal val connectionId: String?
+        get() = synchronized(lock) { lastConnectionId }
+
     /**
      * Opens the USB accessory and starts the communication session.
      *
@@ -173,8 +180,10 @@ class UsbAccessoryServer(
                     fileDescriptor = fd
                     // Each connection is its own session, so a PER_SESSION
                     // approval given before a detach does not carry over to
-                    // the next attach (#134).
-                    requestHandler.setSessionId("usb:${UUID.randomUUID()}")
+                    // the next attach (#134). The id rides with every request
+                    // on this connection; nothing handler-wide is set.
+                    val connectionId = "usb:${UUID.randomUUID()}"
+                    lastConnectionId = connectionId
                     inputStream = FileInputStream(fd.fileDescriptor)
                     outputStream = FileOutputStream(fd.fileDescriptor)
 
@@ -182,7 +191,7 @@ class UsbAccessoryServer(
                     serverScope = scope
                     _state.value = UsbAccessoryState.Handshaking
                     connectionJob = scope.launch {
-                        handleConnection(context, accessory.toString(), scope)
+                        handleConnection(context, accessory.toString(), connectionId, scope)
                     }
                     lastSessionJob = connectionJob
                     true
@@ -236,7 +245,12 @@ class UsbAccessoryServer(
     /**
      * Drives the pairing session over the USB streams for the connection lifetime.
      */
-    private suspend fun handleConnection(context: Context, accessoryInfo: String, scope: CoroutineScope) {
+    private suspend fun handleConnection(
+        context: Context,
+        accessoryInfo: String,
+        connectionId: String,
+        scope: CoroutineScope,
+    ) {
         try {
             val noiseSession = NoiseSession()
             noiseSession.loadStaticKey(context)
@@ -248,6 +262,7 @@ class UsbAccessoryServer(
                 input = input,
                 output = output,
                 noiseSession = noiseSession,
+                connectionId = connectionId,
                 isActive = { scope.isActive },
                 onConnected = {
                     synchronized(lock) {

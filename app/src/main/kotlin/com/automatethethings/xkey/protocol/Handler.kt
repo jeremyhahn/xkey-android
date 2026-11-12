@@ -61,6 +61,7 @@ import java.lang.ref.WeakReference
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import java.util.Base64
+import java.util.UUID
 import com.automatethethings.xkey.pin.PinManager
 import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinType
@@ -107,11 +108,10 @@ interface MessageSender {
  * // Update settings when they change
  * handler.updateSettings(newSettings)
  *
- * // Set session ID when BLE connection is established
- * handler.setSessionId(deviceAddress)
- *
- * // Handle requests
- * val response = handler.handleRequest(request)
+ * // Handle a request in the context of the connection it arrived on
+ * val response = withContext(RequestHandler.servedConnection(binding, peerKeyHex, connectionId)) {
+ *     handler.handleRequest(request)
+ * }
  * ```
  *
  * @param context Application context for device capability checks.
@@ -176,12 +176,14 @@ class RequestHandler(
          *
          * @param binding the binding of the connection the request arrived on
          * @param peerPublicKeyHex that connection's authenticated peer static key
-         * @param connectionId the id the transport assigned the connection
+         * @param connectionId the id the transport assigned the connection when
+         *   it connected, unique to it and never reused; PER_SESSION approval
+         *   is checked and recorded against it
          */
         fun servedConnection(
             binding: SessionBindingProvider,
             peerPublicKeyHex: String?,
-            connectionId: String? = null,
+            connectionId: String,
         ): CoroutineContext = CallerSession(binding, peerPublicKeyHex, served = true, connectionId = connectionId)
     }
 
@@ -210,14 +212,6 @@ class RequestHandler(
      */
     @Volatile
     private var currentSettings: BiometricSettingsData = BiometricSettingsData()
-
-    /**
-     * Current BLE session identifier (typically device address).
-     *
-     * Updated via [setSessionId] when BLE connection state changes.
-     */
-    @Volatile
-    private var currentSessionId: String? = null
 
     /**
      * Public key hex of the currently connected device.
@@ -359,16 +353,16 @@ class RequestHandler(
     }
 
     /**
-     * Sets the current BLE session identifier.
+     * Ends the PER_SESSION approval and the connected peer's identity when
+     * called with null.
      *
-     * This should be called when a BLE connection is established (with the device
-     * address) or disconnected (with null). The session ID is used by
-     * [SessionAuthManager] for PER_SESSION authentication mode.
+     * A non-null id changes nothing: approval keys on the connection id each
+     * request carries ([servedConnection]), never on handler-wide state that
+     * another transport's connect would overwrite (#134).
      *
-     * @param sessionId The BLE device address, or null if disconnected.
+     * @param sessionId null when the session ended.
      */
     fun setSessionId(sessionId: String?) {
-        currentSessionId = sessionId
         if (sessionId == null) {
             sessionAuthManager?.clearSession()
             synchronized(connectedPeerLock) {
@@ -516,32 +510,38 @@ class RequestHandler(
         return Response.error(id, code, message).toJson()
     }
 
-    suspend fun handleRequest(request: Request): Response =
-        withContext(currentCoroutineContext()[ApprovalSession] ?: ApprovalSession(currentSessionId)) {
+    suspend fun handleRequest(request: Request): Response {
+        val context = currentCoroutineContext()
+        val approval = context[ApprovalSession]
+            ?: ApprovalSession(context[CallerSession]?.connectionId ?: unsharedApprovalId())
+        return withContext(approval) {
             dispatch(request).copy(generation = request.generation)
         }
+    }
 
     /**
-     * The session id a request arrived with, captured once when it reaches
-     * [handleRequest] and carried in the coroutine context for the rest of
-     * the request (#134).
+     * The connection id a request arrived with, captured once when it
+     * reaches [handleRequest] and carried in the coroutine context for the
+     * rest of the request (#134).
      *
-     * One handler serves BLE, TCP and USB, and a USB reattach sets a new
-     * [currentSessionId] while a prompt on another transport is still open.
-     * Biometric approval is checked and recorded against this captured id,
-     * never against [currentSessionId] read after the prompt, so that prompt
-     * approves only the session it was shown for and the new USB session's
-     * first protected sign still prompts.
+     * One handler serves BLE, TCP and USB, so the id comes from the request's
+     * own [CallerSession], which its transport set to the id it assigned the
+     * connection at connect; nothing handler-wide that another transport's
+     * connect could overwrite. Biometric approval is checked and recorded
+     * against this id alone, so an approval given on one connection never
+     * authenticates a request on another. A request with no connection id
+     * gets an id of its own, so it shares no approval.
      */
-    private class ApprovalSession(val sessionId: String?) : AbstractCoroutineContextElement(Key) {
+    private class ApprovalSession(val sessionId: String) : AbstractCoroutineContextElement(Key) {
         companion object Key : CoroutineContext.Key<ApprovalSession>
     }
 
+    /** An approval id no other request carries. */
+    private fun unsharedApprovalId(): String = "request:${UUID.randomUUID()}"
+
     /** The [ApprovalSession] id of the request being handled. */
-    private suspend fun requestSessionId(): String? {
-        val session = currentCoroutineContext()[ApprovalSession]
-        return if (session != null) session.sessionId else currentSessionId
-    }
+    private suspend fun requestSessionId(): String =
+        currentCoroutineContext()[ApprovalSession]?.sessionId ?: unsharedApprovalId()
 
     private suspend fun dispatch(request: Request): Response {
         Log.d(TAG, "Handling request: id=${request.id}, method=${request.method}")

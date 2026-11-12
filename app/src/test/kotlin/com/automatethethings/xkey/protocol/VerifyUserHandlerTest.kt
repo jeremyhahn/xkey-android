@@ -333,7 +333,7 @@ class VerifyUserHandlerTest {
     private suspend fun <T> onConnection(
         binding: SessionBindingProvider = sessionBinding,
         block: suspend () -> T
-    ): T = withContext(RequestHandler.servedConnection(binding, PEER)) { block() }
+    ): T = withContext(RequestHandler.servedConnection(binding, PEER, "test:connection")) { block() }
 
     private suspend fun assertRefused(expected: Int) {
         val response = answer(verifyUserRequest())
