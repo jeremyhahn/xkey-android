@@ -16,6 +16,7 @@ package com.automatethethings.xkey.crypto
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import org.bouncycastle.crypto.digests.SHA256Digest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
 import org.bouncycastle.crypto.params.HKDFParameters
@@ -57,6 +58,9 @@ class FileEncryptor(
 ) {
 
     companion object {
+        /** Key ID prefix of the ephemeral agreement key (Keystore alias `xkey_key_ephemeral_<UUID>`). */
+        const val EPHEMERAL_KEY_PREFIX = "ephemeral_"
+
         private const val VERSION: Byte = 0x01
         private const val SALT_SIZE = 32
         private const val IV_SIZE = 12
@@ -83,7 +87,7 @@ class FileEncryptor(
         plaintext: InputStream,
         output: OutputStream
     ) {
-        val ephemeralKeyId = "ephemeral_${UUID.randomUUID()}"
+        val ephemeralKeyId = "$EPHEMERAL_KEY_PREFIX${UUID.randomUUID()}"
         try {
             // Generate ephemeral EC key in Keystore with PURPOSE_AGREE_KEY
             generateEphemeralKey("xkey_key_$ephemeralKeyId")
@@ -128,8 +132,9 @@ class FileEncryptor(
                 }
             }
         } finally {
-            // Always delete ephemeral key
-            keystoreManager.deleteKey(ephemeralKeyId)
+            // Always delete ephemeral key, as a revoke of its ID: a share of
+            // it, however it got a row, is refused from here on.
+            SharePermissionLedger.revoking(ephemeralKeyId) { keystoreManager.deleteKey(ephemeralKeyId) }
         }
     }
 

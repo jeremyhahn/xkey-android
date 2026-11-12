@@ -16,6 +16,7 @@ package com.automatethethings.xkey.remote
 
 import android.util.Log
 import com.automatethethings.xkey.ca.DeviceIdentity
+import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.protocol.ErrorCodes
@@ -313,6 +314,13 @@ object DesktopShareGate {
     fun isIdentityKey(keyId: String): Boolean =
         keyId.startsWith(DeviceIdentity.ALIAS_PREFIX) || keyId == KeystoreUserVerificationKey.ALIAS
 
+    /**
+     * FileEncryptor's ephemeral agreement keys, deleted when their one
+     * encryption ends. Discovery no longer gives them rows; a row an earlier
+     * build gave one is still never shared.
+     */
+    fun isEphemeralKey(keyId: String): Boolean = keyId.startsWith(FileEncryptor.EPHEMERAL_KEY_PREFIX)
+
     suspend fun decide(
         entity: KeyEntity?,
         software: SoftwareKey?,
@@ -321,7 +329,9 @@ object DesktopShareGate {
         isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean
     ): DesktopShareDecision {
         if (peerPublicKeyHex.isNullOrEmpty()) return DesktopShareDecision.NO_PEER
-        if (entity == null || isIdentityKey(entity.keyId)) return DesktopShareDecision.POLICY_DENIED
+        if (entity == null || isIdentityKey(entity.keyId) || isEphemeralKey(entity.keyId)) {
+            return DesktopShareDecision.POLICY_DENIED
+        }
         val admitted = when (entity.sharingPolicy) {
             SharingPolicyType.PRIVATE -> false
             SharingPolicyType.ALL_PEERS -> true

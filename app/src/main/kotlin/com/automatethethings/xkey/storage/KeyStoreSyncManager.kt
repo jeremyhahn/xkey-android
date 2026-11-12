@@ -15,6 +15,8 @@
 package com.automatethethings.xkey.storage
 
 import android.util.Log
+import androidx.annotation.VisibleForTesting
+import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.remote.SharePermissionLedger
@@ -56,6 +58,25 @@ class KeyStoreSyncManager(
         private const val ROOT_CA_ALIAS = "xkey_root_ca"
         private const val INTERMEDIATE_CA_ALIAS = "xkey_intermediate_ca"
         private val CA_ALIASES = setOf(ROOT_CA_ALIAS, INTERMEDIATE_CA_ALIAS)
+
+        /**
+         * FileEncryptor's per-operation agreement keys. They live for one
+         * encryption and are deleted after it, so they never get a key row.
+         */
+        private const val EPHEMERAL_ALIAS_PREFIX = KEY_ALIAS_PREFIX_GENERAL + FileEncryptor.EPHEMERAL_KEY_PREFIX
+
+        /**
+         * The Keystore aliases [discoverKeystoreEntries] maps to key ID
+         * [keyId], in [KeystoreManager.resolveKeystoreAlias]'s order. The ID
+         * itself is an alias only when it is a CA alias or carries neither
+         * xKey prefix: `xkey_key_a` is discovered as key `a`, never as key
+         * `xkey_key_a`.
+         */
+        fun keystoreAliasesOf(keyId: String): List<String> {
+            val raw = keyId in CA_ALIASES ||
+                !(keyId.startsWith(KEY_ALIAS_PREFIX) || keyId.startsWith(KEY_ALIAS_PREFIX_GENERAL))
+            return listOfNotNull(KEY_ALIAS_PREFIX + keyId, KEY_ALIAS_PREFIX_GENERAL + keyId, keyId.takeIf { raw })
+        }
 
         /** Alias prefixes used by Android framework libraries (must not be deleted). */
         private val SYSTEM_KEY_PREFIXES = listOf(
@@ -132,13 +153,15 @@ class KeyStoreSyncManager(
      *
      * @return Number of keys discovered.
      */
-    private suspend fun discoverKeystoreEntries(): Int {
+    @VisibleForTesting
+    internal suspend fun discoverKeystoreEntries(): Int {
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER)
         keyStore.load(null)
 
         var discovered = 0
 
         for (alias in keyStore.aliases()) {
+            if (alias.startsWith(EPHEMERAL_ALIAS_PREFIX)) continue
             val (keyId, isFido2, isCA) = when {
                 alias in CA_ALIASES -> {
                     Triple(alias, false, true)
@@ -330,6 +353,13 @@ class KeyStoreSyncManager(
  * detail screen do: its material, then its row, inside one
  * [SharePermissionLedger] revoke of the row's key ID ([deleteKeyAndMaterial]).
  *
+ * The row's ID names exactly one key, and only its material is removed: the
+ * software key of that ID if [softwareKeys] holds one, else the Keystore
+ * entry [KeyStoreSyncManager] discovers under that ID. Never
+ * [KeystoreManager.resolveKeystoreAlias], which reads `xkey_key_a` as the
+ * alias of hardware key `a`: software key `xkey_key_a` and hardware key `a`
+ * can both exist, and deleting the first must leave the second.
+ *
  * @return Number of rows deleted.
  */
 suspend fun KeyDao.deleteKeyRow(
@@ -337,7 +367,10 @@ suspend fun KeyDao.deleteKeyRow(
     keystoreManager: KeystoreManager,
     softwareKeys: SoftwareKeyStore
 ): Int = deleteKeyAndMaterial(key.keyId) {
-    if (key.source != "xkmsd") {
-        keystoreManager.resolveKeystoreAlias(key.keyId)?.let { keystoreManager.deleteByAlias(it) }
+    if (key.source == "xkmsd") return@deleteKeyAndMaterial
+    if (softwareKeys.contains(key.keyId)) {
+        softwareKeys.delete(key.keyId)
+    } else {
+        KeyStoreSyncManager.keystoreAliasesOf(key.keyId).firstOrNull { keystoreManager.deleteByAlias(it) }
     }
 }

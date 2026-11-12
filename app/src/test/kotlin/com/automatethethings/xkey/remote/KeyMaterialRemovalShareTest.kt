@@ -120,7 +120,7 @@ class KeyMaterialRemovalShareTest {
         val softwareStore = mutableSetOf("xkey_key_a")
         val softwareKeys = mockk<SoftwareKeyStore>(relaxed = true)
         every { softwareKeys.contains(any()) } answers { firstArg<String>() in softwareStore }
-        every { softwareKeys.delete(any()) } answers { softwareStore.remove(firstArg<String>()); Unit }
+        every { softwareKeys.delete(any()) } answers { softwareStore -= firstArg<String>() }
         val keyDao = mockk<KeyDao>(relaxed = true)
         coEvery { keyDao.deleteByKeyId(any()) } answers { if (stored.remove(firstArg<String>()) != null) 1 else 0 }
         val revisionBefore = SharePermissionLedger.revision(software.keyId)
