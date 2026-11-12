@@ -42,6 +42,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -176,7 +177,9 @@ class KeySharingPeersTest {
         // Meanwhile A is unpaired, and its revocation is cleaned up and acknowledged.
         repo.removeDevice(PEER_A)
         runCleanup(PEER_A)
-        assertFalse(repo.isRevocationPending(PEER_A))
+        assertNull("the revocation is acknowledged", repo.pendingRevocationGeneration(PEER_A))
+        // A write checked against the ended pairing is still in flight.
+        assertTrue(repo.isRevocationPending(PEER_A))
 
         // The insert lands after the revocation completed.
         gate.complete(Unit)

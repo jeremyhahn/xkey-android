@@ -321,8 +321,10 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
             val removed = getAllDevices().map { it.publicKeyHex }
             prefs.edit()
                 .remove(KEY_DEVICES)
+                .remove(KEY_PAIRINGS)
                 .recordRevocations(removed)
                 .apply()
+            storeChangeCount.value++
             removed
         }
         notifyRemoved(removed)
@@ -451,8 +453,18 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * prefs edit that removes the pairing, so the two persist or vanish
      * together, and cleared by [completeRevocation] only once the delete for
      * that generation has committed. Replayed at app start.
+     *
+     * Also every key with a grant write in flight, or interrupted, that was
+     * checked against a pairing which has since ended: its row may already be
+     * in the table, so the key is treated as revoking until the write is
+     * finished and its revocation recorded ([writeGrant]).
      */
-    fun pendingRevocations(): Set<String> = synchronized(storeLock) { readPending().keys }
+    fun pendingRevocations(): Set<String> = synchronized(storeLock) {
+        val pairings = readPairings()
+        readPending().keys + readGrantWrites()
+            .filter { (key, generation) -> pairings[key] != generation }
+            .map { it.first }
+    }
 
     fun isRevocationPending(publicKeyHex: String): Boolean = publicKeyHex in pendingRevocations()
 
@@ -484,14 +496,111 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
             prefs.edit().putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending)).apply()
             throw IOException("Acknowledging a grant revocation did not reach disk")
         }
-        revocationChangeCount.value++
+        storeChangeCount.value++
         true
     }
 
+    /**
+     * The pairing generation of [publicKeyHex], or null if it is not paired.
+     * Each pairing of a key gets a new one; a key paired again while still
+     * paired keeps its pairing. Devices paired before #174 have 0.
+     */
+    fun pairingGeneration(publicKeyHex: String): Long? = synchronized(storeLock) { currentPairing(publicKeyHex) }
+
+    /**
+     * Runs [write], which inserts a sharing grant for [publicKeyHex], bound to
+     * the key's current pairing (#174). Every grant writer goes through here.
+     *
+     * Refused, returning false without running [write], when the key is not
+     * paired or a revocation of it is pending. Otherwise a marker naming the
+     * key and its pairing generation is committed before [write] runs and
+     * cleared after it. While the marker names a pairing that has ended, the
+     * key counts as revoking ([pendingRevocations]), so a row the write left
+     * authorizes nothing. If the pairing ended while [write] ran, a
+     * revocation of the key is recorded when it finishes, in the same commit
+     * that clears the marker, and the grant cleanup deletes the row; the call
+     * returns false. A marker an ended process left behind is settled the
+     * same way by [recoverInterruptedGrantWrites].
+     */
+    suspend fun writeGrant(publicKeyHex: String, write: suspend () -> Unit): Boolean {
+        val marker = synchronized(storeLock) {
+            val generation = currentPairing(publicKeyHex) ?: return false
+            if (publicKeyHex in pendingRevocations()) return false
+            val marker = publicKeyHex to generation
+            if (grantWritesInFlight.merge(marker, 1, Int::plus) == 1) {
+                val written = prefs.edit()
+                    .putStringSet(KEY_GRANT_WRITES, encodeGenerations(readGrantWrites() + marker))
+                    .commit()
+                if (!written) {
+                    grantWritesInFlight.remove(marker)
+                    prefs.edit().putStringSet(KEY_GRANT_WRITES, encodeGenerations(readGrantWrites() - marker)).apply()
+                    return false
+                }
+            }
+            marker
+        }
+        var stale = true
+        try {
+            write()
+        } finally {
+            stale = finishGrantWrite(marker)
+        }
+        return !stale
+    }
+
+    /** Clears [marker]; true, with a revocation recorded, if its pairing ended. */
+    private fun finishGrantWrite(marker: Pair<String, Long>): Boolean {
+        val (publicKeyHex, generation) = marker
+        val stale = synchronized(storeLock) {
+            val stale = currentPairing(publicKeyHex) != generation || publicKeyHex in readPending()
+            val left = grantWritesInFlight.merge(marker, -1) { count, minus -> (count + minus).takeIf { it > 0 } }
+            val edit = prefs.edit()
+            if (left == null) edit.putStringSet(KEY_GRANT_WRITES, encodeGenerations(readGrantWrites() - marker))
+            if (stale) edit.recordRevocations(listOf(publicKeyHex))
+            // On a failed commit the marker stays and the key keeps counting
+            // as revoking; the next start settles it.
+            if (!edit.commit()) Log.e(TAG, "Finishing a grant write did not reach disk")
+            stale
+        }
+        if (stale) notifyRevocationPending(publicKeyHex)
+        return stale
+    }
+
+    /**
+     * Settles the grant writes an ended process left unfinished: one whose
+     * pairing is still current stands; any other may have left a row for an
+     * ended pairing, so the key's revocation is recorded. Run at app start.
+     */
+    fun recoverInterruptedGrantWrites() = synchronized(storeLock) {
+        val markers = readGrantWrites().filter { it !in grantWritesInFlight }
+        if (markers.isEmpty()) return@synchronized
+        val pending = readPending()
+        val stale = markers.filter { (key, generation) -> currentPairing(key) != generation || key in pending }
+        val written = prefs.edit()
+            .putStringSet(KEY_GRANT_WRITES, encodeGenerations(readGrantWrites() - markers.toSet()))
+            .recordRevocations(stale.map { it.first }.distinct())
+            .commit()
+        if (!written) Log.e(TAG, "Settling interrupted grant writes did not reach disk")
+    }
+
     /** Call under [storeLock]. */
-    private fun readPending(): Map<String, Long> {
-        val entries = prefs.getStringSet(KEY_PENDING_REVOCATIONS, null) ?: return emptyMap()
-        return entries.associate { entry ->
+    private fun currentPairing(publicKeyHex: String): Long? {
+        if (getAllDevices().none { it.publicKeyHex == publicKeyHex }) return null
+        return readPairings()[publicKeyHex] ?: 0L
+    }
+
+    /** Call under [storeLock]. */
+    private fun readPairings(): Map<String, Long> = decodeGenerations(prefs.getStringSet(KEY_PAIRINGS, null)).toMap()
+
+    /** Call under [storeLock]. */
+    private fun readGrantWrites(): Set<Pair<String, Long>> =
+        decodeGenerations(prefs.getStringSet(KEY_GRANT_WRITES, null)).toSet()
+
+    private fun encodeGenerations(markers: Set<Pair<String, Long>>): Set<String> =
+        markers.map { (key, generation) -> "$key$GENERATION_SEPARATOR$generation" }.toSet()
+
+    private fun decodeGenerations(entries: Set<String>?): List<Pair<String, Long>> =
+        entries.orEmpty().map { entry ->
             val at = entry.lastIndexOf(GENERATION_SEPARATOR)
             if (at < 0) {
                 entry to 0L
@@ -499,7 +608,10 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
                 entry.substring(0, at) to (entry.substring(at + 1).toLongOrNull() ?: 0L)
             }
         }
-    }
+
+    /** Call under [storeLock]. */
+    private fun readPending(): Map<String, Long> =
+        decodeGenerations(prefs.getStringSet(KEY_PENDING_REVOCATIONS, null)).toMap()
 
     private fun encodePending(pending: Map<String, Long>): Set<String> =
         pending.map { (key, generation) -> "$key$GENERATION_SEPARATOR$generation" }.toSet()
@@ -511,17 +623,37 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         val pending = readPending().toMutableMap()
         for (key in keys) pending[key] = ++generation
         // Under storeLock: a reader woken by this blocks until the edit is applied.
-        revocationChangeCount.value++
+        storeChangeCount.value++
         return putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending))
             .putLong(KEY_REVOCATION_GENERATION, generation)
     }
 
+    /**
+     * Call under [storeLock]. Writes the device list and, in the same edit,
+     * the pairing generations: a key that was not paired gets a new one, a
+     * key that stays paired keeps its own, a key that left loses it.
+     */
     private fun saveDevices(devices: List<PairedDeviceData>, revoke: Collection<String> = emptyList()) {
         val arr = JSONArray()
         for (device in devices) {
             arr.put(device.toJson())
         }
-        prefs.edit().putString(KEY_DEVICES, arr.toString()).recordRevocations(revoke).apply()
+        val wasPaired = getAllDevices().map { it.publicKeyHex }.toSet()
+        val before = readPairings()
+        var counter = prefs.getLong(KEY_PAIRING_GENERATION, 0L)
+        val pairings = devices.map { it.publicKeyHex }.distinct().associateWith { key ->
+            when {
+                key !in wasPaired -> ++counter
+                else -> before[key] ?: 0L
+            }
+        }
+        prefs.edit()
+            .putString(KEY_DEVICES, arr.toString())
+            .putStringSet(KEY_PAIRINGS, encodeGenerations(pairings.toList().toSet()))
+            .putLong(KEY_PAIRING_GENERATION, counter)
+            .recordRevocations(revoke)
+            .apply()
+        storeChangeCount.value++
     }
 
     private fun notifyRevocationPending(publicKeyHex: String) {
@@ -552,6 +684,9 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         private const val KEY_DEVICES = "paired_devices"
         private const val KEY_PENDING_REVOCATIONS = "pending_grant_revocations"
         private const val KEY_REVOCATION_GENERATION = "grant_revocation_generation"
+        private const val KEY_PAIRINGS = "pairing_generations"
+        private const val KEY_PAIRING_GENERATION = "pairing_generation"
+        private const val KEY_GRANT_WRITES = "grant_writes"
         private const val GENERATION_SEPARATOR = '@'
 
         /**
@@ -562,14 +697,17 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
          */
         private val storeLock = Any()
 
-        private val revocationChangeCount = MutableStateFlow(0L)
+        private val storeChangeCount = MutableStateFlow(0L)
 
         /**
-         * Changes whenever a revocation is queued or completed, in any
-         * repository instance: a screen that shows the pending state rereads
-         * it on each value.
+         * Changes whenever the paired devices change or a revocation is
+         * queued or completed, in any repository instance: a screen that
+         * shows the devices or their pending state rereads them on each value.
          */
-        val revocationChanges: StateFlow<Long> = revocationChangeCount.asStateFlow()
+        val storeChanges: StateFlow<Long> = storeChangeCount.asStateFlow()
+
+        /** Grant writes running in this process, by key and pairing generation. Guarded by [storeLock]. */
+        private val grantWritesInFlight = HashMap<Pair<String, Long>, Int>()
 
         /**
          * Process-wide: the Activity that unpairs a device and the service
@@ -665,6 +803,7 @@ class PairedDeviceGrantCleanup(
     fun replayPending() {
         scope.launch {
             val pending = try {
+                repository().recoverInterruptedGrantWrites()
                 repository().pendingRevocations()
             } catch (e: Exception) {
                 Log.e(TAG, "Reading pending grant revocations failed", e)

@@ -25,14 +25,17 @@ import kotlinx.coroutines.flow.combine
  * The peer list of [KeySharingBottomSheet] for one key: every paired device,
  * whether it holds a grant, and whether the user may change that.
  *
- * Read from the `key_sharing_policies` rows themselves, so a change made
- * elsewhere (a grant cleanup, another screen) reaches the sheet.
+ * Read from the `key_sharing_policies` rows and the paired-device store
+ * themselves, so a change made elsewhere (a grant cleanup, another screen, a
+ * device pairing while the sheet is open) reaches the sheet.
  *
  * A peer whose grant revocation is still pending (#174: unpaired, then
  * paired again before the cleanup finished) is shown unselected and not
  * selectable, whatever rows it still has, and a grant for it is refused:
  * the cleanup would delete it. The list updates when the revocation
- * completes.
+ * completes. A grant is bound to the pairing it was checked against
+ * ([PairedDeviceRepository.writeGrant]): one that lands after that pairing
+ * ended authorizes nothing and is deleted.
  */
 class KeySharingPeers(
     private val keyId: String,
@@ -47,9 +50,9 @@ class KeySharingPeers(
         val selectable: Boolean
     )
 
-    /** The list, again on every change to this key's policy rows or to the pending revocations. */
+    /** The list, again on every change to this key's policy rows, the paired devices or the pending revocations. */
     fun peers(): Flow<List<Peer>> =
-        combine(policyDao.getPoliciesForKey(keyId), PairedDeviceRepository.revocationChanges) { policies, _ ->
+        combine(policyDao.getPoliciesForKey(keyId), PairedDeviceRepository.storeChanges) { policies, _ ->
             val pending = repository.pendingRevocations()
             val allowed = policies.filter { it.allowed }.map { it.peerPublicKeyHex }.toSet()
             repository.getAllDevices().map { device ->
@@ -64,13 +67,16 @@ class KeySharingPeers(
 
     /**
      * Grants or withdraws [peerPublicKeyHex]'s access to the key. Returns
-     * false if the change was refused and nothing was written: a grant to a
-     * peer whose revocation is still pending. Withdrawing is always allowed.
+     * false if a grant does not stand: refused before anything was written
+     * (the peer is not paired, or its revocation is pending), or written for
+     * a pairing that ended meanwhile, which the grant cleanup then deletes.
+     * Withdrawing is always allowed.
      */
     suspend fun setAllowed(peerPublicKeyHex: String, allowed: Boolean): Boolean {
         if (allowed) {
-            if (repository.isRevocationPending(peerPublicKeyHex)) return false
-            policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
+            return repository.writeGrant(peerPublicKeyHex) {
+                policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
+            }
         } else {
             policyDao.removePolicy(keyId, peerPublicKeyHex)
         }
