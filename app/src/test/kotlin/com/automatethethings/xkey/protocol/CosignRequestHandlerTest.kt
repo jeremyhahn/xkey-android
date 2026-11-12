@@ -701,7 +701,7 @@ class CosignRequestHandlerTest {
         // The caller goes away after startActivity, before the activity has a cancel receiver.
         first.cancel()
         runCurrent()
-        advanceTimeBy(ActivityCosignPromptSurface.DISMISS_WAIT_MS + 1)
+        advanceTimeBy(ACTIVITY_START_MS) // past r4's 2 s wait for the withdrawn prompt
         runCurrent()
         assertEquals(
             "the next co-sign waits while the cancelled prompt can still come up",
@@ -750,5 +750,8 @@ class CosignRequestHandlerTest {
 
     private companion object {
         const val PROMPT_TIMEOUT_MS = 60_000L
+
+        /** A slow activity start: startActivity returned, onCreate has not run yet. */
+        const val ACTIVITY_START_MS = 5_000L
     }
 }
