@@ -17,6 +17,7 @@ package com.automatethethings.xkey.backup
 import android.content.Context
 import com.automatethethings.xkey.crypto.SyncCodec
 import java.io.DataInputStream
+import java.io.EOFException
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -69,8 +70,15 @@ import java.nio.ByteBuffer
  * reconstruction of the id (for every id this app generated itself it *is* the
  * id), so the file is rewritten as an `XKB2` record with sequence 0 and its
  * modification time as the creation time.
+ *
+ * ## Failures
+ *
+ * A record whose header is truncated or carries an unknown magic is skipped.
+ * Any other read failure is an [IOException] from [store], [latestId] and
+ * [createdAtMillis]: an unreadable backup is never treated as absent, so a
+ * restore without an id cannot silently fall back to an older backup.
  */
-class BackupStore(context: Context) {
+class BackupStore(context: Context, private val clock: () -> Long = System::currentTimeMillis) {
     private val dir: File = File(context.filesDir, "backups").apply { mkdirs() }
 
     private var migrated = false
@@ -83,7 +91,7 @@ class BackupStore(context: Context) {
     fun store(backupId: String, data: ByteArray): String = synchronized(LOCK) {
         migrateLegacyRecords()
         var sequence = nextSequence()
-        val now = System.currentTimeMillis()
+        val now = clock()
         val id = if (backupId.isNotBlank()) {
             backupId
         } else {
@@ -157,10 +165,13 @@ class BackupStore(context: Context) {
     /**
      * Reads only the header of [file]: an `XKB2` record's sequence and
      * creation time, or sequence 0 and the modification time for an `XKB1`
-     * record. Null if [file] is not a record.
+     * record. Null if [file] is not a record (unknown magic, or a header cut
+     * short). Any other read failure propagates.
+     *
+     * @throws IOException if [file] cannot be opened or read.
      */
-    private fun readHeader(file: File): Header? = try {
-        DataInputStream(file.inputStream().buffered()).use { input ->
+    private fun readHeader(file: File): Header? = DataInputStream(file.inputStream().buffered()).use { input ->
+        try {
             val magic = ByteArray(MAGIC_V2.size)
             input.readFully(magic)
             when {
@@ -168,9 +179,9 @@ class BackupStore(context: Context) {
                 MAGIC_V1.contentEquals(magic) -> Header(0L, file.lastModified())
                 else -> null
             }
+        } catch (e: EOFException) {
+            null
         }
-    } catch (e: IOException) {
-        null
     }
 
     /** Splits a record into (id, blob), or null if [bytes] is not a record. */
