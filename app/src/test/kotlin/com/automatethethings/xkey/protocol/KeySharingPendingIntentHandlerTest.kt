@@ -29,6 +29,7 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.ui.KeySharingPeers
+import com.automatethethings.xkey.ui.SharingPolicyType as SheetPolicy
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.just
@@ -206,7 +207,7 @@ class KeySharingPendingIntentHandlerTest {
         assertTrue(shares(key, stored, PEER_A))
 
         detached {
-            peers.setKeyPolicy(SharingPolicyType.SELECTED_PEERS) {
+            peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS) {
                 if (failing) throw IllegalStateException("disk I/O error")
                 stored = SharingPolicyType.SELECTED_PEERS
             }
@@ -239,7 +240,7 @@ class KeySharingPendingIntentHandlerTest {
         val peers = KeySharingPeers(key, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         detached {
-            peers.setKeyPolicy(SharingPolicyType.PRIVATE) {
+            peers.setKeyPolicy(SheetPolicy.PRIVATE) {
                 if (privateFails) throw IllegalStateException("disk I/O error")
                 stored = SharingPolicyType.PRIVATE
             }
@@ -247,7 +248,7 @@ class KeySharingPendingIntentHandlerTest {
         assertFalse(shares(key, stored, PEER_A))
 
         // Back to Selected Peers while the old rows still cannot be cleared.
-        peers.setKeyPolicy(SharingPolicyType.SELECTED_PEERS) { stored = SharingPolicyType.SELECTED_PEERS }
+        peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS) { stored = SharingPolicyType.SELECTED_PEERS }
         assertEquals(2, table.value.count { it.keyId == key })
         assertFalse("Selected Peers lifted the denial over the old grants", shares(key, stored, PEER_A))
         assertFalse(shares(key, stored, PEER_B))
@@ -302,13 +303,13 @@ class KeySharingPendingIntentHandlerTest {
         val all = KeySharingPeers(allKey, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         detached {
-            selected.setKeyPolicy(SharingPolicyType.PRIVATE) {
+            selected.setKeyPolicy(SheetPolicy.PRIVATE) {
                 if (failing) throw IllegalStateException("disk I/O error")
                 selectedStored = SharingPolicyType.PRIVATE
             }
         }
         detached {
-            all.setKeyPolicy(SharingPolicyType.PRIVATE) {
+            all.setKeyPolicy(SheetPolicy.PRIVATE) {
                 if (failing) throw IllegalStateException("disk I/O error")
                 allStored = SharingPolicyType.PRIVATE
             }
@@ -328,7 +329,7 @@ class KeySharingPendingIntentHandlerTest {
         assertFalse(shares(allKey, allStored, PEER_A))
 
         // Once resolved, the next choice decides again.
-        all.setKeyPolicy(SharingPolicyType.ALL_PEERS) { allStored = SharingPolicyType.ALL_PEERS }
+        all.setKeyPolicy(SheetPolicy.ALL_PEERS) { allStored = SharingPolicyType.ALL_PEERS }
         assertTrue(shares(allKey, allStored, PEER_A))
         assertTrue(shares(allKey, allStored, PEER_B))
     }
