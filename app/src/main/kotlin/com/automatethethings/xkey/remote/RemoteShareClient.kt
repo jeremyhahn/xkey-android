@@ -380,7 +380,11 @@ class DesktopKeyShare(
 ) {
 
     sealed class Outcome {
+        /** The desktop accepted the key (`accepted` true). */
         data class Sent(val result: RemoteShareClient.ShareResult) : Outcome()
+
+        /** The desktop answered but did not import the key (`accepted` false). */
+        data class Declined(val result: RemoteShareClient.ShareResult) : Outcome()
         data class Refused(val decision: DesktopShareDecision) : Outcome()
 
         /** The session was replaced before the key was sent; nothing left the phone. */
@@ -417,7 +421,7 @@ class DesktopKeyShare(
             } catch (e: SessionChangedException) {
                 return Outcome.SessionChanged
             }
-            return Outcome.Sent(result)
+            return if (result.accepted) Outcome.Sent(result) else Outcome.Declined(result)
         } finally {
             software?.material.let { it?.fill(0) }
         }

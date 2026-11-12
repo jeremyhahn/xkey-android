@@ -726,9 +726,9 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->
                         getString(R.string.sharing_desktop_sent, out.result.importId)
-                    is DesktopKeyShare.Outcome.Refused -> getString(desktopStatusFor(out.decision))
-                    // Nothing was sent: show what the new session allows.
-                    DesktopKeyShare.Outcome.SessionChanged -> null
+                    // Declined, refused, or (null) a changed session: nothing was
+                    // imported. A changed session re-reads what the new one allows.
+                    else -> desktopOutcomeFor(out)?.let { getString(it) }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -934,6 +934,20 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             DesktopShareDecision.NOT_FOUND -> R.string.sharing_desktop_no_public_key
             DesktopShareDecision.NOT_EXPORTABLE -> R.string.sharing_desktop_not_exportable
             DesktopShareDecision.SYMMETRIC_NO_WRAP_PATH -> R.string.sharing_desktop_no_wrap_path
+        }
+
+        /**
+         * The status line after a send: the import id line only when the
+         * desktop accepted the key, the refusal when it declined, the gate's
+         * reason when nothing was sent, and none when the session changed
+         * (the section is re-read for the new session instead).
+         */
+        @StringRes
+        internal fun desktopOutcomeFor(outcome: DesktopKeyShare.Outcome): Int? = when (outcome) {
+            is DesktopKeyShare.Outcome.Sent -> R.string.sharing_desktop_sent
+            is DesktopKeyShare.Outcome.Declined -> R.string.sharing_desktop_declined
+            is DesktopKeyShare.Outcome.Refused -> desktopStatusFor(outcome.decision)
+            DesktopKeyShare.Outcome.SessionChanged -> null
         }
 
         /**
