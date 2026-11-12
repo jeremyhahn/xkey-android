@@ -205,7 +205,11 @@ class KeystoreManagerGeneralKeysTest {
         }
     }
 
-    /** A P-256 key that prefers StrongBox gets it exactly when the device has it. */
+    /**
+     * A P-256 key that prefers StrongBox reports the level its own KeyInfo
+     * gives. The StrongBox feature flag is no proof of this key's backing:
+     * generation falls back to the TEE when StrongBox refuses the key.
+     */
     @Test
     fun aP256KeyThatPrefersStrongBoxReportsStrongBoxOnlyOnAStrongBoxDevice() {
         val keyId = newKeyId("level-p256-sb")
@@ -215,11 +219,18 @@ class KeystoreManagerGeneralKeysTest {
 
         val level = keystoreManager.keySecurityLevel(keyId)
         assertNotNull(level)
-        if (keystoreManager.isStrongBoxAvailable()) {
-            assertEquals(KeySecurityLevel.STRONGBOX, level)
-            assertTrue(keystoreManager.isKeyStrongBoxBacked(keyId))
-        } else {
+        if (!keystoreManager.isStrongBoxAvailable()) {
             assertNotEquals(KeySecurityLevel.STRONGBOX, level)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val keyStore = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            val key = keyStore.getKey("xkey_key_$keyId", null)
+            val info = java.security.KeyFactory.getInstance(key.algorithm, "AndroidKeyStore")
+                .getKeySpec(key, android.security.keystore.KeyInfo::class.java)
+            val inStrongBox = info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
+            assertEquals(inStrongBox, level == KeySecurityLevel.STRONGBOX)
+            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(keyId))
+        } else {
+            assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(keyId))
         }
     }
 
