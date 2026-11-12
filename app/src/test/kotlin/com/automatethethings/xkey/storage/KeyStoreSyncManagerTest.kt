@@ -95,9 +95,26 @@ class KeyStoreSyncManagerTest {
         every { listed.keyId } returns pivAlias
         every { listed.source } returns "local"
         coEvery { keyDao.getAll() } returns listOf(listed)
+        // KeystoreManager never resolves a raw PIV slot alias.
+        every { keystoreManager.resolveKeystoreAlias(pivAlias) } returns null
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao).syncAll()
 
         coVerify { keyDao.deleteByKeyId(pivAlias) }
+    }
+
+    @Test
+    fun `a general key whose logical id starts with the PIV prefix is kept`() = runTest {
+        val generalId = "xkey_piv_example"
+        val listed = mockk<KeyEntity>(relaxed = true)
+        every { listed.keyId } returns generalId
+        every { listed.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(listed)
+        // local.generateKey stores it at the general alias xkey_key_<keyId>.
+        every { keystoreManager.resolveKeystoreAlias(generalId) } returns "xkey_key_$generalId"
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao).syncAll()
+
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(generalId) }
     }
 }
