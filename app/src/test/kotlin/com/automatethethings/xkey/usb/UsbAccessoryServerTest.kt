@@ -65,7 +65,7 @@ class UsbAccessoryServerTest {
     private lateinit var accessory: UsbAccessory
     private lateinit var server: UsbAccessoryServer
     private lateinit var watcher: FakeDetachWatcher
-    private var detachedCalls = 0
+    private var closedCalls = 0
     private val openFiles = mutableListOf<RandomAccessFile>()
     private val sessions = mutableListOf<Job>()
 
@@ -89,11 +89,11 @@ class UsbAccessoryServerTest {
         every { accessory.model } returns "xKey"
 
         watcher = FakeDetachWatcher()
-        detachedCalls = 0
+        closedCalls = 0
         server = UsbAccessoryServer(
             requestHandler = mockk<RequestHandler>(relaxed = true),
             detachWatcher = watcher,
-            onDetached = { detachedCalls++ },
+            onClosed = { closedCalls++ },
         )
     }
 
@@ -148,6 +148,15 @@ class UsbAccessoryServerTest {
         val pfd = mockk<ParcelFileDescriptor>(relaxed = true)
         every { pfd.fileDescriptor } returns raf.fd
         return pfd
+    }
+
+    /**
+     * Holds every session in its key load until it is cancelled, so it is
+     * still running when a detach arrives and only a close can end it.
+     */
+    private fun holdSessionsOpen() {
+        mockkConstructor(NoiseSession::class)
+        coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers { awaitCancellation() }
     }
 
     /** Waits up to [timeoutMs] for [condition], polling. */
@@ -209,12 +218,15 @@ class UsbAccessoryServerTest {
     }
 
     @Test
-    fun `a refused accessory registers no detach receiver`() {
+    fun `a refused accessory unregisters its detach receiver and tells the owner`() {
         every { usbManager.openAccessory(accessory) } returns null
 
         attach()
 
-        assertEquals(0, watcher.starts)
+        assertEquals(1, watcher.starts)
+        assertTrue(watcher.stops >= 1)
+        assertEquals(null, watcher.onDetach)
+        assertEquals(1, closedCalls)
     }
 
     // -------------------------------------------------------------------------
@@ -259,6 +271,7 @@ class UsbAccessoryServerTest {
 
     @Test
     fun `a detach closes the accessory and its session and tells the owner`() {
+        holdSessionsOpen()
         val pfd = openableDescriptor()
         every { usbManager.openAccessory(accessory) } returns pfd
 
@@ -268,7 +281,7 @@ class UsbAccessoryServerTest {
         verify { pfd.close() }
         assertFalse(server.isOpen)
         assertEquals(UsbAccessoryState.Disconnected, server.state.value)
-        assertEquals(1, detachedCalls)
+        assertEquals(1, closedCalls)
         assertEquals(null, watcher.onDetach)
     }
 
@@ -276,8 +289,7 @@ class UsbAccessoryServerTest {
     fun `a detach cancels a session that is still running`() {
         // The session waits in its key load until it is cancelled, so it is
         // alive when the detach arrives and only the detach can end it.
-        mockkConstructor(NoiseSession::class)
-        coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers { awaitCancellation() }
+        holdSessionsOpen()
         val pfd = openableDescriptor()
         every { usbManager.openAccessory(accessory) } returns pfd
 
@@ -294,11 +306,70 @@ class UsbAccessoryServerTest {
         verify { pfd.close() }
         assertFalse(server.isOpen)
         assertEquals(UsbAccessoryState.Disconnected, server.state.value)
-        assertEquals(1, detachedCalls)
+        assertEquals(1, closedCalls)
+    }
+
+    @Test
+    fun `the detach receiver is registered before the accessory opens`() {
+        var registeredAtOpen = false
+        val pfd = openableDescriptor()
+        every { usbManager.openAccessory(accessory) } answers {
+            registeredAtOpen = watcher.onDetach != null
+            pfd
+        }
+
+        attach()
+
+        assertTrue("the open ran with no detach receiver", registeredAtOpen)
+    }
+
+    @Test
+    fun `a detach while the accessory is opening closes it once open`() {
+        // The cable is pulled while openAccessory runs: the broadcast arrives
+        // on another thread and must not be lost.
+        holdSessionsOpen()
+        val pfd = openableDescriptor()
+        var detacher: Thread? = null
+        every { usbManager.openAccessory(accessory) } answers {
+            val callback = watcher.onDetach
+            assertNotNull("the open ran with no detach receiver", callback)
+            detacher = Thread { callback!!(accessory) }.also { it.start() }
+            Thread.sleep(50)
+            pfd
+        }
+
+        attach()
+        detacher!!.join(5_000)
+
+        assertTrue("the detach was lost", awaitTrue { closedCalls == 1 })
+        verify { pfd.close() }
+        assertFalse(server.isOpen)
+        assertEquals(UsbAccessoryState.Disconnected, server.state.value)
+        assertEquals(null, watcher.onDetach)
+        server.sessionJob?.let { assertTrue(awaitTrue { it.isCancelled }) }
+    }
+
+    @Test
+    fun `a detach that the open never saw finishes still drops the descriptor`() {
+        // The broadcast runs inside the open (same thread): the descriptor the
+        // open then returns belongs to a gone accessory and is closed at once.
+        val pfd = openableDescriptor()
+        every { usbManager.openAccessory(accessory) } answers {
+            watcher.detach(accessory)
+            pfd
+        }
+
+        attach()
+
+        verify { pfd.close() }
+        assertFalse(server.isOpen)
+        assertEquals(UsbAccessoryState.Disconnected, server.state.value)
+        assertEquals(1, closedCalls)
     }
 
     @Test
     fun `a detach that names no accessory still closes the open one`() {
+        holdSessionsOpen()
         val pfd = openableDescriptor()
         every { usbManager.openAccessory(accessory) } returns pfd
 
@@ -306,11 +377,12 @@ class UsbAccessoryServerTest {
         watcher.detach(null)
 
         verify { pfd.close() }
-        assertEquals(1, detachedCalls)
+        assertEquals(1, closedCalls)
     }
 
     @Test
     fun `a detach of another accessory leaves the open one alone`() {
+        holdSessionsOpen()
         val pfd = openableDescriptor()
         every { usbManager.openAccessory(accessory) } returns pfd
         val other = mockk<UsbAccessory>(relaxed = true)
@@ -318,12 +390,13 @@ class UsbAccessoryServerTest {
         attach()
         watcher.detach(other)
 
-        assertEquals(0, detachedCalls)
+        assertEquals(0, closedCalls)
         assertNotNull(watcher.onDetach)
     }
 
     @Test
     fun `after a detach a later attach serves again on the same server`() {
+        holdSessionsOpen()
         every { usbManager.openAccessory(accessory) } returnsMany listOf(openableDescriptor(), openableDescriptor())
 
         attach()
@@ -334,7 +407,7 @@ class UsbAccessoryServerTest {
         assertEquals(2, watcher.starts)
 
         watcher.detach(accessory)
-        assertEquals(2, detachedCalls)
+        assertEquals(2, closedCalls)
     }
 
     @Test
@@ -349,5 +422,16 @@ class UsbAccessoryServerTest {
         attach()
 
         verify(exactly = 2) { usbManager.openAccessory(accessory) }
+    }
+
+    @Test
+    fun `a session that ends with no detach broadcast tells the owner`() {
+        every { usbManager.openAccessory(accessory) } returns openableDescriptor()
+
+        attach()
+
+        assertTrue("the owner was never told", awaitTrue { closedCalls == 1 })
+        assertFalse(server.isOpen)
+        assertEquals(null, watcher.onDetach)
     }
 }
