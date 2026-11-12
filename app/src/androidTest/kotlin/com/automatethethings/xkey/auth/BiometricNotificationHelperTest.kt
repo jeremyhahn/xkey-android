@@ -62,6 +62,9 @@ class BiometricNotificationHelperTest {
     private lateinit var notificationManager: NotificationManager
     private lateinit var helper: BiometricNotificationHelper
 
+    /** The key each test posts under, and tearDown takes down. */
+    private val requestId = "request-${System.nanoTime()}"
+
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
@@ -72,7 +75,7 @@ class BiometricNotificationHelperTest {
 
     @After
     fun tearDown() {
-        helper.cancelNotification()
+        helper.cancelNotification(requestId)
         notificationManager.cancel(notificationId)
     }
 
@@ -121,7 +124,7 @@ class BiometricNotificationHelperTest {
         helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}"
+            requestId = requestId
         )
 
         val notification = awaitPosted().notification
@@ -139,7 +142,7 @@ class BiometricNotificationHelperTest {
         helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}"
+            requestId = requestId
         )
 
         val text = awaitPosted().notification.extras
@@ -158,7 +161,7 @@ class BiometricNotificationHelperTest {
         helper.showBiometricRequiredNotification(
             operationType = "decrypt",
             rpName = null,
-            requestId = "request-${System.nanoTime()}"
+            requestId = requestId
         )
 
         val text = awaitPosted().notification.extras
@@ -172,11 +175,11 @@ class BiometricNotificationHelperTest {
         helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}"
+            requestId = requestId
         )
         awaitPosted()
 
-        helper.cancelNotification()
+        helper.cancelNotification(requestId)
 
         awaitGone()
     }
@@ -188,7 +191,7 @@ class BiometricNotificationHelperTest {
         helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}",
+            requestId = requestId,
             timeoutMs = 400L,
             onTimeout = { timedOut.countDown() }
         )
@@ -207,13 +210,13 @@ class BiometricNotificationHelperTest {
         helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}",
+            requestId = requestId,
             timeoutMs = 1_500L,
             onTimeout = { timedOut.countDown() }
         )
         awaitPosted()
 
-        helper.cancelNotification()
+        helper.cancelNotification(requestId)
 
         // The helper's timeout sits on the main looper. A marker posted there now
         // with the same delay runs after the timeout's deadline, so by the time it

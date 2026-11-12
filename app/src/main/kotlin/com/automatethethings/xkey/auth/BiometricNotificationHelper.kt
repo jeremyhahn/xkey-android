@@ -26,6 +26,7 @@ import com.automatethethings.xkey.XKeyApplication
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Helper class for showing high-priority biometric request notifications.
@@ -41,10 +42,12 @@ import java.util.concurrent.ConcurrentHashMap
  * - Cancellation support
  *
  * Each notification belongs to the request it was posted for: it is posted
- * under that request id as its tag, and [cancelNotification] with the id
- * takes down only that one. Requests take turns on screen, and one that is
- * withdrawn while it waits for its turn has posted nothing, so it must take
- * nothing down: the notification up is the route to another request's prompt.
+ * under that request's key ([NotificationKeys]) as its tag, and
+ * [cancelNotification] with the key takes down only that one; there is no
+ * way to take down every notification. Requests take turns on screen, and one
+ * that is withdrawn while it waits for its turn has posted nothing, so it
+ * must take nothing down: the notification up is the route to another
+ * request's prompt.
  *
  * Usage:
  * ```kotlin
@@ -81,9 +84,9 @@ class BiometricNotificationHelper(private val context: Context) {
      * @param operationType The type of operation requiring authentication
      *                      (e.g., "sign", "decrypt", "attestKey")
      * @param rpName The relying party name for context, or null if unavailable
-     * @param requestId A unique identifier for the biometric request; the
-     *   notification is posted under it, and replaces only an earlier one for
-     *   the same request
+     * @param requestId The request's key ([NotificationKeys]), unique across
+     *   the app; the notification is posted under it, and replaces only an
+     *   earlier one for the same request
      * @param timeoutMs Timeout in milliseconds before auto-dismissing (default 30s)
      * @param onTimeout Callback invoked when the notification times out without user action
      * @param promptIntent The prompt a [BiometricActivityLauncher] request opened
@@ -163,8 +166,9 @@ class BiometricNotificationHelper(private val context: Context) {
     }
 
     /**
-     * Cancels the notification posted for [requestId], and its pending
-     * timeout callback, leaving every other request's notification up.
+     * Cancels the notification posted under [requestId], the request's key,
+     * and its pending timeout callback, leaving every other request's
+     * notification up.
      */
     fun cancelNotification(requestId: String) {
         Log.d(TAG, "Cancelling biometric notification")
@@ -174,15 +178,36 @@ class BiometricNotificationHelper(private val context: Context) {
         val notificationManager = context.getSystemService(NotificationManager::class.java)
         notificationManager.cancel(requestId, NOTIFICATION_ID)
     }
+}
 
-    /**
-     * Cancels every notification this helper has up, and their timeout
-     * callbacks. For a caller that cannot name its request; one that can
-     * cancels by its id instead, so it never takes down another request's.
-     */
-    fun cancelNotification() {
-        for (requestId in timeouts.keys.toList()) {
-            cancelNotification(requestId)
-        }
-    }
+/**
+ * The keys lock-screen approval notifications are posted under: one per
+ * request, across the whole app.
+ *
+ * Notification tags are app-wide, whichever helper posts them, and generic
+ * approvals ([PendingAuthentications]) and crypto signatures
+ * ([PendingCryptoSignatures]) are numbered apart, each from 1, so a bare
+ * request id would let one family's request take down the other's
+ * notification. A launcher request's key names its family as well as its
+ * id; a notification that only wakes the phone, for a prompt no launcher
+ * request waits on, gets a number of its own.
+ */
+object NotificationKeys {
+    private const val APPROVAL = "approval-"
+    private const val SIGNATURE = "signature-"
+
+    private val nextWakeOnly = AtomicLong(0L)
+
+    /** The key of generic approval [requestId]. */
+    fun approval(requestId: String): String = APPROVAL + requestId
+
+    /** The key of crypto signature [requestId]. */
+    fun signature(requestId: String): String = SIGNATURE + requestId
+
+    /** A fresh key for a notification that only wakes the phone for [operationType]. */
+    fun wakeOnly(operationType: String): String = "wake-$operationType-${nextWakeOnly.incrementAndGet()}"
+
+    /** The generic approval request [key] names, or null for a key of any other kind. */
+    fun approvalRequestId(key: String): String? =
+        if (key.startsWith(APPROVAL)) key.removePrefix(APPROVAL) else null
 }

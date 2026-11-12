@@ -15,6 +15,7 @@ import com.automatethethings.xkey.ca.DeviceIdentityException
 import org.bouncycastle.asn1.x500.X500Name
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.credential.UserVerificationCompliance
 import com.automatethethings.xkey.credential.UserVerificationRequiredException
@@ -758,8 +759,8 @@ class RequestHandler(
         dataHash: ByteArray
     ): Response {
         // On a locked phone the notification opens the launcher's own prompt
-        // (lockScreenPrompt), so its result completes this request.
-        val onLockScreen = lockScreenPrompt(operationType = "sign", rpName = null)
+        // (OwnNotifications), so its result completes this request.
+        val notice = OwnNotifications(operationType = "sign", rpName = null)
 
         try {
             // Check if we're in PER_OPERATION mode (requires crypto-bound biometric every time)
@@ -778,7 +779,7 @@ class RequestHandler(
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
                         showOnLockScreen = keyguardManager.isKeyguardLocked,
-                        onLaunch = onLockScreen
+                        onLaunch = notice.onLaunch
                     )
 
                     // Record successful authentication for session tracking
@@ -829,7 +830,7 @@ class RequestHandler(
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
                         showOnLockScreen = keyguardManager.isKeyguardLocked,
-                        onLaunch = onLockScreen
+                        onLaunch = notice.onLaunch
                     )
 
                     // Record successful authentication for session tracking
@@ -862,11 +863,7 @@ class RequestHandler(
 
             // The activity's own prompt answers no launcher request; the
             // notification only wakes the phone for it.
-            showBiometricNotificationIfLocked(
-                operationType = "sign",
-                rpName = null,
-                requestId = "sign-${request.id}"
-            )
+            notice.wakeOnly()
             val signature = keystoreManager.sign(
                 credentialId = signParams.credentialId,
                 dataHash = dataHash,
@@ -887,8 +884,8 @@ class RequestHandler(
             Log.i(TAG, "Signed data for credential: ${signParams.credentialId} (via crypto-bound helper)")
             return Response.success(request.id, result.toJson())
         } finally {
-            // Always cancel the notification after biometric completes
-            cancelBiometricNotification()
+            // This request's notifications, and no other request's.
+            notice.close()
         }
     }
 
@@ -902,18 +899,19 @@ class RequestHandler(
      *
      * @param operationType The type of operation requiring biometric (e.g., "sign", "decrypt")
      * @param rpName The relying party name for context, or null if unavailable
-     * @param requestId A unique identifier for this biometric request
+     * @param key The notification's key ([NotificationKeys]), naming its
+     *   request across the whole app
      * @param onTimeout Callback invoked if the notification times out without user action
      * @param notifyLaptop Whether the installed [messageSender]'s laptop is the
      *   one waiting on this prompt, and so should hear that it is pending
      * @param promptIntent The launcher prompt the notification opens, so that
-     *   its result completes the launcher's request [requestId]; null for a
+     *   its result completes the launcher's request [key] names; null for a
      *   prompt no launcher request waits on
      */
     private fun showBiometricNotificationIfLocked(
         operationType: String,
         rpName: String?,
-        requestId: String,
+        key: String,
         onTimeout: () -> Unit = {},
         notifyLaptop: Boolean = true,
         promptIntent: android.content.Intent? = null
@@ -923,7 +921,7 @@ class RequestHandler(
             biometricNotificationHelper.showBiometricRequiredNotification(
                 operationType = operationType,
                 rpName = rpName,
-                requestId = requestId,
+                requestId = key,
                 onTimeout = onTimeout,
                 promptIntent = promptIntent
             )
@@ -935,25 +933,54 @@ class RequestHandler(
     }
 
     /**
-     * The `onLaunch` hook for a [BiometricActivityLauncher] prompt: on a locked
-     * phone it shows the notification for the launcher's own request id and
-     * prompt intent, so approving or cancelling from the lock screen
-     * completes the request that waits on it. Every launcher prompt goes
-     * through this; a notification shown with an id of its own would open a
-     * prompt whose result nobody waits on.
+     * The lock-screen notifications one operation posts, and only those.
+     *
+     * Notification tags are app-wide, and requests from every connection take
+     * turns on one screen, so the notification up may be any request's. Each
+     * is posted under its own request's key ([NotificationKeys]), and [close]
+     * takes down the ones this operation posted, by the keys it posted them
+     * under: an operation withdrawn or timed out while it waited for its turn
+     * posted nothing, and takes nothing down.
      */
-    private fun lockScreenPrompt(
-        operationType: String,
-        rpName: String?,
-        notifyLaptop: Boolean = true
-    ): (String, android.content.Intent) -> Unit = { requestId, prompt ->
-        showBiometricNotificationIfLocked(
-            operationType = operationType,
-            rpName = rpName,
-            requestId = requestId,
-            notifyLaptop = notifyLaptop,
-            promptIntent = prompt
-        )
+    private inner class OwnNotifications(
+        private val operationType: String,
+        private val rpName: String?,
+        private val notifyLaptop: Boolean = true
+    ) {
+        private val posted = java.util.concurrent.ConcurrentLinkedQueue<String>()
+
+        /**
+         * The `onLaunch` of a [BiometricActivityLauncher] prompt. On a locked
+         * phone the notification opens the launched request's own prompt, so
+         * approving or cancelling from the lock screen completes that request;
+         * should it expire unanswered with the prompt never up (Android
+         * blocked its start), the request settles and hands the screen on.
+         * Every launcher prompt goes through this: a notification of its own
+         * would open a prompt whose result nobody waits on.
+         */
+        val onLaunch: (String, android.content.Intent) -> Unit = { key, prompt ->
+            post(key, prompt) { biometricLauncher?.expireUnshown(key) }
+        }
+
+        /** Wakes a locked phone for a prompt no launcher request waits on. */
+        fun wakeOnly() = post(NotificationKeys.wakeOnly(operationType), prompt = null) {}
+
+        private fun post(key: String, prompt: android.content.Intent?, onTimeout: () -> Unit) {
+            posted.add(key)
+            showBiometricNotificationIfLocked(
+                operationType = operationType,
+                rpName = rpName,
+                key = key,
+                onTimeout = onTimeout,
+                notifyLaptop = notifyLaptop,
+                promptIntent = prompt
+            )
+        }
+
+        /** Takes down every notification this operation posted, and no other. */
+        fun close() {
+            while (true) biometricNotificationHelper.cancelNotification(posted.poll() ?: return)
+        }
     }
 
     /**
@@ -996,21 +1023,6 @@ class RequestHandler(
                 // Don't throw - this is fire-and-forget
             }
         }
-    }
-
-    /**
-     * Cancels any pending biometric notification.
-     *
-     * Should be called after biometric authentication completes (success or failure)
-     * to dismiss the notification.
-     */
-    private fun cancelBiometricNotification() {
-        biometricNotificationHelper.cancelNotification()
-    }
-
-    /** Cancels only the notification posted for [requestId]. */
-    private fun cancelBiometricNotification(requestId: String) {
-        biometricNotificationHelper.cancelNotification(requestId)
     }
 
     /**
@@ -1467,16 +1479,17 @@ class RequestHandler(
         }
 
         if (biometricRequired && biometricLauncher != null) {
+            val notice = OwnNotifications(operationType = "sign", rpName = null)
             try {
                 biometricLauncher.requestAuthentication(
                     title = "Signing Request",
                     subtitle = "Verify your identity to sign data",
                     showOnLockScreen = keyguardManager.isKeyguardLocked,
-                    onLaunch = lockScreenPrompt(operationType = "sign", rpName = null)
+                    onLaunch = notice.onLaunch
                 )
                 sessionAuthManager?.recordAuthentication(currentSessionId)
             } finally {
-                cancelBiometricNotification()
+                notice.close()
             }
         }
 
@@ -1965,12 +1978,10 @@ class RequestHandler(
                 errorCode = ErrorCodes.BIOMETRIC_FAILED
             )
             withContext(Dispatchers.Main) {
-                // The request id, once its prompt came up and with it its
-                // notification. A request withdrawn or timed out while it
-                // waited for its turn posted none, and takes none down: the
+                // A request withdrawn or timed out while it waited for its
+                // turn posted no notification, and takes none down: the
                 // notification up belongs to the request on screen.
-                var prompted: String? = null
-                val showNotification = lockScreenPrompt(operationType = "share", rpName = keyName)
+                val notice = OwnNotifications(operationType = "share", rpName = keyName)
                 try {
                     // One launcher-owned request: on a locked phone the
                     // notification opens this same prompt.
@@ -1978,10 +1989,7 @@ class RequestHandler(
                         title = "Share key with all devices",
                         subtitle = "Allow every paired device to use \"$keyName\"",
                         showOnLockScreen = keyguardManager.isKeyguardLocked,
-                        onLaunch = { requestId, prompt ->
-                            prompted = requestId
-                            showNotification(requestId, prompt)
-                        }
+                        onLaunch = notice.onLaunch
                     )
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -1991,7 +1999,7 @@ class RequestHandler(
                         errorCode = ErrorCodes.BIOMETRIC_FAILED
                     )
                 } finally {
-                    prompted?.let(::cancelBiometricNotification)
+                    notice.close()
                 }
             }
             // The owner approved widening from the policy revision read
@@ -2151,23 +2159,19 @@ class RequestHandler(
         // which is not the one waiting on a phone-initiated request.
         val notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
 
+        val notice = OwnNotifications(operationType, rpName = null, notifyLaptop = notifyLaptop)
         try {
             if (biometricLauncher != null) {
                 biometricLauncher.requestAuthentication(
                     title = title,
                     subtitle = subtitle,
                     showOnLockScreen = isLocked,
-                    onLaunch = lockScreenPrompt(operationType, rpName = null, notifyLaptop = notifyLaptop)
+                    onLaunch = notice.onLaunch
                 )
             } else {
                 // The activity's own prompt answers no launcher request; the
                 // notification only wakes the phone for it.
-                showBiometricNotificationIfLocked(
-                    operationType = operationType,
-                    rpName = null,
-                    requestId = "$operationType-${request.id}",
-                    notifyLaptop = notifyLaptop
-                )
+                notice.wakeOnly()
                 val helper = biometricHelper
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
@@ -2176,7 +2180,7 @@ class RequestHandler(
                 helper.authenticateWithoutCrypto(title = title, subtitle = subtitle)
             }
         } finally {
-            cancelBiometricNotification()
+            notice.close()
         }
     }
 
@@ -2490,12 +2494,12 @@ class RequestHandler(
         )
 
         val isLocked = keyguardManager.isKeyguardLocked
-        showBiometricNotificationIfLocked(
+        val notice = OwnNotifications(
             operationType = "verifyUser",
             rpName = null,
-            requestId = "verifyUser-${request.id}",
             notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
         )
+        notice.wakeOnly()
         return try {
             val title = context.getString(R.string.verify_user_prompt_title)
             val subtitle = context.getString(R.string.verify_user_prompt_subtitle)
@@ -2503,7 +2507,7 @@ class RequestHandler(
                 ?: promptWithUserVerificationKey(transcript, title, subtitle, isLocked)
             certChain to signature
         } finally {
-            cancelBiometricNotification()
+            notice.close()
         }
     }
 
@@ -2938,17 +2942,18 @@ class RequestHandler(
         var userVerified = false
 
         if (biometricRequired && biometricLauncher != null) {
+            val notice = OwnNotifications(operationType = "sign", rpName = entity.rpName)
             try {
                 biometricLauncher.requestAuthentication(
                     title = "xKey Authentication",
                     subtitle = "Verify your identity to use this passkey",
                     showOnLockScreen = keyguardManager.isKeyguardLocked,
-                    onLaunch = lockScreenPrompt(operationType = "sign", rpName = entity.rpName)
+                    onLaunch = notice.onLaunch
                 )
                 sessionAuthManager?.recordAuthentication(currentSessionId)
                 userVerified = true
             } finally {
-                cancelBiometricNotification()
+                notice.close()
             }
         }
 

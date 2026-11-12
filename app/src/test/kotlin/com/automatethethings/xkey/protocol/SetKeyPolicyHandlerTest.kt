@@ -190,7 +190,6 @@ class SetKeyPolicyHandlerTest {
             anyConstructed<BiometricNotificationHelper>()
                 .showBiometricRequiredNotification(any(), any(), any(), any(), any(), any())
         } just runs
-        every { anyConstructed<BiometricNotificationHelper>().cancelNotification() } just runs
         every { anyConstructed<BiometricNotificationHelper>().cancelNotification(any<String>()) } just runs
     }
 
@@ -402,13 +401,11 @@ class SetKeyPolicyHandlerTest {
 
     /** No request's lock-screen notification has been taken down. */
     private fun assertNoNotificationCancelled() {
-        verify(exactly = 0) { anyConstructed<BiometricNotificationHelper>().cancelNotification() }
         verify(exactly = 0) { anyConstructed<BiometricNotificationHelper>().cancelNotification(any<String>()) }
     }
 
     /** Only [requestId]'s notification was taken down, once, by its id. */
     private fun assertOnlyNotificationCancelled(requestId: String) {
-        verify(exactly = 0) { anyConstructed<BiometricNotificationHelper>().cancelNotification() }
         verify(exactly = 1) { anyConstructed<BiometricNotificationHelper>().cancelNotification(any<String>()) }
         verify(exactly = 1) { anyConstructed<BiometricNotificationHelper>().cancelNotification(requestId) }
     }

@@ -70,6 +70,9 @@ class TransparentBiometricActivity : FragmentActivity() {
     private var biometricPrompt: BiometricPrompt? = null
     private var hasFinished = false
 
+    /** Whether this instance counts as its request's prompt being up. */
+    private var claimed = false
+
     /**
      * What the system tells the prompt on screen. Tests stand in for the
      * owner through it; nothing else calls it.
@@ -91,6 +94,15 @@ class TransparentBiometricActivity : FragmentActivity() {
             finish()
             return
         }
+
+        // A request that expired unshown was answered as timed out and has
+        // handed the screen on: a late start of it prompts for nothing.
+        if (!claim(requestId)) {
+            hasFinished = true
+            finish()
+            return
+        }
+        claimed = true
 
         val title = intent.getStringExtra(EXTRA_TITLE) ?: DEFAULT_TITLE
         val subtitle = intent.getStringExtra(EXTRA_SUBTITLE) ?: DEFAULT_SUBTITLE
@@ -149,6 +161,10 @@ class TransparentBiometricActivity : FragmentActivity() {
                 errorMessage = "The approval prompt went away unanswered"
             )
             hasFinished = true
+        }
+        if (claimed) {
+            release(requestId)
+            claimed = false
         }
         super.onDestroy()
         biometricPrompt?.cancelAuthentication()
@@ -301,6 +317,40 @@ class TransparentBiometricActivity : FragmentActivity() {
          * `verifyUser-…`, `sign-…`) answers no launcher request, so it never
          * displaces a prompt, and a launcher request always displaces it.
          */
+        private const val MAX_EXPIRED = 64
+
+        /** Prompt instances up, by request id. */
+        private val onScreen = HashMap<String, Int>()
+
+        /** Requests that expired unshown, newest last, so a late start of one never prompts. */
+        private val expired = LinkedHashSet<String>()
+
+        /**
+         * Ends [requestId]'s prompt unshown, so a start of it that comes later
+         * finishes without prompting. False while its prompt is up: the owner
+         * is answering it, and it is not taken away.
+         */
+        @Synchronized
+        internal fun expireUnshown(requestId: String): Boolean {
+            if (requestId in onScreen) return false
+            expired.add(requestId)
+            while (expired.size > MAX_EXPIRED) expired.remove(expired.first())
+            return true
+        }
+
+        @Synchronized
+        private fun claim(requestId: String): Boolean {
+            if (requestId in expired) return false
+            onScreen[requestId] = (onScreen[requestId] ?: 0) + 1
+            return true
+        }
+
+        @Synchronized
+        private fun release(requestId: String) {
+            val left = (onScreen[requestId] ?: return) - 1
+            if (left > 0) onScreen[requestId] = left else onScreen.remove(requestId)
+        }
+
         internal fun isNewer(candidate: String, current: String): Boolean {
             val next = candidate.toLongOrNull() ?: return false
             val shown = current.toLongOrNull() ?: return true

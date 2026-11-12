@@ -419,7 +419,8 @@ class ApprovalPromptFlowTest {
         val first = shareWithAllPeers()
         runCurrent()
         // Android blocked the direct start: the notification is the only way in.
-        val id = directStart().requestId()!!
+        val firstPrompt = directStart()
+        val id = firstPrompt.requestId()!!
         val second = shareWithAllPeers()
         runCurrent()
 
@@ -434,7 +435,14 @@ class ApprovalPromptFlowTest {
         assertEquals(ErrorCodes.BIOMETRIC_FAILED, first.await().error?.code)
         assertEquals(SharingPolicyType.PRIVATE, stored)
 
-        val secondId = directStart().requestId()!!
+        val secondPrompt = directStart()
+        val secondId = secondPrompt.requestId()!!
+        // The blocked start of the expired approval arrives late: it is
+        // dismissed without prompting or answering anything.
+        val stale = open(firstPrompt)
+        assertTrue("the stale prompt goes away", stale.get().isFinishing)
+        assertNull(stale.get().promptCallback)
+
         open(tapNotification(secondId)).approve()
         settle()
 

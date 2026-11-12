@@ -307,7 +307,9 @@ class BiometricActivityLauncher(
      * @param subtitle The subtitle providing context (e.g., relying party name).
      * @param description Optional additional description text.
      * @param showOnLockScreen Whether to show the prompt over the lock screen.
-     * @param onLaunch Called with this request's id and prompt intent just
+     * @param onLaunch Called with this request's notification key
+     *   ([NotificationKeys.approval], unique across both prompt families) and
+     *   its prompt intent just
      *   before the prompt starts, which is when its turn on screen comes: a
      *   request arriving while another prompts waits for it to settle, and
      *   one still waiting at [PendingAuthentications.QUEUE_DEADLINE_MILLIS]
@@ -343,7 +345,7 @@ class BiometricActivityLauncher(
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
-            onLaunch(requestId, intent)
+            onLaunch(NotificationKeys.approval(requestId), intent)
             context.startActivity(intent)
         }
 
@@ -378,7 +380,8 @@ class BiometricActivityLauncher(
      * @param keyAlias A full Keystore alias to sign with instead of the
      *   credential's (the user verification key); null for a credential key.
      * @param onLaunch As for [requestAuthentication]: called with this
-     *   request's id and prompt intent just before the prompt starts. The
+     *   request's notification key ([NotificationKeys.signature]) and prompt
+     *   intent just before the prompt starts. The
      *   request has one owner, the first activity started for it: a repeat
      *   delivery of the same intent (the notification's full-screen intent,
      *   or a tap on it) finishes without prompting and answers nothing
@@ -423,7 +426,7 @@ class BiometricActivityLauncher(
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
-            onLaunch(requestId, intent)
+            onLaunch(NotificationKeys.signature(requestId), intent)
             context.startActivity(intent)
         }
 
@@ -439,6 +442,20 @@ class BiometricActivityLauncher(
                 throw mapCryptoErrorToException(result.code, result.message)
             }
         }
+    }
+
+    /**
+     * Settles the approval [key] names as timed out if its prompt never came
+     * up: Android blocked the prompt's start and the owner let the lock-screen
+     * notification, the only way in, expire. The request hands the screen to
+     * the next one instead of holding it for as long as its caller waits, and
+     * a late start of its prompt finishes without prompting. A prompt that is
+     * up stays, since the owner is answering it; a crypto signature's key is
+     * left alone. Called when [key]'s notification expires.
+     */
+    fun expireUnshown(key: String) {
+        val requestId = NotificationKeys.approvalRequestId(key) ?: return
+        pendingRequests.expireUnshown(requestId)
     }
 
     /**
@@ -541,14 +558,18 @@ class BiometricActivityLauncher(
  * with [BiometricPrompt.ERROR_TIMEOUT] rather than waiting forever.
  *
  * Every request is settled exactly once: by its result, by the failure to
- * launch its prompt, by its queue deadline, or by its cancellation; and
- * however it settles, it hands the screen to the next.
+ * launch its prompt, by its queue deadline, by its notification expiring with
+ * its prompt never up ([expireUnshown]), or by its cancellation; and however
+ * it settles, it hands the screen to the next.
  *
  * @param prompts the turns the requests take on screen; process-wide, since
  *   there is one screen whichever launcher a request came through
+ * @param expirePrompt ends a request's prompt unshown, so a late start of it
+ *   prompts for nothing; false while the prompt is up
  */
 internal class PendingAuthentications(
     private val prompts: SigningPromptQueue = SigningPromptQueue.process,
+    private val expirePrompt: (requestId: String) -> Boolean = TransparentBiometricActivity::expireUnshown,
 ) {
     private val pending =
         ConcurrentHashMap<Long, CancellableContinuation<BiometricActivityLauncher.BiometricResult>>()
@@ -606,6 +627,23 @@ internal class PendingAuthentications(
         val continuation = pending.remove(id) ?: return false
         continuation.resume(result)
         return true
+    }
+
+    /**
+     * Settles launched request [requestId] with [BiometricPrompt.ERROR_TIMEOUT]
+     * unless its prompt is up; false when it was left waiting, or nothing
+     * waits on that id.
+     */
+    fun expireUnshown(requestId: String): Boolean {
+        val id = requestId.toLongOrNull() ?: return false
+        if (!pending.containsKey(id) || !expirePrompt(requestId)) return false
+        return complete(
+            requestId,
+            BiometricActivityLauncher.BiometricResult.Error(
+                BiometricPrompt.ERROR_TIMEOUT,
+                "The approval's notification expired with its prompt never shown"
+            )
+        )
     }
 
     /** Cancels every waiting request, those still waiting for their turn first. */
