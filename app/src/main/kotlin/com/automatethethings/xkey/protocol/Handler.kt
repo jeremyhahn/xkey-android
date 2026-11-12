@@ -2725,6 +2725,11 @@ class RequestHandler(
                 if (peerPublicKeyHex == null) {
                     Log.w(TAG, "Cannot check SELECTED_PEERS policy without peer public key")
                     false
+                } else if (pairedDeviceRepository?.isRevocationPending(peerPublicKeyHex) == true) {
+                    // Fail closed (#174): this peer was unpaired and its old
+                    // grants may not be deleted yet; they must not authorize it.
+                    Log.w(TAG, "SELECTED_PEERS refused: grant revocation pending for peer")
+                    false
                 } else {
                     keySharingPolicyDao.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
                 }
@@ -3272,6 +3277,8 @@ class RequestHandler(
                 put("backup_id", id)
                 if (label.isNotEmpty()) put("message", "stored backup '$label'")
             })
+        } catch (e: ProtocolException) {
+            Response.error(request.id, e.errorCode, e.message ?: "Invalid backup_data")
         } catch (e: Exception) {
             Log.e(TAG, "createBackup failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "createBackup failed: ${e.message}")
@@ -3293,7 +3300,7 @@ class RequestHandler(
             val bytes = store.load(id)
                 ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Backup not found: $id")
             Response.success(request.id, JSONObject().apply {
-                put("backup_data", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+                put("backup_data", java.util.Base64.getEncoder().encodeToString(bytes))
                 put("backup_id", id)
                 put("created_at", com.automatethethings.xkey.crypto.SyncCodec.toRfc3339(store.createdAtMillis(id)))
             })
