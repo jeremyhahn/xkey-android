@@ -51,9 +51,10 @@ import java.time.Instant
  * The content hash the automatic signer signs, kept apart from the service so
  * the signing-to-verification round trip can be tested on the JVM.
  *
- * Memory stays bounded for every capture: media other than JPEG is hashed by
- * streaming, and a JPEG is read into memory only up to
- * [MAX_CANONICAL_JPEG_BYTES].
+ * Memory stays bounded for every capture: a JPEG is read into memory only up
+ * to [MAX_CANONICAL_JPEG_BYTES], an MP4/MOV, PNG or WebP only up to
+ * [XmpMetadataHelper.maxEmbedBytes], and anything larger or of another type
+ * is hashed by streaming.
  */
 internal object AutoSignHash {
 
@@ -66,9 +67,14 @@ internal object AutoSignHash {
      */
     const val MAX_CANONICAL_JPEG_BYTES = 32 * 1024 * 1024
 
-    /** A JPEG above [limit] bytes, which the automatic signer refuses to sign. */
-    class TooLargeException(val limit: Int) :
-        java.io.IOException("JPEG is larger than $limit bytes, the most the automatic signer canonicalises")
+    /**
+     * Media the automatic signer refuses to sign: a JPEG above [limit] bytes,
+     * or larger media that already carries an embedded signature.
+     */
+    class TooLargeException(
+        val limit: Int,
+        message: String = "JPEG is larger than $limit bytes, the most the automatic signer canonicalises"
+    ) : java.io.IOException(message)
 
     /**
      * The stored `contentHash` for [data], typed by [mimeType]: the canonical
@@ -81,21 +87,48 @@ internal object AutoSignHash {
         MediaHasher.hashCanonical(data, mimeType)
 
     /**
-     * [contentHash] over the content at [uri], typed by the resolver. Media
-     * other than JPEG is hashed whole by streaming ([MediaHasher.hashUri]):
-     * its signature goes to a sidecar, and for it the canonical hash is the
-     * whole-file hash. A JPEG above [limit] bytes throws [TooLargeException].
+     * [contentHash] over the content at [uri], typed by the resolver, in the
+     * domain verification uses. A JPEG above [limit] bytes throws
+     * [TooLargeException].
+     *
+     * An MP4/MOV, PNG or WebP may already carry an embedded signature (an
+     * import, or a capture notified again after a restart), which the
+     * canonical hash leaves out and [XmpMetadataHelper.writeSignature]
+     * replaces. Up to [embedLimit] bytes it is read into memory and hashed
+     * canonically. A larger one gets a sidecar, never an embedded packet, so
+     * it is hashed whole while streaming; if it already carries an embedded
+     * signature, which would shadow that sidecar, it is refused with
+     * [TooLargeException] and the existing signature is kept.
+     *
+     * Any other media goes to a sidecar and is hashed whole by streaming
+     * ([MediaHasher.hashUri]).
      */
     fun contentHashUri(
         contentResolver: ContentResolver,
         uri: Uri,
-        limit: Int = MAX_CANONICAL_JPEG_BYTES
+        limit: Int = MAX_CANONICAL_JPEG_BYTES,
+        embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
     ): String {
         val mimeType = contentResolver.getType(uri)
-        if (!MediaHasher.isCanonicalisedJpeg(mimeType)) return MediaHasher.hashUri(contentResolver, uri)
-        val bytes = contentResolver.openInputStream(uri)?.use { readAtMost(it, limit) }
+        if (MediaHasher.isCanonicalisedJpeg(mimeType)) {
+            val bytes = contentResolver.openInputStream(uri)?.use { readAtMost(it, limit) }
+                ?: throw IllegalArgumentException("Cannot open URI: $uri")
+            return contentHash(bytes, mimeType)
+        }
+        val format = XmpContainers.formatOf(mimeType) ?: return MediaHasher.hashUri(contentResolver, uri)
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val input = contentResolver.openInputStream(uri)
             ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        return contentHash(bytes, mimeType)
+        val bytes = input.use { readOrDigest(it, embedLimit, digest) }
+        if (bytes != null) return contentHash(bytes, mimeType)
+        val carried = contentResolver.openInputStream(uri)?.use { XmpContainers.read(it.buffered(), format) }
+        if (carried != null) {
+            throw TooLargeException(
+                embedLimit,
+                "media is larger than $embedLimit bytes and already carries an embedded signature"
+            )
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     /** All of [input], or [TooLargeException] as soon as it passes [limit] bytes. */
@@ -109,6 +142,27 @@ internal object AutoSignHash {
             total += n
             if (total > limit) throw TooLargeException(limit)
             out.write(buffer, 0, n)
+        }
+    }
+
+    /**
+     * All of [input] while it stays within [limit] bytes; past that, null,
+     * with every byte fed to [digest] and never more than [limit] bytes held.
+     */
+    private fun readOrDigest(
+        input: java.io.InputStream,
+        limit: Int,
+        digest: java.security.MessageDigest
+    ): ByteArray? {
+        var out: java.io.ByteArrayOutputStream? = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        var total = 0L
+        while (true) {
+            val n = input.read(buffer)
+            if (n == -1) return out?.toByteArray()
+            digest.update(buffer, 0, n)
+            total += n
+            if (total > limit) out = null else out?.write(buffer, 0, n)
         }
     }
 }

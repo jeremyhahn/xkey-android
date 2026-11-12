@@ -28,16 +28,41 @@ import java.io.InputStream
  * - MP4/MOV, PNG and WebP: an XMP box or chunk ([XmpContainers]), so the
  *   signature travels with the file.
  * - Anything else (HEIC, MKV, unknown), and an MP4/MOV, PNG or WebP that
- *   [XmpContainers.embed] refuses: a `<name>.xkeysig` sidecar.
+ *   [XmpContainers.embed] refuses or that is larger than [maxEmbedBytes]: a
+ *   `<name>.xkeysig` sidecar.
  *
  * Readers try the embedded form first and fall back to a sidecar, so a file
- * signed before embedding existed still reads.
+ * signed before embedding existed still reads. Writes to one path are
+ * serialized, so overlapping signing jobs never interleave their updates.
  */
 object XmpMetadataHelper {
 
     private const val XKEY_SIGNATURE_PREFIX = "XKEY_SIG:"
 
-    fun writeSignature(filePath: String, data: ContentAuthenticityData) {
+    /**
+     * Largest MP4/MOV, PNG or WebP the writer embeds into: 128 MiB, or a
+     * sixth of the heap when that is less. Embedding holds the file in memory
+     * about three times over (the read, the stripped copy and the output), so
+     * a larger file keeps a sidecar, which needs no read of the file at all.
+     * Settable so tests can exercise the bound without a large fixture.
+     */
+    @Volatile
+    var maxEmbedBytes: Int = minOf(128L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 6).toInt()
+
+    private val pathLocks = Array(64) { Any() }
+
+    /** The lock serializing every write to [filePath]; a fixed set, so it never grows. */
+    private fun lockFor(filePath: String): Any {
+        val file = File(filePath)
+        val key = try {
+            file.canonicalPath
+        } catch (_: IOException) {
+            file.absolutePath
+        }
+        return pathLocks[Math.floorMod(key.hashCode(), pathLocks.size)]
+    }
+
+    fun writeSignature(filePath: String, data: ContentAuthenticityData): Unit = synchronized(lockFor(filePath)) {
         val mimeType = getMimeType(filePath)
         val format = XmpContainers.formatOf(mimeType)
         when {
@@ -97,7 +122,7 @@ object XmpMetadataHelper {
      * from: an embedded signature stays embedded, and a legacy sidecar beside
      * an MP4/MOV, PNG or WebP stays a sidecar, so the media file is untouched.
      */
-    fun appendSignature(filePath: String, entry: SignatureEntry) {
+    fun appendSignature(filePath: String, entry: SignatureEntry): Unit = synchronized(lockFor(filePath)) {
         val format = XmpContainers.formatOf(getMimeType(filePath))
         val embedded = format?.let { readEmbeddedSignature(filePath, it) }
         val existing = embedded ?: readSignature(filePath)
@@ -142,12 +167,15 @@ object XmpMetadataHelper {
 
     /**
      * Embeds [data] in the file as XMP. False when the file cannot carry it
-     * (see [XmpContainers.embed]), so the caller writes a sidecar instead. A
-     * file that already carries an embedded signature it cannot rewrite
-     * throws: a sidecar would be shadowed by the stale embedded one.
+     * (see [XmpContainers.embed]) or is larger than [maxEmbedBytes], so the
+     * caller writes a sidecar instead. A file that already carries an
+     * embedded signature it cannot rewrite throws: a sidecar would be
+     * shadowed by the stale embedded one.
      *
-     * The new bytes go to a temporary file beside the media and replace it by
-     * rename, so a failed write never leaves half a video.
+     * The new bytes go to a staging file beside the media, created
+     * exclusively under a unique name for this write, and replace it by
+     * rename, so a failed write never leaves half a video and no other write
+     * shares or deletes it. Callers hold [lockFor] the path.
      */
     private fun writeEmbeddedSignature(
         filePath: String,
@@ -155,6 +183,17 @@ object XmpMetadataHelper {
         data: ContentAuthenticityData
     ): Boolean {
         val file = File(filePath)
+        if (file.length() > maxEmbedBytes) {
+            val carried = try {
+                file.inputStream().use { XmpContainers.read(it.buffered(), format) }
+            } catch (_: IOException) {
+                null
+            }
+            if (carried != null) {
+                throw IOException("$filePath is larger than $maxEmbedBytes bytes and carries an embedded signature")
+            }
+            return false
+        }
         val bytes = try {
             file.readBytes()
         } catch (_: IOException) {
@@ -167,7 +206,7 @@ object XmpMetadataHelper {
             }
             return false
         }
-        val temp = File(file.absoluteFile.parentFile, ".${file.name}.xkeytmp")
+        val temp = File.createTempFile(".${file.name}.", ".xkeytmp", file.absoluteFile.parentFile)
         try {
             temp.writeBytes(embedded)
             if (!temp.renameTo(file)) throw IOException("cannot replace $filePath")

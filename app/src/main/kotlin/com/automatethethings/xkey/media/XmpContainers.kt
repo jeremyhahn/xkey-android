@@ -109,10 +109,21 @@ object XmpContainers {
      * [data] without our box/chunk, as it was before [embed]: the bytes the
      * canonical hash covers. Returned unchanged when [data] holds no packet
      * of ours or does not parse.
+     *
+     * In MP4/MOV only a trailing run of our boxes is left out, the only place
+     * [embed] puts one: sample offsets (`stco`/`co64`) are absolute, so a box
+     * of ours before any other box would shift the media they address. Such a
+     * file is returned unchanged, so its hash covers the extra box and can
+     * never match the hash signed over the file without it.
      */
     fun strip(data: ByteArray, format: Format): ByteArray {
         val parts = parse(data, format) ?: return data
-        val kept = parts.filterNot { isOurs(data, it, format) }
+        val ours = parts.map { isOurs(data, it, format) }
+        if (format == Format.ISO_BMFF) {
+            val first = ours.indexOf(true)
+            if (first >= 0 && ours.drop(first).any { !it }) return data
+        }
+        val kept = parts.filterIndexed { i, _ -> !ours[i] }
         if (kept.size == parts.size) return data
         val out = ByteArrayOutputStream(data.size)
         when (format) {
