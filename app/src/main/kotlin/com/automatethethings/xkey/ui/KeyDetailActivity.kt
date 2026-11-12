@@ -45,7 +45,8 @@ import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
+import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.storage.deleteKeyRow
 import com.google.android.material.appbar.AppBarLayout
 import com.google.android.material.appbar.CollapsingToolbarLayout
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -2073,11 +2074,7 @@ class KeyDetailActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            keyDao.deleteKeyAndMaterial(key.keyId) {
-                if (key.source != "xkmsd") {
-                    keystoreManager.resolveKeystoreAlias(key.keyId)?.let { keystoreManager.deleteByAlias(it) }
-                }
-            }
+            keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyDetailActivity))
             finish()
         }
     }

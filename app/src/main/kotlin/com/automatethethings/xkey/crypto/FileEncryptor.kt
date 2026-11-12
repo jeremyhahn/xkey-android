@@ -48,11 +48,15 @@ import javax.crypto.spec.SecretKeySpec
  * ```
  *
  * @param keystoreManager The [KeystoreManager] instance used for ECDH and key operations.
+ * @param generateEphemeralKey Generates the ephemeral agreement key at the given
+ *   Keystore alias; the Android Keystore unless a test supplies another.
  */
-class FileEncryptor(private val keystoreManager: KeystoreManager) {
+class FileEncryptor(
+    private val keystoreManager: KeystoreManager,
+    private val generateEphemeralKey: (alias: String) -> Unit = ::generateKeystoreAgreementKey
+) {
 
     companion object {
-        private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         private const val VERSION: Byte = 0x01
         private const val SALT_SIZE = 32
         private const val IV_SIZE = 12
@@ -82,7 +86,7 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
         val ephemeralKeyId = "ephemeral_${UUID.randomUUID()}"
         try {
             // Generate ephemeral EC key in Keystore with PURPOSE_AGREE_KEY
-            generateEphemeralKey(ephemeralKeyId)
+            generateEphemeralKey("xkey_key_$ephemeralKeyId")
 
             // Get ephemeral public key DER
             val ephemeralPubKeyDer = keystoreManager.getPublicKeyDER(ephemeralKeyId)
@@ -193,36 +197,6 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
         }
     }
 
-    /**
-     * Generate an ephemeral EC key in Android Keystore with [KeyProperties.PURPOSE_AGREE_KEY].
-     *
-     * The key is created on the secp256r1 (P-256) curve without user authentication
-     * requirements, as it is used only for a single ECDH operation and then deleted.
-     *
-     * @param keyId Unique identifier for the ephemeral key.
-     */
-    private fun generateEphemeralKey(keyId: String) {
-        val alias = "xkey_key_$keyId"
-        val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-
-        if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
-        }
-
-        val specBuilder = KeyGenParameterSpec.Builder(
-            alias,
-            KeyProperties.PURPOSE_AGREE_KEY
-        )
-            .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-            .setUserAuthenticationRequired(false)
-
-        val keyPairGenerator = KeyPairGenerator.getInstance(
-            KeyProperties.KEY_ALGORITHM_EC,
-            KEYSTORE_PROVIDER
-        )
-        keyPairGenerator.initialize(specBuilder.build())
-        keyPairGenerator.generateKeyPair()
-    }
 
     /**
      * Derive a key using HKDF-SHA256.
@@ -255,4 +229,34 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
             offset += bytesRead
         }
     }
+}
+
+/**
+ * Generate an ephemeral EC key in Android Keystore with [KeyProperties.PURPOSE_AGREE_KEY].
+ *
+ * The key is created on the secp256r1 (P-256) curve without user authentication
+ * requirements, as it is used only for a single ECDH operation and then deleted.
+ *
+ * @param alias Keystore alias of the ephemeral key.
+ */
+private fun generateKeystoreAgreementKey(alias: String) {
+    val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+
+    if (keyStore.containsAlias(alias)) {
+        keyStore.deleteEntry(alias)
+    }
+
+    val specBuilder = KeyGenParameterSpec.Builder(
+        alias,
+        KeyProperties.PURPOSE_AGREE_KEY
+    )
+        .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+        .setUserAuthenticationRequired(false)
+
+    val keyPairGenerator = KeyPairGenerator.getInstance(
+        KeyProperties.KEY_ALGORITHM_EC,
+        "AndroidKeyStore"
+    )
+    keyPairGenerator.initialize(specBuilder.build())
+    keyPairGenerator.generateKeyPair()
 }

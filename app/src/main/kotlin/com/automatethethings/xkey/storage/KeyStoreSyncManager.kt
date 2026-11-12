@@ -16,9 +16,11 @@ package com.automatethethings.xkey.storage
 
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import java.security.KeyStore
@@ -320,5 +322,22 @@ class KeyStoreSyncManager(
             isDiscoverable = cred.isDiscoverable,
             signCount = cred.signCount
         )
+    }
+}
+
+/**
+ * Deletes the key behind one key row [key], as the key list and the key
+ * detail screen do: its material, then its row, inside one
+ * [SharePermissionLedger] revoke of the row's key ID ([deleteKeyAndMaterial]).
+ *
+ * @return Number of rows deleted.
+ */
+suspend fun KeyDao.deleteKeyRow(
+    key: KeyEntity,
+    keystoreManager: KeystoreManager,
+    softwareKeys: SoftwareKeyStore
+): Int = deleteKeyAndMaterial(key.keyId) {
+    if (key.source != "xkmsd") {
+        keystoreManager.resolveKeystoreAlias(key.keyId)?.let { keystoreManager.deleteByAlias(it) }
     }
 }
