@@ -44,9 +44,10 @@ import kotlinx.coroutines.withContext
  *
  * The grant protocol commits prefs synchronously, so it runs on
  * [ioDispatcher], never on the sheet's Main caller. Grants, withdrawals and
- * [clearAll] take one lock, which is FIFO, before that switch, so they land
- * in the order the user made them: a later withdrawal always follows an
- * earlier grant.
+ * key-wide policy changes ([setKeyPolicy]) take one lock, which is FIFO,
+ * before that switch, so they land in the order the user made them: a later
+ * withdrawal or clear always follows an earlier grant. A grant carries the
+ * pairing generation read when the user acted, before that wait.
  */
 class KeySharingPeers(
     private val keyId: String,
@@ -86,9 +87,13 @@ class KeySharingPeers(
      */
     suspend fun setAllowed(peerPublicKeyHex: String, allowed: Boolean): Boolean {
         if (allowed) {
+            // The pairing the user approved, read before any wait: a grant
+            // still queued when that pairing ends is refused, never written
+            // for a later pairing of the same key.
+            val pairing = repository.pairingOf(peerPublicKeyHex) ?: return false
             return edits.withLock {
                 withContext(ioDispatcher) {
-                    repository.writeGrant(peerPublicKeyHex) {
+                    repository.writeGrant(peerPublicKeyHex, pairing) {
                         policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
                     }
                 }
@@ -96,11 +101,6 @@ class KeySharingPeers(
         }
         edits.withLock { policyDao.removePolicy(keyId, peerPublicKeyHex) }
         return true
-    }
-
-    /** Withdraws every peer's access to the key, after any grant or withdrawal already made. */
-    suspend fun clearAll() {
-        edits.withLock { policyDao.clearPoliciesForKey(keyId) }
     }
 
     /**

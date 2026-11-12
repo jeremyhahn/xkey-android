@@ -523,10 +523,23 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * that clears the marker, and the grant cleanup deletes the row; the call
      * returns false. A marker an ended process left behind is settled the
      * same way by [recoverInterruptedGrantWrites].
+     *
+     * The grant is bound to the pairing current now. A caller that approved
+     * it earlier passes the [pairing] it read then, from [pairingOf].
      */
-    suspend fun writeGrant(publicKeyHex: String, write: suspend () -> Unit): Boolean {
+    suspend fun writeGrant(publicKeyHex: String, write: suspend () -> Unit): Boolean =
+        writeGrant(publicKeyHex, pairingOf(publicKeyHex) ?: return false, write)
+
+    /**
+     * [writeGrant] for the pairing generation [pairing], read by [pairingOf]
+     * when the user approved the grant. Refused, without running [write],
+     * when the key's current pairing is not that one: a grant approved for
+     * an ended pairing never reaches a later pairing of the same key.
+     */
+    suspend fun writeGrant(publicKeyHex: String, pairing: Long, write: suspend () -> Unit): Boolean {
         val marker = synchronized(storeLock) {
             val generation = currentPairing(publicKeyHex) ?: return false
+            if (generation != pairing) return false
             if (publicKeyHex in pendingRevocations()) return false
             val marker = publicKeyHex to generation
             if (grantWritesInFlight.merge(marker, 1, Int::plus) == 1) {
@@ -584,6 +597,12 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
             .commit()
         if (!written) Log.e(TAG, "Settling interrupted grant writes did not reach disk")
     }
+
+    /**
+     * The key's current pairing generation, or null if it is not paired. A
+     * grant reads it when the user approves and passes it to [writeGrant].
+     */
+    fun pairingOf(publicKeyHex: String): Long? = synchronized(storeLock) { currentPairing(publicKeyHex) }
 
     /** Call under [storeLock]. */
     private fun currentPairing(publicKeyHex: String): Long? {
