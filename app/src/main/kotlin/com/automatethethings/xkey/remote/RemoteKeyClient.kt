@@ -441,7 +441,9 @@ class RemoteKeyClient(
                     val entry = array.get(i) as? JSONObject
                         ?: throw malformed("slots[$i] is not an object")
                     val slot = entry.requiredString("slot")
-                    if (slot.isEmpty()) throw malformed("slots[$i].slot is empty")
+                    // Kept verbatim (go-xkms ids are case-sensitive), but a
+                    // blank id names no slot and could never be sent back.
+                    if (slot.isBlank()) throw malformed("slots[$i].slot is blank")
                     RemotePivSlot(
                         slot = slot,
                         label = entry.optionalString("label"),

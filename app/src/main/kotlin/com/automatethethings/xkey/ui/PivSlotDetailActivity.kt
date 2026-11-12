@@ -1012,9 +1012,9 @@ class DesktopPivSlotActions(private val client: RemoteKeyClient) {
     suspend fun signTest(slot: String): RemotePivSignature = client.pivSign(slot, TEST_DATA)
 
     /**
-     * [signTest] as an outcome: a desktop error or a transport failure (no
-     * session, send failed) is [DesktopSignTestOutcome.Failed]. Cancellation
-     * still propagates.
+     * [signTest] as an outcome: a desktop error, a transport failure (no
+     * session, send failed) or a slot id the client refuses (blank) is
+     * [DesktopSignTestOutcome.Failed]. Cancellation still propagates.
      */
     suspend fun trySignTest(slot: String): DesktopSignTestOutcome =
         try {
@@ -1022,6 +1022,8 @@ class DesktopPivSlotActions(private val client: RemoteKeyClient) {
         } catch (e: ProtocolException) {
             DesktopSignTestOutcome.Failed(e.message)
         } catch (e: IOException) {
+            DesktopSignTestOutcome.Failed(e.message)
+        } catch (e: IllegalArgumentException) {
             DesktopSignTestOutcome.Failed(e.message)
         }
 }
@@ -1075,6 +1077,9 @@ fun desktopPivSlotDetail(
             } catch (e: ProtocolException) {
                 DesktopPivSlotDetail.Failed(e.message)
             } catch (e: IOException) {
+                DesktopPivSlotDetail.Failed(e.message)
+            } catch (e: IllegalArgumentException) {
+                // A slot id the client refuses (blank) is a malformed reply.
                 DesktopPivSlotDetail.Failed(e.message)
             }
         }
