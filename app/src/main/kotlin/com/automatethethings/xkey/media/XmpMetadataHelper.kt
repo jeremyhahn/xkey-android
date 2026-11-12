@@ -20,6 +20,7 @@ import androidx.exifinterface.media.ExifInterface
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 
 /**
  * Where a media file's signature lives:
@@ -134,6 +135,14 @@ object XmpMetadataHelper {
             writeSignature(filePath, updated)
         }
     }
+
+    fun replaceEmbeddedSignature(
+        open: () -> InputStream,
+        openOutput: () -> OutputStream,
+        format: XmpContainers.Format,
+        data: ContentAuthenticityData,
+        workDir: File
+    ): Boolean = TODO("fix round")
 
     fun getSidecarPath(filePath: String): String = "$filePath.xkeysig"
 

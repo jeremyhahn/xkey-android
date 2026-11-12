@@ -20,9 +20,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.InputStream
+import java.io.SequenceInputStream
 import java.util.zip.CRC32
 
 /**
@@ -320,6 +325,60 @@ class XmpContainersTest {
             val signed = embed(file, mime)!!
             assertEquals(mime, json, XmpContainers.read(ByteArrayInputStream(signed), formatOf(mime)))
             assertNull(mime, XmpContainers.read(ByteArrayInputStream(file), formatOf(mime)))
+        }
+    }
+
+    /** A real image followed by [count] empty chunks/boxes: tiny on disk, a heap's worth if each is kept. */
+    private fun manyTinyParts(format: Format, count: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        when (format) {
+            Format.WEBP -> {
+                // The extended fixture's chunks, so embed may add to it.
+                val extended = XmpFixtures.webp()
+                out.write(extended, 8, extended.size - 8)
+                val chunk = XmpFixtures.riffChunk("junk", ByteArray(0))
+                repeat(count) { out.write(chunk) }
+                val body = out.toByteArray()
+                return XmpFixtures.ascii("RIFF") + XmpFixtures.le32(body.size.toLong()) + body
+            }
+            else -> {
+                out.write(XmpFixtures.mp4())
+                val box = XmpFixtures.box("free", ByteArray(0))
+                repeat(count) { out.write(box) }
+                return out.toByteArray()
+            }
+        }
+    }
+
+    @Test
+    fun `a webp or mp4 with very many tiny chunks or boxes is refused`() {
+        for (format in listOf(Format.WEBP, Format.ISO_BMFF)) {
+            val file = manyTinyParts(format, 100_000)
+            assertNull(format.name, XmpContainers.embed(file, format, json))
+            assertNull(format.name, XmpContainers.extract(file, format))
+            assertArrayEquals(format.name, file, XmpContainers.strip(file, format))
+        }
+    }
+
+    @Test
+    fun `a file with a few thousand chunks or boxes still embeds`() {
+        for (format in listOf(Format.WEBP, Format.ISO_BMFF)) {
+            val file = manyTinyParts(format, 5_000)
+            val signed = XmpContainers.embed(file, format, json)
+            assertNotNull(format.name, signed)
+            assertEquals(format.name, json, XmpContainers.extract(signed!!, format))
+            assertArrayEquals(format.name, file, XmpContainers.strip(signed, format))
+        }
+    }
+
+    @Test
+    fun `a stream that fails mid-read is an error, not an unsigned file`() {
+        val broken = object : InputStream() {
+            override fun read(): Int = throw IOException("device gone")
+        }
+        for ((mime, file) in XmpFixtures.all) {
+            val failing = SequenceInputStream(ByteArrayInputStream(file.copyOfRange(0, 12)), broken)
+            assertThrows(mime, IOException::class.java) { XmpContainers.read(failing, formatOf(mime)) }
         }
     }
 

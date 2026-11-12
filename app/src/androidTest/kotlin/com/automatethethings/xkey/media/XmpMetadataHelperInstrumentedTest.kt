@@ -397,4 +397,38 @@ class XmpMetadataHelperInstrumentedTest {
 
         assertNull(read)
     }
+
+    @Test
+    fun replaceEmbeddedSignature_reSigningThroughAUriShowsTheSecondSigner() {
+        val file = container("png")
+        val uri = Uri.fromFile(file)
+        val resolver = context.contentResolver
+        XmpMetadataHelper.writeSignature(file.path, sampleData(hash = "5".repeat(64)))
+        val second = ContentAuthenticityData(
+            contentHash = "5".repeat(64),
+            signatures = listOf(
+                SignatureEntry(
+                    keyFingerprint = "d".repeat(64),
+                    signerName = "Second Signer",
+                    algorithm = "ES256",
+                    value = "c2Vjb25k",
+                    timestamp = "2026-01-02T00:00:00Z",
+                    role = SignerRole.CREATOR
+                )
+            )
+        )
+
+        // The streams the Share-sheet signer opens on the shared URI.
+        val replaced = XmpMetadataHelper.replaceEmbeddedSignature(
+            open = { resolver.openInputStream(uri)!! },
+            openOutput = { resolver.openOutputStream(uri, "wt")!! },
+            format = XmpContainers.Format.PNG,
+            data = second,
+            workDir = context.cacheDir
+        )
+
+        assertTrue(replaced)
+        assertFalse(File(XmpMetadataHelper.getSidecarPath(file.path)).exists())
+        assertEquals(second, XmpMetadataHelper.readSignatureFromUri(resolver, uri, "image/png"))
+    }
 }

@@ -23,7 +23,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 
 /**
  * Unit tests for the file-type routing and the failure branches of
@@ -328,5 +330,127 @@ class XmpMetadataHelperSidecarBranchTest {
             listOf(SignerRole.CREATOR, SignerRole.WITNESS, SignerRole.ATTESTOR),
             read.signatures.map { it.role }
         )
+    }
+
+    // -------------------------------------------------------------------------
+    // Read failures and re-signing
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `a media file that cannot be read fails the write and gets no sidecar`() {
+        val saved = XmpMetadataHelper.maxEmbedBytes
+        try {
+            // The default bound reaches the whole-file read; a bound of 1 the oversized probe.
+            for (limit in listOf(saved, 1)) {
+                XmpMetadataHelper.maxEmbedBytes = limit
+                for (name in embeddedNames.keys) {
+                    // A directory under a media name has a length, but every read of it fails.
+                    val dir = tempFolder.newFolder("unreadable-$limit-$name")
+                    File(dir, "entry").writeBytes(ByteArray(64))
+                    assertTrue("$limit $name", dir.length() > 1)
+
+                    assertThrows("$limit $name", IOException::class.java) {
+                        XmpMetadataHelper.writeSignature(dir.path, sampleData())
+                    }
+                    assertFalse("$limit $name", sidecarOf(dir.path).exists())
+                }
+            }
+        } finally {
+            XmpMetadataHelper.maxEmbedBytes = saved
+        }
+    }
+
+    @Test
+    fun `an append to a media file that cannot be read fails and leaves its sidecar alone`() {
+        for (name in embeddedNames.keys) {
+            val dir = tempFolder.newFolder("append-unreadable-$name")
+            File(dir, "entry").writeBytes(ByteArray(64))
+            val legacy = sampleData(hash = "e".repeat(64)).toJsonString()
+            sidecarOf(dir.path).writeText(legacy)
+
+            assertThrows(name, IOException::class.java) {
+                XmpMetadataHelper.appendSignature(
+                    dir.path,
+                    SignatureEntry("fp-w", "Bob", "ES256", "sig-w", "2026-01-02T00:00:00Z", SignerRole.WITNESS)
+                )
+            }
+            assertEquals(name, legacy, sidecarOf(dir.path).readText())
+        }
+    }
+
+    @Test
+    fun `a file the parser refuses but the reader finds signed is not given a sidecar`() {
+        // A signed mp4 followed by more boxes than the parser walks: embed
+        // refuses it, while the stream reader still finds the old signature.
+        val signed = XmpContainers.embed(XmpFixtures.mp4(), XmpContainers.Format.ISO_BMFF, sampleData().toJsonString())!!
+        val out = ByteArrayOutputStream()
+        out.write(signed)
+        val free = XmpFixtures.box("free", ByteArray(0))
+        repeat(100_000) { out.write(free) }
+        val file = tempFolder.newFile("crowded.mp4")
+        file.writeBytes(out.toByteArray())
+
+        assertThrows(IOException::class.java) {
+            XmpMetadataHelper.writeSignature(file.path, sampleData(hash = "9".repeat(64)))
+        }
+        assertFalse(sidecarOf(file.path).exists())
+    }
+
+    private fun secondSigner(hash: String) = ContentAuthenticityData(
+        contentHash = hash,
+        signatures = listOf(
+            SignatureEntry("SHA256:second", "Bob", "ES256", "sig-2", "2026-01-03T00:00:00Z", SignerRole.CREATOR)
+        )
+    )
+
+    /** What the Share-sheet signer does with a shared stream, here over a plain file. */
+    private fun replace(path: String, mime: String, data: ContentAuthenticityData, work: File) =
+        XmpMetadataHelper.replaceEmbeddedSignature(
+            open = { File(path).inputStream() },
+            openOutput = { File(path).outputStream() },
+            format = XmpContainers.formatOf(mime)!!,
+            data = data,
+            workDir = work
+        )
+
+    @Test
+    fun `re-signing auto-signed media with a second key replaces the embedded signer`() {
+        for ((name, mime) in embeddedNames) {
+            val path = fixtureFile("resign-$name", mime)
+            XmpMetadataHelper.writeSignature(path, sampleData(hash = "f".repeat(64)))
+            val second = secondSigner("f".repeat(64))
+            val work = tempFolder.newFolder("work-$name")
+
+            assertTrue(name, replace(path, mime, second, work))
+
+            assertFalse(name, sidecarOf(path).exists())
+            assertEquals(name, second, XmpMetadataHelper.readSignature(path))
+            val format = XmpContainers.formatOf(mime)!!
+            assertEquals(name, second.toJsonString(), File(path).inputStream().use { XmpContainers.read(it, format) })
+            assertTrue("$name: the working copy is removed", work.listFiles()!!.isEmpty())
+        }
+    }
+
+    @Test
+    fun `re-signing media above the embed bound refuses a carried signature and otherwise embeds nothing`() {
+        val saved = XmpMetadataHelper.maxEmbedBytes
+        try {
+            for ((name, mime) in embeddedNames) {
+                val signedPath = fixtureFile("big-signed-$name", mime)
+                XmpMetadataHelper.writeSignature(signedPath, sampleData())
+                val unsignedPath = fixtureFile("big-unsigned-$name", mime)
+                val unsigned = File(unsignedPath).readBytes()
+                val work = tempFolder.newFolder("big-work-$name")
+                XmpMetadataHelper.maxEmbedBytes = 8
+
+                assertThrows(name, IOException::class.java) { replace(signedPath, mime, secondSigner("a".repeat(64)), work) }
+                assertFalse(name, replace(unsignedPath, mime, secondSigner("a".repeat(64)), work))
+                assertArrayEquals(name, unsigned, File(unsignedPath).readBytes())
+                assertTrue(name, work.listFiles()!!.isEmpty())
+                XmpMetadataHelper.maxEmbedBytes = saved
+            }
+        } finally {
+            XmpMetadataHelper.maxEmbedBytes = saved
+        }
     }
 }
