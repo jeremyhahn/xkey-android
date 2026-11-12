@@ -253,6 +253,21 @@ class AndroidCARevocationTest {
         assertEquals(false, result)
         verify(exactly = 0) { AuditLogger.logCertificateRevoked(any(), any(), any()) }
     }
+
+    @Test
+    fun `first revocation reports it and writes one audit entry`() {
+        val row = revokedRow(leaf()).copy(revoked = false, revokedAt = null, revokedReason = null)
+        coEvery { dao.getBySerial(row.serialNumber) } returns row
+        coEvery { dao.revoke(row.serialNumber, any(), AndroidCA.CRLReason.SUPERSEDED) } returns 1
+
+        val result = runBlocking { ca.revoke(row.serialNumber, AndroidCA.CRLReason.SUPERSEDED) }
+
+        assertEquals(true, result)
+        coVerify(exactly = 1) { dao.revoke(row.serialNumber, any(), AndroidCA.CRLReason.SUPERSEDED) }
+        verify(exactly = 1) {
+            AuditLogger.logCertificateRevoked(row.serialNumber, row.subjectDN, AndroidCA.CRLReason.SUPERSEDED)
+        }
+    }
 }
 
 /** In-memory KeyStore: private-key entries without passwords, like the Android Keystore's. */
