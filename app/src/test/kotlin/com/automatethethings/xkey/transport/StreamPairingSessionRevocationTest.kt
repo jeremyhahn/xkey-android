@@ -25,6 +25,11 @@ import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.piv.PivAlgorithm
+import com.automatethethings.xkey.piv.PivKeyManager
+import com.automatethethings.xkey.piv.PivSlot
+import com.automatethethings.xkey.piv.PivSlotDao
+import com.automatethethings.xkey.piv.PivSlotInfo
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -59,7 +64,11 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.file.Files
+import java.security.KeyPair
 import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.PublicKey
+import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -77,6 +86,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -930,6 +940,118 @@ class StreamPairingSessionRevocationTest {
         )
     }
 
+    /**
+     * A PIV slot's key is an ordinary shareable key under the ID
+     * `KeyStoreSyncManager` discovers it by, its Keystore alias: the real
+     * [PivKeyManager.deleteKey], paused right after it removed the slot's
+     * Keystore entry, refuses a share of that ID waiting at admission.
+     */
+    @Test
+    fun aShareOfAPivKeyDeletedWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val slot = PivSlot.KEY_MANAGEMENT
+        val keyStore = pivEdges()
+        val removed = CompletableDeferred<Unit>()
+        val finish = CountDownLatch(1)
+        every { keyStore.containsAlias(slot.keystoreAlias) } returns true
+        // The entry goes, then the delete pauses there.
+        every { keyStore.deleteEntry(slot.keystoreAlias) } answers {
+            removed.complete(Unit)
+            finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            Unit
+        }
+        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true))
+        assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
+            val deleting = scope.async(Dispatchers.IO) { manager.deleteKey(slot) }
+            try {
+                withTimeout(TIMEOUT_MS) { removed.await() }
+                resumeShare()
+            } finally {
+                finish.countDown()
+            }
+            withTimeout(TIMEOUT_MS) { deleting.await() }
+        }
+        verify { keyStore.deleteEntry(slot.keystoreAlias) }
+    }
+
+    /**
+     * The real [PivKeyManager.generateKey] replacing a slot's key, paused
+     * inside the generation that overwrites the slot's alias, refuses a share
+     * of that slot's ID waiting at admission: the old public key it loaded is
+     * never sent.
+     */
+    @Test
+    fun aShareOfAPivKeyReplacedByGenerateKeyWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val slot = PivSlot.DIGITAL_SIGNATURE
+        pivEdges()
+        val replacing = CompletableDeferred<Unit>()
+        val finish = CountDownLatch(1)
+        val newKey = keyPair(ByteArray(91) { 5 })
+        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ ->
+            replacing.complete(Unit)
+            finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            newKey
+        }
+        var generated: PivSlotInfo? = null
+        assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
+            val generating = scope.async(Dispatchers.IO) { manager.generateKey(slot, PivAlgorithm.ES256) }
+            try {
+                withTimeout(TIMEOUT_MS) { replacing.await() }
+                resumeShare()
+            } finally {
+                finish.countDown()
+            }
+            generated = withTimeout(TIMEOUT_MS) { generating.await() }
+        }
+        assertArrayEquals("the generation must succeed", newKey.public.encoded, generated?.publicKeyDer)
+    }
+
+    /**
+     * The PIV writers' revoke ends with them: a share of a slot's key started
+     * after [PivKeyManager.generateKey] completed sends the new public key.
+     */
+    @Test
+    fun aShareOfAPivKeyStartedAfterGenerateKeyCompletesSendsTheNewKey() = runBlocking<Unit> {
+        val slot = PivSlot.CARD_AUTHENTICATION
+        pivEdges()
+        val newKey = keyPair(ByteArray(91) { 7 })
+        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ -> newKey }
+        val phone = connectPaired()
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) { true }!!
+        val store = SharedKeyStore(phone.desktop.publicKeyHex, slot.keystoreAlias)
+
+        val generated = manager.generateKey(slot, PivAlgorithm.ES256)
+        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val newPem = "-----BEGIN PUBLIC KEY-----\n" +
+            Base64.getEncoder().encodeToString(generated.publicKeyDer) + "\n-----END PUBLIC KEY-----\n"
+        // No reply comes back to this router; only the request is checked.
+        val sending = scope.async {
+            runCatching {
+                DesktopKeyShare(session, TIMEOUT_MS)
+                    .send(baseline, store.entity!!, null, newPem, null, store.isShared, store.current)
+            }
+        }
+
+        val request = phone.desktop.readEncrypted()
+        assertEquals("remote.sharePublicKey", request.getString("method"))
+        val sentPem = String(Base64.getDecoder().decode(request.getJSONObject("params").getString("public_key_pem")))
+        assertEquals("the new public key must be sent", newPem, sentPem)
+        sending.cancel()
+    }
+
+    /** The Android edges [PivKeyManager] reaches; returns the Keystore it opens. */
+    private fun pivEdges(): KeyStore {
+        val keyStore = mockk<KeyStore>(relaxed = true)
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
+        every { AuditLogger.logKeyCreated(any(), any(), any(), any(), any()) } just runs
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        return keyStore
+    }
+
+    private fun keyPair(publicDer: ByteArray): KeyPair =
+        KeyPair(mockk<PublicKey> { every { encoded } returns publicDer }, mockk<PrivateKey>())
+
     private suspend fun generate(handler: RequestHandler, keyId: String): JSONObject {
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 2).put("method", "local.generateKey")
             .put(
@@ -976,13 +1098,15 @@ class StreamPairingSessionRevocationTest {
      * the share has finished.
      */
     private suspend fun assertRevokedAtAdmissionDuring(
+        keyId: String? = null,
         revoke: suspend (store: SharedKeyStore, resumeShare: suspend () -> Unit) -> Unit
     ) {
         val gate = GatedOutputStream()
         val phone = connectPaired(gate)
         val router = BidirectionalMessageRouter(requestHandler)
         val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) { true }!!
-        val store = SharedKeyStore(phone.desktop.publicKeyHex)
+        val store = keyId?.let { SharedKeyStore(phone.desktop.publicKeyHex, it) }
+            ?: SharedKeyStore(phone.desktop.publicKeyHex)
         val baseline = SharePermissionLedger.baseline(store.keyId)
         val paused = CompletableDeferred<Unit>()
         val resume = CompletableDeferred<Unit>()

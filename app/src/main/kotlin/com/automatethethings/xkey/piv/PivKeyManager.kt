@@ -18,6 +18,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.Signature
@@ -106,8 +107,14 @@ private fun ByteArray?.contentEquals(other: ByteArray?): Boolean {
  * are logged via [AuditLogger] for security auditing.
  *
  * @param pivSlotDao The Room DAO for persisting PIV slot metadata.
+ * @param generateKeyPair Generates the slot's key pair under its Keystore
+ *   alias, replacing any key there; the Android Keystore unless a test
+ *   substitutes it.
  */
-class PivKeyManager(private val pivSlotDao: PivSlotDao) {
+class PivKeyManager(
+    private val pivSlotDao: PivSlotDao,
+    private val generateKeyPair: (alias: String, algorithm: PivAlgorithm) -> KeyPair = ::generateInAndroidKeystore
+) {
 
     private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
@@ -136,37 +143,7 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
     suspend fun generateKey(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
         val alias = slot.keystoreAlias
 
-        // Build key generation parameters based on the algorithm
-        val paramSpec = when (algorithm.keyAlgorithm) {
-            "EC" -> {
-                KeyGenParameterSpec.Builder(
-                    alias,
-                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-                )
-                    .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384)
-                    .setKeySize(algorithm.keySizeBits)
-                    .build()
-            }
-            "RSA" -> {
-                KeyGenParameterSpec.Builder(
-                    alias,
-                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-                )
-                    .setDigests(KeyProperties.DIGEST_SHA256)
-                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
-                    .setKeySize(algorithm.keySizeBits)
-                    .build()
-            }
-            else -> throw IllegalArgumentException("Unsupported key algorithm: ${algorithm.keyAlgorithm}")
-        }
-
-        // Generate the key pair in Android Keystore
-        val keyPairGenerator = KeyPairGenerator.getInstance(
-            algorithm.keyAlgorithm,
-            "AndroidKeyStore"
-        )
-        keyPairGenerator.initialize(paramSpec)
-        val keyPair = keyPairGenerator.generateKeyPair()
+        val keyPair = generateKeyPair(alias, algorithm)
 
         val publicKeyDer = keyPair.public.encoded
         val now = System.currentTimeMillis()
@@ -383,4 +360,48 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
 
         Log.i(TAG, "Deleted key from PIV slot ${slot.hexId} (${slot.label})")
     }
+}
+
+/**
+ * Generates a key pair in Android Keystore under [alias], overwriting any key
+ * there.
+ *
+ * The key is configured with:
+ * - Purpose: SIGN and VERIFY
+ * - Digest: SHA-256 (EC) or SHA-256 (RSA)
+ * - For EC keys: no padding required
+ * - For RSA keys: PKCS1 padding
+ */
+private fun generateInAndroidKeystore(alias: String, algorithm: PivAlgorithm): KeyPair {
+    // Build key generation parameters based on the algorithm
+    val paramSpec = when (algorithm.keyAlgorithm) {
+        "EC" -> {
+            KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+            )
+                .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384)
+                .setKeySize(algorithm.keySizeBits)
+                .build()
+        }
+        "RSA" -> {
+            KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+            )
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+                .setKeySize(algorithm.keySizeBits)
+                .build()
+        }
+        else -> throw IllegalArgumentException("Unsupported key algorithm: ${algorithm.keyAlgorithm}")
+    }
+
+    // Generate the key pair in Android Keystore
+    val keyPairGenerator = KeyPairGenerator.getInstance(
+        algorithm.keyAlgorithm,
+        "AndroidKeyStore"
+    )
+    keyPairGenerator.initialize(paramSpec)
+    return keyPairGenerator.generateKeyPair()
 }

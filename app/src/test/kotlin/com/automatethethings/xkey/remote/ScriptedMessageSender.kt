@@ -103,10 +103,11 @@ class ScriptedMessageSender(
  * pending. [makePrivate] and [removeGrant] are its revoke writers: each
  * commits its change the way the app's writers do.
  */
-class SharedKeyStore(private val peerPublicKeyHex: String) {
-
-    /** A fresh key id per store, so no two tests share one key's history. */
-    val keyId = "pending-" + next.incrementAndGet()
+class SharedKeyStore(
+    private val peerPublicKeyHex: String,
+    /** A fresh key id per store by default, so no two tests share one key's history. */
+    val keyId: String = "pending-" + next.incrementAndGet(),
+) {
 
     @Volatile var entity: KeyEntity? = KeyEntity(
         keyId = keyId,
