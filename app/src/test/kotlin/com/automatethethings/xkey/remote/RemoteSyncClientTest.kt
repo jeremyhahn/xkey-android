@@ -19,6 +19,8 @@ import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.sync.SyncEngine
+import com.automatethethings.xkey.R
+import com.automatethethings.xkey.ui.SyncStatusText
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -38,6 +40,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.time.ZoneOffset
+import java.util.Locale
 
 /**
  * Unit tests for [RemoteSyncClient], the phone-initiated (`remote.sync*`) half
@@ -298,6 +302,51 @@ class RemoteSyncClientTest {
         assertEquals(null, status.lastSync)
         assertEquals("desk-1", status.deviceId)
         assertEquals(emptyMap<String, String>(), status.storeChecksums)
+    }
+
+    @Test
+    fun `syncStatus reads an explicit null last_sync as never and an omitted map as no checksums`() = runTest {
+        sender.succeedWith("""{"last_sync":null,"device_id":"desk-1"}""")
+
+        val status = client.syncStatus()
+
+        assertEquals(null, status.lastSync)
+        assertEquals(emptyMap<String, String>(), status.storeChecksums)
+    }
+
+    @Test
+    fun `syncStatus refuses wrongly typed or missing fields`() = runTest {
+        val malformed = listOf(
+            """{}""",
+            """{"store_checksums":{}}""",
+            """{"device_id":7}""",
+            """{"device_id":null}""",
+            """{"device_id":"desk-1","last_sync":1731400200}""",
+            """{"device_id":"desk-1","last_sync":{}}""",
+            """{"device_id":"desk-1","store_checksums":["ab12"]}""",
+            """{"device_id":"desk-1","store_checksums":"ab12"}""",
+            """{"device_id":"desk-1","store_checksums":{"oath":12}}""",
+            """{"device_id":"desk-1","store_checksums":{"oath":null}}"""
+        )
+        for (reply in malformed) {
+            sender.succeedWith(reply)
+
+            val e = expectProtocolException { client.syncStatus() }
+
+            assertEquals(reply, ErrorCodes.INTERNAL_ERROR, e.errorCode)
+            assertTrue(reply, e.message!!.startsWith("Malformed remote.syncStatus reply"))
+        }
+    }
+
+    @Test
+    fun `an unreadable status reply shows the desktop's status as unavailable`() = runTest {
+        sender.succeedWith("""{"device_id":"desk-1","store_checksums":["ab12"]}""")
+
+        val line = SyncStatusText.desktopLine(
+            SyncStatusText.fetch { client.syncStatus() }, ZoneOffset.UTC, Locale.US
+        )
+
+        assertEquals(R.string.sync_desktop_status_unavailable, line.message)
     }
 
     @Test

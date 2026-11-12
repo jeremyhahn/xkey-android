@@ -126,19 +126,38 @@ class RemoteSyncClient(
      * Asks the desktop for its sync status (`remote.syncStatus`, empty
      * params). Reads nothing from and writes nothing to the phone's stores.
      * A missing `last_sync` (omitempty) is null; a `null` `store_checksums`
-     * (a nil Go map) is empty.
+     * (a nil Go map) is empty. A missing `device_id`, or any field of the
+     * wrong type, throws [ProtocolException].
      */
     suspend fun syncStatus(): DesktopSyncStatus {
-        val result = sendRequest(MethodNames.REMOTE_SYNC_STATUS, JSONObject()).result ?: JSONObject()
-        val checksums = result.optJSONObject("store_checksums")
-        return DesktopSyncStatus(
-            lastSync = result.optString("last_sync", "").ifEmpty { null },
-            deviceId = result.optString("device_id", ""),
-            storeChecksums = checksums?.keys()?.asSequence()
-                ?.associateWith { checksums.optString(it, "") }
-                ?: emptyMap()
-        )
+        val result = sendRequest(MethodNames.REMOTE_SYNC_STATUS, JSONObject()).result
+            ?: throw malformedStatus("no result")
+        return decodeStatus(result)
     }
+
+    private fun decodeStatus(result: JSONObject): DesktopSyncStatus {
+        val deviceId = result.opt("device_id") as? String
+            ?: throw malformedStatus("device_id is not a string")
+        val lastSync = when (val v = result.opt("last_sync")) {
+            null, JSONObject.NULL -> null
+            is String -> v.ifEmpty { null }
+            else -> throw malformedStatus("last_sync is not a string")
+        }
+        val checksums = when (val v = result.opt("store_checksums")) {
+            null, JSONObject.NULL -> emptyMap()
+            is JSONObject -> v.keys().asSequence().associateWith { store ->
+                v.opt(store) as? String
+                    ?: throw malformedStatus("store_checksums[$store] is not a string")
+            }
+            else -> throw malformedStatus("store_checksums is not an object")
+        }
+        return DesktopSyncStatus(lastSync = lastSync, deviceId = deviceId, storeChecksums = checksums)
+    }
+
+    private fun malformedStatus(why: String) = ProtocolException(
+        "Malformed ${MethodNames.REMOTE_SYNC_STATUS} reply: $why",
+        errorCode = ErrorCodes.INTERNAL_ERROR
+    )
 
     /**
      * How many of the offered items the desktop actually took, from the
