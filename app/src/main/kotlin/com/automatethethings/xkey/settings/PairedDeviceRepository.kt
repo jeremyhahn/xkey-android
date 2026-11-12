@@ -25,8 +25,11 @@ import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.util.getStringOrNull
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArraySet
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -458,11 +461,26 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * Called once [publicKeyHex]'s sharing grants are deleted for [generation].
      * A no-op, returning false, when that generation is no longer the pending
      * one: the revocation already completed, or a later removal replaced it.
+     *
+     * Durable before visible: the entry is cleared with commit(), under
+     * [storeLock], which every reader of the pending set takes. So no grant
+     * writer sees the revocation as done before the acknowledgment is on
+     * disk, and a crash cannot leave a pending entry that the next start's
+     * replay would use to delete a grant approved after completion.
+     *
+     * @throws IOException if the write did not reach disk; the entry is put
+     *   back and stays pending.
      */
     fun completeRevocation(publicKeyHex: String, generation: Long): Boolean = synchronized(storeLock) {
         val pending = readPending()
         if (pending[publicKeyHex] != generation) return@synchronized false
-        prefs.edit().putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending - publicKeyHex)).apply()
+        val written = prefs.edit()
+            .putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending - publicKeyHex))
+            .commit()
+        if (!written) {
+            prefs.edit().putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending)).apply()
+            throw IOException("Acknowledging a grant revocation did not reach disk")
+        }
         true
     }
 
@@ -611,8 +629,18 @@ class PairedDeviceGrantCleanup(
     private val scope: CoroutineScope
 ) : PairedDeviceRemovalListener {
 
-    /** Peer key to the token of its one in-flight job. Guarded by itself. */
-    private val inFlight = HashMap<String, Any>()
+    /**
+     * One peer's job. [requested] and [wake] record a request that arrived
+     * while the job ran, so a failure does not lose it.
+     */
+    private class Job {
+        /** Guarded by [inFlight]. */
+        var requested = false
+        val wake = Channel<Unit>(Channel.CONFLATED)
+    }
+
+    /** Peer key to its one in-flight job. Guarded by itself. */
+    private val inFlight = HashMap<String, Job>()
 
     override fun onDeviceRemoved(publicKeyHex: String) = revoke(publicKeyHex)
 
@@ -632,22 +660,27 @@ class PairedDeviceGrantCleanup(
     }
 
     /**
-     * At most one job per peer: a request while one runs is folded into it,
-     * since the job rereads the pending generation before it ends.
+     * At most one job per peer. A request while one runs is recorded on it:
+     * the job rereads the pending generation before it ends, and a job that
+     * failed and is backing off retries at once.
      */
     private fun revoke(publicKeyHex: String) {
-        val token = Any()
+        val job = Job()
         synchronized(inFlight) {
-            if (publicKeyHex in inFlight) return
-            inFlight[publicKeyHex] = token
+            inFlight[publicKeyHex]?.let { running ->
+                running.requested = true
+                running.wake.trySend(Unit)
+                return
+            }
+            inFlight[publicKeyHex] = job
         }
-        scope.launch { drain(publicKeyHex, token) }
-            .invokeOnCompletion { release(publicKeyHex, token) }
+        scope.launch { drain(publicKeyHex, job) }
+            .invokeOnCompletion { release(publicKeyHex, job) }
     }
 
-    private fun release(publicKeyHex: String, token: Any) {
+    private fun release(publicKeyHex: String, job: Job) {
         synchronized(inFlight) {
-            if (inFlight[publicKeyHex] === token) inFlight.remove(publicKeyHex)
+            if (inFlight[publicKeyHex] === job) inFlight.remove(publicKeyHex)
         }
     }
 
@@ -655,16 +688,25 @@ class PairedDeviceGrantCleanup(
      * Deletes the peer's grants for the pending generation and acknowledges
      * that generation only. With nothing pending the job is a no-op, so a
      * stale or duplicate job never deletes grants approved after the
-     * revocation completed. A failure leaves the entry pending.
+     * revocation completed.
+     *
+     * A failure leaves the entry pending and retries after a backoff that
+     * doubles from [BASE_BACKOFF_MS] up to [MAX_BACKOFF_MS]. After
+     * [MAX_FAILURES] failures in a row the job ends; the entry is retried at
+     * the next start or re-pairing. A request that arrived since the last
+     * attempt cuts the backoff short and resets the count.
      */
-    private suspend fun drain(publicKeyHex: String, token: Any) {
+    private suspend fun drain(publicKeyHex: String, job: Job) {
+        var failures = 0
         while (true) {
             val generation = try {
                 // The read and the release are one step, so a removal that
                 // lands after the read always finds no job and starts one.
                 synchronized(inFlight) {
+                    job.requested = false
+                    job.wake.tryReceive()
                     repository().pendingRevocationGeneration(publicKeyHex).also {
-                        if (it == null) release(publicKeyHex, token)
+                        if (it == null) release(publicKeyHex, job)
                     }
                 }
             } catch (e: Exception) {
@@ -674,19 +716,28 @@ class PairedDeviceGrantCleanup(
             try {
                 val dropped = policyDao().clearPoliciesForPeer(publicKeyHex)
                 repository().completeRevocation(publicKeyHex, generation)
+                failures = 0
                 if (dropped > 0) {
                     AuditLogger.logPeerGrantsDropped(deviceId = publicKeyHex, droppedGrants = dropped)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                // Left pending: retried at the next start or re-pairing.
                 Log.e(TAG, "Dropping sharing grants for a removed device failed", e)
-                return
+                val requested = synchronized(inFlight) { job.requested }
+                failures = if (requested) 1 else failures + 1
+                if (failures > MAX_FAILURES) return
+                val backoff = (BASE_BACKOFF_MS shl (failures - 1)).coerceAtMost(MAX_BACKOFF_MS)
+                if (!requested) withTimeoutOrNull(backoff) { job.wake.receive() }
             }
         }
     }
 
     private companion object {
         const val TAG = "PairedDeviceGrantCleanup"
+        const val BASE_BACKOFF_MS = 1_000L
+        const val MAX_BACKOFF_MS = 60_000L
+        const val MAX_FAILURES = 8
     }
 }
 

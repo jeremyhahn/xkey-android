@@ -245,7 +245,8 @@ class PairedDeviceGrantCleanupTest {
         }
         heldCleanup(repo)
         repo.removeDevice(PEER_A)
-        scheduler.advanceUntilIdle()
+        // The delete fails; the process dies before the backoff ends.
+        scheduler.runCurrent()
         assertEquals(2, grantsOf(PEER_A).size)
         assertTrue(PEER_A in repo.pendingRevocations())
 
@@ -297,7 +298,8 @@ class PairedDeviceGrantCleanupTest {
         }
         heldCleanup(repo)
         repo.removeDevice(PEER_A)
-        scheduler.advanceUntilIdle()
+        // The delete fails; the re-pairing comes before the backoff ends.
+        scheduler.runCurrent()
         assertTrue(PEER_A in repo.pendingRevocations())
 
         repo.addDevice(PEER_A, "desktop-a")
