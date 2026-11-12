@@ -294,4 +294,32 @@ class KeySharingPeersTest {
         assertEquals(listOf("grant-io", "grant-io"), synchronized(commits) { commits.toList() })
         assertTrue(hasAccess(PEER_A))
     }
+
+    @Test
+    fun aWithdrawalAfterAHeldGrantLeavesThePeerWithoutAccess() = runTest {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_B))
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            gate.await()
+            val row = firstArg<KeySharingPolicy>()
+            table.value = table.value.filterNot {
+                it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
+            } + row
+        }
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler))
+
+        // The user checks A; the grant is held before its insert.
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true) }
+        assertFalse(grant.isCompleted)
+
+        // The user unchecks A; the withdrawal gets as far as it can.
+        val withdrawal = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, false) }
+
+        // The grant lands, then the withdrawal: the last action wins.
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        assertTrue(withdrawal.await())
+        assertFalse("an earlier grant overwrote a later withdrawal", hasAccess(PEER_A))
+        assertFalse(table.value.any { it.peerPublicKeyHex == PEER_A })
+    }
 }
