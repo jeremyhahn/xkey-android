@@ -30,6 +30,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.ui.CryptoSigningActivity
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -638,6 +639,10 @@ internal class PendingAuthentications(
                         "Another approval prompt held the screen past this request's deadline"
                     )
                 }
+            // Still queued means not cancelled: cancelAll removes a request
+            // from queued even once its turn has completed, so one cancelled
+            // between its turn and this resume is withdrawn unlaunched.
+            if (queued[id] !== turnCame) throw CancellationException("Withdrawn as its turn came")
             return coroutineScope {
                 // Its own clock, started with the launch: no notification or
                 // other callback has to exist for an unseen request to let go.
@@ -648,9 +653,15 @@ internal class PendingAuthentications(
                 }
                 try {
                     suspendCancellableCoroutine { continuation ->
+                        // In pending before it leaves queued: cancelAll, which
+                        // empties queued before pending, finds it in one.
                         pending[id] = continuation
-                        queued.remove(id, turnCame)
                         continuation.invokeOnCancellation { pending.remove(id, continuation) }
+                        if (!queued.remove(id, turnCame)) {
+                            pending.remove(id, continuation)
+                            continuation.cancel()
+                            return@suspendCancellableCoroutine
+                        }
                         try {
                             launch(id.toString())
                         } catch (e: Exception) {
@@ -720,7 +731,12 @@ internal class PendingAuthentications(
         return true
     }
 
-    /** Cancels every waiting request, those still waiting for their turn first. */
+    /**
+     * Cancels every waiting request, those still waiting for their turn
+     * first. A request stays in queued from enqueue until it is in pending,
+     * past its turn coming, so one whose turn came but whose caller has not
+     * resumed is cancelled here too, and never launches.
+     */
     fun cancelAll() {
         for (id in queued.keys.toList()) {
             queued.remove(id)?.cancel()

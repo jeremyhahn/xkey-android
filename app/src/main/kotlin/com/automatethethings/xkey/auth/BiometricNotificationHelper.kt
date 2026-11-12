@@ -18,6 +18,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -66,6 +67,14 @@ class BiometricNotificationHelper(private val context: Context) {
         private const val TAG = "BiometricNotifyHelper"
         private const val NOTIFICATION_ID = 2001
         private const val DEFAULT_TIMEOUT_MS = 30_000L
+        private const val INTENT_SCHEME = "xkey-notification"
+
+        /**
+         * The data a notification's full-screen intent for [key] carries, so
+         * each key has a pending intent of its own. The prompt activities are
+         * started by component and read nothing from it.
+         */
+        internal fun intentData(key: String): Uri = Uri.Builder().scheme(INTENT_SCHEME).opaquePart(key).build()
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -122,6 +131,10 @@ class BiometricNotificationHelper(private val context: Context) {
             putExtra(TransparentBiometricActivity.EXTRA_SUBTITLE, rpName ?: operationType)
             putExtra(TransparentBiometricActivity.EXTRA_SHOW_ON_LOCK_SCREEN, true)
         }
+        // The key, whole, in the intent's data: extras do not tell two pending
+        // intents apart, and two keys' hashCode() can be equal, so without it
+        // posting one request would rewrite another's pending intent.
+        fullScreenIntent.data = intentData(requestId)
 
         val fullScreenPendingIntent = PendingIntent.getActivity(
             context,
