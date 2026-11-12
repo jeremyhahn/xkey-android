@@ -14,15 +14,18 @@
  */
 package com.automatethethings.xkey.ui
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -237,5 +240,175 @@ class FileOperationStagingTest {
         assertEquals("delivery should complete, got $failure", null, failure)
         assertEquals("signed", target.readText())
         assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    /** An output stream that records its close and, when [failWrite], fails every write. */
+    private class TrackedOutput(private val failWrite: Boolean) : ByteArrayOutputStream() {
+        var closed = false
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (failWrite) throw IOException("disk full")
+            super.write(b, off, len)
+        }
+
+        override fun write(b: Int) {
+            if (failWrite) throw IOException("disk full")
+            super.write(b)
+        }
+
+        override fun close() {
+            closed = true
+            super.close()
+        }
+    }
+
+    @Test
+    fun `deliverTo deletes the staged file when opening the destination throws`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.pdf")
+
+        val thrown = assertThrows(SecurityException::class.java) {
+            staging.deliverTo(file) { throw SecurityException("no grant") }
+        }
+
+        assertEquals("no grant", thrown.message)
+        assertFalse(file.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `deliverTo deletes the staged file when the destination opens as null`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.pdf")
+
+        assertThrows(IllegalStateException::class.java) {
+            staging.deliverTo(file) { null }
+        }
+
+        assertFalse(file.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `deliverTo closes the destination and deletes the staged file when the write fails`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.pdf")
+        val target = TrackedOutput(failWrite = true)
+
+        val thrown = assertThrows(IOException::class.java) {
+            staging.deliverTo(file) { target }
+        }
+
+        assertEquals("disk full", thrown.message)
+        assertTrue(target.closed)
+        assertFalse(file.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `deliverTo closes the destination after a successful copy`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.pdf")
+        val target = TrackedOutput(failWrite = false)
+
+        staging.deliverTo(file) { target }
+
+        assertTrue(target.closed)
+        assertArrayEquals(byteArrayOf(1, 2, 3), target.toByteArray())
+        assertFalse(file.exists())
+    }
+
+    /** One handoff as performDecrypt / performEncrypt run it: stage, [prepare], then the picker [launch]. */
+    private fun handOff(
+        staging: FileOperationStaging,
+        pending: PendingStagedSave,
+        displayName: String,
+        prepare: () -> Unit = {},
+        launch: () -> Unit = {}
+    ) = runBlocking {
+        stageForSave(
+            staging,
+            displayName,
+            write = { it.writeBytes(byteArrayOf(4, 5, 6)) },
+            prepare = prepare,
+            handOff = { pending.handOff(it, launch) }
+        )
+    }
+
+    private fun assertHandOffFailureLeavesNothing(displayName: String, prepare: () -> Unit, launch: () -> Unit) {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+
+        repeat(3) {
+            assertThrows(RuntimeException::class.java) {
+                handOff(staging, pending, displayName, prepare, launch)
+            }
+            assertEquals(null, pending.file)
+            assertTrue(staging.directory.list().isNullOrEmpty())
+        }
+    }
+
+    @Test
+    fun `decrypt handoff releases the staged plaintext when recordUsage throws`() {
+        assertHandOffFailureLeavesNothing(
+            "report.pdf",
+            prepare = { throw IllegalStateException("database or disk is full") },
+            launch = { fail("the picker must not open") }
+        )
+    }
+
+    @Test
+    fun `decrypt handoff releases the staged plaintext when the picker launch throws`() {
+        assertHandOffFailureLeavesNothing(
+            "report.pdf",
+            prepare = {},
+            launch = { throw IllegalStateException("no activity handles CREATE_DOCUMENT") }
+        )
+    }
+
+    @Test
+    fun `encrypt handoff releases the staged output when its prepare step throws`() {
+        assertHandOffFailureLeavesNothing(
+            "report.pdf.xkeyenc",
+            prepare = { throw IllegalStateException("audit log write failed") },
+            launch = { fail("the picker must not open") }
+        )
+    }
+
+    @Test
+    fun `encrypt handoff releases the staged output when the picker launch throws`() {
+        assertHandOffFailureLeavesNothing(
+            "report.pdf.xkeyenc",
+            prepare = {},
+            launch = { throw IllegalStateException("no activity handles CREATE_DOCUMENT") }
+        )
+    }
+
+    @Test
+    fun `a failed handoff after a successful one keeps nothing but the earlier pending file released`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf")
+        val first = pending.file!!
+        assertTrue(first.exists())
+
+        assertThrows(IllegalStateException::class.java) {
+            handOff(staging, pending, "report.pdf", launch = { throw IllegalStateException("launch failed") })
+        }
+
+        assertEquals(null, pending.file)
+        assertFalse(first.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a successful handoff keeps the staged file pending for the save callback`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf")
+
+        val file = pending.take()!!
+        assertArrayEquals(byteArrayOf(4, 5, 6), file.readBytes())
+        assertEquals(null, pending.file)
     }
 }

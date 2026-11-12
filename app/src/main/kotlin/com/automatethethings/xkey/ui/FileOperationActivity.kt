@@ -1383,3 +1383,39 @@ class FileOperationActivity : AppCompatActivity() {
         return data
     }
 }
+
+/** The staged file one save picker is open for. */
+internal class PendingStagedSave(private val staging: FileOperationStaging) {
+
+    @Volatile
+    var file: File? = null
+        private set
+
+    /** Make [staged] the pending file, releasing the one it replaces, and run [launch] (the picker). */
+    fun handOff(staged: File, launch: () -> Unit) {
+        file?.takeIf { it != staged }?.let { staging.release(it) }
+        file = staged
+        launch()
+    }
+
+    /** Take the pending file for the save callback, leaving nothing pending. */
+    fun take(): File? = file.also { file = null }
+
+    /** The user cancelled the picker: delete the pending file. */
+    fun cancel() {
+        take()?.let { staging.release(it) }
+    }
+}
+
+/** Stage [write]'s output, run [prepare] (usage record, audit), then [handOff] it to a save picker. */
+internal suspend fun stageForSave(
+    staging: FileOperationStaging,
+    displayName: String?,
+    write: (File) -> Unit,
+    prepare: () -> Unit,
+    handOff: suspend (File) -> Unit
+) {
+    val file = staging.stage(displayName, write)
+    prepare()
+    handOff(file)
+}
