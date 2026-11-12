@@ -102,6 +102,13 @@ sequenceDiagram
   `PairingConfirmationCallback`, fails `connect` with a `BleClientException`
   and disconnects; the desktop's requests on that session are never served or
   answered, `sendRequest` refuses, and the re-attest flow records nothing.
+- The SAS prompt runs under the connection's own job and outside
+  `stateMutex`: the link dropping, `disconnect()` or `destroy()` ends a prompt
+  that is still open, without waiting for the user, and `connect` returns
+  false. An Allow is honoured only if its connection is still the client's
+  (checked under `stateMutex`); one that lands after the session ended trusts
+  nothing. If the caller of `connect` is cancelled, the prompt is ended and
+  the session disconnected.
 
 ## Tests
 

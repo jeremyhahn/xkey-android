@@ -48,7 +48,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -412,7 +415,7 @@ class BleClient(
         Log.i(TAG, "Connecting to ${device.name ?: "Unknown"} ($address)")
         _connectionState.value = ClientConnectionState.Connecting(address)
 
-        return stateMutex.withLock {
+        val established = stateMutex.withLock {
             try {
                 // Connect to GATT server
                 connectGatt(device)
@@ -432,21 +435,44 @@ class BleClient(
                 // Perform Noise handshake
                 performHandshake(expectedRemoteKey)
 
-                val deviceName = device.name ?: "Unknown"
-
-                // Trusted only once the user confirms the SAS (#137).
-                confirmShortAuthString(deviceName)
-
-                _connectionState.value = ClientConnectionState.Connected(deviceName, address)
-                Log.i(TAG, "Connected and handshake complete with $deviceName ($address)")
-
-                true
+                connection ?: throw BleClientException("Noise session not initialized")
             } catch (e: Exception) {
                 Log.e(TAG, "Connection failed", e)
                 disconnectInternal()
                 _connectionState.value = ClientConnectionState.Disconnected
                 throw BleClientException("Connection failed: ${e.message}", e)
             }
+        }
+
+        // Trusted only once the user confirms the SAS (#137). Outside
+        // stateMutex: a disconnect or destroy() must not wait for the user.
+        val deviceName = device.name ?: "Unknown"
+        val trusted = try {
+            confirmShortAuthString(established, deviceName, address)
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { abandon(established) }
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Connection failed", e)
+            abandon(established)
+            throw BleClientException("Connection failed: ${e.message}", e)
+        }
+        if (!trusted) {
+            Log.w(TAG, "The session ended before its SAS was confirmed")
+            abandon(established)
+        }
+        return trusted
+    }
+
+    /**
+     * Ends [established] if it is still the connection; one a disconnect has
+     * already replaced is left to that disconnect, so a newer one is never
+     * torn down here.
+     */
+    private suspend fun abandon(established: Connection) {
+        stateMutex.withLock {
+            if (connection === established) disconnectInternal()
+            if (connection == null) _connectionState.value = ClientConnectionState.Disconnected
         }
     }
 
@@ -504,6 +530,8 @@ class BleClient(
      */
     @SuppressLint("MissingPermission")
     fun disconnect() {
+        // Before the teardown takes stateMutex: the user's answer is moot.
+        connection?.prompt?.cancel()
         scope.launch {
             stateMutex.withLock {
                 disconnectInternal()
@@ -550,6 +578,7 @@ class BleClient(
         mtuDeferred = null
         notificationEnabledDeferred?.completeExceptionally(cause)
         notificationEnabledDeferred = null
+        connection?.prompt?.cancel()
         failWrite(connection?.pendingWrite?.getAndSet(null), "BleClient destroyed")
 
         withContext(NonCancellable) {
@@ -884,15 +913,25 @@ class BleClient(
     }
 
     /**
-     * Shows the user this session's SAS and waits for the answer. Nothing on
-     * the wire: the code comes from the session binding the handshake left,
-     * which the desktop derives too. Until the answer, the desktop's requests
-     * wait in [dispatchInboundRequest]; a no (or no one to ask) refuses the
-     * session, and [connect]'s failure path disconnects it.
+     * Shows the user [current]'s SAS and waits for the answer; true once the
+     * session is trusted. Nothing on the wire: the code comes from the
+     * session binding the handshake left, which the desktop derives too.
+     * Until the answer, the desktop's requests wait in
+     * [dispatchInboundRequest]; a no (or no one to ask) throws, and
+     * [connect]'s failure path disconnects the session.
+     *
+     * The prompt runs under the connection's own job, so whatever ends the
+     * connection (the link dropping, [disconnect], [destroy]) ends the
+     * prompt too, and nothing here holds [stateMutex] while the user looks.
+     * An answer that arrives once the connection has ended, or one given to
+     * a connection that is no longer the client's, trusts nothing: false.
      */
-    private suspend fun confirmShortAuthString(deviceName: String) {
-        val current = connection ?: throw BleClientException("Noise session not initialized")
-        val confirmed = try {
+    private suspend fun confirmShortAuthString(
+        current: Connection,
+        deviceName: String,
+        address: String
+    ): Boolean {
+        val prompt = CoroutineScope(current.requests).async {
             val binding = current.session.sessionBinding()
                 ?: throw BleClientException("No session binding to derive the SAS from")
             val sas = shortAuthStringFor(binding)
@@ -904,17 +943,45 @@ class BleClient(
             } else {
                 callback.onPairingConfirmationRequired(deviceName, peerKeyHex.take(16), sas)
             }
+        }
+        current.prompt = prompt
+
+        val confirmed = try {
+            prompt.await()
+        } catch (e: CancellationException) {
+            current.sasConfirmed.complete(false)
+            if (!currentCoroutineContext().isActive) {
+                // The caller gave up, not the connection: end the prompt too.
+                prompt.cancel()
+                throw e
+            }
+            Log.w(TAG, "The session ended while its SAS was shown")
+            return false
         } catch (e: Throwable) {
             current.sasConfirmed.complete(false)
             throw e
         }
 
-        current.trusted = confirmed
-        current.sasConfirmed.complete(confirmed)
         if (!confirmed) {
+            current.sasConfirmed.complete(false)
             throw BleClientException("Short authentication string not confirmed")
         }
-        Log.i(TAG, "SAS confirmed by the user")
+
+        // Trusted only if it is still the connection: under stateMutex, so a
+        // teardown either ran before (and this sees it) or runs after.
+        return stateMutex.withLock {
+            if (connection !== current || !current.requests.isActive) {
+                current.sasConfirmed.complete(false)
+                Log.w(TAG, "SAS confirmed for a session that has ended; not trusted")
+                false
+            } else {
+                current.trusted = true
+                current.sasConfirmed.complete(true)
+                _connectionState.value = ClientConnectionState.Connected(deviceName, address)
+                Log.i(TAG, "SAS confirmed; connected and trusted with $deviceName ($address)")
+                true
+            }
+        }
     }
 
     /** Fragments [message] and writes it on [target], one fragment at a time. */
@@ -1562,6 +1629,13 @@ class BleClient(
         /** Whether the user confirmed this session's SAS; nothing is sent before. */
         @Volatile
         var trusted = false
+
+        /**
+         * The SAS prompt shown for this session while it is pending; it runs
+         * under [requests], so ending the connection ends it.
+         */
+        @Volatile
+        var prompt: Job? = null
     }
 
     /** What the stack delivered on a [Connection], in the order it did. */
