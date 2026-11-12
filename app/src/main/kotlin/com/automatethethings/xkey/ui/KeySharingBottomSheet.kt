@@ -735,6 +735,16 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 desktopSendButton.visibility =
                     if (decision == DesktopShareDecision.PUBLIC_KEY) View.VISIBLE else View.GONE
                 desktopStatusText.text = getString(desktopStatusFor(decision))
+            },
+            // The key could not be read (e.g. deleted between the store's
+            // existence check and its read): nothing can be sent, but the
+            // sheet and its policy controls stay usable.
+            failed = failed@{ e ->
+                if (!isAdded || !::desktopContainer.isInitialized) return@failed
+                desktopContainer.visibility = View.VISIBLE
+                desktopSendButton.visibility = View.GONE
+                desktopStatusText.text =
+                    getString(R.string.sharing_desktop_load_failed, e.message ?: e.javaClass.simpleName)
             }
         )
     }

@@ -8,6 +8,7 @@
     <string name="sharing_desktop_sent">The desktop imported the public key as %1$s.</string>
     <string name="sharing_desktop_declined">The desktop declined the key and did not import it.</string>
     <string name="sharing_desktop_failed">The desktop did not import the key: %1$s</string>
+    <string name="sharing_desktop_load_failed">This key could not be read, so it cannot be sent: %1$s</string>
     <string name="sharing_desktop_no_peer">The connected desktop has no confirmed pairing identity, so no key can be sent to it.</string>
     <string name="sharing_desktop_policy_denied">This key\'s sharing policy does not include the connected desktop.</string>
     <string name="sharing_desktop_no_public_key">This key has no public key to send.</string>

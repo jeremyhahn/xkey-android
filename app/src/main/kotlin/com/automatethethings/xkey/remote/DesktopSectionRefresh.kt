@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.remote
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -28,6 +29,10 @@ import kotlinx.coroutines.launch
  * session that replaced it. A disconnect or a session change that overtakes a
  * refresh suspended in its decision therefore always wins.
  *
+ * A decision that fails (the key cannot be loaded, for one) is passed to
+ * [failed] under the same rule instead of escaping the refresh's scope;
+ * cancellation is never reported.
+ *
  * Call [refresh] and [cancel] on [scope]'s thread (the main thread for the
  * sheet).
  *
@@ -35,12 +40,14 @@ import kotlinx.coroutines.launch
  *   when the section must be hidden
  * @param decide what the gate allows on that session
  * @param show applies a decision; null hides the section
+ * @param failed reports a decision that failed; nothing may be sent
  */
 class DesktopSectionRefresh(
     private val scope: CoroutineScope,
     private val currentSession: () -> ShareSession?,
     private val decide: suspend (ShareSession) -> DesktopShareDecision,
-    private val show: (DesktopShareDecision?) -> Unit
+    private val show: (DesktopShareDecision?) -> Unit,
+    private val failed: (Exception) -> Unit
 ) {
     private var running: Job? = null
 
@@ -53,13 +60,19 @@ class DesktopSectionRefresh(
             return
         }
         running = scope.launch {
-            val decision = decide(session)
+            val decision = try {
+                Result.success(decide(session))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
             if (!isActive) return@launch
             if (!session.sameAs(currentSession())) {
                 refresh()
                 return@launch
             }
-            show(decision)
+            decision.fold(onSuccess = { show(it) }, onFailure = { failed(it as Exception) })
         }
     }
 
