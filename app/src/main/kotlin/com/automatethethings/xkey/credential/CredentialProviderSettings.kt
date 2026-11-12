@@ -185,13 +185,17 @@ class CredentialProviderSettingsRepository(
 class CredentialProviderEnableGate(
     private val isEnabled: suspend () -> Boolean
 ) {
+    /** The create handler's answer while the switch is on; no create entries while it is off. */
     suspend fun beginCreate(
         request: BeginCreateCredentialRequest,
         handle: suspend (BeginCreateCredentialRequest) -> BeginCreateCredentialResponse
-    ): BeginCreateCredentialResponse = handle(request)
+    ): BeginCreateCredentialResponse =
+        if (isEnabled()) handle(request) else BeginCreateCredentialResponse()
 
+    /** The get handler's answer while the switch is on; no credential entries while it is off. */
     suspend fun beginGet(
         request: BeginGetCredentialRequest,
         handle: suspend (BeginGetCredentialRequest) -> BeginGetCredentialResponse
-    ): BeginGetCredentialResponse = handle(request)
+    ): BeginGetCredentialResponse =
+        if (isEnabled()) handle(request) else BeginGetCredentialResponse()
 }
