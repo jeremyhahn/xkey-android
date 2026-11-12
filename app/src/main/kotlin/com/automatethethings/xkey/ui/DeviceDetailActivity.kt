@@ -41,11 +41,13 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.snackbar.Snackbar
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.BleClient
 import com.automatethethings.xkey.ble.NoiseSession
+import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.AttestationHelper
 import com.automatethethings.xkey.ble.XKeyGattService
 import com.automatethethings.xkey.ca.EnrolledDeviceRepository
@@ -58,6 +60,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1395,7 +1400,8 @@ class DeviceDetailActivity : AppCompatActivity() {
                 // completes and drops a session that cannot answer it.
                 val client = BleClient(
                     this@DeviceDetailActivity,
-                    gattService?.phoneInitiatedRequestHandler()
+                    gattService?.phoneInitiatedRequestHandler(),
+                    sasConfirmation()
                 )
                 val connected = client.connect(
                     address = bleAddress,
@@ -1460,6 +1466,42 @@ class DeviceDetailActivity : AppCompatActivity() {
                 ).show()
                 gattService?.let { ensureAdvertisingAndShowInstructions(it) }
                     ?: showReattestInstructions()
+            }
+        }
+    }
+
+    /**
+     * Asks the user to compare this session's SAS with the code the desktop
+     * shows, in the same dialog the sessions the phone accepts use. The session
+     * is trusted, and the attestation recorded, only on Allow (#137).
+     */
+    private fun sasConfirmation(): PairingConfirmationCallback = object : PairingConfirmationCallback {
+        override suspend fun onPairingConfirmationRequired(
+            deviceName: String,
+            publicKeyFingerprint: String
+        ): Boolean = false
+
+        override suspend fun onPairingConfirmationRequired(
+            deviceName: String,
+            publicKeyFingerprint: String,
+            shortAuthString: String
+        ): Boolean = withContext(Dispatchers.Main) {
+            if (isFinishing || isDestroyed) return@withContext false
+            suspendCancellableCoroutine { continuation ->
+                val dialog = MaterialAlertDialogBuilder(this@DeviceDetailActivity)
+                    .setTitle(getString(R.string.pairing_dialog_title))
+                    .setMessage(
+                        getString(R.string.pairing_dialog_message_sas, deviceName, publicKeyFingerprint, shortAuthString)
+                    )
+                    .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ ->
+                        if (continuation.isActive) continuation.resume(true)
+                    }
+                    .setNegativeButton(getString(R.string.pairing_dialog_deny)) { _, _ ->
+                        if (continuation.isActive) continuation.resume(false)
+                    }
+                    .setCancelable(false)
+                    .show()
+                continuation.invokeOnCancellation { dialog.dismiss() }
             }
         }
     }
