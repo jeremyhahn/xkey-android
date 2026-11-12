@@ -247,3 +247,20 @@ sequenceDiagram
     User->>SAF: Confirm save
     FOA-->>User: "File decrypted successfully"
 ```
+
+## Verify a File
+
+Verify reads an embedded (in-band) signature block, or asks for a
+`.xkeysig` sidecar when there is none. Each signer's result comes from
+`SignerVerification.verify` (in `media/`), the rule the verified-media viewer
+shares:
+
+1. The stored content hash must match the file first: the canonical hash for
+   an in-band block, the canonical or whole-file hash for a sidecar
+   (`MediaHasher.contentHashMatchesUri`). On a mismatch every signer fails,
+   so a signature block copied onto another file never verifies.
+2. The signature is checked against a public key we hold: the contact's, or
+   the local key whose public key hashes to the entry's fingerprint.
+3. No such public key means the signer is unknown, never verified. A local
+   key row without public key material never matches by keyId: the
+   fingerprint comes from the file being checked.
