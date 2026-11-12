@@ -25,7 +25,13 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
+import java.util.Collections
+import java.util.concurrent.CyclicBarrier
+import kotlin.concurrent.thread
 
 /**
  * Unit tests for the file-type routing and the failure branches of
@@ -410,8 +416,193 @@ class XmpMetadataHelperSidecarBranchTest {
             openOutput = { File(path).outputStream() },
             format = XmpContainers.formatOf(mime)!!,
             data = data,
-            workDir = work
+            workDir = work,
+            destination = path
         )
+
+    /** Writes the first [failAfter] bytes and then throws, or throws on close when [failAfter] is null. */
+    private class FailingOutput(private val failAfter: Int?) : OutputStream() {
+        private var written = 0
+        override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (failAfter != null && written + len > failAfter) throw IOException("storage full")
+            written += len
+        }
+        override fun close() {
+            if (failAfter == null) throw IOException("provider disconnected")
+        }
+    }
+
+    @Test
+    fun `a signed copy whose output fails leaves the original and keeps the working copy`() {
+        for ((name, mime) in embeddedNames) {
+            val path = fixtureFile("publish-$name", mime)
+            XmpMetadataHelper.writeSignature(path, sampleData(hash = "f".repeat(64)))
+            val original = File(path).readBytes()
+            val format = XmpContainers.formatOf(mime)!!
+            val second = secondSigner("f".repeat(64))
+
+            for (failAfter in listOf(16, null)) {
+                val work = tempFolder.newFolder("publish-work-$name-$failAfter")
+                val thrown = assertThrows(name, IOException::class.java) {
+                    XmpMetadataHelper.replaceEmbeddedSignature(
+                        open = { File(path).inputStream() },
+                        openOutput = { FailingOutput(failAfter) },
+                        format = format,
+                        data = second,
+                        workDir = work,
+                        destination = "content://media/external/file/$name"
+                    )
+                }
+
+                assertArrayEquals(name, original, File(path).readBytes())
+                val kept = work.listFiles()!!.single()
+                assertTrue(name, thrown.message!!.contains(kept.path))
+                assertEquals(name, second.toJsonString(), kept.inputStream().use { XmpContainers.read(it, format) })
+            }
+        }
+    }
+
+    /** Writes each chunk in two halves with a pause between, widening any overlap. */
+    private class SlowOutput(private val out: OutputStream) : OutputStream() {
+        override fun write(b: Int) = out.write(b)
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            val half = len / 2
+            out.write(b, off, half)
+            out.flush()
+            Thread.sleep(150)
+            out.write(b, off + half, len - half)
+        }
+        override fun close() = out.close()
+    }
+
+    @Test
+    fun `overlapping replacements of one destination end as one complete verifiable file`() {
+        for ((name, mime) in embeddedNames) {
+            val source = fixtureFile("race-$name", mime)
+            XmpMetadataHelper.writeSignature(source, sampleData(hash = "f".repeat(64)))
+            val format = XmpContainers.formatOf(mime)!!
+            val dest = File(tempFolder.root, "race-dest-$name")
+            val short = secondSigner("f".repeat(64))
+            val long = ContentAuthenticityData(
+                contentHash = "f".repeat(64),
+                signatures = listOf(
+                    SignatureEntry("SHA256:third", "C".repeat(600), "ES256", "sig-3", "2026-01-04T00:00:00Z", SignerRole.CREATOR)
+                )
+            )
+            val start = CyclicBarrier(2)
+            val failures = Collections.synchronizedList(mutableListOf<Throwable>())
+            val threads = listOf(long, short).mapIndexed { i, data ->
+                val work = tempFolder.newFolder("race-work-$name-$i")
+                thread {
+                    try {
+                        start.await()
+                        if (data === short) Thread.sleep(50)
+                        XmpMetadataHelper.replaceEmbeddedSignature(
+                            open = { File(source).inputStream() },
+                            openOutput = { SlowOutput(FileOutputStream(dest)) },
+                            format = format,
+                            data = data,
+                            workDir = work,
+                            destination = dest.path
+                        )
+                    } catch (t: Throwable) {
+                        failures += t
+                    }
+                }
+            }
+            threads.forEach { it.join() }
+
+            assertTrue("$name: $failures", failures.isEmpty())
+            val bytes = dest.readBytes()
+            val json = XmpContainers.extract(bytes, format)
+            assertTrue(name, json == long.toJsonString() || json == short.toJsonString())
+            assertArrayEquals(
+                name,
+                XmpContainers.strip(File(source).readBytes(), format),
+                XmpContainers.strip(bytes, format)
+            )
+        }
+    }
+
+    /** A shared URI granted read access only: opening it for writing throws. */
+    private class ReadOnlyProvider(private val bytes: ByteArray) {
+        var writeAttempts = 0
+        fun openInputStream(): InputStream = bytes.inputStream()
+        fun openOutputStream(mode: String): OutputStream {
+            writeAttempts++
+            throw SecurityException("no write grant for mode $mode")
+        }
+    }
+
+    @Test
+    fun `unsigned media shared read-only signs through the sidecar path`() {
+        for (mime in listOf("image/png", "image/webp", "video/mp4")) {
+            val provider = ReadOnlyProvider(XmpFixtures.all.getValue(mime))
+
+            assertEquals(
+                mime,
+                XmpMetadataHelper.SharedSigning.SIDECAR,
+                XmpMetadataHelper.sharedSigning({ provider.openInputStream() }, XmpContainers.formatOf(mime))
+            )
+            assertEquals(mime, 0, provider.writeAttempts)
+        }
+    }
+
+    @Test
+    fun `signed media shared read-only gets a signed copy and the original is never opened for writing`() {
+        for ((name, mime) in embeddedNames) {
+            val path = fixtureFile("readonly-$name", mime)
+            XmpMetadataHelper.writeSignature(path, sampleData(hash = "f".repeat(64)))
+            val provider = ReadOnlyProvider(File(path).readBytes())
+            val format = XmpContainers.formatOf(mime)!!
+            val copy = File(tempFolder.root, "readonly-copy-$name")
+            val second = secondSigner("f".repeat(64))
+
+            assertEquals(
+                name,
+                XmpMetadataHelper.SharedSigning.SIGNED_COPY,
+                XmpMetadataHelper.sharedSigning({ provider.openInputStream() }, format)
+            )
+            assertTrue(
+                name,
+                XmpMetadataHelper.replaceEmbeddedSignature(
+                    open = { provider.openInputStream() },
+                    openOutput = { copy.outputStream() },
+                    format = format,
+                    data = second,
+                    workDir = tempFolder.newFolder("readonly-work-$name"),
+                    destination = copy.path
+                )
+            )
+            assertEquals(name, 0, provider.writeAttempts)
+            assertEquals(name, second.toJsonString(), copy.inputStream().use { XmpContainers.read(it, format) })
+        }
+    }
+
+    @Test
+    fun `media at the part limit keeps a valid sidecar and one part fewer embeds`() {
+        val names = mapOf("video/mp4" to "crowded.mp4", "image/png" to "crowded.png", "image/webp" to "crowded.webp")
+        for ((mime, crowded) in XmpFixtures.crowded) {
+            val format = XmpContainers.formatOf(mime)!!
+            val data = sampleData(hash = "f".repeat(64))
+
+            val full = File(tempFolder.newFolder("full-$mime".replace('/', '-')), names.getValue(mime))
+            val fullBytes = crowded(1 shl 16)
+            full.writeBytes(fullBytes)
+            XmpMetadataHelper.writeSignature(full.path, data)
+            assertArrayEquals(mime, fullBytes, full.readBytes())
+            assertTrue(mime, sidecarOf(full.path).exists())
+            assertEquals(mime, data, XmpMetadataHelper.readSignature(full.path))
+
+            val fewer = File(tempFolder.newFolder("fewer-$mime".replace('/', '-')), names.getValue(mime))
+            fewer.writeBytes(crowded((1 shl 16) - 1))
+            XmpMetadataHelper.writeSignature(fewer.path, data)
+            assertFalse(mime, sidecarOf(fewer.path).exists())
+            assertEquals(mime, data.toJsonString(), fewer.inputStream().use { XmpContainers.read(it, format) })
+            assertEquals(mime, data.toJsonString(), XmpContainers.extract(fewer.readBytes(), format))
+        }
+    }
 
     @Test
     fun `re-signing auto-signed media with a second key replaces the embedded signer`() {

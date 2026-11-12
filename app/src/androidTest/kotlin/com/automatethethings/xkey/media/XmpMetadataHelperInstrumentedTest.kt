@@ -399,9 +399,11 @@ class XmpMetadataHelperInstrumentedTest {
     }
 
     @Test
-    fun replaceEmbeddedSignature_reSigningThroughAUriShowsTheSecondSigner() {
+    fun replaceEmbeddedSignature_signedCopyThroughAUriShowsTheSecondSigner() {
         val file = container("png")
         val uri = Uri.fromFile(file)
+        val copy = File(file.parentFile, "copy-${file.name}")
+        val copyUri = Uri.fromFile(copy)
         val resolver = context.contentResolver
         XmpMetadataHelper.writeSignature(file.path, sampleData(hash = "5".repeat(64)))
         val second = ContentAuthenticityData(
@@ -418,17 +420,26 @@ class XmpMetadataHelperInstrumentedTest {
             )
         )
 
-        // The streams the Share-sheet signer opens on the shared URI.
+        val original = file.readBytes()
+
+        // The streams the Share-sheet signer opens: the shared URI read only,
+        // the signed copy written to the document the user picked.
+        assertEquals(
+            XmpMetadataHelper.SharedSigning.SIGNED_COPY,
+            XmpMetadataHelper.sharedSigning({ resolver.openInputStream(uri)!! }, XmpContainers.Format.PNG)
+        )
         val replaced = XmpMetadataHelper.replaceEmbeddedSignature(
             open = { resolver.openInputStream(uri)!! },
-            openOutput = { resolver.openOutputStream(uri, "wt")!! },
+            openOutput = { resolver.openOutputStream(copyUri, "w")!! },
             format = XmpContainers.Format.PNG,
             data = second,
-            workDir = context.cacheDir
+            workDir = context.cacheDir,
+            destination = copyUri.toString()
         )
 
         assertTrue(replaced)
-        assertFalse(File(XmpMetadataHelper.getSidecarPath(file.path)).exists())
-        assertEquals(second, XmpMetadataHelper.readSignatureFromUri(resolver, uri, "image/png"))
+        assertTrue(original.contentEquals(file.readBytes()))
+        assertFalse(File(XmpMetadataHelper.getSidecarPath(copy.path)).exists())
+        assertEquals(second, XmpMetadataHelper.readSignatureFromUri(resolver, copyUri, "image/png"))
     }
 }

@@ -115,6 +115,31 @@ internal object XmpFixtures {
         )
     }
 
+    /**
+     * MP4, PNG and extended WebP of exactly `parts` boxes or chunks, the
+     * fixture's own padded with empty ones, keyed by mime type.
+     */
+    val crowded: Map<String, (Int) -> ByteArray> = mapOf(
+        "video/mp4" to { parts -> crowd(mp4(), box("free", ByteArray(0)), parts - 3) },
+        "image/png" to { parts ->
+            val png = png()
+            val iend = png.size - 12
+            crowd(png.copyOfRange(0, iend), pngChunk("tEXt", ByteArray(0)), parts - 3) + png.copyOfRange(iend, png.size)
+        },
+        "image/webp" to { parts ->
+            val webp = webp()
+            val body = crowd(webp.copyOfRange(12, webp.size), riffChunk("JUNK", ByteArray(0)), parts - 2)
+            ascii("RIFF") + le32(4L + body.size) + ascii("WEBP") + body
+        }
+    )
+
+    private fun crowd(head: ByteArray, filler: ByteArray, count: Int): ByteArray {
+        val out = ByteArrayOutputStream(head.size + filler.size * count)
+        out.write(head)
+        repeat(count) { out.write(filler) }
+        return out.toByteArray()
+    }
+
     fun json(hash: String = "a".repeat(64)) = ContentAuthenticityData(
         contentHash = hash,
         signatures = listOf(
@@ -388,5 +413,33 @@ class XmpContainersTest {
         assertTrue(packet.contains("xmlns:xkey=\"${XmpContainers.XKEY_NAMESPACE}\""))
         assertTrue(packet.contains("&lt;a&amp;b&gt;"))
         assertEquals(json, XmpContainers.jsonFromPacket(XmpContainers.packet(json)))
+    }
+}
+
+/** Media at the parser's part limit, where the embedded box or chunk is one part too many. */
+class XmpContainersPartLimitTest {
+
+    /** The [XmpContainers] parser's limit on boxes or chunks. */
+    private val maxParts = 1 shl 16
+
+    @Test
+    fun `embed is refused when the signature would take the media past the part limit`() {
+        for ((mime, crowded) in XmpFixtures.crowded) {
+            val format = XmpContainers.formatOf(mime)!!
+
+            assertNull(mime, XmpContainers.embed(crowded(maxParts), format, XmpFixtures.json()))
+
+            val base = crowded(maxParts - 1)
+            val embedded = XmpContainers.embed(base, format, XmpFixtures.json())
+            assertNotNull(mime, embedded)
+            assertEquals(mime, XmpFixtures.json(), XmpContainers.extract(embedded!!, format))
+            assertEquals(mime, XmpFixtures.json(), XmpContainers.read(ByteArrayInputStream(embedded), format))
+            assertTrue(
+                mime,
+                MediaHasher.contentHashMatches(
+                    MediaHasher.hashCanonical(base, mime), embedded, mime, MediaHasher.SignatureSource.IN_BAND
+                )
+            )
+        }
     }
 }
