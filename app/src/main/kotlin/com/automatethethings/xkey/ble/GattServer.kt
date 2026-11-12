@@ -17,6 +17,7 @@ import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConfirmedConnection
 import com.automatethethings.xkey.remote.MessageSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -2450,6 +2451,20 @@ class GattServer(
         }
 
         return buffer.toByteArray()
+    }
+
+    /**
+     * The established session's own authenticated peer, while that session is
+     * confirmed, current and not revoked. A revocation clears the
+     * confirmation at once, before the deferred teardown clears the handler's
+     * peer key, so this answers null from the moment of the revocation.
+     */
+    override fun confirmedConnection(): ConfirmedConnection? {
+        val session = establishedSession ?: return null
+        val peer = authenticatedPeerKeyHex
+        if (!pairingConfirmed || peer.isNullOrEmpty()) return null
+        if (!isCurrent(session) || !session.isHandshakeComplete()) return null
+        return ConfirmedConnection(peer, session)
     }
 
     /**

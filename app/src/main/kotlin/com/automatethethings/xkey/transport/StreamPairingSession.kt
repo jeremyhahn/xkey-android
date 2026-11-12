@@ -33,6 +33,7 @@ import com.automatethethings.xkey.protocol.SessionBinding
 import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConfirmedConnection
 import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.settings.PairedDeviceRemovalListener
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -834,6 +835,21 @@ class StreamPairingSession(
             ProtocolResponse.error(
                 id, ErrorCodes.PAIRING_REJECTED, "Pairing rejected by user", generation = generation
             ).toJson()
+        }
+    }
+
+    /**
+     * The current connection's own authenticated peer, while that connection
+     * is confirmed and neither revoked nor ended. Read under the connection's
+     * lock, which a revocation also takes.
+     */
+    override fun confirmedConnection(): ConfirmedConnection? {
+        val connection = activeConnection ?: return null
+        return synchronized(connection.state) {
+            val peer = connection.peerKeyHex
+            if (connection.isCurrent && connection.confirmed && !peer.isNullOrEmpty()) {
+                ConfirmedConnection(peer, connection)
+            } else null
         }
     }
 

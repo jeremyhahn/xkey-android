@@ -31,4 +31,25 @@ interface MessageSender {
      * @throws java.io.IOException if the message could not be sent.
      */
     suspend fun sendEncryptedMessage(data: ByteArray)
+
+    /**
+     * The peer confirmed on the connection this sender reaches right now,
+     * read from that connection alone, or null when it confirms no one (no
+     * connection, not yet confirmed, revoked or ended). Never the request
+     * handler's one peer key, which another transport's session may have set
+     * and a deferred teardown may not have cleared yet.
+     */
+    fun confirmedConnection(): ConfirmedConnection? = null
+}
+
+/**
+ * One live connection's confirmed peer. [connection] is the connection
+ * itself, compared by identity, so the same peer on a later connection is
+ * another one.
+ */
+class ConfirmedConnection(val peerPublicKeyHex: String, val connection: Any) {
+
+    /** The same connection, confirmed for the same peer. */
+    fun sameAs(other: ConfirmedConnection?): Boolean =
+        other != null && other.connection === connection && other.peerPublicKeyHex == peerPublicKeyHex
 }

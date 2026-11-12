@@ -311,30 +311,38 @@ object DesktopShareGate {
 
 /**
  * One desktop session as it stood at one moment: the transport a share goes
- * out on and the peer identity confirmed on that same session.
+ * out on and the peer identity confirmed on that same connection.
  *
- * The phone's request handler holds one confirmed peer key for all its
- * transports, so it cannot say which session confirmed it. [of] keeps that
- * key only while exactly one transport is live. With several live, the
- * session has no peer it can vouch for and every share is refused.
+ * The peer comes from the transport's own connection
+ * ([MessageSender.confirmedConnection]), never from the request handler's one
+ * peer key: that key belongs to whichever session last confirmed, and a
+ * revoked session whose teardown is still pending leaves it set.
  */
 class ShareSession private constructor(
     val sender: MessageSender,
     val router: BidirectionalMessageRouter,
-    val peerPublicKeyHex: String?,
+    private val confirmed: ConfirmedConnection?,
     private val stillCurrent: (ShareSession) -> Boolean
 ) {
 
     /** A transport with an established session. */
     class Transport(val sender: MessageSender, val router: BidirectionalMessageRouter)
 
-    /** True while this is still the session the phone would send on, with the same peer. */
-    fun isCurrent(): Boolean = stillCurrent(this)
+    /** The peer confirmed on this session's connection, or null when it confirms no one. */
+    val peerPublicKeyHex: String? get() = confirmed?.peerPublicKeyHex
 
-    /** Same transport, same router and same confirmed peer. */
+    /**
+     * True while this is still the session the phone would send on: the
+     * transport still reaches the same connection, confirmed for the same peer.
+     */
+    fun isCurrent(): Boolean = sameConnection(sender.confirmedConnection()) && stillCurrent(this)
+
+    /** Same transport, same router and the same connection confirmed for the same peer. */
     fun sameAs(other: ShareSession?): Boolean =
-        other != null && other.sender === sender && other.router === router &&
-            other.peerPublicKeyHex == peerPublicKeyHex
+        other != null && other.sender === sender && other.router === router && sameConnection(other.confirmed)
+
+    private fun sameConnection(other: ConfirmedConnection?): Boolean =
+        if (confirmed == null) other == null else confirmed.sameAs(other)
 
     /**
      * A client on this session whose every send re-checks [isCurrent] just
@@ -353,17 +361,16 @@ class ShareSession private constructor(
     companion object {
         /**
          * The session on the first of [live] (the caller's transport order),
-         * or null when none is live. [confirmedPeerHex] is the phone's one
-         * confirmed peer key; it is kept only when [live] has one transport.
+         * or null when none is live, with the peer confirmed on that
+         * transport's own connection.
          */
         fun of(
             live: List<Transport>,
-            confirmedPeerHex: String?,
             stillCurrent: (ShareSession) -> Boolean
         ): ShareSession? {
             val active = live.firstOrNull() ?: return null
-            val peer = confirmedPeerHex?.takeIf { live.size == 1 && it.isNotEmpty() }
-            return ShareSession(active.sender, active.router, peer, stillCurrent)
+            val confirmed = active.sender.confirmedConnection()?.takeIf { it.peerPublicKeyHex.isNotEmpty() }
+            return ShareSession(active.sender, active.router, confirmed, stillCurrent)
         }
     }
 }

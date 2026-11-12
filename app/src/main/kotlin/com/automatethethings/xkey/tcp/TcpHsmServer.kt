@@ -202,6 +202,9 @@ class TcpHsmServer(
         pairingSession.sendEncryptedMessage(data)
     }
 
+    /** The TCP connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
+    override fun confirmedConnection() = pairingSession.confirmedConnection()
+
     private fun closeQuietly(closeable: java.io.Closeable?) {
         try {
             closeable?.close()

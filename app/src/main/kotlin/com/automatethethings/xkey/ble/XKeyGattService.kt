@@ -790,12 +790,12 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     /**
      * The desktop session a key share would go out on, with the peer
      * confirmed on it, or null when no desktop is connected. Transports are
-     * taken in [activeTransport]'s order. The confirmed peer key is one value
-     * for all transports, so [ShareSession.of] drops it while more than one
-     * is live. [ShareSession.isCurrent] re-reads this snapshot.
+     * taken in [activeTransport]'s order. The peer is the one confirmed on
+     * that transport's own connection, never the handler-wide peer key.
+     * [ShareSession.isCurrent] re-reads this snapshot.
      */
     fun shareSession(): ShareSession? =
-        ShareSession.of(liveShareTransports(), getConnectedDevicePublicKeyHex()) { snapshot ->
+        ShareSession.of(liveShareTransports()) { snapshot ->
             snapshot.sameAs(shareSession())
         }
 

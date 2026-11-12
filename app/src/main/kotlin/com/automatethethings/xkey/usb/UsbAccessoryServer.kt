@@ -187,6 +187,9 @@ class UsbAccessoryServer(
         pairingSession.sendEncryptedMessage(data)
     }
 
+    /** The USB connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
+    override fun confirmedConnection() = pairingSession.confirmedConnection()
+
     private fun closeStreams() {
         try {
             inputStream?.close()
