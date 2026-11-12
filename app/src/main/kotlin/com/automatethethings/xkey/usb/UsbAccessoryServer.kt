@@ -194,6 +194,18 @@ class UsbAccessoryServer(
         pairingSession.sendEncryptedMessage(data)
     }
 
+    /**
+     * Sends on [connection] alone, refused unless it is still the current USB
+     * connection (see [StreamPairingSession.sendEncryptedMessageOn]).
+     */
+    override suspend fun sendEncryptedMessageOn(
+        connection: com.automatethethings.xkey.remote.ConfirmedConnection,
+        data: ByteArray
+    ) = pairingSession.sendEncryptedMessageOn(connection, data)
+
+    /** The USB connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
+    override fun confirmedConnection() = pairingSession.confirmedConnection()
+
     private fun closeStreams() {
         try {
             inputStream?.close()

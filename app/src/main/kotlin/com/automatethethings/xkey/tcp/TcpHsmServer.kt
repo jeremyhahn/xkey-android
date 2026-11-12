@@ -209,6 +209,18 @@ class TcpHsmServer(
         pairingSession.sendEncryptedMessage(data)
     }
 
+    /**
+     * Sends on [connection] alone, refused unless it is still the current TCP
+     * connection (see [StreamPairingSession.sendEncryptedMessageOn]).
+     */
+    override suspend fun sendEncryptedMessageOn(
+        connection: com.automatethethings.xkey.remote.ConfirmedConnection,
+        data: ByteArray
+    ) = pairingSession.sendEncryptedMessageOn(connection, data)
+
+    /** The TCP connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
+    override fun confirmedConnection() = pairingSession.confirmedConnection()
+
     private fun closeQuietly(closeable: java.io.Closeable?) {
         try {
             closeable?.close()

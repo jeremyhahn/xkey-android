@@ -31,6 +31,7 @@ import com.automatethethings.xkey.remote.RemoteKeyClient
 import com.automatethethings.xkey.remote.DesktopPeerSession
 import com.automatethethings.xkey.remote.DesktopSessions
 import com.automatethethings.xkey.remote.DesktopTransport
+import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.remote.RemoteBackupClient
 import com.automatethethings.xkey.backup.BackupStore
 import com.automatethethings.xkey.usb.PasswordStoreMethods
@@ -844,6 +845,39 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * null while the active session is not up or its peer is not yet confirmed.
      */
     fun desktopSessionPeer(): String? = desktopSession()?.peerPublicKeyHex
+
+    /**
+     * The desktop session a key share would go out on, with the peer
+     * confirmed on it, or null when no desktop is connected. Transports are
+     * taken in [activeTransport]'s order. The peer is the one confirmed on
+     * that transport's own connection, never the handler-wide peer key.
+     * [ShareSession.isCurrent] re-reads this snapshot.
+     */
+    fun shareSession(): ShareSession? =
+        ShareSession.of(liveShareTransports()) { snapshot ->
+            snapshot.sameAs(shareSession())
+        }
+
+    private fun liveShareTransports(): List<ShareSession.Transport> {
+        val live = mutableListOf<ShareSession.Transport>()
+        gattServer?.let { server ->
+            val router = bleMessageRouter
+            if (server.isSessionEstablished() && router != null) live += ShareSession.Transport(server, router)
+        }
+        tcpHsmServer?.let { server ->
+            val router = tcpMessageRouter
+            if (server.state.value is com.automatethethings.xkey.tcp.TcpHsmState.Connected && router != null) {
+                live += ShareSession.Transport(server, router)
+            }
+        }
+        usbAccessoryServer?.let { server ->
+            val router = usbMessageRouter
+            if (server.state.value is com.automatethethings.xkey.usb.UsbAccessoryState.Connected && router != null) {
+                live += ShareSession.Transport(server, router)
+            }
+        }
+        return live
+    }
 
     /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)
