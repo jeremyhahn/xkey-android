@@ -19,10 +19,12 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import java.io.File
+import java.io.IOException
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -44,6 +46,7 @@ class TrustStoreDeletionTest {
 
     private val fingerprintA = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
     private val fingerprintB = TestCertificates.fingerprint(TestCertificates.LEAF_B_PEM)
+    private val rootA = TestCertificates.fingerprint(TestCertificates.ROOT_CA_A_PEM)
 
     @Before
     fun setUp() {
@@ -111,5 +114,54 @@ class TrustStoreDeletionTest {
         assertFalse(result.complete)
         assertEquals(listOf(fingerprintA), deletedRows)
         assertTrue(repository.hasCertificate(fingerprintB))
+    }
+
+    /**
+     * A repository whose metadata writes all fail, and whose file deleter
+     * refuses the DER file of [refused] (when given).
+     */
+    private fun failingMetadataWrites(refused: String? = null) =
+        TrustStoreRepository(
+            context,
+            mockk(),
+            fileDeleter = { file: File -> if (file.name == "$refused.der") false else file.delete() },
+            fileWriter = { _, _ -> throw IOException("disk full") }
+        )
+
+    private suspend fun leafAVerifies(): Boolean =
+        repository.verifyIDevIDChain(listOf(TestCertificates.der(TestCertificates.LEAF_A_PEM))) is
+            VerificationResult.Valid
+
+    @Test
+    fun `removeTrustedCertificate keeps a CA whose metadata rewrite fails trusted for chain verification`() = runTest {
+        repository.importInternalCACertificate(TestCertificates.cert(TestCertificates.ROOT_CA_A_PEM), "root A")
+        assertTrue(leafAVerifies())
+        val deletedRows = mutableListOf<String>()
+
+        val removed = removeTrustedCertificate(failingMetadataWrites(), rootA) { deletedRows += rootA }
+
+        // Reported trusted, row kept: chain verification must agree.
+        assertFalse(removed)
+        assertTrue(deletedRows.isEmpty())
+        assertNotNull(repository.getCertificate(rootA))
+        assertTrue(repository.hasCertificate(rootA))
+        assertTrue("a CA reported trusted must still anchor its chains", leafAVerifies())
+    }
+
+    @Test
+    fun `clearTrustStore keeps CAs whose metadata rewrite fails trusted for chain verification`() = runTest {
+        repository.importInternalCACertificate(TestCertificates.cert(TestCertificates.ROOT_CA_A_PEM), "root A")
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_B_PEM))
+        val deletedRows = mutableListOf<String>()
+
+        val result = clearTrustStore(failingMetadataWrites(refused = fingerprintB)) { deletedRows += it }
+
+        assertFalse(result.complete)
+        assertTrue(rootA in result.failed)
+        assertFalse(rootA in result.removed)
+        assertTrue(deletedRows.isEmpty())
+        assertNotNull(repository.getCertificate(rootA))
+        assertTrue(repository.hasCertificate(rootA))
+        assertTrue("a CA reported trusted must still anchor its chains", leafAVerifies())
     }
 }
