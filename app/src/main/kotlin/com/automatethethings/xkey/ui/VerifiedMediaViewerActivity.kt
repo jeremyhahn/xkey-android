@@ -40,8 +40,8 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.databinding.ActivityVerifiedViewerBinding
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
-import com.automatethethings.xkey.media.SignatureVerifier
 import com.automatethethings.xkey.media.SignatureEntry
+import com.automatethethings.xkey.media.SignerVerification
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.ContactDao
@@ -360,97 +360,48 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
     /**
      * Verify a single [SignatureEntry] against the local key store and contacts.
      *
-     * Resolution order:
-     * 1. Look up the fingerprint in the contacts table.
-     * 2. Search the keys table by matching public key DER hash.
-     * 3. If no key found, report as unknown signer.
-     * 4. If key found, cryptographically verify the signature.
+     * Looks up the contact and the local keys, then leaves the decision to
+     * [SignerVerification.verify], the rule this screen shares with the
+     * file-operation screen.
      */
     private suspend fun verifyEntry(
         entry: SignatureEntry,
         contentHashMatches: Boolean,
         storedContentHash: String
     ): VerificationResult {
-        try {
-            // Try contacts first
+        val result = try {
             val contact = contactDao.getByFingerprint(entry.keyFingerprint)
-            if (contact != null) {
-                val verified = verifyCryptographic(
-                    contact.publicKeyDer, entry, contentHashMatches, storedContentHash
-                )
-                return VerificationResult(
-                    signerName = entry.signerName ?: contact.name,
-                    role = entry.role.name,
-                    timestamp = entry.timestamp,
-                    status = if (verified) VerificationStatus.VERIFIED else VerificationStatus.FAILED
-                )
-            }
-
-            // Try local keys by matching DER fingerprint
-            val allKeys = keyDao.getAll()
-            val matchedKey = allKeys.find { key ->
-                val pubDer = key.publicKeyDer
-                if (pubDer != null) {
-                    MediaHasher.hashBytes(pubDer) == entry.keyFingerprint
-                } else {
-                    key.keyId == entry.keyFingerprint
+            val localKeys = if (contact == null) {
+                keyDao.getAll().map {
+                    SignerVerification.LocalKey(it.keyId, it.label, it.publicKeyDer)
                 }
+            } else {
+                emptyList()
             }
-
-            if (matchedKey != null) {
-                val pubDer = matchedKey.publicKeyDer
-                val verified = if (pubDer != null) {
-                    verifyCryptographic(pubDer, entry, contentHashMatches, storedContentHash)
-                } else {
-                    // Cannot verify without public key material; trust by association
-                    true
-                }
-                return VerificationResult(
-                    signerName = entry.signerName ?: matchedKey.label,
-                    role = entry.role.name,
-                    timestamp = entry.timestamp,
-                    status = if (verified) VerificationStatus.VERIFIED else VerificationStatus.FAILED
-                )
-            }
-
-            // Unknown signer
-            return VerificationResult(
-                signerName = entry.signerName ?: entry.keyFingerprint.take(16) + "...",
-                role = entry.role.name,
-                timestamp = entry.timestamp,
-                status = VerificationStatus.UNKNOWN
+            SignerVerification.verify(
+                entry = entry,
+                storedContentHash = storedContentHash,
+                contentHashMatches = contentHashMatches,
+                contact = contact?.let { SignerVerification.Contact(it.name, it.publicKeyDer) },
+                localKeys = localKeys
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error verifying entry for ${entry.keyFingerprint}", e)
-            return VerificationResult(
-                signerName = entry.signerName ?: entry.keyFingerprint.take(16) + "...",
-                role = entry.role.name,
-                timestamp = entry.timestamp,
-                status = VerificationStatus.FAILED
+            SignerVerification.Result(
+                SignerVerification.Status.FAILED,
+                entry.signerName ?: (entry.keyFingerprint.take(16) + "...")
             )
         }
-    }
-
-    /**
-     * Perform cryptographic signature verification using the signer's public key.
-     *
-     * Checks whether the signature in the entry is valid for the content hash.
-     * The stored content hash must also match the file, by
-     * [MediaHasher.contentHashMatches], for integrity assurance.
-     */
-    private fun verifyCryptographic(
-        publicKeyDer: ByteArray,
-        entry: SignatureEntry,
-        contentHashMatches: Boolean,
-        storedContentHash: String
-    ): Boolean {
-        // Content hash mismatch means the file has been tampered with
-        if (!contentHashMatches) {
-            Log.w(TAG, "Content hash mismatch: stored=$storedContentHash")
-            return false
-        }
-
-        return SignatureVerifier.verifyEntry(publicKeyDer, entry, storedContentHash)
+        return VerificationResult(
+            signerName = result.displayName,
+            role = entry.role.name,
+            timestamp = entry.timestamp,
+            status = when (result.status) {
+                SignerVerification.Status.VERIFIED -> VerificationStatus.VERIFIED
+                SignerVerification.Status.FAILED -> VerificationStatus.FAILED
+                SignerVerification.Status.UNKNOWN -> VerificationStatus.UNKNOWN
+            }
+        )
     }
 
     // -------------------------------------------------------------------------

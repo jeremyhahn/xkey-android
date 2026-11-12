@@ -435,6 +435,52 @@ class FileOperationFlowTest {
     }
 
     /**
+     * The in-band content hash is checked before any signature: the block a
+     * genuine signer put on one image, copied onto different image content,
+     * fails even though the signature over the stored hash is valid.
+     */
+    @Test
+    fun verifyOperation_rejectsAnEmbeddedSignatureCopiedOntoDifferentContent() {
+        embedSignature(jpegFile, contactFingerprint, contactName)
+        val original = launch(jpegFile)
+        clickClickableWithExactText(original, string(original, R.string.file_operation_verify))
+        process(original)
+        assertShownTextInTree(original, string(original, R.string.file_operation_verify_success))
+        assertShownTextInTree(original, "$contactName: Verified")
+        original.close()
+
+        val other = jpeg("xkey-fileop-copied-$suffix.jpg", Color.rgb(0xCC, 0x22, 0x44))
+        XmpMetadataHelper.writeSignature(other.path, XmpMetadataHelper.readSignature(jpegFile.path)!!)
+        val scenario = launch(other)
+        clickClickableWithExactText(scenario, string(scenario, R.string.file_operation_verify))
+
+        process(scenario)
+
+        assertShownTextInTree(scenario, string(scenario, R.string.file_operation_verify_failed))
+        assertShownTextInTree(scenario, "Content hash mismatch: Failed")
+        assertShownTextInTree(scenario, "$contactName: Failed")
+    }
+
+    /**
+     * A copied block from a signer nobody knows fails too: the mismatch is
+     * decided before the signer lookup, never shown as an unknown signer.
+     */
+    @Test
+    fun verifyOperation_rejectsACopiedBlockFromAnUnknownSigner() {
+        val strangerFingerprint = "ee".repeat(32)
+        embedSignature(jpegFile, strangerFingerprint, signerName = null)
+        val other = jpeg("xkey-fileop-copied-unknown-$suffix.jpg", Color.rgb(0xCC, 0x22, 0x44))
+        XmpMetadataHelper.writeSignature(other.path, XmpMetadataHelper.readSignature(jpegFile.path)!!)
+        val scenario = launch(other)
+        clickClickableWithExactText(scenario, string(scenario, R.string.file_operation_verify))
+
+        process(scenario)
+
+        assertShownTextInTree(scenario, string(scenario, R.string.file_operation_verify_failed))
+        assertShownTextInTree(scenario, "${strangerFingerprint.take(16)}...: Failed")
+    }
+
+    /**
      * With nothing embedded, verification asks for the `.xkeysig` sidecar and
      * checks the file's hash against the one the sidecar recorded.
      */
@@ -645,10 +691,10 @@ class FileOperationFlowTest {
     }
 
     /** Writes a small real JPEG so `ExifInterface` has something it can edit. */
-    private fun jpeg(name: String): File {
+    private fun jpeg(name: String, color: Int = Color.rgb(0x11, 0x55, 0x99)): File {
         val file = scratchFile(name)
         val bitmap = Bitmap.createBitmap(24, 24, Bitmap.Config.ARGB_8888)
-        bitmap.eraseColor(Color.rgb(0x11, 0x55, 0x99))
+        bitmap.eraseColor(color)
         FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
         bitmap.recycle()
         return file
@@ -657,9 +703,12 @@ class FileOperationFlowTest {
     private fun scratchFile(name: String): File =
         File(context.cacheDir, name).also { scratch.add(it) }
 
-    /** Embeds signature metadata into [file] the way a signed photo carries it. */
+    /**
+     * Embeds signature metadata into [file] the way a signed photo carries it:
+     * an in-band block records the canonical hash, the only one Verify accepts.
+     */
     private fun embedSignature(file: File, fingerprint: String, signerName: String?) {
-        val contentHash = MediaHasher.hashBytes(file.readBytes())
+        val contentHash = MediaHasher.hashCanonical(file.readBytes(), "image/jpeg")
         XmpMetadataHelper.writeSignature(
             file.path,
             ContentAuthenticityData(
