@@ -27,6 +27,7 @@ import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.PendingAuthentications
 import com.automatethethings.xkey.auth.PendingCryptoSignatures
 import com.automatethethings.xkey.auth.PromptOwnership
+import com.automatethethings.xkey.auth.PromptRequestIds
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
@@ -228,6 +229,25 @@ class ApprovalPromptFlowTest {
         }
         // Keys start over too, so the owner forgets the ones that settled.
         PromptOwnership.process.forgetSettled()
+    }
+
+    /**
+     * A process restart: the launcher and its requests, the prompt owner's
+     * memory and the prompt activity's records start over, and both families
+     * number their requests as a freshly started process does. What survives
+     * is what Android holds, the notifications' pending intents.
+     */
+    private fun TestScope.restartProcess() {
+        launcher.unregister()
+        runCurrent()
+        for (family in listOf(PendingAuthentications::class.java, PendingCryptoSignatures::class.java)) {
+            val counter = family.getDeclaredField("nextRequestId").apply { isAccessible = true }
+            (counter.get(null) as AtomicLong).set(PromptRequestIds.firstOfProcess())
+        }
+        PromptOwnership.process.forgetSettled()
+        val expired = TransparentBiometricActivity::class.java.getDeclaredField("expired").apply { isAccessible = true }
+        (expired.get(null) as MutableSet<*>).clear()
+        launcher = BiometricActivityLauncher(app).also { it.register() }
     }
 
     /** Delivers what the prompts broadcast, and resumes whoever it settled. */
@@ -670,6 +690,38 @@ class ApprovalPromptFlowTest {
         assertUpdated(second.await())
         assertEquals(listOf(firstId to false, secondId to true), results())
     }
+
+    @Test
+    fun `an approval's notification from before a process restart neither answers nor fails the approval after it`() =
+        runTest {
+            // The process that posts the old notification starts fresh too.
+            restartProcess()
+            val before = shareWithAllPeers()
+            runCurrent()
+            val oldId = directStart().requestId()!!
+            val oldTap = tapNotification(oldId)
+
+            restartProcess()
+            assertNotNull("the old process's request is gone", before.await().error)
+
+            val after = shareWithAllPeers()
+            runCurrent()
+            val prompt = directStart()
+            val id = prompt.requestId()!!
+
+            // The old notification, still on the lock screen, is opened while
+            // the new approval holds the screen.
+            assertRefusedFresh(oldTap)
+            assertTrue("the new approval is not answered by it", after.isActive)
+            assertEquals("nothing was answered", emptyList<Pair<String?, Boolean>>(), results())
+            assertEquals(SharingPolicyType.PRIVATE, stored)
+
+            open(prompt).approve()
+            settle()
+
+            assertUpdated(after.await())
+            assertEquals(listOf(id to true), results())
+        }
 
     private companion object {
         /** The id every lock-screen approval notification is posted under, with its own tag. */

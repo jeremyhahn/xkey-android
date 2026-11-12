@@ -543,6 +543,12 @@ class BiometricActivityLauncher(
     }
 }
 
+/** Where each prompt family's request ids start in a process. */
+internal object PromptRequestIds {
+    /** The id just before a freshly started process's first. */
+    fun firstOfProcess(): Long = 0L
+}
+
 /**
  * The authentication requests a [BiometricActivityLauncher] is waiting on.
  *
@@ -728,7 +734,7 @@ internal class PendingAuthentications(
         const val ACTIVE_DEADLINE_MILLIS = 60_000L
 
         /** Process-wide, so ids from two launchers never name the same request. */
-        private val nextRequestId = AtomicLong(0L)
+        private val nextRequestId = AtomicLong(PromptRequestIds.firstOfProcess())
     }
 }
 

@@ -176,6 +176,6 @@ internal class PendingCryptoSignatures(
 
     private companion object {
         /** Process-wide, so ids from two launchers never name the same prompt. */
-        val nextRequestId = AtomicLong(0L)
+        val nextRequestId = AtomicLong(PromptRequestIds.firstOfProcess())
     }
 }

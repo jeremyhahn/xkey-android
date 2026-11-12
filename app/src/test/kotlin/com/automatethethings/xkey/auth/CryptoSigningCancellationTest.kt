@@ -264,6 +264,44 @@ class CryptoSigningCancellationTest {
         assertEquals(CryptoSigningResult.Success(SIGNATURE_BASE64), third.await())
     }
 
+    /**
+     * The launch posts the lock-screen notification, then the direct start
+     * throws: the request fails and the next takes the screen. The
+     * notification's intent, already dispatched, then starts an activity for
+     * the failed request; it must neither prompt nor touch the key.
+     */
+    @Test
+    fun aNotificationDeliveredAfterAFailedDirectStartNeverPromptsOrSigns() = runTest {
+        var notified: String? = null
+        val failed = async {
+            runCatching {
+                pending.await { requestId ->
+                    notified = requestId
+                    throw IllegalStateException("the activity cannot start")
+                }
+            }
+        }
+        val next = async { pending.await(::launchActivity) }
+        runCurrent()
+        assertTrue(failed.await().exceptionOrNull() is IllegalStateException)
+        val nextActivity = activities.values.single()
+
+        val late = FakeActivity(notified!!)
+        assertFalse("a failed request's late delivery must not prompt", late.controller.start())
+        assertTrue(late.finished)
+        late.authenticate()
+        late.controller.release(recreating = false)
+        runCurrent()
+
+        assertEquals("the key is not used", 0, late.signings)
+        assertNull("nothing is delivered", late.delivered)
+        assertTrue("the request on screen is left alone", next.isActive)
+        assertEquals(0, nextActivity.prompt.cancellations)
+        nextActivity.authenticate()
+        runCurrent()
+        assertEquals(CryptoSigningResult.Success(SIGNATURE_BASE64), next.await())
+    }
+
     // -----------------------------------------------------------------
     // The activity goes away
     // -----------------------------------------------------------------
