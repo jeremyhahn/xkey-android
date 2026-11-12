@@ -22,7 +22,6 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.InputType
-import android.util.Base64
 import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
@@ -49,6 +48,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.ContactKeyParser
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.qr.QrCodeScannerHelper
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -67,10 +67,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONException
 import org.json.JSONObject
-import java.security.KeyFactory
-import java.security.MessageDigest
-import java.security.PublicKey
-import java.security.spec.X509EncodedKeySpec
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -912,8 +908,8 @@ class ContactManagementActivity : AppCompatActivity() {
         val envelope = parseContactEnvelope(payload)
         val keyMaterial = envelope?.publicKeyPem ?: payload
 
-        val der = parsePEM(keyMaterial)
-        if (der == null || parsePublicKey(der) == null) {
+        val der = ContactKeyParser.decodePem(keyMaterial)
+        if (der == null || ContactKeyParser.parse(der) == null) {
             showError(getString(R.string.contact_qr_invalid))
             return
         }
@@ -1013,7 +1009,7 @@ class ContactManagementActivity : AppCompatActivity() {
             .setPositiveButton(getString(R.string.contact_import_paste)) { _, _ ->
                 val pem = pemInput.text.toString().trim()
                 if (pem.isNotEmpty()) {
-                    val bytes = parsePEM(pem)
+                    val bytes = ContactKeyParser.decodePem(pem)
                     if (bytes != null) {
                         importPublicKeyBytes(bytes, "paste")
                     } else {
@@ -1167,12 +1163,12 @@ class ContactManagementActivity : AppCompatActivity() {
         }
         dialogLayout.addView(algorithmLabel)
 
-        val der = parsePEM(key.publicKeyPem)
+        val der = ContactKeyParser.decodePem(key.publicKeyPem)
         if (der != null) {
             dialogLayout.addView(TextView(this).apply {
                 text = getString(
                     R.string.contact_fingerprint,
-                    formatFingerprint(computeFingerprint(der))
+                    formatFingerprint(ContactKeyParser.fingerprint(der))
                 )
                 textSize = 12f
                 typeface = Typeface.MONOSPACE
@@ -1254,7 +1250,7 @@ class ContactManagementActivity : AppCompatActivity() {
      * @param bytes Raw key bytes, either DER or PEM.
      * @param source Value recorded in [ContactEntity.source].
      * @param suggestedName Name to pre-fill in the name prompt, if the payload carried one.
-     * @param algorithmHint Algorithm declared by the payload; overrides the detected one.
+     * @param algorithmHint Algorithm declared by the payload; the one detected from the key wins.
      */
     private fun importPublicKeyBytes(
         bytes: ByteArray,
@@ -1262,75 +1258,14 @@ class ContactManagementActivity : AppCompatActivity() {
         suggestedName: String? = null,
         algorithmHint: String? = null
     ) {
-        // Try parsing as DER first, then try PEM
-        val parsed = parsePublicKey(bytes)
-            ?: parsePEM(String(bytes, Charsets.UTF_8))?.let { parsePublicKey(it) }
-
+        val parsed = ContactKeyParser.parse(bytes)
         if (parsed == null) {
             showError("Unable to parse public key. Supported formats: DER, PEM (EC or RSA).")
             return
         }
 
-        val (publicKey, detectedAlgorithm) = parsed
-        val der = publicKey.encoded
-        val fingerprint = computeFingerprint(der)
-        val algorithm = algorithmHint?.takeIf { it.isNotBlank() } ?: detectedAlgorithm
-
-        showNamePromptDialog(fingerprint, algorithm, der, source, suggestedName)
-    }
-
-    /**
-     * Tries to parse raw bytes as a DER-encoded public key (EC then RSA).
-     *
-     * @param bytes The raw key bytes in X.509 SubjectPublicKeyInfo (DER) format.
-     * @return A pair of the parsed PublicKey and its algorithm name, or null.
-     */
-    private fun parsePublicKey(bytes: ByteArray): Pair<PublicKey, String>? {
-        // Try EC first
-        try {
-            val keyFactory = KeyFactory.getInstance("EC")
-            val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(bytes))
-            return Pair(pubKey, "ES256")
-        } catch (_: Exception) {
-            // Not an EC key, try RSA
-        }
-        try {
-            val keyFactory = KeyFactory.getInstance("RSA")
-            val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(bytes))
-            return Pair(pubKey, "RS256")
-        } catch (_: Exception) {
-            // Not an RSA key either
-        }
-        return null
-    }
-
-    /**
-     * Computes the SHA-256 fingerprint of DER-encoded key bytes.
-     *
-     * @param der The DER-encoded key bytes.
-     * @return The hex-encoded SHA-256 fingerprint.
-     */
-    private fun computeFingerprint(der: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        return digest.digest(der).joinToString("") { "%02x".format(it) }
-    }
-
-    /**
-     * Strips PEM headers/footers and decodes the Base64 content.
-     *
-     * @param pem The PEM-encoded string.
-     * @return The decoded bytes, or null if decoding fails.
-     */
-    private fun parsePEM(pem: String): ByteArray? {
-        val base64 = pem.lines()
-            .filter { !it.startsWith("-----") }
-            .joinToString("")
-            .trim()
-        return try {
-            Base64.decode(base64, Base64.DEFAULT)
-        } catch (_: Exception) {
-            null
-        }
+        val algorithm = ContactKeyParser.resolveAlgorithm(algorithmHint, parsed.algorithm)
+        showNamePromptDialog(parsed.fingerprint, algorithm, parsed.der, source, suggestedName)
     }
 
     /**
