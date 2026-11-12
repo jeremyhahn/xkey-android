@@ -185,7 +185,7 @@ class RequestHandlerRefusalDetailTest {
         )
 
         assertTrue("a bad payload must produce an error frame", response.isError())
-        assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
+        assertEquals(ErrorCodes.INVALID_PARAMS, response.errorCode())
     }
 
     /**

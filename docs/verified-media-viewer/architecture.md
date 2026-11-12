@@ -45,3 +45,20 @@ sequenceDiagram
     VMA-->>User: Image displayed with verification overlay
     Note over User: Two green badges showing:<br/>1. My Photo Key (Creator)<br/>2. Bob (Attestor)
 ```
+
+## When a signer shows as verified
+
+`SignerVerification.verify` (in `media/`) decides each signer's badge; the
+file-operation screen's Verify uses the same function.
+
+1. The stored content hash must match the file
+   (`MediaHasher.contentHashMatchesUri`). If it does not, every signer
+   fails: the signatures cover some other content.
+2. The signer is looked up as a contact, then as a local key whose public
+   key hashes to the entry's fingerprint. The signature is then checked
+   against that public key (`SignatureVerifier.verifyEntry`): valid is
+   verified (green), invalid is failed (red).
+3. A signer with no public key we hold is unknown, never verified. A local
+   key row without public key material never matches, even when its keyId
+   equals the fingerprint: the fingerprint comes from the file being
+   checked, so matching on it would let any file name a trusted signer.
