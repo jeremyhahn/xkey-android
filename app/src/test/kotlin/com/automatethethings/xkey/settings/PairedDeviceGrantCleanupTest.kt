@@ -48,6 +48,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import org.junit.After
@@ -479,6 +481,9 @@ class PairedDeviceGrantCleanupTest {
     ) : SharedPreferences by memory {
         private var disk: Map<String, *> = emptyMap<String, Any>()
 
+        /** The next this many commit() calls fail, changing nothing. */
+        @Volatile var failCommits = 0
+
         fun flush() {
             disk = memory.all
         }
@@ -513,7 +518,13 @@ class PairedDeviceGrantCleanupTest {
                 override fun apply() {
                     inner.commit()
                 }
-                override fun commit(): Boolean = inner.commit().also { flush() }
+                override fun commit(): Boolean {
+                    if (failCommits > 0) {
+                        failCommits--
+                        return false
+                    }
+                    return inner.commit().also { flush() }
+                }
             }
         }
     }
@@ -590,6 +601,69 @@ class PairedDeviceGrantCleanupTest {
             sharingPolicy = SharingPolicyType.SELECTED_PEERS
         )
         assertTrue(canShareKeyWithPeer(requestHandlerOver(repo), key, PEER_A))
+    }
+
+    // --- r5: the audit count across acknowledgment retries, and an atomic worker exit. ---
+
+    /**
+     * The delete drops A's two rows but the acknowledgment's commit fails
+     * once. The retry deletes nothing, yet the security event for the two
+     * dropped grants must still be recorded, exactly once.
+     */
+    @Test
+    fun aFailedAcknowledgmentKeepsTheDroppedGrantsAuditEvent() {
+        val disk = DiskPrefs()
+        val paired = PairedDeviceRepository(disk)
+        heldCleanup(paired)
+        paired.addDevice(PEER_A, "desktop-a")
+        disk.failCommits = 1
+
+        paired.removeDevice(PEER_A)
+        scheduler.advanceUntilIdle()
+
+        assertEquals(emptyList<KeySharingPolicy>(), grantsOf(PEER_A))
+        assertFalse(PEER_A in paired.pendingRevocations())
+        coVerify(exactly = 2) { dao.clearPoliciesForPeer(PEER_A) }
+        verify(exactly = 1) { AuditLogger.logPeerGrantsDropped(any(), any()) }
+        verify(exactly = 1) { AuditLogger.logPeerGrantsDropped(PEER_A, 2) }
+    }
+
+    /**
+     * Every attempt fails until the worker gives up. Its last attempt leaves
+     * a child coroutine behind, so the worker has returned but its job has
+     * not completed: the window between its decision to stop and its
+     * removal from the job map in the old code. A re-pairing in that window
+     * must still get the revocation done.
+     */
+    @Test
+    fun aRePairingWhileAnExhaustedWorkerExitsIsNotLost() {
+        // The worker gives up after its ninth failure in a row (MAX_FAILURES = 8).
+        val attempts = 9
+        val exiting = CompletableDeferred<Unit>()
+        var calls = 0
+        val delete = dao.clearPoliciesForPeerAnswer()
+        coEvery { dao.clearPoliciesForPeer(any()) } coAnswers {
+            calls++
+            if (calls <= attempts) {
+                if (calls == attempts) {
+                    CoroutineScope(currentCoroutineContext()).launch { exiting.await() }
+                }
+                throw IllegalStateException("db closed")
+            }
+            delete(firstArg())
+        }
+        heldCleanup(repo)
+        repo.removeDevice(PEER_A)
+        scheduler.advanceUntilIdle()
+        assertEquals(attempts, calls)
+        assertTrue(PEER_A in repo.pendingRevocations())
+
+        repo.addDevice(PEER_A, "desktop-a")
+        exiting.complete(Unit)
+        scheduler.advanceUntilIdle()
+
+        assertEquals(emptyList<KeySharingPolicy>(), grantsOf(PEER_A))
+        assertFalse(PEER_A in repo.pendingRevocations())
     }
 
     /** Calls the private suspend check; the faked DAO never suspends. */
