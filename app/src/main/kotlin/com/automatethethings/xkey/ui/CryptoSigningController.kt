@@ -16,6 +16,8 @@
 package com.automatethethings.xkey.ui
 
 import androidx.biometric.BiometricPrompt
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import java.util.Base64
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
@@ -49,11 +51,16 @@ object CryptoSigningCancellations {
 
     /**
      * False when [controller] must not prompt: its request was cancelled or
-     * has ended, or another activity already owns it.
+     * has ended, another activity already owns it, or the prompt owner does
+     * not hold it ACTIVE -- still queued, settled (a failed direct start
+     * whose notification was already dispatched), or unknown (a notification
+     * from an earlier process). Checked before anything is shown, since the
+     * key signs before any result could be refused.
      */
     @Synchronized
     fun register(controller: CryptoSigningController): Boolean {
         if (controller.requestId in refused) return false
+        if (!controller.holdsScreen(controller.requestId)) return false
         if (live[controller.requestId].let { it != null && it !== controller }) return false
         live[controller.requestId] = controller
         return true
@@ -110,6 +117,10 @@ object CryptoSigningCancellations {
  *
  * Everything but [cancel] runs on the main thread; [cancel] may be called from
  * any thread and does its work on [mainExecutor].
+ *
+ * [holdsScreen] says whether the prompt owner holds the request ACTIVE; by
+ * default the process owner, whose `signature-<id>` entry the launcher's
+ * request holds.
  */
 class CryptoSigningController(
     val requestId: String,
@@ -117,6 +128,9 @@ class CryptoSigningController(
     private val deliverSuccess: (signatureBase64: String) -> Unit,
     private val deliverError: (code: Int, message: String) -> Unit,
     private val finish: () -> Unit,
+    internal val holdsScreen: (requestId: String) -> Boolean = { id ->
+        PromptOwnership.process.accept(NotificationKeys.signature(id), PromptOwnership.Event.NOTIFICATION_TAP)
+    },
 ) {
     /** The biometric prompt this request is showing. */
     fun interface Prompt {

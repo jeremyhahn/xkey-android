@@ -36,6 +36,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -543,10 +544,23 @@ class BiometricActivityLauncher(
     }
 }
 
-/** Where each prompt family's request ids start in a process. */
 internal object PromptRequestIds {
-    /** The id just before a freshly started process's first. */
-    fun firstOfProcess(): Long = 0L
+    private val random = SecureRandom()
+
+    /**
+     * The id just before a freshly started process's first: a nonce drawn
+     * for each process incarnation, below 2^62 so its ids never overflow.
+     *
+     * The lock-screen notifications' pending intents outlive the process
+     * that posted them, carrying their request's id. Were ids to start over
+     * at each start, an old notification opened after a restart would name
+     * whichever new request reused its id, and its approval would answer an
+     * operation the owner never saw. Drawn at random, one incarnation's ids
+     * do not reach another's, so the prompt activities and the result
+     * receivers, which check the id against the ACTIVE entry, refuse it.
+     * Within a process the ids still grow.
+     */
+    fun firstOfProcess(): Long = random.nextLong() ushr 2
 }
 
 /**

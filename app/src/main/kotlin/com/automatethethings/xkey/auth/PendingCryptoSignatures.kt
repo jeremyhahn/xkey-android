@@ -97,7 +97,10 @@ internal class PendingCryptoSignatures(
                         launch(id.toString())
                         launched.complete(Unit)
                     } catch (e: Exception) {
-                        if (prompts.settle(key, PromptOwnership.Outcome.FAILED) &&
+                        // The launch may have posted the notification before
+                        // the start threw: its prompt is ended, so a late
+                        // delivery of that intent never signs.
+                        if (prompts.settle(key, PromptOwnership.Outcome.FAILED) { cancelPrompt(id.toString()) } &&
                             pending.remove(id, continuation)
                         ) {
                             continuation.resumeWithException(e)
