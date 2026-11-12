@@ -50,6 +50,8 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.time.ZoneId
+import java.util.Locale
 
 /**
  * Main activity for xKey - Premium Security Key Experience.
@@ -259,11 +261,16 @@ class MainActivity : AppCompatActivity() {
             lifecycleScope.launch {
                 try {
                     val result = service.syncNow()
+                    // The desktop's own view of sync (remote.syncStatus); a
+                    // failure here leaves the completed sync reported as is.
+                    val status = SyncStatusText.fetch(service::desktopSyncStatus)
+                    val line = SyncStatusText.desktopLine(status, ZoneId.systemDefault(), Locale.getDefault())
                     Snackbar.make(
                         binding.root,
-                        getString(R.string.sync_complete, result.totalPushed, result.totalPulled),
+                        getString(R.string.sync_complete, result.totalPushed, result.totalPulled) + "\n" +
+                            getString(line.message, line.arg),
                         Snackbar.LENGTH_LONG
-                    ).show()
+                    ).apply { setTextMaxLines(3) }.show()
                 } catch (e: Exception) {
                     Snackbar.make(
                         binding.root,
