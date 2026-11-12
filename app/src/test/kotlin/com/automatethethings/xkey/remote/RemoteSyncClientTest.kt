@@ -253,6 +253,68 @@ class RemoteSyncClientTest {
         coVerify(exactly = 0) { anyConstructed<SyncEngine>().gatherPasswords() }
     }
 
+    // --- syncStatus (go-xkms RemoteSyncStatus*) -----------------------------
+
+    @Test
+    fun `syncStatus sends remote syncStatus with empty params and touches no store`() = runTest {
+        sender.succeedWith("""{"device_id":"desk-1","store_checksums":{}}""")
+
+        client.syncStatus()
+
+        assertEquals(listOf("remote.syncStatus"), sender.sent.map { it.method })
+        assertEquals("RemoteSyncStatusParams is struct{}", 0, sender.lastRequest.params!!.length())
+        coVerify(exactly = 0) { anyConstructed<SyncEngine>().markSynced() }
+        coVerify(exactly = 0) { anyConstructed<SyncEngine>().gatherCertificates() }
+    }
+
+    @Test
+    fun `syncStatus parses last_sync, device_id and store_checksums`() = runTest {
+        sender.succeedWith(
+            """{"last_sync":"2026-11-12T08:30:00Z","device_id":"desk-1",
+                "store_checksums":{"trust_store":"ab12","oath":"cd34","passwords":"ef56"}}"""
+        )
+
+        val status = client.syncStatus()
+
+        assertEquals(
+            RemoteSyncClient.DesktopSyncStatus(
+                lastSync = "2026-11-12T08:30:00Z",
+                deviceId = "desk-1",
+                storeChecksums = mapOf("trust_store" to "ab12", "oath" to "cd34", "passwords" to "ef56")
+            ),
+            status
+        )
+    }
+
+    @Test
+    fun `syncStatus reads an omitted last_sync as never and a nil map as no checksums`() = runTest {
+        sender.succeedWith("""{"device_id":"desk-1","store_checksums":null}""")
+
+        val status = client.syncStatus()
+
+        assertEquals(null, status.lastSync)
+        assertEquals("desk-1", status.deviceId)
+        assertEquals(emptyMap<String, String>(), status.storeChecksums)
+    }
+
+    @Test
+    fun `syncStatus surfaces an error reply`() = runTest {
+        sender.failWith(ErrorCodes.PAIRING_REQUIRED, "not paired")
+
+        val e = expectProtocolException { client.syncStatus() }
+
+        assertEquals(ErrorCodes.PAIRING_REQUIRED, e.errorCode)
+    }
+
+    @Test
+    fun `syncStatus times out and names the method`() = runTest {
+        sender.neverReply()
+
+        val e = expectProtocolException { client.syncStatus() }
+
+        assertEquals("Sync request timed out: remote.syncStatus", e.message)
+    }
+
     // --- Failure paths ------------------------------------------------------
 
     @Test
