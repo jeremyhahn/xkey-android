@@ -461,7 +461,7 @@ class StreamPairingSessionRevocationTest {
      * revocation, before its teardown has run.
      */
     @Test
-    fun theConfirmedConnectionIsThisConnectionsOwnPeerUntilItIsRevoked() = runBlocking {
+    fun theConfirmedConnectionIsThisConnectionsOwnPeerUntilItIsRevoked() = runBlocking<Unit> {
         val unconfirmed = connectUnpaired()
         assertNull("an unconfirmed connection confirms no one", pairing.confirmedConnection())
         unconfirmed.desktop.close()

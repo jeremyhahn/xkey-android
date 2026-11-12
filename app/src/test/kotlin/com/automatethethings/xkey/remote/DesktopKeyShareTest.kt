@@ -131,7 +131,8 @@ class DesktopKeyShareTest {
 
     @Test
     fun `no confirmed peer or no key record never reaches the wire`() = runTest {
-        val unconfirmed = DesktopKeyShare(session(sender, router, null), 200)
+        // Another transport whose connection confirms no one.
+        val unconfirmed = DesktopKeyShare(session(ScriptedMessageSender(router), router, null), 200)
         assertEquals(
             DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NO_PEER),
             unconfirmed.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
