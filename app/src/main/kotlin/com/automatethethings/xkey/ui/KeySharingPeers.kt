@@ -18,8 +18,11 @@ import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.withContext
 
 /**
  * The peer list of [KeySharingBottomSheet] for one key: every paired device,
@@ -36,11 +39,15 @@ import kotlinx.coroutines.flow.combine
  * completes. A grant is bound to the pairing it was checked against
  * ([PairedDeviceRepository.writeGrant]): one that lands after that pairing
  * ended authorizes nothing and is deleted.
+ *
+ * The grant protocol commits prefs synchronously, so it runs on
+ * [ioDispatcher], never on the sheet's Main caller.
  */
 class KeySharingPeers(
     private val keyId: String,
     private val policyDao: KeySharingPolicyDao,
-    private val repository: PairedDeviceRepository
+    private val repository: PairedDeviceRepository,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
 
     /** One row of the list. [selectable] is false while the row must not be changed. */
@@ -74,8 +81,10 @@ class KeySharingPeers(
      */
     suspend fun setAllowed(peerPublicKeyHex: String, allowed: Boolean): Boolean {
         if (allowed) {
-            return repository.writeGrant(peerPublicKeyHex) {
-                policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
+            return withContext(ioDispatcher) {
+                repository.writeGrant(peerPublicKeyHex) {
+                    policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
+                }
             }
         } else {
             policyDao.removePolicy(keyId, peerPublicKeyHex)
