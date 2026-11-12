@@ -123,6 +123,7 @@ public class TrustStoreRepository(
     public suspend fun importFromURL(url: String, label: String? = null): ImportResult =
         withContext(Dispatchers.IO) {
             val bundle = caFetcher.fetchBundle(url)
+            val source = "url:${redactedUrl(url)}"
             var imported = 0
             var skipped = 0
             val errors = mutableListOf<String>()
@@ -135,7 +136,7 @@ public class TrustStoreRepository(
                 }
 
                 try {
-                    if (storeIfAbsent(cert, label, "url:$url") != null) {
+                    if (storeIfAbsent(cert, label, source) != null) {
                         imported++
                     } else {
                         skipped++
@@ -602,6 +603,47 @@ public class TrustStoreRepository(
         private val storeLocks = ConcurrentHashMap<String, Any>()
 
         fun lockFor(dir: File): Any = storeLocks.computeIfAbsent(dir.canonicalPath) { Any() }
+
+        const val UNPARSEABLE_URL = "[unparseable url]"
+        const val ILLEGAL_URI_CHARS = " \"<>\\^`{|}"
+
+        /**
+         * The import source recorded for [url]: scheme, host, port and path
+         * only. Userinfo, the query and the fragment can carry credentials
+         * (basic auth, signed-URL tokens), and the source is stored in the
+         * metadata and in audit details that the audit log exports, so they
+         * are dropped. Characters a URI never allows (quotes, spaces, braces)
+         * are percent-encoded before parsing and the path is recorded decoded.
+         * A URL that still does not parse as a hierarchical URL with a
+         * server-based authority is recorded without its text.
+         */
+        fun redactedUrl(url: String): String {
+            val escaped = buildString {
+                url.trim().forEach { c ->
+                    if (c < ' ' || c == '\u007f' || c in ILLEGAL_URI_CHARS) {
+                        append('%').append("%02X".format(c.code))
+                    } else {
+                        append(c)
+                    }
+                }
+            }
+            val uri = try {
+                java.net.URI(escaped)
+            } catch (e: java.net.URISyntaxException) {
+                return UNPARSEABLE_URL
+            }
+            val scheme = uri.scheme
+            if (uri.isOpaque || scheme == null) return UNPARSEABLE_URL
+            val host = uri.host
+            if (host == null) {
+                // A registry-based authority (e.g. a host with "_") keeps the
+                // userinfo in its raw text: record nothing of it.
+                if (uri.rawAuthority != null) return UNPARSEABLE_URL
+                return "$scheme:${uri.path.orEmpty()}"
+            }
+            val port = if (uri.port != -1) ":${uri.port}" else ""
+            return "$scheme://$host$port${uri.path.orEmpty()}"
+        }
     }
 
     private fun saveMetadataSync(certs: List<TrustedCA>) {
