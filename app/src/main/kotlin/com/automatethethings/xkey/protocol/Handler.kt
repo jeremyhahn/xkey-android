@@ -3681,7 +3681,8 @@ class RequestHandler(
         val pinType = params.optString("pinType", "")
         val currentPin = params.optString("currentPin", "")
         val newPin = params.optString("newPin", "")
-        if (currentPin.isEmpty() || newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Current and new PINs required")
+        if (newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "New PIN required")
+        if (currentPin.isEmpty()) return Response.error(request.id, ErrorCodes.PIN_REQUIRED, "Current PIN required")
         newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
