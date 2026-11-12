@@ -60,8 +60,11 @@ object XmpMetadataHelper {
         } catch (_: IOException) {
             file.absolutePath
         }
-        return pathLocks[Math.floorMod(key.hashCode(), pathLocks.size)]
+        return lockForKey(key)
     }
+
+    /** The lock for a destination named by [identity], a canonical path or a URI. */
+    private fun lockForKey(identity: String): Any = pathLocks[Math.floorMod(identity.hashCode(), pathLocks.size)]
 
     fun writeSignature(filePath: String, data: ContentAuthenticityData): Unit = synchronized(lockFor(filePath)) {
         val mimeType = getMimeType(filePath)
@@ -137,24 +140,51 @@ object XmpMetadataHelper {
         }
     }
 
+    /** How the Share-sheet signer signs MP4/MOV, PNG or WebP it can only stream. */
+    enum class SharedSigning {
+        /** A detached `.xkeysig`: the media is only read, so a read-only grant signs. */
+        SIDECAR,
+
+        /** The media carries an embedded signature, which a sidecar would not override: write a signed copy. */
+        SIGNED_COPY
+    }
+
     /**
-     * Signs MP4/MOV, PNG or WebP the caller can only stream, such as a
-     * shared content URI, in place: [open] is copied into a working file
-     * under [workDir] (at most [maxEmbedBytes]), [data] is embedded there,
-     * replacing any earlier signature, and the result is written to
-     * [openOutput]. False, with nothing written, when the media cannot carry
-     * an embedded signature and carries none, so a detached sidecar is what
-     * verifies. Throws when it carries one that cannot be replaced, or a read
-     * fails: a sidecar would then be shadowed by the old embedded signer.
+     * Decides how a shared stream is signed, reading [open] only: never
+     * opening it for writing keeps media shared with read access signable.
+     * A read failure propagates: it has not shown the media unsigned.
+     */
+    fun sharedSigning(open: () -> InputStream, format: XmpContainers.Format?): SharedSigning {
+        if (format == null) return SharedSigning.SIDECAR
+        val carried = open().use { XmpContainers.read(it.buffered(), format) }
+        return if (carried == null) SharedSigning.SIDECAR else SharedSigning.SIGNED_COPY
+    }
+
+    /**
+     * Writes a signed copy of MP4/MOV, PNG or WebP the caller can only
+     * stream, such as a shared content URI: [open] is copied into a working
+     * file under [workDir] (at most [maxEmbedBytes]), [data] is embedded
+     * there, replacing any earlier signature, and only the complete result
+     * is copied to [openOutput], which should not be [open]'s own document.
+     * Replacements naming one [destination] (a URI or a canonical path) are
+     * serialized from the read through the copy. If the copy fails, the
+     * working file is kept and the thrown [IOException] names it.
+     *
+     * False, with nothing written, when the media cannot carry an embedded
+     * signature and carries none, so a detached sidecar is what verifies.
+     * Throws when it carries one that cannot be replaced, or a read fails:
+     * a sidecar would then be shadowed by the old embedded signer.
      */
     fun replaceEmbeddedSignature(
         open: () -> InputStream,
         openOutput: () -> OutputStream,
         format: XmpContainers.Format,
         data: ContentAuthenticityData,
-        workDir: File
-    ): Boolean {
+        workDir: File,
+        destination: String
+    ): Boolean = synchronized(lockForKey(destination)) {
         val work = File.createTempFile(".xkey-sign.", ".xkeytmp", workDir)
+        var keep = false
         try {
             val whole = open().use { input -> work.outputStream().use { copyAtMost(input, it, maxEmbedBytes.toLong()) } }
             if (!whole) {
@@ -164,12 +194,17 @@ object XmpMetadataHelper {
                 }
                 return false
             }
-            val embedded = synchronized(lockFor(work.path)) { writeEmbeddedSignature(work.path, format, data) }
-            if (!embedded) return false
-            openOutput().use { output -> work.inputStream().use { it.copyTo(output) } }
-            return true
+            // The working file is this call's own: no other write shares its lock.
+            if (!writeEmbeddedSignature(work.path, format, data)) return false
+            try {
+                openOutput().use { output -> work.inputStream().use { it.copyTo(output) } }
+            } catch (e: IOException) {
+                keep = true
+                throw IOException("cannot write the signed copy; it is kept at ${work.path}", e)
+            }
+            true
         } finally {
-            work.delete()
+            if (!keep) work.delete()
         }
     }
 

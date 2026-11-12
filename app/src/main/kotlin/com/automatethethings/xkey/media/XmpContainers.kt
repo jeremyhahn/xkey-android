@@ -180,6 +180,9 @@ object XmpContainers {
         }
         val base = strip(data, format)
         val baseParts = parse(base, format) ?: return null
+        // Ours is one more part ([embedWebp] adds two only beside a lone
+        // image chunk): past the limit [parse] would refuse the result.
+        if (baseParts.size >= MAX_PARTS) return null
         val packet = packet(json)
         // The payload [read] would load: a larger one would read back as unsigned.
         val readerPayload = when (format) {
