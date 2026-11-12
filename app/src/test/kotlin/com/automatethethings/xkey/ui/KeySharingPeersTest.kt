@@ -30,6 +30,7 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.runs
+import io.mockk.spyk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -386,6 +387,7 @@ class KeySharingPeersTest {
             if (firstArg<KeySharingPolicy>().peerPublicKeyHex == PEER_B) gate.await()
             insert(firstArg())
         }
+        repo = spyk(repo)
         val peers = peersOf()
         var attached = true
         var redraws = 0
@@ -416,10 +418,67 @@ class KeySharingPeersTest {
         assertTrue(first.await())
         tap.join()
         assertEquals("a detached sheet was redrawn", 0, redraws)
+        // The cancelled tap's grant still took its turn, and was refused there.
+        coVerify(exactly = 1) { repo.writeGrant(PEER_A, tapped!!, any()) }
         assertTrue(table.value.none { it.peerPublicKeyHex == PEER_A })
         assertFalse(hasAccess(PEER_A))
         // The refused grant left the queue: the next edit of the key runs at once.
         assertTrue(peers.setAllowed(PEER_B, false, null))
+    }
+
+    @Test
+    fun aWithdrawalQueuedBehindAGrantSurvivesTheSheetsDismissal() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            gate.await()
+            insert(firstArg())
+        }
+        val peers = peersOf()
+
+        // B's grant is being written when the user withdraws A: the withdrawal waits its turn.
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B))
+        }
+        val withdrawal = launch(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A))
+        }
+        assertFalse(withdrawal.isCompleted)
+
+        // The sheet is dismissed before the queue drains.
+        withdrawal.cancel()
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        withdrawal.join()
+        assertFalse("a dismissed sheet discarded a queued withdrawal", hasAccess(PEER_A))
+        assertEquals(listOf(PEER_B), table.value.map { it.peerPublicKeyHex })
+    }
+
+    @Test
+    fun aKeyWideClearQueuedBehindAGrantSurvivesTheSheetsDismissal() = runTest {
+        var column = SharingPolicyType.SELECTED_PEERS
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            gate.await()
+            insert(firstArg())
+        }
+        val peers = peersOf()
+
+        // B's grant is being written when the user leaves selected peers: the clear waits its turn.
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B))
+        }
+        val leave = launch(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setSharingPolicy(selectedPeers = false) { column = SharingPolicyType.PRIVATE }
+        }
+        assertFalse(leave.isCompleted)
+
+        // The sheet is dismissed before the queue drains.
+        leave.cancel()
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        leave.join()
+        assertEquals(SharingPolicyType.PRIVATE, column)
+        assertTrue("a dismissed sheet discarded a queued key-wide clear", table.value.none { it.keyId == KEY })
     }
 
     @Test
