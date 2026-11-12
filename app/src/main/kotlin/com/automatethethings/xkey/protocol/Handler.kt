@@ -1856,6 +1856,14 @@ class RequestHandler(
 
     /**
      * Handles local.setKeyPolicy - update key sharing policy.
+     *
+     * Widening a key to every peer (`shareable: true` on a key whose policy
+     * is not already [SharingPolicyType.ALL_PEERS]) lets any paired peer pass
+     * the sharing check, so it needs a confirmed peer and the owner's
+     * approval on the phone. Without a launcher, or when the prompt is
+     * cancelled or fails, the request answers BIOMETRIC_FAILED and the stored
+     * policy is unchanged. Narrowing needs neither. Every stored change is
+     * audited.
      */
     private suspend fun handleLocalSetKeyPolicy(request: Request): Response {
         val params = request.params
@@ -1863,17 +1871,60 @@ class RequestHandler(
 
         val policyParams = LocalSetKeyPolicyParams.fromJson(params)
 
-        keyDao.getByKeyId(policyParams.keyId)
+        val entity = keyDao.getByKeyId(policyParams.keyId)
             ?: throw ProtocolException("Key not found: ${policyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
         if (policyParams.shareable != null) {
+            val newPolicy = if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
+            val widening = newPolicy == SharingPolicyType.ALL_PEERS &&
+                entity.sharingPolicy != SharingPolicyType.ALL_PEERS
+
+            if (widening) {
+                requireConfirmedPeer("Sharing a key with all peers")
+                val keyName = entity.label.ifBlank { entity.keyId }
+                val launcher = biometricLauncher ?: throw ProtocolException(
+                    "Sharing a key with all peers needs the owner's approval, and no biometric prompt is available",
+                    errorCode = ErrorCodes.BIOMETRIC_FAILED
+                )
+                withContext(Dispatchers.Main) {
+                    showBiometricNotificationIfLocked(
+                        operationType = "share",
+                        rpName = keyName,
+                        requestId = "set-key-policy-${request.id}"
+                    )
+                    try {
+                        launcher.requestAuthentication(
+                            title = "Share key with all devices",
+                            subtitle = "Allow every paired device to use \"$keyName\"",
+                            showOnLockScreen = keyguardManager.isKeyguardLocked
+                        )
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        throw ProtocolException(
+                            "Owner did not approve sharing the key with all peers: ${e.message}",
+                            errorCode = ErrorCodes.BIOMETRIC_FAILED
+                        )
+                    } finally {
+                        cancelBiometricNotification()
+                    }
+                }
+            }
+
             // updateSharingPolicy, not updateShareable: it keeps `shareable` and
             // `sharing_policy` in step, which KeyEntity requires. Writing the
             // legacy flag alone could leave shareable=1 with policy=PRIVATE.
-            keyDao.updateSharingPolicy(
-                policyParams.keyId,
-                if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
-            )
+            keyDao.updateSharingPolicy(policyParams.keyId, newPolicy)
+
+            if (entity.sharingPolicy != newPolicy) {
+                AuditLogger.logKeySharingChanged(
+                    keyId = entity.keyId,
+                    keyLabel = entity.label,
+                    keyType = entity.keyType,
+                    oldPolicy = entity.sharingPolicy.name,
+                    newPolicy = newPolicy.name
+                )
+            }
         }
 
         Log.i(TAG, "Updated policy for key: ${policyParams.keyId}, shareable=${policyParams.shareable}")
