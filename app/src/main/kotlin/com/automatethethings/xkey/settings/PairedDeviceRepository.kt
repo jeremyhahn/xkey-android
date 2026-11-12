@@ -232,6 +232,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     }
 
     fun addDevice(publicKeyHex: String, deviceName: String, bleAddress: String? = null) {
+        var stillPending = false
         val evicted = synchronized(this) {
             val devices = getAllDevices().toMutableList()
             // Remove stale entries for this device. A re-pairing device will have a new Noise
@@ -249,14 +250,20 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
                 pairedAt = System.currentTimeMillis(),
                 bleAddress = bleAddress
             ))
-            saveDevices(devices)
-            evicted
+            val evictedKeys = evicted.map { it.publicKeyHex }.filter { it != publicKeyHex }
+            saveDevices(devices, revoke = evictedKeys)
+            stillPending = publicKeyHex in pendingRevocations()
+            evictedKeys
         }
         // A stale entry replaced under a different key is no longer paired:
         // a live session with it must not outlive the record. Listeners run
         // outside the store's lock, so one that takes a transport lock can
         // never deadlock against a send that reads the store.
-        notifyRemoved(evicted.map { it.publicKeyHex }.filter { it != publicKeyHex })
+        notifyRemoved(evicted)
+        // A key re-paired while its earlier revocation never committed: retry
+        // it now, not only at the next start. Until it commits, the request
+        // handler refuses SELECTED_PEERS for this key.
+        if (stillPending) notifyRevocationPending(publicKeyHex)
     }
 
     @Synchronized
@@ -281,7 +288,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
             val devices = getAllDevices().toMutableList()
             val deviceToRemove = devices.find { it.publicKeyHex == publicKeyHex }
             devices.removeAll { it.publicKeyHex == publicKeyHex }
-            saveDevices(devices)
+            saveDevices(devices, revoke = listOf(publicKeyHex))
 
             // Log device unpairing
             if (deviceToRemove != null) {
@@ -308,7 +315,10 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     fun clear() {
         val removed = synchronized(this) {
             val removed = getAllDevices().map { it.publicKeyHex }
-            prefs.edit().remove(KEY_DEVICES).apply()
+            prefs.edit()
+                .remove(KEY_DEVICES)
+                .putStringSet(KEY_PENDING_REVOCATIONS, pendingRevocations() + removed)
+                .apply()
             removed
         }
         notifyRemoved(removed)
@@ -436,12 +446,47 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         }
     }
 
-    private fun saveDevices(devices: List<PairedDeviceData>) {
+    /**
+     * Keys whose sharing grants are still to be dropped (#174): written in the
+     * same prefs edit that removes their pairing, so the two persist or vanish
+     * together, and cleared by [completeRevocation] only once the delete has
+     * committed. Replayed at app start.
+     */
+    @Synchronized
+    fun pendingRevocations(): Set<String> =
+        prefs.getStringSet(KEY_PENDING_REVOCATIONS, null)?.toSet() ?: emptySet()
+
+    fun isRevocationPending(publicKeyHex: String): Boolean = publicKeyHex in pendingRevocations()
+
+    /** Called once [publicKeyHex]'s sharing grants are deleted. */
+    @Synchronized
+    fun completeRevocation(publicKeyHex: String) {
+        val pending = pendingRevocations()
+        if (publicKeyHex in pending) {
+            prefs.edit().putStringSet(KEY_PENDING_REVOCATIONS, pending - publicKeyHex).apply()
+        }
+    }
+
+    private fun saveDevices(devices: List<PairedDeviceData>, revoke: Collection<String> = emptyList()) {
         val arr = JSONArray()
         for (device in devices) {
             arr.put(device.toJson())
         }
-        prefs.edit().putString(KEY_DEVICES, arr.toString()).apply()
+        val edit = prefs.edit().putString(KEY_DEVICES, arr.toString())
+        if (revoke.isNotEmpty()) {
+            edit.putStringSet(KEY_PENDING_REVOCATIONS, pendingRevocations() + revoke)
+        }
+        edit.apply()
+    }
+
+    private fun notifyRevocationPending(publicKeyHex: String) {
+        for (listener in removalListeners) {
+            try {
+                listener.onRevocationPending(publicKeyHex)
+            } catch (e: Exception) {
+                Log.e(TAG, "Removal listener failed", e)
+            }
+        }
     }
 
     private fun notifyRemoved(publicKeysHex: List<String>) {
@@ -460,6 +505,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         private const val TAG = "PairedDeviceRepository"
         private const val PREFS_NAME = "xkey_paired_devices"
         private const val KEY_DEVICES = "paired_devices"
+        private const val KEY_PENDING_REVOCATIONS = "pending_grant_revocations"
 
         /**
          * Process-wide: the Activity that unpairs a device and the service
@@ -499,6 +545,13 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
  */
 fun interface PairedDeviceRemovalListener {
     fun onDeviceRemoved(publicKeyHex: String)
+
+    /**
+     * [publicKeyHex] was paired again while an earlier removal's grant
+     * revocation is still pending (#174). Not a removal: the device stays
+     * paired. Same threading as [onDeviceRemoved].
+     */
+    fun onRevocationPending(publicKeyHex: String) {}
 }
 
 /**
@@ -512,24 +565,52 @@ fun interface PairedDeviceRemovalListener {
  * [scope] (the app passes an IO scope): [onDeviceRemoved] must not block the
  * thread that changed the store. Only the peer's policy rows go; keys and
  * their sharing policy (`ALL_PEERS`, `PRIVATE`, `SELECTED_PEERS`) are
- * untouched. [policyDao] is resolved on [scope], so registering the listener
- * does not open the database.
+ * untouched. [policyDao] and [repository] are resolved on [scope], so
+ * registering the listener opens neither the database nor the prefs.
+ *
+ * Durable: the repository records each removed key as a pending revocation
+ * together with the removal. A key leaves that set only after its delete
+ * commits, so a delete that failed, or never ran because the process died,
+ * is retried by [replayPending] at the next start, or as soon as the key is
+ * paired again.
  */
 class PairedDeviceGrantCleanup(
     private val policyDao: () -> KeySharingPolicyDao,
+    private val repository: () -> PairedDeviceRepository,
     private val scope: CoroutineScope
 ) : PairedDeviceRemovalListener {
 
     override fun onDeviceRemoved(publicKeyHex: String) {
+        scope.launch { revoke(publicKeyHex) }
+    }
+
+    override fun onRevocationPending(publicKeyHex: String) {
+        scope.launch { revoke(publicKeyHex) }
+    }
+
+    /** Retries every revocation a previous process left pending. */
+    fun replayPending() {
         scope.launch {
-            try {
-                val dropped = policyDao().clearPoliciesForPeer(publicKeyHex)
-                if (dropped > 0) {
-                    AuditLogger.logPeerGrantsDropped(deviceId = publicKeyHex, droppedGrants = dropped)
-                }
+            val pending = try {
+                repository().pendingRevocations()
             } catch (e: Exception) {
-                Log.e(TAG, "Dropping sharing grants for a removed device failed", e)
+                Log.e(TAG, "Reading pending grant revocations failed", e)
+                return@launch
             }
+            for (publicKeyHex in pending) revoke(publicKeyHex)
+        }
+    }
+
+    private suspend fun revoke(publicKeyHex: String) {
+        try {
+            val dropped = policyDao().clearPoliciesForPeer(publicKeyHex)
+            repository().completeRevocation(publicKeyHex)
+            if (dropped > 0) {
+                AuditLogger.logPeerGrantsDropped(deviceId = publicKeyHex, droppedGrants = dropped)
+            }
+        } catch (e: Exception) {
+            // Left pending: retried at the next start or re-pairing.
+            Log.e(TAG, "Dropping sharing grants for a removed device failed", e)
         }
     }
 
