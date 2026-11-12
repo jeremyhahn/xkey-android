@@ -299,6 +299,29 @@ class DesktopKeyShareTest {
     }
 
     @Test
+    fun `a peer grant revoked while the share waits before admission sends nothing`() = runTest {
+        // Granted when the share is decided; the grant is removed from the
+        // store while the share waits at the transport's door (the guarded
+        // sender's check just before it hands the bytes over for encryption).
+        val e = entity(SharingPolicyType.SELECTED_PEERS)
+        listed += e.keyId to peer
+        var checks = 0
+        val waiting = DesktopKeyShare(
+            session(sender, router, peer) {
+                if (checks++ == 1) listed.clear()
+                true
+            },
+            200
+        )
+
+        val out = waiting.send(e, null, pem, null, isShared)
+
+        assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
+        assertTrue("nothing reaches the wire after the revoke", sender.sent.isEmpty())
+        assertTrue("the revoke landed while the share was pending", checks >= 2)
+    }
+
+    @Test
     fun `sessions are the same only for the same transport and peer`() {
         val other = ScriptedMessageSender(router)
         val a = session(sender, router, peer)
