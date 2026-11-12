@@ -1293,11 +1293,26 @@ class KeystoreManager(private val context: Context) {
             val peerPublicKey = keyFactory.generatePublic(X509EncodedKeySpec(peerPublicKeyDer))
 
             val keyAgreement = KeyAgreement.getInstance("ECDH")
-            keyAgreement.init(privateKey)
+            try {
+                keyAgreement.init(privateKey)
+            } catch (e: java.security.InvalidKeyException) {
+                // An EC key generated before the device reached API 31 (or
+                // before PURPOSE_AGREE_KEY was requested) cannot agree.
+                if (e is android.security.keystore.UserNotAuthenticatedException ||
+                    e is android.security.keystore.KeyPermanentlyInvalidatedException
+                ) throw e
+                throw ECDHException(
+                    "key $keyId was not generated with PURPOSE_AGREE_KEY " +
+                        "(EC keys made below Android 12 / API 31 cannot do ECDH)",
+                    e
+                )
+            }
             keyAgreement.doPhase(peerPublicKey, true)
             return keyAgreement.generateSecret()
         } catch (e: android.security.keystore.UserNotAuthenticatedException) {
             throw BiometricRequiredException()
+        } catch (e: ECDHException) {
+            throw e
         } catch (e: Exception) {
             throw ECDHException("ECDH key agreement failed", e)
         }

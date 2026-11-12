@@ -71,6 +71,16 @@ graph TB
 |-----------|-------|-------------|
 | ECDH | EC P-256 | `PURPOSE_AGREE_KEY` |
 
+ECDH has an API floor of 31 (Android 12): Android Keystore has no
+`PURPOSE_AGREE_KEY` below it, although minSdk is 28. `KeystoreCapabilities`
+holds the decision. On API 28-30 `local.getCapabilities` answers
+`supportsECDH: false` and `local.ecdh` refuses with `ECDH_FAILED` ("requires
+Android 12 (API 31)") without calling `KeyAgreement`. An EC key generated
+before the device was upgraded to API 31 has no agree purpose either;
+`local.ecdh` on it answers `ECDH_FAILED` saying the key was not generated
+with `PURPOSE_AGREE_KEY`. Ed25519 is advertised in `supportedAlgorithms`
+only from API 33.
+
 ## Key Lifecycle
 
 ```mermaid
