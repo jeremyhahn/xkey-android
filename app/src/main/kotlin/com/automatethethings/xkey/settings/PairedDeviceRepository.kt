@@ -233,7 +233,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
 
     fun addDevice(publicKeyHex: String, deviceName: String, bleAddress: String? = null) {
         var stillPending = false
-        val evicted = synchronized(this) {
+        val evicted = synchronized(storeLock) {
             val devices = getAllDevices().toMutableList()
             // Remove stale entries for this device. A re-pairing device will have a new Noise
             // static key, so we match by publicKeyHex, BLE address, OR device name to ensure
@@ -252,7 +252,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
             ))
             val evictedKeys = evicted.map { it.publicKeyHex }.filter { it != publicKeyHex }
             saveDevices(devices, revoke = evictedKeys)
-            stillPending = publicKeyHex in pendingRevocations()
+            stillPending = publicKeyHex in readPending()
             evictedKeys
         }
         // A stale entry replaced under a different key is no longer paired:
@@ -266,8 +266,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         if (stillPending) notifyRevocationPending(publicKeyHex)
     }
 
-    @Synchronized
-    fun updateDeviceBleAddress(publicKeyHex: String, bleAddress: String) {
+    fun updateDeviceBleAddress(publicKeyHex: String, bleAddress: String) = synchronized(storeLock) {
         val devices = getAllDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
@@ -284,7 +283,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * They are told after the record is gone and outside the store's lock.
      */
     fun removeDevice(publicKeyHex: String) {
-        synchronized(this) {
+        synchronized(storeLock) {
             val devices = getAllDevices().toMutableList()
             val deviceToRemove = devices.find { it.publicKeyHex == publicKeyHex }
             devices.removeAll { it.publicKeyHex == publicKeyHex }
@@ -301,10 +300,9 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         notifyRemoved(listOf(publicKeyHex))
     }
 
-    @Synchronized
-    fun getAllDevices(): List<PairedDeviceData> {
-        val jsonStr = prefs.getString(KEY_DEVICES, null) ?: return emptyList()
-        return try {
+    fun getAllDevices(): List<PairedDeviceData> = synchronized(storeLock) {
+        val jsonStr = prefs.getString(KEY_DEVICES, null) ?: return@synchronized emptyList()
+        try {
             val arr = JSONArray(jsonStr)
             (0 until arr.length()).map { PairedDeviceData.fromJson(arr.getJSONObject(it)) }
         } catch (e: Exception) {
@@ -313,11 +311,11 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     }
 
     fun clear() {
-        val removed = synchronized(this) {
+        val removed = synchronized(storeLock) {
             val removed = getAllDevices().map { it.publicKeyHex }
             prefs.edit()
                 .remove(KEY_DEVICES)
-                .putStringSet(KEY_PENDING_REVOCATIONS, pendingRevocations() + removed)
+                .recordRevocations(removed)
                 .apply()
             removed
         }
@@ -336,13 +334,12 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         }
     }
 
-    @Synchronized
     fun updateDeviceSettings(
         publicKeyHex: String,
         requireAttestationForKeyUse: Boolean,
         requireAttestationForKeyAttestation: Boolean,
         attestationGracePeriodMinutes: Int
-    ) {
+    ) = synchronized(storeLock) {
         val devices = getAllDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
@@ -355,14 +352,13 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         }
     }
 
-    @Synchronized
     fun updateDeviceAttestation(
         publicKeyHex: String,
         bootHashHex: String,
         securityLevel: String,
         bootStateVerified: Boolean,
         deviceFingerprint: String? = null
-    ) {
+    ) = synchronized(storeLock) {
         val devices = getAllDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
@@ -389,8 +385,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * the desktop's `local.attestDevice` at pairing time, so the phone echoes
      * exactly what the desktop verified. No-op for an unknown peer.
      */
-    @Synchronized
-    fun updateDeviceFingerprint(publicKeyHex: String, deviceFingerprint: String) {
+    fun updateDeviceFingerprint(publicKeyHex: String, deviceFingerprint: String) = synchronized(storeLock) {
         val devices = getAllDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
@@ -409,7 +404,6 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * @param subjectDN The certificate subject distinguished name
      * @param notAfter The certificate expiry timestamp in milliseconds
      */
-    @Synchronized
     fun updateDeviceIDevID(
         publicKeyHex: String,
         certificateDER: ByteArray,
@@ -417,7 +411,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         trustLevel: String,
         subjectDN: String,
         notAfter: Long
-    ) {
+    ) = synchronized(storeLock) {
         val devices = getAllDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
@@ -433,8 +427,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         }
     }
 
-    @Synchronized
-    fun recordConnection(publicKeyHex: String) {
+    fun recordConnection(publicKeyHex: String) = synchronized(storeLock) {
         val devices = getAllDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
@@ -447,24 +440,56 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     }
 
     /**
-     * Keys whose sharing grants are still to be dropped (#174): written in the
-     * same prefs edit that removes their pairing, so the two persist or vanish
-     * together, and cleared by [completeRevocation] only once the delete has
-     * committed. Replayed at app start.
+     * Keys whose sharing grants are still to be dropped (#174), each tagged
+     * with the generation of the removal that queued it: written in the same
+     * prefs edit that removes the pairing, so the two persist or vanish
+     * together, and cleared by [completeRevocation] only once the delete for
+     * that generation has committed. Replayed at app start.
      */
-    @Synchronized
-    fun pendingRevocations(): Set<String> =
-        prefs.getStringSet(KEY_PENDING_REVOCATIONS, null)?.toSet() ?: emptySet()
+    fun pendingRevocations(): Set<String> = synchronized(storeLock) { readPending().keys }
 
     fun isRevocationPending(publicKeyHex: String): Boolean = publicKeyHex in pendingRevocations()
 
-    /** Called once [publicKeyHex]'s sharing grants are deleted. */
-    @Synchronized
-    fun completeRevocation(publicKeyHex: String) {
-        val pending = pendingRevocations()
-        if (publicKeyHex in pending) {
-            prefs.edit().putStringSet(KEY_PENDING_REVOCATIONS, pending - publicKeyHex).apply()
+    /** The generation of [publicKeyHex]'s pending revocation, or null if none is pending. */
+    fun pendingRevocationGeneration(publicKeyHex: String): Long? =
+        synchronized(storeLock) { readPending()[publicKeyHex] }
+
+    /**
+     * Called once [publicKeyHex]'s sharing grants are deleted for [generation].
+     * A no-op, returning false, when that generation is no longer the pending
+     * one: the revocation already completed, or a later removal replaced it.
+     */
+    fun completeRevocation(publicKeyHex: String, generation: Long): Boolean = synchronized(storeLock) {
+        val pending = readPending()
+        if (pending[publicKeyHex] != generation) return@synchronized false
+        prefs.edit().putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending - publicKeyHex)).apply()
+        true
+    }
+
+    /** Call under [storeLock]. */
+    private fun readPending(): Map<String, Long> {
+        val entries = prefs.getStringSet(KEY_PENDING_REVOCATIONS, null) ?: return emptyMap()
+        return entries.associate { entry ->
+            val at = entry.lastIndexOf(GENERATION_SEPARATOR)
+            if (at < 0) {
+                entry to 0L
+            } else {
+                entry.substring(0, at) to (entry.substring(at + 1).toLongOrNull() ?: 0L)
+            }
         }
+    }
+
+    private fun encodePending(pending: Map<String, Long>): Set<String> =
+        pending.map { (key, generation) -> "$key$GENERATION_SEPARATOR$generation" }.toSet()
+
+    /** Call under [storeLock]: adds [keys] to the pending set, each under a fresh generation. */
+    private fun SharedPreferences.Editor.recordRevocations(keys: Collection<String>): SharedPreferences.Editor {
+        if (keys.isEmpty()) return this
+        var generation = prefs.getLong(KEY_REVOCATION_GENERATION, 0L)
+        val pending = readPending().toMutableMap()
+        for (key in keys) pending[key] = ++generation
+        return putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending))
+            .putLong(KEY_REVOCATION_GENERATION, generation)
     }
 
     private fun saveDevices(devices: List<PairedDeviceData>, revoke: Collection<String> = emptyList()) {
@@ -472,11 +497,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         for (device in devices) {
             arr.put(device.toJson())
         }
-        val edit = prefs.edit().putString(KEY_DEVICES, arr.toString())
-        if (revoke.isNotEmpty()) {
-            edit.putStringSet(KEY_PENDING_REVOCATIONS, pendingRevocations() + revoke)
-        }
-        edit.apply()
+        prefs.edit().putString(KEY_DEVICES, arr.toString()).recordRevocations(revoke).apply()
     }
 
     private fun notifyRevocationPending(publicKeyHex: String) {
@@ -506,6 +527,16 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         private const val PREFS_NAME = "xkey_paired_devices"
         private const val KEY_DEVICES = "paired_devices"
         private const val KEY_PENDING_REVOCATIONS = "pending_grant_revocations"
+        private const val KEY_REVOCATION_GENERATION = "grant_revocation_generation"
+        private const val GENERATION_SEPARATOR = '@'
+
+        /**
+         * Guards every read-modify-write of the store. Process-wide: the
+         * Activity, the services and the grant cleanup each build their own
+         * repository over the same prefs, so a per-instance lock would let
+         * one write back a set another has changed since it read it.
+         */
+        private val storeLock = Any()
 
         /**
          * Process-wide: the Activity that unpairs a device and the service
@@ -580,13 +611,12 @@ class PairedDeviceGrantCleanup(
     private val scope: CoroutineScope
 ) : PairedDeviceRemovalListener {
 
-    override fun onDeviceRemoved(publicKeyHex: String) {
-        scope.launch { revoke(publicKeyHex) }
-    }
+    /** Peer key to the token of its one in-flight job. Guarded by itself. */
+    private val inFlight = HashMap<String, Any>()
 
-    override fun onRevocationPending(publicKeyHex: String) {
-        scope.launch { revoke(publicKeyHex) }
-    }
+    override fun onDeviceRemoved(publicKeyHex: String) = revoke(publicKeyHex)
+
+    override fun onRevocationPending(publicKeyHex: String) = revoke(publicKeyHex)
 
     /** Retries every revocation a previous process left pending. */
     fun replayPending() {
@@ -601,16 +631,57 @@ class PairedDeviceGrantCleanup(
         }
     }
 
-    private suspend fun revoke(publicKeyHex: String) {
-        try {
-            val dropped = policyDao().clearPoliciesForPeer(publicKeyHex)
-            repository().completeRevocation(publicKeyHex)
-            if (dropped > 0) {
-                AuditLogger.logPeerGrantsDropped(deviceId = publicKeyHex, droppedGrants = dropped)
+    /**
+     * At most one job per peer: a request while one runs is folded into it,
+     * since the job rereads the pending generation before it ends.
+     */
+    private fun revoke(publicKeyHex: String) {
+        val token = Any()
+        synchronized(inFlight) {
+            if (publicKeyHex in inFlight) return
+            inFlight[publicKeyHex] = token
+        }
+        scope.launch { drain(publicKeyHex, token) }
+            .invokeOnCompletion { release(publicKeyHex, token) }
+    }
+
+    private fun release(publicKeyHex: String, token: Any) {
+        synchronized(inFlight) {
+            if (inFlight[publicKeyHex] === token) inFlight.remove(publicKeyHex)
+        }
+    }
+
+    /**
+     * Deletes the peer's grants for the pending generation and acknowledges
+     * that generation only. With nothing pending the job is a no-op, so a
+     * stale or duplicate job never deletes grants approved after the
+     * revocation completed. A failure leaves the entry pending.
+     */
+    private suspend fun drain(publicKeyHex: String, token: Any) {
+        while (true) {
+            val generation = try {
+                // The read and the release are one step, so a removal that
+                // lands after the read always finds no job and starts one.
+                synchronized(inFlight) {
+                    repository().pendingRevocationGeneration(publicKeyHex).also {
+                        if (it == null) release(publicKeyHex, token)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Reading a pending grant revocation failed", e)
+                return
+            } ?: return
+            try {
+                val dropped = policyDao().clearPoliciesForPeer(publicKeyHex)
+                repository().completeRevocation(publicKeyHex, generation)
+                if (dropped > 0) {
+                    AuditLogger.logPeerGrantsDropped(deviceId = publicKeyHex, droppedGrants = dropped)
+                }
+            } catch (e: Exception) {
+                // Left pending: retried at the next start or re-pairing.
+                Log.e(TAG, "Dropping sharing grants for a removed device failed", e)
+                return
             }
-        } catch (e: Exception) {
-            // Left pending: retried at the next start or re-pairing.
-            Log.e(TAG, "Dropping sharing grants for a removed device failed", e)
         }
     }
 
