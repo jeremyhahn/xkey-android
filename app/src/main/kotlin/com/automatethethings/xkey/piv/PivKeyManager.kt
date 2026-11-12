@@ -18,8 +18,10 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -92,13 +94,23 @@ private fun ByteArray?.contentEquals(other: ByteArray?): Boolean {
 }
 
 /**
+ * Prefix of every PIV slot's Android Keystore alias ([PivSlot.keystoreAlias]).
+ * These keys belong to [PivKeyManager] and its `piv_slots` rows: the general
+ * key paths neither list nor resolve them, so nothing outside [PivKeyManager]
+ * can delete or replace a slot key behind its row.
+ */
+const val PIV_KEYSTORE_ALIAS_PREFIX = "xkey_piv_"
+
+/**
  * Manages PIV smart card key slots using Android Keystore for key storage
  * and Room for metadata persistence.
  *
  * Keys are generated and stored in Android Keystore using the alias convention
  * `xkey_piv_{slotHex}` (e.g., `xkey_piv_9A` for the Authentication slot).
  * Certificate and usage metadata is stored in the Room `piv_slots` table via
- * [PivSlotDao].
+ * [PivSlotDao]. The Keystore entry is the proof that a slot holds a key and
+ * which key it is; the row's `hasKey` and `publicKeyDer` are a cache, so a
+ * decision that depends on the slot key reads the Keystore.
  *
  * Supported operations:
  * - **Generate**: Create a new key pair in a PIV slot with a specified algorithm.
@@ -114,9 +126,8 @@ private fun ByteArray?.contentEquals(other: ByteArray?): Boolean {
  */
 class PivKeyManager(private val pivSlotDao: PivSlotDao) {
 
-    // Opened on first use: a certificate import for a slot whose row holds
-    // the public key never touches the Keystore, so it also runs in JVM
-    // unit tests, where the AndroidKeyStore provider does not exist.
+    // Opened on first use, so constructing a manager does not need the
+    // AndroidKeyStore provider (JVM unit tests substitute it).
     private val keyStore: KeyStore by lazy { KeyStore.getInstance("AndroidKeyStore").apply { load(null) } }
 
     companion object {
@@ -177,6 +188,8 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
             "AndroidKeyStore"
         )
         keyPairGenerator.initialize(paramSpec)
+        // This replaces any key the slot held: from here the row must be made
+        // to describe the new key, or the slot must be emptied.
         val keyPair = keyPairGenerator.generateKeyPair()
 
         val publicKeyDer = keyPair.public.encoded
@@ -192,7 +205,16 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
             lastUsedAt = null,
             useCount = 0
         )
-        pivSlotDao.upsert(entity)
+        // A cancelled caller must not stop the upsert half way: the row would
+        // keep the replaced key's public key and algorithm.
+        withContext(NonCancellable) {
+            try {
+                pivSlotDao.upsert(entity)
+            } catch (e: Exception) {
+                discardUnrecordedKey(slot)
+                throw e
+            }
+        }
 
         // Log to audit system
         AuditLogger.logKeyCreated(
@@ -217,12 +239,38 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
     }
 
     /**
+     * Empty [slot] after its Keystore key was replaced but the row could not
+     * be written: the replaced key is gone, and leaving the new one would
+     * leave a row describing a key the slot no longer holds. Best effort; the
+     * caller rethrows the original failure.
+     */
+    private suspend fun discardUnrecordedKey(slot: PivSlot) {
+        runCatching { keyStore.deleteEntry(slot.keystoreAlias) }
+            .onFailure { Log.w(TAG, "Could not remove unrecorded key from PIV slot ${slot.hexId}: ${it.message}") }
+        runCatching { pivSlotDao.deleteBySlotId(slot.hexId) }
+            .onFailure { Log.w(TAG, "Could not clear PIV slot ${slot.hexId} row: ${it.message}") }
+    }
+
+    /**
+     * The SubjectPublicKeyInfo DER of the key the Android Keystore holds for
+     * [slot], or null if the alias is gone. This, not the `piv_slots` row, is
+     * the proof of the slot's key.
+     */
+    private fun liveSlotPublicKey(slot: PivSlot): ByteArray? {
+        val alias = slot.keystoreAlias
+        if (!keyStore.containsAlias(alias)) return null
+        return keyStore.getCertificate(alias)?.publicKey?.encoded
+    }
+
+    /**
      * Import an X.509 certificate for an existing PIV slot.
      *
      * Parses [certDer] as exactly one DER-encoded X.509 certificate and stores
      * it in the Room database only when its SubjectPublicKeyInfo equals the
-     * slot key's public key ([getPublicKey]). A refused import stores nothing:
-     * a certificate imported earlier stays.
+     * public key the Android Keystore holds for the slot, read under the slot
+     * lock. The row's cached public key is not trusted; it is refreshed from
+     * the Keystore on success. A refused import stores nothing: a certificate
+     * imported earlier stays.
      *
      * @param slot The PIV slot to import the certificate into.
      * @param certDer DER-encoded X.509 certificate bytes.
@@ -237,8 +285,10 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
         val existing = pivSlotDao.getBySlotId(slot.hexId)
             ?: throw PivSlotEmptyException(slot)
         if (!existing.hasKey) throw PivSlotEmptyException(slot)
-        val slotPublicKey = existing.publicKeyDer ?: getPublicKey(slot)
-            ?: throw PivSlotEmptyException(slot)
+        val slotPublicKey = liveSlotPublicKey(slot) ?: run {
+            Log.w(TAG, "PIV slot ${slot.hexId} row claims a key the Keystore does not hold")
+            throw PivSlotEmptyException(slot)
+        }
 
         val certificate = parseCertificate(certDer)
         if (!certificate.publicKey.encoded.contentEquals(slotPublicKey)) {
@@ -246,7 +296,7 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
             throw PivCertificateKeyMismatchException(slot)
         }
 
-        val updated = existing.copy(certificateDer = certDer)
+        val updated = existing.copy(publicKeyDer = slotPublicKey, certificateDer = certDer)
         pivSlotDao.upsert(updated)
 
         Log.i(TAG, "Imported certificate for PIV slot ${slot.hexId} (${slot.label})")
@@ -283,7 +333,9 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
      * List all PIV slots and their current state.
      *
      * Returns information for every slot that has a database entry. Slots
-     * without entries (never used) are not included.
+     * without entries (never used) are not included. `hasKey` and
+     * `publicKeyDer` come from the Android Keystore: a row whose alias is gone
+     * is reported without a key.
      *
      * @return List of [PivSlotInfo] for all slots with database entries.
      */
@@ -297,12 +349,13 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
                     null
                 }
             }
+            val livePublicKey = if (entity.hasKey) liveSlotPublicKey(slot) else null
             PivSlotInfo(
                 slot = slot,
                 algorithm = algorithm,
-                hasKey = entity.hasKey,
+                hasKey = livePublicKey != null,
                 hasCertificate = entity.certificateDer != null,
-                publicKeyDer = entity.publicKeyDer,
+                publicKeyDer = livePublicKey,
                 createdAt = entity.createdAt,
                 lastUsedAt = entity.lastUsedAt,
                 useCount = entity.useCount
@@ -390,23 +443,14 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
     /**
      * Get the DER-encoded public key for a PIV slot.
      *
-     * Returns the SubjectPublicKeyInfo (SPKI) DER encoding of the public key.
+     * Returns the SubjectPublicKeyInfo (SPKI) DER encoding of the public key
+     * the Android Keystore holds for the slot. The `piv_slots` copy is not
+     * consulted: it can name a key the slot no longer holds.
      *
      * @param slot The PIV slot to get the public key for.
      * @return DER-encoded public key bytes, or null if the slot has no key.
      */
-    suspend fun getPublicKey(slot: PivSlot): ByteArray? {
-        // Try Room first for the stored copy
-        val entity = pivSlotDao.getBySlotId(slot.hexId)
-        if (entity?.publicKeyDer != null) {
-            return entity.publicKeyDer
-        }
-
-        // Fall back to Android Keystore
-        val alias = slot.keystoreAlias
-        val cert = keyStore.getCertificate(alias) ?: return null
-        return cert.publicKey.encoded
-    }
+    suspend fun getPublicKey(slot: PivSlot): ByteArray? = liveSlotPublicKey(slot)
 
     /**
      * Delete a key from a PIV slot.

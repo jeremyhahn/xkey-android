@@ -25,6 +25,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -1485,7 +1486,9 @@ class KeystoreManager(private val context: Context) {
         val generalAlias = KEY_ALIAS_PREFIX_GENERAL + keyId
         if (keyStore.containsAlias(generalAlias)) return generalAlias
 
-        if (keyStore.containsAlias(keyId)) return keyId
+        // A PIV slot key is reached only through PivKeyManager, which keeps
+        // its piv_slots row in step; a raw alias must not resolve to it.
+        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return keyId
 
         // Check Ed25519 software-backed keys
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -1536,6 +1539,8 @@ class KeystoreManager(private val context: Context) {
      * @return true if the key was deleted, false if it didn't exist.
      */
     fun deleteByAlias(alias: String): Boolean {
+        // PIV slot keys are deleted through PivKeyManager with their row.
+        if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
         if (!keyStore.containsAlias(alias)) return false
         keyStore.deleteEntry(alias)
         return true
