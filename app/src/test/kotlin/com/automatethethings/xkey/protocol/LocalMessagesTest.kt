@@ -347,6 +347,28 @@ class LocalMessagesTest {
         }
     }
 
+    /** The base generateKey result carries the key's own three-way level (SPEC securityLevel). */
+    @Test
+    fun `GenerateKeyResult withLevel carries securityLevel for each key security level`() {
+        val expected = mapOf(
+            KeySecurityLevel.SOFTWARE to "software",
+            KeySecurityLevel.TEE to "tee",
+            KeySecurityLevel.STRONGBOX to "strongbox"
+        )
+        assertEquals(KeySecurityLevel.entries.toSet(), expected.keys)
+
+        expected.forEach { (level, wire) ->
+            val json = GenerateKeyResult.withLevel(helloB64, null, level).toJson()
+
+            assertEquals(level.name, wire, json.getString("securityLevel"))
+            assertEquals(level.name, level == KeySecurityLevel.STRONGBOX, json.getBoolean("strongBoxBacked"))
+
+            val parsed = GenerateKeyResult.fromJson(json)
+            assertEquals(level.name, level, parsed.securityLevel)
+            assertEquals(level.name, level == KeySecurityLevel.STRONGBOX, parsed.strongBoxBacked)
+        }
+    }
+
     @Test
     fun `LocalGenerateKeyResult toJson omits publicKeyDer when the key has no exportable public part`() {
         val json = LocalGenerateKeyResult("k", "", null, "AES-256", 256, false, softwareBacked = true).toJson()
