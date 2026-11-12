@@ -50,6 +50,7 @@ import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopShareDecision
 import com.automatethethings.xkey.remote.DesktopShareGate
+import com.automatethethings.xkey.remote.shareSessionChanges
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -58,6 +59,7 @@ import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -133,6 +135,9 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     private var gattService: XKeyGattService? = null
     private var serviceBound = false
 
+    /** Follows desktop connect, confirm and disconnect while the sheet is started. */
+    private var desktopWatch: Job? = null
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             gattService = (binder as? XKeyGattService.LocalBinder)?.getService()
@@ -207,9 +212,16 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         serviceBound = requireContext().bindService(
             Intent(requireContext(), XKeyGattService::class.java), serviceConnection, 0
         )
+        // The section tracks the session while the sheet is open.
+        desktopWatch?.cancel()
+        desktopWatch = lifecycleScope.launch {
+            shareSessionChanges { gattService?.shareSession() }.collect { refreshDesktopSection() }
+        }
     }
 
     override fun onStop() {
+        desktopWatch?.cancel()
+        desktopWatch = null
         if (serviceBound) {
             requireContext().unbindService(serviceConnection)
             serviceBound = false

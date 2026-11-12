@@ -26,6 +26,9 @@ import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import org.json.JSONObject
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicLong
@@ -427,3 +430,25 @@ class DesktopKeyShare(
         }
     }
 }
+
+/**
+ * The desktop session as it changes: emits [probe]'s answer on start, then
+ * again each time a poll finds a different session. A desktop connecting,
+ * its peer being confirmed, a move to another transport and the desktop
+ * going away each emit once. The service exposes no confirm event, so the
+ * session is polled every [periodMs] while collected.
+ */
+fun shareSessionChanges(periodMs: Long = 500L, probe: () -> ShareSession?): Flow<ShareSession?> = flow {
+    var last: ShareSession? = null
+    var started = false
+    while (true) {
+        val now = probe()
+        if (!started || !sameSession(now, last)) {
+            emit(now)
+            last = now
+            started = true
+        }
+        delay(periodMs)
+    }
+}
+private fun sameSession(a: ShareSession?, b: ShareSession?): Boolean = if (a == null) b == null else a.sameAs(b)
