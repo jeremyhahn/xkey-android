@@ -22,6 +22,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -41,7 +43,10 @@ import kotlinx.coroutines.withContext
  * ended authorizes nothing and is deleted.
  *
  * The grant protocol commits prefs synchronously, so it runs on
- * [ioDispatcher], never on the sheet's Main caller.
+ * [ioDispatcher], never on the sheet's Main caller. Grants, withdrawals and
+ * [clearAll] take one lock, which is FIFO, before that switch, so they land
+ * in the order the user made them: a later withdrawal always follows an
+ * earlier grant.
  */
 class KeySharingPeers(
     private val keyId: String,
@@ -81,14 +86,25 @@ class KeySharingPeers(
      */
     suspend fun setAllowed(peerPublicKeyHex: String, allowed: Boolean): Boolean {
         if (allowed) {
-            return withContext(ioDispatcher) {
-                repository.writeGrant(peerPublicKeyHex) {
-                    policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
+            return edits.withLock {
+                withContext(ioDispatcher) {
+                    repository.writeGrant(peerPublicKeyHex) {
+                        policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
+                    }
                 }
             }
-        } else {
-            policyDao.removePolicy(keyId, peerPublicKeyHex)
         }
+        edits.withLock { policyDao.removePolicy(keyId, peerPublicKeyHex) }
         return true
+    }
+
+    /** Withdraws every peer's access to the key, after any grant or withdrawal already made. */
+    suspend fun clearAll() {
+        edits.withLock { policyDao.clearPoliciesForKey(keyId) }
+    }
+
+    private companion object {
+        /** Orders every grant and withdrawal, across all sheets. */
+        val edits = Mutex()
     }
 }
