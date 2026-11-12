@@ -2777,6 +2777,14 @@ class GattServer(
         val session = establishedSession ?: return false
         return isCurrent(session) && session.isHandshakeComplete()
     }
+
+    /**
+     * The peer this BLE session confirmed, or null while no session is
+     * established and confirmed. [stop] and a disconnect clear it, unlike the
+     * request handler's peer, which every transport shares.
+     */
+    fun confirmedPeerKeyHex(): String? =
+        authenticatedPeerKeyHex?.takeIf { pairingConfirmed && isSessionEstablished() }
 }
 
 /**

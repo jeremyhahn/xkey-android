@@ -19,6 +19,7 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -41,14 +42,14 @@ class DesktopSessionsTest {
     private class Link {
         val router = BidirectionalMessageRouter(mockk<RequestHandler>())
         val sender = ScriptedMessageSender(router)
-        fun transport(established: Boolean = true) = DesktopTransport(sender, router, established)
+        fun transport(established: Boolean = true, peer: String? = null) =
+            DesktopTransport(sender, router, established, peer)
     }
 
     private val ble = Link()
     private val tcp = Link()
-    private var live: List<DesktopTransport> = listOf(ble.transport())
-    private var confirmed: String? = desktopA
-    private val sessions = DesktopSessions({ live }, { confirmed })
+    private var live: List<DesktopTransport> = listOf(ble.transport(peer = desktopA))
+    private val sessions = DesktopSessions { live }
 
     private val backendsReply =
         """{"backends":[{"name":"tpm2","type":"tpm2","hardwareBacked":true,"signing":true,""" +
@@ -77,8 +78,7 @@ class DesktopSessionsTest {
 
     @Test
     fun `the session pairs the confirmed peer with the client of its own transport`() = runTest {
-        live = listOf(tcp.transport())
-        confirmed = desktopB
+        live = listOf(tcp.transport(peer = desktopB))
         val session = sessions.session()!!
         assertEquals(desktopB, session.peerPublicKeyHex)
         tcp.sender.succeedWith(backendsReply)
@@ -89,13 +89,14 @@ class DesktopSessionsTest {
 
     @Test
     fun `A on BLE and B confirmed on TCP never yields B with A's client`() {
-        live = listOf(ble.transport(), tcp.transport())
-        confirmed = desktopB
-        assertNull(sessions.session())
+        val bleClient = sessions.client()
+        live = listOf(ble.transport(peer = desktopA), tcp.transport(peer = desktopB))
+        val session = sessions.session()!!
+        assertEquals(desktopA, session.peerPublicKeyHex)
+        assertSame(bleClient, session.client)
 
-        // B still handshaking on TCP: the confirmed field may be about to change hands.
-        live = listOf(ble.transport(), tcp.transport(established = false))
-        confirmed = desktopA
+        // BLE up but not yet confirmed: B's TCP identity is not lent to it.
+        live = listOf(ble.transport(), tcp.transport(peer = desktopB))
         assertNull(sessions.session())
 
         // A session not yet established names nobody.
@@ -105,15 +106,15 @@ class DesktopSessionsTest {
 
     @Test
     fun `A on TCP, B on BLE, then a BLE stop never yields B with A's TCP client`() {
-        live = listOf(tcp.transport(), ble.transport())
-        confirmed = desktopB
+        live = listOf(tcp.transport(peer = desktopA), ble.transport(peer = desktopB))
         // GattServer.stop() drops BLE without clearing the handler's shared peer field.
-        live = listOf(tcp.transport())
-        val session = sessions.session()
-        assertTrue(
-            "B named on A's TCP client",
-            session == null || session.peerPublicKeyHex == desktopA
-        )
+        live = listOf(tcp.transport(peer = desktopA))
+        val session = sessions.session()!!
+        assertEquals(desktopA, session.peerPublicKeyHex)
+        tcp.sender.succeedWith(backendsReply)
+        runBlocking { session.client.listBackends() }
+        assertEquals(1, tcp.sender.sent.size)
+        assertTrue(ble.sender.sent.isEmpty())
     }
 
     @Test

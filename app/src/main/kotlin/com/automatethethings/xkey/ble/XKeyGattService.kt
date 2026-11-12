@@ -798,29 +798,31 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             val router = bleMessageRouter ?: return@let
             val established = server.isSessionEstablished()
             if (established || server.connectionState.value is ConnectionState.Connected) {
-                add(DesktopTransport(server, router, established))
+                add(DesktopTransport(server, router, established, server.confirmedPeerKeyHex()))
             }
         }
         tcpHsmServer?.let { server ->
             val router = tcpMessageRouter ?: return@let
             when (server.state.value) {
-                is com.automatethethings.xkey.tcp.TcpHsmState.Connected -> add(DesktopTransport(server, router, true))
-                is com.automatethethings.xkey.tcp.TcpHsmState.Handshaking -> add(DesktopTransport(server, router, false))
+                is com.automatethethings.xkey.tcp.TcpHsmState.Connected ->
+                    add(DesktopTransport(server, router, true, server.confirmedPeerKeyHex()))
+                is com.automatethethings.xkey.tcp.TcpHsmState.Handshaking -> add(DesktopTransport(server, router, false, null))
                 else -> Unit
             }
         }
         usbAccessoryServer?.let { server ->
             val router = usbMessageRouter ?: return@let
             when (server.state.value) {
-                is com.automatethethings.xkey.usb.UsbAccessoryState.Connected -> add(DesktopTransport(server, router, true))
-                is com.automatethethings.xkey.usb.UsbAccessoryState.Handshaking -> add(DesktopTransport(server, router, false))
+                is com.automatethethings.xkey.usb.UsbAccessoryState.Connected ->
+                    add(DesktopTransport(server, router, true, server.confirmedPeerKeyHex()))
+                is com.automatethethings.xkey.usb.UsbAccessoryState.Handshaking -> add(DesktopTransport(server, router, false, null))
                 else -> Unit
             }
         }
     }
 
     /** The key clients per router, and which desktop each reaches; every `remote.*` key call goes through it. */
-    private val desktopSessions = DesktopSessions(::desktopTransports, ::getConnectedDevicePublicKeyHex)
+    private val desktopSessions = DesktopSessions(::desktopTransports)
 
     /**
      * The `remote.*` key client for the active desktop session, or null when
@@ -831,7 +833,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
 
     /**
      * The confirmed desktop and the key client of its own transport, read in
-     * one snapshot, or null while no single desktop session is up and
+     * one snapshot, or null while the active session is not up and
      * confirmed. Use this, never [getConnectedDevicePublicKeyHex] beside
      * [remoteKeyClient]: with two transports up those can name two desktops.
      */
@@ -839,7 +841,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
 
     /**
      * The confirmed peer public key hex of the desktop session that is up, or
-     * null while no single session is up or its peer is not yet confirmed.
+     * null while the active session is not up or its peer is not yet confirmed.
      */
     fun desktopSessionPeer(): String? = desktopSession()?.peerPublicKeyHex
 

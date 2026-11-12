@@ -25,11 +25,14 @@ import java.util.WeakHashMap
  *
  * @property established whether the encrypted session is up; false while the
  *   handshake still runs
+ * @property confirmedPeer the peer public key hex this transport's own session
+ *   confirmed, or null while it has none
  */
 class DesktopTransport(
     val sender: MessageSender,
     val router: BidirectionalMessageRouter,
-    val established: Boolean
+    val established: Boolean,
+    val confirmedPeer: String?
 )
 
 /** The desktop the phone serves now: its confirmed peer key and the key client on its own transport. */
@@ -42,19 +45,15 @@ class DesktopPeerSession(val peerPublicKeyHex: String, val client: RemoteKeyClie
  * replies by id, so every key call on a router, device attestation included,
  * goes through the one client kept here for that router.
  *
- * The confirmed peer is one value shared by BLE, TCP and USB: whichever
- * transport confirmed last wrote it, and each clears it when its session
- * ends. It names the desktop on a transport only while that transport is the
- * only one with a connection, so [session] answers only then. With a second
- * connection up or still handshaking it answers null rather than pair one
- * desktop's identity with another desktop's client.
+ * Each transport reports the peer its own session confirmed, so [session]
+ * pairs a desktop's identity only with the client of the transport that
+ * confirmed it, never with the request handler's peer, which BLE, TCP and USB
+ * share and which a stopped transport can leave behind.
  *
  * @param transports the transports with a connection, in priority order
- * @param confirmedPeer the confirmed peer public key hex, or null
  */
 class DesktopSessions(
-    private val transports: () -> List<DesktopTransport>,
-    private val confirmedPeer: () -> String?
+    private val transports: () -> List<DesktopTransport>
 ) {
     /**
      * One client per router, so a switch to another desktop and back reuses
@@ -70,15 +69,14 @@ class DesktopSessions(
     fun client(): RemoteKeyClient? = transports().firstOrNull { it.established }?.let(::clientFor)
 
     /**
-     * The confirmed peer and the client of its transport, read together, or
-     * null unless exactly one transport has a connection, its session is
-     * established and its peer is confirmed.
+     * The first established transport's confirmed peer and its client, read
+     * from one snapshot, or null while that transport has no confirmed peer.
      */
     @Synchronized
     fun session(): DesktopPeerSession? {
-        val only = transports().singleOrNull()?.takeIf { it.established } ?: return null
-        val peer = confirmedPeer() ?: return null
-        return DesktopPeerSession(peer, clientFor(only))
+        val active = transports().firstOrNull { it.established } ?: return null
+        val peer = active.confirmedPeer ?: return null
+        return DesktopPeerSession(peer, clientFor(active))
     }
 
     /**

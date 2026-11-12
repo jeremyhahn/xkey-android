@@ -101,6 +101,13 @@ class TcpHsmServer(
     /** Observable state of the TCP server. */
     val state: StateFlow<TcpHsmState> = _state.asStateFlow()
 
+    /**
+     * The peer this connection's session confirmed, or null while none is
+     * established and confirmed. It ends with the session, unlike the request
+     * handler's peer, which every transport shares.
+     */
+    fun confirmedPeerKeyHex(): String? = pairingSession.confirmedPeerKeyHex()
+
     private var serverScope: CoroutineScope? = null
     private var serverSocket: ServerSocket? = null
     @Volatile private var activeSocket: Socket? = null

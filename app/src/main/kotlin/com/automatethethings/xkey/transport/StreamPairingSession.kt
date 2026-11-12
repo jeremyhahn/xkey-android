@@ -155,6 +155,17 @@ class StreamPairingSession(
     /** The connection whose handshake completed most recently, while it lasts. */
     @Volatile private var activeConnection: Connection? = null
 
+    /**
+     * The peer the current connection confirmed, or null while none is
+     * current and confirmed. Read under the connection's lock, so a
+     * revocation either lands first or after.
+     */
+    fun confirmedPeerKeyHex(): String? = activeConnection?.let { connection ->
+        synchronized(connection.state) {
+            connection.peerKeyHex.takeIf { connection.confirmed && connection.isCurrent }
+        }
+    }
+
     /** Test seam: runs on the IO dispatcher just before a send is admitted. */
     @Volatile internal var beforeAdmissionForTest: (suspend () -> Unit)? = null
 
