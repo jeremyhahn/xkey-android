@@ -1008,6 +1008,11 @@ class RequestHandler(
         biometricNotificationHelper.cancelNotification()
     }
 
+    /** Cancels only the notification posted for [requestId]. */
+    private fun cancelBiometricNotification(requestId: String) {
+        biometricNotificationHelper.cancelNotification(requestId)
+    }
+
     /**
      * Calculates the authentication duration based on biometric settings.
      *
@@ -1960,6 +1965,12 @@ class RequestHandler(
                 errorCode = ErrorCodes.BIOMETRIC_FAILED
             )
             withContext(Dispatchers.Main) {
+                // The request id, once its prompt came up and with it its
+                // notification. A request withdrawn or timed out while it
+                // waited for its turn posted none, and takes none down: the
+                // notification up belongs to the request on screen.
+                var prompted: String? = null
+                val showNotification = lockScreenPrompt(operationType = "share", rpName = keyName)
                 try {
                     // One launcher-owned request: on a locked phone the
                     // notification opens this same prompt.
@@ -1967,7 +1978,10 @@ class RequestHandler(
                         title = "Share key with all devices",
                         subtitle = "Allow every paired device to use \"$keyName\"",
                         showOnLockScreen = keyguardManager.isKeyguardLocked,
-                        onLaunch = lockScreenPrompt(operationType = "share", rpName = keyName)
+                        onLaunch = { requestId, prompt ->
+                            prompted = requestId
+                            showNotification(requestId, prompt)
+                        }
                     )
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -1977,7 +1991,7 @@ class RequestHandler(
                         errorCode = ErrorCodes.BIOMETRIC_FAILED
                     )
                 } finally {
-                    cancelBiometricNotification()
+                    prompted?.let(::cancelBiometricNotification)
                 }
             }
             // The owner approved widening from the policy revision read

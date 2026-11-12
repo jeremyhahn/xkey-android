@@ -25,6 +25,7 @@ import androidx.core.app.NotificationCompat
 import com.automatethethings.xkey.XKeyApplication
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Helper class for showing high-priority biometric request notifications.
@@ -38,6 +39,12 @@ import com.automatethethings.xkey.ui.TransparentBiometricActivity
  * - High-priority notification channel for visibility
  * - Auto-dismiss after timeout with callback
  * - Cancellation support
+ *
+ * Each notification belongs to the request it was posted for: it is posted
+ * under that request id as its tag, and [cancelNotification] with the id
+ * takes down only that one. Requests take turns on screen, and one that is
+ * withdrawn while it waits for its turn has posted nothing, so it must take
+ * nothing down: the notification up is the route to another request's prompt.
  *
  * Usage:
  * ```kotlin
@@ -59,7 +66,9 @@ class BiometricNotificationHelper(private val context: Context) {
     }
 
     private val handler = Handler(Looper.getMainLooper())
-    private var timeoutRunnable: Runnable? = null
+
+    /** The pending timeout of each notification this helper has up, by request id. */
+    private val timeouts = ConcurrentHashMap<String, Runnable>()
 
     /**
      * Shows a high-priority notification indicating biometric authentication is required.
@@ -72,7 +81,9 @@ class BiometricNotificationHelper(private val context: Context) {
      * @param operationType The type of operation requiring authentication
      *                      (e.g., "sign", "decrypt", "attestKey")
      * @param rpName The relying party name for context, or null if unavailable
-     * @param requestId A unique identifier for the biometric request
+     * @param requestId A unique identifier for the biometric request; the
+     *   notification is posted under it, and replaces only an earlier one for
+     *   the same request
      * @param timeoutMs Timeout in milliseconds before auto-dismissing (default 30s)
      * @param onTimeout Callback invoked when the notification times out without user action
      * @param promptIntent The prompt a [BiometricActivityLauncher] request opened
@@ -133,41 +144,45 @@ class BiometricNotificationHelper(private val context: Context) {
             .build()
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        notificationManager.notify(requestId, NOTIFICATION_ID, notification)
 
-        // Schedule timeout callback
-        cancelTimeoutRunnable()
-        timeoutRunnable = Runnable {
-            Log.d(TAG, "Biometric notification timed out")
-            cancelNotification()
-            onTimeout()
+        // Schedule this request's timeout callback
+        val timeout = object : Runnable {
+            override fun run() {
+                // Only while this is still the request's notification.
+                if (!timeouts.remove(requestId, this)) return
+                Log.d(TAG, "Biometric notification timed out")
+                notificationManager.cancel(requestId, NOTIFICATION_ID)
+                onTimeout()
+            }
         }
-        handler.postDelayed(timeoutRunnable!!, timeoutMs)
+        timeouts.put(requestId, timeout)?.let(handler::removeCallbacks)
+        handler.postDelayed(timeout, timeoutMs)
 
         Log.i(TAG, "Biometric notification shown, will timeout in ${timeoutMs}ms")
     }
 
     /**
-     * Cancels the biometric notification if it's currently showing.
-     *
-     * This also cancels any pending timeout callback.
+     * Cancels the notification posted for [requestId], and its pending
+     * timeout callback, leaving every other request's notification up.
      */
-    fun cancelNotification() {
+    fun cancelNotification(requestId: String) {
         Log.d(TAG, "Cancelling biometric notification")
 
-        cancelTimeoutRunnable()
+        timeouts.remove(requestId)?.let(handler::removeCallbacks)
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)
-        notificationManager.cancel(NOTIFICATION_ID)
+        notificationManager.cancel(requestId, NOTIFICATION_ID)
     }
 
     /**
-     * Cancels the timeout runnable if pending.
+     * Cancels every notification this helper has up, and their timeout
+     * callbacks. For a caller that cannot name its request; one that can
+     * cancels by its id instead, so it never takes down another request's.
      */
-    private fun cancelTimeoutRunnable() {
-        timeoutRunnable?.let {
-            handler.removeCallbacks(it)
+    fun cancelNotification() {
+        for (requestId in timeouts.keys.toList()) {
+            cancelNotification(requestId)
         }
-        timeoutRunnable = null
     }
 }
