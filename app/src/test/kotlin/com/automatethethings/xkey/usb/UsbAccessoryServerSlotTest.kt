@@ -297,4 +297,29 @@ class UsbAccessoryServerSlotTest {
         assertSame(next, slot.current()?.first)
         assertEquals(2, descriptors.size)
     }
+
+    @Test
+    fun `a clear between publishing the server and connecting it leaves nothing running`() {
+        var discarded: UsbAccessoryServer? = null
+        // Service shutdown clears the slot after open() published the server
+        // and before it connects it.
+        slot = UsbAccessoryServerSlot(
+            newDetachWatcher = { BroadcastAccessoryDetachWatcher { _, receiver -> receivers += receiver } },
+            afterPublish = { server ->
+                discarded = server
+                slot.clear()
+            },
+        )
+
+        val result = attach()
+
+        assertNotNull(discarded)
+        discarded!!.also { synchronized(opened) { opened += it } }
+        assertNull("open returned the cleared server", result)
+        assertNull(slot.current())
+        assertFalse("the cleared server connected", discarded!!.isOpen)
+        assertNull("the cleared server started a session", discarded!!.sessionJob)
+        assertTrue("the cleared server registered a detach receiver", receivers.isEmpty())
+        verify(exactly = 0) { usbManager.openAccessory(any()) }
+    }
 }

@@ -40,9 +40,12 @@ import kotlinx.coroutines.withTimeoutOrNull
  * transport shares, and must not clear the identity the new session sets.
  *
  * @param newDetachWatcher Builds the detach watcher for each new server.
+ * @param afterPublish Runs between publishing a server and connecting it;
+ *   tests use it to interleave a [clear].
  */
 class UsbAccessoryServerSlot(
     private val newDetachWatcher: () -> AccessoryDetachWatcher = { BroadcastAccessoryDetachWatcher() },
+    private val afterPublish: (UsbAccessoryServer) -> Unit = {},
 ) {
     private val lock = Any()
     private var server: UsbAccessoryServer? = null
@@ -101,6 +104,7 @@ class UsbAccessoryServerSlot(
             this.server = server
             this.router = router
         }
+        afterPublish(server)
         try {
             server.connect(context, accessory)
         } catch (e: Throwable) {

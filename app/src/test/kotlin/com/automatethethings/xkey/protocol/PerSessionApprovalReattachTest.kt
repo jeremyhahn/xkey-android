@@ -24,6 +24,7 @@ import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.settings.BiometricAuthMode
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.UserVerificationPolicy
@@ -48,6 +49,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
@@ -207,9 +209,45 @@ class PerSessionApprovalReattachTest {
         sign(BLE)
         assertPrompts(2)
 
-        sign(USB_FIRST)
         sign(TCP)
-        assertPrompts(4)
+        assertPrompts(3)
+    }
+
+    @Test
+    fun `an approved BLE request between two USB requests keeps the USB approval`() = runTest {
+        attachUsb(USB_FIRST)
+        sign(USB_FIRST)
+        sign(BLE)
+        assertPrompts(2)
+
+        // The USB connection is unchanged, so its approval still stands.
+        sign(USB_FIRST)
+        assertPrompts(2)
+
+        // A new connection id is a new session and prompts.
+        attachUsb(USB_SECOND)
+        sign(USB_SECOND)
+        assertPrompts(3)
+    }
+
+    @Test
+    fun `a cancelled BLE prompt between two USB requests keeps the USB approval`() = runTest {
+        var cancel = false
+        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any()) } answers {
+            if (cancel) throw UserCancelledException()
+            keystoreWindowOpen = true
+            mockk(relaxed = true)
+        }
+        attachUsb(USB_FIRST)
+        sign(USB_FIRST)
+
+        cancel = true
+        sign(BLE, expectSuccess = false)
+        cancel = false
+        assertPrompts(2)
+
+        sign(USB_FIRST)
+        assertPrompts(2)
     }
 
     @Test
@@ -234,7 +272,7 @@ class PerSessionApprovalReattachTest {
     }
 
     /** Signs on the connection [connectionId], as its transport routes a request. */
-    private suspend fun sign(connectionId: String) {
+    private suspend fun sign(connectionId: String, expectSuccess: Boolean = true) {
         val params = JSONObject()
             .put("credentialId", "credential-1")
             .put("dataHash", Base64.getEncoder().encodeToString(ByteArray(32) { 1 }))
@@ -245,7 +283,11 @@ class PerSessionApprovalReattachTest {
             handler.handleRawRequest(Request(id = 1, method = MethodNames.SIGN, params = params).toJson())
         }
         val response = Response.fromJson(raw)
-        assertNull("sign failed: ${response.error?.message}", response.error)
+        if (expectSuccess) {
+            assertNull("sign failed: ${response.error?.message}", response.error)
+        } else {
+            assertNotNull("a cancelled sign succeeded", response.error)
+        }
     }
 
     private companion object {
