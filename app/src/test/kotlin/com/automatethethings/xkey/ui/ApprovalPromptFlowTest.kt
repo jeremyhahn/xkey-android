@@ -23,7 +23,9 @@ import android.content.Intent
 import android.os.Looper
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.PendingAuthentications
+import com.automatethethings.xkey.auth.PendingCryptoSignatures
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
@@ -69,6 +71,9 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
+import java.time.Duration
+import java.util.Base64
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * `local.setKeyPolicy` approvals on a locked phone, end to end through the
@@ -154,20 +159,50 @@ class ApprovalPromptFlowTest {
         source = "local"
     )
 
-    /** A peer's request to share the key with every peer, on a handler of its own connection. */
-    private fun TestScope.shareWithAllPeers(): Deferred<Response> = async {
-        RequestHandler(
-            context = app,
-            keystoreManager = mockk<KeystoreManager>(relaxed = true),
-            biometricLauncher = launcher,
-            sessionAuthManager = null
-        ).also { it.setConnectedDevicePublicKeyHex(peer) }.handleRequest(
+    /** A request handler with the real launcher, whose key store has every signing key. */
+    private fun newHandler(): RequestHandler = RequestHandler(
+        context = app,
+        keystoreManager = mockk<KeystoreManager>(relaxed = true) {
+            every { generalKeyExists(any()) } returns true
+        },
+        biometricLauncher = launcher,
+        sessionAuthManager = null
+    ).also { it.setConnectedDevicePublicKeyHex(peer) }
+
+    /** A peer's request to share the key with every peer, on [handler] (by default one of its own). */
+    private fun TestScope.shareWithAllPeers(handler: RequestHandler = newHandler()): Deferred<Response> = async {
+        handler.handleRequest(
             Request(
                 id = 178L,
                 method = MethodNames.LOCAL_SET_KEY_POLICY,
                 params = JSONObject().put("keyId", keyId).put("shareable", true)
             )
         )
+    }
+
+    /** A `local.sign` request that needs the owner's verification, on [handler]. */
+    private fun TestScope.signWithUserVerification(handler: RequestHandler): Deferred<Response> = async {
+        handler.handleRequest(
+            Request(
+                id = 179L,
+                method = MethodNames.LOCAL_SIGN,
+                params = JSONObject()
+                    .put("keyId", "signing-key")
+                    .put("data", Base64.getEncoder().encodeToString("payload".toByteArray()))
+                    .put("userVerificationRequired", true)
+            )
+        )
+    }
+
+    /**
+     * Numbers both prompt families, generic approvals and crypto signatures,
+     * from 1 again, as in a freshly started process.
+     */
+    private fun numberBothFamiliesFromOne() {
+        for (family in listOf(PendingAuthentications::class.java, PendingCryptoSignatures::class.java)) {
+            val counter = family.getDeclaredField("nextRequestId").apply { isAccessible = true }
+            (counter.get(null) as AtomicLong).set(0L)
+        }
     }
 
     /** Delivers what the prompts broadcast, and resumes whoever it settled. */
@@ -189,7 +224,9 @@ class ApprovalPromptFlowTest {
     /** The lock-screen notification posted for [requestId], or null when none is up. */
     private fun notificationFor(requestId: String): Notification? =
         shadowOf(notifications).allNotifications.singleOrNull {
-            shadowOf(it.fullScreenIntent).savedIntent.requestId() == requestId
+            val opens = shadowOf(it.fullScreenIntent).savedIntent
+            opens.component?.className == TransparentBiometricActivity::class.java.name &&
+                opens.requestId() == requestId
         }
 
     /** What tapping [requestId]'s notification (or its full-screen intent firing) starts. */
@@ -375,5 +412,123 @@ class ApprovalPromptFlowTest {
 
         assertUpdated(first.await())
         assertEquals(listOf(id to true), results())
+    }
+
+    @Test
+    fun `an approval whose notification expires unanswered fails, and the next request gets its prompt`() = runTest {
+        val first = shareWithAllPeers()
+        runCurrent()
+        // Android blocked the direct start: the notification is the only way in.
+        val id = directStart().requestId()!!
+        val second = shareWithAllPeers()
+        runCurrent()
+
+        // The owner never looks: the notification expires, and time passes
+        // well short of the queued request's own deadline.
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(31))
+        advanceTimeBy(UNANSWERED_MILLIS)
+        settle()
+
+        assertNull("the expired notification is gone", notificationFor(id))
+        assertTrue("the ignored approval settled", first.isCompleted)
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, first.await().error?.code)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+
+        val secondId = directStart().requestId()!!
+        open(tapNotification(secondId)).approve()
+        settle()
+
+        assertUpdated(second.await())
+        assertEquals(listOf(secondId to true), results())
+    }
+
+    @Test
+    fun `withdrawing a queued local sign leaves the notification of the approval on screen`() = runTest {
+        // One handler serves both requests, as one does for every connection
+        // it is shared by.
+        val handler = newHandler()
+        val approval = shareWithAllPeers(handler)
+        runCurrent()
+        val id = directStart().requestId()!!
+        val signing = signWithUserVerification(handler)
+        runCurrent()
+        assertNull("the signing request waits for its turn", shadowOf(app).nextStartedActivity)
+
+        signing.cancel()
+        settle()
+
+        assertNotNull("the approval keeps its notification", notificationFor(id))
+        open(tapNotification(id)).approve()
+        settle()
+
+        assertUpdated(approval.await())
+        assertEquals(listOf(id to true), results())
+        assertNull(notificationFor(id))
+    }
+
+    @Test
+    fun `an approval handing the screen to a crypto signature leaves the signature's notification up`() = runTest {
+        numberBothFamiliesFromOne()
+        val approval = shareWithAllPeers()
+        runCurrent()
+        val id = directStart().requestId()!!
+
+        // A signature request through the launcher, posting its notification
+        // as the request handler does, with a helper of its own.
+        val signer = BiometricNotificationHelper(app)
+        var signatureKey: String? = null
+        var keyAlreadyUp = false
+        val signing = async {
+            launcher.requestCryptoSignature(
+                credentialId = "credential-1",
+                dataHash = ByteArray(32),
+                title = "xKey Authentication",
+                subtitle = "Verify your identity to sign",
+                showOnLockScreen = true,
+                onLaunch = { key, prompt ->
+                    signatureKey = key
+                    keyAlreadyUp = shadowOf(notifications).getNotification(key, NOTIFICATION_ID) != null
+                    signer.showBiometricRequiredNotification(
+                        operationType = "sign",
+                        rpName = null,
+                        requestId = key,
+                        promptIntent = prompt
+                    )
+                }
+            )
+        }
+        runCurrent()
+        assertNull("the signature waits for its turn", signatureKey)
+
+        open(tapNotification(id)).approve()
+        settle()
+
+        assertUpdated(approval.await())
+        val key = signatureKey
+        assertNotNull("the signature got its turn", key)
+        assertFalse("its key names no other request's notification", keyAlreadyUp)
+        assertEquals(
+            CryptoSigningActivity::class.java.name,
+            shadowOf(app).nextStartedActivity?.component?.className
+        )
+        assertNotNull(
+            "the signature's notification is still up",
+            shadowOf(notifications).getNotification(key, NOTIFICATION_ID)
+        )
+        assertNull("the approval's is gone", notificationFor(id))
+        assertTrue(signing.isActive)
+        signing.cancel()
+    }
+
+    private companion object {
+        /** The id every lock-screen approval notification is posted under, with its own tag. */
+        const val NOTIFICATION_ID = 2001
+
+        /**
+         * How long an ignored approval is left: past its notification's 30 s
+         * and the screen's hold on an unanswered prompt, inside a queued
+         * request's [PendingAuthentications.QUEUE_DEADLINE_MILLIS].
+         */
+        const val UNANSWERED_MILLIS = 90_000L
     }
 }
