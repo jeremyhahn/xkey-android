@@ -50,6 +50,7 @@ import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopShareDecision
 import com.automatethethings.xkey.remote.DesktopShareGate
+import com.automatethethings.xkey.remote.loadZeroedOnCancel
 import com.automatethethings.xkey.remote.shareSessionChanges
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -63,7 +64,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -677,8 +677,14 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     /** What may leave the phone for this key, as of now. */
     private class ShareInputs(val entity: KeyEntity?, val software: SoftwareKey?, val publicKeyPem: String?)
 
-    /** Reads the key fresh (the policy may just have changed). The caller zeroes [ShareInputs.software]. */
-    private suspend fun loadShareInputs(): ShareInputs = withContext(Dispatchers.IO) {
+    /**
+     * Reads the key fresh (the policy may just have changed). The caller
+     * zeroes [ShareInputs.software]; a cancellation that drops the result at
+     * the hand back from the IO dispatcher zeroes it here.
+     */
+    private suspend fun loadShareInputs(): ShareInputs = loadZeroedOnCancel(
+        Dispatchers.IO, zero = { it.software?.material?.fill(0) }
+    ) {
         val context = requireContext().applicationContext
         val entity = keyDao.getByKeyId(keyId)
         val software = SoftwareKeyStore(context).get(keyId)
