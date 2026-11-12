@@ -17,7 +17,9 @@ package com.automatethethings.xkey.auth
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.service.notification.StatusBarNotification
@@ -26,9 +28,12 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.XKeyApplication
+import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -290,6 +295,59 @@ class BiometricNotificationHelperTest {
         } finally {
             listOf(first, second, third).forEach(helper::cancelNotification)
         }
+    }
+
+    @Test
+    fun twoKeysWithEqualHashCodesNeverShareOrRewriteAPendingIntent() {
+        // Process-safe approval ids are large; these two hash alike, so a
+        // request code drawn from hashCode() alone cannot tell them apart.
+        val older = "approval-3363295394234823610"
+        val newer = "approval-2315463952855601407"
+        assertEquals("the keys must collide for this test to mean anything", older.hashCode(), newer.hashCode())
+        val unused = CountDownLatch(1)
+        try {
+            show(older, 30_000L, unused)
+            val olderIntent = awaitPostedUnder(older).notification.contentIntent
+            assertNotNull(olderIntent)
+
+            show(newer, 30_000L, unused)
+            val newerIntent = awaitPostedUnder(newer).notification.contentIntent
+            assertNotNull(newerIntent)
+
+            assertNotEquals(
+                "the newer request's notification took over the older one's pending intent",
+                olderIntent,
+                newerIntent
+            )
+            assertEquals(
+                "posting the newer request replaced the older notification's pending intent",
+                olderIntent,
+                postedUnder(older)!!.notification.contentIntent
+            )
+            // Each key has a pending intent of its own: a plain intent that
+            // differs only in extras, as both did before, matches neither.
+            assertNull(
+                "an intent without the key's data still matches a notification's pending intent",
+                PendingIntent.getActivity(
+                    context,
+                    older.hashCode(),
+                    Intent(context, TransparentBiometricActivity::class.java),
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+        } finally {
+            helper.cancelNotification(older)
+            helper.cancelNotification(newer)
+        }
+    }
+
+    private fun awaitPostedUnder(key: String, timeoutMs: Long = 5_000L): StatusBarNotification {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            postedUnder(key)?.let { return it }
+            Thread.sleep(25)
+        }
+        throw AssertionError("no notification was posted under $key")
     }
 
     @Test

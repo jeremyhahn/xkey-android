@@ -15,11 +15,15 @@
 
 package com.automatethethings.xkey.auth
 
+import com.automatethethings.xkey.auth.BiometricActivityLauncher.BiometricResult
 import com.automatethethings.xkey.auth.PromptOwnership.Event
 import com.automatethethings.xkey.auth.PromptOwnership.Kind
 import com.automatethethings.xkey.auth.PromptOwnership.Outcome
 import com.automatethethings.xkey.auth.PromptOwnership.Refusal
 import com.automatethethings.xkey.auth.PromptOwnership.State
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -63,6 +67,38 @@ class PromptOwnershipTest {
         assertNull(owner.activeKey)
         assertTrue(refused.isEmpty())
     }
+
+    @Test
+    fun aCancelAllBetweenTheNextTurnAndItsCallerResumingCancelsItUnlaunchedAndFreesTheQueue() = runTest {
+        val requests = PendingAuthentications(owner, expirePrompt = { true })
+        val launched = mutableListOf<String>()
+        val first = async { requests.await { launched += it } }
+        val second = async { requests.await { launched += it } }
+        runCurrent()
+        assertEquals(1, launched.size)
+
+        // Settling the first makes the second ACTIVE and completes its turn
+        // at once; its coroutine is only dispatched, not yet resumed.
+        assertTrue(requests.complete(launched.single(), BiometricResult.Success))
+        assertEquals(State.ACTIVE, owner.state(NotificationKeys.approval(launchedNext(launched.single()))))
+        requests.cancelAll()
+        runCurrent()
+
+        assertEquals(BiometricResult.Success, first.await())
+        assertTrue("the request whose turn had come is cancelled", second.isCancelled)
+        assertEquals("and never launches", 1, launched.size)
+        assertEquals("it holds no entry", 0, owner.entries)
+        assertNull(owner.activeKey)
+
+        val next = async { requests.await { launched += it } }
+        runCurrent()
+        assertEquals("the queue is free for the next request", 2, launched.size)
+        assertTrue(requests.complete(launched[1], BiometricResult.Success))
+        assertEquals(BiometricResult.Success, next.await())
+    }
+
+    /** The id allocated after [id]: ids grow by one within a process. */
+    private fun launchedNext(id: String) = (id.toLong() + 1).toString()
 
     @Test
     fun aQueuedApprovalSettledByItsOwnerReleasesItsEntryUnshown() {
