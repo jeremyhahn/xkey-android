@@ -78,8 +78,8 @@ holds the decision. On API 28-30 `local.getCapabilities` answers
 Android 12 (API 31)") without calling `KeyAgreement`. An EC key generated
 before the device was upgraded to API 31 has no agree purpose either;
 `local.ecdh` on it answers `ECDH_FAILED` saying the key was not generated
-with `PURPOSE_AGREE_KEY`. Ed25519 is advertised in `supportedAlgorithms`
-only from API 33.
+with `PURPOSE_AGREE_KEY`. Ed25519 is not advertised in `supportedAlgorithms`:
+`local.generateKey` cannot parse the name yet.
 
 ## Key Lifecycle
 

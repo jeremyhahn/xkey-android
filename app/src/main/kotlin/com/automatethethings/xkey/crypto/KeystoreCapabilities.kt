@@ -34,15 +34,17 @@ object KeystoreCapabilities {
     /** Keystore key agreement (`KeyProperties.PURPOSE_AGREE_KEY`) is API 31. */
     const val ECDH_MIN_SDK = 31
 
-    /** [KeystoreManager.generateKeyForAlgorithm] refuses Ed25519 below API 33. */
-    const val ED25519_MIN_SDK = 33
-
     /** True when local.ecdh can run on [sdk]. */
     fun supportsEcdh(sdk: Int): Boolean = sdk >= ECDH_MIN_SDK
 
-    /** Algorithms local.generateKey can create on [sdk]. */
-    fun supportedAlgorithms(sdk: Int): List<String> =
-        if (sdk >= ED25519_MIN_SDK) BASE_ALGORITHMS + "Ed25519" else BASE_ALGORITHMS
+    /**
+     * Algorithms local.generateKey can create on [sdk].
+     *
+     * Ed25519 is left out on every release: local.generateKey parses names
+     * through CoseAlgorithms.fromName, which has no Ed25519.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun supportedAlgorithms(sdk: Int): List<String> = BASE_ALGORITHMS
 
     /** Why local.ecdh is refused on [sdk]. */
     fun ecdhUnsupportedReason(sdk: Int): String =
