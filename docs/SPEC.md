@@ -33,37 +33,37 @@ Never does:
 |---|---|---|---|
 | noise-pairing | shipped | Noise responder for `Noise_XX_25519_ChaChaPoly_SHA256` after the pre-handshake identity exchange, with the wire contract's prologue and counter nonces; static key in `EncryptedSharedPreferences`; JSON-RPC 2.0 base methods `ping`, `getInfo`, `generateKey`, `sign`, `loadKey`, `deleteKey`, `pairing.confirm`; the user approves each pairing; paired-device list and detail screens | `docs/noise-pairing/` |
 | ble-transport | shipped | GATT peripheral advertising the xkey service; 7-byte fragment header (flags, sequence, total, length), MTU-aware; a foreground service keeps it advertising | `docs/ble-transport/` |
-| usb-transport | shipped | USB accessory (AOA) with a 2-byte big-endian length prefix; shares the `StreamPairingSession` responder with TCP | none |
-| tcp-pairing | shipped | Loopback server on `:8444` behind the Settings toggle "TCP Pairing (ADB)", same framing as USB; enables the emulator and ADB end-to-end suites | none |
-| device-attestation | shipped | Protocol version 2 of the pairing wire contract: a persistent Device Attestation Key attested once to an Android hardware root, a live ECDSA-P256 signature over the transcript, and a `DeviceFingerprint` that hashes the DAK's SPKI | none |
+| usb-transport | shipped | USB accessory (AOA) with a 2-byte big-endian length prefix; shares the `StreamPairingSession` responder with TCP | `docs/usb-transport/` |
+| tcp-pairing | shipped | Loopback server on `:8444` behind the Settings toggle "TCP Pairing (ADB)", same framing as USB; enables the emulator and ADB end-to-end suites | `docs/tcp-pairing/` |
+| device-attestation | shipped | Protocol version 2 of the pairing wire contract: a persistent Device Attestation Key attested once to an Android hardware root, a live ECDSA-P256 signature over the transcript, and a `DeviceFingerprint` that hashes the DAK's SPKI | `docs/device-attestation/` |
 | hardware-backed-keys | shipped | `local.*` crypto: generate, sign, decrypt, symmetric encrypt and decrypt, ECDH, HMAC, public key, list, info, delete, key policy, key attestation, capabilities; StrongBox preferred, TEE fallback; `generateKey` returns `publicKeyDer` and `securityLevel`; EC keys carry `PURPOSE_AGREE_KEY` | `docs/hardware-backed-keys/` |
-| exportable-symmetric-keys | shipped | `local.generateKey` with `exportable` makes a software-backed symmetric key whose material may be shared or synced; exportable asymmetric keys are refused; the desktop side of the contract is `go-xkms/xkey/pkg/pairing` | none |
+| exportable-symmetric-keys | shipped | `local.generateKey` with `exportable` makes a software-backed symmetric key whose material may be shared or synced; exportable asymmetric keys are refused; the desktop side of the contract is `go-xkms/xkey/pkg/pairing` | `docs/exportable-symmetric-keys/` |
 | key-sharing | shipped | `local.sharePublicKey`, `local.shareSymmetric`, `local.importSharedKey`; per-key, per-peer sharing policies managed from the key detail screen | `docs/key-sharing/` |
 | user-verification | shipped | Biometric auth mode, UV policy and session duration in Settings; a disabled mode for devices with no enrolled biometric, which auth-bound keys require; the user confirms the biometric prompt on the phone | `docs/user-verification/` |
-| pin | shipped | The `local.pin*` family (set, verify, change, status, reset lockout), served over every transport | none |
-| piv | shipped | The `local.piv*` family (list slots, generate key, sign, import and get certificate), served over every transport; `remote.piv*` to the desktop | none |
-| oath | shipped | `local.oathAdd`, `oathGenerate`, `oathList`, `oathRemove`; TOTP codes match the desktop's | none |
+| pin | shipped | The `local.pin*` family (set, verify, change, status, reset lockout), served over every transport | `docs/pin/` |
+| piv | shipped | The `local.piv*` family (list slots, generate key, sign, import and get certificate), served over every transport; `remote.piv*` to the desktop | `docs/piv/` |
+| oath | shipped | `local.oathAdd`, `oathGenerate`, `oathList`, `oathRemove`; TOTP codes match the desktop's | `docs/oath/` |
 | passkey-provider | shipped | Android Credential Provider service handling create and get credential requests from the system credential manager, with an enable setting; real ceremonies pass against the go-xkms relying party | `docs/passkey-provider/` |
-| fido2-phone-backend | shipped | CTAP2 over BLE so `xkey fido2 --backend phone` authenticates with keys on the phone after a biometric prompt there | none |
-| store-sync | shipped | One `SyncEngine` gathers and merges the trust store, OATH and passwords, inbound through `local.sync*` and outbound through `remote.sync*` and `RemoteSyncClient` | none |
-| desktop-backup-store | shipped | `local.createBackup` and `local.restoreBackup` hold a paired desktop's backups; backups round-trip | none |
+| fido2-phone-backend | shipped | CTAP2 over BLE so `xkey fido2 --backend phone` authenticates with keys on the phone after a biometric prompt there | `docs/fido2-phone-backend/` |
+| store-sync | shipped | One `SyncEngine` gathers and merges the trust store, OATH and passwords, inbound through `local.sync*` and outbound through `remote.sync*` and `RemoteSyncClient` | `docs/store-sync/` |
+| desktop-backup-store | shipped | `local.createBackup` and `local.restoreBackup` hold a paired desktop's backups; backups round-trip | `docs/desktop-backup-store/` |
 | remote-key-access | shipped | `remote.*` from phone to desktop reaches xkmsd backends through the desktop `Bridge`: key operations, sync and PIV; a router sends `remote.*` to the desktop and `local.*` to the phone | `docs/remote-key-access/` |
-| trust-store-bootstrap | shipped | Fetches the platform CA bundle by the configured bootstrap methods from `/v1/ca/bootstrap` or `/acme/ca-bundle`; verifies IDevID certificates; trusted-CA screen | none |
+| trust-store-bootstrap | shipped | Fetches the platform CA bundle by the configured bootstrap methods from `/v1/ca/bootstrap` or `/acme/ca-bundle`; verifies IDevID certificates; trusted-CA screen | `docs/trust-store-bootstrap/` |
 | certificate-authority | shipped | A local CA issues X.509 certificates by profile and tracks their lifecycle; certificate management screens | `docs/certificate-authority/` |
-| password-vault | shipped | The phone's password store, synced with the desktop through `syncPasswords` | none |
+| password-vault | shipped | The phone's password store, synced with the desktop through `syncPasswords` | `docs/password-vault/` |
 | contacts | shipped | Recipient public keys for encryption and signature verification, with import and export | `docs/contacts/` |
 | file-operations | shipped | Sign, verify, encrypt and decrypt files received through the Android Share sheet | `docs/file-operations/` |
 | media-signing | shipped | A foreground service watches MediaStore, hashes new photos and videos, signs them and embeds the signature in EXIF or XMP; auto-sign toggle and key choice | `docs/media-signing/` |
 | co-signing | shipped | Multi-party signing of media by QR or BLE exchange (`cosign.request`, `cosign.response`); Android-only, not part of the desktop contract | `docs/co-signing/` |
 | verified-media-viewer | shipped | Shows media with signature verification badges | `docs/verified-media-viewer/` |
 | audit-log | shipped | Records security events in Room; audit screen and recent activity on the home screen | `docs/audit-log/` |
-| release-signing | shipped | `assembleRelease` and `bundleRelease` sign with credentials outside version control and fail with a message when they are missing | none |
-| remote-backup-password | shipped | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690) | none |
+| release-signing | shipped | `assembleRelease` and `bundleRelease` sign with credentials outside version control and fail with a message when they are missing | `docs/release-signing/` |
+| remote-backup-password | shipped | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690) | `docs/remote-backup-password/` |
 | password-vault-rpcs | planned | Answer the `Password*` and `SealStore*` methods the desktop sends over USB (go-xkms#692), including the per-user vault's new unlock body | none |
-| phone-initiated-pairing | shipped | Answer `local.attestDevice` on sessions the phone opens and display the pairing SAS (go-xkms#1306) | none |
-| request-generation-echo | shipped | Echo a per-request `generation` in every pairing response, the phone half of the go-xkms#128 flag day | none |
-| fido2-built-in-uv | shipped | A biometric-gated, verifiable "verify user" RPC so the desktop authenticator can issue a pinUvAuthToken through UV `local.verifyUser` per go-xkms#1716 | none |
-| protected-memory | shipped | `NoiseSession` zeroes the Noise static, ephemeral and session keys, and the handshake intermediates, with `fill(0)` once they are no longer needed; on Android's managed heap this is best-effort hygiene, not a guarantee, since the collector and the JCA objects may keep copies, and the class documentation states that limit | none |
+| phone-initiated-pairing | shipped | Answer `local.attestDevice` on sessions the phone opens and display the pairing SAS (go-xkms#1306) | `docs/phone-initiated-pairing/` |
+| request-generation-echo | shipped | Echo a per-request `generation` in every pairing response, the phone half of the go-xkms#128 flag day | `docs/request-generation-echo/` |
+| fido2-built-in-uv | shipped | A biometric-gated, verifiable "verify user" RPC so the desktop authenticator can issue a pinUvAuthToken through UV `local.verifyUser` per go-xkms#1716 | `docs/fido2-built-in-uv/` |
+| protected-memory | shipped | `NoiseSession` zeroes the Noise static, ephemeral and session keys, and the handshake intermediates, with `fill(0)` once they are no longer needed; on Android's managed heap this is best-effort hygiene, not a guarantee, since the collector and the JCA objects may keep copies, and the class documentation states that limit | `docs/protected-memory/` |
 | trusted-computing-enrollment | future | Android initiators for `remote.getTCGCSRIDevID`, `remote.activateCredential` and `remote.getAttestationQuote` (needs a Kotlin TPM2 credential-activation flow), and the `local.*` IDevID and TCG family, dormant on both sides | none |
 
 ## Interfaces
