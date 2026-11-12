@@ -44,6 +44,7 @@ import com.automatethethings.xkey.crypto.XKeyCryptoException
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricAuthMode
@@ -1856,13 +1857,13 @@ class RequestHandler(
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
 
-        // Delete from Android Keystore and the software key store (only one
-        // of the two will actually hold the key).
-        keystoreManager.deleteGeneralKey(keyId)
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
-
-        // Delete from unified key store
-        SharePermissionLedger.revoking(keyId) { keyDao.deleteByKeyId(keyId) }
+        // One revoke from the first removal: the Android Keystore and the
+        // software key store (only one of the two holds the key), then the
+        // unified key store's row.
+        keyDao.deleteKeyAndMaterial(keyId) {
+            keystoreManager.deleteGeneralKey(keyId)
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
+        }
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))

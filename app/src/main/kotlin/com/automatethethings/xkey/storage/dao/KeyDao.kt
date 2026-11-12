@@ -392,3 +392,21 @@ interface KeyDao {
     @Query("SELECT DISTINCT rp_id FROM keys WHERE key_type = 'fido2' AND rp_id IS NOT NULL ORDER BY rp_id")
     suspend fun getFido2RpIds(): List<String>
 }
+
+/**
+ * Deletes key [keyId]: its key material, through [removeMaterial], then its
+ * metadata row, as one [SharePermissionLedger] revoke opened before the first
+ * removal. A share of the key waiting at transport admission is refused from
+ * the moment any of the key is removed, never admitted between the material
+ * going and the row going. Every delete of a key's material goes through here.
+ *
+ * @param keyId The unique key identifier.
+ * @param removeMaterial Removes the key's material (Keystore entry, software
+ *   store file); runs inside the revoke.
+ * @return Number of rows deleted.
+ */
+suspend fun KeyDao.deleteKeyAndMaterial(keyId: String, removeMaterial: suspend () -> Unit): Int =
+    SharePermissionLedger.revoking(keyId) {
+        removeMaterial()
+        deleteByKeyId(keyId)
+    }
