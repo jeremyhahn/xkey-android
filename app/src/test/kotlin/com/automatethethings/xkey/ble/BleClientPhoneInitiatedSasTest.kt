@@ -297,6 +297,41 @@ class BleClientPhoneInitiatedSasTest {
         assertTrue("nothing may be answered on a retired session", h.receivedResponses.isEmpty())
     }
 
+    /**
+     * Outbound too: until the user confirms, sendRequest refuses and nothing
+     * reaches the desktop; once they do, a request goes out.
+     */
+    @Test
+    fun sendRequestWaitsForTheConfirmedSas(): Unit = runBlocking {
+        val shown = CompletableDeferred<Unit>()
+        val answer = CompletableDeferred<Boolean>()
+        val h = harness(RecordingHandler(), RecordingConfirmation {
+            shown.complete(Unit)
+            answer.await()
+        })
+
+        val connecting = async { h.client.connect(h.address, randomKey()) }
+        withTimeout(5_000) { shown.await() }
+
+        try {
+            withTimeout(5_000) { h.client.sendRequest(appRequest(id = 21)) }
+            fail("sendRequest must refuse a session whose SAS is not confirmed")
+        } catch (e: BleClientException) {
+            // expected
+        }
+        assertTrue("no request may reach the desktop before the SAS is confirmed", h.receivedRequests.isEmpty())
+
+        answer.complete(true)
+        assertTrue(withTimeout(5_000) { connecting.await() })
+
+        withTimeout(5_000) { h.client.sendRequest(appRequest(id = 22)) }
+        assertEquals("a confirmed session sends", 1, h.receivedRequests.size)
+        assertEquals(22L, JSONObject(String(h.receivedRequests[0], Charsets.UTF_8)).getLong("id"))
+    }
+
+    private fun appRequest(id: Long): ByteArray =
+        """{"jsonrpc":"2.0","id":$id,"method":"${MethodNames.REMOTE_ATTEST_DEVICE}","params":{}}""".toByteArray()
+
     private fun connectionOf(client: BleClient): Any? =
         BleClient::class.java.getDeclaredField("connection").apply { isAccessible = true }.get(client)
 
