@@ -104,6 +104,25 @@ class DesktopSessionsTest {
     }
 
     @Test
+    fun `A then B then A keeps the reply of A's outstanding request`() = runTest {
+        val first = async { sessions.client()!!.listBackends() }
+        runCurrent()
+        live = listOf(tcp.transport())
+        sessions.client()
+        live = listOf(ble.transport())
+        val second = async { sessions.client()!!.listKeys("tpm2") }
+        runCurrent()
+
+        val (firstRequest, secondRequest) = ble.sender.sent
+        assertNotEquals(firstRequest.id, secondRequest.id)
+        ble.router.processMessage("""{"id":${firstRequest.id},"result":$backendsReply}""".toByteArray())
+        ble.router.processMessage("""{"id":${secondRequest.id},"result":{"keys":[]}}""".toByteArray())
+
+        assertEquals("tpm2", first.await().single().name)
+        assertTrue(second.await().isEmpty())
+    }
+
+    @Test
     fun `device attestation goes only to the named peer`() = runTest {
         assertNull(sessions.attestDevice(desktopB, ByteArray(32)))
         assertTrue(ble.sender.sent.isEmpty())
