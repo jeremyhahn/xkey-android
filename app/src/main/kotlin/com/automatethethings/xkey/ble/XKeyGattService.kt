@@ -786,20 +786,15 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         return null
     }
 
-    /** The [RemoteKeyClient] cached for the router it was built on. */
-    private var cachedRemoteKeyClient: Pair<BidirectionalMessageRouter, RemoteKeyClient>? = null
+    /** The one [RemoteKeyClient] per active router; every `remote.*` key call goes through it. */
+    private val remoteKeyClients = RemoteKeyClientCache(::activeTransport)
 
     /**
      * The `remote.*` key client for the active desktop session, or null when
      * no desktop is connected. One client is cached per active router, so a
      * new session (or a switch of transport) gets a fresh client.
      */
-    @Synchronized
-    fun remoteKeyClient(): RemoteKeyClient? {
-        val (sender, router) = activeTransport() ?: return null
-        cachedRemoteKeyClient?.let { (cachedRouter, client) -> if (cachedRouter === router) return client }
-        return RemoteKeyClient(sender, router).also { cachedRemoteKeyClient = router to it }
-    }
+    fun remoteKeyClient(): RemoteKeyClient? = remoteKeyClients.client()
 
     /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)
@@ -900,22 +895,17 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             return false
         }
 
-        // Determine which transport is active and has a message router.
-        val (messageSender, messageRouter) = activeTransport() ?: run {
-            Log.e(TAG, "No active transport for device attestation")
-            return false
-        }
-
-        val remoteClient = RemoteKeyClient(messageSender, messageRouter)
-
         return try {
             // Generate random nonce
             val nonce = ByteArray(32)
             java.security.SecureRandom().nextBytes(nonce)
-            val nonceB64 = java.util.Base64.getEncoder().encodeToString(nonce)
 
             Log.d(TAG, "Requesting device attestation for $publicKeyHex")
-            val result = remoteClient.attestDevice(nonceB64)
+            // The router's shared client: a second client would reuse its request ids.
+            val result = remoteKeyClients.attestDevice(nonce) ?: run {
+                Log.e(TAG, "No active transport for device attestation")
+                return false
+            }
 
             // Store the PEER's boot state. deviceFingerprint is intentionally
             // omitted: it is the phone's own attested-key SPKI bound at pairing
@@ -1012,4 +1002,35 @@ sealed class ServiceState {
 
     /** An error occurred */
     data class Error(val message: String) : ServiceState()
+}
+
+/**
+ * Hands out one [RemoteKeyClient] per desktop router, built over what
+ * [transport] reports as active.
+ *
+ * Each client numbers its own requests and the router matches replies by id,
+ * so two clients on one router would send the same ids and take each other's
+ * replies. Every outbound `remote.*` key call on a router, the device
+ * attestation included, must go through the client cached here.
+ */
+internal class RemoteKeyClientCache(
+    private val transport: () -> Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>?
+) {
+    private var cached: Pair<BidirectionalMessageRouter, RemoteKeyClient>? = null
+
+    /** The client for the active router, or null when no desktop is connected. */
+    @Synchronized
+    fun client(): RemoteKeyClient? {
+        val (sender, router) = transport() ?: return null
+        cached?.let { (cachedRouter, client) -> if (cachedRouter === router) return client }
+        return RemoteKeyClient(sender, router).also { cached = router to it }
+    }
+
+    /**
+     * Asks the connected desktop for its device attestation
+     * (`remote.attestDevice`) over [nonce], or returns null when no desktop is
+     * connected.
+     */
+    suspend fun attestDevice(nonce: ByteArray): com.automatethethings.xkey.protocol.RemoteAttestDeviceResult? =
+        client()?.attestDevice(java.util.Base64.getEncoder().encodeToString(nonce))
 }
