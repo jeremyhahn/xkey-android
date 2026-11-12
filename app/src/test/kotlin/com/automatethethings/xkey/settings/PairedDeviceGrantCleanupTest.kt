@@ -769,7 +769,7 @@ class PairedDeviceGrantCleanupTest {
         disk.failCommits = 1
         var wrote = false
 
-        assertFalse(paired.writeGrant(PEER_C) { wrote = true; table += KeySharingPolicy("k-9", PEER_C) })
+        assertFalse(paired.writeGrant(PEER_C, paired.pairingGeneration(PEER_C)!!) { wrote = true; table += KeySharingPolicy("k-9", PEER_C) })
 
         assertFalse(wrote)
         assertTrue(grantsOf(PEER_C).isEmpty())
@@ -778,5 +778,27 @@ class PairedDeviceGrantCleanupTest {
         after.recoverInterruptedGrantWrites()
         assertFalse(after.isRevocationPending(PEER_C))
         assertTrue(after.pendingRevocations().isEmpty())
+    }
+
+    /**
+     * #193: a grant is bound to the pairing the user saw when they tapped. A
+     * that was unpaired and paired again since then is refused, though the new
+     * pairing is current and has no revocation pending.
+     */
+    @Test
+    fun writeGrantRefusesAnotherPairing() = runTest {
+        val tapped = repo.pairingGeneration(PEER_A)!!
+        repo.removeDevice(PEER_A)
+        repo.addDevice(PEER_A, "desktop-a")
+        assertNotEquals(tapped, repo.pairingGeneration(PEER_A))
+        assertFalse(repo.isRevocationPending(PEER_A))
+        var wrote = false
+
+        assertFalse(repo.writeGrant(PEER_A, tapped) { wrote = true; table += KeySharingPolicy("k-9", PEER_A) })
+
+        assertFalse(wrote)
+        assertTrue(grantsOf(PEER_A).isEmpty())
+        assertFalse(repo.isRevocationPending(PEER_A))
+        assertTrue(prefs.getStringSet("grant_writes", null).isNullOrEmpty())
     }
 }

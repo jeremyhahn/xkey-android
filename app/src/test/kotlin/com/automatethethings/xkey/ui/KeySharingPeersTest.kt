@@ -21,6 +21,7 @@ import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -37,11 +38,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -81,11 +86,11 @@ class KeySharingPeersTest {
             val keyId = firstArg<String>()
             table.map { rows -> rows.filter { it.keyId == keyId } }
         }
-        coEvery { dao.setPolicy(any()) } answers {
-            val row = firstArg<KeySharingPolicy>()
-            table.value = table.value.filterNot {
-                it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
-            } + row
+        coEvery { dao.setPolicy(any()) } answers { insert(firstArg()) }
+        coEvery { dao.clearPoliciesForKey(any()) } answers {
+            val before = table.value
+            table.value = before.filterNot { it.keyId == firstArg<String>() }
+            before.size - table.value.size
         }
         coEvery { dao.removePolicy(any(), any()) } answers {
             val before = table.value
@@ -109,6 +114,16 @@ class KeySharingPeersTest {
         unmockkAll()
     }
 
+    /** The DAO's `INSERT OR REPLACE`. */
+    private fun insert(row: KeySharingPolicy) {
+        table.value = table.value.filterNot {
+            it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
+        } + row
+    }
+
+    /** The list for [KEY], its writes run unconfined on the test scheduler. */
+    private fun TestScope.peersOf() = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler))
+
     private fun List<KeySharingPeers.Peer>.of(peer: String) = single { it.device.publicKeyHex == peer }
 
     /** The request handler's SELECTED_PEERS check: refused while a revocation is pending, else the row decides. */
@@ -129,7 +144,7 @@ class KeySharingPeersTest {
         repo.addDevice(PEER_A, "desktop-a")
         assertTrue(repo.isRevocationPending(PEER_A))
 
-        val peers = KeySharingPeers(KEY, dao, repo)
+        val peers = peersOf()
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
 
@@ -140,7 +155,7 @@ class KeySharingPeersTest {
         assertTrue(seen.last().of(PEER_B).selectable)
 
         // The user taps it anyway: nothing is written.
-        assertFalse(peers.setAllowed(PEER_A, true))
+        assertFalse(peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)))
         coVerify(exactly = 0) { dao.setPolicy(any()) }
 
         // The cleanup deletes A's rows and then acknowledges the revocation.
@@ -152,7 +167,7 @@ class KeySharingPeersTest {
         assertFalse(done.allowed)
         assertTrue("the list updates once the revocation completes", done.selectable)
 
-        assertTrue(peers.setAllowed(PEER_A, true))
+        assertTrue(peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)))
         assertTrue(seen.last().of(PEER_A).allowed)
         assertEquals(listOf(PEER_B, PEER_A), table.value.map { it.peerPublicKeyHex })
     }
@@ -168,10 +183,10 @@ class KeySharingPeersTest {
                 it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
             } + row
         }
-        val peers = KeySharingPeers(KEY, dao, repo)
+        val peers = peersOf()
 
         // The grant passes its pending check and stops before its insert.
-        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true) }
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)) }
         assertFalse(grant.isCompleted)
 
         // Meanwhile A is unpaired, and its revocation is cleaned up and acknowledged.
@@ -201,7 +216,7 @@ class KeySharingPeersTest {
         // The sheet subscribes when it opens, whatever the key's policy (PRIVATE
         // here: nothing in the table changes below), and shows this list as soon
         // as SELECTED_PEERS is chosen.
-        val peers = KeySharingPeers(KEY, dao, repo)
+        val peers = peersOf()
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
         assertEquals(setOf(PEER_A, PEER_B), seen.last().map { it.device.publicKeyHex }.toSet())
@@ -238,11 +253,11 @@ class KeySharingPeersTest {
                 it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
             } + row
         }
-        val peers = KeySharingPeers(KEY, dao, repo)
+        val peers = peersOf()
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
 
-        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true) }
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)) }
         assertEquals("the write is under way", false, revokingDuringWrite)
         assertFalse("SELECTED_PEERS refused during the peer's own grant write", repo.isRevocationPending(PEER_A))
 
@@ -252,5 +267,133 @@ class KeySharingPeersTest {
         val after = seen.last().of(PEER_A)
         assertTrue("the sheet keeps the peer selectable", after.selectable)
         assertTrue(after.allowed)
+    }
+
+    // #193: edits of a key's peer rows land in the order the user made them.
+
+    @Test
+    fun aWithdrawalAfterAGrantStillWaitingEndsWithdrawn() = runTest {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_B))
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            gate.await()
+            insert(firstArg())
+        }
+        val peers = peersOf()
+
+        // The user grants A, then withdraws it before the grant is written.
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A))
+        }
+        val withdrawal = async(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A))
+        }
+        assertFalse(grant.isCompleted)
+        assertFalse("the withdrawal waits for the grant made before it", withdrawal.isCompleted)
+
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        assertTrue(withdrawal.await())
+        assertFalse("a grant landed after its withdrawal", hasAccess(PEER_A))
+        assertEquals(listOf(PEER_B), table.value.map { it.peerPublicKeyHex })
+    }
+
+    @Test
+    fun leavingSelectedPeersForPrivateDuringAGrantLeavesNoPeerRow() = runTest {
+        leaveSelectedPeersDuringAGrant(SharingPolicyType.PRIVATE)
+    }
+
+    @Test
+    fun leavingSelectedPeersForAllPeersDuringAGrantLeavesNoPeerRow() = runTest {
+        leaveSelectedPeersDuringAGrant(SharingPolicyType.ALL_PEERS)
+    }
+
+    /**
+     * A grant is in flight when the user switches the key to [destination],
+     * then back to SELECTED_PEERS: the clear runs after the grant, so no peer
+     * row is left and the list shows no access.
+     */
+    private suspend fun TestScope.leaveSelectedPeersDuringAGrant(destination: SharingPolicyType) {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_B))
+        var column = SharingPolicyType.SELECTED_PEERS
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            gate.await()
+            insert(firstArg())
+        }
+        val peers = peersOf()
+        val seen = mutableListOf<List<KeySharingPeers.Peer>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
+
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A))
+        }
+        val leave = async(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setSharingPolicy(selectedPeers = false) { column = destination }
+        }
+        assertFalse(grant.isCompleted)
+        assertFalse("the clear waits for the grant made before it", leave.isCompleted)
+
+        gate.complete(Unit)
+        grant.await()
+        leave.await()
+        assertEquals(destination, column)
+        assertTrue("a grant in flight outlived the key-wide clear", table.value.none { it.keyId == KEY })
+
+        peers.setSharingPolicy(selectedPeers = true) { column = SharingPolicyType.SELECTED_PEERS }
+        assertEquals(SharingPolicyType.SELECTED_PEERS, column)
+        assertFalse(hasAccess(PEER_A))
+        assertFalse(hasAccess(PEER_B))
+        assertTrue("selected peers starts from nothing", seen.last().none { it.allowed })
+    }
+
+    @Test
+    fun aGrantTappedBeforeAnUnpairAndRepairIsRefused() = runTest {
+        table.value = emptyList()
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            if (firstArg<KeySharingPolicy>().peerPublicKeyHex == PEER_B) gate.await()
+            insert(firstArg())
+        }
+        val peers = peersOf()
+
+        // B's grant is being written when the user taps A: A's grant waits its turn.
+        val first = async(UnconfinedTestDispatcher(testScheduler)) {
+            peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B))
+        }
+        val tapped = repo.pairingGeneration(PEER_A)
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true, tapped) }
+        assertFalse(grant.isCompleted)
+
+        // Before it runs, A is unpaired, its revocation completes, and it pairs again.
+        repo.removeDevice(PEER_A)
+        runCleanup(PEER_A)
+        repo.addDevice(PEER_A, "desktop-a")
+        assertFalse(repo.isRevocationPending(PEER_A))
+
+        gate.complete(Unit)
+        assertTrue(first.await())
+        assertFalse("a grant tapped for an ended pairing was written", grant.await())
+        assertTrue(table.value.none { it.peerPublicKeyHex == PEER_A })
+        assertFalse(hasAccess(PEER_A))
+    }
+
+    @Test
+    fun theGrantWriteDoesNotRunOnTheCallingDispatcher() = runTest {
+        table.value = emptyList()
+        val caller = Thread.currentThread()
+        val writer = AtomicReference<Thread>()
+        coEvery { dao.setPolicy(any()) } answers {
+            writer.set(Thread.currentThread())
+            insert(firstArg())
+        }
+        // The production dispatcher.
+        val peers = KeySharingPeers(KEY, dao, repo)
+
+        assertTrue(peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)))
+
+        assertNotNull(writer.get())
+        assertNotSame("the grant was written on the calling thread", caller, writer.get())
+        assertTrue(hasAccess(PEER_A))
     }
 }
