@@ -16,11 +16,14 @@ package com.automatethethings.xkey.usb
 
 import android.content.Context
 import android.hardware.usb.UsbAccessory
+import android.util.Log
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The service's one USB accessory server and its message router.
@@ -32,6 +35,10 @@ import com.automatethethings.xkey.settings.PairedDeviceRepository
  * at once finds it and clears it. The attach runs on a worker and the detach
  * broadcast on the main thread, so the slot is guarded by a lock.
  *
+ * A replacement waits for the closed server's session to finish its teardown:
+ * that teardown clears the peer identity on the request handler every
+ * transport shares, and must not clear the identity the new session sets.
+ *
  * @param newDetachWatcher Builds the detach watcher for each new server.
  */
 class UsbAccessoryServerSlot(
@@ -40,6 +47,9 @@ class UsbAccessoryServerSlot(
     private val lock = Any()
     private var server: UsbAccessoryServer? = null
     private var router: BidirectionalMessageRouter? = null
+
+    /** The session of the last server to leave the slot, until it ends. */
+    private var retiring: Job? = null
 
     /** True while a server holds the slot. */
     val isActive: Boolean
@@ -54,9 +64,10 @@ class UsbAccessoryServerSlot(
 
     /**
      * Builds a server for [accessory], publishes it with [router] and connects
-     * it. Returns the server, or null when one is already active.
+     * it, once the session of the server before it has ended. Returns the
+     * server, or null when one is already active.
      */
-    fun open(
+    suspend fun open(
         context: Context,
         accessory: UsbAccessory,
         requestHandler: RequestHandler,
@@ -65,6 +76,13 @@ class UsbAccessoryServerSlot(
         pairedDeviceRepository: PairedDeviceRepository? = null,
         storeMethods: List<TransportMethods> = emptyList(),
     ): UsbAccessoryServer? {
+        val previous = synchronized(lock) {
+            if (this.server != null) return null
+            retiring
+        }
+        if (previous != null && withTimeoutOrNull(TEARDOWN_WAIT_MS) { previous.join() } == null) {
+            Log.w(TAG, "The previous USB session is still ending; opening anyway")
+        }
         var published: UsbAccessoryServer? = null
         val server = UsbAccessoryServer(
             requestHandler,
@@ -78,6 +96,7 @@ class UsbAccessoryServerSlot(
         published = server
         synchronized(lock) {
             if (this.server != null) return null
+            retiring = null
             this.server = server
             this.router = router
         }
@@ -89,6 +108,7 @@ class UsbAccessoryServerSlot(
     fun clear() {
         val active = synchronized(lock) {
             server.also {
+                if (it != null) retiring = it.sessionJob
                 server = null
                 router = null
             }
@@ -100,8 +120,16 @@ class UsbAccessoryServerSlot(
     private fun closed(closedServer: UsbAccessoryServer) {
         synchronized(lock) {
             if (server !== closedServer) return
+            retiring = closedServer.sessionJob
             server = null
             router = null
         }
+    }
+
+    private companion object {
+        const val TAG = "UsbAccessoryServerSlot"
+
+        /** How long an attach waits for the previous session's teardown. */
+        const val TEARDOWN_WAIT_MS = 5_000L
     }
 }
