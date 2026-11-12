@@ -134,23 +134,11 @@ class FileOperationActivity : AppCompatActivity() {
 
     private val createEncryptedFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri ->
-        if (uri != null) {
-            saveEncryptedToUri(uri)
-        } else {
-            pendingEncryptedSave.cancel()
-        }
-    }
+    ) { uri -> pendingEncryptedSave.onResult(uri, ::saveEncryptedToUri) }
 
     private val createDecryptedFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("*/*")
-    ) { uri ->
-        if (uri != null) {
-            saveDecryptedToUri(uri)
-        } else {
-            pendingDecryptedSave.cancel()
-        }
-    }
+    ) { uri -> pendingDecryptedSave.onResult(uri, ::saveDecryptedToUri) }
 
     private val pickSidecarLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -1424,7 +1412,7 @@ internal class PendingStagedSave(private val staging: FileOperationStaging) {
 
     /** A save picker's result: a destination goes to [save]; null is a cancel. */
     fun <T : Any> onResult(result: T?, save: (T) -> Unit) {
-        if (result != null) save(result)
+        if (result != null) save(result) else cancel()
     }
 }
 
