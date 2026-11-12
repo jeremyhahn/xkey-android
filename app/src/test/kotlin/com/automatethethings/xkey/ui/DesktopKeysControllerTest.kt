@@ -64,6 +64,8 @@ class DesktopKeysControllerTest {
             RemoteAttestKeyResult("tpm2", listOf("A", "B"), Base64.getEncoder().encodeToString(ByteArray(5)), nonce)
         }
         var lastVerify: List<String> = emptyList()
+        /** Thrown by getPublicKey only, as for a key with no public half. */
+        var publicKeyFailure: Exception? = null
         /** Runs when sign is called, before it answers. */
         var onSign: () -> Unit = {}
 
@@ -78,7 +80,7 @@ class DesktopKeysControllerTest {
             call("getKeyInfo:$backend:$keyId"); return info
         }
         override suspend fun getPublicKey(backend: String, keyId: String): RemoteGetPublicKeyResult {
-            call("getPublicKey:$backend:$keyId"); return publicKey
+            call("getPublicKey:$backend:$keyId"); publicKeyFailure?.let { throw it }; return publicKey
         }
         override suspend fun sign(backend: String, keyId: String, data: String): RemoteSignResult {
             call("sign:$backend:$keyId"); onSign(); return RemoteSignResult("c2ln", "ecdsa-p256-sha256")
@@ -141,6 +143,29 @@ class DesktopKeysControllerTest {
         val detail = openDetail()
         assertEquals(DesktopKeysState.Detail(tpm, info, publicKey), detail)
         assertEquals(listOf("getKeyInfo:tpm2:k1", "getPublicKey:tpm2:k1"), fake.calls.takeLast(2))
+    }
+
+    @Test
+    fun `a symmetric key with unsupported public export opens its detail`() = runTest {
+        fake.publicKeyFailure = ProtocolException(
+            "Remote error: aes-256 has no public key", errorCode = ErrorCodes.UNSUPPORTED_FORMAT
+        )
+        controller.open()
+        controller.chooseBackend(tpm)
+        val shown = controller.chooseKey(key)
+        assertTrue("detail shown, got $shown", shown is DesktopKeysState.Detail)
+        val detail = shown as DesktopKeysState.Detail
+        assertEquals(info, detail.info)
+        assertNull(detail.publicKey)
+    }
+
+    @Test
+    fun `a link failure while reading the public key still fails the step`() = runTest {
+        controller.open()
+        controller.chooseBackend(tpm)
+        fake.publicKeyFailure = IOException("broken pipe")
+        val failed = controller.chooseKey(key) as DesktopKeysState.Failed
+        assertEquals(DesktopKeyError.Kind.TRANSPORT, failed.error.kind)
     }
 
     @Test
