@@ -3327,14 +3327,30 @@ class RequestHandler(
     // -------------------------------------------------------------------------
 
     /**
-     * Returns the confirmed peer identity for the current session.
+     * Returns the confirmed peer identity of the connection the request
+     * arrived on.
+     *
+     * A request that carries a [CallerSession] is decided by that session's
+     * peer alone, confirmed when the paired-device store knows it. The
+     * handler-wide [connectedDevicePublicKeyHex] is shared by BLE, TCP and
+     * USB and cleared by each one's teardown, so it neither stands in for
+     * the caller's peer nor takes a still-paired one away. Only a request
+     * that names no connection falls back to it.
      *
      * @throws ProtocolException with [ErrorCodes.OPERATION_DENIED] when the
      * session has no confirmed peer, since no sharing decision can be made
      * about an anonymous peer.
      */
-    private fun requireConfirmedPeer(operation: String): String {
-        return connectedDevicePublicKeyHex ?: throw ProtocolException(
+    private suspend fun requireConfirmedPeer(operation: String): String {
+        val caller = currentCoroutineContext()[CallerSession]
+        val peer = if (caller == null) {
+            connectedDevicePublicKeyHex
+        } else {
+            caller.peerPublicKeyHex?.takeIf {
+                it.isNotEmpty() && pairedDeviceRepository?.isDeviceKnown(it) == true
+            }
+        }
+        return peer ?: throw ProtocolException(
             "$operation requires a confirmed peer identity",
             errorCode = ErrorCodes.OPERATION_DENIED
         )
