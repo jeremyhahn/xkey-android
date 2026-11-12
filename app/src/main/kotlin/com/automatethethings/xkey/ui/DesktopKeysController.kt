@@ -60,6 +60,14 @@ interface DesktopKeysSource {
     }
 }
 
+/**
+ * The desktop session the service has now: [peer] is the confirmed peer's
+ * public key hex (null before confirmation) and [source] the client on that
+ * session's router. The same client must come back as the same [source]
+ * object, since the screen refuses a source it did not open with.
+ */
+class DesktopSession(val peer: String?, val source: DesktopKeysSource)
+
 /** A failure the screen shows, typed by what went wrong on the desktop link. */
 data class DesktopKeyError(val kind: Kind, val code: Int?, val detail: String) {
     enum class Kind {
@@ -161,12 +169,19 @@ sealed class DesktopKeysState {
  * [DesktopKeysState.Failed] carrying a typed [DesktopKeyError]. Cancellation
  * is rethrown, never shown as a failure.
  *
- * @param source the desktop link, or null while no desktop session is up.
+ * The screen belongs to one desktop, [peer]. Its client is captured on the
+ * first step; before every request the current [session] must still be that
+ * desktop on that client. Otherwise nothing is sent, the state is cleared and
+ * [DesktopKeysState.NoSession] is shown, so no request reaches another desktop.
+ *
+ * @param peer the public key hex of the desktop this screen was opened for.
+ * @param session the service's current desktop session, or null while none is up.
  * @param nonce the attestation challenge, 32 random bytes by default.
  * @param onState called with every state the screen must show.
  */
 class DesktopKeysController(
-    private val source: () -> DesktopKeysSource?,
+    private val peer: String,
+    private val session: () -> DesktopSession?,
     private val nonce: () -> ByteArray = { ByteArray(32).also(SecureRandom()::nextBytes) },
     private val onState: (DesktopKeysState) -> Unit = {}
 ) {
@@ -184,6 +199,9 @@ class DesktopKeysController(
 
     private var backends: DesktopKeysState.Backends? = null
     private var keys: DesktopKeysState.Keys? = null
+
+    /** The client captured on the first step; later steps refuse any other. */
+    private var captured: DesktopKeysSource? = null
 
     /** The content state under any loading or failure, if one is shown. */
     private val content: DesktopKeysState?
@@ -256,21 +274,57 @@ class DesktopKeysController(
         return true
     }
 
+    /** Thrown inside a step when the session stopped being this screen's desktop. */
+    private class SessionChanged : Exception()
+
+    /** The captured client while the session is still [peer] on it, else null. */
+    private fun ownSource(): DesktopKeysSource? {
+        val now = session() ?: return null
+        if (now.peer != peer) return null
+        val held = captured ?: return now.source.also { captured = it }
+        return held.takeIf { now.source === it }
+    }
+
+    /** [ownSource] checked again before each request. */
+    private val checked = object : DesktopKeysSource {
+        private fun source() = ownSource() ?: throw SessionChanged()
+        override suspend fun listBackends() = source().listBackends()
+        override suspend fun listKeys(backend: String) = source().listKeys(backend)
+        override suspend fun getKeyInfo(backend: String, keyId: String) = source().getKeyInfo(backend, keyId)
+        override suspend fun getPublicKey(backend: String, keyId: String) = source().getPublicKey(backend, keyId)
+        override suspend fun sign(backend: String, keyId: String, data: String) = source().sign(backend, keyId, data)
+        override suspend fun verify(
+            backend: String, keyId: String, data: String, signature: String, algorithm: String
+        ) = source().verify(backend, keyId, data, signature, algorithm)
+        override suspend fun attestKey(backend: String, keyId: String, nonce: String) =
+            source().attestKey(backend, keyId, nonce)
+    }
+
     private suspend fun run(block: suspend (DesktopKeysSource) -> DesktopKeysState): DesktopKeysState {
-        val client = source() ?: return publish(DesktopKeysState.NoSession)
+        if (ownSource() == null) return clear()
         val previous = content
         val loading = DesktopKeysState.Loading(previous)
         publish(loading)
         val next = try {
-            block(client)
+            block(checked)
         } catch (e: CancellationException) {
             // Restore the screen only if nothing (such as back) replaced the loading state.
             if (state === loading) publish(previous ?: loading)
             throw e
+        } catch (e: SessionChanged) {
+            return clear()
         } catch (e: Exception) {
             DesktopKeysState.Failed(DesktopKeyError.from(e), previous)
         }
+        if (ownSource() == null) return clear()
         return publish(next)
+    }
+
+    /** Forgets everything shown and shows [DesktopKeysState.NoSession]. */
+    private fun clear(): DesktopKeysState {
+        backends = null
+        keys = null
+        return publish(DesktopKeysState.NoSession)
     }
 
     private fun publish(next: DesktopKeysState): DesktopKeysState {

@@ -537,7 +537,9 @@ class DeviceDetailActivity : AppCompatActivity() {
             }
             text = getString(R.string.desktop_keys_open)
             visibility = View.GONE
-            setOnClickListener { startActivity(DesktopKeysActivity.intent(this@DeviceDetailActivity)) }
+            setOnClickListener {
+                startActivity(DesktopKeysActivity.intent(this@DeviceDetailActivity, publicKeyHex))
+            }
         }
         cardContent.addView(desktopKeysButton)
 

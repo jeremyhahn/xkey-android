@@ -33,6 +33,7 @@ import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.XKeyGattService
 import com.automatethethings.xkey.protocol.RemoteBackendInfo
 import com.automatethethings.xkey.protocol.RemoteKeyInfo
+import com.automatethethings.xkey.remote.RemoteKeyClient
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.progressindicator.LinearProgressIndicator
@@ -50,6 +51,8 @@ import java.util.Date
  * lists its keys (`remote.listKeys`); choosing a key shows its info and public
  * key, a sign-then-verify test on a fixed message and `remote.attestKey`. The
  * state logic lives in [DesktopKeysController]; this class only renders it.
+ * The screen is opened for one desktop, named by its peer public key, and
+ * sends nothing once the session is with any other.
  */
 class DesktopKeysActivity : AppCompatActivity() {
 
@@ -60,10 +63,25 @@ class DesktopKeysActivity : AppCompatActivity() {
     /** The last step launched, which Retry repeats. */
     private var lastStep: (suspend () -> Unit)? = null
 
-    private val controller = DesktopKeysController(
-        source = { gattService?.remoteKeyClient()?.let(DesktopKeysSource::of) },
-        onState = { render(it) }
-    )
+    /** The client last adapted, so the same client is always the same source. */
+    private var adapted: Pair<RemoteKeyClient, DesktopKeysSource>? = null
+
+    private val controller by lazy {
+        DesktopKeysController(
+            peer = intent.getStringExtra(EXTRA_PEER_PUBLIC_KEY_HEX).orEmpty(),
+            session = ::currentSession,
+            onState = { render(it) }
+        )
+    }
+
+    /** The service's desktop session now: its confirmed peer and its client. */
+    private fun currentSession(): DesktopSession? {
+        val service = gattService ?: return null
+        val client = service.remoteKeyClient() ?: return null
+        val source = adapted?.takeIf { it.first === client }?.second
+            ?: DesktopKeysSource.of(client).also { adapted = client to it }
+        return DesktopSession(service.getConnectedDevicePublicKeyHex(), source)
+    }
 
     private lateinit var root: View
     private lateinit var progress: LinearProgressIndicator
@@ -288,7 +306,11 @@ class DesktopKeysActivity : AppCompatActivity() {
     }
 
     companion object {
-        /** Opens the desktop keys screen. */
-        fun intent(context: Context): Intent = Intent(context, DesktopKeysActivity::class.java)
+        private const val EXTRA_PEER_PUBLIC_KEY_HEX = "peer_public_key_hex"
+
+        /** Opens the desktop keys screen for the desktop whose peer public key is [peerPublicKeyHex]. */
+        fun intent(context: Context, peerPublicKeyHex: String): Intent =
+            Intent(context, DesktopKeysActivity::class.java)
+                .putExtra(EXTRA_PEER_PUBLIC_KEY_HEX, peerPublicKeyHex)
     }
 }
