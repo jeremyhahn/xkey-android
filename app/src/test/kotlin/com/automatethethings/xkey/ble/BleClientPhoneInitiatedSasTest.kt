@@ -14,6 +14,8 @@
  */
 package com.automatethethings.xkey.ble
 
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothProfile
 import android.util.Log
 import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.protocol.MethodNames
@@ -24,8 +26,17 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import java.security.SecureRandom
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -160,6 +171,109 @@ class BleClientPhoneInitiatedSasTest {
             // expected
         }
         assertFalse(h.client.isConnected())
+    }
+
+    /** The link drops while the user compares: the prompt ends and nothing is trusted. */
+    @Test
+    fun aTransportDisconnectEndsThePendingPrompt(): Unit = runBlocking {
+        val prompt = PendingPrompt()
+        val h = harness(RecordingHandler(), prompt.confirmation)
+
+        val connecting = async { h.client.connect(h.address, randomKey()) }
+        prompt.awaitShown()
+        h.probe.gattCallback.onConnectionStateChange(
+            h.gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
+        )
+
+        assertFalse("a session whose link dropped must not be reported up", withTimeout(5_000) { connecting.await() })
+        assertTrue("the disconnect must end the prompt", prompt.cancelled.await())
+        assertFalse(h.client.isConnected())
+    }
+
+    /** disconnect() while the user compares ends the prompt; it does not wait for the answer. */
+    @Test
+    fun disconnectEndsThePendingPrompt(): Unit = runBlocking {
+        val prompt = PendingPrompt()
+        val h = harness(RecordingHandler(), prompt.confirmation)
+
+        val connecting = async { h.client.connect(h.address, randomKey()) }
+        prompt.awaitShown()
+        h.client.disconnect()
+
+        assertFalse(withTimeout(5_000) { connecting.await() })
+        assertTrue("disconnect() must end the prompt", withTimeout(5_000) { prompt.cancelled.await() })
+        assertFalse(h.client.isConnected())
+    }
+
+    /** destroy() returns while the prompt is pending, and ends it. */
+    @Test
+    fun destroyReturnsWhileThePromptIsPending(): Unit = runBlocking {
+        val prompt = PendingPrompt()
+        val h = harness(RecordingHandler(), prompt.confirmation)
+
+        val connecting = async {
+            try {
+                h.client.connect(h.address, randomKey())
+            } catch (e: BleClientException) {
+                false
+            }
+        }
+        prompt.awaitShown()
+        // Off this test's job: destroy() tears down NonCancellable, so a
+        // timeout around it could not end a destroy() that hangs.
+        val destroyed = CompletableDeferred<Unit>()
+        CoroutineScope(Dispatchers.Default).launch { h.client.destroy(); destroyed.complete(Unit) }
+        withTimeout(5_000) { destroyed.await() }
+
+        assertTrue("destroy() must end the prompt", withTimeout(5_000) { prompt.cancelled.await() })
+        assertFalse(withTimeout(5_000) { connecting.await() })
+        assertFalse(h.client.isConnected())
+    }
+
+    /** An Allow that lands after the disconnect trusts nothing and reports nothing up. */
+    @Test
+    fun anAllowAfterTheDisconnectTrustsNothing(): Unit = runBlocking {
+        val handler = RecordingHandler()
+        val shown = CompletableDeferred<Unit>()
+        val allow = CompletableDeferred<Unit>()
+        lateinit var h: BleClientHarness
+        val confirmation = RecordingConfirmation {
+            h.desktopSends(attestRequest(id = 11))
+            shown.complete(Unit)
+            // A dialog that answers even though the session is gone.
+            withContext(NonCancellable) { allow.await() }
+            true
+        }
+        h = harness(handler, confirmation)
+
+        val connecting = async { h.client.connect(h.address, randomKey()) }
+        withTimeout(5_000) { shown.await() }
+        h.client.disconnect()
+        delay(300)
+        allow.complete(Unit)
+
+        assertFalse("an Allow for a retired session must not report it up", withTimeout(5_000) { connecting.await() })
+        delay(200)
+        assertFalse(h.client.isConnected())
+        assertTrue("nothing may be served on a retired session", handler.requests.isEmpty())
+        assertTrue("nothing may be answered on a retired session", h.receivedResponses.isEmpty())
+    }
+
+    /** A prompt that stays open until it is cancelled, and says whether it was. */
+    private class PendingPrompt {
+        private val shown = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Boolean>()
+        val confirmation = RecordingConfirmation {
+            shown.complete(Unit)
+            try {
+                CompletableDeferred<Boolean>().await()
+            } catch (e: CancellationException) {
+                cancelled.complete(true)
+                throw e
+            }
+        }
+
+        suspend fun awaitShown() = withTimeout(5_000) { shown.await() }
     }
 
     private class RecordingConfirmation(
