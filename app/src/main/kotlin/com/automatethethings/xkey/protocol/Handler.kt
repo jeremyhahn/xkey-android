@@ -17,6 +17,7 @@ import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.credential.UserVerificationCompliance
+import com.automatethethings.xkey.credential.UserVerificationRequiredException
 import com.automatethethings.xkey.credential.UvRequirement
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricUnavailableException
@@ -555,6 +556,12 @@ class RequestHandler(
         } catch (e: UnsupportedAlgorithmException) {
             Log.e(TAG, "Unsupported algorithm: ${e.message}")
             Response.error(request.id, ErrorCodes.INVALID_ALGORITHM, e.message ?: "Unsupported algorithm")
+        } catch (e: UserVerificationRequiredException) {
+            // local.signFido2Assertion refused a ceremony the peer required
+            // user verification for. Explicit mapping (#135): the code and
+            // why it was chosen are documented at UserVerificationWireError.
+            Log.e(TAG, "User verification required: ${e.message}")
+            UserVerificationWireError.response(request.id, e)
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected handler error", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}")
