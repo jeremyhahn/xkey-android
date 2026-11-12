@@ -15,6 +15,8 @@
 package com.automatethethings.xkey.remote
 
 import android.util.Log
+import com.automatethethings.xkey.ca.DeviceIdentity
+import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
@@ -269,7 +271,8 @@ enum class DesktopShareDecision {
  *  1. a confirmed peer identity is required;
  *  2. the key's recorded policy must admit that peer (PRIVATE never,
  *     ALL_PEERS always, SELECTED_PEERS only when the peer is listed); a key
- *     with no record is unshareable;
+ *     with no record, and the phone's identity keys ([isIdentityKey]), are
+ *     unshareable;
  *  3. a hardware key shares its public half only;
  *  4. software material only when both stores mark it exportable and shareable.
  *
@@ -290,13 +293,25 @@ object DesktopShareGate {
      * The SELECTED_PEERS grant check an outbound share passes to [decide]
      * and [DesktopKeyShare.send], built from the grant rows
      * ([isKeySharedWithPeer]) and the pairing record ([isRevocationPending]).
+     * As in protocol/Handler.kt's canShareKeyWithPeer, a peer whose unpair
+     * revocation is pending (#174) has no grant: it may have been re-paired
+     * under the same key before its old rows were deleted.
      */
     fun peerGrant(
         isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean,
         isRevocationPending: (peerPublicKeyHex: String) -> Boolean
     ): suspend (keyId: String, peerPublicKeyHex: String) -> Boolean = { keyId, peer ->
-        isKeySharedWithPeer(keyId, peer)
+        !isRevocationPending(peer) && isKeySharedWithPeer(keyId, peer)
     }
+
+    /**
+     * The phone's own identity keys: DeviceIdentity's enrollment keys and the
+     * user-verification key. Their writers replace them outside
+     * [SharePermissionLedger], so a share could not tell a retired key from
+     * the current one; they are never shared.
+     */
+    fun isIdentityKey(keyId: String): Boolean =
+        keyId.startsWith(DeviceIdentity.ALIAS_PREFIX) || keyId == KeystoreUserVerificationKey.ALIAS
 
     suspend fun decide(
         entity: KeyEntity?,
@@ -306,7 +321,7 @@ object DesktopShareGate {
         isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean
     ): DesktopShareDecision {
         if (peerPublicKeyHex.isNullOrEmpty()) return DesktopShareDecision.NO_PEER
-        if (entity == null) return DesktopShareDecision.POLICY_DENIED
+        if (entity == null || isIdentityKey(entity.keyId)) return DesktopShareDecision.POLICY_DENIED
         val admitted = when (entity.sharingPolicy) {
             SharingPolicyType.PRIVATE -> false
             SharingPolicyType.ALL_PEERS -> true

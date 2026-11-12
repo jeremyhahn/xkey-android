@@ -1919,11 +1919,16 @@ class RequestHandler(
 
         // One revoke of the canonical ID from the first removal: the Android
         // Keystore and the software key store (only one of the two holds the
-        // key), then the unified key store's row.
-        val canonicalId = canonicalKeyId(keyId)
+        // key), then the unified key store's row. An ID with a row or a
+        // software key of its own is that key; only an ID with neither is read
+        // as a raw Keystore alias. Software key `xkey_key_a` and hardware key
+        // `a` (alias `xkey_key_a`) can both exist, and deleting the first must
+        // never delete the second.
+        val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
+        val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
         keyDao.deleteKeyAndMaterial(canonicalId) {
             keystoreManager.deleteGeneralKey(canonicalId)
-            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(canonicalId)
+            softwareKeys.delete(canonicalId)
         }
 
         Log.i(TAG, "Deleted key: $keyId")
