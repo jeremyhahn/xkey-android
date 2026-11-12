@@ -1421,6 +1421,11 @@ internal class PendingStagedSave(private val staging: FileOperationStaging) {
     fun cancel() {
         take()?.let { staging.release(it) }
     }
+
+    /** A save picker's result: a destination goes to [save]; null is a cancel. */
+    fun <T : Any> onResult(result: T?, save: (T) -> Unit) {
+        if (result != null) save(result)
+    }
 }
 
 /**

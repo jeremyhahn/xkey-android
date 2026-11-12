@@ -94,13 +94,67 @@ class FileOperationStagingTest {
     @Test
     fun `staged file is deleted when the save is cancelled`() {
         val staging = staging()
-        val file = staging.stageBytes("secret.txt")
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "secret.txt")
+        val file = pending.file!!
         assertTrue(file.exists())
 
-        staging.release(file)
+        pending.cancel()
 
         assertFalse(file.exists())
+        assertEquals(null, pending.file)
         assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    /** A picker result as the encrypt and decrypt launchers deliver it: [result] null is a cancel. */
+    private fun deliverResult(pending: PendingStagedSave, result: String?): List<String> {
+        val saved = mutableListOf<String>()
+        pending.onResult(result) { saved += it }
+        return saved
+    }
+
+    @Test
+    fun `a cancelled decrypt picker deletes the staged plaintext and clears the pending file`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf", prepare = { /* recordUsage */ })
+        val file = pending.file!!
+
+        val saved = deliverResult(pending, null)
+
+        assertTrue(saved.isEmpty())
+        assertFalse(file.exists())
+        assertEquals(null, pending.file)
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a cancelled encrypt picker deletes the staged output and clears the pending file`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf.xkeyenc", prepare = { /* audit write */ })
+        val file = pending.file!!
+
+        val saved = deliverResult(pending, null)
+
+        assertTrue(saved.isEmpty())
+        assertFalse(file.exists())
+        assertEquals(null, pending.file)
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a chosen destination hands the result to the save and keeps the staged file for it`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf")
+        val file = pending.file!!
+
+        val saved = deliverResult(pending, "content://example/out")
+
+        assertEquals(listOf("content://example/out"), saved)
+        assertTrue(file.exists())
+        assertEquals(file, pending.file)
     }
 
     @Test
