@@ -18,6 +18,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConfirmedConnection
+import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.MessageSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -2489,6 +2490,23 @@ class GattServer(
     }
 
     /**
+     * Sends [data] on [connection]'s own Noise session alone. Admission
+     * refuses it unless that session is still the established, current one,
+     * confirmed for the same peer, so a share authorized for one desktop is
+     * never encrypted to a desktop that reconnected since.
+     *
+     * @throws ConnectionChangedException if [connection] is not current;
+     *   nothing is encrypted.
+     */
+    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+        val session = connection.connection as? NoiseSession ?: throw ConnectionChangedException()
+        if (!connection.sameAs(confirmedConnection())) throw ConnectionChangedException()
+        val device = connectedDevice
+            ?: throw java.io.IOException("No connected device")
+        sendOnSession(session, device, data, revalidatePeer = true, expected = connection)
+    }
+
+    /**
      * Encrypts [plaintext] on [session] and notifies it to [device].
      *
      * Waiting for the notification channel happens first and may be
@@ -2498,6 +2516,8 @@ class GattServer(
      * paired and confirmed on it) and encryption share [revocationLock] with the removal, so a
      * refused send writes nothing and consumes no nonce, and once a nonce is
      * consumed the frame is delivered or the session is torn down.
+     * A send scoped to [expected] is admitted only while [session] is still
+     * that confirmed connection.
      *
      * @throws PeerNotPairedException if the session was revoked or its peer is no longer paired
      * @throws java.io.IOException if the session is gone, its connection is
@@ -2507,7 +2527,8 @@ class GattServer(
         session: NoiseSession,
         device: BluetoothDevice,
         plaintext: ByteArray,
-        revalidatePeer: Boolean
+        revalidatePeer: Boolean,
+        expected: ConfirmedConnection? = null
     ) {
         val channel = openChannel(device)
             ?: throw java.io.IOException("No notification channel to ${device.address}")
@@ -2526,6 +2547,11 @@ class GattServer(
                         // encrypts nothing more.
                         if (sessionQueue?.inputEnded == true) {
                             throw java.io.IOException("The connection to ${device.address} is closing")
+                        }
+                        if (expected != null &&
+                            (expected.connection !== session || !expected.sameAs(confirmedConnection()))
+                        ) {
+                            throw ConnectionChangedException()
                         }
                         if (revalidatePeer) {
                             pairedDeviceRepository?.requirePaired(peerKeyHex)

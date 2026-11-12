@@ -345,16 +345,20 @@ class ShareSession private constructor(
         if (confirmed == null) other == null else confirmed.sameAs(other)
 
     /**
-     * A client on this session whose every send re-checks [isCurrent] just
-     * before the bytes go to the transport, which encrypts them.
+     * A client on this session whose every send re-checks [isCurrent] and
+     * then goes out on this session's own connection alone
+     * ([MessageSender.sendEncryptedMessageOn]): the transport refuses it at
+     * encryption admission if another connection, even another peer, has
+     * replaced that one since the check.
      */
     internal fun client(requestTimeoutMs: Long): RemoteShareClient =
         RemoteShareClient(GuardedSender(), router, requestTimeoutMs)
 
     private inner class GuardedSender : MessageSender {
         override suspend fun sendEncryptedMessage(data: ByteArray) {
+            val on = confirmed ?: throw SessionChangedException()
             if (!isCurrent()) throw SessionChangedException()
-            sender.sendEncryptedMessage(data)
+            sender.sendEncryptedMessageOn(on, data)
         }
     }
 
@@ -376,7 +380,7 @@ class ShareSession private constructor(
 }
 
 /** The session a share was authorized on was replaced before the send. */
-internal class SessionChangedException : java.io.IOException("the desktop session changed before the send")
+internal class SessionChangedException : ConnectionChangedException("the desktop session changed before the send")
 
 /**
  * Sends one of the phone's keys to the paired desktop on [session], after
@@ -428,7 +432,7 @@ class DesktopKeyShare(
                         backend = null
                     )
                 )
-            } catch (e: SessionChangedException) {
+            } catch (e: ConnectionChangedException) {
                 return Outcome.SessionChanged
             }
             return if (result.accepted) Outcome.Sent(result) else Outcome.Declined(result)

@@ -77,6 +77,12 @@ class ScriptedMessageSender(
         sent += request
         script(request)?.let { router.processMessage(it.toByteArray(Charsets.UTF_8)) }
     }
+
+    /** Sends on [connection] only while it is still this transport's confirmed one. */
+    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+        if (!connection.sameAs(confirmedConnection())) throw ConnectionChangedException()
+        sendEncryptedMessage(data)
+    }
 }
 
 /**

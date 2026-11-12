@@ -34,6 +34,7 @@ import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConfirmedConnection
+import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.settings.PairedDeviceRemovalListener
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -244,12 +245,25 @@ class StreamPairingSession(
         /**
          * Admits one frame: the connection is live, and a phone-initiated
          * frame's peer is still paired. Only then is a nonce consumed.
+         * A frame scoped to [expected] is admitted only while this is still
+         * the current connection, confirmed for that same peer.
          */
-        fun admit(plaintext: ByteArray, phoneInitiated: Boolean): ByteArray = synchronized(state) {
+        fun admit(
+            plaintext: ByteArray,
+            phoneInitiated: Boolean,
+            expected: ConfirmedConnection? = null
+        ): ByteArray = synchronized(state) {
             ensureLive()
             if (!established) throw IOException("No active Noise session")
+            if (expected != null && !expected.sameAs(confirmedHere())) throw ConnectionChangedException()
             if (phoneInitiated) pairedDeviceRepository?.requirePaired(peerKeyHex)
             noise.encrypt(plaintext)
+        }
+
+        /** This connection's own confirmed peer, while it is current. Call under [state]. */
+        fun confirmedHere(): ConfirmedConnection? {
+            val peer = peerKeyHex
+            return if (isCurrent && confirmed && !peer.isNullOrEmpty()) ConfirmedConnection(peer, this) else null
         }
 
         override fun onDeviceRemoved(publicKeyHex: String) {
@@ -845,12 +859,7 @@ class StreamPairingSession(
      */
     override fun confirmedConnection(): ConfirmedConnection? {
         val connection = activeConnection ?: return null
-        return synchronized(connection.state) {
-            val peer = connection.peerKeyHex
-            if (connection.isCurrent && connection.confirmed && !peer.isNullOrEmpty()) {
-                ConfirmedConnection(peer, connection)
-            } else null
-        }
+        return synchronized(connection.state) { connection.confirmedHere() }
     }
 
     /**
@@ -868,19 +877,40 @@ class StreamPairingSession(
     }
 
     /**
+     * [MessageSender] entry point for a send scoped to one connection: the
+     * frame is encrypted on [connection]'s own session, and admission refuses
+     * it unless that is still the current connection, confirmed for the same
+     * peer. A reconnect, even of another paired desktop, gets nothing.
+     *
+     * @throws ConnectionChangedException if [connection] is not current;
+     *   nothing is written and no nonce is consumed.
+     */
+    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+        val target = connection.connection as? Connection ?: throw ConnectionChangedException()
+        // Only this transport's own current connection; never another one's.
+        if (target !== activeConnection) throw ConnectionChangedException()
+        send(target, data, phoneInitiated = true, expected = connection)
+    }
+
+    /**
      * The one admitted operation every frame on an established connection
      * goes through: admission, encryption and the write run as a single
      * non-cancellable step under the send lock. Cancellation is honoured only
      * before admission; once a nonce is consumed the frame is written, or the
      * connection is ended.
      */
-    private suspend fun send(connection: Connection, plaintext: ByteArray, phoneInitiated: Boolean) {
+    private suspend fun send(
+        connection: Connection,
+        plaintext: ByteArray,
+        phoneInitiated: Boolean,
+        expected: ConfirmedConnection? = null
+    ) {
         beforeSendLockForTest?.invoke()
         connection.sendLock.withLock {
             currentCoroutineContext().ensureActive()
             withContext(NonCancellable + Dispatchers.IO) {
                 beforeAdmissionForTest?.invoke()
-                val frame = connection.admit(plaintext, phoneInitiated)
+                val frame = connection.admit(plaintext, phoneInitiated, expected)
                 try {
                     afterAdmissionForTest?.invoke()
                     StreamMessageFraming.writeMessage(connection.output, frame)

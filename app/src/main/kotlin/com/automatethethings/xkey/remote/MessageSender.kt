@@ -40,6 +40,22 @@ interface MessageSender {
      * and a deferred teardown may not have cleared yet.
      */
     fun confirmedConnection(): ConfirmedConnection? = null
+
+    /**
+     * Sends [data] encrypted on [connection] alone. The transport checks, at
+     * the admission that consumes the nonce, that [connection] is still its
+     * current connection, confirmed for the same peer; otherwise it encrypts
+     * and writes nothing and throws [ConnectionChangedException]. It never
+     * falls back to whatever connection is current at send time.
+     *
+     * A transport that cannot scope a send to one connection keeps this
+     * default, which fails closed.
+     *
+     * @throws ConnectionChangedException if [connection] is no longer current
+     * @throws java.io.IOException if the message could not be sent
+     */
+    suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray): Unit =
+        throw ConnectionChangedException()
 }
 
 /**
@@ -53,3 +69,8 @@ class ConfirmedConnection(val peerPublicKeyHex: String, val connection: Any) {
     fun sameAs(other: ConfirmedConnection?): Boolean =
         other != null && other.connection === connection && other.peerPublicKeyHex == peerPublicKeyHex
 }
+
+/** The connection a send was scoped to is no longer the transport's current, confirmed one. */
+open class ConnectionChangedException(
+    message: String = "the connection changed before the send"
+) : java.io.IOException(message)
