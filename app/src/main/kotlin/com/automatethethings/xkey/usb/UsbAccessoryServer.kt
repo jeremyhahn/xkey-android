@@ -38,6 +38,7 @@ import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.util.UUID
 
 /**
  * USB Accessory Mode server for direct USB communication without ADB.
@@ -79,7 +80,7 @@ import java.io.IOException
  *   attach.
  */
 class UsbAccessoryServer(
-    requestHandler: RequestHandler,
+    private val requestHandler: RequestHandler,
     messageRouter: BidirectionalMessageRouter? = null,
     pairingCallback: com.automatethethings.xkey.ble.PairingConfirmationCallback? = null,
     pairedDeviceRepository: com.automatethethings.xkey.settings.PairedDeviceRepository? = null,
@@ -170,6 +171,10 @@ class UsbAccessoryServer(
                 }
                 else -> {
                     fileDescriptor = fd
+                    // Each connection is its own session, so a PER_SESSION
+                    // approval given before a detach does not carry over to
+                    // the next attach (#134).
+                    requestHandler.setSessionId("usb:${UUID.randomUUID()}")
                     inputStream = FileInputStream(fd.fileDescriptor)
                     outputStream = FileOutputStream(fd.fileDescriptor)
 
