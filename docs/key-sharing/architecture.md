@@ -24,7 +24,14 @@ pairing:
   the same static key therefore starts with no `SELECTED_PEERS` grants. It
   still reaches `ALL_PEERS` keys, because that comes from the key's own policy,
   not from a row.
-- Re-pairing under the same key is not a removal, so the rows stay.
+- The revocation is durable. The removed key goes into a pending set
+  (`pending_grant_revocations` in the paired-devices prefs) in the same edit
+  that removes the pairing, and leaves it only once the delete commits. A
+  delete that failed or never ran is retried at the next app start and when
+  the key is paired again. Until then `canShareKeyWithPeer` refuses
+  `SELECTED_PEERS` to that key (fail closed).
+- Re-pairing under the same key is not a removal, so with no revocation
+  pending the rows stay.
 
 ## Index Strategy
 
