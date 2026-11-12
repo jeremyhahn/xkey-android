@@ -115,6 +115,14 @@ android {
         jacocoVersion = libs.versions.jacoco.get()
     }
 
+    // Robolectric tests start the real activities, which read the app's
+    // layouts and strings.
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+
     lint {
         abortOnError = true
         warningsAsErrors = false

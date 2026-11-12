@@ -233,12 +233,18 @@ class SetKeyPolicyHandlerTest {
      * [PendingAuthentications] on a screen of this test's own, mapping a
      * result to the launcher's outcome, so overlapping requests take turns as
      * they do on the phone. Settle a prompt with [PendingAuthentications.complete]
-     * on the id in [prompts].
+     * on the id in [prompts]. A prompt coming up runs the request's `onLaunch`,
+     * as the launcher does.
      */
     private fun promptsTakeTurns(): PendingAuthentications {
         val approvals = PendingAuthentications(SigningPromptQueue())
         coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } coAnswers {
-            when (val result = approvals.await { prompts += it }) {
+            val onLaunch = arg<(String, Intent) -> Unit>(4)
+            val launch = { requestId: String ->
+                prompts += requestId
+                onLaunch(requestId, mockk())
+            }
+            when (val result = approvals.await(launch = launch)) {
                 is BiometricResult.Success -> Unit
                 is BiometricResult.Error -> throw BiometricException(result.code, result.message)
             }
@@ -385,6 +391,56 @@ class SetKeyPolicyHandlerTest {
         assertNull(timedOut.result)
         assertEquals(ErrorCodes.BIOMETRIC_FAILED, timedOut.error?.code)
         assertEquals("the queued request never prompted", 1, prompts.size)
+        assertTrue("the request on screen still waits for the owner", first.isActive)
+
+        assertTrue(approvals.complete(prompts[0], BiometricResult.Success))
+        runCurrent()
+        assertUpdated(first.await())
+        assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
+    }
+
+    /** No request's lock-screen notification has been taken down. */
+    private fun assertNoNotificationCancelled() {
+        verify(exactly = 0) { anyConstructed<BiometricNotificationHelper>().cancelNotification() }
+    }
+
+    @Test
+    fun `withdrawing a queued approval leaves the notification of the one on screen`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        every { keyguard.isKeyguardLocked } returns true
+        val approvals = promptsTakeTurns()
+
+        val first = async { handler().handleRequest(request(shareable = true)) }
+        val second = async { handler().handleRequest(request(shareable = true)) }
+        runCurrent()
+        // The queued request's connection closes before its turn.
+        second.cancel()
+        runCurrent()
+
+        assertEquals("the queued request was never prompted", 1, prompts.size)
+        assertNoNotificationCancelled()
+        assertTrue("the request on screen still waits for the owner", first.isActive)
+
+        assertTrue(approvals.complete(prompts[0], BiometricResult.Success))
+        runCurrent()
+        assertUpdated(first.await())
+        assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
+    }
+
+    @Test
+    fun `a queued approval timing out leaves the notification of the one on screen`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        every { keyguard.isKeyguardLocked } returns true
+        val approvals = promptsTakeTurns()
+
+        val first = async { handler().handleRequest(request(shareable = true)) }
+        val second = async { handler().handleRequest(request(shareable = true)) }
+        runCurrent()
+        advanceTimeBy(PendingAuthentications.QUEUE_DEADLINE_MILLIS + 1)
+        runCurrent()
+
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, second.await().error?.code)
+        assertNoNotificationCancelled()
         assertTrue("the request on screen still waits for the owner", first.isActive)
 
         assertTrue(approvals.complete(prompts[0], BiometricResult.Success))

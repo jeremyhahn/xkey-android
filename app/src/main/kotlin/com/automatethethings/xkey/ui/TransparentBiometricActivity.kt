@@ -19,6 +19,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.OnBackPressedCallback
+import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
@@ -68,6 +69,14 @@ class TransparentBiometricActivity : FragmentActivity() {
     private var requestId: String = ""
     private var biometricPrompt: BiometricPrompt? = null
     private var hasFinished = false
+
+    /**
+     * What the system tells the prompt on screen. Tests stand in for the
+     * owner through it; nothing else calls it.
+     */
+    @VisibleForTesting
+    internal var promptCallback: BiometricPrompt.AuthenticationCallback? = null
+        private set
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -205,6 +214,7 @@ class TransparentBiometricActivity : FragmentActivity() {
             }
         }
 
+        promptCallback = callback
         biometricPrompt = BiometricPrompt(this, executor, callback)
 
         val promptInfoBuilder = BiometricPrompt.PromptInfo.Builder()
