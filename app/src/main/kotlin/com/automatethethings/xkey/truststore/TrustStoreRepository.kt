@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.truststore
 
 import android.content.Context
+import com.automatethethings.xkey.audit.AuditLogger
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -275,14 +276,19 @@ public class TrustStoreRepository(
             }
 
             saveMetadataSync(remaining)
+            val subject = all.firstOrNull { it.fingerprint == fingerprint }?.subjectDN ?: ""
+            auditDelete(subject, fingerprint)
             true
         }
 
     /**
-     * Clear all certificates from the trust store.
+     * Clear all certificates from the trust store, recording one audit
+     * deletion per certificate listed in the metadata.
      */
     public suspend fun clearAll(): Unit = withContext(Dispatchers.IO) {
+        val removed = readMetadataSync()
         trustStoreDir.listFiles()?.forEach { it.delete() }
+        removed.forEach { auditDelete(it.subjectDN, it.fingerprint) }
     }
 
     /**
@@ -459,7 +465,22 @@ public class TrustStoreRepository(
         val updated = existing.filter { it.fingerprint != fingerprint } + trustedCA
         saveMetadataSync(updated)
 
+        if (AuditLogger.isInitialized()) {
+            AuditLogger.logTrustStoreImport(trustedCA.subjectDN, fingerprint, source)
+        }
+
         return trustedCA
+    }
+
+    /**
+     * Record a trust store deletion. Only when the audit logger is
+     * initialized: its drop path calls `Log.w`, which callers that never
+     * initialize it (JVM tests, sync) must not reach.
+     */
+    private fun auditDelete(subject: String, fingerprint: String) {
+        if (AuditLogger.isInitialized()) {
+            AuditLogger.logTrustStoreDelete(subject, fingerprint)
+        }
     }
 
     private fun saveMetadataSync(certs: List<TrustedCA>) {

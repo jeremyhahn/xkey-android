@@ -11,6 +11,8 @@ Comprehensive security event log with 35+ operation types covering key lifecycle
 cryptographic operations, FIDO2 events, connection events, certificate operations,
 file/media operations, contact management, and co-signing.
 
+Trust store events: `TrustStoreRepository` records `TRUST_STORE_IMPORT` (subject, fingerprint, source: `manual`, `url:<url>`, `internal-ca`, ...) for each stored certificate and `TRUST_STORE_DELETE` (subject, fingerprint) for each removed one, `clearAll` included; duplicates and refused certificates record nothing.
+
 ## Index Strategy
 
 ### audit_logs
