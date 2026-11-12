@@ -43,9 +43,11 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -57,9 +59,18 @@ import org.junit.Test
  * Widening a key to every peer needs a confirmed peer and the owner's
  * approval on the phone; a refused or impossible prompt leaves the stored
  * policy alone. Narrowing, and a key already open to every peer, need
- * neither. Every stored change is audited. Requests go through the real
- * [RequestHandler.handleRequest], so the wire error codes are the ones a peer
- * sees. The Android edges are mocked as in [UserVerificationWireErrorTest].
+ * neither. The write is a compare-and-set against the policy the decision
+ * was taken on, so a change that lands between the read and the write is
+ * never overwritten, and the audit names the policy the write replaced.
+ *
+ * The confirmed peer is the one of the connection the request arrived on
+ * (its CallerSession), not the handler-wide peer another transport may have
+ * set or cleared.
+ *
+ * Requests go through the real [RequestHandler.handleRequest], so the wire
+ * error codes are the ones a peer sees. The key store is a small stateful
+ * fake over the mocked [KeyDao]; the Android edges are mocked as in
+ * [UserVerificationWireErrorTest].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SetKeyPolicyHandlerTest {
@@ -70,6 +81,17 @@ class SetKeyPolicyHandlerTest {
 
     private val keyId = "key-178"
     private val peer = "ab".repeat(32)
+    private val otherPeer = "cd".repeat(32)
+
+    /** The stored sharing policy, or null when the key does not exist. */
+    private var stored: SharingPolicyType? = null
+    private var storedLabel = "Work key"
+
+    /** Every policy the fake store was asked to write, by any DAO call. */
+    private val writes = mutableListOf<SharingPolicyType>()
+
+    /** Runs once, after the next read has taken its snapshot. */
+    private var afterNextRead: (() -> Unit)? = null
 
     @Before
     fun setUp() {
@@ -86,6 +108,27 @@ class SetKeyPolicyHandlerTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
         keyDao = mockk(relaxed = true)
+        coEvery { keyDao.getByKeyId(keyId) } answers {
+            val snapshot = stored?.let { key(it, storedLabel) }
+            afterNextRead?.also { afterNextRead = null }?.invoke()
+            snapshot
+        }
+        coEvery { keyDao.updateSharingPolicy(keyId, any()) } answers {
+            val policy = secondArg<SharingPolicyType>()
+            writes += policy
+            if (stored != null) stored = policy
+        }
+        coEvery { keyDao.compareAndSetSharingPolicy(keyId, any(), any()) } answers {
+            val expected = secondArg<SharingPolicyType>()
+            val policy = thirdArg<SharingPolicyType>()
+            if (stored != null && stored == expected) {
+                writes += policy
+                stored = policy
+                1
+            } else {
+                0
+            }
+        }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
@@ -141,19 +184,36 @@ class SetKeyPolicyHandlerTest {
         }
     )
 
+    /** Handles [request] as one arriving on a served connection whose peer is [callerPeer]. */
+    private suspend fun RequestHandler.handleFromCaller(request: Request, callerPeer: String?): Response =
+        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, callerPeer)) {
+            handleRequest(request)
+        }
+
     private fun assertUpdated(response: Response) {
         assertNull(response.error)
         assertEquals(true, response.result?.getBoolean("updated"))
     }
 
-    private fun assertPolicyUntouched() {
-        coVerify(exactly = 0) { keyDao.updateSharingPolicy(any(), any()) }
+    private fun assertNoPrompt() {
+        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any()) }
+    }
+
+    private fun assertNothingWrittenOrAudited() {
+        assertEquals(emptyList<SharingPolicyType>(), writes)
         verify(exactly = 0) { AuditLogger.logKeySharingChanged(any(), any(), any(), any(), any()) }
+    }
+
+    private fun assertAudited(oldPolicy: SharingPolicyType, newPolicy: SharingPolicyType) {
+        verify(exactly = 1) { AuditLogger.logKeySharingChanged(any(), any(), any(), any(), any()) }
+        verify(exactly = 1) {
+            AuditLogger.logKeySharingChanged(keyId, storedLabel, "aes", oldPolicy.name, newPolicy.name)
+        }
     }
 
     @Test
     fun `widening approved on the phone stores ALL_PEERS and audits it`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns key(SharingPolicyType.PRIVATE)
+        stored = SharingPolicyType.PRIVATE
 
         val response = handler().handleRequest(request(shareable = true))
 
@@ -161,15 +221,14 @@ class SetKeyPolicyHandlerTest {
         coVerify(exactly = 1) {
             launcher.requestAuthentication(any(), match { it.contains("Work key") }, any(), any())
         }
-        coVerify(exactly = 1) { keyDao.updateSharingPolicy(keyId, SharingPolicyType.ALL_PEERS) }
-        verify(exactly = 1) {
-            AuditLogger.logKeySharingChanged(keyId, "Work key", "aes", "PRIVATE", "ALL_PEERS")
-        }
+        assertEquals(SharingPolicyType.ALL_PEERS, stored)
+        assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
     }
 
     @Test
     fun `the prompt names a key with no label by its id`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns key(SharingPolicyType.PRIVATE, label = "")
+        stored = SharingPolicyType.PRIVATE
+        storedLabel = ""
 
         assertUpdated(handler().handleRequest(request(shareable = true)))
 
@@ -180,81 +239,188 @@ class SetKeyPolicyHandlerTest {
 
     @Test
     fun `widening the owner cancels answers BIOMETRIC_FAILED and stores nothing`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns key(SharingPolicyType.PRIVATE)
+        stored = SharingPolicyType.PRIVATE
         coEvery { launcher.requestAuthentication(any(), any(), any(), any()) } throws UserCancelledException()
 
         val response = handler().handleRequest(request(shareable = true))
 
         assertNull(response.result)
         assertEquals(ErrorCodes.BIOMETRIC_FAILED, response.error?.code)
-        assertPolicyUntouched()
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertNothingWrittenOrAudited()
     }
 
     @Test
     fun `widening with no biometric launcher answers BIOMETRIC_FAILED and stores nothing`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns key(SharingPolicyType.PRIVATE)
+        stored = SharingPolicyType.PRIVATE
 
         val response = handler(withLauncher = false).handleRequest(request(shareable = true))
 
         assertNull(response.result)
         assertEquals(ErrorCodes.BIOMETRIC_FAILED, response.error?.code)
-        assertPolicyUntouched()
+        assertNothingWrittenOrAudited()
     }
 
     @Test
     fun `widening with no confirmed peer answers OPERATION_DENIED without a prompt`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns key(SharingPolicyType.PRIVATE)
+        stored = SharingPolicyType.PRIVATE
 
         val response = handler(confirmedPeer = null).handleRequest(request(shareable = true))
 
         assertNull(response.result)
         assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
-        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any()) }
-        assertPolicyUntouched()
+        assertNoPrompt()
+        assertNothingWrittenOrAudited()
     }
 
     @Test
     fun `narrowing stores PRIVATE with no prompt and audits it`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns key(SharingPolicyType.ALL_PEERS)
+        stored = SharingPolicyType.ALL_PEERS
 
         val response = handler().handleRequest(request(shareable = false))
 
         assertUpdated(response)
-        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any()) }
-        coVerify(exactly = 1) { keyDao.updateSharingPolicy(keyId, SharingPolicyType.PRIVATE) }
-        verify(exactly = 1) {
-            AuditLogger.logKeySharingChanged(keyId, "Work key", "aes", "ALL_PEERS", "PRIVATE")
-        }
+        assertNoPrompt()
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertAudited(SharingPolicyType.ALL_PEERS, SharingPolicyType.PRIVATE)
     }
 
     @Test
-    fun `a key already open to every peer needs no prompt`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns key(SharingPolicyType.ALL_PEERS)
+    fun `a key already open to every peer is neither prompted for, written nor audited`() = runTest {
+        stored = SharingPolicyType.ALL_PEERS
 
         val response = handler(withLauncher = false).handleRequest(request(shareable = true))
 
         assertUpdated(response)
-        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any()) }
+        assertNoPrompt()
+        assertNothingWrittenOrAudited()
+    }
+
+    @Test
+    fun `a narrowing that lands after the read is not overwritten back to ALL_PEERS`() = runTest {
+        stored = SharingPolicyType.ALL_PEERS
+        // The owner narrows the key after this request has read ALL_PEERS.
+        afterNextRead = { stored = SharingPolicyType.PRIVATE }
+
+        val response = handler().handleRequest(request(shareable = true))
+
+        assertUpdated(response)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertNoPrompt()
+        assertNothingWrittenOrAudited()
+    }
+
+    @Test
+    fun `a change during the approval prompt refuses the widening it was not approved for`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        // While the owner is looking at the prompt, the key moves to selected peers.
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any()) } answers {
+            stored = SharingPolicyType.SELECTED_PEERS
+        }
+
+        val response = handler().handleRequest(request(shareable = true))
+
+        assertNull(response.result)
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertEquals(SharingPolicyType.SELECTED_PEERS, stored)
+        assertNothingWrittenOrAudited()
+    }
+
+    @Test
+    fun `a narrowing audits the policy its write actually replaced`() = runTest {
+        stored = SharingPolicyType.ALL_PEERS
+        // Another writer moves the key to selected peers after this request's read.
+        afterNextRead = { stored = SharingPolicyType.SELECTED_PEERS }
+
+        val response = handler().handleRequest(request(shareable = false))
+
+        assertUpdated(response)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertAudited(SharingPolicyType.SELECTED_PEERS, SharingPolicyType.PRIVATE)
     }
 
     @Test
     fun `an absent shareable changes nothing and needs no prompt`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns key(SharingPolicyType.PRIVATE)
+        stored = SharingPolicyType.PRIVATE
 
         val response = handler(withLauncher = false).handleRequest(request(shareable = null))
 
         assertUpdated(response)
-        assertPolicyUntouched()
+        assertNothingWrittenOrAudited()
     }
 
     @Test
     fun `an unknown key answers KEY_NOT_FOUND`() = runTest {
-        coEvery { keyDao.getByKeyId(keyId) } returns null
+        stored = null
 
         val response = handler().handleRequest(request(shareable = true))
 
         assertEquals(ErrorCodes.KEY_NOT_FOUND, response.error?.code)
         assertTrue(response.error?.message.orEmpty().contains(keyId))
-        assertPolicyUntouched()
+        assertNothingWrittenOrAudited()
     }
+
+    @Test
+    fun `the caller's confirmed peer is enough when the handler-wide peer was cleared`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        // Another transport's teardown cleared the handler-wide peer.
+        val handler = handler(confirmedPeer = null)
+
+        val response = handler.handleFromCaller(request(shareable = true), callerPeer = peer)
+
+        assertUpdated(response)
+        coVerify(exactly = 1) { launcher.requestAuthentication(any(), any(), any(), any()) }
+        assertEquals(SharingPolicyType.ALL_PEERS, stored)
+    }
+
+    @Test
+    fun `a caller with no confirmed peer is denied even when the handler-wide peer is set`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        val handler = handler(confirmedPeer = otherPeer)
+
+        val response = handler.handleFromCaller(request(shareable = true), callerPeer = null)
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertNoPrompt()
+        assertNothingWrittenOrAudited()
+    }
+
+    private val noPeerMessage = "requires a confirmed peer identity"
+
+    private fun shareSymmetric() = Request(
+        id = 179L,
+        method = MethodNames.LOCAL_SHARE_SYMMETRIC,
+        params = JSONObject().put("wrapped_key", "AAAA").put("label", keyId)
+    )
+
+    private fun importSharedKey() = Request(
+        id = 180L,
+        method = MethodNames.LOCAL_IMPORT_SHARED_KEY,
+        params = JSONObject().put("key_id", keyId)
+    )
+
+    @Test
+    fun `shareSymmetric and importSharedKey deny a caller with no peer even when the handler-wide peer is set`() =
+        runTest {
+            val handler = handler(confirmedPeer = otherPeer)
+
+            for (request in listOf(shareSymmetric(), importSharedKey())) {
+                val response = handler.handleFromCaller(request, callerPeer = null)
+
+                assertEquals(request.method, ErrorCodes.OPERATION_DENIED, response.error?.code)
+                assertTrue(request.method, response.error?.message.orEmpty().contains(noPeerMessage))
+            }
+        }
+
+    @Test
+    fun `shareSymmetric and importSharedKey accept the caller's peer when the handler-wide peer was cleared`() =
+        runTest {
+            val handler = handler(confirmedPeer = null)
+
+            for (request in listOf(shareSymmetric(), importSharedKey())) {
+                val response = handler.handleFromCaller(request, callerPeer = peer)
+
+                assertFalse(request.method, response.error?.message.orEmpty().contains(noPeerMessage))
+            }
+        }
 }
