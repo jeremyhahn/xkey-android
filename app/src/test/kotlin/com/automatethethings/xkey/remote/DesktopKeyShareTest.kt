@@ -34,8 +34,9 @@ import org.junit.Test
 /**
  * The outbound share honours the phone's `local.*` sharing rules: a key the
  * rules refuse, or material that is not exportable, never reaches the wire.
- * The rules are checked against the peer confirmed on the session the key is
- * sent on, and nothing is sent once that session has been replaced.
+ * The rules are checked against the peer confirmed on the very connection the
+ * key is sent on, never the handler-wide peer key, and nothing is sent once
+ * that connection has been replaced.
  */
 class DesktopKeyShareTest {
 
@@ -63,12 +64,16 @@ class DesktopKeyShareTest {
         unmockkAll()
     }
 
+    /** The session on [s], with [peerHex] confirmed on [s]'s own connection. */
     private fun session(
-        s: MessageSender,
+        s: ScriptedMessageSender,
         r: BidirectionalMessageRouter,
         peerHex: String?,
         stillCurrent: (ShareSession) -> Boolean = { true }
-    ): ShareSession = ShareSession.of(listOf(ShareSession.Transport(s, r)), peerHex, stillCurrent)!!
+    ): ShareSession {
+        s.confirmedPeer = peerHex
+        return ShareSession.of(listOf(ShareSession.Transport(s, r)), stillCurrent)!!
+    }
 
     private fun entity(
         policy: SharingPolicyType,
@@ -180,13 +185,12 @@ class DesktopKeyShareTest {
         val routerA = BidirectionalMessageRouter(mockk<RequestHandler>())
         val senderA = ScriptedMessageSender(routerA).apply { succeedWith(accepted) }
         val routerB = BidirectionalMessageRouter(mockk<RequestHandler>())
-        val senderB = ScriptedMessageSender(routerB).apply { succeedWith(accepted) }
+        val senderB = ScriptedMessageSender(routerB).apply { succeedWith(accepted); confirmedPeer = peerB }
 
-        // A is the active transport; the one confirmed identity the phone
-        // holds is B's, from the other session.
+        // A is the active transport and confirms no one; B is confirmed only
+        // on the other session.
         val s = ShareSession.of(
-            listOf(ShareSession.Transport(senderA, routerA), ShareSession.Transport(senderB, routerB)),
-            peerB
+            listOf(ShareSession.Transport(senderA, routerA), ShareSession.Transport(senderB, routerB))
         ) { true }!!
         assertSame(senderA, s.sender)
         assertNull(s.peerPublicKeyHex)
@@ -195,6 +199,57 @@ class DesktopKeyShareTest {
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NO_PEER), out)
         assertTrue(senderA.sent.isEmpty())
         assertTrue(senderB.sent.isEmpty())
+    }
+
+    @Test
+    fun `TCP peer A plus a revoked BLE session of B never authorizes a key granted only to B`() = runTest {
+        val peerA = "aa".repeat(32)
+        val peerB = "bb".repeat(32)
+        listed += "k" to peerB
+        val bleRouter = BidirectionalMessageRouter(mockk<RequestHandler>())
+        val ble = ScriptedMessageSender(bleRouter).apply { succeedWith(accepted); confirmedPeer = peerB }
+        val tcpRouter = BidirectionalMessageRouter(mockk<RequestHandler>())
+        val tcp = ScriptedMessageSender(tcpRouter).apply { succeedWith(accepted); confirmedPeer = peerA }
+
+        // B's BLE session is revoked and its teardown deferred: the
+        // handler-wide peer key still names B, but B's connection confirms no
+        // one and is no longer live. TCP is the only live transport.
+        ble.confirmedPeer = null
+        val s = ShareSession.of(listOf(ShareSession.Transport(tcp, tcpRouter))) { true }!!
+        assertSame(tcp, s.sender)
+        assertEquals(peerA, s.peerPublicKeyHex)
+
+        val out = DesktopKeyShare(s, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared)
+        assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
+        assertTrue(tcp.sent.isEmpty())
+        assertTrue(ble.sent.isEmpty())
+
+        // An unconfirmed TCP connection is no peer at all, whatever B was.
+        tcp.confirmedPeer = null
+        val unconfirmed = ShareSession.of(listOf(ShareSession.Transport(tcp, tcpRouter))) { true }!!
+        assertEquals(
+            DesktopKeyShare.Outcome.Refused(DesktopShareDecision.NO_PEER),
+            DesktopKeyShare(unconfirmed, 200).send(entity(SharingPolicyType.SELECTED_PEERS), null, pem, null, isShared)
+        )
+        assertTrue(tcp.sent.isEmpty())
+    }
+
+    @Test
+    fun `a connection replaced after the decision is no longer current, even for the same peer`() = runTest {
+        val s = session(sender, router, peer)
+        assertTrue(s.isCurrent())
+        // The desktop reconnects: same transport and peer, another connection.
+        sender.connection = Any()
+        assertFalse(s.isCurrent())
+        assertFalse(s.sameAs(session(sender, router, peer)))
+
+        val held = session(sender, router, peer)
+        sender.confirmedPeer = null
+        assertEquals(
+            DesktopKeyShare.Outcome.SessionChanged,
+            DesktopKeyShare(held, 200).send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+        )
+        assertTrue(sender.sent.isEmpty())
     }
 
     @Test
@@ -210,7 +265,7 @@ class DesktopKeyShareTest {
 
     @Test
     fun `no live transport is no session`() {
-        assertNull(ShareSession.of(emptyList(), peer) { true })
+        assertNull(ShareSession.of(emptyList()) { true })
     }
 
     @Test

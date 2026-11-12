@@ -50,8 +50,11 @@ class ShareSessionChangesTest {
         unmockkAll()
     }
 
-    private fun session(peerHex: String?): ShareSession =
-        ShareSession.of(listOf(ShareSession.Transport(sender, router)), peerHex) { true }!!
+    /** The session as the service would snapshot it with [peerHex] confirmed on the connection. */
+    private fun session(peerHex: String?): ShareSession {
+        sender.confirmedPeer = peerHex
+        return ShareSession.of(listOf(ShareSession.Transport(sender, router))) { true }!!
+    }
 
     @Test
     fun `connect, confirm and disconnect each emit once`() = runTest {
@@ -80,8 +83,8 @@ class ShareSessionChangesTest {
     @Test
     fun `a session moving to another transport emits`() = runTest {
         val otherRouter = BidirectionalMessageRouter(mockk<RequestHandler>())
-        val other = ScriptedMessageSender(otherRouter)
-        val moved = ShareSession.of(listOf(ShareSession.Transport(other, otherRouter)), peer) { true }!!
+        val other = ScriptedMessageSender(otherRouter).apply { confirmedPeer = peer }
+        val moved = ShareSession.of(listOf(ShareSession.Transport(other, otherRouter))) { true }!!
         val polls = ArrayDeque(listOf<ShareSession?>(session(peer), session(peer), moved))
         val seen = shareSessionChanges(periodMs = 100) { polls.removeFirstOrNull() ?: moved }.take(2).toList()
         assertSame(sender, seen[0]!!.sender)

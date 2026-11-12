@@ -60,6 +60,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -447,6 +448,32 @@ class StreamPairingSessionRevocationTest {
         verify(exactly = 0) { requestHandler.setConnectedDevicePublicKeyHex(old.desktop.publicKeyHex) }
         val reply = replacement.desktop.request("system.ping")
         assertEquals(ErrorCodes.PAIRING_REQUIRED, reply.getJSONObject("error").getInt("code"))
+    }
+
+    // ---------------------------------------------------------------------
+    // The confirmed peer a key share is checked against
+    // ---------------------------------------------------------------------
+
+    /**
+     * A key share is authorized against the peer confirmed on the connection
+     * it goes out on. That is this connection's own authenticated peer, never
+     * the handler-wide key, and the answer ends with the connection's
+     * revocation, before its teardown has run.
+     */
+    @Test
+    fun theConfirmedConnectionIsThisConnectionsOwnPeerUntilItIsRevoked() = runBlocking {
+        val unconfirmed = connectUnpaired()
+        assertNull("an unconfirmed connection confirms no one", pairing.confirmedConnection())
+        unconfirmed.desktop.close()
+        unconfirmed.awaitServeEnded()
+
+        val phone = connectPaired()
+        val confirmed = pairing.confirmedConnection()
+        assertEquals(phone.desktop.publicKeyHex, confirmed?.peerPublicKeyHex)
+
+        repo.removeDevice(phone.desktop.publicKeyHex)
+        assertNull("a revoked connection confirms no one", pairing.confirmedConnection())
+        phone.awaitServeEnded()
     }
 
     // ---------------------------------------------------------------------

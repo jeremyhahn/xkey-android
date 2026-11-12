@@ -41,6 +41,15 @@ class ScriptedMessageSender(
     /** The most recent outbound request. */
     val lastRequest: Request get() = sent.last()
 
+    /** The peer confirmed on this transport's own connection, or null when none is. */
+    var confirmedPeer: String? = null
+
+    /** This transport's connection; replace it to model a reconnect. */
+    var connection: Any = Any()
+
+    override fun confirmedConnection(): ConfirmedConnection? =
+        confirmedPeer?.let { ConfirmedConnection(it, connection) }
+
     /** Replaces the reply script for subsequent requests. */
     fun replyWith(script: (Request) -> String?) {
         this.script = script
