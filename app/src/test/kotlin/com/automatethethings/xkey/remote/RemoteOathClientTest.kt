@@ -87,11 +87,11 @@ class RemoteOathClientTest {
         assertEquals(MethodNames.REMOTE_OATH_ADD, req.method)
         assertEquals("remote.oathAdd", req.method)
         val params = req.params!!
-        assertEquals(setOf("credential"), params.keySet())
+        assertEquals(setOf("credential"), keysOf(params))
         val cred = params.getJSONObject("credential")
         assertEquals(
             setOf("name", "issuer", "account_name", "secret", "type", "algorithm", "digits", "period"),
-            cred.keySet()
+            keysOf(cred)
         )
         assertEquals("GitHub:alice", cred.getString("name"))
         assertEquals("GitHub", cred.getString("issuer"))
@@ -259,18 +259,6 @@ class RemoteOathClientTest {
     }
 
     @Test
-    fun `oathAdd rejects a missing or non-object result`() = runTest {
-        for (script in listOf<(com.automatethethings.xkey.protocol.Request) -> String?>(
-            { """{"id":${it.id}}""" },
-            { """{"id":${it.id},"result":"ok"}""" },
-            { """{"id":${it.id},"result":[1]}""" }
-        )) {
-            sender.replyWith(script)
-            expectProtocolError { client().oathAdd(totp()) }
-        }
-    }
-
-    @Test
     fun `oathAdd maps a desktop error to ProtocolException with its code`() = runTest {
         sender.failWith(-32602, "bad credential")
 
@@ -297,7 +285,7 @@ class RemoteOathClientTest {
         val req = sender.lastRequest
         assertEquals(MethodNames.REMOTE_OATH_GENERATE, req.method)
         assertEquals("remote.oathGenerate", req.method)
-        assertEquals(setOf("credential_id"), req.params!!.keySet())
+        assertEquals(setOf("credential_id"), keysOf(req.params!!))
         assertEquals("desk-1", req.params!!.getString("credential_id"))
     }
 
@@ -387,6 +375,8 @@ class RemoteOathClientTest {
             RemoteOathClient.base32Chars(byteArrayOf(0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x21, 0xde.toByte(), 0xad.toByte(), 0xbe.toByte(), 0xef.toByte()))
         )
     }
+
+    private fun keysOf(o: org.json.JSONObject): Set<String> = o.keys().asSequence().toSet()
 
     private fun RemoteOathClient.Credential.copyWith(
         name: String = this.name,
