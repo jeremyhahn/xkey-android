@@ -28,6 +28,9 @@ import java.util.concurrent.CopyOnWriteArraySet
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -481,6 +484,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
             prefs.edit().putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending)).apply()
             throw IOException("Acknowledging a grant revocation did not reach disk")
         }
+        revocationChangeCount.value++
         true
     }
 
@@ -506,6 +510,8 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         var generation = prefs.getLong(KEY_REVOCATION_GENERATION, 0L)
         val pending = readPending().toMutableMap()
         for (key in keys) pending[key] = ++generation
+        // Under storeLock: a reader woken by this blocks until the edit is applied.
+        revocationChangeCount.value++
         return putStringSet(KEY_PENDING_REVOCATIONS, encodePending(pending))
             .putLong(KEY_REVOCATION_GENERATION, generation)
     }
@@ -555,6 +561,15 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
          * one write back a set another has changed since it read it.
          */
         private val storeLock = Any()
+
+        private val revocationChangeCount = MutableStateFlow(0L)
+
+        /**
+         * Changes whenever a revocation is queued or completed, in any
+         * repository instance: a screen that shows the pending state rereads
+         * it on each value.
+         */
+        val revocationChanges: StateFlow<Long> = revocationChangeCount.asStateFlow()
 
         /**
          * Process-wide: the Activity that unpairs a device and the service
@@ -703,6 +718,9 @@ class PairedDeviceGrantCleanup(
             // inFlight's lock, the lock revoke() takes: a request that lands
             // after it finds no job and starts one.
             val generation = synchronized(inFlight) {
+                // A request since the last attempt, even one that woke this
+                // job from its backoff, renews the failure budget.
+                if (job.requested) failures = 0
                 job.requested = false
                 job.wake.tryReceive()
                 val pending = try {
