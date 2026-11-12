@@ -22,9 +22,13 @@ import android.hardware.usb.UsbManager
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.content.IntentCompat
+import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.settings.BiometricAuthMode
+import com.automatethethings.xkey.settings.BiometricSettingsData
+import com.automatethethings.xkey.settings.UserVerificationPolicy
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -32,8 +36,11 @@ import io.mockk.mockkConstructor
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -42,10 +49,13 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
 
 /**
  * The service's USB server slot (#134): a detach delivered through the
@@ -66,6 +76,11 @@ class UsbAccessoryServerSlotTest {
     private val receivers = mutableListOf<BroadcastReceiver>()
     private val opened = mutableListOf<UsbAccessoryServer>()
     private val openFiles = mutableListOf<RandomAccessFile>()
+
+    /** One handler shared by every attach, as the service shares its RequestHandler. */
+    private lateinit var handler: RequestHandler
+    @Volatile private var sessionId: String? = null
+    @Volatile private var peerKeyHex: String? = null
 
     @Before
     fun setUp() {
@@ -92,6 +107,10 @@ class UsbAccessoryServerSlotTest {
         every { accessory.manufacturer } returns "Automate The Things"
         every { accessory.model } returns "xKey"
 
+        handler = mockk(relaxed = true)
+        every { handler.setSessionId(any()) } answers { sessionId = firstArg() }
+        every { handler.setConnectedDevicePublicKeyHex(any()) } answers { peerKeyHex = firstArg() }
+
         slot = UsbAccessoryServerSlot(
             newDetachWatcher = { BroadcastAccessoryDetachWatcher { _, receiver -> receivers += receiver } },
         )
@@ -114,13 +133,23 @@ class UsbAccessoryServerSlotTest {
         return pfd
     }
 
-    private fun attach(): UsbAccessoryServer? =
+    private fun attach(): UsbAccessoryServer? = runBlocking {
         slot.open(
             context = context,
             accessory = accessory,
-            requestHandler = mockk<RequestHandler>(relaxed = true),
+            requestHandler = handler,
             router = mockk<BidirectionalMessageRouter>(relaxed = true),
-        )?.also { opened += it }
+        )
+    }?.also { synchronized(opened) { opened += it } }
+
+    private fun waitFor(timeoutMs: Long, condition: () -> Boolean): Boolean {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            if (condition()) return true
+            Thread.sleep(10)
+        }
+        return condition()
+    }
 
     /** Plays the system's USB_ACCESSORY_DETACHED broadcast to the last registered receiver. */
     private fun broadcastDetach(detached: UsbAccessory) {
@@ -160,5 +189,69 @@ class UsbAccessoryServerSlotTest {
 
         assertNull(attach())
         assertSame(first, slot.current()?.first)
+    }
+
+    @Test
+    fun `a per-session approval does not carry over a detach and reattach`() {
+        val auth = SessionAuthManager()
+        val perSession = BiometricSettingsData(
+            uvPolicy = UserVerificationPolicy.REQUIRED,
+            authMode = BiometricAuthMode.PER_SESSION,
+        )
+
+        assertNotNull(attach())
+        // The user approves once in this USB session, as a local.sign prompt does.
+        assertTrue(auth.isBiometricRequired(perSession, sessionId))
+        auth.recordAuthentication(sessionId)
+        assertFalse(auth.isBiometricRequired(perSession, sessionId))
+
+        broadcastDetach(accessory)
+        assertNotNull(attach())
+
+        assertTrue(
+            "the approval of the detached USB session was reused",
+            auth.isBiometricRequired(perSession, sessionId),
+        )
+    }
+
+    @Test
+    fun `a slow teardown of the detached session keeps the new peer identity`() {
+        val oldTeardown = CompletableDeferred<Unit>()
+        val sessions = AtomicInteger()
+        coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers {
+            if (sessions.incrementAndGet() == 1) {
+                handler.setConnectedDevicePublicKeyHex("old-peer")
+                try {
+                    awaitCancellation()
+                } finally {
+                    // The pairing session's teardown clears the shared peer identity.
+                    withContext(NonCancellable) {
+                        oldTeardown.await()
+                        handler.setConnectedDevicePublicKeyHex(null)
+                    }
+                }
+            } else {
+                handler.setConnectedDevicePublicKeyHex("new-peer")
+                awaitCancellation()
+            }
+        }
+
+        val first = attach()
+        assertNotNull(first)
+        assertTrue(waitFor(5_000) { peerKeyHex == "old-peer" })
+
+        broadcastDetach(accessory)
+        var second: UsbAccessoryServer? = null
+        val reattach = thread { second = attach() }
+        waitFor(1_000) { peerKeyHex == "new-peer" }
+
+        oldTeardown.complete(Unit)
+        reattach.join(5_000)
+        runBlocking { withTimeout(5_000) { first!!.sessionJob?.join() } }
+        assertNotNull("the reattach was ignored", second)
+        assertTrue(waitFor(5_000) { sessions.get() == 2 })
+        waitFor(2_000) { peerKeyHex == "new-peer" }
+
+        assertEquals("the old session's teardown cleared the new peer", "new-peer", peerKeyHex)
     }
 }
