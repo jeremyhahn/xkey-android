@@ -17,6 +17,7 @@ package com.automatethethings.xkey.media
 import com.automatethethings.xkey.media.XmpContainers.Format
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -93,9 +94,9 @@ internal object XmpFixtures {
     /** Simple format: a lone `VP8 ` chunk, no VP8X. */
     fun simpleWebp(pixels: ByteArray = bytes(0x55, 0x66, 0x77)) = riff(vp8(pixels))
 
-    /** Simple lossless format: a lone `VP8L` chunk for a 16x8 image. */
-    fun losslessWebp(): ByteArray {
-        val bits = 15L or (7L shl 14)
+    /** Simple lossless format: a lone `VP8L` chunk for a 16x8 image, [alpha] its alpha_is_used bit. */
+    fun losslessWebp(alpha: Boolean = false): ByteArray {
+        val bits = 15L or (7L shl 14) or (if (alpha) 1L shl 28 else 0L)
         return riff(riffChunk("VP8L", bytes(0x2F) + le32(bits) + bytes(0xAA, 0xBB)))
     }
 
@@ -253,6 +254,53 @@ class XmpContainersTest {
             XmpFixtures.vp8()
         )
         assertNull(embed(bare, "image/webp"))
+    }
+
+    @Test
+    fun `a tampered canvas in the VP8X added to a simple webp stays in the canonical bytes`() {
+        for (file in listOf(XmpFixtures.simpleWebp(), XmpFixtures.losslessWebp())) {
+            val signed = embed(file, "image/webp")!!
+            // Canvas width minus one: 16 becomes 256.
+            val tampered = signed.copyOf().apply { this[24] = 0xFF.toByte() }
+            assertEquals(json, XmpContainers.extract(tampered, Format.WEBP))
+            assertFalse(XmpContainers.strip(tampered, Format.WEBP).contentEquals(file))
+        }
+    }
+
+    @Test
+    fun `a transparent simple lossless webp gets a VP8X declaring alpha`() {
+        val file = XmpFixtures.losslessWebp(alpha = true)
+        val signed = embed(file, "image/webp")!!
+        assertEquals("VP8X", String(signed, 12, 4, Charsets.US_ASCII))
+        assertEquals(0x14, signed[20].toInt() and 0xFF)
+        assertArrayEquals(file, XmpContainers.strip(signed, Format.WEBP))
+    }
+
+    @Test
+    fun `an extended webp indistinguishable from an added VP8X is not embedded`() {
+        val alphaOnly = XmpFixtures.riff(
+            XmpFixtures.riffChunk("VP8X", XmpFixtures.bytes(0x10, 0, 0, 0, 15, 0, 0, 7, 0, 0)),
+            XmpFixtures.losslessWebp(alpha = true).copyOfRange(12, XmpFixtures.losslessWebp(alpha = true).size)
+        )
+        val signed = embed(alphaOnly, "image/webp")
+        if (signed != null) assertArrayEquals(alphaOnly, XmpContainers.strip(signed, Format.WEBP))
+    }
+
+    @Test
+    fun `a packet the stream reader would skip is never embedded`() {
+        val limit = 1 shl 20
+        val overhead = XmpContainers.packet("").size
+        for ((mime, file) in XmpFixtures.all) {
+            for (delta in listOf(-40, -23, -22, -21, -1, 0, 1)) {
+                val text = "x".repeat(limit - overhead + delta)
+                val signed = embed(file, mime, text)
+                if (delta == -40) assertNotNull("$mime $delta", signed)
+                if (delta == 1) assertNull("$mime $delta", signed)
+                if (signed != null) {
+                    assertEquals("$mime $delta", text, XmpContainers.read(ByteArrayInputStream(signed), formatOf(mime)))
+                }
+            }
+        }
     }
 
     @Test
