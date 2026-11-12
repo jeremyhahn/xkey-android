@@ -18,6 +18,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -143,22 +144,28 @@ class PivKeyManager(
     suspend fun generateKey(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
         val alias = slot.keystoreAlias
 
-        val keyPair = generateKeyPair(alias, algorithm)
+        // The slot's alias is the key ID KeyStoreSyncManager discovers it by, so
+        // a share of it may be waiting: replacing the key is a revoke of that ID.
+        val (publicKeyDer, now) = SharePermissionLedger.revoking(alias) {
+            val keyPair = generateKeyPair(alias, algorithm)
 
-        val publicKeyDer = keyPair.public.encoded
-        val now = System.currentTimeMillis()
+            val publicKeyDer = keyPair.public.encoded
+            val now = System.currentTimeMillis()
 
-        // Persist metadata in Room
-        val entity = PivSlotEntity(
-            slotId = slot.hexId,
-            algorithm = algorithm.name,
-            publicKeyDer = publicKeyDer,
-            hasKey = true,
-            createdAt = now,
-            lastUsedAt = null,
-            useCount = 0
-        )
-        pivSlotDao.upsert(entity)
+            // Persist metadata in Room
+            pivSlotDao.upsert(
+                PivSlotEntity(
+                    slotId = slot.hexId,
+                    algorithm = algorithm.name,
+                    publicKeyDer = publicKeyDer,
+                    hasKey = true,
+                    createdAt = now,
+                    lastUsedAt = null,
+                    useCount = 0
+                )
+            )
+            publicKeyDer to now
+        }
 
         // Log to audit system
         AuditLogger.logKeyCreated(
@@ -343,13 +350,17 @@ class PivKeyManager(
     suspend fun deleteKey(slot: PivSlot) {
         val alias = slot.keystoreAlias
 
-        // Remove from Android Keystore
-        if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
-        }
+        // The slot's alias is the key ID KeyStoreSyncManager discovers it by, so
+        // a share of it may be waiting: removing the key is a revoke of that ID.
+        SharePermissionLedger.revoking(alias) {
+            // Remove from Android Keystore
+            if (keyStore.containsAlias(alias)) {
+                keyStore.deleteEntry(alias)
+            }
 
-        // Remove metadata from Room
-        pivSlotDao.deleteBySlotId(slot.hexId)
+            // Remove metadata from Room
+            pivSlotDao.deleteBySlotId(slot.hexId)
+        }
 
         // Log to audit system
         AuditLogger.logKeyDeleted(
