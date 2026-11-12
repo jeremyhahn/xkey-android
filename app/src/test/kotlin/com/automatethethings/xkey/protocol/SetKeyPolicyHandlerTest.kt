@@ -97,6 +97,12 @@ class SetKeyPolicyHandlerTest {
      */
     private var storedRowId = 1L
 
+    /**
+     * The stored row's policy revision: every policy write bumps it, so a
+     * policy changed away and back reads the same but is a later revision.
+     */
+    private var storedRevision = 0L
+
     /** Every policy the fake store was asked to write, by any DAO call. */
     private val writes = mutableListOf<SharingPolicyType>()
 
@@ -126,15 +132,22 @@ class SetKeyPolicyHandlerTest {
         coEvery { keyDao.updateSharingPolicy(keyId, any()) } answers {
             val policy = secondArg<SharingPolicyType>()
             writes += policy
-            if (stored != null) stored = policy
+            if (stored != null) {
+                stored = policy
+                storedRevision++
+            }
         }
-        coEvery { keyDao.compareAndSetSharingPolicy(any(), keyId, any(), any()) } answers {
+        coEvery { keyDao.compareAndSetSharingPolicy(any(), keyId, any(), any(), any()) } answers {
             val rowId = firstArg<Long>()
-            val expected = thirdArg<SharingPolicyType>()
-            val policy = arg<SharingPolicyType>(3)
-            if (stored != null && rowId == storedRowId && stored == expected) {
+            val expectedRevision = thirdArg<Long>()
+            val expected = arg<SharingPolicyType>(3)
+            val policy = arg<SharingPolicyType>(4)
+            if (stored != null && rowId == storedRowId && storedRevision == expectedRevision &&
+                stored == expected
+            ) {
                 writes += policy
                 stored = policy
+                storedRevision++
                 1
             } else {
                 0
@@ -194,8 +207,15 @@ class SetKeyPolicyHandlerTest {
         keySizeBits = 256,
         shareable = policy != SharingPolicyType.PRIVATE,
         sharingPolicy = policy,
+        policyRevision = storedRevision,
         source = "local"
     )
+
+    /** Another policy writer (the key's sharing sheet) stores [policy] on the same row. */
+    private fun otherWriter(policy: SharingPolicyType) {
+        stored = policy
+        storedRevision++
+    }
 
     private fun request(shareable: Boolean?) = Request(
         id = 178L,
@@ -351,13 +371,52 @@ class SetKeyPolicyHandlerTest {
     fun `a narrowing audits the policy its write actually replaced`() = runTest {
         stored = SharingPolicyType.ALL_PEERS
         // Another writer moves the key to selected peers after this request's read.
-        afterNextRead = { stored = SharingPolicyType.SELECTED_PEERS }
+        afterNextRead = { otherWriter(SharingPolicyType.SELECTED_PEERS) }
 
         val response = handler().handleRequest(request(shareable = false))
 
         assertUpdated(response)
         assertEquals(SharingPolicyType.PRIVATE, stored)
         assertAudited(SharingPolicyType.SELECTED_PEERS, SharingPolicyType.PRIVATE)
+    }
+
+    @Test
+    fun `an approval taken before the key was shared and revoked again writes nothing`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        // While the owner approves widening from PRIVATE, another writer
+        // shares the key with every peer and then revokes it back to
+        // PRIVATE. The policy reads the same, but the approval predates the
+        // revocation, so it must not reopen the key.
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } answers {
+            otherWriter(SharingPolicyType.ALL_PEERS)
+            otherWriter(SharingPolicyType.PRIVATE)
+        }
+
+        val response = handler().handleRequest(request(shareable = true))
+
+        assertNull(response.result)
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertEquals(2L, storedRevision)
+        assertNothingWrittenOrAudited()
+    }
+
+    @Test
+    fun `a narrowing writes against the revision it re-read`() = runTest {
+        stored = SharingPolicyType.ALL_PEERS
+        // Revoked and shared again after this request's read: the policy
+        // reads ALL_PEERS as before, at a later revision.
+        afterNextRead = {
+            otherWriter(SharingPolicyType.PRIVATE)
+            otherWriter(SharingPolicyType.ALL_PEERS)
+        }
+
+        val response = handler().handleRequest(request(shareable = false))
+
+        assertUpdated(response)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertEquals("one write, by this request", 3L, storedRevision)
+        assertAudited(SharingPolicyType.ALL_PEERS, SharingPolicyType.PRIVATE)
     }
 
     @Test

@@ -336,6 +336,75 @@ class CryptoSigningCancellationTest {
     }
 
     // -----------------------------------------------------------------
+    // The same request delivered again
+    // -----------------------------------------------------------------
+
+    /**
+     * On a locked phone the lock-screen notification carries the launcher's
+     * own prompt intent, so its full-screen intent, delivered after the
+     * direct launch, and a tap on it while the request is pending each start
+     * another activity for the same request id. Only the first prompts: the
+     * repeats finish unseen, and going away answers nothing, so the live
+     * request is neither failed nor dequeued.
+     */
+    @Test
+    fun aRepeatDeliveryOfALiveRequestLeavesExactlyOnePromptAndTheRequestAlone() = runTest {
+        val first = async { pending.await(::launchActivity) }
+        val second = async { pending.await(::launchActivity) }
+        runCurrent()
+        val live = activities.values.single()
+
+        val fullScreenDelivery = FakeActivity(live.controller.requestId)
+        val tap = FakeActivity(live.controller.requestId)
+        assertFalse("a repeat delivery must not prompt", fullScreenDelivery.controller.start())
+        assertFalse("a tap while pending must not prompt", tap.controller.start())
+        assertTrue(fullScreenDelivery.finished)
+        assertTrue(tap.finished)
+        // Their activities are destroyed for good.
+        fullScreenDelivery.controller.release(recreating = false)
+        tap.controller.release(recreating = false)
+        runCurrent()
+
+        assertNull("a repeat answers nothing", fullScreenDelivery.delivered)
+        assertNull(tap.delivered)
+        assertTrue("the live request is not failed", first.isActive)
+        assertEquals("the request still holds the screen", 1, activities.size)
+        assertEquals("the live prompt stays up", 0, live.prompt.cancellations)
+        assertFalse(live.finished)
+
+        // The live prompt still answers, and a cancel still reaches only it.
+        live.authenticate()
+        runCurrent()
+        assertEquals(CryptoSigningResult.Success(SIGNATURE_BASE64), first.await())
+        assertEquals(1, live.deliveries)
+        assertEquals("the next request comes up", 2, activities.size)
+        second.cancel()
+        runCurrent()
+        activities.values.last().mainThread.drain()
+        assertEquals(1, activities.values.last().prompt.cancellations)
+    }
+
+    /** A delivery that arrives after its request was answered and its activity went away never prompts. */
+    @Test
+    fun aDeliveryAfterTheRequestWasAnsweredNeverPrompts() = runTest {
+        val waiting = async { pending.await(::launchActivity) }
+        runCurrent()
+        val answered = activities.values.single()
+        answered.authenticate()
+        answered.controller.release(recreating = false)
+        runCurrent()
+        assertEquals(CryptoSigningResult.Success(SIGNATURE_BASE64), waiting.await())
+
+        val late = FakeActivity(answered.controller.requestId)
+        assertFalse("an answered request must not prompt again", late.controller.start())
+        assertTrue(late.finished)
+        late.authenticate()
+        late.controller.release(recreating = false)
+        assertEquals("the key is not used again", 0, late.signings)
+        assertNull(late.delivered)
+    }
+
+    // -----------------------------------------------------------------
     // An uncancelled request
     // -----------------------------------------------------------------
 
