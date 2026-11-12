@@ -15,15 +15,15 @@ internal data class OathLabel(val issuer: String?, val account: String)
 private const val ENCODED_COLON = "%3A"
 
 /**
- * Parse an otpauth label into its issuer and account name.
+ * Parse an imported otpauth label (QR code, pasted URI) into its issuer and
+ * account name.
  *
  * A literal `:` separates the issuer and the account, and a `:` inside
  * either is written `%3A` (#156). The label is split before it is
- * percent-decoded, so that `%3A` stays in its part. With no literal `:`, an
- * encoded `%3A` separates the label only where the decoded prefix is the
- * `issuer` query parameter (older manual-entry URIs and other generators
- * encode the separator); otherwise the label is all account, so an
- * issuerless `host%3Auser` stays whole.
+ * percent-decoded, so that `%3A` stays in its part. With no literal `:`, the
+ * label splits on the `%3A` after a decoded prefix equal to the `issuer`
+ * query parameter, else on its first `%3A`: third-party generators encode
+ * the separator, and the importer has always split there.
  *
  * @param encodedLabel The label as it appears in the URI path, still
  *        percent-encoded, without the leading `/`.
@@ -45,14 +45,29 @@ internal fun parseOathLabel(encodedLabel: String, issuerParam: String? = null): 
             index = encodedLabel.indexOf(ENCODED_COLON, index + 1, ignoreCase = true)
         }
     }
+    val encodedIndex = encodedLabel.indexOf(ENCODED_COLON, ignoreCase = true)
+    if (encodedIndex >= 0) {
+        return splitLabel(encodedLabel, encodedIndex, ENCODED_COLON.length)
+    }
     return OathLabel(null, decodeLabelPart(encodedLabel).trim())
 }
 
 /**
  * Parse a label the app wrote from separate issuer and account fields
- * (manual entry, sync): only a literal `:` separates them.
+ * (manual entry, sync): only a literal `:` separates them, so an issuerless
+ * account containing a colon (`%3A`) stays whole (#156).
+ *
+ * @param encodedLabel The label as it appears in the URI path, still
+ *        percent-encoded, without the leading `/`.
+ * @return The [OathLabel]; both parts are decoded and trimmed.
  */
-internal fun parseStructuredOathLabel(encodedLabel: String): OathLabel = parseOathLabel(encodedLabel)
+internal fun parseStructuredOathLabel(encodedLabel: String): OathLabel {
+    val colonIndex = encodedLabel.indexOf(':')
+    if (colonIndex >= 0) {
+        return splitLabel(encodedLabel, colonIndex, 1)
+    }
+    return OathLabel(null, decodeLabelPart(encodedLabel).trim())
+}
 
 /** Split [label] around the [length]-char separator at [index], then decode. */
 private fun splitLabel(label: String, index: Int, length: Int): OathLabel {

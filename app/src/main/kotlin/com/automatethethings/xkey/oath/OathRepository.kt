@@ -149,11 +149,16 @@ class OathRepository(
      * All other query parameters are optional with sensible defaults.
      *
      * @param uri The `otpauth://` URI string to parse.
+     * @param structuredLabel True when the app built [uri] from separate
+     *        issuer and account fields (manual entry, sync): only a literal
+     *        `:` then separates the label ([parseStructuredOathLabel]).
+     *        False for an external import, whose label also splits on an
+     *        encoded `%3A` ([parseOathLabel]).
      * @return The generated unique oath identifier for the imported credential.
      * @throws IllegalArgumentException if the URI scheme is not `otpauth`,
      *         the type is not `totp` or `hotp`, or the `secret` parameter is missing.
      */
-    suspend fun importFromUri(uri: String): String {
+    suspend fun importFromUri(uri: String, structuredLabel: Boolean = false): String {
         val parsed = Uri.parse(uri)
 
         require(parsed.scheme == "otpauth") {
@@ -168,7 +173,11 @@ class OathRepository(
         // Parse the label: /Issuer:account or /account
         // Split before decoding, so an encoded ':' (%3A) stays in its part.
         val label = parsed.encodedPath?.removePrefix("/") ?: ""
-        val (labelIssuer, accountName) = parseOathLabel(label, parsed.getQueryParameter("issuer"))
+        val (labelIssuer, accountName) = if (structuredLabel) {
+            parseStructuredOathLabel(label)
+        } else {
+            parseOathLabel(label, parsed.getQueryParameter("issuer"))
+        }
 
         // Secret is required
         val secretBase32 = parsed.getQueryParameter("secret")

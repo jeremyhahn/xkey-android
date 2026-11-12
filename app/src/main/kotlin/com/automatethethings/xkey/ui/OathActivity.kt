@@ -843,7 +843,8 @@ class OathActivity : AppCompatActivity() {
                             algorithm = algorithm,
                             digits = digits,
                             period = period
-                        )
+                        ),
+                        structuredLabel = true
                     )
                     Snackbar.make(
                         rootLayout,
