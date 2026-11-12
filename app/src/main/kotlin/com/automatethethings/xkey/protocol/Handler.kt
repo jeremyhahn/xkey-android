@@ -72,6 +72,7 @@ import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivAlgorithm
 import com.automatethethings.xkey.settings.PinSettingsRepository
 import com.automatethethings.xkey.ui.KeySharingPeers
+import com.automatethethings.xkey.ui.SharingPolicyType as SheetPolicy
 
 /**
  * Interface for sending messages to the connected laptop.
@@ -1868,13 +1869,18 @@ class RequestHandler(
             ?: throw ProtocolException("Key not found: ${policyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
         if (policyParams.shareable != null) {
+            val policy = if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
+            // Through the sheet's ordering (#174): this write supersedes an
+            // older policy change still being retried, which would otherwise
+            // land over it, and a failure of it is enforced and retried.
             // updateSharingPolicy, not updateShareable: it keeps `shareable` and
             // `sharing_policy` in step, which KeyEntity requires. Writing the
             // legacy flag alone could leave shareable=1 with policy=PRIVATE.
-            keyDao.updateSharingPolicy(
+            KeySharingPeers.setKeyPolicy(
                 policyParams.keyId,
-                if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
-            )
+                keySharingPolicyDao,
+                SheetPolicy.valueOf(policy.name)
+            ) { keyDao.updateSharingPolicy(policyParams.keyId, policy) }
         }
 
         Log.i(TAG, "Updated policy for key: ${policyParams.keyId}, shareable=${policyParams.shareable}")

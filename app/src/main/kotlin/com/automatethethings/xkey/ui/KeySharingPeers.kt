@@ -136,74 +136,14 @@ class KeySharingPeers(
 
     /**
      * Stores the key's sharing [policy] through [persist], in the same order
-     * as grants and withdrawals. Leaving [SharingPolicyType.SELECTED_PEERS]
-     * clears every per-peer row under that order too, so a grant the user
-     * made earlier lands first and is cleared, never after the clear.
-     *
-     * The change is first recorded as the key's pending [KeyIntent],
-     * replacing an older one: Selected Peers takes over a row clear the
-     * older intent still owed, so returning to Selected starts empty. Its
-     * caller may be gone (the sheet was dismissed), so a failure is handled
-     * here: logged, and retried in [editScope] until the intent lands or a
-     * newer one replaces it. Until then the intent is enforced
-     * ([enforcedPolicy]): a narrowing to Private or Selected Peers denies
-     * from the moment it is accepted, whatever is stored.
+     * as grants, withdrawals and local.setKeyPolicy: the companion's
+     * [setKeyPolicy], in this sheet's [editScope].
      */
-    suspend fun setKeyPolicy(policy: SharingPolicyType, persist: suspend () -> Unit) {
-        accepted {
-            val token = Any()
-            keyIntents.update { intents ->
-                val older = intents[keyId]
-                intents + (keyId to KeyIntent(
-                    policy = policy,
-                    persist = persist,
-                    clearRows = policy != SharingPolicyType.SELECTED_PEERS || older?.clearRows == true,
-                    carried = older?.enforced,
-                    token = token
-                ))
-            }
-            try {
-                land(token)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Storing the key's sharing policy failed; it is enforced until a retry lands", e)
-                editScope.launch {
-                    retry({ keyIntents.value[keyId]?.token === token }) { land(token) }
-                }
-            }
-        }
-    }
+    suspend fun setKeyPolicy(policy: SharingPolicyType, persist: suspend () -> Unit) =
+        setKeyPolicy(keyId, policyDao, policy, editScope, persist)
 
-    /**
-     * Lands the key's intent [token] under the edits lock already held:
-     * the row clear it owes first (after which no per-peer withdrawal of
-     * the key is outstanding), then its policy. The intent is dropped only
-     * after both; a step that throws leaves it, minus what already landed.
-     */
-    private suspend fun land(token: Any) {
-        val intent = keyIntents.value[keyId]?.takeIf { it.token === token } ?: return
-        if (intent.clearRows) {
-            policyDao.clearPoliciesForKey(keyId)
-            keyIntents.update { intents ->
-                val current = intents[keyId]
-                if (current?.token === token) intents + (keyId to current.copy(clearRows = false)) else intents
-            }
-            settle { it.first == keyId }
-        }
-        intent.persist()
-        keyIntents.update { intents -> if (intents[keyId]?.token === token) intents - keyId else intents }
-    }
-
-    /**
-     * Runs [edit] under the edits lock in [editScope], not the caller's
-     * scope: a sheet dismissed while its edit waits behind another grant
-     * stops waiting for the answer, but the edit still lands. Started
-     * undispatched, so it joins the lock's queue before this call returns
-     * to its caller, in the order the user acted.
-     */
-    private suspend fun <T> accepted(edit: suspend () -> T): T =
-        editScope.async(start = CoroutineStart.UNDISPATCHED) { edits.withLock { edit() } }.await()
+    /** Runs [edit] under the edits lock in [editScope] ([accepted] in the companion). */
+    private suspend fun <T> accepted(edit: suspend () -> T): T = accepted(editScope, edit)
 
     /**
      * Runs [write], a withdrawal, under the edits lock already held. Its
@@ -231,45 +171,13 @@ class KeySharingPeers(
         }
     }
 
-    /**
-     * Retries [attempt] under the edits lock, with a growing delay, until it
-     * lands or [current] turns false because a later edit settled or
-     * replaced what it writes: the user's later choice is never undone by an
-     * earlier one's retry.
-     */
-    private suspend fun retry(current: () -> Boolean, attempt: suspend () -> Unit) {
-        var wait = FIRST_RETRY_MS
-        while (true) {
-            delay(wait)
-            val done = edits.withLock {
-                if (!current()) return@withLock true
-                try {
-                    attempt()
-                    true
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.e(TAG, "Retrying a sharing edit failed; it stays enforced", e)
-                    false
-                }
-            }
-            if (done) return
-            wait = (wait * 2).coerceAtMost(MAX_RETRY_MS)
-        }
-    }
-
-    /** Drops the pending withdrawals [which] selects: a later edit landed over them. */
-    private fun settle(which: (Pair<String, String>) -> Boolean) {
-        pendingWithdrawals.update { pending -> pending.filterKeys { !which(it) } }
-    }
-
     companion object {
         private const val TAG = "KeySharingPeers"
 
         private const val FIRST_RETRY_MS = 1_000L
         private const val MAX_RETRY_MS = 60_000L
 
-        /** Orders every grant and withdrawal, across all sheets. */
+        /** Orders every grant, withdrawal and policy change, across all sheets and local.setKeyPolicy. */
         private val edits = Mutex()
 
         /** Outlives every sheet: an edit the user made lands after its sheet is gone. */
@@ -302,6 +210,119 @@ class KeySharingPeers(
          */
         fun enforcedPolicy(keyId: String): StoredPolicy? =
             keyIntents.value[keyId]?.enforced?.let { StoredPolicy.valueOf(it.name) }
+
+        /**
+         * Stores [keyId]'s sharing [policy] through [persist], in the same
+         * order as every grant and withdrawal. Every writer of a key's
+         * policy goes through here, the sheet and local.setKeyPolicy alike:
+         * an older change's retry is superseded by a later change from
+         * either, never landed over it. Leaving
+         * [SharingPolicyType.SELECTED_PEERS] clears every per-peer row
+         * under that order too, so a grant the user made earlier lands
+         * first and is cleared, never after the clear.
+         *
+         * The change is first recorded as the key's pending [KeyIntent],
+         * replacing an older one: Selected Peers takes over a row clear the
+         * older intent still owed, so returning to Selected starts empty.
+         * Its caller may be gone (the sheet was dismissed), so a failure is
+         * handled here: logged, and retried in [editScope] until the intent
+         * lands or a newer one replaces it. Until then the intent is
+         * enforced ([enforcedPolicy]): a narrowing to Private or Selected
+         * Peers denies from the moment it is accepted, whatever is stored.
+         */
+        suspend fun setKeyPolicy(
+            keyId: String,
+            policyDao: KeySharingPolicyDao,
+            policy: SharingPolicyType,
+            editScope: CoroutineScope = acceptedEdits,
+            persist: suspend () -> Unit
+        ) {
+            accepted(editScope) {
+                val token = Any()
+                keyIntents.update { intents ->
+                    val older = intents[keyId]
+                    intents + (keyId to KeyIntent(
+                        policy = policy,
+                        persist = persist,
+                        clearRows = policy != SharingPolicyType.SELECTED_PEERS || older?.clearRows == true,
+                        carried = older?.enforced,
+                        token = token
+                    ))
+                }
+                try {
+                    land(keyId, policyDao, token)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Storing the key's sharing policy failed; it is enforced until a retry lands", e)
+                    editScope.launch {
+                        retry({ keyIntents.value[keyId]?.token === token }) { land(keyId, policyDao, token) }
+                    }
+                }
+            }
+        }
+
+        /**
+         * Lands [keyId]'s intent [token] under the edits lock already held:
+         * the row clear it owes first (after which no per-peer withdrawal of
+         * the key is outstanding), then its policy. The intent is dropped only
+         * after both; a step that throws leaves it, minus what already landed.
+         */
+        private suspend fun land(keyId: String, policyDao: KeySharingPolicyDao, token: Any) {
+            val intent = keyIntents.value[keyId]?.takeIf { it.token === token } ?: return
+            if (intent.clearRows) {
+                policyDao.clearPoliciesForKey(keyId)
+                keyIntents.update { intents ->
+                    val current = intents[keyId]
+                    if (current?.token === token) intents + (keyId to current.copy(clearRows = false)) else intents
+                }
+                settle { it.first == keyId }
+            }
+            intent.persist()
+            keyIntents.update { intents -> if (intents[keyId]?.token === token) intents - keyId else intents }
+        }
+
+        /**
+         * Runs [edit] under the edits lock in [editScope], not the caller's
+         * scope: a sheet dismissed while its edit waits behind another grant
+         * stops waiting for the answer, but the edit still lands. Started
+         * undispatched, so it joins the lock's queue before this call returns
+         * to its caller, in the order the user acted.
+         */
+        private suspend fun <T> accepted(editScope: CoroutineScope, edit: suspend () -> T): T =
+            editScope.async(start = CoroutineStart.UNDISPATCHED) { edits.withLock { edit() } }.await()
+
+        /**
+         * Retries [attempt] under the edits lock, with a growing delay, until it
+         * lands or [current] turns false because a later edit settled or
+         * replaced what it writes: the user's later choice is never undone by an
+         * earlier one's retry.
+         */
+        private suspend fun retry(current: () -> Boolean, attempt: suspend () -> Unit) {
+            var wait = FIRST_RETRY_MS
+            while (true) {
+                delay(wait)
+                val done = edits.withLock {
+                    if (!current()) return@withLock true
+                    try {
+                        attempt()
+                        true
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Retrying a sharing edit failed; it stays enforced", e)
+                        false
+                    }
+                }
+                if (done) return
+                wait = (wait * 2).coerceAtMost(MAX_RETRY_MS)
+            }
+        }
+
+        /** Drops the pending withdrawals [which] selects: a later edit landed over them. */
+        private fun settle(which: (Pair<String, String>) -> Boolean) {
+            pendingWithdrawals.update { pending -> pending.filterKeys { !which(it) } }
+        }
     }
 
     /**

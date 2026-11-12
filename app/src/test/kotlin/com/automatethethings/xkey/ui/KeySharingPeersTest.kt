@@ -587,6 +587,35 @@ class KeySharingPeersTest {
         assertTrue(peers.peers().first().of(PEER_B).allowed)
     }
 
+
+    /**
+     * A key-wide policy written outside the sheet (local.setKeyPolicy) goes
+     * through the companion [KeySharingPeers.setKeyPolicy]: it supersedes the
+     * sheet's older change still being retried, which never lands over it.
+     */
+    @Test
+    fun aLaterPolicyWriteOutsideTheSheetSupersedesItsQueuedRetry() = runTest {
+        val key = "k-rpc-supersedes"
+        table.value = listOf(KeySharingPolicy(key, PEER_A))
+        var failing = true
+        val stored = mutableListOf<SharingPolicyType>()
+        val peers = KeySharingPeers(key, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        peers.setKeyPolicy(SharingPolicyType.ALL_PEERS) {
+            if (failing) throw IllegalStateException("disk I/O error")
+            stored += SharingPolicyType.ALL_PEERS
+        }
+        KeySharingPeers.setKeyPolicy(key, dao, SharingPolicyType.PRIVATE, editScope = this) {
+            stored += SharingPolicyType.PRIVATE
+        }
+        assertEquals(listOf(SharingPolicyType.PRIVATE), stored)
+
+        failing = false
+        advanceUntilIdle()
+        assertEquals("the older All Peers retry landed over the later Private", listOf(SharingPolicyType.PRIVATE), stored)
+        assertTrue(table.value.none { it.keyId == key })
+    }
+
     /** Holds every grant before its insert until the returned gate completes. */
     private fun holdGrants(): CompletableDeferred<Unit> {
         val gate = CompletableDeferred<Unit>()
