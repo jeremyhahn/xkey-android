@@ -1490,8 +1490,11 @@ class KeystoreManager(private val context: Context) {
         // its piv_slots row in step; a raw alias must not resolve to it.
         if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return keyId
 
-        // Check Ed25519 software-backed keys
-        if (hasSoftwareEd25519Key(generalAlias) || hasSoftwareEd25519Key(keyId)) return keyId
+        // Check Ed25519 software-backed keys. Callers use the result as a
+        // Keystore alias, so a key stored under the general alias resolves to
+        // that alias, never to keyId: keyId may be a PIV slot's raw alias.
+        if (hasSoftwareEd25519Key(generalAlias)) return generalAlias
+        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && hasSoftwareEd25519Key(keyId)) return keyId
 
         return null
     }

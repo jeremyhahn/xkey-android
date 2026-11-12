@@ -337,29 +337,37 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
      * `publicKeyDer` come from the Android Keystore: a row whose alias is gone
      * is reported without a key.
      *
+     * Each slot is read under its [PivSlotLocks] lock, and its row is read
+     * again once the lock is held, so the algorithm, certificate flag and
+     * public key all describe one generation of the slot even when another
+     * manager regenerates it during the listing.
+     *
      * @return List of [PivSlotInfo] for all slots with database entries.
      */
     suspend fun listSlots(): List<PivSlotInfo> {
-        return pivSlotDao.getAll().mapNotNull { entity ->
-            val slot = PivSlot.fromHexId(entity.slotId) ?: return@mapNotNull null
-            val algorithm = entity.algorithm?.let { name ->
-                try {
-                    PivAlgorithm.valueOf(name)
-                } catch (_: IllegalArgumentException) {
-                    null
+        return pivSlotDao.getAll().mapNotNull { listed ->
+            val slot = PivSlot.fromHexId(listed.slotId) ?: return@mapNotNull null
+            PivSlotLocks.withSlot(slot) {
+                val entity = pivSlotDao.getBySlotId(slot.hexId) ?: return@withSlot null
+                val algorithm = entity.algorithm?.let { name ->
+                    try {
+                        PivAlgorithm.valueOf(name)
+                    } catch (_: IllegalArgumentException) {
+                        null
+                    }
                 }
+                val livePublicKey = if (entity.hasKey) liveSlotPublicKey(slot) else null
+                PivSlotInfo(
+                    slot = slot,
+                    algorithm = algorithm,
+                    hasKey = livePublicKey != null,
+                    hasCertificate = entity.certificateDer != null,
+                    publicKeyDer = livePublicKey,
+                    createdAt = entity.createdAt,
+                    lastUsedAt = entity.lastUsedAt,
+                    useCount = entity.useCount
+                )
             }
-            val livePublicKey = if (entity.hasKey) liveSlotPublicKey(slot) else null
-            PivSlotInfo(
-                slot = slot,
-                algorithm = algorithm,
-                hasKey = livePublicKey != null,
-                hasCertificate = entity.certificateDer != null,
-                publicKeyDer = livePublicKey,
-                createdAt = entity.createdAt,
-                lastUsedAt = entity.lastUsedAt,
-                useCount = entity.useCount
-            )
         }
     }
 
@@ -494,8 +502,10 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
  * build their own [PivKeyManager], and GATT requests run concurrently, so the
  * lock lives here rather than on an instance: an import that has checked a
  * certificate against key A must finish before another caller can replace or
- * delete A, or its upsert would bring A's row back. Different slots do not
- * wait for each other; signing, listing and reads take no lock.
+ * delete A, or its upsert would bring A's row back. [PivKeyManager.listSlots]
+ * reads each slot under its lock so a listing never mixes two generations.
+ * Different slots do not wait for each other; signing and the getters take
+ * no lock.
  */
 internal object PivSlotLocks {
     private val locks: Map<PivSlot, Mutex> = PivSlot.entries.associateWith { Mutex() }
