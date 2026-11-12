@@ -21,6 +21,11 @@ import io.mockk.mockk
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -212,6 +217,41 @@ class BackupStoreIdTest {
 
         assertEquals(ids.last(), fixedClockStore().latestId())
         ids.forEach { assertEquals(fixedMillis, fixedClockStore().createdAtMillis(it)) }
+    }
+
+    @Test
+    fun `overlapping writes from separate instances in one millisecond get distinct ids and keep every payload`() {
+        val threads = 8
+        val rounds = 25
+        // One barrier trip per round, so every thread enters store() at the same moment.
+        val barrier = CyclicBarrier(threads)
+        val stored = ConcurrentHashMap<String, ByteArray>()
+        val ids = Collections.synchronizedList(mutableListOf<String>())
+        val pool = Executors.newFixedThreadPool(threads)
+        try {
+            val futures = (0 until threads).map { t ->
+                pool.submit {
+                    val own = fixedClockStore()
+                    repeat(rounds) { r ->
+                        val payload = byteArrayOf(t.toByte(), r.toByte())
+                        barrier.await(30, TimeUnit.SECONDS)
+                        val id = own.store("", payload)
+                        ids += id
+                        stored[id] = payload
+                    }
+                }
+            }
+            futures.forEach { it.get(60, TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        assertEquals(threads * rounds, ids.size)
+        val duplicates = ids.groupingBy { it }.eachCount().filterValues { it > 1 }
+        assertTrue("duplicate ids: $duplicates", duplicates.isEmpty())
+        val reader = fixedClockStore()
+        stored.forEach { (id, payload) -> assertArrayEquals(id, payload, reader.load(id)) }
+        assertEquals(threads * rounds, backupDir().listFiles()!!.size)
     }
 
     // -----------------------------------------------------------------
