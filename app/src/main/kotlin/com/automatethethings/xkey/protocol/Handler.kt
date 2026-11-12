@@ -4016,10 +4016,18 @@ class RequestHandler(
         val certBase64 = params.optString("certificate_der").ifEmpty { params.optString("certificate") }
         val slot = PivSlot.fromHexId(slotId) ?: return Response.error(request.id, ErrorCodes.PIV_INVALID_SLOT, "Invalid slot: $slotId")
         if (certBase64.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Certificate is required")
+        val certDer = try {
+            Base64.getDecoder().decode(certBase64)
+        } catch (_: IllegalArgumentException) {
+            return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Certificate is not valid base64")
+        }
         return try {
-            val certDer = Base64.getDecoder().decode(certBase64)
             pkm.importCertificate(slot, certDer)
             Response.success(request.id, JSONObject().apply { put("success", true) })
+        } catch (e: com.automatethethings.xkey.piv.PivCertificateRejectedException) {
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, e.message ?: "Certificate refused")
+        } catch (e: com.automatethethings.xkey.piv.PivSlotEmptyException) {
+            Response.error(request.id, ErrorCodes.PIV_SLOT_NOT_FOUND, e.message ?: "No key in slot $slotId")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "Certificate import failed")
         }
