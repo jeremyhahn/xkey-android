@@ -34,6 +34,7 @@ import com.automatethethings.xkey.usb.PasswordStoreMethods
 import com.automatethethings.xkey.usb.SealStoreMethods
 import com.automatethethings.xkey.storage.SealStore
 import com.automatethethings.xkey.usb.UsbAccessoryServer
+import com.automatethethings.xkey.usb.UsbAccessoryServerSlot
 import com.automatethethings.xkey.password.FilePasswordVaultFactorStore
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordVault
@@ -96,9 +97,6 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     // Coroutine scope for service operations
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    /** Guards [usbAccessoryServer] and [usbMessageRouter]: attach runs on a worker, detach on main. */
-    private val usbServerLock = Any()
-
     // Bluetooth components
     private var bluetoothManager: BluetoothManager? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -112,9 +110,6 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private var keystoreManager: KeystoreManager? = null
     private var bleMessageRouter: BidirectionalMessageRouter? = null
 
-    @Volatile
-    private var usbMessageRouter: BidirectionalMessageRouter? = null
-
     private var tcpMessageRouter: BidirectionalMessageRouter? = null
 
     // Auth and settings components
@@ -124,8 +119,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private var currentSettings: BiometricSettingsData = BiometricSettingsData()
 
     // USB HSM components
-    @Volatile
-    private var usbAccessoryServer: UsbAccessoryServer? = null
+    private val usbServerSlot = UsbAccessoryServerSlot()
     private var usbHsmSettingsRepository: UsbHsmSettingsRepository? = null
     private var tcpHsmServer: TcpHsmServer? = null
     private var pairedDeviceRepository: PairedDeviceRepository? = null
@@ -679,7 +673,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * @param accessory The attached USB accessory.
      */
     fun onUsbAccessoryAttached(accessory: android.hardware.usb.UsbAccessory) {
-        if (usbAccessoryServer != null) {
+        if (usbServerSlot.isActive) {
             Log.w(TAG, "USB accessory server already active, ignoring attach")
             return
         }
@@ -712,30 +706,20 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 ),
                 SealStoreMethods(SealStore(java.io.File(filesDir, SEAL_STORE_DIR)))
             )
-            // A pulled cable, a session that ends by itself or a refused open
-            // drops this server, so the next attach builds a fresh one
-            // without a service restart (#134). The server is published
-            // before connect starts watching for the detach, so a close that
-            // comes at once finds it and clears it.
-            var published: UsbAccessoryServer? = null
-            val server = UsbAccessoryServer(
-                handler,
-                usbRouter,
-                this@XKeyGattService,
-                pairedDeviceRepository,
-                storeMethods,
-                onClosed = { published?.let { onUsbAccessoryServerClosed(it) } }
-            )
-            published = server
-            synchronized(usbServerLock) {
-                if (usbAccessoryServer != null) {
-                    Log.w(TAG, "USB accessory server already active, ignoring attach")
-                    return@launch
-                }
-                usbAccessoryServer = server
-                usbMessageRouter = usbRouter
+            // The slot drops a server that closes, so the next attach builds
+            // a fresh one without a service restart (#134).
+            usbServerSlot.open(
+                context = this@XKeyGattService,
+                accessory = accessory,
+                requestHandler = handler,
+                router = usbRouter,
+                pairingCallback = this@XKeyGattService,
+                pairedDeviceRepository = pairedDeviceRepository,
+                storeMethods = storeMethods,
+            ) ?: run {
+                Log.w(TAG, "USB accessory server already active, ignoring attach")
+                return@launch
             }
-            server.connect(this@XKeyGattService, accessory)
             Log.i(TAG, "USB accessory server started")
             AuditLogger.logConnectionEstablished(
                 deviceId = accessory.toString(),
@@ -749,27 +733,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * Called when the USB accessory is detached.
      */
     fun onUsbAccessoryDetached() {
-        val server = synchronized(usbServerLock) {
-            usbAccessoryServer.also {
-                usbAccessoryServer = null
-                usbMessageRouter = null
-            }
-        }
-        server?.disconnect()
-        Log.i(TAG, "USB accessory server stopped")
-    }
-
-    /**
-     * Drops [server] after its accessory closed (detached, its session ended
-     * or the open was refused). A close of a server an attach has since
-     * replaced leaves the current one in place.
-     */
-    private fun onUsbAccessoryServerClosed(server: UsbAccessoryServer) {
-        synchronized(usbServerLock) {
-            if (usbAccessoryServer !== server) return
-            usbAccessoryServer = null
-            usbMessageRouter = null
-        }
+        usbServerSlot.clear()
         Log.i(TAG, "USB accessory server stopped")
     }
 
@@ -817,9 +781,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 tcpMessageRouter?.let { return server to it }
             }
         }
-        usbAccessoryServer?.let { server ->
-            usbMessageRouter?.let { return server to it }
-        }
+        usbServerSlot.current()?.let { return it }
         return null
     }
 

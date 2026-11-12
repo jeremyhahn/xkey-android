@@ -123,9 +123,12 @@ class UsbAccessoryServer(
     internal val isOpen: Boolean
         get() = synchronized(lock) { serverScope != null }
 
-    /** The running session's coroutine, for tests that wait for it to end. */
+    /** The coroutine of the session started last, kept after it ends. */
+    private var lastSessionJob: Job? = null
+
+    /** The last session's coroutine, for tests that wait for it to end. */
     internal val sessionJob: Job?
-        get() = synchronized(lock) { connectionJob }
+        get() = synchronized(lock) { lastSessionJob }
 
     /**
      * Opens the USB accessory and starts the communication session.
@@ -176,6 +179,7 @@ class UsbAccessoryServer(
                     connectionJob = scope.launch {
                         handleConnection(context, accessory.toString(), scope)
                     }
+                    lastSessionJob = connectionJob
                     true
                 }
             }

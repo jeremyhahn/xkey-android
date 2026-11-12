@@ -47,8 +47,15 @@ interface AccessoryDetachWatcher {
  * context, so it does not outlive a destroyed service as a leaked receiver.
  * It is not exported: the detach is a protected system broadcast, and no
  * other app may fake one.
+ *
+ * @param register Registers the receiver on the application context; tests
+ *   swap it, as the unit-test android.jar has no IntentFilter.
  */
-class BroadcastAccessoryDetachWatcher : AccessoryDetachWatcher {
+class BroadcastAccessoryDetachWatcher internal constructor(
+    private val register: (Context, BroadcastReceiver) -> Unit,
+) : AccessoryDetachWatcher {
+    constructor() : this(::registerDetachReceiver)
+
     private var registeredOn: Context? = null
     private var receiver: BroadcastReceiver? = null
 
@@ -64,12 +71,7 @@ class BroadcastAccessoryDetachWatcher : AccessoryDetachWatcher {
                 )
             }
         }
-        ContextCompat.registerReceiver(
-            appContext,
-            detachReceiver,
-            IntentFilter(UsbManager.ACTION_USB_ACCESSORY_DETACHED),
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+        register(appContext, detachReceiver)
         registeredOn = appContext
         receiver = detachReceiver
     }
@@ -85,4 +87,14 @@ class BroadcastAccessoryDetachWatcher : AccessoryDetachWatcher {
         receiver = null
         registeredOn = null
     }
+}
+
+/** Registers [receiver] for the detach broadcast, not exported. */
+private fun registerDetachReceiver(context: Context, receiver: BroadcastReceiver) {
+    ContextCompat.registerReceiver(
+        context,
+        receiver,
+        IntentFilter(UsbManager.ACTION_USB_ACCESSORY_DETACHED),
+        ContextCompat.RECEIVER_NOT_EXPORTED
+    )
 }
