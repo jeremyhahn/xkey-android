@@ -12,9 +12,11 @@ photos and videos. When new media is detected, it computes a SHA-256 hash,
 signs it with the configured key via `KeystoreManager.signWithAlgorithm()`,
 and embeds the signature in the file using `XmpMetadataHelper`: EXIF
 `UserComment` for JPEG, an XMP box or chunk for MP4/MOV, PNG and WebP
-(`XmpContainers`). HEIC, MKV, unknown types and a file the embed refuses get a
-`<name>.xkeysig` sidecar, and readers fall back to a sidecar, so files signed
-before embedding still verify. See
+(`XmpContainers`). HEIC, MKV, unknown types, a file the embed refuses and one
+above the embed bound (`XmpMetadataHelper.maxEmbedBytes`, hashed by streaming)
+get a `<name>.xkeysig` sidecar, and readers fall back to a sidecar, so files
+signed before embedding still verify. Embedded writes go through a unique,
+exclusively created staging file, serialized per path. See
 [engineering.md](engineering.md#mp4--mov-png-webp-embedded-xmp).
 
 - Foreground service type: `dataSync`
