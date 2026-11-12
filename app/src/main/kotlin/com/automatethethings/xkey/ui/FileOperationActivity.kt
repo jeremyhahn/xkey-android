@@ -167,9 +167,8 @@ class FileOperationActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Staging files left by an earlier run (process death) go first
+        // This instance's staging session; onDestroy shuts it down
         staging = FileOperationStaging(cacheDir)
-        staging.sweep()
 
         // Initialize database and crypto
         val db = XKeyDatabase.getInstance(this)
@@ -185,6 +184,10 @@ class FileOperationActivity : AppCompatActivity() {
             return
         }
 
+        // Only a valid share sweeps: it removes what a dead process or a
+        // shut-down instance left, never a live instance's staged output
+        staging.sweep()
+
         // Build and set the programmatic UI
         setContentView(buildUI())
 
@@ -196,12 +199,12 @@ class FileOperationActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        // Finishing drops any staged file; after a recreation onCreate sweeps them
-        if (isFinishing) {
-            pendingEncryptedFile = null
-            pendingDecryptedFile = null
-            staging.releaseAll()
-        }
+        // Every teardown (finish or recreation) drops this instance's staged
+        // files and fences its writers: a worker still blocked in its input
+        // deletes its file when it returns
+        pendingEncryptedFile = null
+        pendingDecryptedFile = null
+        staging.shutdown()
         super.onDestroy()
     }
 
