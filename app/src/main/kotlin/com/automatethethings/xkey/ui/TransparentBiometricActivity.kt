@@ -14,8 +14,10 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.OnBackPressedCallback
@@ -59,6 +61,9 @@ class TransparentBiometricActivity : FragmentActivity() {
     private var biometricPrompt: BiometricPrompt? = null
     private var hasFinished = false
 
+    // Finishes this prompt when its requester withdraws it (ACTION_CANCEL_PROMPT)
+    private var cancelReceiver: BroadcastReceiver? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_transparent_biometric)
@@ -90,12 +95,30 @@ class TransparentBiometricActivity : FragmentActivity() {
             }
         })
 
+        // A cancel for this prompt's own request id takes it down
+        cancelReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.getStringExtra(EXTRA_REQUEST_ID) == requestId) {
+                    handleWithdrawal()
+                }
+            }
+        }.also {
+            ContextCompat.registerReceiver(
+                this,
+                it,
+                IntentFilter(ACTION_CANCEL_PROMPT),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }
+
         // Show biometric prompt immediately
         showBiometricPrompt(title, subtitle, description)
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        cancelReceiver?.let { unregisterReceiver(it) }
+        cancelReceiver = null
         biometricPrompt?.cancelAuthentication()
         biometricPrompt = null
     }
@@ -187,6 +210,19 @@ class TransparentBiometricActivity : FragmentActivity() {
         sendErrorResult(
             errorCode = BiometricPrompt.ERROR_USER_CANCELED,
             errorMessage = "User cancelled authentication"
+        )
+        finishWithResult()
+    }
+
+    /**
+     * Handles the requester withdrawing the prompt (its caller went away or
+     * its wait timed out).
+     */
+    private fun handleWithdrawal() {
+        biometricPrompt?.cancelAuthentication()
+        sendErrorResult(
+            errorCode = ERROR_CODE_WITHDRAWN,
+            errorMessage = "Prompt withdrawn"
         )
         finishWithResult()
     }
@@ -297,6 +333,17 @@ class TransparentBiometricActivity : FragmentActivity() {
          */
         const val ERROR_CODE_PROMPT_FAILED = -1001
 
+        /**
+         * Broadcast action that finishes the prompt whose [EXTRA_REQUEST_ID]
+         * matches; a prompt for another request ignores it.
+         */
+        const val ACTION_CANCEL_PROMPT = "com.automatethethings.xkey.CANCEL_BIOMETRIC_PROMPT"
+
+        /**
+         * Custom error code: the requester withdrew the prompt.
+         */
+        const val ERROR_CODE_WITHDRAWN = -1002
+
         private const val DEFAULT_TITLE = "xKey Authentication"
         private const val DEFAULT_SUBTITLE = "Verify your identity"
 
@@ -330,6 +377,20 @@ class TransparentBiometricActivity : FragmentActivity() {
                     putExtra(EXTRA_DESCRIPTION, description)
                 }
                 putExtra(EXTRA_SHOW_ON_LOCK_SCREEN, showOnLockScreen)
+            }
+        }
+
+        /**
+         * Creates the broadcast that finishes the prompt for [requestId] only.
+         *
+         * @param context The context to create the intent from.
+         * @param requestId The request id the prompt was launched with.
+         * @return An intent to send with [Context.sendBroadcast].
+         */
+        fun createCancelIntent(context: Context, requestId: String): Intent {
+            return Intent(ACTION_CANCEL_PROMPT).apply {
+                setPackage(context.packageName)
+                putExtra(EXTRA_REQUEST_ID, requestId)
             }
         }
     }
