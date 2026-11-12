@@ -269,6 +269,41 @@ class PendingAuthenticationsTest {
     }
 
     @Test
+    fun aLaunchedRequestWhosePromptNeverComesUpTimesOutAndHandsTheScreenOn() = runTest {
+        // Android blocked the start and nothing else (no notification, no
+        // expiry callback) will ever answer it.
+        val unseen = PendingAuthentications(screen, expirePrompt = { true })
+        val blocked = async { unseen.await { launched += it } }
+        val next = async { unseen.await { launched += it } }
+        runCurrent()
+        assertEquals(1, launched.size)
+
+        advanceTimeBy(UNSEEN_MILLIS)
+        runCurrent()
+
+        assertTrue("the unseen request settles on its own", blocked.isCompleted)
+        val timedOut = blocked.await()
+        assertEquals(BiometricPrompt.ERROR_TIMEOUT, (timedOut as BiometricResult.Error).code)
+        assertEquals("the next request gets the screen", 2, launched.size)
+        assertTrue(unseen.complete(launched[1], BiometricResult.Success))
+        assertEquals(BiometricResult.Success, next.await())
+    }
+
+    @Test
+    fun aLaunchedRequestWhosePromptIsUpKeepsWaitingPastTheDeadline() = runTest {
+        val answering = PendingAuthentications(screen, expirePrompt = { false })
+        val onScreen = async { answering.await { launched += it } }
+        runCurrent()
+
+        advanceTimeBy(UNSEEN_MILLIS)
+        runCurrent()
+
+        assertTrue("the owner is answering it", onScreen.isActive)
+        assertTrue(answering.complete(launched.single(), BiometricResult.Success))
+        assertEquals(BiometricResult.Success, onScreen.await())
+    }
+
+    @Test
     fun cancelAllCancelsEveryWaitingCaller() = runTest {
         val first = async { pending.await { launched += it } }
         val second = async { pending.await { launched += it } }
@@ -280,5 +315,10 @@ class PendingAuthenticationsTest {
         assertTrue(first.isCancelled)
         assertTrue("a request waiting for its turn is cancelled too", second.isCancelled)
         assertEquals("and never prompts", 1, launched.size)
+    }
+
+    private companion object {
+        /** Past any launched request's own deadline, inside a queued one's. */
+        const val UNSEEN_MILLIS = 90_000L
     }
 }

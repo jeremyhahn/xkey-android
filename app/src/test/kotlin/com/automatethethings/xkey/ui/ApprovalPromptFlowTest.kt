@@ -194,6 +194,27 @@ class ApprovalPromptFlowTest {
         )
     }
 
+    /** A `local.generateKey` request that needs the owner's verification, on a handler of its own. */
+    private fun TestScope.generateKeyWithUserVerification(): Deferred<Response> = async {
+        RequestHandler(
+            context = app,
+            keystoreManager = mockk<KeystoreManager>(relaxed = true) {
+                every { generalKeyExists(any()) } returns false
+            },
+            biometricLauncher = launcher,
+            sessionAuthManager = null
+        ).also { it.setConnectedDevicePublicKeyHex(peer) }.handleRequest(
+            Request(
+                id = 180L,
+                method = MethodNames.LOCAL_GENERATE_KEY,
+                params = JSONObject()
+                    .put("keyId", "new-key")
+                    .put("algorithm", "ES256")
+                    .put("requireUserVerification", true)
+            )
+        )
+    }
+
     /**
      * Numbers both prompt families, generic approvals and crypto signatures,
      * from 1 again, as in a freshly started process.
@@ -398,6 +419,8 @@ class ApprovalPromptFlowTest {
         val first = shareWithAllPeers()
         runCurrent()
         val id = directStart().requestId()!!
+        // The owner opened it from the notification and is answering it.
+        val prompt = open(tapNotification(id))
         val second = shareWithAllPeers()
         runCurrent()
 
@@ -407,7 +430,7 @@ class ApprovalPromptFlowTest {
         assertEquals(ErrorCodes.BIOMETRIC_FAILED, second.await().error?.code)
         assertNotNull("the prompt on screen keeps its notification", notificationFor(id))
         assertTrue(first.isActive)
-        open(tapNotification(id)).approve()
+        prompt.approve()
         settle()
 
         assertUpdated(first.await())
@@ -527,6 +550,34 @@ class ApprovalPromptFlowTest {
         assertTrue(signing.isActive)
         signing.cancel()
     }
+
+    @Test
+    fun `a key generation whose start is blocked fails at its deadline, and a sharing approval then gets its prompt`() =
+        runTest {
+            val generating = generateKeyWithUserVerification()
+            runCurrent()
+            // Android blocked the direct start silently, and the owner never
+            // sees a notification: nothing will ever answer this prompt.
+            val blocked = directStart().requestId()!!
+            val sharing = shareWithAllPeers()
+            runCurrent()
+            assertNull("the approval waits for its turn", shadowOf(app).nextStartedActivity)
+
+            // Only coroutine time passes: no notification timer fires.
+            advanceTimeBy(UNANSWERED_MILLIS)
+            settle()
+
+            assertTrue("the unseen key generation settled", generating.isCompleted)
+            assertEquals(ErrorCodes.BIOMETRIC_FAILED, generating.await().error?.code)
+            assertNull("its notification is gone", notificationFor(blocked))
+
+            val approval = directStart().requestId()!!
+            open(tapNotification(approval)).approve()
+            settle()
+
+            assertUpdated(sharing.await())
+            assertEquals(listOf(approval to true), results())
+        }
 
     private companion object {
         /** The id every lock-screen approval notification is posted under, with its own tag. */
