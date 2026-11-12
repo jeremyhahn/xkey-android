@@ -71,6 +71,8 @@ import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivAlgorithm
 import com.automatethethings.xkey.settings.PinSettingsRepository
+import com.automatethethings.xkey.ui.KeySharingPeers
+import com.automatethethings.xkey.ui.SharingPolicyType as SheetPolicy
 
 /**
  * Interface for sending messages to the connected laptop.
@@ -1867,13 +1869,18 @@ class RequestHandler(
             ?: throw ProtocolException("Key not found: ${policyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
         if (policyParams.shareable != null) {
+            val policy = if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
+            // Through the sheet's ordering (#174): this write supersedes an
+            // older policy change still being retried, which would otherwise
+            // land over it, and a failure of it is enforced and retried.
             // updateSharingPolicy, not updateShareable: it keeps `shareable` and
             // `sharing_policy` in step, which KeyEntity requires. Writing the
             // legacy flag alone could leave shareable=1 with policy=PRIVATE.
-            keyDao.updateSharingPolicy(
+            KeySharingPeers.setKeyPolicy(
                 policyParams.keyId,
-                if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
-            )
+                keySharingPolicyDao,
+                SheetPolicy.valueOf(policy.name)
+            ) { keyDao.updateSharingPolicy(policyParams.keyId, policy) }
         }
 
         Log.i(TAG, "Updated policy for key: ${policyParams.keyId}, shareable=${policyParams.shareable}")
@@ -2717,7 +2724,15 @@ class RequestHandler(
      * @return True if the key can be shared with this peer.
      */
     private suspend fun canShareKeyWithPeer(entity: KeyEntity, peerPublicKeyHex: String?): Boolean {
-        return when (entity.sharingPolicy) {
+        if (KeySharingPeers.isWithdrawalPending(entity.keyId, peerPublicKeyHex)) {
+            // Fail closed (#174): the user withdrew this peer, or made the
+            // key Private, and that write is still being retried.
+            Log.w(TAG, "Key sharing refused: withdrawal pending persistence")
+            return false
+        }
+        // A policy change not yet stored is enforced over the stored one, so
+        // a narrowing from All Peers to Selected Peers denies at once.
+        return when (KeySharingPeers.enforcedPolicy(entity.keyId) ?: entity.sharingPolicy) {
             SharingPolicyType.PRIVATE -> false
             SharingPolicyType.ALL_PEERS -> true
             SharingPolicyType.SELECTED_PEERS -> {
@@ -2731,7 +2746,10 @@ class RequestHandler(
                     Log.w(TAG, "SELECTED_PEERS refused: grant revocation pending for peer")
                     false
                 } else {
-                    keySharingPolicyDao.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
+                    // The grant row alone, never isKeySharedWithPeer: it reads
+                    // the stored policy, which may still be All Peers while a
+                    // Selected Peers change of it is pending (#174).
+                    keySharingPolicyDao.isPeerGranted(entity.keyId, peerPublicKeyHex)
                 }
             }
         }

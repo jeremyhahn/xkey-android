@@ -677,10 +677,8 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             SharingPolicyType.ALL_PEERS -> EntitySharingPolicyType.ALL_PEERS
             SharingPolicyType.SELECTED_PEERS -> EntitySharingPolicyType.SELECTED_PEERS
         }
-        // In the key's edit queue, after every grant tapped before it (#193).
-        sharingPeers.setSharingPolicy(policy == SharingPolicyType.SELECTED_PEERS) {
-            keyDao.updateSharingPolicy(keyId, entityPolicy)
-        }
+        // In the order of the user's actions, after every grant tapped before it (#174, #193).
+        sharingPeers.setKeyPolicy(policy) { keyDao.updateSharingPolicy(keyId, entityPolicy) }
     }
 
     private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?) {
@@ -753,9 +751,9 @@ internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     redraw: () -> Unit
 ) {
     if (setAllowed(peerPublicKeyHex, allowed, pairing)) return
-    // The queued edit completes under NonCancellable, and returning from it
-    // does not check the caller's job: a sheet dismissed meanwhile has no
-    // context to draw with (#193 r2).
+    // The queued edit completes in the edit scope, whatever the caller's job;
+    // check it before drawing: a sheet dismissed meanwhile has no context to
+    // draw with (#193 r2).
     currentCoroutineContext().ensureActive()
     if (attached()) redraw()
 }

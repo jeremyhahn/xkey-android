@@ -514,9 +514,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * the key's current pairing (#174). Every grant writer goes through here.
      *
      * Refused, returning false without running [write], when the key is not
-     * paired, its pairing is not [expectedPairing] (the [pairingGeneration]
-     * the user acted on, #193: that pairing ended since), or a revocation of
-     * it is pending. Otherwise a marker naming the
+     * paired or a revocation of it is pending. Otherwise a marker naming the
      * key and its pairing generation is committed before [write] runs and
      * cleared after it. While the marker names a pairing that has ended, the
      * key counts as revoking ([pendingRevocations]), so a row the write left
@@ -525,11 +523,25 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * that clears the marker, and the grant cleanup deletes the row; the call
      * returns false. A marker an ended process left behind is settled the
      * same way by [recoverInterruptedGrantWrites].
+     *
+     * The grant is bound to the pairing current now. A caller that approved
+     * it earlier passes the [pairing] it read then, from [pairingGeneration].
      */
-    suspend fun writeGrant(publicKeyHex: String, expectedPairing: Long, write: suspend () -> Unit): Boolean {
+    suspend fun writeGrant(publicKeyHex: String, write: suspend () -> Unit): Boolean {
+        val pairing = pairingGeneration(publicKeyHex) ?: return false
+        return writeGrant(publicKeyHex, pairing, write)
+    }
+
+    /**
+     * [writeGrant] for the pairing generation [pairing], read by [pairingGeneration]
+     * when the user approved the grant. Refused, without running [write],
+     * when the key's current pairing is not that one: a grant approved for
+     * an ended pairing never reaches a later pairing of the same key.
+     */
+    suspend fun writeGrant(publicKeyHex: String, pairing: Long, write: suspend () -> Unit): Boolean {
         val marker = synchronized(storeLock) {
             val generation = currentPairing(publicKeyHex) ?: return false
-            if (generation != expectedPairing) return false
+            if (generation != pairing) return false
             if (publicKeyHex in pendingRevocations()) return false
             val marker = publicKeyHex to generation
             if (grantWritesInFlight.merge(marker, 1, Int::plus) == 1) {
