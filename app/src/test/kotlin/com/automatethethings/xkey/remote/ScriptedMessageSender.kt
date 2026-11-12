@@ -16,8 +16,12 @@ package com.automatethethings.xkey.remote
 
 import android.util.Log
 import com.automatethethings.xkey.protocol.Request
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import io.mockk.every
 import io.mockk.mockkStatic
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Test double for the paired-desktop transport shared by the `remote.*` client
@@ -82,6 +86,51 @@ class ScriptedMessageSender(
     override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
         if (!connection.sameAs(confirmedConnection())) throw ConnectionChangedException()
         sendEncryptedMessage(data)
+    }
+}
+
+/**
+ * One key shared with [peerPublicKeyHex] alone (selected peers), as the
+ * phone's store holds it, for the tests that revoke it while a share is
+ * pending. [makePrivate] and [removeGrant] are its revoke writers: each
+ * commits its change the way the app's writers do.
+ */
+class SharedKeyStore(private val peerPublicKeyHex: String) {
+
+    /** A fresh key id per store, so no two tests share one key's history. */
+    val keyId = "pending-" + next.incrementAndGet()
+
+    @Volatile var entity: KeyEntity? = KeyEntity(
+        keyId = keyId,
+        keyType = "signing",
+        algorithm = "EC",
+        label = "pending share",
+        keySizeBits = 256,
+        exportable = false,
+        shareable = true,
+        sharingPolicy = SharingPolicyType.SELECTED_PEERS,
+        source = "local"
+    )
+        private set
+
+    private val grants: MutableSet<Pair<String, String>> =
+        ConcurrentHashMap.newKeySet<Pair<String, String>>().apply { add(keyId to peerPublicKeyHex) }
+
+    val isShared: suspend (String, String) -> Boolean = { key, peer -> (key to peer) in grants }
+    val current: suspend (String) -> KeyEntity? = { id -> entity?.takeIf { it.keyId == id } }
+
+    /** The key is set to private. */
+    suspend fun makePrivate() = revoke { entity = entity?.copy(shareable = false, sharingPolicy = SharingPolicyType.PRIVATE) }
+
+    /** The peer's grant for the key is removed. */
+    suspend fun removeGrant() = revoke { grants.remove(keyId to peerPublicKeyHex) }
+
+    private suspend fun revoke(change: () -> Unit) {
+        change()
+    }
+
+    private companion object {
+        val next = AtomicInteger()
     }
 }
 

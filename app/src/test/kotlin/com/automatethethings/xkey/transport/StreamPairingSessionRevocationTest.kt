@@ -25,8 +25,11 @@ import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectionChangedException
+import com.automatethethings.xkey.remote.DesktopKeyShare
+import com.automatethethings.xkey.remote.DesktopShareDecision
 import com.automatethethings.xkey.remote.RemoteShareClient
 import com.automatethethings.xkey.remote.ShareSession
+import com.automatethethings.xkey.remote.SharedKeyStore
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -81,6 +84,8 @@ class StreamPairingSessionRevocationTest {
 
     private companion object {
         const val TIMEOUT_MS = 10_000L
+        const val SHARE_TIMEOUT_MS = 1_000L
+        const val PEM = "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"
         val TRANSPORT_SECRETS = setOf("sendKey", "recvKey")
         val REQUEST = """{"jsonrpc":"2.0","id":9,"method":"remote.sync","params":{}}""".toByteArray()
 
@@ -575,6 +580,64 @@ class StreamPairingSessionRevocationTest {
         )
         late.desktop.assertNoFrame()
         first.desktop.assertNoFrame()
+    }
+
+    // ---------------------------------------------------------------------
+    // A revoke while a share waits for the transport
+    // ---------------------------------------------------------------------
+
+    /**
+     * A desktop share has passed every check before the transport and waits
+     * for admission (the send lock and the IO dispatcher); the key is set to
+     * private meanwhile. Admission refuses it: nothing is written, no nonce
+     * is consumed and the share is refused by policy. TCP and USB share this
+     * session.
+     */
+    @Test
+    fun aShareWhoseKeyTurnsPrivateWhileItWaitsForAdmissionWritesNothing() = runBlocking<Unit> {
+        assertRevokedAtAdmission { it.makePrivate() }
+    }
+
+    /** As above, with the peer's grant for the key removed instead. */
+    @Test
+    fun aShareWhosePeerGrantIsRemovedWhileItWaitsForAdmissionWritesNothing() = runBlocking<Unit> {
+        assertRevokedAtAdmission { it.removeGrant() }
+    }
+
+    private suspend fun assertRevokedAtAdmission(revoke: suspend (SharedKeyStore) -> Unit) {
+        val gate = GatedOutputStream()
+        val phone = connectPaired(gate)
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) { true }!!
+        val store = SharedKeyStore(phone.desktop.publicKeyHex)
+        val paused = CompletableDeferred<Unit>()
+        val resume = CompletableDeferred<Unit>()
+        pairing.beforeAdmissionForTest = {
+            paused.complete(Unit)
+            resume.await()
+        }
+        val sending = scope.async {
+            runCatching {
+                DesktopKeyShare(session, SHARE_TIMEOUT_MS)
+                    .send(store.entity, null, PEM, null, store.isShared, store.current)
+            }
+        }
+        withTimeout(TIMEOUT_MS) { paused.await() }
+        val writes = gate.writes.get()
+        val nonce = phone.noise.sendNonceForTest()
+
+        revoke(store)
+        resume.complete(Unit)
+
+        val outcome = withTimeout(TIMEOUT_MS) { sending.await() }
+        pairing.beforeAdmissionForTest = null
+        assertEquals(
+            "the share must be refused by policy, got $outcome",
+            DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
+            outcome.getOrNull()
+        )
+        assertEquals("nothing may reach the stream", writes, gate.writes.get())
+        assertEquals("a refused send must not consume a nonce", nonce, phone.noise.sendNonceForTest())
     }
 
     // ---------------------------------------------------------------------
