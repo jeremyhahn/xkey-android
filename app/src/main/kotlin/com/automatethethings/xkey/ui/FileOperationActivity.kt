@@ -972,7 +972,7 @@ class FileOperationActivity : AppCompatActivity() {
                     }
 
                     // Copy the signed staging file back to the original URI
-                    staging.deliver(tempFile) { staged -> copyStagedTo(staged, uri) }
+                    staging.deliverTo(tempFile) { contentResolver.openOutputStream(uri) }
 
                     // Record usage and audit
                     keyDao.recordUsage(key.keyId)
@@ -1266,7 +1266,7 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                staging.deliver(tempFile) { staged -> copyStagedTo(staged, outputUri) }
+                staging.deliverTo(tempFile) { contentResolver.openOutputStream(outputUri) }
 
                 withContext(Dispatchers.Main) {
                     showResult(getString(R.string.file_operation_encrypt_success))
@@ -1344,7 +1344,7 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                staging.deliver(tempFile) { staged -> copyStagedTo(staged, outputUri) }
+                staging.deliverTo(tempFile) { contentResolver.openOutputStream(outputUri) }
 
                 withContext(Dispatchers.Main) {
                     showResult(getString(R.string.file_operation_decrypt_success))
@@ -1353,15 +1353,6 @@ class FileOperationActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) { showError(e) }
             }
         }
-    }
-
-    /** Copy a staging file to [target]; the caller's [FileOperationStaging.deliver] deletes it. */
-    private fun copyStagedTo(staged: File, target: Uri) {
-        contentResolver.openOutputStream(target)?.use { output ->
-            staged.inputStream().use { input ->
-                input.copyTo(output)
-            }
-        } ?: throw IllegalStateException("Cannot open output file")
     }
 
     /** The user cancelled the save picker: delete the staging file it was for; returns the cleared pending value. */

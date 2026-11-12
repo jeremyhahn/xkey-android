@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.ui
 
 import java.io.File
+import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
@@ -36,7 +37,9 @@ import kotlin.coroutines.cancellation.CancellationException
  * only what no live session owns, so one activity never deletes another's
  * output. After [shutdown] the instance stages nothing, and a write step
  * still running then (blocked in its input, say) deletes its file when it
- * returns, so a writer cannot leave plaintext behind its teardown.
+ * returns, so a writer cannot leave plaintext behind its teardown. A file
+ * [deliverTo] holds open is left to it and deleted when its copy ends, so
+ * a teardown never takes the replacement of a target already truncated.
  *
  * Plain Kotlin over a [File] cache directory, so it runs in JVM tests.
  */
@@ -48,6 +51,7 @@ class FileOperationStaging(cacheDir: File) {
 
     private val lock = Any()
     private val owned = mutableSetOf<File>()
+    private val held = mutableSetOf<File>()
     private var closed = false
 
     init {
@@ -81,11 +85,29 @@ class FileOperationStaging(cacheDir: File) {
         }
     }
 
-    /** Copy a staged file to the stream [openTarget] opens, then delete it whether the copy throws or not. */
-    fun deliverTo(file: File, openTarget: () -> OutputStream?) = deliver(file) { staged ->
-        (openTarget() ?: throw IllegalStateException(NO_TARGET)).use { output ->
-            staged.inputStream().use { it.copyTo(output) }
+    /**
+     * Copy a staged file to the stream [openTarget] opens, then delete it
+     * whether the copy throws or not. The staged input is opened and held
+     * first, so the target (which opening may truncate) is touched only once
+     * its replacement is readable; [shutdown] meanwhile leaves the held file
+     * to this call. After [shutdown] this throws [CancellationException]
+     * without calling [openTarget].
+     */
+    fun deliverTo(file: File, openTarget: () -> OutputStream?) {
+        try {
+            hold(file).use { input ->
+                (openTarget() ?: throw IllegalStateException(NO_TARGET)).use { input.copyTo(it) }
+            }
+        } finally {
+            synchronized(lock) { held.remove(file) }
+            release(file)
         }
+    }
+
+    /** Open [file] for reading and mark it held, so [releaseAll] leaves it; refused after [shutdown]. */
+    private fun hold(file: File): InputStream = synchronized(lock) {
+        if (closed) throw CancellationException(CLOSED)
+        file.inputStream().also { held.add(file) }
     }
 
     /** Create an empty staging file under a generated name and own it; refused after [shutdown]. */
@@ -110,9 +132,9 @@ class FileOperationStaging(cacheDir: File) {
         file.delete()
     }
 
-    /** Delete every file this instance staged and has not released. */
+    /** Delete every file this instance staged and has not released, except one [deliverTo] holds. */
     fun releaseAll() {
-        val files = synchronized(lock) { owned.toList().also { owned.clear() } }
+        val files = synchronized(lock) { (owned - held).also { owned.removeAll(it) } }
         files.forEach { it.delete() }
     }
 
