@@ -666,6 +666,42 @@ class PairedDeviceGrantCleanupTest {
         assertFalse(PEER_A in repo.pendingRevocations())
     }
 
+    // --- r6: a request that wakes the worker from backoff resets its failure budget. ---
+
+    /**
+     * The worker fails eight times in a row, one short of giving up, and is
+     * backing off. The peer re-pairs during that backoff, the next attempt
+     * fails once more, and the one after succeeds: the revocation must still
+     * complete, since the re-pairing renewed the worker's budget.
+     */
+    @Test
+    fun aRequestDuringTheLastBackoffRenewsTheFailureBudget() {
+        // MAX_FAILURES = 8: a ninth failure in a row would end the worker.
+        val shortOfTheLimit = 8
+        var calls = 0
+        val delete = dao.clearPoliciesForPeerAnswer()
+        coEvery { dao.clearPoliciesForPeer(any()) } answers {
+            calls++
+            if (calls <= shortOfTheLimit + 1) throw IllegalStateException("db closed")
+            delete(firstArg())
+        }
+        heldCleanup(repo)
+        repo.removeDevice(PEER_A)
+        while (calls < shortOfTheLimit) {
+            scheduler.advanceTimeBy(1_000)
+            scheduler.runCurrent()
+        }
+        // The eighth attempt failed; the worker is now in its backoff.
+        assertEquals(shortOfTheLimit, calls)
+
+        repo.addDevice(PEER_A, "desktop-a")
+        scheduler.advanceUntilIdle()
+
+        assertEquals(shortOfTheLimit + 2, calls)
+        assertEquals(emptyList<KeySharingPolicy>(), grantsOf(PEER_A))
+        assertFalse(PEER_A in repo.pendingRevocations())
+    }
+
     /** Calls the private suspend check; the faked DAO never suspends. */
     private fun canShareKeyWithPeer(handler: RequestHandler, key: KeyEntity, peer: String): Boolean {
         val method = RequestHandler::class.java.getDeclaredMethod(
