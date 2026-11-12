@@ -14,20 +14,141 @@
  */
 package com.automatethethings.xkey.protocol
 
+import android.app.KeyguardManager
+import android.app.NotificationManager
+import android.content.Context
+import android.os.Looper
+import android.util.Log
+import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.piv.PivKeyManager
+import com.automatethethings.xkey.piv.PivSlotDao
+import com.automatethethings.xkey.piv.PivTestCertificates
+import com.automatethethings.xkey.storage.XKeyDatabase
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import org.json.JSONObject
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Before
 import org.junit.Test
+import java.util.Base64
 
 /**
  * Unit tests for PIV and PIN protocol method names and error codes defined in
  * [MethodNames] and [ErrorCodes].
  *
  * These tests verify the protocol contract between the Android authenticator
- * and desktop clients. They do not exercise the full [RequestHandler] dispatch
- * (which requires Android Context and Android Keystore), but pin the wire
- * values of the PIV and PIN method names and error codes. Uniqueness and
- * range of every error code are checked in [ProtocolConstantsTest].
+ * and desktop clients. They pin the wire values of the PIV and PIN method
+ * names and error codes; uniqueness and range of every error code are checked
+ * in [ProtocolConstantsTest]. `local.pivImportCert` is driven through the
+ * [RequestHandler] dispatch over a real [PivKeyManager] and a mocked
+ * [PivSlotDao] (#173), with only the handler's Android edges mocked, as in
+ * [PinOathHandlerErrorsTest].
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class PivHandlerTest {
+
+    private lateinit var pivSlotDao: PivSlotDao
+    private lateinit var handler: RequestHandler
+    private val slotKey = PivTestCertificates.ecKeyPair()
+
+    @Before
+    fun setUp() {
+        mockkStatic(Log::class)
+        every { Log.v(any(), any<String>()) } returns 0
+        every { Log.d(any(), any<String>()) } returns 0
+        every { Log.i(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.e(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } returns 0
+        every { Log.e(any(), any<String>(), any()) } returns 0
+
+        mockkStatic(Looper::class)
+        every { Looper.getMainLooper() } returns mockk(relaxed = true)
+
+        mockkObject(XKeyDatabase.Companion)
+        every { XKeyDatabase.getInstance(any()) } returns mockk(relaxed = true)
+
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+
+        pivSlotDao = mockk(relaxed = true)
+    }
+
+    @After
+    fun tearDown() {
+        Dispatchers.resetMain()
+        unmockkAll()
+    }
+
+    // -------------------------------------------------------------------------
+    // local.pivImportCert checks the certificate against the slot key
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `pivImportCert stores a certificate for the slot key`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+        val cert = PivTestCertificates.selfSigned(slotKey)
+
+        val response = importCert(Base64.getEncoder().encodeToString(cert))
+
+        assertFalse(response.toString(), response.has("error"))
+        assertEquals(true, response.getJSONObject("result").getBoolean("success"))
+        coVerify { pivSlotDao.upsert(match { it.certificateDer.contentEquals(cert) }) }
+    }
+
+    @Test
+    fun `pivImportCert of a certificate for another key is INVALID_PARAMS and keeps the earlier one`() = runTest {
+        val earlier = PivTestCertificates.selfSigned(slotKey)
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded, earlier)
+        val other = PivTestCertificates.selfSigned(PivTestCertificates.ecKeyPair())
+
+        val response = importCert(Base64.getEncoder().encodeToString(other))
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
+
+    @Test
+    fun `pivImportCert of bytes that are not a certificate is INVALID_PARAMS`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+
+        val response = importCert(Base64.getEncoder().encodeToString("not a certificate".toByteArray()))
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
+
+    @Test
+    fun `pivImportCert of a certificate that is not base64 is INVALID_PARAMS`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+
+        val response = importCert("not base64 !!")
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
+
+    @Test
+    fun `pivImportCert into a slot with no key is PIV_SLOT_NOT_FOUND`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns null
+
+        val response = importCert(Base64.getEncoder().encodeToString(PivTestCertificates.selfSigned(slotKey)))
+
+        assertEquals(ErrorCodes.PIV_SLOT_NOT_FOUND, errorCode(response))
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
 
     // -------------------------------------------------------------------------
     // PIV method names
@@ -97,4 +218,29 @@ class PivHandlerTest {
         assertEquals(-32602, ErrorCodes.INVALID_PARAMS)
         assertEquals(-32603, ErrorCodes.INTERNAL_ERROR)
     }
+
+    /**
+     * Sends `local.pivImportCert` for slot 9A. The handler is built per call so
+     * that a [PivKeyManager] which cannot be built on the JVM fails only the
+     * import tests.
+     */
+    private suspend fun importCert(certificateBase64: String): JSONObject {
+        val context = mockk<Context>(relaxed = true)
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns
+            mockk<KeyguardManager>(relaxed = true)
+        every { context.getSystemService(NotificationManager::class.java) } returns
+            mockk<NotificationManager>(relaxed = true)
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = mockk<KeystoreManager>(relaxed = true),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pivKeyManager = PivKeyManager(pivSlotDao)
+        )
+        val params = JSONObject().put("slot", "9A").put("certificate_der", certificateBase64)
+        val request = JSONObject().put("id", 1).put("method", MethodNames.LOCAL_PIV_IMPORT_CERT).put("params", params)
+        return JSONObject(String(handler.handleRawRequest(request.toString().toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
+    }
+
+    private fun errorCode(response: JSONObject): Int = response.getJSONObject("error").getInt("code")
 }
