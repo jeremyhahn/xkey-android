@@ -511,17 +511,32 @@ class RequestHandler(
         return Response.error(id, code, message).toJson()
     }
 
-    /**
-     * Handles a parsed request.
-     *
-     * Every answer carries the request's `generation` (go-xkms#128), copied
-     * here rather than by each handler, so no method can drop it.
-     *
-     * @param request The parsed request
-     * @return Response to the request
-     */
     suspend fun handleRequest(request: Request): Response =
-        dispatch(request).copy(generation = request.generation)
+        withContext(currentCoroutineContext()[ApprovalSession] ?: ApprovalSession(currentSessionId)) {
+            dispatch(request).copy(generation = request.generation)
+        }
+
+    /**
+     * The session id a request arrived with, captured once when it reaches
+     * [handleRequest] and carried in the coroutine context for the rest of
+     * the request (#134).
+     *
+     * One handler serves BLE, TCP and USB, and a USB reattach sets a new
+     * [currentSessionId] while a prompt on another transport is still open.
+     * Biometric approval is checked and recorded against this captured id,
+     * never against [currentSessionId] read after the prompt, so that prompt
+     * approves only the session it was shown for and the new USB session's
+     * first protected sign still prompts.
+     */
+    private class ApprovalSession(val sessionId: String?) : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<ApprovalSession>
+    }
+
+    /** The [ApprovalSession] id of the request being handled. */
+    private suspend fun requestSessionId(): String? {
+        val session = currentCoroutineContext()[ApprovalSession]
+        return if (session != null) session.sessionId else currentSessionId
+    }
 
     private suspend fun dispatch(request: Request): Response {
         Log.d(TAG, "Handling request: id=${request.id}, method=${request.method}")
@@ -726,7 +741,7 @@ class RequestHandler(
 
         // Determine if biometric authentication is required
         val biometricRequired = if (signParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -819,7 +834,7 @@ class RequestHandler(
                     )
 
                     // Record successful authentication for session tracking
-                    sessionAuthManager?.recordAuthentication(currentSessionId)
+                    sessionAuthManager?.recordAuthentication(requestSessionId())
 
                     val signatureBase64 = Base64.getEncoder().encodeToString(signature)
                     val result = SignResult(
@@ -843,7 +858,7 @@ class RequestHandler(
                     // Keystore window may still be open from an earlier session (a USB detach and
                     // reattach, #134), and that approval does not carry over.
                     val sessionUnapproved = currentSettings.authMode == BiometricAuthMode.PER_SESSION &&
-                        sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) != false
+                        sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) != false
                     if (!sessionUnapproved) try {
                         Log.d(TAG, "Trying signWithoutBiometric (optimistic for TIME_WINDOW/PER_SESSION)")
                         val signature = keystoreManager.signWithoutBiometric(
@@ -875,7 +890,7 @@ class RequestHandler(
                     )
 
                     // Record successful authentication for session tracking
-                    sessionAuthManager?.recordAuthentication(currentSessionId)
+                    sessionAuthManager?.recordAuthentication(requestSessionId())
 
                     // Now sign within the fresh auth window
                     Log.d(TAG, "Biometric succeeded, signing within auth window")
@@ -911,7 +926,7 @@ class RequestHandler(
             )
 
             // Record successful authentication for session tracking
-            sessionAuthManager?.recordAuthentication(currentSessionId)
+            sessionAuthManager?.recordAuthentication(requestSessionId())
 
             val signatureBase64 = Base64.getEncoder().encodeToString(signature)
             val result = SignResult(
@@ -1464,7 +1479,7 @@ class RequestHandler(
 
         // Check if biometric is needed
         val biometricRequired = if (signParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -1484,7 +1499,7 @@ class RequestHandler(
                     subtitle = "Verify your identity to sign data",
                     showOnLockScreen = keyguardManager.isKeyguardLocked
                 )
-                sessionAuthManager?.recordAuthentication(currentSessionId)
+                sessionAuthManager?.recordAuthentication(requestSessionId())
             } finally {
                 cancelBiometricNotification()
             }
@@ -2820,7 +2835,7 @@ class RequestHandler(
 
         // Biometric authentication if required
         val biometricRequired = if (assertionParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -2844,7 +2859,7 @@ class RequestHandler(
                     subtitle = "Verify your identity to use this passkey",
                     showOnLockScreen = keyguardManager.isKeyguardLocked
                 )
-                sessionAuthManager?.recordAuthentication(currentSessionId)
+                sessionAuthManager?.recordAuthentication(requestSessionId())
                 userVerified = true
             } finally {
                 cancelBiometricNotification()
