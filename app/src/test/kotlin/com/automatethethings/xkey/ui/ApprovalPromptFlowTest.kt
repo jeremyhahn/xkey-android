@@ -337,6 +337,26 @@ class ApprovalPromptFlowTest {
     }
 
     @Test
+    fun `a direct launch and its notification carry the same intent identity`() = runTest {
+        val approval = shareWithAllPeers()
+        runCurrent()
+        val prompt = directStart()
+        val id = prompt.requestId()!!
+
+        val tap = tapNotification(id)
+        // Android matches a launch to the live prompt's task by its intent
+        // (component and data): with different data, the tap would start a
+        // second prompt instead of reaching the one on screen.
+        assertNotNull("the direct launch carries the request's data", prompt.data)
+        assertEquals("both launches carry the same data", prompt.data, tap.data)
+        assertTrue("the tap matches the direct launch", prompt.filterEquals(tap))
+
+        open(tap).approve()
+        settle()
+        assertUpdated(approval.await())
+    }
+
+    @Test
     fun `a prompt delivered again prompts once, and its cancel fails only its own request`() = runTest {
         val approval = shareWithAllPeers()
         runCurrent()
