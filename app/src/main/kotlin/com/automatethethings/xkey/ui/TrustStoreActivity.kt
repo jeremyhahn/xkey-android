@@ -1749,18 +1749,28 @@ class TrustStoreActivity : AppCompatActivity() {
             .setMessage(getString(R.string.trust_store_delete_message, displayName))
             .setPositiveButton(R.string.trust_store_delete) { _, _ ->
                 lifecycleScope.launch {
-                    val deleted = trustStoreRepository.deleteCertificate(cert.fingerprint)
-                    if (deleted) {
-                        XKeyDatabase.getInstance(this@TrustStoreActivity)
-                            .certificateDao()
-                            .deleteByFingerprint(cert.fingerprint)
-                        Snackbar.make(
-                            rootLayout,
-                            R.string.trust_store_deleted,
-                            Snackbar.LENGTH_SHORT
-                        ).show()
-                        loadCertificates()
-                    }
+                    deleteFromTrustStoreScreen(
+                        trustStoreRepository,
+                        cert.fingerprint,
+                        deleteRow = {
+                            XKeyDatabase.getInstance(this@TrustStoreActivity)
+                                .certificateDao()
+                                .deleteByFingerprint(cert.fingerprint)
+                        },
+                        showResult = { removed ->
+                            if (removed) {
+                                Snackbar.make(rootLayout, R.string.trust_store_deleted, Snackbar.LENGTH_SHORT)
+                                    .show()
+                            } else {
+                                Snackbar.make(
+                                    rootLayout,
+                                    "Certificate could not be removed; it is still trusted",
+                                    Snackbar.LENGTH_LONG
+                                ).show()
+                            }
+                        },
+                        refresh = { loadCertificates() }
+                    )
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -2065,5 +2075,26 @@ private class TrustedCertificateAdapter(
         override fun areContentsTheSame(oldItem: TrustedCA, newItem: TrustedCA): Boolean {
             return oldItem == newItem
         }
+    }
+}
+
+/**
+ * Deletes one certificate for the trust-store screen's confirmation.
+ *
+ * @param deleteRow deletes the certificate's database row
+ * @param showResult shows whether the certificate was removed
+ * @param refresh reloads the displayed list
+ */
+internal suspend fun deleteFromTrustStoreScreen(
+    repository: TrustStoreRepository,
+    fingerprint: String,
+    deleteRow: suspend () -> Unit,
+    showResult: (removed: Boolean) -> Unit,
+    refresh: () -> Unit
+) {
+    if (repository.deleteCertificate(fingerprint)) {
+        deleteRow()
+        showResult(true)
+        refresh()
     }
 }
