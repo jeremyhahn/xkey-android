@@ -573,7 +573,7 @@ class DesktopKeyShare(
                         keyId = entity.keyId,
                         publicKeyPem = publicKeyPem,
                         certificatePem = certificatePem,
-                        algorithm = entity.algorithm,
+                        algorithm = shareAlgorithm(publicKeyPem, entity.algorithm),
                         label = entity.label,
                         backend = null
                     )
@@ -586,6 +586,43 @@ class DesktopKeyShare(
             return if (result.accepted) Outcome.Sent(result) else Outcome.Declined(result)
         } finally {
             software?.material.let { it?.fill(0) }
+        }
+    }
+
+    /**
+     * The algorithm of the key [publicKeyPem] holds. The keys row's
+     * [recorded] algorithm can be stale: a PIV slot replaced with a key of
+     * another algorithm updates only its slot record. An EC key is named by
+     * its curve; an RSA key keeps a recorded RSA algorithm; a PEM neither
+     * parses as keeps [recorded].
+     */
+    private fun shareAlgorithm(publicKeyPem: String, recorded: String): String {
+        val der = try {
+            java.util.Base64.getMimeDecoder().decode(
+                publicKeyPem.lineSequence().filterNot { it.startsWith("-----") }.joinToString("")
+            )
+        } catch (e: IllegalArgumentException) {
+            return recorded
+        }
+        val key = listOf("EC", "RSA").firstNotNullOfOrNull { type ->
+            try {
+                java.security.KeyFactory.getInstance(type)
+                    .generatePublic(java.security.spec.X509EncodedKeySpec(der))
+            } catch (e: java.security.GeneralSecurityException) {
+                null
+            }
+        }
+        return when (key) {
+            is java.security.interfaces.ECPublicKey -> {
+                val bits = key.params.order.bitLength()
+                when {
+                    bits <= 256 -> "ES256"
+                    bits <= 384 -> "ES384"
+                    else -> "ES512"
+                }
+            }
+            is java.security.interfaces.RSAPublicKey -> if (recorded.startsWith("RS")) recorded else "RS256"
+            else -> recorded
         }
     }
 }

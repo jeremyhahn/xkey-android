@@ -1960,9 +1960,9 @@ class RequestHandler(
         //
         // Only the one key the ID names loses its material. A raw alias
         // (`xkey_credential_k`, `xkey_key_k`) is that Keystore entry itself;
-        // a canonical ID is its software key if the store holds one, else the
-        // Keystore entry discovery maps to it, by the rules
-        // `KeyDao.deleteKeyRow` uses. A credential `xkey_credential_k` and a
+        // a canonical ID is its software key if the store holds one, else its
+        // general key `xkey_key_<id>`, else the other Keystore entry discovery
+        // maps to it, by the rules `KeyDao.deleteKeyRow` uses. A credential `xkey_credential_k` and a
         // general key `xkey_key_k` can both exist, and deleting one must leave
         // the other.
         val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
@@ -1975,7 +1975,10 @@ class RequestHandler(
                     softwareKeys.delete(canonicalId)
                     true
                 }
+                // A canonical ID names its general key `xkey_key_k` first, as
+                // this method always did; another alias only when it has none.
                 else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
+                    .sortedByDescending { it == "xkey_key_$canonicalId" }
                     .any { deleteKeystoreAlias(canonicalId, it) }
             }
         }
