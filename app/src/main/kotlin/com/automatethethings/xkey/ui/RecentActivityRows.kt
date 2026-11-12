@@ -53,5 +53,39 @@ object RecentActivityRows {
         entries: List<AuditLogEntity>,
         clock: Clock,
         limit: Int = DEFAULT_LIMIT
-    ): List<RecentActivityRow> = emptyList()
+    ): List<RecentActivityRow> {
+        if (entries.isEmpty() || limit <= 0) return listOf(RecentActivityRow.Empty)
+        val nowMillis = clock.millis()
+        return entries
+            .sortedByDescending { it.timestamp }
+            .take(limit)
+            .map { entry ->
+                val (timeRes, timeCount) = age(nowMillis - entry.timestamp)
+                RecentActivityRow.Entry(
+                    labelRes = AuditOperationLabels.labelRes(entry.operationType),
+                    keyLabel = entry.keyLabel,
+                    success = entry.success,
+                    outcomeRes = if (entry.success) {
+                        R.string.recent_activity_succeeded
+                    } else {
+                        R.string.recent_activity_failed
+                    },
+                    timeRes = timeRes,
+                    timeCount = timeCount
+                )
+            }
+    }
+
+    /** How long ago [elapsedMillis] is; a time ahead of the clock reads "just now". */
+    private fun age(elapsedMillis: Long): Pair<Int, Long> {
+        val minutes = elapsedMillis / MINUTE_MILLIS
+        return when {
+            minutes < 1 -> R.string.recent_activity_just_now to 0L
+            minutes < 60 -> R.string.recent_activity_minutes_ago to minutes
+            minutes < 24 * 60 -> R.string.recent_activity_hours_ago to minutes / 60
+            else -> R.string.recent_activity_days_ago to minutes / (24 * 60)
+        }
+    }
+
+    private const val MINUTE_MILLIS = 60_000L
 }
