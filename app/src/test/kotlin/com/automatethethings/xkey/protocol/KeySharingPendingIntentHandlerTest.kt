@@ -41,6 +41,7 @@ import io.mockk.runs
 import io.mockk.unmockkAll
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -60,6 +61,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.json.JSONObject
 import org.junit.Test
 
 /**
@@ -134,6 +136,7 @@ class KeySharingPendingIntentHandlerTest {
         coEvery { dao.isPeerGranted(any(), any()) } answers { granted(firstArg(), secondArg()) }
         val keyDao = mockk<KeyDao>()
         coEvery { keyDao.getByKeyId(any()) } answers { keys[firstArg()] }
+        coEvery { keyDao.updateSharingPolicy(any(), any()) } answers { store(firstArg(), secondArg()) }
 
         repo = PairedDeviceRepository(InMemorySharedPreferences())
         repo.addDevice(PEER_A, "desktop-a")
@@ -201,6 +204,21 @@ class KeySharingPendingIntentHandlerTest {
      */
     private fun shares(keyId: String, stored: SharingPolicyType, peer: String): Boolean =
         call("canShareKeyWithPeer", store(keyId, stored), peer, types = arrayOf(KeyEntity::class.java, String::class.java)) as Boolean
+
+    /** Runs local.setKeyPolicy through the handler, as a desktop's RPC does. */
+    private suspend fun rpcSetShareable(keyId: String, shareable: Boolean) {
+        val method = RequestHandler::class.java.getDeclaredMethod(
+            "handleLocalSetKeyPolicy", Request::class.java, Continuation::class.java
+        )
+        method.isAccessible = true
+        val request = Request(
+            id = 1,
+            method = MethodNames.LOCAL_SET_KEY_POLICY,
+            params = JSONObject().put("keyId", keyId).put("shareable", shareable)
+        )
+        val response = suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+        assertEquals(null, response.error)
+    }
 
     /** The authorization key export runs: the stored key when [peer] may have it, else null. */
     private fun exports(keyId: String, peer: String): Boolean =
@@ -291,6 +309,33 @@ class KeySharingPendingIntentHandlerTest {
         assertEquals(SharingPolicyType.SELECTED_PEERS, keys.getValue(key).sharingPolicy)
         assertFalse(exports(key, PEER_A))
         assertTrue(exports(key, PEER_B))
+    }
+
+    @Test
+    fun aLaterPrivateRpcSupersedesAnOlderSheetPolicyRetry() = runTest {
+        val key = "k-rpc-private"
+        table.value = listOf(KeySharingPolicy(key, PEER_B))
+        store(key, SharingPolicyType.SELECTED_PEERS)
+        var failing = true
+        val peers = KeySharingPeers(key, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        // The sheet's Selected Peers -> All Peers fails to persist and queues a retry.
+        peers.setKeyPolicy(SheetPolicy.ALL_PEERS) {
+            if (failing) throw IllegalStateException("disk I/O error")
+            store(key, SharingPolicyType.ALL_PEERS)
+        }
+        assertEquals(SharingPolicyType.SELECTED_PEERS, keys.getValue(key).sharingPolicy)
+
+        // A desktop then makes the key Private, and that write succeeds.
+        rpcSetShareable(key, shareable = false)
+        assertEquals(SharingPolicyType.PRIVATE, keys.getValue(key).sharingPolicy)
+
+        failing = false
+        advanceUntilIdle()
+
+        assertEquals("the older All Peers retry overwrote the later Private", SharingPolicyType.PRIVATE, keys.getValue(key).sharingPolicy)
+        assertFalse(exports(key, PEER_A))
+        assertFalse(exports(key, PEER_B))
     }
 
     @Test
