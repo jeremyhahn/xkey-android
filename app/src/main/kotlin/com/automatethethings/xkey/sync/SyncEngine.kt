@@ -254,5 +254,9 @@ internal fun otpauthUri(
     if (counter != null) append("&counter=$counter")
 }
 
+/**
+ * Uses the charset-name overload: `URLEncoder.encode(String, Charset)` is
+ * API 33, above minSdk 28, and throws NoSuchMethodError below it.
+ */
 private fun percentEncode(value: String): String =
-    URLEncoder.encode(value, Charsets.UTF_8).replace("+", "%20")
+    URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
