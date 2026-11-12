@@ -179,6 +179,28 @@ interface KeySharingPolicyDao {
     suspend fun isKeySharedWithPeer(keyId: String, peerPublicKeyHex: String): Boolean
 
     /**
+     * Check whether [peerPublicKeyHex] holds an explicit grant row for [keyId],
+     * whatever the key's stored sharing policy says.
+     *
+     * The check for a Selected Peers policy that is enforced but not yet
+     * stored (#174): [isKeySharedWithPeer] answers from the stored policy, so
+     * a key still stored as All Peers would authorize every peer.
+     *
+     * @param keyId The unique key identifier.
+     * @param peerPublicKeyHex Hex-encoded public key of the peer device.
+     * @return True if an allowed policy row exists for this key and peer.
+     */
+    @Query(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM key_sharing_policies
+            WHERE key_id = :keyId AND peer_public_key_hex = :peerPublicKeyHex AND allowed = 1
+        )
+        """
+    )
+    suspend fun isPeerGranted(keyId: String, peerPublicKeyHex: String): Boolean
+
+    /**
      * Get all peers that have access to a specific key.
      *
      * @param keyId The unique key identifier.
