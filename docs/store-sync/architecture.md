@@ -16,8 +16,9 @@ directions use it:
   array.
 
 The DTO field names follow the go-xkms pairing contract
-(`pkg/pairing/protocol_sync.go`: `SyncCertificate`, `SyncOATHCredential`,
-`SyncPassword`).
+(`pkg/pairingproto/protocol_sync.go` at tag `xkey/v0.64.2-alpha`:
+`SyncCertificate`, `SyncOATHCredential`, `SyncPassword`,
+`RemoteSyncStatusResult`).
 
 ## Components
 
@@ -25,10 +26,11 @@ The DTO field names follow the go-xkms pairing contract
 |-------|------|------|
 | `SyncEngine` | `app/src/main/kotlin/com/automatethethings/xkey/sync/SyncEngine.kt` | Gather and merge for each store (`gatherCertificates`, `mergeCertificates`, `gatherOath`, `mergeOath`, `gatherPasswords`, `mergePasswords`), plus status (`deviceId`, `storeChecksums`, `lastSyncRfc3339`, `markSynced`) |
 | `PasswordSync` | `app/src/main/kotlin/com/automatethethings/xkey/sync/PasswordSync.kt` | Password gather and merge, behind the password vault's lock (see [password-vault](../password-vault/architecture.md)) |
-| `RemoteSyncClient` | `app/src/main/kotlin/com/automatethethings/xkey/remote/RemoteSyncClient.kt` | Phone-initiated sync: `syncAll`, `syncTrustStore`, `syncOath`, `syncPasswords` |
+| `RemoteSyncClient` | `app/src/main/kotlin/com/automatethethings/xkey/remote/RemoteSyncClient.kt` | Phone-initiated sync: `syncAll`, `syncTrustStore`, `syncOath`, `syncPasswords`; the desktop's status: `syncStatus` (`DesktopSyncStatus`) |
 | `RequestHandler` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | Inbound handlers `handleSyncTrustStore`, `handleSyncOATH`, `handleSyncPasswords`, `handleSyncStatus` |
-| `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | `syncNow()` picks the active transport (`activeTransport()`: BLE, then TCP, then USB) and runs `RemoteSyncClient.syncAll()` |
-| `MainActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/MainActivity.kt` | Calls `syncNow()` from the UI |
+| `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | `syncNow()` picks the active transport (`activeTransport()`: BLE, then TCP, then USB) and runs `RemoteSyncClient.syncAll()`; `desktopSyncStatus()` runs `RemoteSyncClient.syncStatus()` |
+| `MainActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/MainActivity.kt` | Calls `syncNow()`, then `desktopSyncStatus()`, from the Sync with Desktop card |
+| `SyncStatusText` | `app/src/main/kotlin/com/automatethethings/xkey/ui/SyncStatusText.kt` | The result line about the desktop's status: its last sync time in the phone's zone, never synced, or unavailable |
 | `SyncCodec` | `app/src/main/kotlin/com/automatethethings/xkey/crypto/SyncCodec.kt` | PEM/DER conversion, RFC 3339 times, store checksums |
 | `SyncStateRepository` | `app/src/main/kotlin/com/automatethethings/xkey/settings/SyncStateRepository.kt` | Stores the last successful sync time |
 | `TrustStoreRepository` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/TrustStoreRepository.kt` | The trust store read and written by the certificate leg |
@@ -47,10 +49,20 @@ Method names are constants in `MethodNames` (`protocol/Messages.kt`).
 | `remote.syncTrustStore` | phone to desktop | `certificates` | `local`, `added`, `updated` |
 | `remote.syncOATH` | phone to desktop | `credentials` | `local`, `added`, `updated` |
 | `remote.syncPasswords` | phone to desktop | `passwords` | `local`, `added`, `updated` |
+| `remote.syncStatus` | phone to desktop | none (`{}`) | `last_sync` (RFC 3339, omitted when never synced), `device_id` (required), `store_checksums` (map of strings; `null` read as empty) |
 
-`MethodNames` also defines `REMOTE_SYNC_ALL` (`remote.syncAll`) and
-`REMOTE_SYNC_STATUS` (`remote.syncStatus`); no code on main sends them.
 `RemoteSyncClient.syncAll()` runs the three `remote.sync*` legs in turn.
+
+### Why `remote.syncAll` is not sent
+
+`MethodNames` defines `REMOTE_SYNC_ALL` (`remote.syncAll`), and the desktop
+serves it, but the phone never sends it. go-xkms `RemoteSyncAllParams` carries
+only the include flags (`include_trust_store`, `include_oath`,
+`include_passwords`) and none of the phone's items, so the desktop could not
+merge the phone's stores from it: it would be a pull, not a sync. Each
+per-store `remote.sync*` call pushes the phone's items and pulls the desktop's
+in one round trip, and lets the password leg be skipped on its own when the
+vault is locked.
 
 ## Merge rules
 
@@ -98,7 +110,20 @@ sequenceDiagram
     RSC->>Eng: mergePasswords(local)
     RSC->>Eng: markSynced()
     RSC-->>UI: SyncResult (pushed / pulled per store)
+    UI->>Svc: desktopSyncStatus()
+    Svc->>RSC: syncStatus()
+    RSC->>Desk: remote.syncStatus {}
+    Desk-->>RSC: {last_sync, device_id, store_checksums}
+    RSC-->>UI: DesktopSyncStatus
+    UI->>User: sent / received, and the desktop's last sync time
 ```
+
+The status request runs after the store legs and touches no phone store. A
+failure there, including an unreadable reply (a missing `device_id` or a
+wrongly typed field), is turned into no status by `SyncStatusText.fetch`: the
+completed sync is still reported, with the desktop's status shown as unavailable. The
+phone does not compare `store_checksums` with its own digests: the two sides'
+digest inputs are not pinned to match.
 
 The inbound flow is the mirror image: `RequestHandler` builds a `SyncEngine`,
 calls the store's merge, then its gather, then `markSynced()`, and answers with
@@ -109,7 +134,11 @@ the counts and the `remote` array.
 - `syncNow()` throws `IllegalStateException` when no desktop is connected.
 - `RemoteSyncClient` throws `ProtocolException` when the desktop returns an
   error, or with `ErrorCodes.INTERNAL_ERROR` when no reply arrives within
-  `requestTimeoutMs` (30 s by default).
+  `requestTimeoutMs` (30 s by default) or a `remote.syncStatus` reply is
+  malformed.
+- Request ids come from one counter shared by every `RemoteSyncClient`, so a
+  status request from `desktopSyncStatus()` never reuses the id of a store leg
+  still pending on the same router.
 - A locked password vault throws `PasswordStoreLockedException` before anything
   is read or written. `syncAll()` catches it, logs it and still syncs the other
   stores. `handleSyncPasswords` answers `ErrorCodes.PASSWORD_STORE_LOCKED`
@@ -122,10 +151,11 @@ the counts and the `remote` array.
 
 | Test class | Covers |
 |------------|--------|
-| `RemoteSyncClientTest` (`app/src/test/.../remote/`) | Outbound legs and push counts |
+| `RemoteSyncClientTest` (`app/src/test/.../remote/`) | Outbound legs and push counts; `remote.syncStatus` params, result parsing and malformed replies; distinct ids for a status request beside a store leg |
 | `RemoteClientInteropTest` (`app/src/test/.../remote/`) | Outbound client wire interop |
 | `SyncEngineStatusTest`, `SyncEngineTrustStoreTest`, `PasswordSyncTest` (`app/src/test/.../sync/`) | Status checksums, certificate merge, password gather and merge |
 | `SyncCodecTest` (`app/src/test/.../crypto/`) | Codec helpers |
+| `SyncStatusTextTest` (`app/src/test/.../ui/`) | The desktop status line and its failure handling |
 | `SyncEngineTest` (`app/src/androidTest/.../sync/`) | Engine on a device database |
 | `SyncStateRepositoryTest` (`app/src/androidTest/.../settings/`) | Last-sync time |
 | `BleSyncLoopbackTest` (`app/src/androidTest/.../ble/`) | `local.sync*` over the BLE loopback |

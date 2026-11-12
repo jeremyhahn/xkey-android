@@ -30,16 +30,19 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Phone-initiated (outbound) backup client: asks the paired desktop to create
  * an encrypted backup of chosen stores (`remote.createBackup`) or to restore
- * one (`remote.restoreBackup`).
+ * one (`remote.restoreBackup`), and lists the backups the desktop holds
+ * (`remote.listBackups`).
  *
  * The desktop derives the backup key from [password] the way
  * `xkey backup create --password` does and hands the encrypted envelope back;
  * it never keeps it. The phone stores the envelope as an opaque blob.
  *
  * Wire contract: go-xkms `pkg/pairingproto/protocol_backup.go`
- * (RemoteCreateBackup* / RemoteRestoreBackup*). Since go-xkms #1695 the
- * `password` field is required: a request without one, or with an empty one,
- * is refused with -32602.
+ * (RemoteCreateBackup* / RemoteRestoreBackup* / RemoteListBackups*, BackupInfo;
+ * pinned at tag `xkey/v0.64.2-alpha`). Since go-xkms #1695 the `password`
+ * field is required on create and restore: a request without one, or with an
+ * empty one, is refused with -32602. `remote.listBackups` carries no password
+ * and empty params.
  *
  * ## Password handling
  *
@@ -100,6 +103,18 @@ class RemoteBackupClient(
     )
 
     /**
+     * One backup the desktop holds, from `remote.listBackups` (go-xkms
+     * `BackupInfo`). [createdAt] is the desktop's text as sent; [label] is
+     * null when the desktop omitted it; [size] is in bytes.
+     */
+    data class BackupInfo(
+        val backupId: String,
+        val createdAt: String,
+        val label: String?,
+        val size: Long
+    )
+
+    /**
      * Asks the desktop to create a backup of the stores in [include], labelled
      * [label] (the desktop uses the label as the backup id).
      *
@@ -155,13 +170,35 @@ class RemoteBackupClient(
         }
     }
 
-    private suspend fun sendRequest(method: String, params: JSONObject, password: CharArray): JSONObject {
+    /**
+     * Asks the desktop which backups it holds (`remote.listBackups`). The
+     * request has empty params and no password. A `null` or missing
+     * `backups` (a nil Go slice) is an empty list.
+     *
+     * @throws RemoteBackupException on an error reply, a timeout or a reply
+     *   the phone cannot read.
+     */
+    suspend fun listBackups(): List<BackupInfo> {
+        val result = send(MethodNames.REMOTE_LIST_BACKUPS) { id ->
+            Request(id, MethodNames.REMOTE_LIST_BACKUPS, JSONObject()).toJson()
+        }
+        return decodeListResult(result)
+    }
+
+    private suspend fun sendRequest(method: String, params: JSONObject, password: CharArray): JSONObject =
+        send(method) { id -> encodeRequest(id, method, params, password) }
+
+    /**
+     * Sends the request [encode] builds for a fresh id and returns its
+     * result. The buffer is zeroed after the send, whatever it holds.
+     */
+    private suspend fun send(method: String, encode: (Long) -> ByteArray): JSONObject {
         val id = nextRequestId.getAndIncrement()
         val deferred = CompletableDeferred<Response>()
         var body: ByteArray? = null
         try {
             messageRouter.registerPendingResponse(id, deferred)
-            body = encodeRequest(id, method, params, password)
+            body = encode(id)
             Log.d(TAG, "Sending backup request: id=$id, method=$method")
             messageSender.sendEncryptedMessage(body)
             val response = withTimeout(requestTimeoutMs) { deferred.await() }
@@ -173,6 +210,22 @@ class RemoteBackupClient(
         } finally {
             body?.fill(0)
             messageRouter.removePendingResponse(id)
+        }
+    }
+
+    private fun decodeListResult(result: JSONObject): List<BackupInfo> {
+        if (result.isNull("backups")) return emptyList()
+        val backups = result.optJSONArray("backups")
+            ?: throw RemoteBackupException.MalformedReply("backups is not a list")
+        return (0 until backups.length()).map { i ->
+            val info = backups.optJSONObject(i)
+                ?: throw RemoteBackupException.MalformedReply("backups is not a list of objects")
+            BackupInfo(
+                backupId = info.optString("backup_id", ""),
+                createdAt = info.optString("created_at", ""),
+                label = info.optString("label", "").ifEmpty { null },
+                size = info.optLong("size", 0L)
+            )
         }
     }
 

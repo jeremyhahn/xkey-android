@@ -852,6 +852,20 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
+     * Asks the connected desktop for its own sync status
+     * (`remote.syncStatus`) over the active transport.
+     *
+     * @throws IllegalStateException if no desktop is currently connected.
+     * @throws com.automatethethings.xkey.protocol.ProtocolException on an
+     *   error reply or a timeout.
+     */
+    suspend fun desktopSyncStatus(): com.automatethethings.xkey.remote.RemoteSyncClient.DesktopSyncStatus {
+        val (sender, router) = activeTransport()
+            ?: throw IllegalStateException("No desktop connected; pair and connect first")
+        return com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, sender, router).syncStatus()
+    }
+
+    /**
      * Asks the connected desktop for an encrypted backup of the stores in
      * [include] under [password] (`remote.createBackup`) over the active
      * transport, and keeps the returned envelope in [BackupStore] under the
@@ -892,6 +906,20 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      */
     suspend fun latestStoredBackupId(): String? =
         withContext(Dispatchers.IO) { BackupStore(applicationContext).latestId() }
+
+    /**
+     * Asks the connected desktop which backups it holds
+     * (`remote.listBackups`) over the active transport.
+     *
+     * @throws IllegalStateException if no desktop is currently connected.
+     * @throws com.automatethethings.xkey.remote.RemoteBackupException on an
+     *   error reply, a timeout or an unreadable reply.
+     */
+    suspend fun listDesktopBackups(): List<RemoteBackupClient.BackupInfo> {
+        val (sender, router) = activeTransport()
+            ?: throw IllegalStateException("No desktop connected; pair and connect first")
+        return RemoteBackupClient(sender, router).listBackups()
+    }
 
     /**
      * Asks the connected desktop to restore the stored backup [backupId] under
