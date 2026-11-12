@@ -52,7 +52,13 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
@@ -107,21 +113,20 @@ class PivActivity : AppCompatActivity() {
 
     private var retiredSlotsExpanded = false
 
-    /** The bound service, which holds the connected desktop's transport. */
-    private var gattService: XKeyGattService? = null
+    /**
+     * The bound service, which holds the connected desktop's transport, or
+     * null while unbound.
+     */
+    private val boundService = MutableStateFlow<XKeyGattService?>(null)
     private var serviceBound = false
-
-    private val desktopSlots = DesktopPivSlots { gattService?.remoteKeyClient() }
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            gattService = (binder as? XKeyGattService.LocalBinder)?.getService()
-            loadDesktopSlots()
+            boundService.value = (binder as? XKeyGattService.LocalBinder)?.getService()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            gattService = null
-            showDesktopSlots(emptyList())
+            boundService.value = null
         }
     }
 
@@ -141,11 +146,7 @@ class PivActivity : AppCompatActivity() {
         // Bind without creating: the desktop's slots show only while the
         // service is already running with a connected desktop.
         serviceBound = bindService(Intent(this, XKeyGattService::class.java), serviceConnection, 0)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        if (gattService != null) loadDesktopSlots()
+        observeDesktopSlots()
     }
 
     override fun onDestroy() {
@@ -1024,10 +1025,18 @@ class PivActivity : AppCompatActivity() {
         contentLayout.addView(desktopSlotsContainer)
     }
 
-    /** Asks the connected desktop for its slots; no desktop shows nothing. */
-    private fun loadDesktopSlots() {
+    /**
+     * Follows the desktop session while the screen is started: a desktop that
+     * connects shows its slots, one that is lost clears them, and each start
+     * asks again.
+     */
+    private fun observeDesktopSlots() {
         lifecycleScope.launch {
-            showDesktopSlots(desktopSlots.load())
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                desktopPivSlots(desktopSessions(boundService)).collect { slots ->
+                    showDesktopSlots(slots)
+                }
+            }
         }
     }
 
@@ -1166,3 +1175,20 @@ class DesktopPivSlots(private val clientProvider: () -> RemoteKeyClient?) {
         }
     }
 }
+
+/**
+ * The desktop session of the bound [XKeyGattService]: its shared client while
+ * a desktop is connected, null while none is or the service is unbound.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+fun desktopSessions(service: Flow<XKeyGattService?>): Flow<RemoteKeyClient?> =
+    service.flatMapLatest { it?.desktopSession ?: flowOf(null) }
+
+/**
+ * The desktop slots to show for each desktop session: none while no desktop is
+ * connected, the desktop's slots (via [DesktopPivSlots]) once one is. A newer
+ * session cancels a load still running for the older one.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+fun desktopPivSlots(sessions: Flow<RemoteKeyClient?>): Flow<List<RemotePivSlot>> =
+    sessions.mapLatest { client -> DesktopPivSlots { client }.load() }

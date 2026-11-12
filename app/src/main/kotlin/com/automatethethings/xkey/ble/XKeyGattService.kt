@@ -139,6 +139,16 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private val _serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     val serviceState: StateFlow<ServiceState> = _serviceState.asStateFlow()
 
+    private val _desktopSession = MutableStateFlow<RemoteKeyClient?>(null)
+
+    /**
+     * The connected desktop's session: the shared [remoteKeyClient] while a
+     * desktop session is ready on any transport (BLE, TCP, USB), null once it
+     * is lost. Screens that show desktop data follow this to load on connect
+     * and clear on disconnect.
+     */
+    val desktopSession: StateFlow<RemoteKeyClient?> = _desktopSession.asStateFlow()
+
     /**
      * Binder for local service binding.
      */
@@ -496,6 +506,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      */
     private fun handleConnectionStateChange(state: ConnectionState) {
         Log.d(TAG, "Connection state changed: $state")
+        refreshDesktopSession()
 
         when (state) {
             is ConnectionState.Connected -> {
@@ -717,6 +728,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             ).also { server ->
                 server.connect(this@XKeyGattService, accessory)
             }
+            refreshDesktopSession()
             Log.i(TAG, "USB accessory server started")
             AuditLogger.logConnectionEstablished(
                 deviceId = accessory.toString(),
@@ -733,6 +745,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         usbAccessoryServer?.disconnect()
         usbAccessoryServer = null
         usbMessageRouter = null
+        refreshDesktopSession()
         Log.i(TAG, "USB accessory server stopped")
     }
 
@@ -751,7 +764,11 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         tcpMessageRouter = tcpRouter
         tcpHsmServer = TcpHsmServer(
             handler, tcpRouter, this, pairedDeviceRepository
-        ).also { it.start(this) }
+        ).also { server ->
+            server.start(this)
+            // A TCP desktop connecting or dropping changes the desktop session.
+            tcpStateJob = serviceScope.launch { server.state.collect { refreshDesktopSession() } }
+        }
         Log.i(TAG, "TCP HSM server started on loopback:${TcpHsmServer.DEFAULT_PORT}")
     }
 
@@ -759,9 +776,12 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * Stops the TCP pairing server if running.
      */
     private fun stopTcpHsmServer() {
+        tcpStateJob?.cancel()
+        tcpStateJob = null
         tcpHsmServer?.stop()
         tcpHsmServer = null
         tcpMessageRouter = null
+        refreshDesktopSession()
     }
 
     /**
@@ -797,12 +817,32 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      */
     @Synchronized
     fun remoteKeyClient(): RemoteKeyClient? {
-        val (sender, router) = activeTransport() ?: return null
+        val (sender, router) = activeTransport() ?: run {
+            // The desktop is gone: drop its client with it.
+            remoteKeyClientCache = null
+            return null
+        }
         remoteKeyClientCache?.let { (cachedRouter, client) ->
             if (cachedRouter === router) return client
         }
         return RemoteKeyClient(sender, router).also {
             remoteKeyClientCache = router to it
+        }
+    }
+
+    /** Collects the TCP server's state into [desktopSession] while it runs. */
+    private var tcpStateJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Recomputes [desktopSession] from the active transport. Called on every
+     * BLE connection change, TCP state change and USB attach/detach.
+     */
+    @Synchronized
+    private fun refreshDesktopSession() {
+        val client = remoteKeyClient()
+        if (_desktopSession.value !== client) {
+            Log.d(TAG, "Desktop session ${if (client == null) "lost" else "ready"}")
+            _desktopSession.value = client
         }
     }
 

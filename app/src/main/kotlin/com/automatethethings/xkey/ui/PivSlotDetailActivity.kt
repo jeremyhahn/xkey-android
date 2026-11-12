@@ -35,7 +35,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
 import androidx.core.widget.NestedScrollView
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.XKeyGattService
 import com.automatethethings.xkey.piv.PivAlgorithm
@@ -53,8 +55,13 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -113,17 +120,18 @@ class PivSlotDetailActivity : AppCompatActivity() {
 
     /** True when this view shows a paired desktop slot ([EXTRA_DESKTOP]). */
     private var desktopMode = false
-    private var gattService: XKeyGattService? = null
+
+    /** The bound service (desktop mode), or null while unbound. */
+    private val boundService = MutableStateFlow<XKeyGattService?>(null)
     private var serviceBound = false
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            gattService = (binder as? XKeyGattService.LocalBinder)?.getService()
-            currentSlot?.let { loadDesktopSlotDetails(it) }
+            boundService.value = (binder as? XKeyGattService.LocalBinder)?.getService()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            gattService = null
+            boundService.value = null
         }
     }
 
@@ -142,17 +150,13 @@ class PivSlotDetailActivity : AppCompatActivity() {
             return
         }
 
-        val slot = PivSlot.fromHexId(slotId) ?: run {
-            finish()
-            return
-        }
-
-        currentSlotId = slotId
-        currentSlot = slot
-
         desktopMode = intent.getBooleanExtra(EXTRA_DESKTOP, false)
-        buildUI(slot)
         if (desktopMode) {
+            // The desktop's own slot id, sent back exactly as it listed it:
+            // go-xkms slot ids are case-sensitive and need not be one of the
+            // phone's PivSlot values.
+            currentSlotId = slotId
+            buildUI(slotId, PivSlot.fromHexId(slotId)?.label ?: slotId)
             showDesktopMessage(getString(R.string.piv_desktop_not_connected))
             // Bind without creating: a desktop is connected only while the
             // service already runs.
@@ -161,9 +165,20 @@ class PivSlotDetailActivity : AppCompatActivity() {
                 serviceConnection,
                 0
             )
-        } else {
-            loadSlotDetails(slotId)
+            observeDesktopSlot(slotId)
+            return
         }
+
+        val slot = PivSlot.fromHexId(slotId) ?: run {
+            finish()
+            return
+        }
+
+        currentSlotId = slotId
+        currentSlot = slot
+
+        buildUI(slot.hexId, slot.label)
+        loadSlotDetails(slotId)
     }
 
     override fun onResume() {
@@ -193,7 +208,7 @@ class PivSlotDetailActivity : AppCompatActivity() {
     // UI Construction
     // -------------------------------------------------------------------------
 
-    private fun buildUI(slot: PivSlot) {
+    private fun buildUI(slotHexId: String, slotLabel: String) {
         rootLayout = FrameLayout(this).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -213,7 +228,7 @@ class PivSlotDetailActivity : AppCompatActivity() {
             )
         }
 
-        buildPremiumToolbar(mainContent, slot)
+        buildPremiumToolbar(mainContent, slotHexId, slotLabel)
 
         val scrollView = NestedScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -246,7 +261,7 @@ class PivSlotDetailActivity : AppCompatActivity() {
         setContentView(rootLayout)
     }
 
-    private fun buildPremiumToolbar(parent: LinearLayout, slot: PivSlot) {
+    private fun buildPremiumToolbar(parent: LinearLayout, slotHexId: String, slotLabel: String) {
         val toolbarContainer = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -302,7 +317,7 @@ class PivSlotDetailActivity : AppCompatActivity() {
         // Slot ID badge in toolbar
         val goldColor = ContextCompat.getColor(this, R.color.secondary)
         val slotBadge = TextView(this).apply {
-            text = slot.hexId
+            text = slotHexId
             textSize = 14f
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             setTextColor(ContextCompat.getColor(this@PivSlotDetailActivity, R.color.on_secondary))
@@ -323,7 +338,7 @@ class PivSlotDetailActivity : AppCompatActivity() {
         subtitleRow.addView(slotBadge)
 
         val subtitleText = TextView(this).apply {
-            text = getString(R.string.piv_detail_subtitle, slot.hexId, slot.label)
+            text = getString(R.string.piv_detail_subtitle, slotHexId, slotLabel)
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
             setTextColor(UIHelpers.applyAlpha(
                 ContextCompat.getColor(this@PivSlotDetailActivity, R.color.on_primary),
@@ -778,33 +793,43 @@ class PivSlotDetailActivity : AppCompatActivity() {
         })
     }
 
-    private fun loadDesktopSlotDetails(slot: PivSlot) {
-        val client = gattService?.remoteKeyClient() ?: run {
-            showDesktopMessage(getString(R.string.piv_desktop_not_connected))
-            return
-        }
-        val actions = DesktopPivSlotActions(client)
+    /**
+     * Follows the desktop session while the screen is started: the slot's
+     * certificate loads when a desktop connects, and a lost desktop drops the
+     * certificate and the sign action.
+     */
+    private fun observeDesktopSlot(slotId: String) {
         lifecycleScope.launch {
-            val cert = try {
-                actions.certificate(slot.hexId)
-            } catch (e: ProtocolException) {
-                showDesktopMessage(getString(R.string.piv_desktop_cert_failed, e.message))
-                return@launch
-            }
-            contentLayout.removeAllViews()
-            buildDesktopInfoCard(slot)
-            buildCertificateCard(cert?.certificateDer, onExport = null)
-            if (intent.getBooleanExtra(EXTRA_DESKTOP_HAS_KEY, false)) {
-                buildDesktopActionsCard(slot, actions)
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                desktopPivSlotDetail(desktopSessions(boundService), slotId).collect { detail ->
+                    showDesktopDetail(detail)
+                }
             }
         }
     }
 
-    private fun buildDesktopInfoCard(slot: PivSlot) {
+    private fun showDesktopDetail(detail: DesktopPivSlotDetail) {
+        when (detail) {
+            DesktopPivSlotDetail.NotConnected ->
+                showDesktopMessage(getString(R.string.piv_desktop_not_connected))
+            is DesktopPivSlotDetail.Failed ->
+                showDesktopMessage(getString(R.string.piv_desktop_cert_failed, detail.message))
+            is DesktopPivSlotDetail.Loaded -> {
+                contentLayout.removeAllViews()
+                buildDesktopInfoCard(detail.slotId)
+                buildCertificateCard(detail.certificate?.certificateDer, onExport = null)
+                if (intent.getBooleanExtra(EXTRA_DESKTOP_HAS_KEY, false)) {
+                    buildDesktopActionsCard(detail)
+                }
+            }
+        }
+    }
+
+    private fun buildDesktopInfoCard(slotId: String) {
         val card = createSectionCard(getString(R.string.piv_section_info))
         val content = card.findViewWithTag<LinearLayout>("card_content")
-        addDetailRow(content, getString(R.string.piv_detail_slot_id), slot.hexId)
-        addDetailRow(content, getString(R.string.piv_detail_label), slot.label)
+        addDetailRow(content, getString(R.string.piv_detail_slot_id), slotId)
+        addDetailRow(content, getString(R.string.piv_detail_label), PivSlot.fromHexId(slotId)?.label ?: slotId)
         addDetailRow(content, getString(R.string.piv_detail_location), getString(R.string.piv_location_desktop))
         intent.getStringExtra(EXTRA_DESKTOP_ALGORITHM)?.let {
             addDetailRow(content, getString(R.string.piv_detail_algorithm), it)
@@ -812,7 +837,7 @@ class PivSlotDetailActivity : AppCompatActivity() {
         contentLayout.addView(card)
     }
 
-    private fun buildDesktopActionsCard(slot: PivSlot, actions: DesktopPivSlotActions) {
+    private fun buildDesktopActionsCard(detail: DesktopPivSlotDetail.Loaded) {
         val card = createSectionCard(getString(R.string.piv_section_actions))
         val content = card.findViewWithTag<LinearLayout>("card_content")
         content.addView(MaterialButton(
@@ -825,27 +850,31 @@ class PivSlotDetailActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
             text = getString(R.string.piv_action_sign_test)
-            setOnClickListener { desktopSignTest(slot, actions) }
+            setOnClickListener { desktopSignTest(detail) }
         })
         contentLayout.addView(card)
     }
 
-    /** The test sign for a desktop slot: one `remote.pivSign` to the desktop. */
-    private fun desktopSignTest(slot: PivSlot, actions: DesktopPivSlotActions) {
+    /**
+     * The test sign for a desktop slot: one `remote.pivSign` to the desktop.
+     * A desktop error or a lost session shows as a failure snackbar.
+     */
+    private fun desktopSignTest(detail: DesktopPivSlotDetail.Loaded) {
         lifecycleScope.launch {
-            try {
-                val startTime = System.currentTimeMillis()
-                val result = actions.signTest(slot.hexId)
-                val durationMs = System.currentTimeMillis() - startTime
-                Snackbar.make(
+            val startTime = System.currentTimeMillis()
+            when (val outcome = detail.actions.trySignTest(detail.slotId)) {
+                is DesktopSignTestOutcome.Signed -> Snackbar.make(
                     rootLayout,
-                    getString(R.string.piv_desktop_sign_test_success, result.algorithm, durationMs),
+                    getString(
+                        R.string.piv_desktop_sign_test_success,
+                        outcome.signature.algorithm,
+                        System.currentTimeMillis() - startTime
+                    ),
                     Snackbar.LENGTH_SHORT
                 ).show()
-            } catch (e: ProtocolException) {
-                Snackbar.make(
+                is DesktopSignTestOutcome.Failed -> Snackbar.make(
                     rootLayout,
-                    getString(R.string.piv_sign_test_error, e.message),
+                    getString(R.string.piv_sign_test_error, outcome.message),
                     Snackbar.LENGTH_LONG
                 ).show()
             }
@@ -981,4 +1010,72 @@ class DesktopPivSlotActions(private val client: RemoteKeyClient) {
 
     /** Signs [TEST_DATA] with the slot's key on the desktop. */
     suspend fun signTest(slot: String): RemotePivSignature = client.pivSign(slot, TEST_DATA)
+
+    /**
+     * [signTest] as an outcome: a desktop error or a transport failure (no
+     * session, send failed) is [DesktopSignTestOutcome.Failed]. Cancellation
+     * still propagates.
+     */
+    suspend fun trySignTest(slot: String): DesktopSignTestOutcome =
+        try {
+            DesktopSignTestOutcome.Signed(signTest(slot))
+        } catch (e: ProtocolException) {
+            DesktopSignTestOutcome.Failed(e.message)
+        } catch (e: IOException) {
+            DesktopSignTestOutcome.Failed(e.message)
+        }
 }
+
+/** The outcome of a desktop slot's test sign. */
+sealed interface DesktopSignTestOutcome {
+    /** The desktop signed the test data. */
+    class Signed(val signature: RemotePivSignature) : DesktopSignTestOutcome
+
+    /** The desktop refused, or the transport failed; [message] says why. */
+    data class Failed(val message: String?) : DesktopSignTestOutcome
+}
+
+/** What the detail screen shows for one desktop slot. */
+sealed interface DesktopPivSlotDetail {
+    /** No desktop is connected (or it was lost): nothing desktop-side shows. */
+    object NotConnected : DesktopPivSlotDetail
+
+    /** The certificate fetch failed (desktop error or transport failure). */
+    data class Failed(val message: String?) : DesktopPivSlotDetail
+
+    /**
+     * The slot loaded. [slotId] is the desktop's id verbatim; [certificate] is
+     * null when the slot has none; [actions] act on this session's client.
+     */
+    class Loaded(
+        val slotId: String,
+        val certificate: RemotePivCertificate?,
+        val actions: DesktopPivSlotActions
+    ) : DesktopPivSlotDetail
+}
+
+/**
+ * The detail for the desktop slot [slotId] for each desktop session: it loads
+ * the certificate when a desktop connects and goes back to
+ * [DesktopPivSlotDetail.NotConnected] when it is lost. [slotId] is sent
+ * exactly as given; it is never mapped onto the phone's own slots.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+fun desktopPivSlotDetail(
+    sessions: Flow<RemoteKeyClient?>,
+    slotId: String
+): Flow<DesktopPivSlotDetail> =
+    sessions.mapLatest { client ->
+        if (client == null) {
+            DesktopPivSlotDetail.NotConnected
+        } else {
+            val actions = DesktopPivSlotActions(client)
+            try {
+                DesktopPivSlotDetail.Loaded(slotId, actions.certificate(slotId), actions)
+            } catch (e: ProtocolException) {
+                DesktopPivSlotDetail.Failed(e.message)
+            } catch (e: IOException) {
+                DesktopPivSlotDetail.Failed(e.message)
+            }
+        }
+    }
