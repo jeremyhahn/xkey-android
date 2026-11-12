@@ -31,7 +31,8 @@ import org.junit.Test
 /**
  * The sharing sheet's desktop section shows only what the live session
  * allows: a refresh suspended in its decision never re-shows the section
- * after a disconnect, nor applies a decision taken on a replaced session.
+ * after a disconnect, nor applies a decision taken on a replaced session,
+ * and a key that fails to load is reported instead of escaping the refresh.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class DesktopSectionRefreshTest {
@@ -43,6 +44,8 @@ class DesktopSectionRefreshTest {
 
     /** What the section showed, in order; null is hidden. */
     private val shown = mutableListOf<DesktopShareDecision?>()
+    /** The load failures the section reported, in order. */
+    private val failures = mutableListOf<Throwable>()
     private val decisions = mutableMapOf<String?, CompletableDeferred<DesktopShareDecision>>()
     private var current: ShareSession? = null
 
@@ -71,7 +74,8 @@ class DesktopSectionRefreshTest {
         scope = this,
         currentSession = { current },
         decide = { s -> decision(s.peerPublicKeyHex).await() },
-        show = { shown += it }
+        show = { shown += it },
+        failed = { failures += it }
     )
 
     @Test
@@ -118,5 +122,52 @@ class DesktopSectionRefreshTest {
         advanceUntilIdle()
 
         assertEquals(listOf<DesktopShareDecision?>(DesktopShareDecision.POLICY_DENIED), shown)
+    }
+
+    @Test
+    fun `a key that fails to load is reported and never escapes the refresh`() = runTest {
+        val refresh = refresher()
+        current = session(peerA)
+        refresh.refresh()
+        runCurrent()
+
+        // e.g. the desktop deleted the software key between the store's
+        // existence check and its read
+        decision(peerA).completeExceptionally(java.io.IOException("the key file is gone"))
+        advanceUntilIdle()
+
+        assertEquals(emptyList<DesktopShareDecision?>(), shown)
+        assertEquals("the key file is gone", failures.single().message)
+    }
+
+    @Test
+    fun `a load failure on a replaced session decides again on the new one`() = runTest {
+        val refresh = refresher()
+        current = session(peerA)
+        refresh.refresh()
+        runCurrent()
+
+        current = session(peerB) // not yet seen by the watcher
+        decision(peerA).completeExceptionally(java.io.IOException("the key file is gone"))
+        runCurrent()
+        decision(peerB).complete(DesktopShareDecision.PUBLIC_KEY)
+        advanceUntilIdle()
+
+        assertEquals(listOf<DesktopShareDecision?>(DesktopShareDecision.PUBLIC_KEY), shown)
+        assertEquals(emptyList<Throwable>(), failures)
+    }
+
+    @Test
+    fun `a cancelled refresh reports no failure`() = runTest {
+        val refresh = refresher()
+        current = session(peerA)
+        refresh.refresh()
+        runCurrent()
+
+        refresh.cancel()
+        advanceUntilIdle()
+
+        assertEquals(emptyList<DesktopShareDecision?>(), shown)
+        assertEquals(emptyList<Throwable>(), failures)
     }
 }
