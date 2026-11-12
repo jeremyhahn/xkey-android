@@ -103,7 +103,7 @@ class ContactManagementActivity : AppCompatActivity() {
         private const val SOURCE_QR = "qr"
 
         /** Discriminator carried by the xKey contact QR envelope. */
-        private const val QR_PAYLOAD_TYPE = "xkey-contact"
+        internal const val QR_PAYLOAD_TYPE = "xkey-contact"
 
         /** Envelope version emitted by this build. */
         private const val QR_PAYLOAD_VERSION = 1
@@ -904,60 +904,13 @@ class ContactManagementActivity : AppCompatActivity() {
      * @param raw The decoded QR text.
      */
     private fun importScannedPayload(raw: String) {
-        val payload = raw.trim()
-        val envelope = parseContactEnvelope(payload)
-        val keyMaterial = envelope?.publicKeyPem ?: payload
-
-        val der = ContactKeyParser.decodePem(keyMaterial)
-        if (der == null || ContactKeyParser.parse(der) == null) {
+        val candidate = ContactImportCandidate.fromScannedPayload(raw)
+        if (candidate == null) {
             showError(getString(R.string.contact_qr_invalid))
             return
         }
-
-        importPublicKeyBytes(
-            bytes = der,
-            source = SOURCE_QR,
-            suggestedName = envelope?.label,
-            algorithmHint = envelope?.algorithm
-        )
+        showNamePromptDialog(candidate, SOURCE_QR)
     }
-
-    /**
-     * Decodes the xKey contact QR envelope.
-     *
-     * Field names mirror the `local.sharePublicKey` wire parameters so that a
-     * contact added by scanning is indistinguishable from one pushed over the
-     * pairing channel. Unknown envelope versions are still read rather than
-     * rejected: `public_key_pem` is the only field an importer needs.
-     *
-     * @param text The decoded QR text.
-     * @return The envelope contents, or null if [text] is not an xKey contact envelope.
-     */
-    private fun parseContactEnvelope(text: String): ContactQrEnvelope? {
-        if (!text.startsWith("{")) return null
-        return try {
-            val json = JSONObject(text)
-            if (json.optString("type") != QR_PAYLOAD_TYPE) return null
-            val pem = json.optString("public_key_pem")
-            if (pem.isBlank()) return null
-            ContactQrEnvelope(
-                label = json.optString("label").ifBlank { null },
-                algorithm = json.optString("algorithm").ifBlank { null },
-                publicKeyPem = pem
-            )
-        } catch (_: JSONException) {
-            null
-        }
-    }
-
-    /**
-     * Contents of a scanned xKey contact QR envelope.
-     */
-    private data class ContactQrEnvelope(
-        val label: String?,
-        val algorithm: String?,
-        val publicKeyPem: String
-    )
 
     /**
      * Lifecycle owner scoped to a single QR scan dialog.
@@ -1258,14 +1211,12 @@ class ContactManagementActivity : AppCompatActivity() {
         suggestedName: String? = null,
         algorithmHint: String? = null
     ) {
-        val parsed = ContactKeyParser.parse(bytes)
-        if (parsed == null) {
+        val candidate = ContactImportCandidate.fromBytes(bytes, suggestedName, algorithmHint)
+        if (candidate == null) {
             showError("Unable to parse public key. Supported formats: DER, PEM (EC or RSA).")
             return
         }
-
-        val algorithm = ContactKeyParser.resolveAlgorithm(algorithmHint, parsed.algorithm)
-        showNamePromptDialog(parsed.fingerprint, algorithm, parsed.der, source, suggestedName)
+        showNamePromptDialog(candidate, source)
     }
 
     /**
@@ -1282,13 +1233,10 @@ class ContactManagementActivity : AppCompatActivity() {
     /**
      * Shows a dialog prompting the user for a contact name before inserting.
      */
-    private fun showNamePromptDialog(
-        fingerprint: String,
-        algorithm: String,
-        der: ByteArray,
-        source: String,
-        suggestedName: String? = null
-    ) {
+    private fun showNamePromptDialog(candidate: ContactImportCandidate, source: String) {
+        val fingerprint = candidate.fingerprint
+        val algorithm = candidate.algorithm
+        val suggestedName = candidate.suggestedName
         val dialogLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(
@@ -1352,7 +1300,7 @@ class ContactManagementActivity : AppCompatActivity() {
             .setPositiveButton(getString(R.string.contact_import_action)) { _, _ ->
                 val name = nameInput.text.toString().trim()
                     .ifBlank { getString(R.string.contact_default_name) }
-                insertContact(name, der, fingerprint, algorithm, source)
+                insertContact(candidate.toEntity(name, source, System.currentTimeMillis()))
             }
             .setNegativeButton(getString(R.string.button_cancel), null)
             .show()
@@ -1361,23 +1309,12 @@ class ContactManagementActivity : AppCompatActivity() {
     /**
      * Inserts a new contact into the database.
      */
-    private fun insertContact(
-        name: String,
-        der: ByteArray,
-        fingerprint: String,
-        algorithm: String,
-        source: String
-    ) {
+    private fun insertContact(entity: ContactEntity) {
+        val name = entity.name
+        val fingerprint = entity.publicKeyFingerprint
+        val source = entity.source
         lifecycleScope.launch {
             try {
-                val entity = ContactEntity(
-                    name = name,
-                    publicKeyDer = der,
-                    publicKeyFingerprint = fingerprint,
-                    algorithm = algorithm,
-                    importedAt = System.currentTimeMillis(),
-                    source = source
-                )
                 withContext(Dispatchers.IO) {
                     contactDao.insert(entity)
                 }
@@ -1840,6 +1777,107 @@ class ContactManagementActivity : AppCompatActivity() {
             newItem: ContactEntity
         ): Boolean {
             return oldItem == newItem
+        }
+    }
+}
+
+/**
+ * Contents of a scanned xKey contact QR envelope.
+ */
+internal data class ContactQrEnvelope(
+    val label: String?,
+    val algorithm: String?,
+    val publicKeyPem: String
+) {
+    companion object {
+        /**
+         * Decodes the xKey contact QR envelope.
+         *
+         * Field names mirror the `local.sharePublicKey` wire parameters so that a
+         * contact added by scanning is indistinguishable from one pushed over the
+         * pairing channel. Unknown envelope versions are still read rather than
+         * rejected: `public_key_pem` is the only field an importer needs.
+         *
+         * @param text The decoded QR text.
+         * @return The envelope contents, or null if [text] is not an xKey contact envelope.
+         */
+        fun parse(text: String): ContactQrEnvelope? {
+            if (!text.startsWith("{")) return null
+            return try {
+                val json = JSONObject(text)
+                if (json.optString("type") != ContactManagementActivity.QR_PAYLOAD_TYPE) return null
+                val pem = json.optString("public_key_pem")
+                if (pem.isBlank()) return null
+                ContactQrEnvelope(
+                    label = json.optString("label").ifBlank { null },
+                    algorithm = json.optString("algorithm").ifBlank { null },
+                    publicKeyPem = pem
+                )
+            } catch (_: JSONException) {
+                null
+            }
+        }
+    }
+}
+
+/**
+ * A contact ready for the name prompt, built from imported key bytes or a
+ * scanned QR payload. No Android types, so the import step runs under the
+ * JVM unit tests.
+ *
+ * @property der The key's DER encoding.
+ * @property fingerprint Lowercase hex SHA-256 of [der].
+ * @property algorithm The algorithm detected from the key; a payload hint never overrides it.
+ * @property suggestedName Name to pre-fill in the name prompt, if the payload carried one.
+ */
+internal class ContactImportCandidate(
+    val der: ByteArray,
+    val fingerprint: String,
+    val algorithm: String,
+    val suggestedName: String?
+) {
+    /** The row stored once the user names the contact. */
+    fun toEntity(name: String, source: String, importedAt: Long): ContactEntity =
+        ContactEntity(
+            name = name,
+            publicKeyDer = der,
+            publicKeyFingerprint = fingerprint,
+            algorithm = algorithm,
+            importedAt = importedAt,
+            source = source
+        )
+
+    companion object {
+        /**
+         * @param bytes Raw key bytes, either DER or PEM.
+         * @param algorithmHint Algorithm declared by the payload; the one detected from the key wins.
+         * @return The candidate, or null when the key is unparseable or unsupported.
+         */
+        fun fromBytes(
+            bytes: ByteArray,
+            suggestedName: String? = null,
+            algorithmHint: String? = null
+        ): ContactImportCandidate? {
+            val parsed = ContactKeyParser.parse(bytes) ?: return null
+            return ContactImportCandidate(
+                der = parsed.der,
+                fingerprint = parsed.fingerprint,
+                algorithm = ContactKeyParser.resolveAlgorithm(algorithmHint, parsed.algorithm),
+                suggestedName = suggestedName
+            )
+        }
+
+        /**
+         * Reads a decoded QR payload: an xKey contact envelope, or PEM key text.
+         *
+         * @param raw The decoded QR text.
+         * @return The candidate, or null when the payload carries no usable key.
+         */
+        fun fromScannedPayload(raw: String): ContactImportCandidate? {
+            val payload = raw.trim()
+            val envelope = ContactQrEnvelope.parse(payload)
+            val der = ContactKeyParser.decodePem(envelope?.publicKeyPem ?: payload) ?: return null
+            return fromBytes(der, envelope?.label, envelope?.algorithm)
         }
     }
 }
