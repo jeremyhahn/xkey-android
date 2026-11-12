@@ -36,6 +36,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
@@ -56,6 +57,7 @@ import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -1375,8 +1377,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         )
         snackbar.show()
 
-        activityScope.launch {
-            try {
+        launchPhoneInitiatedReattest(snackbar) step@{
                 val keyPair = NoiseSession.getStoredStaticKeyPair(this@DeviceDetailActivity)
                 if (keyPair == null) {
                     snackbar.dismiss()
@@ -1385,7 +1386,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                         getString(R.string.device_reattest_no_keys),
                         Snackbar.LENGTH_LONG
                     ).show()
-                    return@launch
+                    return@step
                 }
 
                 val expectedRemoteKey = try {
@@ -1413,7 +1414,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                     snackbar.dismiss()
                     gattService?.let { ensureAdvertisingAndShowInstructions(it) }
                         ?: showReattestInstructions()
-                    return@launch
+                    return@step
                 }
 
                 snackbar.dismiss()
@@ -1457,8 +1458,23 @@ class DeviceDetailActivity : AppCompatActivity() {
                         ).show()
                     }
                 }
-            } catch (e: Exception) {
-                snackbar.dismiss()
+        }
+    }
+
+    /**
+     * Runs one phone-initiated re-attest [step] in this activity's scope, which
+     * [onDestroy] cancels. A failure falls back to the advertise-and-wait
+     * instructions.
+     */
+    @VisibleForTesting
+    internal fun launchPhoneInitiatedReattest(
+        snackbar: Snackbar?,
+        step: suspend () -> Unit
+    ): Job = activityScope.launch {
+        runPhoneInitiatedReattest(
+            activityGone = { isFinishing || isDestroyed },
+            onFailure = {
+                snackbar?.dismiss()
                 Snackbar.make(
                     rootLayout,
                     getString(R.string.device_reattest_connection_failed),
@@ -1466,8 +1482,9 @@ class DeviceDetailActivity : AppCompatActivity() {
                 ).show()
                 gattService?.let { ensureAdvertisingAndShowInstructions(it) }
                     ?: showReattestInstructions()
-            }
-        }
+            },
+            step = step
+        )
     }
 
     /**
@@ -1475,7 +1492,8 @@ class DeviceDetailActivity : AppCompatActivity() {
      * shows, in the same dialog the sessions the phone accepts use. The session
      * is trusted, and the attestation recorded, only on Allow (#137).
      */
-    private fun sasConfirmation(): PairingConfirmationCallback = object : PairingConfirmationCallback {
+    @VisibleForTesting
+    internal fun sasConfirmation(): PairingConfirmationCallback = object : PairingConfirmationCallback {
         override suspend fun onPairingConfirmationRequired(
             deviceName: String,
             publicKeyFingerprint: String
@@ -1693,5 +1711,23 @@ class DeviceDetailActivity : AppCompatActivity() {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         val hash = digest.digest(certDER)
         return hash.take(8).joinToString(":") { "%02X".format(it) } + "..."
+    }
+}
+
+/**
+ * Runs a phone-initiated re-attest [step] and hands a failure to [onFailure].
+ *
+ * [activityGone] reports whether the screen that would show the fallback has
+ * been finished or destroyed.
+ */
+internal suspend fun runPhoneInitiatedReattest(
+    activityGone: () -> Boolean,
+    onFailure: (Exception) -> Unit,
+    step: suspend () -> Unit
+) {
+    try {
+        step()
+    } catch (e: Exception) {
+        onFailure(e)
     }
 }
