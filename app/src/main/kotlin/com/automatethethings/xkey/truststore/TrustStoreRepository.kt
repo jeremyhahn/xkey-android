@@ -21,6 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.CertPathValidator
@@ -66,6 +67,20 @@ public data class ImportResult(
 )
 
 /**
+ * Result of [TrustStoreRepository.clearAll]: the fingerprints actually
+ * removed, those whose file or metadata row could not be removed (still
+ * trusted), and whether the store directory could not be listed for files
+ * no metadata row names.
+ */
+public data class ClearResult(
+    val removed: List<String>,
+    val failed: List<String>,
+    val unlisted: Boolean = false
+) {
+    val complete: Boolean get() = failed.isEmpty() && !unlisted
+}
+
+/**
  * Repository for managing trusted CA certificates.
  *
  * Certificates are stored in the app's private directory and used
@@ -75,7 +90,9 @@ public data class ImportResult(
  */
 public class TrustStoreRepository(
     private val context: Context,
-    private val caFetcher: CABundleFetcher = CABundleFetcher()
+    private val caFetcher: CABundleFetcher = CABundleFetcher(),
+    /** Deletes one file; tests inject a deleter that refuses. */
+    private val fileDeleter: (File) -> Boolean = { it.delete() }
 ) {
     private val trustStoreDir: File by lazy {
         context.getDir("trust_store", Context.MODE_PRIVATE)
@@ -257,38 +274,94 @@ public class TrustStoreRepository(
     /**
      * Delete a certificate from the trust store.
      *
+     * Records a successful deletion only when the certificate's file and
+     * metadata row are both gone; a removal that fails is recorded as a
+     * failure and leaves the certificate trusted.
+     *
      * @param fingerprint The SHA-256 fingerprint of the certificate to delete
-     * @return true if deleted, false if not found
+     * @return true if deleted, false if not found or it could not be removed
      */
     public suspend fun deleteCertificate(fingerprint: String): Boolean =
         withContext(Dispatchers.IO) {
             val certFile = getCertificateFile(fingerprint)
             val all = readMetadataSync()
-            val remaining = all.filter { it.fingerprint != fingerprint }
-            val hadEntry = remaining.size != all.size
+            val entry = all.firstOrNull { it.fingerprint == fingerprint }
+            val fileExisted = certFile.exists()
 
             // The DER file may already be gone while the metadata row survives.
             // Returning early there would strand the row: it stays listed
             // forever and only clearAll() can remove it.
-            val deletedFile = certFile.exists() && certFile.delete()
-            if (!deletedFile && !hadEntry) {
+            if (!fileExisted && entry == null) {
                 return@withContext false
             }
+            val subject = entry?.subjectDN ?: ""
 
-            saveMetadataSync(remaining)
-            val subject = all.firstOrNull { it.fingerprint == fingerprint }?.subjectDN ?: ""
+            if (fileExisted && !removeFile(certFile)) {
+                auditDelete(subject, fingerprint, FILE_NOT_DELETED)
+                return@withContext false
+            }
+            if (entry != null) {
+                try {
+                    saveMetadataSync(all.filter { it.fingerprint != fingerprint })
+                } catch (e: IOException) {
+                    auditDelete(subject, fingerprint, "$METADATA_NOT_UPDATED: ${e.message}")
+                    return@withContext false
+                }
+            }
             auditDelete(subject, fingerprint)
             true
         }
 
     /**
-     * Clear all certificates from the trust store, recording one audit
-     * deletion per certificate listed in the metadata.
+     * Clear all certificates from the trust store.
+     *
+     * Each certificate in the metadata is removed on its own. A deletion
+     * is recorded as successful only when the certificate's file and its
+     * metadata row are both gone; one that could not be removed stays
+     * listed and trusted, is recorded as a failure, and is returned in
+     * [ClearResult.failed].
      */
-    public suspend fun clearAll(): Unit = withContext(Dispatchers.IO) {
-        val removed = readMetadataSync()
-        trustStoreDir.listFiles()?.forEach { it.delete() }
-        removed.forEach { auditDelete(it.subjectDN, it.fingerprint) }
+    public suspend fun clearAll(): ClearResult = withContext(Dispatchers.IO) {
+        val entries = readMetadataSync()
+        val filesRemoved = entries.filter { removeFile(getCertificateFile(it.fingerprint)) }
+        val kept = entries.filter { it !in filesRemoved }
+
+        val metadataFile = File(trustStoreDir, "metadata.json")
+        val metadataError: String? = try {
+            if (kept.isNotEmpty()) {
+                saveMetadataSync(kept)
+            } else if (metadataFile.exists() && !removeFile(metadataFile)) {
+                saveMetadataSync(emptyList())
+            }
+            null
+        } catch (e: IOException) {
+            "$METADATA_NOT_UPDATED: ${e.message}"
+        }
+
+        // Files no metadata row names (strays): remove them too, except the
+        // ones kept above. A directory that cannot be listed is a failure.
+        val keepNames = kept.map { getCertificateFile(it.fingerprint).name }.toSet() + metadataFile.name
+        val listing = trustStoreDir.listFiles()
+        val strayFailed = listing.orEmpty()
+            .filter { it.name !in keepNames && !removeFile(it) }
+            .map { it.name.removeSuffix(".der") }
+
+        val removed = if (metadataError == null) filesRemoved else emptyList()
+        filesRemoved.forEach {
+            if (metadataError == null) {
+                auditDelete(it.subjectDN, it.fingerprint)
+            } else {
+                auditDelete(it.subjectDN, it.fingerprint, metadataError)
+            }
+        }
+        kept.forEach { auditDelete(it.subjectDN, it.fingerprint, FILE_NOT_DELETED) }
+        strayFailed.forEach { auditDelete("", it, FILE_NOT_DELETED) }
+
+        ClearResult(
+            removed = removed.map { it.fingerprint },
+            failed = (entries - removed.toSet()).map { it.fingerprint } + strayFailed,
+            unlisted = listing == null
+        )
     }
 
     /**
@@ -473,14 +546,26 @@ public class TrustStoreRepository(
     }
 
     /**
-     * Record a trust store deletion. Only when the audit logger is
-     * initialized: its drop path calls `Log.w`, which callers that never
-     * initialize it (JVM tests, sync) must not reach.
+     * Record a trust store deletion: a success when [error] is null, else a
+     * failure carrying it. Only when the audit logger is initialized: its
+     * drop path calls `Log.w`, which callers that never initialize it (JVM
+     * tests, sync) must not reach.
      */
-    private fun auditDelete(subject: String, fingerprint: String) {
+    private fun auditDelete(subject: String, fingerprint: String, error: String? = null) {
         if (AuditLogger.isInitialized()) {
-            AuditLogger.logTrustStoreDelete(subject, fingerprint)
+            AuditLogger.logTrustStoreDelete(subject, fingerprint, error == null, error)
         }
+    }
+
+    /** Delete [file] through [fileDeleter]; true only if it is gone. */
+    private fun removeFile(file: File): Boolean {
+        fileDeleter(file)
+        return !file.exists()
+    }
+
+    private companion object {
+        const val FILE_NOT_DELETED = "could not delete the certificate file"
+        const val METADATA_NOT_UPDATED = "could not update the trust store metadata"
     }
 
     private fun saveMetadataSync(certs: List<TrustedCA>) {
