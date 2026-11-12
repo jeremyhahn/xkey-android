@@ -71,6 +71,7 @@ import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivAlgorithm
 import com.automatethethings.xkey.settings.PinSettingsRepository
+import com.automatethethings.xkey.ui.KeySharingPeers
 
 /**
  * Interface for sending messages to the connected laptop.
@@ -2717,6 +2718,12 @@ class RequestHandler(
      * @return True if the key can be shared with this peer.
      */
     private suspend fun canShareKeyWithPeer(entity: KeyEntity, peerPublicKeyHex: String?): Boolean {
+        if (KeySharingPeers.isWithdrawalPending(entity.keyId, peerPublicKeyHex)) {
+            // Fail closed (#174): the user withdrew this peer, or made the
+            // key Private, and that write is still being retried.
+            Log.w(TAG, "Key sharing refused: withdrawal pending persistence")
+            return false
+        }
         return when (entity.sharingPolicy) {
             SharingPolicyType.PRIVATE -> false
             SharingPolicyType.ALL_PEERS -> true

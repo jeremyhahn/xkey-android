@@ -128,7 +128,7 @@ class KeySharingPeersTest {
 
     /** The request handler's SELECTED_PEERS check: refused while a revocation is pending, else the row decides. */
     private fun hasAccess(peer: String) =
-        !repo.isRevocationPending(peer) && table.value.any { it.keyId == KEY && it.peerPublicKeyHex == peer && it.allowed }
+        !KeySharingPeers.isWithdrawalPending(KEY, peer) && !repo.isRevocationPending(peer) && table.value.any { it.keyId == KEY && it.peerPublicKeyHex == peer && it.allowed }
 
     /** What the grant cleanup does for [peer]'s pending revocation: delete its rows, then acknowledge. */
     private suspend fun runCleanup(peer: String) {
