@@ -15,10 +15,19 @@
 
 package com.automatethethings.xkey.settings
 
+import android.app.KeyguardManager
+import android.app.NotificationManager
+import android.content.Context
+import android.content.SharedPreferences
+import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
+import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.confirmVerified
@@ -31,6 +40,9 @@ import io.mockk.runs
 import io.mockk.unmockkAll
 import io.mockk.verify
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.concurrent.thread
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -301,5 +313,164 @@ class PairedDeviceGrantCleanupTest {
         val rows = table.filter { it.peerPublicKeyHex == peer }
         table.removeAll(rows.toSet())
         rows.size
+    }
+
+    // --- r3: one lock for every repository, and generation-checked cleanup. ---
+
+    /**
+     * A second view of the same prefs, as another repository instance in the
+     * process holds. [afterNextStringSetRead] runs once, right after a read of
+     * the pending set, while the reader may still mean to write it back.
+     */
+    private class HookedPrefs(private val backing: SharedPreferences) : SharedPreferences by backing {
+        @Volatile var afterNextStringSetRead: (() -> Unit)? = null
+
+        override fun getStringSet(key: String, defValues: Set<String>?): Set<String>? {
+            val value = backing.getStringSet(key, defValues)
+            afterNextStringSetRead?.let {
+                afterNextStringSetRead = null
+                it()
+            }
+            return value
+        }
+    }
+
+    /**
+     * The cleanup completes A through its own repository while the UI's
+     * repository removes B in between the cleanup's read and its write of the
+     * pending set. B must stay pending.
+     */
+    @Test
+    fun completingOneRevocationKeepsAnotherInstancesNewPendingEntry() {
+        val hooked = HookedPrefs(prefs)
+        val cleanupRepo = PairedDeviceRepository(hooked)
+        heldCleanup(cleanupRepo)
+        repo.removeDevice(PEER_A)
+        // B's removal only has to land in the pending set; no job for it.
+        PairedDeviceRepository.removeRemovalListener(cleanup)
+
+        var other: Thread? = null
+        hooked.afterNextStringSetRead = {
+            val t = thread { repo.removeDevice(PEER_B) }
+            other = t
+            // Either it runs to the end (no shared lock) or it waits on the lock.
+            while (t.state != Thread.State.BLOCKED && t.state != Thread.State.TERMINATED) {
+                Thread.yield()
+            }
+        }
+        scheduler.advanceUntilIdle()
+        other!!.join()
+
+        assertEquals(emptyList<KeySharingPolicy>(), grantsOf(PEER_A))
+        assertEquals(setOf(PEER_B), repo.pendingRevocations())
+        assertEquals(setOf(PEER_B), cleanupRepo.pendingRevocations())
+    }
+
+    /**
+     * Remove, re-pair while the cleanup is still queued, and approve a fresh
+     * grant once the revocation has completed: no later cleanup job (the one
+     * the re-pairing queued, a replay, a stray retry) may delete it.
+     */
+    @Test
+    fun aGrantApprovedAfterTheRevocationCompletedSurvivesLaterCleanupJobs() {
+        val fresh = KeySharingPolicy("k-9", PEER_A)
+        var deletes = 0
+        val delete = dao.clearPoliciesForPeerAnswer()
+        coEvery { dao.clearPoliciesForPeer(any()) } answers {
+            // A second delete for A runs after the first one completed the
+            // revocation: by then the user has approved a fresh grant.
+            if (deletes++ == 1 && fresh !in table) {
+                assertFalse(PEER_A in repo.pendingRevocations())
+                table += fresh
+            }
+            delete(firstArg())
+        }
+        heldCleanup(repo)
+        repo.removeDevice(PEER_A)
+        repo.addDevice(PEER_A, "desktop-a")
+        scheduler.advanceUntilIdle()
+        assertFalse(PEER_A in repo.pendingRevocations())
+        if (fresh !in table) table += fresh
+
+        // Delayed duplicates of the finished revocation.
+        cleanup.replayPending()
+        cleanup.onRevocationPending(PEER_A)
+        cleanup.onDeviceRemoved(PEER_A)
+        scheduler.advanceUntilIdle()
+
+        assertEquals(listOf(fresh), grantsOf(PEER_A))
+        assertEquals(1, grantsOf(PEER_B).size)
+    }
+
+    /**
+     * The peer is re-paired while its revocation is held, so its old rows are
+     * still in the table: a SELECTED_PEERS share request for it is refused.
+     * Fails if canShareKeyWithPeer stops checking the pending set.
+     */
+    @Test
+    fun aRePairedPeerIsRefusedSelectedPeersWhileItsRevocationIsPending() {
+        heldCleanup(repo)
+        repo.removeDevice(PEER_A)
+        repo.addDevice(PEER_A, "desktop-a")
+        assertEquals(2, grantsOf(PEER_A).size)
+        assertTrue(PEER_A in repo.pendingRevocations())
+
+        val handler = requestHandlerOver(repo)
+        val key = KeyEntity(
+            keyId = "k-1",
+            keyType = "signing",
+            algorithm = "ES256",
+            label = "L",
+            keySizeBits = 256,
+            source = "local",
+            sharingPolicy = SharingPolicyType.SELECTED_PEERS
+        )
+
+        assertFalse(canShareKeyWithPeer(handler, key, PEER_A))
+        // Control: B's grant still authorizes B.
+        assertTrue(canShareKeyWithPeer(handler, key, PEER_B))
+
+        scheduler.advanceUntilIdle()
+        assertFalse(canShareKeyWithPeer(handler, key, PEER_A))
+    }
+
+    private fun requestHandlerOver(paired: PairedDeviceRepository): RequestHandler {
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.d(any(), any<String>()) } returns 0
+        every { Log.v(any(), any<String>()) } returns 0
+        every { Log.e(any(), any<String>()) } returns 0
+        mockkStatic(Looper::class)
+        every { Looper.getMainLooper() } returns mockk(relaxed = true)
+        coEvery { dao.isKeySharedWithPeer(any(), any()) } answers {
+            val keyId = firstArg<String>()
+            val peer = secondArg<String>()
+            table.any { it.keyId == keyId && it.peerPublicKeyHex == peer }
+        }
+        val database = mockk<XKeyDatabase>(relaxed = true)
+        every { database.keySharingPolicyDao() } returns dao
+        mockkObject(XKeyDatabase.Companion)
+        every { XKeyDatabase.getInstance(any()) } returns database
+        val context = mockk<Context>(relaxed = true)
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns
+            mockk<KeyguardManager>(relaxed = true)
+        every { context.getSystemService(NotificationManager::class.java) } returns
+            mockk<NotificationManager>(relaxed = true)
+        return RequestHandler(
+            context = context,
+            keystoreManager = mockk(relaxed = true),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = paired
+        )
+    }
+
+    /** Calls the private suspend check; the faked DAO never suspends. */
+    private fun canShareKeyWithPeer(handler: RequestHandler, key: KeyEntity, peer: String): Boolean {
+        val method = RequestHandler::class.java.getDeclaredMethod(
+            "canShareKeyWithPeer", KeyEntity::class.java, String::class.java, Continuation::class.java
+        )
+        method.isAccessible = true
+        val noResume = Continuation<Any?>(EmptyCoroutineContext) { error("suspended") }
+        return method.invoke(handler, key, peer, noResume) as Boolean
     }
 }
