@@ -28,6 +28,7 @@ import com.automatethethings.xkey.ui.MainActivity
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.remote.RemoteKeyClient
+import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.remote.RemoteBackupClient
 import com.automatethethings.xkey.backup.BackupStore
 import com.automatethethings.xkey.usb.PasswordStoreMethods
@@ -787,11 +788,37 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
-     * Outbound key-sharing client (`remote.sharePublicKey` and the rest) on
-     * the active transport, or null when no desktop is connected.
+     * The desktop session a key share would go out on, with the peer
+     * confirmed on it, or null when no desktop is connected. Transports are
+     * taken in [activeTransport]'s order. The confirmed peer key is one value
+     * for all transports, so [ShareSession.of] drops it while more than one
+     * is live. [ShareSession.isCurrent] re-reads this snapshot.
      */
-    fun remoteShareClient(): com.automatethethings.xkey.remote.RemoteShareClient? =
-        activeTransport()?.let { (sender, router) -> com.automatethethings.xkey.remote.RemoteShareClient(sender, router) }
+    fun shareSession(): ShareSession? =
+        ShareSession.of(liveShareTransports(), getConnectedDevicePublicKeyHex()) { snapshot ->
+            snapshot.sameAs(shareSession())
+        }
+
+    private fun liveShareTransports(): List<ShareSession.Transport> {
+        val live = mutableListOf<ShareSession.Transport>()
+        gattServer?.let { server ->
+            val router = bleMessageRouter
+            if (server.isSessionEstablished() && router != null) live += ShareSession.Transport(server, router)
+        }
+        tcpHsmServer?.let { server ->
+            val router = tcpMessageRouter
+            if (server.state.value is com.automatethethings.xkey.tcp.TcpHsmState.Connected && router != null) {
+                live += ShareSession.Transport(server, router)
+            }
+        }
+        usbAccessoryServer?.let { server ->
+            val router = usbMessageRouter
+            if (server.state.value is com.automatethethings.xkey.usb.UsbAccessoryState.Connected && router != null) {
+                live += ShareSession.Transport(server, router)
+            }
+        }
+        return live
+    }
 
     /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)

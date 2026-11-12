@@ -307,14 +307,84 @@ object DesktopShareGate {
 }
 
 /**
- * Sends one of the phone's keys to the paired desktop, after [DesktopShareGate].
- * Nothing reaches the wire unless the gate answers [DesktopShareDecision.PUBLIC_KEY].
+ * One desktop session as it stood at one moment: the transport a share goes
+ * out on and the peer identity confirmed on that same session.
+ *
+ * The phone's request handler holds one confirmed peer key for all its
+ * transports, so it cannot say which session confirmed it. [of] keeps that
+ * key only while exactly one transport is live. With several live, the
+ * session has no peer it can vouch for and every share is refused.
  */
-class DesktopKeyShare(private val client: RemoteShareClient) {
+class ShareSession private constructor(
+    val sender: MessageSender,
+    val router: BidirectionalMessageRouter,
+    val peerPublicKeyHex: String?,
+    private val stillCurrent: (ShareSession) -> Boolean
+) {
+
+    /** A transport with an established session. */
+    class Transport(val sender: MessageSender, val router: BidirectionalMessageRouter)
+
+    /** True while this is still the session the phone would send on, with the same peer. */
+    fun isCurrent(): Boolean = stillCurrent(this)
+
+    /** Same transport, same router and same confirmed peer. */
+    fun sameAs(other: ShareSession?): Boolean =
+        other != null && other.sender === sender && other.router === router &&
+            other.peerPublicKeyHex == peerPublicKeyHex
+
+    /**
+     * A client on this session whose every send re-checks [isCurrent] just
+     * before the bytes go to the transport, which encrypts them.
+     */
+    internal fun client(requestTimeoutMs: Long): RemoteShareClient =
+        RemoteShareClient(GuardedSender(), router, requestTimeoutMs)
+
+    private inner class GuardedSender : MessageSender {
+        override suspend fun sendEncryptedMessage(data: ByteArray) {
+            if (!isCurrent()) throw SessionChangedException()
+            sender.sendEncryptedMessage(data)
+        }
+    }
+
+    companion object {
+        /**
+         * The session on the first of [live] (the caller's transport order),
+         * or null when none is live. [confirmedPeerHex] is the phone's one
+         * confirmed peer key; it is kept only when [live] has one transport.
+         */
+        fun of(
+            live: List<Transport>,
+            confirmedPeerHex: String?,
+            stillCurrent: (ShareSession) -> Boolean
+        ): ShareSession? {
+            val active = live.firstOrNull() ?: return null
+            val peer = confirmedPeerHex?.takeIf { live.size == 1 && it.isNotEmpty() }
+            return ShareSession(active.sender, active.router, peer, stillCurrent)
+        }
+    }
+}
+
+/** The session a share was authorized on was replaced before the send. */
+internal class SessionChangedException : java.io.IOException("the desktop session changed before the send")
+
+/**
+ * Sends one of the phone's keys to the paired desktop on [session], after
+ * [DesktopShareGate] has checked it against the peer confirmed on that
+ * session. Nothing reaches the wire unless the gate answers
+ * [DesktopShareDecision.PUBLIC_KEY] and the session is still current.
+ */
+class DesktopKeyShare(
+    private val session: ShareSession,
+    private val requestTimeoutMs: Long = 30_000L
+) {
 
     sealed class Outcome {
         data class Sent(val result: RemoteShareClient.ShareResult) : Outcome()
         data class Refused(val decision: DesktopShareDecision) : Outcome()
+
+        /** The session was replaced before the key was sent; nothing left the phone. */
+        data object SessionChanged : Outcome()
     }
 
     /** [software]'s material is zeroed before this returns, whatever the outcome. */
@@ -323,24 +393,30 @@ class DesktopKeyShare(private val client: RemoteShareClient) {
         software: SoftwareKey?,
         publicKeyPem: String?,
         certificatePem: String?,
-        peerPublicKeyHex: String?,
         isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean
     ): Outcome {
         try {
-            val decision = DesktopShareGate.decide(entity, software, publicKeyPem, peerPublicKeyHex, isKeySharedWithPeer)
+            val decision = DesktopShareGate.decide(
+                entity, software, publicKeyPem, session.peerPublicKeyHex, isKeySharedWithPeer
+            )
+            if (!session.isCurrent()) return Outcome.SessionChanged
             if (decision != DesktopShareDecision.PUBLIC_KEY || entity == null || publicKeyPem == null) {
                 return Outcome.Refused(decision)
             }
-            val result = client.sharePublicKey(
-                RemoteShareClient.PublicKeyShare(
-                    keyId = entity.keyId,
-                    publicKeyPem = publicKeyPem,
-                    certificatePem = certificatePem,
-                    algorithm = entity.algorithm,
-                    label = entity.label,
-                    backend = null
+            val result = try {
+                session.client(requestTimeoutMs).sharePublicKey(
+                    RemoteShareClient.PublicKeyShare(
+                        keyId = entity.keyId,
+                        publicKeyPem = publicKeyPem,
+                        certificatePem = certificatePem,
+                        algorithm = entity.algorithm,
+                        label = entity.label,
+                        backend = null
+                    )
                 )
-            )
+            } catch (e: SessionChangedException) {
+                return Outcome.SessionChanged
+            }
             return Outcome.Sent(result)
         } finally {
             software?.material.let { it?.fill(0) }

@@ -680,11 +680,13 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     /**
      * Shows the desktop section when a desktop is connected, with the send
      * button only for a key [DesktopShareGate] lets go; otherwise the reason.
+     * The decision is taken against the peer confirmed on the session the
+     * key would go out on.
      */
     private fun refreshDesktopSection() {
         if (!::desktopContainer.isInitialized || !isAdded) return
-        val service = gattService
-        if (service == null || keyEntity == null || service.remoteShareClient() == null) {
+        val session = gattService?.shareSession()
+        if (session == null || keyEntity == null) {
             desktopContainer.visibility = View.GONE
             return
         }
@@ -693,7 +695,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             val decision = try {
                 DesktopShareGate.decide(
                     inputs.entity, inputs.software, inputs.publicKeyPem,
-                    service.getConnectedDevicePublicKeyHex(), ::isSharedWithPeer
+                    session.peerPublicKeyHex, ::isSharedWithPeer
                 )
             } finally {
                 inputs.software?.material.let { it?.fill(0) }
@@ -706,22 +708,27 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         }
     }
 
-    /** Sends the key's public half to the connected desktop (`remote.sharePublicKey`). */
+    /**
+     * Sends the key's public half to the connected desktop
+     * (`remote.sharePublicKey`). The transport, router and confirmed peer all
+     * come from one [ShareSession] snapshot, and nothing is sent once that
+     * session has been replaced.
+     */
     private fun sendToDesktop() {
-        val service = gattService ?: return refreshDesktopSection()
-        val client = service.remoteShareClient() ?: return refreshDesktopSection()
+        val session = gattService?.shareSession() ?: return refreshDesktopSection()
         desktopSendButton.isEnabled = false
         desktopStatusText.text = getString(R.string.sharing_desktop_sending)
         lifecycleScope.launch {
-            val message = try {
+            val message: String? = try {
                 val inputs = loadShareInputs()
-                when (val out = DesktopKeyShare(client).send(
-                    inputs.entity, inputs.software, inputs.publicKeyPem, null,
-                    service.getConnectedDevicePublicKeyHex(), ::isSharedWithPeer
+                when (val out = DesktopKeyShare(session).send(
+                    inputs.entity, inputs.software, inputs.publicKeyPem, null, ::isSharedWithPeer
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->
                         getString(R.string.sharing_desktop_sent, out.result.importId)
                     is DesktopKeyShare.Outcome.Refused -> getString(desktopStatusFor(out.decision))
+                    // Nothing was sent: show what the new session allows.
+                    DesktopKeyShare.Outcome.SessionChanged -> null
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -730,7 +737,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             }
             if (!isAdded) return@launch
             desktopSendButton.isEnabled = true
-            desktopStatusText.text = message
+            if (message != null) desktopStatusText.text = message else refreshDesktopSection()
         }
     }
 
