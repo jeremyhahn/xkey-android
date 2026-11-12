@@ -59,6 +59,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.json.JSONObject
@@ -234,15 +235,18 @@ class KeySharingPendingIntentHandlerTest {
         return suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
     }
 
-    /** Runs local.deleteKey through the handler. */
-    private suspend fun rpcDeleteKey(keyId: String) {
-        val method = RequestHandler::class.java.getDeclaredMethod(
-            "handleLocalDeleteKey", Request::class.java, Continuation::class.java
-        )
-        method.isAccessible = true
-        val request = Request(id = 2, method = MethodNames.LOCAL_DELETE_KEY, params = JSONObject().put("keyId", keyId))
-        val response = suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
-        assertEquals(null, response.error)
+    /**
+     * A process restart: [KeySharingPeers]' in-memory intents and pending
+     * withdrawals are gone, and their retries with them; the disk stays.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun restartProcess() {
+        for (name in listOf("keyIntents", "pendingWithdrawals")) {
+            val field = KeySharingPeers::class.java.getDeclaredField(name).apply { isAccessible = true }
+            (field.get(null) as MutableStateFlow<Map<Any, Any>>).value = emptyMap()
+        }
+        repo = PairedDeviceRepository(prefs)
+        handler = newHandler()
     }
 
     /** The authorization key export runs: the stored key when [peer] may have it, else null. */
@@ -465,5 +469,50 @@ class KeySharingPendingIntentHandlerTest {
         all.setKeyPolicy(SheetPolicy.ALL_PEERS) { allStored = SharingPolicyType.ALL_PEERS }
         assertTrue(shares(allKey, allStored, PEER_A))
         assertTrue(shares(allKey, allStored, PEER_B))
+    }
+
+    @Test
+    fun aFailedRpcRevocationIsNotReportedAndSurvivesARestart() = runTest {
+        val key = "k-rpc-restart"
+        table.value = listOf(KeySharingPolicy(key, PEER_A))
+        store(key, SharingPolicyType.ALL_PEERS, id = 7)
+        coEvery { keyDao.updateSharingPolicy(key, any()) } throws IllegalStateException("disk I/O error")
+
+        // A desktop makes the key private; the write fails.
+        val response = rpcSetShareableResponse(key, false)
+        assertFalse(response.result?.optBoolean("updated") == true)
+        assertNotNull(response.error)
+
+        // The process dies with its retry and starts again over the same disk.
+        restartProcess()
+
+        assertFalse(shares(key, SharingPolicyType.ALL_PEERS, PEER_A))
+        assertFalse(exports(key, PEER_A))
+    }
+
+    @Test
+    fun aFailedRpcWideningIsDroppedWhenTheKeyIsDeletedAndReused() = runTest {
+        val key = "k-rpc-reuse"
+        store(key, SharingPolicyType.PRIVATE, id = 1)
+        var failing = true
+        coEvery { keyDao.updateSharingPolicy(key, any()) } answers {
+            if (failing) throw IllegalStateException("disk I/O error")
+            store(firstArg(), secondArg())
+        }
+
+        // A desktop shares the key with all peers; the write fails and is retried.
+        rpcSetShareableResponse(key, true)
+
+        // Before the retry, the key is deleted (as the key screens do) and
+        // generated again under its id, not shareable, and granted to a peer.
+        keyDao.deleteByKeyId(key)
+        store(key, SharingPolicyType.PRIVATE, id = 2)
+        table.value = listOf(KeySharingPolicy(key, PEER_A))
+        failing = false
+        Thread.sleep(2_500) // past the first retry
+
+        assertEquals(2L, keys.getValue(key).id)
+        assertEquals(SharingPolicyType.PRIVATE, keys.getValue(key).sharingPolicy)
+        assertTrue(granted(key, PEER_A))
     }
 }
