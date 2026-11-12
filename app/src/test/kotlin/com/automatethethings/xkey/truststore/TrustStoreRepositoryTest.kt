@@ -33,6 +33,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -770,6 +772,55 @@ class TrustStoreRepositoryTest {
         assertTrue(source.startsWith("url:"))
         listOf("user", "secret", "exa mple", "abc", "frag").forEach {
             assertFalse("source leaks $it: $source", source.contains(it))
+        }
+    }
+
+    @Test
+    fun `importFromURL through okhttp logs a hostless url without its credentials`() = runTest {
+        // OkHttp accepts redundant slashes before the authority, so this URL
+        // fetches from example.com while java.net.URI sees no host at all.
+        val requested = mutableListOf<okhttp3.HttpUrl>()
+        val client = okhttp3.OkHttpClient.Builder()
+            .addInterceptor(
+                okhttp3.Interceptor { chain ->
+                    requested += chain.request().url
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .header("Content-Type", "application/pem-certificate-chain")
+                        .body(
+                            TestCertificates.LEAF_A_PEM.toByteArray().toResponseBody(
+                                "application/pem-certificate-chain".toMediaTypeOrNull()
+                            )
+                        )
+                        .build()
+                }
+            )
+            .build()
+        val okRepository = TrustStoreRepository(context, CABundleFetcher(client))
+        captureAudit()
+
+        val result = okRepository.importFromURL("https:///user:secret@example.com/ca.pem")
+
+        assertEquals(1, result.imported)
+        assertEquals("example.com", requested.single().host)
+        val imports = auditedOf(AuditOperationType.TRUST_STORE_IMPORT)
+        assertEquals(1, imports.size)
+        val source = details(imports[0]).getString("source")
+        assertTrue(
+            "unexpected source: $source",
+            source == "url:[unparseable url]" ||
+                source == "url:https://example.com/ca.pem"
+        )
+        listOf("user", "secret").forEach {
+            assertFalse("audit details leak $it", imports[0].details!!.contains(it))
+        }
+        val stored = okRepository.getCertificate(TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM))
+        assertEquals(source, stored!!.source)
+        listOf("user", "secret").forEach {
+            assertFalse("metadata leaks $it", File(storeDir, "metadata.json").readText().contains(it))
         }
     }
 
