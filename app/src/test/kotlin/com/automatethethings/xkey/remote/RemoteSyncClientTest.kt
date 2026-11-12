@@ -26,11 +26,14 @@ import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.slot
 import io.mockk.unmockkAll
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -315,6 +318,30 @@ class RemoteSyncClientTest {
         assertEquals("Sync request timed out: remote.syncStatus", e.message)
     }
 
+    @Test
+    fun `a status request beside a sync from another client on one router gets its own id and reply`() = runTest {
+        stubIdleEngine()
+        sender.neverReply()
+        // XKeyGattService builds a fresh client for desktopSyncStatus while
+        // syncNow's client may still be waiting on a store leg.
+        val other = RemoteSyncClient(context, sender, router, requestTimeoutMs = 5_000L)
+
+        val store = async { client.syncTrustStore() }
+        runCurrent()
+        val status = async { other.syncStatus() }
+        runCurrent()
+
+        val (storeRequest, statusRequest) = sender.sent
+        assertNotEquals("both requests are pending on one router", storeRequest.id, statusRequest.id)
+        router.processMessage(
+            """{"id":${statusRequest.id},"result":{"device_id":"desk-1","store_checksums":{}}}""".toByteArray()
+        )
+        router.processMessage("""{"id":${storeRequest.id},"result":{"added":1,"local":[]}}""".toByteArray())
+
+        assertEquals("desk-1", status.await().deviceId)
+        assertEquals(1, store.await().first)
+    }
+
     // --- Failure paths ------------------------------------------------------
 
     @Test
@@ -344,14 +371,15 @@ class RemoteSyncClientTest {
         stubIdleEngine()
         sender.neverReply()
         expectProtocolException { client.syncOath() }
+        val abandoned = sender.lastRequest.id
 
         // A late reply for the abandoned id must be discarded, not applied.
-        router.processMessage("""{"id":2000000,"result":{"local":[]}}""".toByteArray())
+        router.processMessage("""{"id":$abandoned,"result":{"local":[]}}""".toByteArray())
         sender.succeedWith("""{"local":[]}""")
 
         client.syncOath()
 
-        assertEquals(2_000_001L, sender.lastRequest.id)
+        assertEquals(abandoned + 1, sender.lastRequest.id)
     }
 
     // --- SyncResult ---------------------------------------------------------

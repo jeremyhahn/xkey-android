@@ -50,7 +50,6 @@ class RemoteSyncClient(
     private val requestTimeoutMs: Long = 30_000L
 ) {
     private val engine = SyncEngine(context.applicationContext)
-    private val nextRequestId = AtomicLong(BASE_REQUEST_ID)
 
     /** Aggregate result of a sync run (items pushed to / pulled from the laptop). */
     data class SyncResult(
@@ -173,11 +172,19 @@ class RemoteSyncClient(
         }
     }
 
-    private companion object {
-        const val TAG = "RemoteSyncClient"
+    internal companion object {
+        private const val TAG = "RemoteSyncClient"
 
         // Distinct from RemoteKeyClient's 1_000_000 base so outbound request IDs
         // from the two clients sharing one router never collide.
         const val BASE_REQUEST_ID = 2_000_000L
+
+        /**
+         * One counter for every instance: XKeyGattService builds a client per
+         * call, so a status request can be pending beside a sync from another
+         * client on the same router, and per-instance counters would give
+         * both the same id.
+         */
+        private val nextRequestId = AtomicLong(BASE_REQUEST_ID)
     }
 }
