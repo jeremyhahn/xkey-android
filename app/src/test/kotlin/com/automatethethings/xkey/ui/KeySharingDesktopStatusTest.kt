@@ -15,7 +15,9 @@
 package com.automatethethings.xkey.ui
 
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopShareDecision
+import com.automatethethings.xkey.remote.RemoteShareClient
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -38,5 +40,28 @@ class KeySharingDesktopStatusTest {
             R.string.sharing_desktop_ready,
             KeySharingBottomSheet.desktopStatusFor(DesktopShareDecision.PUBLIC_KEY)
         )
+    }
+
+    @Test
+    fun `a declined import shows the refusal, not the sent line`() {
+        val declined = DesktopKeyShare.Outcome.Declined(RemoteShareClient.ShareResult(false, "", "software"))
+        assertEquals(R.string.sharing_desktop_declined, KeySharingBottomSheet.desktopOutcomeFor(declined))
+        assertEquals(
+            R.string.sharing_desktop_sent,
+            KeySharingBottomSheet.desktopOutcomeFor(
+                DesktopKeyShare.Outcome.Sent(RemoteShareClient.ShareResult(true, "shared-k", "software"))
+            )
+        )
+    }
+
+    @Test
+    fun `a refused share shows the gate's reason and a changed session shows none`() {
+        assertEquals(
+            R.string.sharing_desktop_policy_denied,
+            KeySharingBottomSheet.desktopOutcomeFor(
+                DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED)
+            )
+        )
+        assertEquals(null, KeySharingBottomSheet.desktopOutcomeFor(DesktopKeyShare.Outcome.SessionChanged))
     }
 }

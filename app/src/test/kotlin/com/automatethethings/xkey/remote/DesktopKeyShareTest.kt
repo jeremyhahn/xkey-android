@@ -251,4 +251,23 @@ class DesktopKeyShareTest {
         assertFalse(a.sameAs(session(other, router, peer)))
         assertFalse(a.sameAs(null))
     }
+
+    // --- accepted=false is a failed import ---
+
+    @Test
+    fun `a reply with accepted false is a declined import, never sent`() = runTest {
+        sender.succeedWith("""{"accepted":false,"import_id":"","backend":"software"}""")
+        val out = share.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+        assertFalse(out is DesktopKeyShare.Outcome.Sent)
+        assertEquals(
+            DesktopKeyShare.Outcome.Declined(RemoteShareClient.ShareResult(false, "", "software")),
+            out
+        )
+    }
+
+    @Test
+    fun `a reply with accepted true is sent`() = runTest {
+        val out = share.send(entity(SharingPolicyType.ALL_PEERS), null, pem, null, isShared)
+        assertEquals(DesktopKeyShare.Outcome.Sent(RemoteShareClient.ShareResult(true, "shared-k", "software")), out)
+    }
 }
