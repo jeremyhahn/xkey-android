@@ -176,9 +176,13 @@ class RequestHandler(
          *
          * @param binding the binding of the connection the request arrived on
          * @param peerPublicKeyHex that connection's authenticated peer static key
+         * @param connectionId the id the transport assigned the connection
          */
-        fun servedConnection(binding: SessionBindingProvider, peerPublicKeyHex: String?): CoroutineContext =
-            CallerSession(binding, peerPublicKeyHex, served = true)
+        fun servedConnection(
+            binding: SessionBindingProvider,
+            peerPublicKeyHex: String?,
+            connectionId: String? = null,
+        ): CoroutineContext = CallerSession(binding, peerPublicKeyHex, served = true, connectionId = connectionId)
     }
 
     // Unified key storage DAO
@@ -473,6 +477,7 @@ class RequestHandler(
         val binding: SessionBindingProvider,
         val peerPublicKeyHex: String?,
         val served: Boolean,
+        val connectionId: String? = null,
     ) : AbstractCoroutineContextElement(Key) {
         companion object Key : CoroutineContext.Key<CallerSession>
     }

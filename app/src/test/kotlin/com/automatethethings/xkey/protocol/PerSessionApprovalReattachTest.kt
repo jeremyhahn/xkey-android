@@ -45,6 +45,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertNull
@@ -131,15 +132,15 @@ class PerSessionApprovalReattachTest {
 
     @Test
     fun `a reattach inside the Keystore window still prompts for the new session`() = runTest {
-        handler.setSessionId("usb:first")
-        sign()
+        attachUsb(USB_FIRST)
+        sign(USB_FIRST)
         assertPrompts(1)
-        sign()
+        sign(USB_FIRST)
         assertPrompts(1)
 
         // Detach, then reattach while the Keystore window is still open.
-        handler.setSessionId("usb:second")
-        sign()
+        attachUsb(USB_SECOND)
+        sign(USB_SECOND)
 
         assertPrompts(2)
     }
@@ -152,32 +153,105 @@ class PerSessionApprovalReattachTest {
             keystoreWindowOpen = true
             mockk(relaxed = true)
         }
-        handler.setSessionId("usb:first")
+        attachUsb(USB_FIRST)
 
         // A BLE or TCP sign arrives and its prompt stays open...
-        val pending = async { sign() }
+        val pending = async { sign(BLE) }
         runCurrent()
         assertPrompts(1)
 
         // ...while USB detaches and reattaches with a new session.
-        handler.setSessionId("usb:second")
+        attachUsb(USB_SECOND)
         bleApproval.complete(Unit)
         pending.await()
 
         // The new USB session's first protected sign still prompts.
-        sign()
+        sign(USB_SECOND)
         assertPrompts(2)
     }
 
-    private suspend fun sign() {
+    @Test
+    fun `a BLE sign approved after a reattach does not approve the new USB session`() = runTest {
+        attachUsb(USB_FIRST)
+        sign(USB_FIRST)
+        attachUsb(USB_SECOND)
+
+        // BLE's sign starts after the reattach and before USB's first sign.
+        sign(BLE)
+        assertPrompts(2)
+
+        sign(USB_SECOND)
+        assertPrompts(3)
+    }
+
+    @Test
+    fun `a TCP sign approved after a reattach does not approve the new USB session`() = runTest {
+        attachUsb(USB_FIRST)
+        sign(USB_FIRST)
+        attachUsb(USB_SECOND)
+
+        sign(TCP)
+        assertPrompts(2)
+
+        sign(USB_SECOND)
+        assertPrompts(3)
+    }
+
+    @Test
+    fun `a USB approval never authenticates a BLE or TCP request`() = runTest {
+        attachUsb(USB_FIRST)
+        sign(USB_FIRST)
+        assertPrompts(1)
+
+        sign(BLE)
+        assertPrompts(2)
+
+        sign(USB_FIRST)
+        sign(TCP)
+        assertPrompts(4)
+    }
+
+    @Test
+    fun `two requests on one connection share one approval`() = runTest {
+        attachUsb(USB_FIRST)
+        sign(BLE)
+        sign(BLE)
+        assertPrompts(1)
+
+        sign(TCP)
+        sign(TCP)
+        assertPrompts(2)
+    }
+
+    /**
+     * Opens a USB connection named [connectionId]. The handler-wide session
+     * id is announced as the USB server once did, so a request on another
+     * transport would pick it up if approval still read handler-wide state.
+     */
+    private fun attachUsb(connectionId: String) {
+        handler.setSessionId(connectionId)
+    }
+
+    /** Signs on the connection [connectionId], as its transport routes a request. */
+    private suspend fun sign(connectionId: String) {
         val params = JSONObject()
             .put("credentialId", "credential-1")
             .put("dataHash", Base64.getEncoder().encodeToString(ByteArray(32) { 1 }))
             .put("userVerificationRequired", true)
-        val response = Response.fromJson(
+        val raw = withContext(
+            RequestHandler.servedConnection(SessionBindingProvider { null }, null, connectionId)
+        ) {
             handler.handleRawRequest(Request(id = 1, method = MethodNames.SIGN, params = params).toJson())
-        )
+        }
+        val response = Response.fromJson(raw)
         assertNull("sign failed: ${response.error?.message}", response.error)
+    }
+
+    private companion object {
+        const val USB_FIRST = "usb:first"
+        const val USB_SECOND = "usb:second"
+        const val BLE = "ble:peer"
+        const val TCP = "tcp:peer"
     }
 
     private fun assertPrompts(expected: Int) {
