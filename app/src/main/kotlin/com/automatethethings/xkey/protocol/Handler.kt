@@ -3507,40 +3507,110 @@ class RequestHandler(
     /**
      * Handles an incoming co-sign request from a paired device.
      *
-     * The request contains a content hash that the local device should sign
-     * if the user approves. The signed response is returned to the initiator.
+     * The request carries a content hash the owner is asked to vouch for. The
+     * phone signs it only when all of these hold, in this order:
+     * - the session has a confirmed peer ([ErrorCodes.OPERATION_DENIED]);
+     * - `hashAlgorithm` is SHA-256, SHA-384 or SHA-512 and `hash` decodes to
+     *   exactly its digest length ([ErrorCodes.INVALID_PARAMS]);
+     * - the key is a `signing` key: a named key of any other type, FIDO2
+     *   included, is [ErrorCodes.OPERATION_DENIED], and the fallback picks
+     *   only signing keys;
+     * - the owner approves the prompt, which names the first 8 hex characters
+     *   of the hash. No prompt available, a cancel or a failure is
+     *   [ErrorCodes.BIOMETRIC_FAILED] and nothing is signed.
      *
      * @param request The co-sign request containing hash, algorithm, and initiator info.
-     * @return Response with the signature or an error if user denies.
+     * @return Response with the signature, or an error when any check fails.
      */
     private suspend fun handleCosignRequest(request: Request): Response {
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
+        // An anonymous session cannot ask the owner to vouch for anything.
+        requireConfirmedPeer("Co-signing")
+
         val contentHash = params.optString("hash", "")
         val hashAlgorithm = params.optString("hashAlgorithm", "SHA-256")
-        val initiatorFingerprint = params.optString("from", "")
         val keyId = params.optString("keyId", "")
 
         if (contentHash.isEmpty()) {
             return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing content hash")
         }
 
-        // Find signing key - use specified key or first available signing key
-        val db = XKeyDatabase.getInstance(context)
-        val signingKey: KeyEntity? = if (keyId.isNotEmpty()) {
-            db.keyDao().getByKeyId(keyId)
-        } else {
-            db.keyDao().getAll().firstOrNull { it.keyType == "signing" || it.keyType == "fido2" }
+        // The hash must be one whole digest of the named algorithm: a truncated
+        // or padded value would be signed as whatever it decodes to.
+        val digestLength = when (hashAlgorithm.uppercase()) {
+            "SHA-256" -> 32
+            "SHA-384" -> 48
+            "SHA-512" -> 64
+            else -> return Response.error(
+                request.id,
+                ErrorCodes.INVALID_PARAMS,
+                "Unsupported hash algorithm: $hashAlgorithm"
+            )
+        }
+        val hashBytes = hexToBytes(contentHash)
+        if (hashBytes.size != digestLength) {
+            return Response.error(
+                request.id,
+                ErrorCodes.INVALID_PARAMS,
+                "A $hashAlgorithm hash is $digestLength bytes, got ${hashBytes.size}"
+            )
         }
 
-        if (signingKey == null) {
-            return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
+        // Only a signing key co-signs: a FIDO2 credential is bound to its
+        // relying party and must never sign an arbitrary hash.
+        val db = XKeyDatabase.getInstance(context)
+        val signingKey: KeyEntity = if (keyId.isNotEmpty()) {
+            val named = db.keyDao().getByKeyId(keyId)
+                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
+            if (named.keyType != KeyTypes.SIGNING) {
+                return Response.error(
+                    request.id,
+                    ErrorCodes.OPERATION_DENIED,
+                    "Key $keyId is not a signing key"
+                )
+            }
+            named
+        } else {
+            db.keyDao().getAll().firstOrNull { it.keyType == KeyTypes.SIGNING }
+                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
+        }
+
+        // The owner approves every co-signature on the phone.
+        val launcher = biometricLauncher
+            ?: return Response.error(
+                request.id,
+                ErrorCodes.BIOMETRIC_FAILED,
+                "Co-signing needs the owner's approval and no prompt is available"
+            )
+        val promptId = "cosign-${request.id}"
+        showBiometricNotificationIfLocked(
+            operationType = "sign",
+            rpName = null,
+            requestId = promptId
+        )
+        try {
+            launcher.requestAuthentication(
+                title = "Co-sign request",
+                subtitle = "Approve co-signing hash ${contentHash.take(8)}",
+                showOnLockScreen = keyguardManager.isKeyguardLocked
+            )
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Co-sign not approved: ${e.message}")
+            return Response.error(
+                request.id,
+                ErrorCodes.BIOMETRIC_FAILED,
+                "Co-sign not approved: ${e.message}"
+            )
+        } finally {
+            cancelBiometricNotification()
         }
 
         // Sign the content hash
         return try {
-            val hashBytes = hexToBytes(contentHash)
             val signatureBytes = keystoreManager.signWithAlgorithm(
                 signingKey.keyId, hashBytes, signingKey.algorithm
             )
