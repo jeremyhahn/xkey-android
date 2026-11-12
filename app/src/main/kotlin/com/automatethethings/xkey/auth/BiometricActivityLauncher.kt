@@ -453,12 +453,13 @@ class BiometricActivityLauncher(
      * notification, the only way in, expire. The request hands the screen to
      * the next one instead of holding it for as long as its caller waits, and
      * a late start of its prompt finishes without prompting. A prompt that is
-     * up stays, since the owner is answering it; a crypto signature's key is
-     * left alone. Called when [key]'s notification expires.
+     * up stays, since the owner is answering it. A crypto signature's key
+     * fails its signature the same way. Called when [key]'s notification
+     * expires.
      */
     fun expireUnshown(key: String) {
-        val requestId = NotificationKeys.approvalRequestId(key) ?: return
-        pendingRequests.expireUnshown(requestId)
+        NotificationKeys.approvalRequestId(key)?.let { pendingRequests.expireUnshown(it) }
+        NotificationKeys.signatureRequestId(key)?.let { pendingCryptoRequests.expireUnshown(it) }
     }
 
     /**

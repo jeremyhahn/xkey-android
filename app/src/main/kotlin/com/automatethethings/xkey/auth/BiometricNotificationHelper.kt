@@ -210,4 +210,8 @@ object NotificationKeys {
     /** The generic approval request [key] names, or null for a key of any other kind. */
     fun approvalRequestId(key: String): String? =
         if (key.startsWith(APPROVAL)) key.removePrefix(APPROVAL) else null
+
+    /** The crypto signature request [key] names, or null for a key of any other kind. */
+    fun signatureRequestId(key: String): String? =
+        if (key.startsWith(SIGNATURE)) key.removePrefix(SIGNATURE) else null
 }

@@ -15,9 +15,14 @@
 
 package com.automatethethings.xkey.auth
 
+import androidx.biometric.BiometricPrompt
 import com.automatethethings.xkey.auth.BiometricActivityLauncher.CryptoSigningResult
 import com.automatethethings.xkey.ui.CryptoSigningCancellations
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -37,15 +42,25 @@ import kotlin.coroutines.resumeWithException
  * arrival order: a request that arrives while another is
  * prompting waits for it to settle, and one cancelled while it waits is
  * never shown. Every request is settled exactly once: by its result, by the
- * failure to launch its prompt, or by its cancellation.
+ * failure to launch its prompt, by its active deadline passing or its
+ * notification expiring with its prompt never up ([expireUnshown]), or by its
+ * cancellation. The screen is shared with the generic approvals
+ * ([PendingAuthentications]), so a signature whose start Android blocked
+ * must let go of it as they do, or every approval behind it times out unseen.
  *
  * @param cancelPrompt dismisses the prompt for a request id
  * @param prompts the turns the requests take on screen; process-wide, since
  *   there is one screen whichever launcher a request came through
+ * @param expirePrompt ends a request's prompt unshown, so a late start of it
+ *   prompts for nothing; false while its activity has the request
+ * @param activeDeadlineMillis how long a launched request waits for its
+ *   prompt to come up; the generic approvals' own deadline
  */
 internal class PendingCryptoSignatures(
     private val cancelPrompt: (requestId: String) -> Unit = CryptoSigningCancellations::cancel,
     private val prompts: SigningPromptQueue = SigningPromptQueue.process,
+    private val expirePrompt: (requestId: String) -> Boolean = CryptoSigningCancellations::expireUnshown,
+    private val activeDeadlineMillis: Long = PendingAuthentications.ACTIVE_DEADLINE_MILLIS,
 ) {
     private val pending = ConcurrentHashMap<Long, Request>()
 
@@ -54,6 +69,7 @@ internal class PendingCryptoSignatures(
         val id: Long,
         val continuation: CancellableContinuation<CryptoSigningResult>,
         private val launch: (requestId: String) -> Unit,
+        private val launched: CompletableDeferred<Unit>,
     ) : SigningPromptQueue.Turn {
         override fun show() {
             // Cancelled before its turn came: it never comes up.
@@ -63,6 +79,7 @@ internal class PendingCryptoSignatures(
             }
             try {
                 launch(id.toString())
+                launched.complete(Unit)
             } catch (e: Exception) {
                 if (pending.remove(id, this)) {
                     prompts.leave(this)
@@ -76,20 +93,57 @@ internal class PendingCryptoSignatures(
      * Allocates a request id, [launch]es the prompt for it when its turn
      * comes, and waits for its result. Cancelling the caller cancels the
      * prompt, or, while the request still waits for its turn, withdraws it.
+     * A launched request whose prompt is still not up [activeDeadlineMillis]
+     * after its launch fails with [BiometricPrompt.ERROR_TIMEOUT] and hands
+     * the screen on ([expireUnshown]); one the owner is answering keeps
+     * waiting, since its prompt answers when it goes away.
      */
-    suspend fun await(launch: (requestId: String) -> Unit): CryptoSigningResult =
-        suspendCancellableCoroutine { continuation ->
-            val request = Request(nextRequestId.incrementAndGet(), continuation, launch)
-            pending[request.id] = request
-            continuation.invokeOnCancellation {
-                pending.remove(request.id, request)
-                // The prompt goes down before the next one comes up.
-                prompts.leave(request) { wasShowing ->
-                    if (wasShowing) cancelPrompt(request.id.toString())
-                }
-            }
-            prompts.join(request)
+    suspend fun await(launch: (requestId: String) -> Unit): CryptoSigningResult = coroutineScope {
+        val id = nextRequestId.incrementAndGet()
+        val launched = CompletableDeferred<Unit>()
+        // Its own clock, started with the launch: no notification has to
+        // exist for an unseen request to let go of the screen.
+        // (`this.launch` is the coroutine builder, not the parameter.)
+        val activeDeadline = this.launch {
+            launched.await()
+            delay(activeDeadlineMillis)
+            expireUnshown(id.toString())
         }
+        try {
+            suspendCancellableCoroutine { continuation ->
+                val request = Request(id, continuation, launch, launched)
+                pending[request.id] = request
+                continuation.invokeOnCancellation {
+                    pending.remove(request.id, request)
+                    // The prompt goes down before the next one comes up.
+                    prompts.leave(request) { wasShowing ->
+                        if (wasShowing) cancelPrompt(request.id.toString())
+                    }
+                }
+                prompts.join(request)
+            }
+        } finally {
+            activeDeadline.cancel()
+        }
+    }
+
+    /**
+     * Fails launched request [requestId] with [BiometricPrompt.ERROR_TIMEOUT]
+     * unless its activity has it; false when it was left waiting, or nothing
+     * waits on that id. Called when its notification expires and when its
+     * active deadline passes, whichever comes first.
+     */
+    fun expireUnshown(requestId: String): Boolean {
+        val id = requestId.toLongOrNull() ?: return false
+        if (!pending.containsKey(id) || !expirePrompt(requestId)) return false
+        return complete(
+            id,
+            CryptoSigningResult.Error(
+                BiometricPrompt.ERROR_TIMEOUT,
+                "The signing prompt was never shown before its deadline"
+            )
+        )
+    }
 
     /** Resumes [requestId]'s caller with [result]; false when nothing waits on it. */
     fun complete(requestId: Long, result: CryptoSigningResult): Boolean {

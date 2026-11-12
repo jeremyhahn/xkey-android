@@ -77,6 +77,18 @@ object CryptoSigningCancellations {
         while (refused.size > MAX_REMEMBERED) refused.remove(refused.first())
     }
 
+    /**
+     * Ends [requestId]'s prompt unshown, so an activity that comes up for it
+     * later finishes without prompting. False when an activity already has
+     * the request: its prompt is up and the owner is answering it.
+     */
+    @Synchronized
+    fun expireUnshown(requestId: String): Boolean {
+        if (requestId in live) return false
+        remember(requestId)
+        return true
+    }
+
     /** Takes down [requestId]'s prompt, now or when its activity comes up. */
     fun cancel(requestId: String) {
         val controller = synchronized(this) {
