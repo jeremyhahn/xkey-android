@@ -26,7 +26,6 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MenuItem
@@ -48,6 +47,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.oath.OathCredentialWithCode
+import com.automatethethings.xkey.oath.manualOtpauthUri
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -859,13 +859,10 @@ class OathActivity : AppCompatActivity() {
 
     /**
      * Assembles the `otpauth://` URI the importer parses, from hand-entered
-     * values.
-     *
-     * Built with [Uri.Builder] rather than by concatenation so that the label
-     * and the parameters are percent-encoded: an issuer or account containing
-     * `&`, `?`, `#`, or `=` — all of them legal in a display name and an email
-     * address — would otherwise be read back as URI structure and corrupt every
-     * field after it.
+     * values, with [manualOtpauthUri]: every value is percent-encoded, so an
+     * issuer or account containing `&`, `?`, `#`, `=` or `:` is not read back
+     * as URI structure, and the label's issuer and account are joined by the
+     * literal `:` the importer splits on (#156).
      */
     private fun buildOtpauthUri(
         issuer: String?,
@@ -875,18 +872,5 @@ class OathActivity : AppCompatActivity() {
         algorithm: String,
         digits: Int,
         period: Int
-    ): String {
-        val label = if (issuer != null) "$issuer:$accountName" else accountName
-        return Uri.Builder()
-            .scheme("otpauth")
-            .authority(type.lowercase())
-            .appendPath(label)
-            .appendQueryParameter("secret", secret)
-            .apply { if (issuer != null) appendQueryParameter("issuer", issuer) }
-            .appendQueryParameter("algorithm", algorithm)
-            .appendQueryParameter("digits", digits.toString())
-            .appendQueryParameter("period", period.toString())
-            .build()
-            .toString()
-    }
+    ): String = manualOtpauthUri(issuer, accountName, secret, type, algorithm, digits, period)
 }

@@ -168,7 +168,7 @@ class OathRepository(
         // Parse the label: /Issuer:account or /account
         // Split before decoding, so an encoded ':' (%3A) stays in its part.
         val label = parsed.encodedPath?.removePrefix("/") ?: ""
-        val (labelIssuer, accountName) = parseOathLabel(label)
+        val (labelIssuer, accountName) = parseOathLabel(label, parsed.getQueryParameter("issuer"))
 
         // Secret is required
         val secretBase32 = parsed.getQueryParameter("secret")
