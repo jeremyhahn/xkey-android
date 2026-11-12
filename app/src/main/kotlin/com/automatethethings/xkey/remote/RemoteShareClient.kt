@@ -472,9 +472,11 @@ internal object SharePermissionLedger {
  * the share enters the transport, on the key as the store holds it then
  * ([currentEntity][send]) and the peer grants as they stand then. The
  * transport's admission then checks [SharePermissionLedger] for a revoke
- * since that re-read. A permission revoked while the share was pending,
- * including while it waited inside the transport, refuses it with
- * [DesktopShareDecision.POLICY_DENIED] and nothing is sent.
+ * since the [SharePermissionLedger.Baseline] the caller took before it
+ * loaded any of the key's inputs. A permission revoked, or the key deleted
+ * or replaced, after that baseline, including while the share waited inside
+ * the transport, refuses it with [DesktopShareDecision.POLICY_DENIED] and
+ * nothing is sent.
  */
 class DesktopKeyShare(
     private val session: ShareSession,
@@ -493,22 +495,16 @@ class DesktopKeyShare(
         data object SessionChanged : Outcome()
     }
 
-    /** Scaffold for the r14 regression tests: [baseline] is not yet enforced. */
-    internal suspend fun send(
-        baseline: SharePermissionLedger.Baseline,
-        entity: KeyEntity?,
-        software: SoftwareKey?,
-        publicKeyPem: String?,
-        certificatePem: String?,
-        isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean,
-        currentEntity: suspend (keyId: String) -> KeyEntity?
-    ): Outcome = send(entity, software, publicKeyPem, certificatePem, isKeySharedWithPeer, currentEntity)
-
     /**
+     * [baseline] is the key's [SharePermissionLedger.Baseline], taken before
+     * any of [entity], [software], [publicKeyPem] and [certificatePem] was
+     * loaded; the transport admits the send only while it holds, and a
+     * baseline for another key refuses the send.
      * [software]'s material is zeroed before this returns, whatever the outcome.
      * [currentEntity] reads the key's record from the store, not a snapshot.
      */
-    suspend fun send(
+    internal suspend fun send(
+        baseline: SharePermissionLedger.Baseline,
         entity: KeyEntity?,
         software: SoftwareKey?,
         publicKeyPem: String?,
@@ -524,16 +520,17 @@ class DesktopKeyShare(
             if (decision != DesktopShareDecision.PUBLIC_KEY || entity == null || publicKeyPem == null) {
                 return Outcome.Refused(decision)
             }
+            if (baseline.keyId != entity.keyId) return Outcome.Refused(DesktopShareDecision.POLICY_DENIED)
             val peer = session.peerPublicKeyHex
             val result = try {
                 session.client(requestTimeoutMs) {
-                    // The revision first: a revoke committed after it is caught at admission.
-                    val revision = SharePermissionLedger.revision(entity.keyId)
                     val now = DesktopShareGate.decide(
                         currentEntity(entity.keyId), null, publicKeyPem, peer, isKeySharedWithPeer
                     )
                     if (now != DesktopShareDecision.PUBLIC_KEY) throw SharePermissionRevokedException(entity.keyId)
-                    return@client { SharePermissionLedger.requireUnchanged(entity.keyId, revision) }
+                    // The baseline predates the inputs: a revoke, delete or
+                    // replacement committed since they were loaded is caught here.
+                    return@client { SharePermissionLedger.requireUnchanged(baseline.keyId, baseline.revision) }
                 }.sharePublicKey(
                     RemoteShareClient.PublicKeyShare(
                         keyId = entity.keyId,

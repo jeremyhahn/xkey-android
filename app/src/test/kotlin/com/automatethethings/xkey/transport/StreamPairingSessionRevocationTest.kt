@@ -983,6 +983,7 @@ class StreamPairingSessionRevocationTest {
         val router = BidirectionalMessageRouter(requestHandler)
         val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) { true }!!
         val store = SharedKeyStore(phone.desktop.publicKeyHex)
+        val baseline = SharePermissionLedger.baseline(store.keyId)
         val paused = CompletableDeferred<Unit>()
         val resume = CompletableDeferred<Unit>()
         pairing.beforeAdmissionForTest = {
@@ -992,7 +993,7 @@ class StreamPairingSessionRevocationTest {
         val sending = scope.async {
             runCatching {
                 DesktopKeyShare(session, SHARE_TIMEOUT_MS)
-                    .send(store.entity, null, PEM, null, store.isShared, store.current)
+                    .send(baseline, store.entity, null, PEM, null, store.isShared, store.current)
             }
         }
         withTimeout(TIMEOUT_MS) { paused.await() }

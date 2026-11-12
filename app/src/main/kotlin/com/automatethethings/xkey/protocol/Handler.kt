@@ -1042,12 +1042,19 @@ class RequestHandler(
             )
         }
 
-        // Delete the key and its metadata row as one revoke, like every other
-        // key delete: a share of the key pending at a transport is refused at
-        // admission.
-        val deleted = SharePermissionLedger.revoking(deleteParams.credentialId) {
-            keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
-                if (removed) keyDao.deleteByKeyId(deleteParams.credentialId)
+        // The key the ID names: an alias form (xkey_key_<id>) removes <id>'s
+        // Keystore entry, so it is <id> that is revoked and whose row goes.
+        val keyId = canonicalKeyId(deleteParams.credentialId)
+
+        // Delete the key and its metadata row as one revoke, opened before the
+        // Keystore is touched, like every other key delete: a share of the key
+        // pending at a transport is refused at admission. The ID as given is
+        // revoked too when it differs.
+        val deleted = SharePermissionLedger.revoking(keyId) {
+            SharePermissionLedger.revoking(deleteParams.credentialId) {
+                keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
+                    if (removed) keyDao.deleteByKeyId(keyId)
+                }
             }
         }
         if (!deleted) {
@@ -1155,46 +1162,99 @@ class RequestHandler(
         val genParams = LocalGenerateKeyParams.fromJson(params)
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
-        // Refuse an ID that exists in any key store: the general and
-        // credential Keystore namespaces, the software store, and the
-        // metadata table. (A row that appears after this check is still
-        // replaced only as a SharePermissionLedger revoke, in KeyDao.insert.)
-        if (keystoreManager.generalKeyExists(genParams.keyId) ||
-            keystoreManager.keyExists(genParams.keyId) ||
-            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).contains(genParams.keyId) ||
-            keyDao.exists(genParams.keyId)
-        ) {
-            throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
+        // An ID in an existing key's raw alias form names that key.
+        val keyId = canonicalKeyId(genParams.keyId)
+        if (keyId != genParams.keyId) {
+            throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
         }
+        // The ID is reserved for the whole generation, across the prompt: a
+        // second generation of it meanwhile is refused.
+        if (!KeyGenerationReservations.reserve(keyId)) {
+            throw ProtocolException("Key generation already pending: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
+        }
+        try {
+            refuseExistingKey(keyId)
 
-        val authDurationSeconds = calculateAuthDuration(currentSettings)
+            val authDurationSeconds = calculateAuthDuration(currentSettings)
 
-        // Biometric verification before key generation
-        if (genParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
-            if (biometricLauncher != null) {
-                biometricLauncher.requestAuthentication(
-                    title = "Key Generation",
-                    subtitle = "Verify your identity to create a new key",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
-                )
-            } else {
-                val helper = biometricHelper
-                    ?: throw ProtocolException(
-                        "No activity available for biometric prompt",
-                        errorCode = ErrorCodes.INTERNAL_ERROR
+            // Biometric verification before key generation
+            if (genParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
+                if (biometricLauncher != null) {
+                    biometricLauncher.requestAuthentication(
+                        title = "Key Generation",
+                        subtitle = "Verify your identity to create a new key",
+                        showOnLockScreen = keyguardManager.isKeyguardLocked
                     )
-                helper.authenticateWithoutCrypto(
-                    title = "Key Generation",
-                    subtitle = "Verify your identity to create a new key"
-                )
+                } else {
+                    val helper = biometricHelper
+                        ?: throw ProtocolException(
+                            "No activity available for biometric prompt",
+                            errorCode = ErrorCodes.INTERNAL_ERROR
+                        )
+                    helper.authenticateWithoutCrypto(
+                        title = "Key Generation",
+                        subtitle = "Verify your identity to create a new key"
+                    )
+                }
             }
-        }
 
+            // Generated inside a revoke of the ID, opened before any key
+            // material is touched (generation replaces a Keystore entry under
+            // the ID), after existence is checked again: a key that appeared
+            // during the prompt is refused, and a share of the ID waiting at
+            // admission is refused from the revoke's start.
+            SharePermissionLedger.revoking(keyId) {
+                refuseExistingKey(keyId)
+                generateLocalKey(request, genParams, algorithmName, authDurationSeconds)
+            }
+        } finally {
+            KeyGenerationReservations.release(keyId)
+        }
+    }
+
+    /**
+     * Refuses an ID that exists in any key store: the general and credential
+     * Keystore namespaces, the software store, and the metadata table.
+     */
+    private suspend fun refuseExistingKey(keyId: String) {
+        if (keystoreManager.generalKeyExists(keyId) ||
+            keystoreManager.keyExists(keyId) ||
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).contains(keyId) ||
+            keyDao.exists(keyId)
+        ) {
+            throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
+        }
+    }
+
+    /**
+     * The canonical ID of the key [id] names. An ID in raw alias form
+     * (`xkey_key_<id>` or `xkey_credential_<id>`, which [KeystoreManager]
+     * resolves to that Keystore entry itself) names the key `<id>`; any other
+     * ID is already canonical. Every operation that removes or replaces key
+     * material resolves its ID here and opens its revoke on the result before
+     * it touches the Keystore.
+     */
+    private fun canonicalKeyId(id: String): String {
+        if (keystoreManager.resolveKeystoreAlias(id) != id) return id
+        val prefix = KEYSTORE_ALIAS_PREFIXES.firstOrNull { id.startsWith(it) && id.length > it.length }
+        return if (prefix == null) id else id.removePrefix(prefix)
+    }
+
+    /**
+     * Generates the key for [handleLocalGenerateKey], inside its reservation
+     * and its revoke of the ID.
+     */
+    private suspend fun generateLocalKey(
+        request: Request,
+        genParams: LocalGenerateKeyParams,
+        algorithmName: String,
+        authDurationSeconds: Int
+    ): Response {
         // Software-backed (exportable) keys take a separate path: the raw
         // material lives in SoftwareKeyStore (app-encrypted) so it can be
         // exported/shared, instead of the non-exportable hardware Keystore.
         if (genParams.exportable) {
-            return@withContext generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
+            return generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
         }
 
         // Generate key based on algorithm type
@@ -1246,7 +1306,7 @@ class RequestHandler(
                 keySizeBits = keySizeBits,
                 strongBoxBacked = keystoreManager.isStrongBoxAvailable()
             )
-            return@withContext Response.success(request.id, result.toJson())
+            return Response.success(request.id, result.toJson())
         }
 
         // Asymmetric key generation
@@ -1322,7 +1382,7 @@ class RequestHandler(
             )
         }
 
-        Response.success(request.id, result.toJson())
+        return Response.success(request.id, result.toJson())
     }
 
     /**
@@ -1857,12 +1917,13 @@ class RequestHandler(
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
 
-        // One revoke from the first removal: the Android Keystore and the
-        // software key store (only one of the two holds the key), then the
-        // unified key store's row.
-        keyDao.deleteKeyAndMaterial(keyId) {
-            keystoreManager.deleteGeneralKey(keyId)
-            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
+        // One revoke of the canonical ID from the first removal: the Android
+        // Keystore and the software key store (only one of the two holds the
+        // key), then the unified key store's row.
+        val canonicalId = canonicalKeyId(keyId)
+        keyDao.deleteKeyAndMaterial(canonicalId) {
+            keystoreManager.deleteGeneralKey(canonicalId)
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(canonicalId)
         }
 
         Log.i(TAG, "Deleted key: $keyId")
@@ -3939,5 +4000,24 @@ class RequestHandler(
     private fun computeFingerprint(publicKeyDer: ByteArray): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         return digest.digest(publicKeyDer).joinToString("") { "%02x".format(it) }
+    }
+}
+
+/** The Keystore alias prefixes of [KeystoreManager]'s credential and general key namespaces. */
+private val KEYSTORE_ALIAS_PREFIXES = listOf("xkey_credential_", "xkey_key_")
+
+/**
+ * Key IDs with a `local.generateKey` in progress, shared by every handler
+ * instance: an ID is reserved from before the generation's existence check
+ * until it ends, across its biometric prompt.
+ */
+private object KeyGenerationReservations {
+    private val pending = HashSet<String>()
+
+    /** Reserves [keyId]; false when a generation of it is already pending. */
+    fun reserve(keyId: String): Boolean = synchronized(pending) { pending.add(keyId) }
+
+    fun release(keyId: String) {
+        synchronized(pending) { pending.remove(keyId) }
     }
 }

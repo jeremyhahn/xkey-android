@@ -38,6 +38,22 @@ import org.junit.Test
  * key is sent on, never the handler-wide peer key, and nothing is sent once
  * that connection has been replaced.
  */
+/**
+ * Sends with a baseline taken at the call: these tests' inputs are fixed
+ * values, so nothing can change between their load and the baseline.
+ */
+private suspend fun DesktopKeyShare.send(
+    entity: KeyEntity?,
+    software: SoftwareKey?,
+    publicKeyPem: String?,
+    certificatePem: String?,
+    isKeySharedWithPeer: suspend (String, String) -> Boolean,
+    currentEntity: suspend (String) -> KeyEntity?
+): DesktopKeyShare.Outcome = send(
+    SharePermissionLedger.baseline(entity?.keyId ?: ""),
+    entity, software, publicKeyPem, certificatePem, isKeySharedWithPeer, currentEntity
+)
+
 class DesktopKeyShareTest {
 
     private lateinit var router: BidirectionalMessageRouter

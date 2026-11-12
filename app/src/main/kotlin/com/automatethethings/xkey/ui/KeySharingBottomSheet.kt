@@ -772,11 +772,14 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         desktopStatusText.text = getString(R.string.sharing_desktop_sending)
         lifecycleScope.launch {
             val message: String? = try {
+                // The baseline before any input is read: a delete, replacement
+                // or revoke of the key after it refuses the send at admission.
+                val baseline = SharePermissionLedger.baseline(keyId)
                 val inputs = loadShareInputs()
                 // The permission is read again from the store just before the
                 // send, so a revoke made while the share was pending wins.
                 when (val out = DesktopKeyShare(session).send(
-                    inputs.entity, inputs.software, inputs.publicKeyPem, null, ::isSharedWithPeer,
+                    baseline, inputs.entity, inputs.software, inputs.publicKeyPem, null, ::isSharedWithPeer,
                     { id -> keyDao.getByKeyId(id) }
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->

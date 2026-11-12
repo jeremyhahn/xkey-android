@@ -28,6 +28,7 @@ import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopShareDecision
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.remote.SharedKeyStore
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
@@ -457,6 +458,7 @@ class GattServerReconnectTest {
         val share = ShareSession.of(listOf(ShareSession.Transport(server, router))) { true }!!
         assertEquals(keyHex, share.peerPublicKeyHex)
         val store = SharedKeyStore(keyHex)
+        val baseline = SharePermissionLedger.baseline(store.keyId)
         val fragments = captureFragments()
         val paused = CompletableDeferred<Unit>()
         val resume = CompletableDeferred<Unit>()
@@ -467,7 +469,7 @@ class GattServerReconnectTest {
         val sending = async {
             runCatching {
                 DesktopKeyShare(share, SHARE_TIMEOUT_MS)
-                    .send(store.entity, null, PEM, null, store.isShared, store.current)
+                    .send(baseline, store.entity, null, PEM, null, store.isShared, store.current)
             }
         }
         withTimeout(TIMEOUT_MS) { paused.await() }
