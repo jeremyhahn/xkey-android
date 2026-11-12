@@ -24,6 +24,10 @@ import com.automatethethings.xkey.protocol.RemoteKeyInfo
 import com.automatethethings.xkey.protocol.RemoteSignResult
 import com.automatethethings.xkey.remote.RemoteKeyClient
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
 import java.io.IOException
 import java.security.SecureRandom
 import java.util.Base64
@@ -67,6 +71,20 @@ interface DesktopKeysSource {
  * object, since the screen refuses a source it did not open with.
  */
 class DesktopSession(val peer: String?, val source: DesktopKeysSource)
+
+/**
+ * Whether the desktop session is with [peer], re-checked every [periodMillis]
+ * while collected. [currentPeer] is the confirmed peer of the session that is
+ * up, or null when none is: the flow turns true once the session with [peer]
+ * is connected and confirmed, and false when it ends or another desktop has it.
+ */
+fun desktopSessionUp(peer: String, currentPeer: () -> String?, periodMillis: Long = 1_000L): Flow<Boolean> =
+    flow {
+        while (true) {
+            emit(currentPeer() == peer)
+            delay(periodMillis)
+        }
+    }.distinctUntilChanged()
 
 /** A failure the screen shows, typed by what went wrong on the desktop link. */
 data class DesktopKeyError(val kind: Kind, val code: Int?, val detail: String) {

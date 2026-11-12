@@ -52,6 +52,9 @@ import com.automatethethings.xkey.ca.EnrolledDeviceRepository
 import com.automatethethings.xkey.ca.EnrollmentRefusal
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -218,6 +221,15 @@ class DeviceDetailActivity : AppCompatActivity() {
 
         buildPremiumLayout()
         setContentView(scrollView)
+
+        // The desktop keys entry follows this device's desktop session while visible.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                desktopSessionUp(publicKeyHex, { gattService?.desktopSessionPeer() }).collect { up ->
+                    desktopKeysButton.visibility = if (up) View.VISIBLE else View.GONE
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -1135,7 +1147,7 @@ class DeviceDetailActivity : AppCompatActivity() {
 
         // Desktop keys need this device's desktop session to be up.
         desktopKeysButton.visibility =
-            if (isConnected && gattService?.remoteKeyClient() != null) View.VISIBLE else View.GONE
+            if (gattService?.desktopSessionPeer() == publicKeyHex) View.VISIBLE else View.GONE
 
         // Update connection card
         if (isConnected) {

@@ -797,6 +797,12 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     fun remoteKeyClient(): RemoteKeyClient? = remoteKeyClients.client()
 
     /**
+     * The confirmed peer public key hex of the desktop session that is up, or
+     * null while no session is up or its peer is not yet confirmed.
+     */
+    fun desktopSessionPeer(): String? = activeTransport()?.let { getConnectedDevicePublicKeyHex() }
+
+    /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)
      * with the connected desktop over the active transport.
      *
