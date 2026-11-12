@@ -61,6 +61,7 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import java.util.Base64
 import com.automatethethings.xkey.pin.PinManager
+import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinType
 import com.automatethethings.xkey.pin.PinException
 import com.automatethethings.xkey.pin.PinLockedException
@@ -3127,9 +3128,13 @@ class RequestHandler(
         return try {
             val db = XKeyDatabase.getInstance(context)
             val cred = db.oathCredentialDao().getByOathId(credentialId)
+            if (cred == null) {
+                // Nothing has that id: say so rather than claim a deletion.
+                return Response.success(request.id, JSONObject().apply { put("deleted", false) })
+            }
             db.oathCredentialDao().deleteByOathId(credentialId)
 
-            AuditLogger.logOathCredentialDeleted(credentialId, cred?.issuer, cred?.accountName ?: "")
+            AuditLogger.logOathCredentialDeleted(credentialId, cred.issuer, cred.accountName)
 
             val result = JSONObject().apply { put("deleted", true) }
             Response.success(request.id, result)
@@ -3635,6 +3640,7 @@ class RequestHandler(
         val currentPin = params.optString("currentPin", "").ifEmpty { null }
         val newPin = params.optString("newPin", "")
         if (newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "New PIN is required")
+        newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
                 "SO_PIN" -> pm.setSOPIN(currentPin, newPin)
@@ -3646,6 +3652,8 @@ class RequestHandler(
                 else -> return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid pinType: $pinType")
             }
             Response.success(request.id, JSONObject().apply { put("success", true) })
+        } catch (e: PinLockedException) {
+            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
         } catch (e: PinException) {
             Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN set failed")
         } catch (e: Exception) {
@@ -3660,6 +3668,7 @@ class RequestHandler(
         val currentPin = params.optString("currentPin", "")
         val newPin = params.optString("newPin", "")
         if (currentPin.isEmpty() || newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Current and new PINs required")
+        newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
                 "SO_PIN" -> pm.changeSOPIN(currentPin, newPin)
@@ -3684,12 +3693,27 @@ class RequestHandler(
         return try {
             pm.resetLockout(soPin)
             Response.success(request.id, JSONObject().apply { put("success", true) })
+        } catch (e: PinLockedException) {
+            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
         } catch (e: PinException) {
             Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "Reset failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "Reset error")
         }
     }
+
+    /**
+     * INVALID_PARAMS when [newPin] is outside the allowed
+     * [PinHasher.MIN_PIN_LENGTH]..[PinHasher.MAX_PIN_LENGTH] UTF-8 bytes,
+     * checked before the [PinManager] is asked to store it; null when it fits.
+     */
+    private fun newPinLengthError(request: Request, newPin: String): Response? =
+        try {
+            PinHasher.validatePinLength(newPin)
+            null
+        } catch (e: IllegalArgumentException) {
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, e.message ?: "Invalid PIN length")
+        }
 
     // -------------------------------------------------------------------------
     // PIV Handlers
