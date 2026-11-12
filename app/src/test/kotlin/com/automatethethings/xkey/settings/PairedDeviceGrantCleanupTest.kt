@@ -43,6 +43,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.EmptyCoroutineContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -462,6 +463,131 @@ class PairedDeviceGrantCleanupTest {
             sessionAuthManager = null,
             pairedDeviceRepository = paired
         )
+    }
+
+    // --- r4: a durable acknowledgment, and a retry for a request made in flight. ---
+
+    /**
+     * Prefs with a disk under them: [apply] changes memory only, [commit]
+     * also writes the whole of memory to disk, as Android's does.
+     * [afterCrash] is a fresh process's view: what reached disk, nothing else.
+     */
+    private class DiskPrefs(
+        private val memory: InMemorySharedPreferences = InMemorySharedPreferences()
+    ) : SharedPreferences by memory {
+        private var disk: Map<String, *> = emptyMap<String, Any>()
+
+        fun flush() {
+            disk = memory.all
+        }
+
+        fun afterCrash(): DiskPrefs {
+            val restored = InMemorySharedPreferences()
+            val editor = restored.edit()
+            @Suppress("UNCHECKED_CAST")
+            for ((key, value) in disk) {
+                when (value) {
+                    is String -> editor.putString(key, value)
+                    is Long -> editor.putLong(key, value)
+                    is Set<*> -> editor.putStringSet(key, value as Set<String>)
+                    else -> error("unexpected $key")
+                }
+            }
+            editor.commit()
+            return DiskPrefs(restored).also { it.flush() }
+        }
+
+        override fun edit(): SharedPreferences.Editor {
+            val inner = memory.edit()
+            return object : SharedPreferences.Editor by inner {
+                override fun putString(key: String, value: String?) = also { inner.putString(key, value) }
+                override fun putStringSet(key: String, values: Set<String>?) = also { inner.putStringSet(key, values) }
+                override fun putInt(key: String, value: Int) = also { inner.putInt(key, value) }
+                override fun putLong(key: String, value: Long) = also { inner.putLong(key, value) }
+                override fun putFloat(key: String, value: Float) = also { inner.putFloat(key, value) }
+                override fun putBoolean(key: String, value: Boolean) = also { inner.putBoolean(key, value) }
+                override fun remove(key: String) = also { inner.remove(key) }
+                override fun clear() = also { inner.clear() }
+                override fun apply() {
+                    inner.commit()
+                }
+                override fun commit(): Boolean = inner.commit().also { flush() }
+            }
+        }
+    }
+
+    /**
+     * A re-paired peer's revocation completes and the user approves a fresh
+     * grant, which Room commits. The process then dies before prefs written
+     * with apply() reach disk. The replay at the next start must not delete
+     * the fresh grant: the acknowledgment has to be on disk before anyone can
+     * see the revocation as done.
+     */
+    @Test
+    fun aGrantApprovedAfterCompletionSurvivesACrashBeforeThePrefsFlush() {
+        val disk = DiskPrefs()
+        val before = PairedDeviceRepository(disk)
+        heldCleanup(before)
+        before.addDevice(PEER_A, "desktop-a")
+        before.removeDevice(PEER_A)
+        before.addDevice(PEER_A, "desktop-a")
+        disk.flush()
+        assertTrue(PEER_A in PairedDeviceRepository(disk.afterCrash()).pendingRevocations())
+
+        scheduler.advanceUntilIdle()
+        assertFalse(PEER_A in before.pendingRevocations())
+        val fresh = KeySharingPolicy("k-9", PEER_A)
+        table += fresh
+
+        val after = PairedDeviceRepository(disk.afterCrash())
+        heldCleanup(after).replayPending()
+        scheduler.advanceUntilIdle()
+
+        assertEquals(listOf(fresh), grantsOf(PEER_A))
+        assertFalse(PEER_A in after.pendingRevocations())
+    }
+
+    /**
+     * The peer re-pairs while its delete is suspended, and that delete then
+     * fails. The re-pairing's request must not be lost with it: a later
+     * attempt clears the pending entry, and a new SELECTED_PEERS grant works
+     * without another re-pairing or a restart.
+     */
+    @Test
+    fun aRePairingDuringAFailingDeleteStillGetsTheRevocationDone() {
+        val held = CompletableDeferred<Unit>()
+        var calls = 0
+        val delete = dao.clearPoliciesForPeerAnswer()
+        coEvery { dao.clearPoliciesForPeer(any()) } coAnswers {
+            if (calls++ == 0) {
+                held.await()
+                throw IllegalStateException("db closed")
+            }
+            delete(firstArg())
+        }
+        heldCleanup(repo)
+        repo.removeDevice(PEER_A)
+        scheduler.runCurrent()
+        assertEquals(1, calls)
+
+        repo.addDevice(PEER_A, "desktop-a")
+        held.complete(Unit)
+        scheduler.advanceUntilIdle()
+
+        assertEquals(emptyList<KeySharingPolicy>(), grantsOf(PEER_A))
+        assertFalse(PEER_A in repo.pendingRevocations())
+
+        table += KeySharingPolicy("k-9", PEER_A)
+        val key = KeyEntity(
+            keyId = "k-9",
+            keyType = "signing",
+            algorithm = "ES256",
+            label = "L",
+            keySizeBits = 256,
+            source = "local",
+            sharingPolicy = SharingPolicyType.SELECTED_PEERS
+        )
+        assertTrue(canShareKeyWithPeer(requestHandlerOver(repo), key, PEER_A))
     }
 
     /** Calls the private suspend check; the faked DAO never suspends. */
