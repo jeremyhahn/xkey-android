@@ -118,6 +118,24 @@ class DesktopSessionsTest {
     }
 
     @Test
+    fun `a request checked for A never reaches B's replacement connection`() = runTest {
+        val session = sessions.session()!!
+        assertEquals(desktopA, session.peerPublicKeyHex)
+
+        // A's BLE connection is replaced by B's on the same server and router.
+        live = listOf(ble.transport(peer = desktopB))
+        ble.sender.succeedWith(backendsReply)
+        val refused = runCatching { session.client.listBackends() }
+        assertTrue("sent to the replacement: $refused", refused.isFailure)
+        assertTrue(ble.sender.sent.isEmpty())
+
+        // Gone altogether: nothing is sent either.
+        live = emptyList()
+        assertTrue(runCatching { session.client.listBackends() }.isFailure)
+        assertTrue(ble.sender.sent.isEmpty())
+    }
+
+    @Test
     fun `A then B then A keeps the reply of A's outstanding request`() = runTest {
         val first = async { sessions.client()!!.listBackends() }
         runCurrent()
