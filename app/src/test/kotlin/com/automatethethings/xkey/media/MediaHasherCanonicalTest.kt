@@ -200,6 +200,23 @@ class MediaHasherCanonicalTest {
         }
     }
 
+    @Test
+    fun `an xKey uuid box inserted before the media data fails contentHashMatches`() {
+        val mime = "video/mp4"
+        val file = XmpFixtures.mp4()
+        val stored = MediaHasher.hashCanonical(file, mime)
+        val signed = embed(file, mime, hash = stored)
+        assertTrue(MediaHasher.contentHashMatches(stored, signed, mime, SignatureSource.IN_BAND))
+
+        // A second recognised box before mdat moves every sample the stco/co64
+        // offsets address, while the trailing signature stays as it was.
+        val ours = signed.copyOfRange(file.size, signed.size)
+        val mdatAt = file.size - (8 + 4)
+        val inserted = signed.copyOfRange(0, mdatAt) + ours + signed.copyOfRange(mdatAt, signed.size)
+
+        assertFalse(MediaHasher.contentHashMatches(stored, inserted, mime, SignatureSource.IN_BAND))
+    }
+
     // -----------------------------------------------------------------
     // contentHashMatches
     // -----------------------------------------------------------------

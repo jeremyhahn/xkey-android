@@ -186,6 +186,51 @@ class XmpMetadataHelperSidecarBranchTest {
     }
 
     @Test
+    fun `overlapping embedded writes to one path stage apart and publish one complete output`() {
+        val path = fixtureFile("clip.mp4", "video/mp4")
+        val file = File(path)
+        val original = file.readBytes()
+        val first = sampleData(hash = "1".repeat(64))
+        // A longer payload, so mixed writes of the two would show as a wrong length.
+        val second = sampleData(hash = "2".repeat(64)).let {
+            it.copy(signatures = it.signatures + it.signatures.first().copy(signerName = "B".repeat(400)))
+        }
+        val outputs = listOf(first, second).map {
+            XmpContainers.embed(original, XmpContainers.Format.ISO_BMFF, it.toJsonString())!!.toList()
+        }
+        // Another job's staging file under the name a fixed scheme would pick.
+        val foreign = File(file.parentFile, ".clip.mp4.xkeytmp").apply { writeBytes(byteArrayOf(7)) }
+
+        repeat(20) { round ->
+            file.writeBytes(original)
+            val start = java.util.concurrent.CountDownLatch(1)
+            val failures = java.util.Collections.synchronizedList(mutableListOf<Throwable>())
+            val jobs = listOf(first, second).map { data ->
+                kotlin.concurrent.thread {
+                    try {
+                        start.await()
+                        XmpMetadataHelper.writeSignature(path, data)
+                    } catch (e: Throwable) {
+                        failures += e
+                    }
+                }
+            }
+            start.countDown()
+            jobs.forEach { it.join() }
+
+            assertEquals("round $round", emptyList<Throwable>(), failures)
+            assertTrue("round $round: a whole output of one write", file.readBytes().toList() in outputs)
+            assertTrue("round $round: the other job's staging file survives", foreign.exists())
+            assertArrayEquals(byteArrayOf(7), foreign.readBytes())
+            assertEquals(
+                "round $round: no staging file left behind",
+                setOf("clip.mp4", foreign.name),
+                file.parentFile!!.list()!!.toSet()
+            )
+        }
+    }
+
+    @Test
     fun `an uppercase extension is routed like its lowercase form`() {
         val upper = mediaFile("CLIP.MOV")
 
