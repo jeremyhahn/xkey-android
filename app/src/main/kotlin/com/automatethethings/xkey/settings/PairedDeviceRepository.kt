@@ -470,6 +470,39 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
 
     fun isRevocationPending(publicKeyHex: String): Boolean = publicKeyHex in pendingRevocations()
 
+    /**
+     * Records [policy] (a sharing policy name) as [keyId]'s pending policy
+     * for its key row [instance] (#193): a narrowing accepted but not yet
+     * stored, enforced over the stored policy until [clearPendingKeyPolicy],
+     * a process restart included.
+     *
+     * @throws IOException if the record did not reach disk.
+     */
+    fun recordPendingKeyPolicy(keyId: String, instance: Long, policy: String) {
+        val written = prefs.edit()
+            .putString(KEY_PENDING_KEY_POLICY + keyId, "$instance$GENERATION_SEPARATOR$policy")
+            .commit()
+        if (!written) throw IOException("Recording a pending key policy did not reach disk")
+    }
+
+    /**
+     * Drops [keyId]'s pending policy: its change landed, or the key is gone.
+     * A removal that does not reach disk leaves the record denying, so it is
+     * only logged.
+     */
+    fun clearPendingKeyPolicy(keyId: String) {
+        if (!prefs.edit().remove(KEY_PENDING_KEY_POLICY + keyId).commit()) {
+            Log.e(TAG, "Clearing a pending key policy did not reach disk")
+        }
+    }
+
+    /** [keyId]'s pending policy name recorded for key row [instance], or null. */
+    fun pendingKeyPolicy(keyId: String, instance: Long): String? {
+        val record = prefs.getString(KEY_PENDING_KEY_POLICY + keyId, null) ?: return null
+        val recorded = record.substringBefore(GENERATION_SEPARATOR, "").toLongOrNull()
+        return record.substringAfter(GENERATION_SEPARATOR).takeIf { recorded == instance }
+    }
+
     /** The generation of [publicKeyHex]'s pending revocation, or null if none is pending. */
     fun pendingRevocationGeneration(publicKeyHex: String): Long? =
         synchronized(storeLock) { readPending()[publicKeyHex] }
@@ -704,6 +737,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         private const val KEY_PAIRINGS = "pairing_generations"
         private const val KEY_PAIRING_GENERATION = "pairing_generation"
         private const val KEY_GRANT_WRITES = "grant_writes"
+        private const val KEY_PENDING_KEY_POLICY = "pending_key_policy:"
         private const val GENERATION_SEPARATOR = '@'
 
         /**

@@ -385,4 +385,17 @@ class KeySharingPolicyDaoTest {
         assertTrue(dao.getPoliciesForKeySync("k-1").isEmpty())
         assertNull(dao.getPolicy("k-1", peer))
     }
+
+    @Test
+    fun keyInstance_changesWhenAKeyIsGeneratedAgainUnderItsId() = runBlocking {
+        insertKey("k-1", SharingPolicyType.PRIVATE)
+        val first = dao.keyInstance("k-1")
+
+        keyDao.deleteByKeyId("k-1")
+        assertNull(dao.keyInstance("k-1"))
+        insertKey("k-1", SharingPolicyType.PRIVATE)
+        val second = dao.keyInstance("k-1")
+
+        assertTrue(first != null && second != null && first != second)
+    }
 }

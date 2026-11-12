@@ -92,6 +92,8 @@ class KeySharingPeersTest {
         every { AuditLogger.logDeviceUnpaired(any(), any()) } just runs
 
         dao = mockk()
+        // No `keys` row: the sheet's edits here are not bound to a key instance.
+        coEvery { dao.keyInstance(any()) } returns null
         every { dao.getPoliciesForKey(any()) } answers {
             val keyId = firstArg<String>()
             table.map { rows -> rows.filter { it.keyId == keyId } }

@@ -1849,8 +1849,10 @@ class RequestHandler(
         keystoreManager.deleteGeneralKey(keyId)
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
 
-        // Delete from unified key store
-        keyDao.deleteByKeyId(keyId)
+        // Delete from unified key store, under the sharing edits' order: a
+        // pending policy change or withdrawal of this key is dropped with it,
+        // never retried onto a key generated again under its id (#193).
+        KeySharingPeers.forgetKey(keyId, pairedDeviceRepository) { keyDao.deleteByKeyId(keyId) }
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
@@ -1876,11 +1878,22 @@ class RequestHandler(
             // updateSharingPolicy, not updateShareable: it keeps `shareable` and
             // `sharing_policy` in step, which KeyEntity requires. Writing the
             // legacy flag alone could leave shareable=1 with policy=PRIVATE.
-            KeySharingPeers.setKeyPolicy(
+            val landed = KeySharingPeers.setKeyPolicy(
                 policyParams.keyId,
                 keySharingPolicyDao,
-                SheetPolicy.valueOf(policy.name)
+                SheetPolicy.valueOf(policy.name),
+                repository = pairedDeviceRepository
             ) { keyDao.updateSharingPolicy(policyParams.keyId, policy) }
+            // Never reported updated before it is stored (#193): the change
+            // is enforced, its denial recorded on disk, and retried.
+            if (!landed) {
+                Log.w(TAG, "Policy for key ${policyParams.keyId} not stored yet; enforced and retried")
+                return Response.error(
+                    request.id,
+                    ErrorCodes.INTERNAL_ERROR,
+                    "Key policy not stored yet; it is enforced and retried"
+                )
+            }
         }
 
         Log.i(TAG, "Updated policy for key: ${policyParams.keyId}, shareable=${policyParams.shareable}")
@@ -2731,8 +2744,11 @@ class RequestHandler(
             return false
         }
         // A policy change not yet stored is enforced over the stored one, so
-        // a narrowing from All Peers to Selected Peers denies at once.
-        return when (KeySharingPeers.enforcedPolicy(entity.keyId) ?: entity.sharingPolicy) {
+        // a narrowing from All Peers to Selected Peers denies at once. Its
+        // recorded denial does so after a restart too (#193).
+        val recorded = pairedDeviceRepository?.pendingKeyPolicy(entity.keyId, entity.id)
+            ?.let { SharingPolicyType.valueOf(it) }
+        return when (KeySharingPeers.enforcedPolicy(entity.keyId) ?: recorded ?: entity.sharingPolicy) {
             SharingPolicyType.PRIVATE -> false
             SharingPolicyType.ALL_PEERS -> true
             SharingPolicyType.SELECTED_PEERS -> {

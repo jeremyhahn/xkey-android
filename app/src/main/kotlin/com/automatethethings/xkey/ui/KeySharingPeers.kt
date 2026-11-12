@@ -142,7 +142,7 @@ class KeySharingPeers(
      * [setKeyPolicy], in this sheet's [editScope].
      */
     suspend fun setKeyPolicy(policy: SharingPolicyType, persist: suspend () -> Unit) =
-        setKeyPolicy(keyId, policyDao, policy, editScope, persist)
+        setKeyPolicy(keyId, policyDao, policy, editScope, repository, persist)
 
     /** Runs [edit] under the edits lock in [editScope] ([accepted] in the companion). */
     private suspend fun <T> accepted(edit: suspend () -> T): T = accepted(editScope, edit)
@@ -152,7 +152,8 @@ class KeySharingPeers(
      * caller may be gone (the sheet was dismissed), so a failure is handled
      * here, not left in an abandoned Deferred: [entry] is recorded as a
      * pending withdrawal, which denies the peer ([isWithdrawalPending]) from
-     * that moment, and [write] is retried in [editScope] until it lands.
+     * that moment, and [write] is retried in [editScope] until it lands, or
+     * until the key row it was made for is gone or replaced (#193).
      */
     private suspend fun withdraw(entry: Pair<String, String>, write: suspend () -> Unit) {
         try {
@@ -163,10 +164,11 @@ class KeySharingPeers(
         } catch (e: Exception) {
             Log.e(TAG, "Withdrawing key access failed; the peer is denied until a retry lands", e)
             val token = Any()
+            val instance = currentInstance(keyId, policyDao)
             pendingWithdrawals.update { it + (entry to token) }
             editScope.launch {
                 retry({ pendingWithdrawals.value[entry] === token }) {
-                    write()
+                    if (instance == null || policyDao.keyInstance(keyId) == instance) write()
                     pendingWithdrawals.update { if (it[entry] === token) it - entry else it }
                 }
             }
@@ -236,16 +238,27 @@ class KeySharingPeers(
          * lands or a newer one replaces it. Until then the intent is
          * enforced ([enforcedPolicy]): a narrowing to Private or Selected
          * Peers denies from the moment it is accepted, whatever is stored.
+         *
+         * The intent is bound to the key row stored when it was accepted: a
+         * retry finding the key deleted, or generated again under its id,
+         * drops it unwritten (#193). With a [repository], a narrowing is also
+         * recorded there before its first attempt, so the denial outlives the
+         * process ([PairedDeviceRepository.pendingKeyPolicy]).
+         *
+         * @return true once the change is stored, false if it is pending: the
+         *   intent is enforced and retried, but nothing has landed yet.
          */
         suspend fun setKeyPolicy(
             keyId: String,
             policyDao: KeySharingPolicyDao,
             policy: SharingPolicyType,
             editScope: CoroutineScope = acceptedEdits,
+            repository: PairedDeviceRepository? = null,
             persist: suspend () -> Unit
-        ) {
+        ): Boolean =
             accepted(editScope) {
                 val token = Any()
+                val instance = currentInstance(keyId, policyDao)
                 keyIntents.update { intents ->
                     val older = intents[keyId]
                     intents + (keyId to KeyIntent(
@@ -253,19 +266,35 @@ class KeySharingPeers(
                         persist = persist,
                         clearRows = policy != SharingPolicyType.SELECTED_PEERS || older?.clearRows == true,
                         carried = older?.enforced,
-                        token = token
+                        token = token,
+                        instance = instance
                     ))
                 }
                 try {
-                    land(keyId, policyDao, token)
+                    land(keyId, policyDao, token, repository)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Storing the key's sharing policy failed; it is enforced until a retry lands", e)
                     editScope.launch {
-                        retry({ keyIntents.value[keyId]?.token === token }) { land(keyId, policyDao, token) }
+                        retry({ keyIntents.value[keyId]?.token === token }) { land(keyId, policyDao, token, repository) }
                     }
+                    false
                 }
+            }
+
+        /**
+         * Deletes [keyId] through [delete] under the edits lock, with its
+         * pending policy intent, withdrawals and recorded denial: no retry of
+         * an edit of the deleted key lands on one generated again under its
+         * id (#193).
+         */
+        suspend fun forgetKey(keyId: String, repository: PairedDeviceRepository?, delete: suspend () -> Unit) {
+            accepted(acceptedEdits) {
+                delete()
+                keyIntents.update { it - keyId }
+                settle { it.first == keyId }
+                repository?.clearPendingKeyPolicy(keyId)
             }
         }
 
@@ -274,9 +303,22 @@ class KeySharingPeers(
          * the row clear it owes first (after which no per-peer withdrawal of
          * the key is outstanding), then its policy. The intent is dropped only
          * after both; a step that throws leaves it, minus what already landed.
+         * An intent whose key row is gone or replaced is dropped unwritten.
+         * Returns whether the intent landed.
          */
-        private suspend fun land(keyId: String, policyDao: KeySharingPolicyDao, token: Any) {
-            val intent = keyIntents.value[keyId]?.takeIf { it.token === token } ?: return
+        private suspend fun land(
+            keyId: String,
+            policyDao: KeySharingPolicyDao,
+            token: Any,
+            repository: PairedDeviceRepository?
+        ): Boolean {
+            val intent = keyIntents.value[keyId]?.takeIf { it.token === token } ?: return false
+            if (intent.instance != null && policyDao.keyInstance(keyId) != intent.instance) {
+                Log.w(TAG, "Dropping a sharing policy change of a deleted key")
+                keyIntents.update { intents -> if (intents[keyId]?.token === token) intents - keyId else intents }
+                return false
+            }
+            recordDenial(keyId, intent, repository)
             if (intent.clearRows) {
                 policyDao.clearPoliciesForKey(keyId)
                 keyIntents.update { intents ->
@@ -284,10 +326,36 @@ class KeySharingPeers(
                     if (current?.token === token) intents + (keyId to current.copy(clearRows = false)) else intents
                 }
                 settle { it.first == keyId }
+                recordDenial(keyId, intent.copy(clearRows = false), repository)
             }
             intent.persist()
             keyIntents.update { intents -> if (intents[keyId]?.token === token) intents - keyId else intents }
+            repository?.clearPendingKeyPolicy(keyId)
+            return true
         }
+
+        /**
+         * Records what [intent] denies, Private or Selected Peers, in
+         * [repository], so a restart before it lands does not restore what is
+         * stored. A widening records nothing, and leaves an older record
+         * denying until it lands.
+         */
+        private fun recordDenial(keyId: String, intent: KeyIntent, repository: PairedDeviceRepository?) {
+            val instance = intent.instance ?: return
+            val enforced = intent.enforced?.takeIf { it != SharingPolicyType.ALL_PEERS } ?: return
+            repository?.recordPendingKeyPolicy(keyId, instance, enforced.name)
+        }
+
+        /** [keyId]'s stored key row, or null if none or it cannot be read: the edit is then unbound. */
+        private suspend fun currentInstance(keyId: String, policyDao: KeySharingPolicyDao): Long? =
+            try {
+                policyDao.keyInstance(keyId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Reading the key's row failed; its sharing edit is not bound to it", e)
+                null
+            }
 
         /**
          * Runs [edit] under the edits lock in [editScope], not the caller's
@@ -335,14 +403,17 @@ class KeySharingPeers(
     /**
      * A key's accepted policy change: [policy] and its [persist], whether
      * the key's rows must still be cleared, and what the intent it replaced
-     * enforced ([carried]). [token] identifies its retry.
+     * enforced ([carried]). [token] identifies its retry; [instance] is the
+     * key row it was accepted for ([KeySharingPolicyDao.keyInstance]), null
+     * if none was stored then.
      */
     private data class KeyIntent(
         val policy: SharingPolicyType,
         val persist: suspend () -> Unit,
         val clearRows: Boolean,
         val carried: SharingPolicyType?,
-        val token: Any
+        val token: Any,
+        val instance: Long?
     ) {
         /**
          * Private denies every peer, and so does Selected Peers while the

@@ -201,6 +201,16 @@ interface KeySharingPolicyDao {
     suspend fun isPeerGranted(keyId: String, peerPublicKeyHex: String): Boolean
 
     /**
+     * The `keys` row id of [keyId], or null when no such key is stored.
+     *
+     * Identifies the key instance a sharing edit was accepted for (#193): a
+     * key deleted and generated again under the same id gets a new row id,
+     * so an older edit's retry can tell it is no longer its key.
+     */
+    @Query("SELECT id FROM keys WHERE key_id = :keyId")
+    suspend fun keyInstance(keyId: String): Long?
+
+    /**
      * Get all peers that have access to a specific key.
      *
      * @param keyId The unique key identifier.

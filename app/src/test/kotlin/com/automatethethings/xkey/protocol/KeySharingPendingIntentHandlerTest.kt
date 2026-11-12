@@ -138,6 +138,7 @@ class KeySharingPendingIntentHandlerTest {
             }
         }
         coEvery { dao.isPeerGranted(any(), any()) } answers { granted(firstArg(), secondArg()) }
+        coEvery { dao.keyInstance(any()) } answers { keys[firstArg()]?.id }
         keyDao = mockk()
         coEvery { keyDao.getByKeyId(any()) } answers { keys[firstArg()] }
         coEvery { keyDao.updateSharingPolicy(any(), any()) } answers { store(firstArg(), secondArg()) }
