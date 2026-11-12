@@ -24,6 +24,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
@@ -81,6 +82,9 @@ class KeySharingPendingIntentHandlerTest {
 
     /** The `key_sharing_policies` table; the DAO's Flow query re-emits on every change. */
     private val table = MutableStateFlow<List<KeySharingPolicy>>(emptyList())
+
+    /** The `keys` table: each key's stored entity, read by the DAO's SQL and the handler. */
+    private val keys = mutableMapOf<String, KeyEntity>()
     private lateinit var dao: KeySharingPolicyDao
     private lateinit var repo: PairedDeviceRepository
     private lateinit var handler: RequestHandler
@@ -119,9 +123,17 @@ class KeySharingPendingIntentHandlerTest {
             table.value = before.filterNot { it.keyId == firstArg<String>() }
             before.size - table.value.size
         }
+        // The real SQL: All Peers stored authorizes every peer, whatever the rows.
         coEvery { dao.isKeySharedWithPeer(any(), any()) } answers {
-            table.value.any { it.keyId == firstArg<String>() && it.peerPublicKeyHex == secondArg<String>() && it.allowed }
+            when (keys[firstArg()]?.sharingPolicy) {
+                SharingPolicyType.ALL_PEERS -> true
+                SharingPolicyType.SELECTED_PEERS -> granted(firstArg(), secondArg())
+                else -> false
+            }
         }
+        coEvery { dao.isPeerGranted(any(), any()) } answers { granted(firstArg(), secondArg()) }
+        val keyDao = mockk<KeyDao>()
+        coEvery { keyDao.getByKeyId(any()) } answers { keys[firstArg()] }
 
         repo = PairedDeviceRepository(InMemorySharedPreferences())
         repo.addDevice(PEER_A, "desktop-a")
@@ -131,6 +143,7 @@ class KeySharingPendingIntentHandlerTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keySharingPolicyDao() } returns dao
+        every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         val context = mockk<Context>(relaxed = true)
@@ -158,9 +171,12 @@ class KeySharingPendingIntentHandlerTest {
         } + row
     }
 
-    /** The handler's own check, for [keyId] stored with [stored]; the faked DAO never suspends. */
-    private fun shares(keyId: String, stored: SharingPolicyType, peer: String): Boolean {
-        val key = KeyEntity(
+    private fun granted(keyId: String, peer: String): Boolean =
+        table.value.any { it.keyId == keyId && it.peerPublicKeyHex == peer && it.allowed }
+
+    /** Stores [keyId] with [stored] in the faked `keys` table and returns it. */
+    private fun store(keyId: String, stored: SharingPolicyType): KeyEntity =
+        KeyEntity(
             keyId = keyId,
             keyType = "signing",
             algorithm = "ES256",
@@ -168,14 +184,27 @@ class KeySharingPendingIntentHandlerTest {
             keySizeBits = 256,
             source = "local",
             sharingPolicy = stored
-        )
-        val method = RequestHandler::class.java.getDeclaredMethod(
-            "canShareKeyWithPeer", KeyEntity::class.java, String::class.java, Continuation::class.java
-        )
+        ).also { keys[keyId] = it }
+
+    /** Invokes the handler's private suspend [name]; the faked DAOs never suspend. */
+    private fun call(name: String, vararg args: Any, types: Array<Class<*>>): Any? {
+        val method = RequestHandler::class.java.getDeclaredMethod(name, *types, Continuation::class.java)
         method.isAccessible = true
         val noResume = Continuation<Any?>(EmptyCoroutineContext) { error("suspended") }
-        return method.invoke(handler, key, peer, noResume) as Boolean
+        return method.invoke(handler, *args, noResume)
     }
+
+    /**
+     * The handler's own check, for [keyId] stored with [stored]: the gate
+     * local.listFido2Credentials filters with and local.signFido2Assertion
+     * refuses by.
+     */
+    private fun shares(keyId: String, stored: SharingPolicyType, peer: String): Boolean =
+        call("canShareKeyWithPeer", store(keyId, stored), peer, types = arrayOf(KeyEntity::class.java, String::class.java)) as Boolean
+
+    /** The authorization key export runs: the stored key when [peer] may have it, else null. */
+    private fun exports(keyId: String, peer: String): Boolean =
+        call("authorizeShare", keyId, peer, types = arrayOf(String::class.java, String::class.java)) != null
 
     /**
      * Runs [edit] from a sheet dismissed while the edit waits behind another
@@ -228,6 +257,29 @@ class KeySharingPendingIntentHandlerTest {
         assertEquals("the Selected Peers policy was not retried", SharingPolicyType.SELECTED_PEERS, stored)
         assertFalse(shares(key, stored, PEER_A))
         assertTrue("the retry dropped the later grant", shares(key, stored, PEER_B))
+    }
+
+    @Test
+    fun aPendingSelectedPeersOverStoredAllPeersAuthorizesOnlyGrantedPeers() = runTest {
+        val key = "k-pending-selected"
+        table.value = listOf(KeySharingPolicy(key, PEER_B))
+        store(key, SharingPolicyType.ALL_PEERS)
+        val peers = KeySharingPeers(key, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        assertTrue(exports(key, PEER_A))
+
+        // All Peers -> Selected Peers fails to persist; the old rows are
+        // cleared, then PEER_B is granted again.
+        detached {
+            peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS) { throw IllegalStateException("disk I/O error") }
+        }
+        assertTrue(peers.setAllowed(PEER_B, true))
+        assertEquals(SharingPolicyType.ALL_PEERS, keys.getValue(key).sharingPolicy)
+
+        // Listing and signing share canShareKeyWithPeer; export runs authorizeShare.
+        assertFalse("an ungranted desktop could list or sign through stored All Peers", shares(key, SharingPolicyType.ALL_PEERS, PEER_A))
+        assertFalse("an ungranted desktop could export through stored All Peers", exports(key, PEER_A))
+        assertTrue(shares(key, SharingPolicyType.ALL_PEERS, PEER_B))
+        assertTrue(exports(key, PEER_B))
     }
 
     @Test
