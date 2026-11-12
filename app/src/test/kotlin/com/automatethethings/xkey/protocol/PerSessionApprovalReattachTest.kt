@@ -36,10 +36,13 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import java.util.Base64
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.json.JSONObject
@@ -138,6 +141,31 @@ class PerSessionApprovalReattachTest {
         handler.setSessionId("usb:second")
         sign()
 
+        assertPrompts(2)
+    }
+
+    @Test
+    fun `a prompt pending on another transport during a reattach approves only its own connection`() = runTest {
+        val bleApproval = CompletableDeferred<Unit>()
+        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any()) } coAnswers {
+            bleApproval.await()
+            keystoreWindowOpen = true
+            mockk(relaxed = true)
+        }
+        handler.setSessionId("usb:first")
+
+        // A BLE or TCP sign arrives and its prompt stays open...
+        val pending = async { sign() }
+        runCurrent()
+        assertPrompts(1)
+
+        // ...while USB detaches and reattaches with a new session.
+        handler.setSessionId("usb:second")
+        bleApproval.complete(Unit)
+        pending.await()
+
+        // The new USB session's first protected sign still prompts.
+        sign()
         assertPrompts(2)
     }
 
