@@ -527,8 +527,10 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * The grant is bound to the pairing current now. A caller that approved
      * it earlier passes the [pairing] it read then, from [pairingOf].
      */
-    suspend fun writeGrant(publicKeyHex: String, write: suspend () -> Unit): Boolean =
-        writeGrant(publicKeyHex, pairingOf(publicKeyHex) ?: return false, write)
+    suspend fun writeGrant(publicKeyHex: String, write: suspend () -> Unit): Boolean {
+        val pairing = pairingOf(publicKeyHex) ?: return false
+        return writeGrant(publicKeyHex, pairing, write)
+    }
 
     /**
      * [writeGrant] for the pairing generation [pairing], read by [pairingOf]
