@@ -133,6 +133,54 @@ class LocalDeleteKeyExactIdTest {
         coVerify(exactly = 0) { keyDao.deleteByKeyId("xkey_key_b") }
     }
 
+    /**
+     * Raw credential alias `xkey_credential_k`, with no row or software key of
+     * its own, names key `k`: deleting it deletes that credential's private
+     * key, the Keystore entry itself, and answers deleted=true only once it
+     * is gone. General key `xkey_key_k`, which discovery also maps to `k`,
+     * survives.
+     */
+    @Test
+    fun aRawCredentialAliasDeletesThatCredentialAndLeavesTheGeneralKey() = runBlocking<Unit> {
+        val credential = "xkey_credential_k"
+        val general = "xkey_key_k"
+        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.resolveKeystoreAlias(any()) } answers {
+            val id = firstArg<String>()
+            listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
+        }
+        every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
+        every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
+        every { keystore.deleteKey(any()) } answers {
+            keystore.resolveKeystoreAlias(firstArg())?.let { aliases.remove(it) } ?: false
+        }
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
+
+        val request = JSONObject().put("jsonrpc", "2.0").put("id", 3).put("method", MethodNames.LOCAL_DELETE_KEY)
+            .put("params", JSONObject().put("keyId", credential))
+        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
+
+        assertTrue("the credential's private key must be deleted, left $aliases", credential !in aliases)
+        assertTrue("the general key must survive, left $aliases", general in aliases)
+        assertTrue(
+            "the delete must succeed once the key is gone, got $response",
+            response.optJSONObject("result")?.optBoolean("deleted") == true
+        )
+        coVerify { keyDao.deleteByKeyId("k") }
+
+        // Deleting it again finds no key: nothing is reported deleted.
+        val again = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
+        assertTrue(
+            "a delete that removes nothing must not report deleted=true, got $again",
+            again.optJSONObject("result")?.optBoolean("deleted") != true
+        )
+        assertTrue("the general key must survive a second delete, left $aliases", general in aliases)
+    }
+
     /** The real [RequestHandler] with only its Android and storage edges mocked. */
     private fun realHandler(keyDao: KeyDao, keystore: KeystoreManager): RequestHandler {
         mockkStatic(Looper::class)
