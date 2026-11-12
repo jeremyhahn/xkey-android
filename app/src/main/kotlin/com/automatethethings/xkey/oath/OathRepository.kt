@@ -166,8 +166,9 @@ class OathRepository(
         }
 
         // Parse the label: /Issuer:account or /account
-        val label = parsed.path?.removePrefix("/") ?: ""
-        val (labelIssuer, accountName) = parseLabel(label)
+        // Split before decoding, so an encoded ':' (%3A) stays in its part.
+        val label = parsed.encodedPath?.removePrefix("/") ?: ""
+        val (labelIssuer, accountName) = parseOathLabel(label)
 
         // Secret is required
         val secretBase32 = parsed.getQueryParameter("secret")
@@ -333,26 +334,6 @@ class OathRepository(
     // -------------------------------------------------------------------------
     // Private Helpers
     // -------------------------------------------------------------------------
-
-    /**
-     * Parse an otpauth label into issuer and account name components.
-     *
-     * The label format is either "issuer:account" or just "account".
-     * Both components are URL-decoded by the [Uri] parser prior to this call.
-     *
-     * @param label The decoded label string from the URI path.
-     * @return A [Pair] of (issuer, accountName). Issuer is null if not present.
-     */
-    private fun parseLabel(label: String): Pair<String?, String> {
-        val colonIndex = label.indexOf(':')
-        return if (colonIndex >= 0) {
-            val issuer = label.substring(0, colonIndex).trim()
-            val account = label.substring(colonIndex + 1).trim()
-            Pair(issuer.ifEmpty { null }, account)
-        } else {
-            Pair(null, label.trim())
-        }
-    }
 
     companion object {
 
