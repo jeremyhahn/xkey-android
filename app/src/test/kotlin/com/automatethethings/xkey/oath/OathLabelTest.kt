@@ -58,6 +58,46 @@ class OathLabelTest {
     }
 
     @Test
+    fun `a percent sign that starts no escape is literal`() {
+        assertEquals(OathLabel("50% off", "user"), parseOathLabel("50% off:user"))
+    }
+
+    @Test
+    fun `a malformed escape is kept as written`() {
+        assertEquals(OathLabel("%zz", "user"), parseOathLabel("%zz:user"))
+        assertEquals(OathLabel(null, "user%"), parseOathLabel("user%"))
+    }
+
+    @Test
+    fun `an encoded colon after the issuer parameter separates the label`() {
+        assertEquals(
+            OathLabel("GitHub", "alice@example.com"),
+            parseOathLabel("GitHub%3Aalice%40example.com", issuerParam = "GitHub")
+        )
+    }
+
+    @Test
+    fun `an encoded colon after an issuer parameter containing a colon separates the label`() {
+        assertEquals(
+            OathLabel("Corp:EU", "alice"),
+            parseOathLabel("Corp%3AEU%3Aalice", issuerParam = "Corp:EU")
+        )
+    }
+
+    @Test
+    fun `an encoded colon not after the issuer parameter stays in the account`() {
+        assertEquals(OathLabel(null, "host:user"), parseOathLabel("host%3Auser", issuerParam = "Other"))
+    }
+
+    @Test
+    fun `a literal colon separates the label whatever the issuer parameter`() {
+        assertEquals(
+            OathLabel("Corp", "host:user"),
+            parseOathLabel("Corp:host%3Auser", issuerParam = "Corp:host")
+        )
+    }
+
+    @Test
     fun `a plus sign in the path is literal`() {
         assertEquals(OathLabel("A+B", "user+tag@example.com"), parseOathLabel("A+B:user+tag@example.com"))
     }
