@@ -451,10 +451,11 @@ class ApprovalPromptFlowTest {
         val second = shareWithAllPeers()
         runCurrent()
 
-        // The owner never looks: the notification expires, and time passes
-        // well short of the queued request's own deadline.
+        // The owner never looks: the notification expires, well short of the
+        // first request's active deadline. The second is launched as the
+        // first lets go, so its own active deadline must not pass either.
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(31))
-        advanceTimeBy(UNANSWERED_MILLIS)
+        runCurrent()
         settle()
 
         assertNull("the expired notification is gone", notificationFor(id))

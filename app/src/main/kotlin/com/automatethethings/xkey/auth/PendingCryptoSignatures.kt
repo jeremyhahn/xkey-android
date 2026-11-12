@@ -123,16 +123,21 @@ internal class PendingCryptoSignatures(
      * Fails launched request [requestId] with [BiometricPrompt.ERROR_TIMEOUT]
      * unless its activity has it; false when it was left waiting, or nothing
      * waits on that id. Called by [event]: its notification expiring or its
-     * active deadline passing, whichever comes first.
+     * active deadline passing, whichever comes first. Another launcher's
+     * request is left alone, its prompt included.
      */
     fun expireUnshown(
         requestId: String,
         event: PromptOwnership.Event = PromptOwnership.Event.NOTIFICATION_EXPIRY,
     ): Boolean {
         val key = NotificationKeys.signature(requestId)
-        if (!prompts.accept(key, event) || !expirePrompt(requestId)) return false
+        val id = requestId.toLongOrNull()
+        val continuation = id?.let { pending[it] }
+        if (!prompts.accept(key, event) || id == null || continuation == null || !expirePrompt(requestId)) {
+            return false
+        }
         if (!prompts.expire(key, event)) return false
-        val continuation = requestId.toLongOrNull()?.let { pending.remove(it) } ?: return false
+        if (!pending.remove(id, continuation)) return false
         continuation.resume(
             CryptoSigningResult.Error(
                 BiometricPrompt.ERROR_TIMEOUT,
@@ -145,13 +150,17 @@ internal class PendingCryptoSignatures(
     /**
      * Resumes [requestId]'s caller with [result]; false when nothing waits on
      * it. Only the ACTIVE request accepts a result: one for a request still
-     * queued or already settled is refused.
+     * queued or already settled is refused. Every launcher's receiver hears
+     * every result, so one for another launcher's ACTIVE request is left to
+     * that launcher, and the shared entry is not touched.
      */
     fun complete(requestId: Long, result: CryptoSigningResult): Boolean {
-        val outcome = promptOutcome((result as? CryptoSigningResult.Error)?.code)
         val key = NotificationKeys.signature(requestId.toString())
+        val continuation = pending[requestId]
+        if (!prompts.accept(key, PromptOwnership.Event.ACTIVITY_RESULT) || continuation == null) return false
+        val outcome = promptOutcome((result as? CryptoSigningResult.Error)?.code)
         if (!prompts.settle(key, outcome, PromptOwnership.Event.ACTIVITY_RESULT)) return false
-        val continuation = pending.remove(requestId) ?: return false
+        if (!pending.remove(requestId, continuation)) return false
         continuation.resume(result)
         return true
     }

@@ -658,14 +658,18 @@ internal class PendingAuthentications(
     /**
      * Resumes [requestId]'s caller with [result]; false when nothing waits on
      * that id. Only the ACTIVE request accepts a result: one for a request
-     * still queued or already settled is refused.
+     * still queued or already settled is refused. Every launcher's receiver
+     * hears every result, so one for another launcher's ACTIVE request is
+     * left to that launcher, and the shared entry is not touched.
      */
     fun complete(requestId: String, result: BiometricActivityLauncher.BiometricResult): Boolean {
+        val key = NotificationKeys.approval(requestId)
+        val id = requestId.toLongOrNull()
+        val continuation = id?.let { pending[it] }
+        if (!prompts.accept(key, PromptOwnership.Event.ACTIVITY_RESULT) || id == null || continuation == null) return false
         val outcome = promptOutcome((result as? BiometricActivityLauncher.BiometricResult.Error)?.code)
-        if (!prompts.settle(NotificationKeys.approval(requestId), outcome, PromptOwnership.Event.ACTIVITY_RESULT)) {
-            return false
-        }
-        val continuation = requestId.toLongOrNull()?.let { pending.remove(it) } ?: return false
+        if (!prompts.settle(key, outcome, PromptOwnership.Event.ACTIVITY_RESULT)) return false
+        if (!pending.remove(id, continuation)) return false
         continuation.resume(result)
         return true
     }
@@ -674,16 +678,19 @@ internal class PendingAuthentications(
      * Settles launched request [requestId] with [BiometricPrompt.ERROR_TIMEOUT]
      * unless its prompt is up; false when it was left waiting, or nothing
      * waits on that id. Called when its notification expires and when its
-     * active deadline passes, whichever comes first.
+     * active deadline passes, whichever comes first. Another launcher's
+     * request is left alone, its prompt included.
      */
     fun expireUnshown(
         requestId: String,
         event: PromptOwnership.Event = PromptOwnership.Event.NOTIFICATION_EXPIRY,
     ): Boolean {
         val key = NotificationKeys.approval(requestId)
-        if (!prompts.accept(key, event) || !expirePrompt(requestId)) return false
+        val id = requestId.toLongOrNull()
+        val continuation = id?.let { pending[it] }
+        if (!prompts.accept(key, event) || id == null || continuation == null || !expirePrompt(requestId)) return false
         if (!prompts.expire(key, event)) return false
-        val continuation = requestId.toLongOrNull()?.let { pending.remove(it) } ?: return false
+        if (!pending.remove(id, continuation)) return false
         continuation.resume(
             BiometricActivityLauncher.BiometricResult.Error(
                 BiometricPrompt.ERROR_TIMEOUT,

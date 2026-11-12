@@ -25,6 +25,8 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 
 /**
  * Transparent activity for showing biometric prompts from background services.
@@ -48,7 +50,9 @@ import com.automatethethings.xkey.R
  * full-screen intent or a tap on it), which is ignored, or a newer request
  * after the one shown here was withdrawn, which this instance hands to a
  * fresh one ([onNewIntent]). Request ids grow, so a late delivery of an older
- * request never displaces the one on screen.
+ * request never displaces the one on screen. Whichever intent delivers a
+ * launcher request, it prompts or is handed on only while
+ * [PromptOwnership.process] holds it ACTIVE.
  *
  * Usage from a service:
  * ```kotlin
@@ -95,8 +99,9 @@ class TransparentBiometricActivity : FragmentActivity() {
             return
         }
 
-        // A request that expired unshown was answered as timed out and has
-        // handed the screen on: a late start of it prompts for nothing.
+        // Only the request that holds the screen prompts. One that expired
+        // unshown, or settled (answered, withdrawn), has handed the screen
+        // on: a late start of it prompts for nothing.
         if (!claim(requestId)) {
             hasFinished = true
             finish()
@@ -128,7 +133,8 @@ class TransparentBiometricActivity : FragmentActivity() {
     /**
      * A start that reached this instance instead of creating one. The
      * request on screen, delivered again, keeps its prompt; an older request
-     * is a late delivery of one already settled and is dropped. A newer
+     * is a late delivery of one already settled and is dropped, as is a newer
+     * one the process owner does not hold ACTIVE. A newer ACTIVE
      * request means the one shown here was withdrawn: this prompt answers
      * cancelled (nobody waits on it) and goes away, and the newer request is
      * started in a fresh instance, so it gets a prompt and a result of its own.
@@ -136,7 +142,7 @@ class TransparentBiometricActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         val next = intent.getStringExtra(EXTRA_REQUEST_ID) ?: return
-        if (!isNewer(next, requestId)) return
+        if (!isNewer(next, requestId) || !ownsScreen(next)) return
         if (!hasFinished) {
             sendErrorResult(
                 errorCode = BiometricPrompt.ERROR_CANCELED,
@@ -338,9 +344,15 @@ class TransparentBiometricActivity : FragmentActivity() {
             return true
         }
 
+        /**
+         * Counts [requestId]'s prompt as up, unless it may not prompt here:
+         * one that expired unshown, or a launcher request the process owner
+         * does not hold ACTIVE (settled, still queued, or unknown), whichever
+         * intent, the launcher's start or its notification's, delivered it.
+         */
         @Synchronized
         private fun claim(requestId: String): Boolean {
-            if (requestId in expired) return false
+            if (requestId in expired || !ownsScreen(requestId)) return false
             onScreen[requestId] = (onScreen[requestId] ?: 0) + 1
             return true
         }
@@ -350,6 +362,18 @@ class TransparentBiometricActivity : FragmentActivity() {
             val left = (onScreen[requestId] ?: return) - 1
             if (left > 0) onScreen[requestId] = left else onScreen.remove(requestId)
         }
+
+        /**
+         * Whether [requestId] may take the screen: a launcher request (a
+         * number) only while the process owner holds it ACTIVE, refused and
+         * reported otherwise; any other id answers no launcher request.
+         */
+        private fun ownsScreen(requestId: String): Boolean =
+            requestId.toLongOrNull() == null ||
+                PromptOwnership.process.accept(
+                    NotificationKeys.approval(requestId),
+                    PromptOwnership.Event.NOTIFICATION_TAP,
+                )
 
         internal fun isNewer(candidate: String, current: String): Boolean {
             val next = candidate.toLongOrNull() ?: return false
