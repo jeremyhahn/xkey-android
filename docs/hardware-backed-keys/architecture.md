@@ -757,9 +757,21 @@ already `ALL_PEERS` need no prompt.
 Every stored policy change is written to the audit log as
 `KEY_SHARING_CHANGED`, with the old and new policy.
 
+The write is a compare-and-set (`KeyDao.compareAndSetSharingPolicy`) against
+the policy the decision was taken on, so a change that lands between the read
+and the write is never overwritten. A key already at the requested policy is
+not written or audited. If the policy moves while the approval prompt is up,
+the widening is refused with `OPERATION_DENIED`, since the approval covered
+the old state; a narrowing re-reads and narrows the new state. The audit
+entry names the policy the write actually replaced.
+
+The confirmed peer is the one of the connection the request arrived on (its
+caller session); the handler-wide peer of the last served connection answers
+only for a request that names no connection.
+
 | Error | When |
 |-------|------|
 | `INVALID_PARAMS` | Params or `keyId` missing |
 | `KEY_NOT_FOUND` | No key with that `keyId` |
-| `OPERATION_DENIED` | Widening on a session with no confirmed peer |
+| `OPERATION_DENIED` | Widening on a session with no confirmed peer, or the policy changed while the prompt was up |
 | `BIOMETRIC_FAILED` | Widening with no biometric prompt available, or the owner cancels or fails it; the stored policy is unchanged |
