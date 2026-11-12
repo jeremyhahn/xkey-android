@@ -786,6 +786,26 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         return null
     }
 
+    /** The client [remoteKeyClient] last built, with the router it was built on. */
+    private var remoteKeyClientCache: Pair<BidirectionalMessageRouter, RemoteKeyClient>? = null
+
+    /**
+     * The `remote.*` key client for the connected desktop, or null if no
+     * desktop is connected. Callers on one transport share a single client, so
+     * their requests draw ids from one counter and never collide in the
+     * router's pending table.
+     */
+    @Synchronized
+    fun remoteKeyClient(): RemoteKeyClient? {
+        val (sender, router) = activeTransport() ?: return null
+        remoteKeyClientCache?.let { (cachedRouter, client) ->
+            if (cachedRouter === router) return client
+        }
+        return RemoteKeyClient(sender, router).also {
+            remoteKeyClientCache = router to it
+        }
+    }
+
     /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)
      * with the connected desktop over the active transport.
