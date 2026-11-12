@@ -32,9 +32,12 @@ import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -42,6 +45,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.After
@@ -398,5 +402,65 @@ class KeySharingPeersTest {
         assertFalse(hasAccess(PEER_A))
         assertFalse(table.value.any { it.peerPublicKeyHex == PEER_A })
         coVerify(exactly = 0) { dao.setPolicy(match { it.peerPublicKeyHex == PEER_A }) }
+    }
+
+    @Test
+    fun aWithdrawalQueuedBehindAGrantSurvivesTheSheetsDismissal() = runTest {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_A))
+        val gate = holdGrants()
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        // Another grant holds the edits lock.
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true) }
+        assertFalse(grant.isCompleted)
+
+        // The sheet withdraws A, already authorized, and is dismissed while that waits.
+        val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
+        sheet.launch { peers.setAllowed(PEER_A, false) }
+        sheet.cancel()
+
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        advanceUntilIdle()
+
+        assertFalse("a withdrawal accepted before dismissal was dropped", hasAccess(PEER_A))
+        assertFalse(peers.peers().first().of(PEER_A).allowed)
+    }
+
+    @Test
+    fun aPrivatePolicyQueuedBehindAGrantSurvivesTheSheetsDismissal() = runTest {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_A))
+        val gate = holdGrants()
+        val stored = mutableListOf<SharingPolicyType>()
+        val peers = KeySharingPeers(KEY, dao, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true) }
+        assertFalse(grant.isCompleted)
+
+        // The sheet selects Private and is dismissed while that waits.
+        val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
+        sheet.launch { peers.setKeyPolicy(SharingPolicyType.PRIVATE) { stored += SharingPolicyType.PRIVATE } }
+        sheet.cancel()
+
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        advanceUntilIdle()
+
+        assertEquals("the Private policy accepted before dismissal was dropped", listOf(SharingPolicyType.PRIVATE), stored)
+        assertFalse(hasAccess(PEER_A))
+        assertTrue(table.value.none { it.keyId == KEY })
+    }
+
+    /** Holds every grant before its insert until the returned gate completes. */
+    private fun holdGrants(): CompletableDeferred<Unit> {
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            gate.await()
+            val row = firstArg<KeySharingPolicy>()
+            table.value = table.value.filterNot {
+                it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
+            } + row
+        }
+        return gate
     }
 }

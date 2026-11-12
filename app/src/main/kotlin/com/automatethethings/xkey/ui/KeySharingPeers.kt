@@ -19,7 +19,9 @@ import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.sync.Mutex
@@ -53,7 +55,8 @@ class KeySharingPeers(
     private val keyId: String,
     private val policyDao: KeySharingPolicyDao,
     private val repository: PairedDeviceRepository,
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val editScope: CoroutineScope = acceptedEdits
 ) {
 
     /** One row of the list. [selectable] is false while the row must not be changed. */
@@ -121,5 +124,8 @@ class KeySharingPeers(
     private companion object {
         /** Orders every grant and withdrawal, across all sheets. */
         val edits = Mutex()
+
+        /** Outlives every sheet: an edit the user made lands after its sheet is gone. */
+        val acceptedEdits = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 }
