@@ -30,6 +30,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -80,7 +81,7 @@ class BleClientInboundConnectionTest {
     fun aFragmentQueuedBeforeItsConnectionEndedDoesNotReachTheNextHandshake(): Unit = runBlocking {
         val h = harness()
         h.client.connect(h.address, randomKey())
-        val paused = ConsumerPause(h.client)
+        val paused = ConsumerPause(h)
         h.probe.gattCallback.onCharacteristicChanged(
             h.gatt, h.responseCharacteristic, singleFragment(byteArrayOf(0x00))
         )
@@ -89,7 +90,7 @@ class BleClientInboundConnectionTest {
         h.probe.disconnectInternal()
         val newGatt = h.nextConnection()
         val reconnect = async(Dispatchers.Default) { h.client.connect(h.address, randomKey()) }
-        awaitUntil("the next connection's identity frame") { h.writesOn(newGatt) >= 1 }
+        h.awaitUntil("the next connection's identity frame") { h.writesOn(newGatt) >= 1 }
         paused.resume()
 
         assertTrue(
@@ -115,12 +116,14 @@ class BleClientInboundConnectionTest {
         h.client.connect(h.address, randomKey())
         h.holdWrites = true
         val call = async(Dispatchers.Default) { h.client.sendRequest(REQUEST) }
-        awaitUntil("the request's write") { h.heldWrites == 1 }
+        h.awaitUntil("the request's write") { h.heldWrites == 1 }
         val reply = h.heldReplies.single() ?: throw AssertionError("the desktop did not reply")
 
         h.probe.handleCompleteMessage(ended, reply)
 
-        Thread.sleep(50)
+        // Routed on this thread: had the next session decrypted the message,
+        // it would have taken the request's waiter before the call returned.
+        assertNotNull("the next connection's session decrypted the ended connection's message", h.probe.pendingResponse)
         assertFalse("the next connection's session decrypted the ended connection's message", call.isCompleted)
         h.releaseHeldWrites()
         assertArrayEquals(h.responseFor(REQUEST), withTimeout(TIMEOUT_MS) { call.await() })
@@ -128,13 +131,13 @@ class BleClientInboundConnectionTest {
 
 
     /** Holds the inbound consumer on the first fragment it takes, until [resume]. */
-    private class ConsumerPause(client: BleClient) {
+    private class ConsumerPause(harness: BleClientHarness) {
         private val paused = CountDownLatch(1)
         private val released = CountDownLatch(1)
         private val first = AtomicBoolean(true)
 
         init {
-            client.inboundFragmentHook = {
+            harness.onInboundEvent = {
                 if (first.getAndSet(false)) {
                     paused.countDown()
                     released.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -151,15 +154,6 @@ class BleClientInboundConnectionTest {
 
     private fun singleFragment(message: ByteArray): ByteArray =
         Fragmenter(Fragmenter.MIN_PAYLOAD_SIZE).fragment(message).single()
-
-    private fun awaitUntil(what: String, condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + TIMEOUT_MS
-        while (System.currentTimeMillis() < deadline) {
-            if (condition()) return
-            Thread.sleep(5)
-        }
-        throw AssertionError("timed out waiting for $what")
-    }
 
     private fun randomKey(): ByteArray = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
