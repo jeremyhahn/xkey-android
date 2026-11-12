@@ -92,7 +92,9 @@ public class TrustStoreRepository(
     private val context: Context,
     private val caFetcher: CABundleFetcher = CABundleFetcher(),
     /** Deletes one file; tests inject a deleter that refuses. */
-    private val fileDeleter: (File) -> Boolean = { it.delete() }
+    private val fileDeleter: (File) -> Boolean = { it.delete() },
+    /** Writes text to one file; tests inject a writer that fails part-way. */
+    private val fileWriter: (File, String) -> Unit = { file, text -> file.writeText(text) }
 ) {
     private val trustStoreDir: File by lazy {
         context.getDir("trust_store", Context.MODE_PRIVATE)
@@ -585,7 +587,7 @@ public class TrustStoreRepository(
                 }
             )
         }
-        File(trustStoreDir, "metadata.json").writeText(array.toString())
+        fileWriter(File(trustStoreDir, "metadata.json"), array.toString())
     }
 
     private suspend fun saveMetadata(certs: List<TrustedCA>): Unit = withContext(Dispatchers.IO) {

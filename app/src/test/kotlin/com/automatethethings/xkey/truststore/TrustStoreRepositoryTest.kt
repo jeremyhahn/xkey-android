@@ -862,6 +862,55 @@ class TrustStoreRepositoryTest {
     }
 
     @Test
+    fun `a metadata write that fails part-way keeps the previous metadata`() = runTest {
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_B_PEM))
+        val fingerprintA = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        val fingerprintB = TestCertificates.fingerprint(TestCertificates.LEAF_B_PEM)
+        val refused = "$fingerprintB.der"
+        // Deletes every file but B's, and fails every write after truncating
+        // its target and writing a fragment.
+        val failing = TrustStoreRepository(
+            context,
+            caFetcher,
+            fileDeleter = { file -> if (file.name == refused) false else file.delete() },
+            fileWriter = { file, text ->
+                file.writeText(text.take(3))
+                throw java.io.IOException("disk full")
+            }
+        )
+
+        val result = failing.clearAll()
+
+        assertFalse(result.complete)
+        // B was never removed: it is still listed, and so is A, whose row
+        // the failed rewrite could not drop.
+        val listed = newRepository().getAllCertificates().map { it.fingerprint }.toSet()
+        assertTrue(fingerprintB in listed)
+        assertEquals(setOf(fingerprintA, fingerprintB), listed)
+        assertTrue(newRepository().hasCertificate(fingerprintB))
+    }
+
+    @Test
+    fun `clearAll removes and audits a certificate file without metadata`() = runTest {
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+        val fingerprintA = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        // An interrupted rewrite lost A's metadata row; its DER remains.
+        assertTrue(File(storeDir, "metadata.json").delete())
+        captureAudit()
+
+        val result = repository.clearAll()
+
+        assertEquals(listOf(fingerprintA), result.removed)
+        assertTrue(result.complete)
+        val deletes = auditedOf(AuditOperationType.TRUST_STORE_DELETE)
+        assertEquals(1, deletes.size)
+        assertTrue(deletes[0].success)
+        assertEquals(fingerprintA, details(deletes[0]).getString("fingerprint"))
+        assertFalse(newRepository().hasCertificate(fingerprintA))
+    }
+
+    @Test
     fun `imports and deletes still succeed with the audit logger uninitialized`() = runTest {
         assertFalse(AuditLogger.isInitialized())
         val der = TestCertificates.der(TestCertificates.LEAF_A_PEM)
