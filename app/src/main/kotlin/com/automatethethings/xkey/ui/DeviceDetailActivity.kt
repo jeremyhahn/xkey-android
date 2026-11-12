@@ -55,6 +55,7 @@ import com.automatethethings.xkey.ca.EnrolledDeviceRepository
 import com.automatethethings.xkey.ca.EnrollmentRefusal
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -1412,6 +1413,7 @@ class DeviceDetailActivity : AppCompatActivity() {
 
                 if (!connected) {
                     snackbar.dismiss()
+                    if (isFinishing || isDestroyed) return@step
                     gattService?.let { ensureAdvertisingAndShowInstructions(it) }
                         ?: showReattestInstructions()
                     return@step
@@ -1464,7 +1466,8 @@ class DeviceDetailActivity : AppCompatActivity() {
     /**
      * Runs one phone-initiated re-attest [step] in this activity's scope, which
      * [onDestroy] cancels. A failure falls back to the advertise-and-wait
-     * instructions.
+     * instructions; leaving the screen, which cancels a pending SAS prompt,
+     * ends the step quietly.
      */
     @VisibleForTesting
     internal fun launchPhoneInitiatedReattest(
@@ -1718,7 +1721,9 @@ class DeviceDetailActivity : AppCompatActivity() {
  * Runs a phone-initiated re-attest [step] and hands a failure to [onFailure].
  *
  * [activityGone] reports whether the screen that would show the fallback has
- * been finished or destroyed.
+ * been finished or destroyed; it then gets no fallback. Cancellation, which is
+ * how leaving the screen ends a pending SAS prompt, is not a failure: it is
+ * rethrown, never handed to [onFailure] (#137).
  */
 internal suspend fun runPhoneInitiatedReattest(
     activityGone: () -> Boolean,
@@ -1727,7 +1732,9 @@ internal suspend fun runPhoneInitiatedReattest(
 ) {
     try {
         step()
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
-        onFailure(e)
+        if (!activityGone()) onFailure(e)
     }
 }
