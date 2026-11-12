@@ -399,21 +399,22 @@ class AndroidCA(private val context: Context) {
         val signingCert = getStoredCertificate(
             if (signingAlias == ROOT_CA_ALIAS) PREF_ROOT_CERT_DER else PREF_INTERMEDIATE_CERT_DER
         ) ?: throw IllegalStateException("Signing CA certificate not found")
+        // Before anything is built or stored: a refused issuer stores nothing.
+        val validity = validityFor(
+            now = Date(),
+            validityDays = profile.validityDays,
+            issuerNotBefore = signingCert.notBefore,
+            issuerNotAfter = signingCert.notAfter
+        )
         val signingKey = keyStore.getKey(signingAlias, null) as PrivateKey
 
         val serialNumber = BigInteger(64, SecureRandom())
 
-        val notBefore = Date()
-        val calendar = Calendar.getInstance()
-        calendar.time = notBefore
-        calendar.add(Calendar.DAY_OF_YEAR, profile.validityDays)
-        val notAfter = calendar.time
-
         val certBuilder = JcaX509v3CertificateBuilder(
             issuerNameOf(signingCert),
             serialNumber,
-            notBefore,
-            notAfter,
+            validity.notBefore,
+            validity.notAfter,
             subject,
             publicKey
         )
@@ -913,18 +914,23 @@ class AndroidCA(private val context: Context) {
         val intermediatePublicKey = keyEntry.certificate.publicKey
 
         val serialNumber = BigInteger(64, SecureRandom())
-        val notBefore = Date()
+        val now = Date()
         val calendar = Calendar.getInstance()
-        calendar.time = notBefore
+        calendar.time = now
         calendar.add(Calendar.YEAR, INTERMEDIATE_CA_VALIDITY_YEARS)
-        val notAfter = calendar.time
+        val validity = validityUntil(
+            now = now,
+            requestedNotAfter = calendar.time,
+            issuerNotBefore = rootCert.notBefore,
+            issuerNotAfter = rootCert.notAfter
+        )
 
         val extUtils = JcaX509ExtensionUtils()
         val certBuilder = JcaX509v3CertificateBuilder(
             issuerNameOf(rootCert),
             serialNumber,
-            notBefore,
-            notAfter,
+            validity.notBefore,
+            validity.notAfter,
             subject,
             intermediatePublicKey
         ).apply {
