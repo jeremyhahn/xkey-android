@@ -63,6 +63,7 @@ class PasskeySignCounterTest {
                 if (metadata == null) null else metadataEntity
             }
             coEvery { updateSignCount(ID, any(), any()) } answers {
+                if (failMetadataWrite) throw IllegalStateException("metadata store unavailable")
                 if (metadata != null) metadata = secondArg()
             }
         }
@@ -73,9 +74,14 @@ class PasskeySignCounterTest {
                 if (key == null) null else keyEntity
             }
             coEvery { updateSignCount(ID, any(), any()) } answers {
+                if (failKeyWrite) throw IllegalStateException("key store unavailable")
                 if (key != null) key = secondArg()
             }
         }
+
+        /** Makes the next sign_count write to that store throw. */
+        @Volatile var failMetadataWrite = false
+        @Volatile var failKeyWrite = false
 
         fun counter() = PasskeySignCounter(credentialDao, keyDao)
     }
@@ -144,6 +150,56 @@ class PasskeySignCounterTest {
         assertEquals(3L, stores.counter().next(ID))
         assertEquals(4L, stores.counter().next(ID))
         assertEquals(4L, stores.key)
+    }
+
+    @Test
+    fun aCounterThatCannotBePersistedRefusesBeforeAnySignature() = runBlocking {
+        for (failing in listOf("metadata", "key")) {
+            val stores = Stores(metadata = 5, key = 5)
+            stores.failMetadataWrite = failing == "metadata"
+            stores.failKeyWrite = failing == "key"
+            val signed = mutableListOf<Long>()
+
+            val result = runCatching { assertWith(stores.counter(), signed) }
+
+            assertTrue("a failed $failing write must refuse the assertion", result.isFailure)
+            assertTrue("a failed $failing write signed $signed", signed.isEmpty())
+        }
+    }
+
+    @Test
+    fun theAssertionAfterAPersistenceFailureStillRises() = runBlocking {
+        for (failing in listOf("metadata", "key")) {
+            val stores = Stores(metadata = 5, key = 5)
+            val signed = mutableListOf(stores.counter().next(ID))
+            stores.failMetadataWrite = failing == "metadata"
+            stores.failKeyWrite = failing == "key"
+            runCatching { assertWith(stores.counter(), signed) }
+            // A write that landed before the failure counts as handed out.
+            val persisted = maxOf(stores.metadata!!, stores.key!!)
+            stores.failMetadataWrite = false
+            stores.failKeyWrite = false
+
+            val next = assertWith(stores.counter(), signed)
+
+            assertTrue(
+                "after a failed $failing write the next assertion signed $next, " +
+                    "not above ${signed.dropLast(1)} and $persisted",
+                signed.dropLast(1).all { next > it } && next > persisted
+            )
+            assertEquals(next, stores.metadata)
+            assertEquals(next, stores.key)
+        }
+    }
+
+    /**
+     * One assertion the way both handlers run it: take the counter, then
+     * sign. A value reaches [signed] only once the counter has returned it.
+     */
+    private suspend fun assertWith(counter: PasskeySignCounter, signed: MutableList<Long>): Long {
+        val value = counter.next(ID)
+        signed += value
+        return value
     }
 
     private companion object {
