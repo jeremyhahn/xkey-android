@@ -1004,9 +1004,6 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // Hash file content
-                val hashHex = MediaHasher.hashCanonicalUri(contentResolver, uri)
-
                 // Try reading embedded signature
                 val mimeType = contentResolver.getType(uri)
                 val embeddedData = XmpMetadataHelper.readSignatureFromUri(
@@ -1014,7 +1011,13 @@ class FileOperationActivity : AppCompatActivity() {
                 )
 
                 if (embeddedData != null) {
-                    val result = verifySignatures(embeddedData, hashHex)
+                    // The stored content hash must match this file before any
+                    // signature over it counts: a copied in-band block covers
+                    // another file's content.
+                    val hashMatches = MediaHasher.contentHashMatchesUri(
+                        contentResolver, uri, embeddedData.contentHash, MediaHasher.SignatureSource.IN_BAND
+                    )
+                    val result = verifySignatures(embeddedData, hashMatches)
 
                     val fileName = getFileName(uri)
                     AuditLogger.logFileVerified(
@@ -1059,7 +1062,7 @@ class FileOperationActivity : AppCompatActivity() {
                     contentResolver, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
                 )
                 val results = if (hashMatches) {
-                    verifySignatures(cad, cad.contentHash)
+                    verifySignatures(cad, hashMatches)
                 } else {
                     listOf("Content hash mismatch" to "failed")
                 }
@@ -1088,12 +1091,13 @@ class FileOperationActivity : AppCompatActivity() {
      * screen shares with the verified-media viewer.
      *
      * @param cad The content authenticity data containing signatures.
-     * @param hashHex The hex-encoded SHA-256 hash of the file content.
+     * @param contentHashMatches Whether `cad.contentHash` matches the file;
+     *        when it does not, every entry fails.
      * @return List of pairs: (signer description, status).
      */
     private suspend fun verifySignatures(
         cad: ContentAuthenticityData,
-        hashHex: String
+        contentHashMatches: Boolean
     ): List<Pair<String, String>> {
         return cad.signatures.map { entry ->
             try {
@@ -1108,7 +1112,7 @@ class FileOperationActivity : AppCompatActivity() {
                 val result = SignerVerification.verify(
                     entry = entry,
                     storedContentHash = cad.contentHash,
-                    contentHashMatches = true,
+                    contentHashMatches = contentHashMatches,
                     contact = contact?.let { SignerVerification.Contact(it.name, it.publicKeyDer) },
                     localKeys = localKeys
                 )

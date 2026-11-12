@@ -74,19 +74,16 @@ object SignerVerification {
                 return Result(if (ok) Status.VERIFIED else Status.FAILED, entry.signerName ?: contact.name)
             }
 
-            val matchedKey = localKeys.find { key ->
+            // Only a key we hold the public key of can match. A row without
+            // one says nothing about the signature: matching it by keyId
+            // would trust a fingerprint the file itself supplies.
+            val matchedKey = localKeys.firstOrNull { key ->
                 val pubDer = key.publicKeyDer
-                if (pubDer != null) {
-                    MediaHasher.hashBytes(pubDer) == entry.keyFingerprint
-                } else {
-                    key.keyId == entry.keyFingerprint
-                }
+                pubDer != null && MediaHasher.hashBytes(pubDer) == entry.keyFingerprint
             } ?: return Result(Status.UNKNOWN, fallbackName)
+            val pubDer = matchedKey.publicKeyDer ?: return Result(Status.UNKNOWN, fallbackName)
 
-            val pubDer = matchedKey.publicKeyDer
-            // Cannot verify without public key material; trust by association.
-            val ok = pubDer == null ||
-                checkSignature(pubDer, entry, storedContentHash, contentHashMatches)
+            val ok = checkSignature(pubDer, entry, storedContentHash, contentHashMatches)
             Result(if (ok) Status.VERIFIED else Status.FAILED, entry.signerName ?: matchedKey.label)
         } catch (e: Exception) {
             Log.e(TAG, "Error verifying entry for ${entry.keyFingerprint}", e)
