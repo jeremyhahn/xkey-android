@@ -23,6 +23,10 @@ data class CertificateValidity(val notBefore: Date, val notAfter: Date)
 /**
  * The validity window for a certificate valid for [validityDays] days from
  * [now], signed by an issuer valid from [issuerNotBefore] to [issuerNotAfter].
+ *
+ * @throws IllegalArgumentException if [validityDays] is not positive.
+ * @throws IllegalStateException if the issuer is expired or not yet valid at
+ *   [now]. See [validityUntil] for the clamp.
  */
 fun validityFor(
     now: Date,
@@ -30,6 +34,7 @@ fun validityFor(
     issuerNotBefore: Date,
     issuerNotAfter: Date
 ): CertificateValidity {
+    require(validityDays > 0) { "Certificate validity must be at least one day, got $validityDays" }
     val requestedNotAfter = Date(now.time + TimeUnit.DAYS.toMillis(validityDays.toLong()))
     return validityUntil(now, requestedNotAfter, issuerNotBefore, issuerNotAfter)
 }
@@ -38,11 +43,29 @@ fun validityFor(
  * The validity window for a certificate requested to be valid from [now] to
  * [requestedNotAfter], signed by an issuer valid from [issuerNotBefore] to
  * [issuerNotAfter].
+ *
+ * A certificate never outlives its issuer: notAfter is the earlier of
+ * [requestedNotAfter] and [issuerNotAfter]. An issuer that is expired or not
+ * yet valid at [now] issues nothing.
+ *
+ * @throws IllegalStateException if the issuer is expired or not yet valid at
+ *   [now].
  */
-@Suppress("UNUSED_PARAMETER")
 fun validityUntil(
     now: Date,
     requestedNotAfter: Date,
     issuerNotBefore: Date,
     issuerNotAfter: Date
-): CertificateValidity = CertificateValidity(now, requestedNotAfter)
+): CertificateValidity {
+    check(!now.after(issuerNotAfter)) {
+        "Issuing CA certificate expired at ${issuerNotAfter.toInstant()}"
+    }
+    check(!now.before(issuerNotBefore)) {
+        "Issuing CA certificate is not valid until ${issuerNotBefore.toInstant()}"
+    }
+    require(requestedNotAfter.after(now)) {
+        "Certificate notAfter ${requestedNotAfter.toInstant()} is not after notBefore ${now.toInstant()}"
+    }
+    val notAfter = if (requestedNotAfter.after(issuerNotAfter)) issuerNotAfter else requestedNotAfter
+    return CertificateValidity(notBefore = now, notAfter = notAfter)
+}
