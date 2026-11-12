@@ -452,29 +452,61 @@ internal class SharePermissionRevokedException(keyId: String) :
  *   write has committed yet or not;
  * - a revoke that starts after admission is ordered after the send, whose
  *   nonce is already consumed.
+ *
+ * The ledger keeps state only for keys with an outstanding [Baseline] (and a
+ * revoke in flight). A revoke of any other key, such as a delete of an ID that
+ * names nothing, only moves one global floor, the revision of every key the
+ * ledger holds no entry for. Closing a key's last baseline reclaims its entry
+ * and raises the floor to the entry's revision, so revisions only grow: no
+ * reclaim makes a baseline taken before a revoke valid again.
  */
 internal object SharePermissionLedger {
 
+    private class Entry(var revision: Long, var baselines: Int)
+
     private val lock = Any()
-    private val revisions = HashMap<String, Long>()
+    private val entries = HashMap<String, Entry>()
     private val inFlight = HashMap<String, Int>()
 
+    /** The last revision handed out; every revision in the ledger is at most this. */
+    private var epoch = 0L
+
+    /** The revision of every key without an entry. */
+    private var floor = 0L
+
     /** The key's revision now; take it before reading the key's permission from the store. */
-    fun revision(keyId: String): Long = synchronized(lock) { revisions[keyId] ?: 0L }
+    fun revision(keyId: String): Long = synchronized(lock) { entries[keyId]?.revision ?: floor }
 
     /**
      * A key's revision taken before any of its share inputs (record, public
-     * half, software material) were read. A share carries it to admission.
+     * half, software material) were read. A share carries it to admission and
+     * [close]s it once done; the ledger tracks the key until its last
+     * baseline is closed.
      */
     class Baseline internal constructor(val keyId: String, val revision: Long) : AutoCloseable {
-        override fun close() {}
+        private var closed = false
+
+        override fun close() = synchronized(lock) {
+            if (closed) return@synchronized
+            closed = true
+            val entry = entries[keyId] ?: return@synchronized
+            entry.baselines--
+            if (entry.baselines == 0) {
+                entries.remove(keyId)
+                floor = maxOf(floor, entry.revision)
+            }
+        }
+    }
+
+    /** Takes [keyId]'s [Baseline]; call before loading anything a share of it sends. */
+    fun baseline(keyId: String): Baseline = synchronized(lock) {
+        val entry = entries.getOrPut(keyId) { Entry(floor, 0) }
+        entry.baselines++
+        Baseline(keyId, entry.revision)
     }
 
     /** Key IDs the ledger holds state for. */
-    internal fun retainedKeyCount(): Int = synchronized(lock) { revisions.size + inFlight.size }
-
-    /** Takes [keyId]'s [Baseline]; call before loading anything a share of it sends. */
-    fun baseline(keyId: String): Baseline = Baseline(keyId, revision(keyId))
+    internal fun retainedKeyCount(): Int = synchronized(lock) { entries.size + inFlight.size }
 
     /**
      * Admission check: no revoke of [keyId] is in flight and none has
@@ -484,7 +516,7 @@ internal object SharePermissionLedger {
      * @throws SharePermissionRevokedException otherwise
      */
     fun requireUnchanged(keyId: String, revision: Long) = synchronized(lock) {
-        if ((inFlight[keyId] ?: 0) > 0 || (revisions[keyId] ?: 0L) != revision) {
+        if ((inFlight[keyId] ?: 0) > 0 || (entries[keyId]?.revision ?: floor) != revision) {
             throw SharePermissionRevokedException(keyId)
         }
     }
@@ -496,7 +528,9 @@ internal object SharePermissionLedger {
             return write()
         } finally {
             synchronized(lock) {
-                revisions[keyId] = (revisions[keyId] ?: 0L) + 1
+                epoch++
+                val entry = entries[keyId]
+                if (entry != null) entry.revision = epoch else floor = epoch
                 val left = (inFlight[keyId] ?: 1) - 1
                 if (left == 0) inFlight.remove(keyId) else inFlight[keyId] = left
             }
@@ -542,7 +576,8 @@ class DesktopKeyShare(
      * any of [entity], [software], [publicKeyPem] and [certificatePem] was
      * loaded; the transport admits the send only while it holds, and a
      * baseline for another key refuses the send.
-     * [software]'s material is zeroed before this returns, whatever the outcome.
+     * [software]'s material is zeroed, and [baseline] closed, before this
+     * returns, whatever the outcome.
      * [currentEntity] reads the key's record from the store, not a snapshot.
      */
     internal suspend fun send(
@@ -591,6 +626,7 @@ class DesktopKeyShare(
             return if (result.accepted) Outcome.Sent(result) else Outcome.Declined(result)
         } finally {
             software?.material.let { it?.fill(0) }
+            baseline.close()
         }
     }
 
