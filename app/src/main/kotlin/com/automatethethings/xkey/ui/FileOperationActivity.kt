@@ -45,9 +45,9 @@ import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
-import com.automatethethings.xkey.media.SignatureVerifier
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
+import com.automatethethings.xkey.media.SignerVerification
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.ContactDao
@@ -1083,10 +1083,9 @@ class FileOperationActivity : AppCompatActivity() {
     /**
      * Verify each signature entry against known keys and contacts.
      *
-     * For each [SignatureEntry]:
-     * - Look up the key fingerprint in the keys table (by matching public key DER hash).
-     * - Look up the key fingerprint in the contacts table.
-     * - Report "verified" if found, "unknown" if not found, "failed" on error.
+     * For each [SignatureEntry] this looks up the contact and the local keys
+     * and leaves the decision to [SignerVerification.verify], the rule this
+     * screen shares with the verified-media viewer.
      *
      * @param cad The content authenticity data containing signatures.
      * @param hashHex The hex-encoded SHA-256 hash of the file content.
@@ -1098,38 +1097,25 @@ class FileOperationActivity : AppCompatActivity() {
     ): List<Pair<String, String>> {
         return cad.signatures.map { entry ->
             try {
-                // Look up by fingerprint in contacts
                 val contact = contactDao.getByFingerprint(entry.keyFingerprint)
-                if (contact != null) {
-                    val signerDesc = entry.signerName ?: contact.name
-                    val genuine = SignatureVerifier.verifyEntry(
-                        contact.publicKeyDer, entry, cad.contentHash
-                    )
-                    return@map signerDesc to if (genuine) "verified" else "failed"
-                }
-
-                // Try to find in local keys by matching fingerprint
-                val allKeys = keyDao.getAll()
-                val matchedKey = allKeys.find { key ->
-                    val pubDer = key.publicKeyDer
-                    if (pubDer != null) {
-                        MediaHasher.hashBytes(pubDer) == entry.keyFingerprint
-                    } else {
-                        key.keyId == entry.keyFingerprint
+                val localKeys = if (contact == null) {
+                    keyDao.getAll().map {
+                        SignerVerification.LocalKey(it.keyId, it.label, it.publicKeyDer)
                     }
-                }
-
-                if (matchedKey != null) {
-                    val signerDesc = entry.signerName ?: matchedKey.label
-                    val pubDer = matchedKey.publicKeyDer
-                    // A key row with no public key material cannot be checked;
-                    // it is trusted by association, as the media viewer does.
-                    val genuine = pubDer == null ||
-                        SignatureVerifier.verifyEntry(pubDer, entry, cad.contentHash)
-                    signerDesc to if (genuine) "verified" else "failed"
                 } else {
-                    val signerDesc = entry.signerName ?: entry.keyFingerprint.take(16) + "..."
-                    signerDesc to "unknown"
+                    emptyList()
+                }
+                val result = SignerVerification.verify(
+                    entry = entry,
+                    storedContentHash = cad.contentHash,
+                    contentHashMatches = true,
+                    contact = contact?.let { SignerVerification.Contact(it.name, it.publicKeyDer) },
+                    localKeys = localKeys
+                )
+                result.displayName to when (result.status) {
+                    SignerVerification.Status.VERIFIED -> "verified"
+                    SignerVerification.Status.FAILED -> "failed"
+                    SignerVerification.Status.UNKNOWN -> "unknown"
                 }
             } catch (e: Exception) {
                 val signerDesc = entry.signerName ?: entry.keyFingerprint.take(16) + "..."
