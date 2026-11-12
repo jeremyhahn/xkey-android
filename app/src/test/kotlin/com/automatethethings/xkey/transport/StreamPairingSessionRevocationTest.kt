@@ -23,6 +23,9 @@ import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.RemoteShareClient
+import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -474,6 +477,36 @@ class StreamPairingSessionRevocationTest {
         repo.removeDevice(phone.desktop.publicKeyHex)
         assertNull("a revoked connection confirms no one", pairing.confirmedConnection())
         phone.awaitServeEnded()
+    }
+
+    /**
+     * A share goes out on the connection it was authorized on, or not at
+     * all: a second paired desktop that connects after the check passed for
+     * the first, and before the bytes reach the transport, receives nothing.
+     */
+    @Test
+    fun aShareAuthorizedForOnePeerNeverReachesAPeerThatConnectedBeforeTheSend() = runBlocking<Unit> {
+        val first = connectPaired()
+        var second: Phone? = null
+        val router = BidirectionalMessageRouter(requestHandler)
+        // The check (same connection, same peer) has passed for the first
+        // desktop when this runs; the second one connects in that window.
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) {
+            if (second == null) second = runBlocking { connectPaired() }
+            true
+        }!!
+        assertEquals(first.desktop.publicKeyHex, session.peerPublicKeyHex)
+
+        val share = RemoteShareClient.PublicKeyShare("k1", "-----BEGIN PUBLIC KEY-----", null, "ECDSA-P256", null, null)
+        val outcome = runCatching { session.client(300).sharePublicKey(share) }
+
+        assertTrue("the share must not succeed", outcome.isFailure)
+        val late = second ?: error("the second desktop never connected")
+        assertTrue(
+            "the second desktop is another peer",
+            late.desktop.publicKeyHex != first.desktop.publicKeyHex
+        )
+        late.desktop.assertNoFrame()
     }
 
     // ---------------------------------------------------------------------
