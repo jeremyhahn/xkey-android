@@ -54,9 +54,16 @@ import java.io.IOException
  *
  * Lifecycle:
  * 1. Android delivers a USB_ACCESSORY_ATTACHED intent.
- * 2. [connect] opens the file descriptor and starts the session.
+ * 2. [connect] opens the file descriptor, starts the session and starts
+ *    watching for the accessory's USB_ACCESSORY_DETACHED broadcast.
  * 3. [StreamPairingSession] performs the handshake and processes messages.
- * 4. [disconnect] is called when the accessory is detached.
+ * 4. On USB_ACCESSORY_DETACHED (the cable pulled) the server [disconnect]s:
+ *    it closes the streams and descriptor, ends the session and tells its
+ *    owner through `onDetached`. A later attach serves again.
+ *
+ * A session that ends by itself (the host closed its end) closes the streams
+ * and frees the connection slot too, so a later [connect] opens the accessory
+ * again.
  *
  * @param requestHandler The shared request handler for processing JSON-RPC requests.
  * @param messageRouter Optional bidirectional message router for remote.* requests.
@@ -64,13 +71,18 @@ import java.io.IOException
  * @param pairedDeviceRepository Optional repository for paired device management.
  * @param storeMethods Method families served on USB only (the password and seal
  *   stores go-xkms proxies over this transport), ahead of [requestHandler].
+ * @param detachWatcher Watches for the open accessory's detach.
+ * @param onDetached Called after a detach has closed the accessory, so the
+ *   owner can drop this server and build a fresh one on the next attach.
  */
 class UsbAccessoryServer(
     requestHandler: RequestHandler,
     messageRouter: BidirectionalMessageRouter? = null,
     pairingCallback: com.automatethethings.xkey.ble.PairingConfirmationCallback? = null,
     pairedDeviceRepository: com.automatethethings.xkey.settings.PairedDeviceRepository? = null,
-    storeMethods: List<TransportMethods> = emptyList()
+    storeMethods: List<TransportMethods> = emptyList(),
+    private val detachWatcher: AccessoryDetachWatcher = BroadcastAccessoryDetachWatcher(),
+    private val onDetached: () -> Unit = {},
 ) : MessageSender {
     companion object {
         private const val TAG = "UsbAccessoryServer"
@@ -90,11 +102,27 @@ class UsbAccessoryServer(
     /** Observable state of the USB accessory server. */
     val state: StateFlow<UsbAccessoryState> = _state.asStateFlow()
 
+    /**
+     * Guards the connection fields below and [_state] changes: the detach
+     * broadcast, the session coroutine and [connect] race.
+     */
+    private val lock = Any()
     private var serverScope: CoroutineScope? = null
     private var fileDescriptor: ParcelFileDescriptor? = null
     private var inputStream: FileInputStream? = null
     private var outputStream: FileOutputStream? = null
     private var connectionJob: Job? = null
+
+    /** The accessory opened last, until it detaches or [disconnect] runs. */
+    private var accessory: UsbAccessory? = null
+
+    /** True while an accessory's streams are open and its session runs. */
+    internal val isOpen: Boolean
+        get() = synchronized(lock) { serverScope != null }
+
+    /** The running session's coroutine, for tests that wait for it to end. */
+    internal val sessionJob: Job?
+        get() = synchronized(lock) { connectionJob }
 
     /**
      * Opens the USB accessory and starts the communication session.
@@ -103,64 +131,97 @@ class UsbAccessoryServer(
      * @param accessory The USB accessory to connect to.
      */
     fun connect(context: Context, accessory: UsbAccessory) {
-        if (serverScope != null) {
-            Log.w(TAG, "Already connected to an accessory")
-            return
-        }
+        synchronized(lock) {
+            if (serverScope != null) {
+                Log.w(TAG, "Already connected to an accessory")
+                return
+            }
 
-        val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-        val fd = usbManager.openAccessory(accessory)
-        if (fd == null) {
-            Log.e(TAG, "Failed to open USB accessory")
-            _state.value = UsbAccessoryState.Error("Failed to open USB accessory")
-            return
-        }
+            val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            val fd = usbManager.openAccessory(accessory)
+            if (fd == null) {
+                Log.e(TAG, "Failed to open USB accessory")
+                _state.value = UsbAccessoryState.Error("Failed to open USB accessory")
+                return
+            }
 
-        fileDescriptor = fd
-        inputStream = FileInputStream(fd.fileDescriptor)
-        outputStream = FileOutputStream(fd.fileDescriptor)
+            fileDescriptor = fd
+            inputStream = FileInputStream(fd.fileDescriptor)
+            outputStream = FileOutputStream(fd.fileDescriptor)
+            this.accessory = accessory
 
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        serverScope = scope
+            detachWatcher.stop()
+            detachWatcher.start(context) { detached -> onAccessoryDetached(detached) }
 
-        connectionJob = scope.launch {
-            handleConnection(context, accessory.toString())
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            serverScope = scope
+            _state.value = UsbAccessoryState.Handshaking
+
+            connectionJob = scope.launch {
+                handleConnection(context, accessory.toString(), scope)
+            }
         }
 
         Log.i(TAG, "USB accessory opened: ${accessory.manufacturer} ${accessory.model}")
     }
 
     /**
-     * Disconnects from the USB accessory and releases resources.
+     * Disconnects from the USB accessory and releases resources: the streams,
+     * the descriptor, the session scope and the detach watcher.
      */
     fun disconnect() {
         Log.i(TAG, "Disconnecting USB accessory")
-        closeStreams()
-        serverScope?.cancel()
-        serverScope = null
-        connectionJob = null
-        _state.value = UsbAccessoryState.Disconnected
+        synchronized(lock) {
+            detachWatcher.stop()
+            accessory = null
+            closeStreams()
+            serverScope?.cancel()
+            serverScope = null
+            connectionJob = null
+            _state.value = UsbAccessoryState.Disconnected
+        }
+    }
+
+    /**
+     * Handles USB_ACCESSORY_DETACHED for [detached] (null when the broadcast
+     * names none): when it is the accessory this server opened, closes it and
+     * its session and calls `onDetached`. A detach of another accessory is
+     * ignored.
+     */
+    internal fun onAccessoryDetached(detached: UsbAccessory?) {
+        synchronized(lock) {
+            val current = accessory ?: return
+            if (detached != null && detached != current) {
+                Log.d(TAG, "Ignoring the detach of another accessory")
+                return
+            }
+        }
+        Log.i(TAG, "USB accessory detached")
+        disconnect()
+        onDetached()
     }
 
     /**
      * Drives the pairing session over the USB streams for the connection lifetime.
      */
-    private suspend fun handleConnection(context: Context, accessoryInfo: String) {
+    private suspend fun handleConnection(context: Context, accessoryInfo: String, scope: CoroutineScope) {
         try {
-            _state.value = UsbAccessoryState.Handshaking
-
             val noiseSession = NoiseSession()
             noiseSession.loadStaticKey(context)
 
-            val input = inputStream ?: throw IOException("Input stream not available")
-            val output = outputStream ?: throw IOException("Output stream not available")
+            val (input, output) = synchronized(lock) { inputStream to outputStream }
+            if (input == null || output == null) throw IOException("USB streams not available")
 
             pairingSession.serve(
                 input = input,
                 output = output,
                 noiseSession = noiseSession,
-                isActive = { serverScope?.isActive == true },
-                onConnected = { _state.value = UsbAccessoryState.Connected(accessoryInfo) },
+                isActive = { scope.isActive },
+                onConnected = {
+                    synchronized(lock) {
+                        if (serverScope === scope) _state.value = UsbAccessoryState.Connected(accessoryInfo)
+                    }
+                },
             )
         } catch (e: IOException) {
             Log.e(TAG, "USB connection error", e)
@@ -168,8 +229,24 @@ class UsbAccessoryServer(
             Log.e(TAG, "Unexpected error in USB connection handler", e)
         } finally {
             Log.i(TAG, "USB connection closed: $accessoryInfo")
+            releaseSession(scope)
+        }
+    }
+
+    /**
+     * Frees the connection slot when the session of [scope] ends by itself.
+     * A session a [disconnect] already ended, or one a later [connect] has
+     * replaced, leaves the current connection alone.
+     */
+    private fun releaseSession(scope: CoroutineScope) {
+        synchronized(lock) {
+            if (serverScope !== scope) return
+            closeStreams()
+            serverScope = null
+            connectionJob = null
             _state.value = UsbAccessoryState.Disconnected
         }
+        scope.cancel()
     }
 
     /**
@@ -187,6 +264,7 @@ class UsbAccessoryServer(
         pairingSession.sendEncryptedMessage(data)
     }
 
+    /** Closes the streams and the descriptor; the caller holds [lock]. */
     private fun closeStreams() {
         try {
             inputStream?.close()

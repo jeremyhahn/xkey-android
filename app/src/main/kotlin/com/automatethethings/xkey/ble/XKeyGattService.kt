@@ -713,7 +713,10 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 usbRouter,
                 this@XKeyGattService,
                 pairedDeviceRepository,
-                storeMethods
+                storeMethods,
+                // A pulled cable drops this server, so the next attach
+                // builds a fresh one without a service restart (#134).
+                onDetached = { onUsbAccessoryDetached() }
             ).also { server ->
                 server.connect(this@XKeyGattService, accessory)
             }
