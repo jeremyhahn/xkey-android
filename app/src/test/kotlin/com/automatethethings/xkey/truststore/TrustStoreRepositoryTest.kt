@@ -15,13 +15,21 @@
 package com.automatethethings.xkey.truststore
 
 import android.content.Context
+import com.automatethethings.xkey.audit.AuditLogDao
+import com.automatethethings.xkey.audit.AuditLogEntity
+import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.audit.AuditOperationType
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import java.io.File
 import java.security.cert.CertificateException
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -68,10 +76,40 @@ class TrustStoreRepositoryTest {
 
     @After
     fun tearDown() {
+        auditHolder<AuditLogDao>("daoRef").set(null)
+        auditHolder<CoroutineScope>("scopeRef").set(null)
         unmockkAll()
     }
 
     private fun newRepository() = TrustStoreRepository(context, caFetcher)
+
+    // -------------------------------------------------------------------------
+    // Audit capture
+    // -------------------------------------------------------------------------
+
+    private val audited = mutableListOf<AuditLogEntity>()
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> auditHolder(name: String): AtomicReference<T?> =
+        AuditLogger::class.java.getDeclaredField(name)
+            .apply { isAccessible = true }
+            .get(AuditLogger) as AtomicReference<T?>
+
+    /** Route [AuditLogger] writes into [audited], synchronously. */
+    private fun captureAudit() {
+        audited.clear()
+        val dao = mockk<AuditLogDao>(relaxed = true)
+        coEvery { dao.insert(any()) } answers {
+            audited += firstArg<AuditLogEntity>()
+            audited.size.toLong()
+        }
+        auditHolder<AuditLogDao>("daoRef").set(dao)
+        auditHolder<CoroutineScope>("scopeRef").set(CoroutineScope(Dispatchers.Unconfined))
+    }
+
+    private fun auditedOf(type: AuditOperationType) = audited.filter { it.operationType == type }
+
+    private fun details(entry: AuditLogEntity): JSONObject = JSONObject(entry.details!!)
 
     // -------------------------------------------------------------------------
     // importCertificate — accepted input
@@ -620,6 +658,155 @@ class TrustStoreRepositoryTest {
         }
 
         assertEquals("boom", error.message)
+        assertEquals(0, repository.getCertificateCount())
+    }
+
+    // -------------------------------------------------------------------------
+    // Audit log
+    // -------------------------------------------------------------------------
+
+    private fun subjectOf(pem: String) = TestCertificates.cert(pem).subjectX500Principal.name
+
+    @Test
+    fun `importCertificate records one trust store import with source manual`() = runTest {
+        captureAudit()
+
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+
+        val imports = auditedOf(AuditOperationType.TRUST_STORE_IMPORT)
+        assertEquals(1, imports.size)
+        assertEquals(1, audited.size)
+        val details = details(imports[0])
+        assertEquals(subjectOf(TestCertificates.LEAF_A_PEM), details.getString("subject"))
+        assertEquals(
+            TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM),
+            details.getString("fingerprint")
+        )
+        assertEquals("manual", details.getString("source"))
+        assertTrue(imports[0].success)
+    }
+
+    @Test
+    fun `a duplicate import records nothing`() = runTest {
+        val der = TestCertificates.der(TestCertificates.LEAF_A_PEM)
+        repository.importCertificate(der)
+        captureAudit()
+
+        assertNull(repository.importCertificate(der))
+
+        assertTrue(audited.isEmpty())
+    }
+
+    @Test
+    fun `a refused self-signed certificate records nothing`() = runTest {
+        captureAudit()
+
+        assertFails(IllegalArgumentException::class.java) {
+            repository.importCertificate(TestCertificates.der(TestCertificates.ROOT_CA_A_PEM))
+        }
+
+        assertTrue(audited.isEmpty())
+    }
+
+    @Test
+    fun `importFromURL records one import per stored certificate with its url`() = runTest {
+        coEvery { caFetcher.fetchBundle(any()) } returns bundleOf(
+            TestCertificates.INTERMEDIATE_A_PEM,
+            TestCertificates.LEAF_A_PEM,
+            TestCertificates.ROOT_CA_A_PEM
+        )
+        captureAudit()
+
+        repository.importFromURL("https://ca.example.com")
+
+        val imports = auditedOf(AuditOperationType.TRUST_STORE_IMPORT)
+        assertEquals(2, imports.size)
+        assertEquals(
+            setOf(
+                TestCertificates.fingerprint(TestCertificates.INTERMEDIATE_A_PEM),
+                TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+            ),
+            imports.map { details(it).getString("fingerprint") }.toSet()
+        )
+        imports.forEach {
+            assertEquals("url:https://ca.example.com", details(it).getString("source"))
+        }
+    }
+
+    @Test
+    fun `importInternalCACertificate records source internal-ca`() = runTest {
+        captureAudit()
+
+        repository.importInternalCACertificate(
+            TestCertificates.cert(TestCertificates.ROOT_CA_A_PEM),
+            "xKey Root CA"
+        )
+        repository.importInternalCACertificate(
+            TestCertificates.cert(TestCertificates.ROOT_CA_A_PEM),
+            "xKey Root CA"
+        )
+
+        val imports = auditedOf(AuditOperationType.TRUST_STORE_IMPORT)
+        assertEquals(1, imports.size)
+        assertEquals("internal-ca", details(imports[0]).getString("source"))
+        assertEquals(subjectOf(TestCertificates.ROOT_CA_A_PEM), details(imports[0]).getString("subject"))
+    }
+
+    @Test
+    fun `deleteCertificate of a stored certificate records one trust store delete`() = runTest {
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+        val fingerprint = TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)
+        captureAudit()
+
+        assertTrue(repository.deleteCertificate(fingerprint))
+
+        assertEquals(1, audited.size)
+        val delete = auditedOf(AuditOperationType.TRUST_STORE_DELETE).single()
+        assertEquals(fingerprint, details(delete).getString("fingerprint"))
+        assertEquals(subjectOf(TestCertificates.LEAF_A_PEM), details(delete).getString("subject"))
+    }
+
+    @Test
+    fun `deleteCertificate of an unknown fingerprint records nothing`() = runTest {
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+        captureAudit()
+
+        assertFalse(repository.deleteCertificate("ab".repeat(32)))
+
+        assertTrue(audited.isEmpty())
+    }
+
+    @Test
+    fun `clearAll over two certificates records two deletes`() = runTest {
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_A_PEM))
+        repository.importCertificate(TestCertificates.der(TestCertificates.LEAF_B_PEM))
+        captureAudit()
+
+        repository.clearAll()
+
+        val deletes = auditedOf(AuditOperationType.TRUST_STORE_DELETE)
+        assertEquals(2, deletes.size)
+        assertEquals(2, audited.size)
+        assertEquals(
+            setOf(
+                TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM),
+                TestCertificates.fingerprint(TestCertificates.LEAF_B_PEM)
+            ),
+            deletes.map { details(it).getString("fingerprint") }.toSet()
+        )
+        assertEquals(0, repository.getCertificateCount())
+    }
+
+    @Test
+    fun `imports and deletes still succeed with the audit logger uninitialized`() = runTest {
+        assertFalse(AuditLogger.isInitialized())
+        val der = TestCertificates.der(TestCertificates.LEAF_A_PEM)
+
+        assertNotNull(repository.importCertificate(der))
+        assertTrue(repository.deleteCertificate(TestCertificates.fingerprint(TestCertificates.LEAF_A_PEM)))
+        repository.importCertificate(der)
+        repository.clearAll()
+
         assertEquals(0, repository.getCertificateCount())
     }
 
