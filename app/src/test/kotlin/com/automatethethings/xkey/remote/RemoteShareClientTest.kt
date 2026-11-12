@@ -40,6 +40,10 @@ import java.util.Base64
  * `pkg/pairingproto/protocol_sharing.go`. Go `[]byte` fields travel as
  * standard base64 strings, including the PEM fields.
  */
+
+/** Android's org.json has no keySet(); collect the keys() iterator. */
+private fun JSONObject.keyNames(): Set<String> = keys().asSequence().toSet()
+
 class RemoteShareClientTest {
 
     private lateinit var router: BidirectionalMessageRouter
@@ -95,7 +99,7 @@ class RemoteShareClientTest {
 
         assertEquals(MethodNames.REMOTE_SHARE_PUBLIC_KEY, sender.lastRequest.method)
         val p = params()
-        assertEquals(setOf("key_id", "public_key_pem", "certificate_pem", "algorithm", "label", "backend"), p.keySet())
+        assertEquals(setOf("key_id", "public_key_pem", "certificate_pem", "algorithm", "label", "backend"), p.keyNames())
         assertEquals("k1", p.getString("key_id"))
         assertEquals(b64(pem), p.getString("public_key_pem"))
         assertEquals(b64(certPem), p.getString("certificate_pem"))
@@ -109,7 +113,7 @@ class RemoteShareClientTest {
     fun `sharePublicKey omits the omitempty fields when absent`() = runTest {
         sender.succeedWith("""{"accepted":true,"import_id":"x","backend":"software"}""")
         client.sharePublicKey(RemoteShareClient.PublicKeyShare("k1", pem, null, "EC", null, null))
-        assertEquals(setOf("key_id", "public_key_pem", "algorithm"), params().keySet())
+        assertEquals(setOf("key_id", "public_key_pem", "algorithm"), params().keyNames())
     }
 
     @Test
@@ -129,8 +133,9 @@ class RemoteShareClientTest {
             """{"accepted":true,"import_id":"","backend":"software"}""",
             """{"accepted":true,"import_id":"x"}""",
             """{"accepted":true,"import_id":"x","backend":null}""",
-            "[]",
-            "null"
+            // A null result never reaches the client: the router reads
+            // {"id":n,"result":null} as an inbound request, not a reply.
+            "[]"
         )
         for (reply in bad) {
             sender.succeedWith(reply)
@@ -172,7 +177,7 @@ class RemoteShareClientTest {
 
         assertEquals(MethodNames.REMOTE_SHARE_SYMMETRIC, sender.lastRequest.method)
         val p = params()
-        assertEquals(setOf("key_id", "wrapped_key", "algorithm", "key_size", "label"), p.keySet())
+        assertEquals(setOf("key_id", "wrapped_key", "algorithm", "key_size", "label"), p.keyNames())
         assertEquals("k2", p.getString("key_id"))
         assertEquals(b64(expected), p.getString("wrapped_key"))
         assertEquals("AES", p.getString("algorithm"))
@@ -218,13 +223,13 @@ class RemoteShareClientTest {
         client.importSharedKey(backend = "pkcs11", keyId = "k3", format = "pem")
         assertEquals(MethodNames.REMOTE_IMPORT_SHARED_KEY, sender.lastRequest.method)
         val p = params()
-        assertEquals(setOf("backend", "key_id", "format"), p.keySet())
+        assertEquals(setOf("backend", "key_id", "format"), p.keyNames())
         assertEquals("pkcs11", p.getString("backend"))
         assertEquals("k3", p.getString("key_id"))
         assertEquals("pem", p.getString("format"))
 
         client.importSharedKey(backend = "software", keyId = "k3", format = null)
-        assertEquals(setOf("backend", "key_id"), params().keySet())
+        assertEquals(setOf("backend", "key_id"), params().keyNames())
     }
 
     @Test
