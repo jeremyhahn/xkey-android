@@ -1,5 +1,6 @@
 package com.automatethethings.xkey.protocol
 
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.util.getStringOrNull
 import org.json.JSONArray
 import org.json.JSONException
@@ -1152,6 +1153,26 @@ data class LocalGenerateKeyResult(
                 }
             )
         }
+    }
+
+    companion object {
+        /** Builds the result for a key whose own KeyInfo reports [level]. */
+        fun withLevel(
+            keyId: String,
+            publicKey: String,
+            publicKeyCose: String?,
+            algorithm: String,
+            keySizeBits: Int,
+            level: KeySecurityLevel
+        ) = LocalGenerateKeyResult(
+            keyId = keyId,
+            publicKey = publicKey,
+            publicKeyCose = publicKeyCose,
+            algorithm = algorithm,
+            keySizeBits = keySizeBits,
+            strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
+            softwareBacked = level == KeySecurityLevel.SOFTWARE
+        )
     }
 }
 

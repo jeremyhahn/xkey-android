@@ -32,6 +32,7 @@ import com.automatethethings.xkey.crypto.HMACException
 import com.automatethethings.xkey.crypto.KeyGenerationException
 import com.automatethethings.xkey.crypto.KeyInvalidatedException
 import com.automatethethings.xkey.crypto.KeyNotFoundException
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SigningException
@@ -1195,9 +1196,10 @@ class RequestHandler(
                 keySizeBits = bits
             } else {
                 keystoreManager.generateHMACKey(genParams.keyId, algorithmName)
-                keySizeBits = 256
+                keySizeBits = if (algorithmName.contains("512")) 512 else 256
             }
             publicKeyDer = ByteArray(0) // No public key for symmetric/HMAC
+            val level = keystoreManager.keySecurityLevel(genParams.keyId) ?: KeySecurityLevel.TEE
 
             // Store in unified key store
             keyDao.insert(
@@ -1207,7 +1209,7 @@ class RequestHandler(
                     algorithm = algorithmName,
                     label = genParams.label,
                     keySizeBits = keySizeBits,
-                    strongBoxBacked = keystoreManager.isStrongBoxAvailable(),
+                    strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
                     biometricRequired = genParams.requireUserVerification,
                     authDurationSeconds = authDurationSeconds,
                     shareable = genParams.shareable,
@@ -1223,13 +1225,13 @@ class RequestHandler(
                 )
             )
 
-            val result = LocalGenerateKeyResult(
+            val result = LocalGenerateKeyResult.withLevel(
                 keyId = genParams.keyId,
                 publicKey = "",
                 publicKeyCose = null,
                 algorithm = algorithmName,
                 keySizeBits = keySizeBits,
-                strongBoxBacked = keystoreManager.isStrongBoxAvailable()
+                level = level
             )
             return@withContext Response.success(request.id, result.toJson())
         }
@@ -1242,7 +1244,8 @@ class RequestHandler(
             preferStrongBox = genParams.preferStrongBox
         )
         keySizeBits = CoseAlgorithms.getKeySizeBits(genParams.algorithm)
-        val isStrongBoxBacked = keystoreManager.isStrongBoxAvailable()
+        val level = keystoreManager.keySecurityLevel(genParams.keyId) ?: KeySecurityLevel.TEE
+        val isStrongBoxBacked = level == KeySecurityLevel.STRONGBOX
 
         // Get COSE-encoded public key for FIDO2 keys
         val publicKeyCose = if (genParams.keyType == KeyTypes.FIDO2 && algorithmName.startsWith("ES")) {
@@ -1286,13 +1289,13 @@ class RequestHandler(
         val publicKeyBase64 = Base64.getEncoder().encodeToString(publicKeyDer)
         val publicKeyCoseBase64 = publicKeyCose?.let { Base64.getEncoder().encodeToString(it) }
 
-        val result = LocalGenerateKeyResult(
+        val result = LocalGenerateKeyResult.withLevel(
             keyId = genParams.keyId,
             publicKey = publicKeyBase64,
             publicKeyCose = publicKeyCoseBase64,
             algorithm = algorithmName,
             keySizeBits = keySizeBits,
-            strongBoxBacked = isStrongBoxBacked
+            level = level
         )
 
         Log.i(TAG, "Generated key: ${genParams.keyId}, algo=$algorithmName, type=${genParams.keyType}")

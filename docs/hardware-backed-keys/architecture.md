@@ -168,6 +168,28 @@ graph LR
 
 Detection is performed via `PackageManager.FEATURE_STRONGBOX_KEYSTORE` on API 28+.
 
+The `securityLevel` that `generateKey` and `local.generateKey` report, and the
+`strongBoxBacked` flag stored with the key, come from the generated key's own
+`KeyInfo` (`KeystoreManager.keySecurityLevel`), not from whether the device has
+StrongBox. A key generated with `preferStrongBox = false`, a StrongBox request
+that fell back to the TEE (P-384, P-521, RSA-4096) and every AES or HMAC key
+therefore report `tee` on a StrongBox device.
+
+| API | KeyInfo | Reported |
+|-----|---------|----------|
+| 31+ | `securityLevel` STRONGBOX | `strongbox` |
+| 31+ | `securityLevel` TRUSTED_ENVIRONMENT or UNKNOWN_SECURE | `tee` |
+| 31+ | `securityLevel` SOFTWARE | `software` |
+| 28-30 | `isInsideSecureHardware` and the StrongBox spec succeeded | `strongbox` |
+| 28-30 | `isInsideSecureHardware` only | `tee` |
+| 28-30 | not inside secure hardware | `software` |
+
+Before API 31 `KeyInfo` cannot tell StrongBox from the TEE, so the key
+generators record, per process, each alias whose StrongBox spec succeeded; after
+a restart such a key reads `tee`, an under-claim and never an over-claim.
+Exportable keys and Ed25519 keys live outside the Keystore and report
+`software`.
+
 ## Ed25519 Software Fallback
 
 Android Keystore does not support Ed25519 keys. When an Ed25519 key is requested
