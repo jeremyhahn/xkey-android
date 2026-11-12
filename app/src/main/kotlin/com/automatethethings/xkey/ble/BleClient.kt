@@ -976,16 +976,29 @@ class BleClient(
             throw BleClientException("Short authentication string not confirmed")
         }
 
-        // Trusted only if it is still the connection: under stateMutex, so a
-        // teardown either ran before (and this sees it) or runs after.
+        // Trusted only if it is still the connection. The check and the
+        // publication are one step under connectionLock, the lock a GATT
+        // disconnect ends the connection under (swapConnection) before it
+        // ever waits for stateMutex: a drop either ended it first, and this
+        // sees it, or ends it after, a trusted connection it then releases.
+        // stateMutex is held too, against disconnect() and destroy(). Lock
+        // order stateMutex -> connectionLock, as everywhere; nothing in the
+        // step suspends.
         return stateMutex.withLock {
-            if (connection !== current || !current.requests.isActive) {
+            sasTrustHook?.invoke()
+            val trusted = synchronized(connectionLock) {
+                if (connection === current && current.requests.isActive) {
+                    current.trusted = true
+                    true
+                } else {
+                    false
+                }
+            }
+            if (!trusted) {
                 current.sasConfirmed.complete(false)
                 Log.w(TAG, "SAS confirmed for a session that has ended; not trusted")
                 false
             } else {
-                sasTrustHook?.invoke()
-                current.trusted = true
                 current.sasConfirmed.complete(true)
                 _connectionState.value = ClientConnectionState.Connected(deviceName, address)
                 Log.i(TAG, "SAS confirmed; connected and trusted with $deviceName ($address)")
