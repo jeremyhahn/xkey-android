@@ -18,11 +18,13 @@ import androidx.biometric.BiometricPrompt
 import com.automatethethings.xkey.auth.BiometricActivityLauncher.BiometricResult
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -31,11 +33,19 @@ import org.junit.Test
  * to whatever shows the prompt (its own activity launch, or the lock-screen
  * notification's full-screen intent) is the id the result broadcast must
  * carry to reach the waiting caller.
+ *
+ * There is one screen, and the prompt activity shows one request: requests
+ * take turns on it, the next launched only once the one before it settles,
+ * and a request still waiting for its turn when its deadline passes settles
+ * with a timeout instead of waiting forever.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PendingAuthenticationsTest {
 
-    private val pending = PendingAuthentications()
+    /** The screen these requests take turns on; each test gets its own. */
+    private val screen = SigningPromptQueue()
+
+    private val pending = PendingAuthentications(screen)
 
     /** The ids handed to the prompts, in launch order. */
     private val launched = mutableListOf<String>()
@@ -77,7 +87,7 @@ class PendingAuthenticationsTest {
 
     @Test
     fun twoLaunchersNeverIssueTheSameId() = runTest {
-        val other = PendingAuthentications()
+        val other = PendingAuthentications(SigningPromptQueue())
         val first = async { pending.await { launched += it } }
         val second = async { other.await { launched += it } }
         runCurrent()
@@ -120,6 +130,131 @@ class PendingAuthenticationsTest {
     }
 
     @Test
+    fun aRequestArrivingWhileAnotherPromptsIsLaunchedOnlyAfterItSettles() = runTest {
+        val first = async { pending.await { launched += it } }
+        val second = async { pending.await { launched += it } }
+        runCurrent()
+
+        assertEquals("one prompt on screen", 1, launched.size)
+        assertTrue(pending.complete(launched[0], BiometricResult.Success))
+        runCurrent()
+        assertEquals(BiometricResult.Success, first.await())
+
+        assertEquals("the next comes up once the first settles", 2, launched.size)
+        assertNotEquals(launched[0], launched[1])
+        assertTrue(pending.complete(launched[1], BiometricResult.Success))
+        assertEquals(BiometricResult.Success, second.await())
+    }
+
+    @Test
+    fun aCancelAnswersOnlyTheRequestOnScreenAndBringsUpTheNext() = runTest {
+        val first = async { pending.await { launched += it } }
+        val second = async { pending.await { launched += it } }
+        val third = async { pending.await { launched += it } }
+        runCurrent()
+
+        val cancel = BiometricResult.Error(BiometricPrompt.ERROR_USER_CANCELED, "cancelled")
+        assertTrue(pending.complete(launched[0], cancel))
+        runCurrent()
+        assertEquals(cancel, first.await())
+        assertEquals(2, launched.size)
+
+        assertTrue(pending.complete(launched[1], BiometricResult.Success))
+        runCurrent()
+        assertEquals(BiometricResult.Success, second.await())
+
+        assertTrue(pending.complete(launched[2], cancel))
+        assertEquals(cancel, third.await())
+    }
+
+    @Test
+    fun aQueuedRequestPastItsDeadlineTimesOutUnseenAndLeavesTheScreenAlone() = runTest {
+        val onScreen = async { pending.await { launched += it } }
+        val queued = async { pending.await(queueDeadlineMillis = 1_000L) { launched += it } }
+        runCurrent()
+
+        advanceTimeBy(1_001L)
+        runCurrent()
+
+        val timedOut = queued.await()
+        assertTrue("a queued request settles", timedOut is BiometricResult.Error)
+        assertEquals(BiometricPrompt.ERROR_TIMEOUT, (timedOut as BiometricResult.Error).code)
+        assertEquals("it never prompts", 1, launched.size)
+        assertTrue("the request on screen keeps waiting", onScreen.isActive)
+
+        assertTrue(pending.complete(launched[0], BiometricResult.Success))
+        assertEquals(BiometricResult.Success, onScreen.await())
+        assertEquals(1, launched.size)
+    }
+
+    @Test
+    fun theDefaultQueueDeadlineIsFiniteAndOutlastsThePromptsOwnTimeout() {
+        assertTrue(PendingAuthentications.QUEUE_DEADLINE_MILLIS in 30_001L..300_000L)
+    }
+
+    @Test
+    fun aCallerCancelledWhileQueuedNeverPromptsAndKeepsItsPlaceForNobody() = runTest {
+        val first = async { pending.await { launched += it } }
+        val withdrawn = async { pending.await { launched += it } }
+        val third = async { pending.await { launched += it } }
+        runCurrent()
+
+        withdrawn.cancel()
+        runCurrent()
+        assertTrue(pending.complete(launched[0], BiometricResult.Success))
+        runCurrent()
+        first.await()
+
+        assertEquals("the withdrawn request is skipped", 2, launched.size)
+        assertTrue(pending.complete(launched[1], BiometricResult.Success))
+        third.await()
+    }
+
+    @Test
+    fun aRequestWithdrawnOnScreenHandsTheScreenOn() = runTest {
+        val first = async { pending.await { launched += it } }
+        val second = async { pending.await { launched += it } }
+        runCurrent()
+
+        first.cancel()
+        runCurrent()
+
+        assertEquals(2, launched.size)
+        assertFalse(pending.complete(launched[0], BiometricResult.Success))
+        assertTrue(pending.complete(launched[1], BiometricResult.Success))
+        second.await()
+    }
+
+    @Test
+    fun twoLaunchersOnOneScreenTakeTurns() = runTest {
+        val other = PendingAuthentications(screen)
+        val first = async { pending.await { launched += it } }
+        val second = async { other.await { launched += it } }
+        runCurrent()
+
+        assertEquals(1, launched.size)
+        assertTrue(pending.complete(launched[0], BiometricResult.Success))
+        runCurrent()
+        first.await()
+        assertTrue(other.complete(launched[1], BiometricResult.Success))
+        second.await()
+    }
+
+    @Test
+    fun aPromptThatCannotLaunchHandsTheScreenOn() = runTest {
+        val failing = async {
+            runCatching { pending.await { launched += it; throw IllegalStateException("no activity") } }
+        }
+        val next = async { pending.await { launched += it } }
+        runCurrent()
+
+        assertNull(failing.await().getOrNull())
+        assertEquals(2, launched.size)
+        assertTrue(pending.complete(launched[1], BiometricResult.Success))
+        next.await()
+    }
+
+    @Test
     fun cancelAllCancelsEveryWaitingCaller() = runTest {
         val first = async { pending.await { launched += it } }
         val second = async { pending.await { launched += it } }
@@ -129,6 +264,7 @@ class PendingAuthenticationsTest {
         runCurrent()
 
         assertTrue(first.isCancelled)
-        assertTrue(second.isCancelled)
+        assertTrue("a request waiting for its turn is cancelled too", second.isCancelled)
+        assertEquals("and never prompts", 1, launched.size)
     }
 }

@@ -20,9 +20,14 @@ import android.content.Context
 import android.content.Intent
 import android.os.Looper
 import android.util.Log
+import androidx.biometric.BiometricPrompt
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.BiometricActivityLauncher.BiometricResult
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
+import com.automatethethings.xkey.auth.PendingAuthentications
+import com.automatethethings.xkey.auth.SigningPromptQueue
+import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -42,6 +47,9 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -105,6 +113,9 @@ class SetKeyPolicyHandlerTest {
 
     /** Every policy the fake store was asked to write, by any DAO call. */
     private val writes = mutableListOf<SharingPolicyType>()
+
+    /** The request ids the approval prompts were launched for, in launch order. */
+    private val prompts = mutableListOf<String>()
 
     /** Runs once, after the next read has taken its snapshot. */
     private var afterNextRead: (() -> Unit)? = null
@@ -217,6 +228,26 @@ class SetKeyPolicyHandlerTest {
         storedRevision++
     }
 
+    /**
+     * Routes the launcher's approval prompts through a real
+     * [PendingAuthentications] on a screen of this test's own, mapping a
+     * result to the launcher's outcome, so overlapping requests take turns as
+     * they do on the phone. Settle a prompt with [PendingAuthentications.complete]
+     * on the id in [prompts].
+     */
+    private fun promptsTakeTurns(): PendingAuthentications {
+        val approvals = PendingAuthentications(SigningPromptQueue())
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } coAnswers {
+            when (val result = approvals.await { prompts += it }) {
+                is BiometricResult.Success -> Unit
+                is BiometricResult.Error -> throw BiometricException(result.code, result.message)
+            }
+        }
+        return approvals
+    }
+
+    private val ownerCancels = BiometricResult.Error(BiometricPrompt.ERROR_USER_CANCELED, "cancelled")
+
     private fun request(shareable: Boolean?) = Request(
         id = 178L,
         method = MethodNames.LOCAL_SET_KEY_POLICY,
@@ -276,6 +307,90 @@ class SetKeyPolicyHandlerTest {
         coVerify(exactly = 1) {
             launcher.requestAuthentication(any(), match { it.contains(keyId) }, any(), any(), any())
         }
+    }
+
+    @Test
+    fun `two overlapping approvals are prompted in turn and both complete`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        val approvals = promptsTakeTurns()
+
+        val first = async { handler().handleRequest(request(shareable = true)) }
+        val second = async { handler().handleRequest(request(shareable = true)) }
+        runCurrent()
+        assertEquals("one prompt on screen at a time", 1, prompts.size)
+
+        assertTrue(approvals.complete(prompts[0], BiometricResult.Success))
+        runCurrent()
+        assertUpdated(first.await())
+        assertEquals("the second prompt comes up once the first is answered", 2, prompts.size)
+
+        assertTrue(approvals.complete(prompts[1], BiometricResult.Success))
+        runCurrent()
+        assertUpdated(second.await())
+        assertEquals(SharingPolicyType.ALL_PEERS, stored)
+    }
+
+    @Test
+    fun `cancelling the first of two overlapping approvals fails only that one`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        val approvals = promptsTakeTurns()
+
+        val first = async { handler().handleRequest(request(shareable = true)) }
+        val second = async { handler().handleRequest(request(shareable = true)) }
+        runCurrent()
+
+        assertTrue(approvals.complete(prompts[0], ownerCancels))
+        runCurrent()
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, first.await().error?.code)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+
+        assertEquals(2, prompts.size)
+        assertTrue(approvals.complete(prompts[1], BiometricResult.Success))
+        runCurrent()
+        assertUpdated(second.await())
+        assertEquals(SharingPolicyType.ALL_PEERS, stored)
+    }
+
+    @Test
+    fun `cancelling the second of two overlapping approvals fails only that one`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        val approvals = promptsTakeTurns()
+
+        val first = async { handler().handleRequest(request(shareable = true)) }
+        val second = async { handler().handleRequest(request(shareable = true)) }
+        runCurrent()
+
+        assertTrue(approvals.complete(prompts[0], BiometricResult.Success))
+        runCurrent()
+        assertUpdated(first.await())
+
+        assertTrue(approvals.complete(prompts[1], ownerCancels))
+        runCurrent()
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, second.await().error?.code)
+        assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
+    }
+
+    @Test
+    fun `an approval still queued at its deadline answers BIOMETRIC_FAILED`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        val approvals = promptsTakeTurns()
+
+        val first = async { handler().handleRequest(request(shareable = true)) }
+        val second = async { handler().handleRequest(request(shareable = true)) }
+        runCurrent()
+
+        advanceTimeBy(PendingAuthentications.QUEUE_DEADLINE_MILLIS + 1)
+        runCurrent()
+        val timedOut = second.await()
+        assertNull(timedOut.result)
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, timedOut.error?.code)
+        assertEquals("the queued request never prompted", 1, prompts.size)
+        assertTrue("the request on screen still waits for the owner", first.isActive)
+
+        assertTrue(approvals.complete(prompts[0], BiometricResult.Success))
+        runCurrent()
+        assertUpdated(first.await())
+        assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
     }
 
     @Test
