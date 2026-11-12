@@ -47,6 +47,23 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.time.Instant
 
+/**
+ * The content hash the automatic signer signs, kept apart from the service so
+ * the signing-to-verification round trip can be tested on the JVM.
+ */
+internal object AutoSignHash {
+
+    /** The stored `contentHash` for [data], typed by [mimeType]. */
+    fun contentHash(data: ByteArray, @Suppress("UNUSED_PARAMETER") mimeType: String?): String =
+        MediaHasher.hashBytes(data)
+
+    fun contentHashUri(contentResolver: ContentResolver, uri: Uri): String {
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw IllegalArgumentException("Cannot open URI: $uri")
+        return contentHash(bytes, contentResolver.getType(uri))
+    }
+}
+
 class MediaSigningService : Service() {
 
     companion object {
@@ -178,7 +195,7 @@ class MediaSigningService : Service() {
                 }
 
                 // Hash the media content
-                val contentHash = MediaHasher.hashUri(contentResolver, uri)
+                val contentHash = AutoSignHash.contentHashUri(contentResolver, uri)
                 val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
                 // Sign with the configured key
