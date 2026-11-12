@@ -310,6 +310,32 @@ class PendingAuthenticationsTest {
     }
 
     @Test
+    fun anUnseenCryptoSignatureFailsAtItsDeadlineAndASharingApprovalThenGetsItsPrompt() = runTest {
+        // A PER_OPERATION signature whose activity start Android blocked; its
+        // notification expired unopened, and nothing will ever answer it.
+        val signatures = PendingCryptoSignatures(cancelPrompt = {}, prompts = screen)
+        val signed = mutableListOf<String>()
+        val unseen = async { signatures.await { signed += it } }
+        val sharing = async { pending.await { launched += it } }
+        runCurrent()
+        assertEquals(1, signed.size)
+        assertTrue("the approval waits behind the signature", launched.isEmpty())
+
+        advanceTimeBy(UNSEEN_MILLIS)
+        runCurrent()
+
+        assertTrue("the unseen signature settles on its own", unseen.isCompleted)
+        val failed = unseen.await()
+        assertEquals(
+            BiometricPrompt.ERROR_TIMEOUT,
+            (failed as BiometricActivityLauncher.CryptoSigningResult.Error).code
+        )
+        assertEquals("the sharing approval gets its prompt", 1, launched.size)
+        assertTrue(pending.complete(launched.single(), BiometricResult.Success))
+        assertEquals(BiometricResult.Success, sharing.await())
+    }
+
+    @Test
     fun cancelAllCancelsEveryWaitingCaller() = runTest {
         val first = async { pending.await { launched += it } }
         val second = async { pending.await { launched += it } }
