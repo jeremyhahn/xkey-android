@@ -19,8 +19,27 @@ import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.protocol.RequestHandler
+import android.app.KeyguardManager
+import android.app.NotificationManager
+import android.content.Context
+import android.os.Looper
+import com.automatethethings.xkey.crypto.FileEncryptor
+import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.KeyDao
+import io.mockk.coEvery
+import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkConstructor
+import io.mockk.mockkObject
+import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.nio.file.Files
+import java.security.KeyStore
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
 import org.junit.After
@@ -306,5 +325,95 @@ class RemoteShareClientTest {
         val (a, b) = sender.sent.map { it.id }
         assertTrue(a >= RemoteShareClient.BASE_REQUEST_ID)
         assertEquals(a + 1, b)
+    }
+
+    // ---- SharePermissionLedger retention ----------------------------------
+
+    /**
+     * A paired desktop can send `local.deleteKey` for IDs that name no key,
+     * with no prompt. None of them leaves state in the revision ledger.
+     */
+    @Test
+    fun `deletes of nonexistent keys leave the revision ledger bounded`() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.exists(any()) } returns false
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.resolveKeystoreAlias(any()) } returns null
+        every { keystore.keyExists(any()) } returns false
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        val handler = realHandler(keyDao, keystore)
+        val before = SharePermissionLedger.retainedKeyCount()
+
+        repeat(10_000) { i ->
+            val request = JSONObject().put("jsonrpc", "2.0").put("id", i).put("method", MethodNames.LOCAL_DELETE_KEY)
+                .put("params", JSONObject().put("keyId", "absent-$i"))
+            handler.handleRawRequest(request.toString().toByteArray())
+        }
+
+        val after = SharePermissionLedger.retainedKeyCount()
+        assertTrue("10 000 deletes of absent keys must not grow the ledger ($before -> $after)", after <= before)
+    }
+
+    /**
+     * A baseline taken before a revoke stays refused after every baseline of
+     * its key has completed and the key's ledger entry has been reclaimed.
+     */
+    @Test
+    fun `a stale baseline stays refused after its key is reclaimed`() {
+        val keyId = "reclaimed-${System.nanoTime()}"
+        val before = SharePermissionLedger.retainedKeyCount()
+        val stale = SharePermissionLedger.baseline(keyId)
+        runBlocking { SharePermissionLedger.revoking(keyId) { } }
+        val completed = SharePermissionLedger.baseline(keyId)
+        SharePermissionLedger.requireUnchanged(completed.keyId, completed.revision)
+        completed.close()
+        stale.close()
+
+        assertEquals("a key with no outstanding baseline must be reclaimed", before, SharePermissionLedger.retainedKeyCount())
+        try {
+            SharePermissionLedger.requireUnchanged(stale.keyId, stale.revision)
+            fail("a baseline taken before the revoke must stay refused after its key is reclaimed")
+        } catch (_: SharePermissionRevokedException) {
+        }
+        // A baseline taken after the reclaim is admitted.
+        val fresh = SharePermissionLedger.baseline(keyId)
+        SharePermissionLedger.requireUnchanged(fresh.keyId, fresh.revision)
+        fresh.close()
+    }
+
+    /** Each encryption revokes a fresh ephemeral key ID; none of them is retained. */
+    @Test
+    fun `repeated encryptions retain no ledger entries`() = runBlocking<Unit> {
+        val encryptor = FileEncryptor(mockk(relaxed = true)) { throw IllegalStateException("no keystore") }
+        val before = SharePermissionLedger.retainedKeyCount()
+
+        repeat(1_000) {
+            try {
+                encryptor.encryptForRecipient(ByteArray(0), ByteArrayInputStream(ByteArray(0)), ByteArrayOutputStream())
+            } catch (_: IllegalStateException) {
+            }
+        }
+
+        val after = SharePermissionLedger.retainedKeyCount()
+        assertTrue("encryptions must not grow the ledger ($before -> $after)", after <= before)
+    }
+
+    /** The real [RequestHandler] with only its Android and storage edges mocked. */
+    private fun realHandler(keyDao: KeyDao, keystore: KeystoreManager): RequestHandler {
+        val context = mockk<Context>(relaxed = true)
+        mockkStatic(Looper::class)
+        every { Looper.getMainLooper() } returns mockk(relaxed = true)
+        val database = mockk<XKeyDatabase>(relaxed = true)
+        every { database.keyDao() } returns keyDao
+        mockkObject(XKeyDatabase.Companion)
+        every { XKeyDatabase.getInstance(any()) } returns database
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
+        every { context.filesDir } returns Files.createTempDirectory("xkey-files").toFile().apply { deleteOnExit() }
+        every { context.getSystemService(NotificationManager::class.java) } returns
+            mockk<NotificationManager>(relaxed = true)
+        return RequestHandler(context, keystore, biometricLauncher = null, sessionAuthManager = null)
     }
 }

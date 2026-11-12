@@ -466,7 +466,12 @@ internal object SharePermissionLedger {
      * A key's revision taken before any of its share inputs (record, public
      * half, software material) were read. A share carries it to admission.
      */
-    class Baseline internal constructor(val keyId: String, val revision: Long)
+    class Baseline internal constructor(val keyId: String, val revision: Long) : AutoCloseable {
+        override fun close() {}
+    }
+
+    /** Key IDs the ledger holds state for. */
+    internal fun retainedKeyCount(): Int = synchronized(lock) { revisions.size + inFlight.size }
 
     /** Takes [keyId]'s [Baseline]; call before loading anything a share of it sends. */
     fun baseline(keyId: String): Baseline = Baseline(keyId, revision(keyId))
