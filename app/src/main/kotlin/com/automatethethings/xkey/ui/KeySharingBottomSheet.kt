@@ -41,6 +41,7 @@ import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -293,8 +294,9 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 RADIO_ID_SELECTED_PEERS -> SharingPolicyType.SELECTED_PEERS
                 else -> SharingPolicyType.PRIVATE
             }
-            lifecycleScope.launch {
-                selectedPolicyFlow.emit(newPolicy)
+            selectedPolicyFlow.value = newPolicy
+            // Undispatched: the change joins the key's edit queue in tap order (#193).
+            lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
                 persistSharingPolicy(newPolicy)
             }
         }
@@ -528,8 +530,10 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
             setOnCheckedChangeListener { _, checked ->
-                lifecycleScope.launch {
-                    updatePeerPolicy(device.publicKeyHex, checked)
+                // The pairing the user saw when they tapped; the grant is refused if it ends first (#193).
+                val pairing = pairedDeviceRepository.pairingGeneration(device.publicKeyHex)
+                lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    updatePeerPolicy(device.publicKeyHex, checked, pairing)
                 }
             }
         }
@@ -671,19 +675,19 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             SharingPolicyType.ALL_PEERS -> EntitySharingPolicyType.ALL_PEERS
             SharingPolicyType.SELECTED_PEERS -> EntitySharingPolicyType.SELECTED_PEERS
         }
-        keyDao.updateSharingPolicy(keyId, entityPolicy)
-
-        if (policy != SharingPolicyType.SELECTED_PEERS) {
-            keySharingPolicyDao.clearPoliciesForKey(keyId)
+        // In the key's edit queue, after every grant tapped before it (#193).
+        sharingPeers.setSharingPolicy(policy == SharingPolicyType.SELECTED_PEERS) {
+            keyDao.updateSharingPolicy(keyId, entityPolicy)
         }
     }
 
     /**
-     * Updates the sharing policy for a specific peer. The list follows the
-     * policy rows; a refused change redraws it from the stored state.
+     * Updates the sharing policy for a specific peer, for the [pairing] the
+     * user tapped. The list follows the policy rows; a refused change redraws
+     * it from the stored state.
      */
-    private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean) {
-        if (!sharingPeers.setAllowed(peerPublicKeyHex, allowed)) {
+    private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?) {
+        if (!sharingPeers.setAllowed(peerPublicKeyHex, allowed, pairing)) {
             populatePeerList(peersFlow.value)
         }
     }

@@ -514,7 +514,9 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * the key's current pairing (#174). Every grant writer goes through here.
      *
      * Refused, returning false without running [write], when the key is not
-     * paired or a revocation of it is pending. Otherwise a marker naming the
+     * paired, its pairing is not [expectedPairing] (the [pairingGeneration]
+     * the user acted on, #193: that pairing ended since), or a revocation of
+     * it is pending. Otherwise a marker naming the
      * key and its pairing generation is committed before [write] runs and
      * cleared after it. While the marker names a pairing that has ended, the
      * key counts as revoking ([pendingRevocations]), so a row the write left
@@ -524,9 +526,10 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * returns false. A marker an ended process left behind is settled the
      * same way by [recoverInterruptedGrantWrites].
      */
-    suspend fun writeGrant(publicKeyHex: String, write: suspend () -> Unit): Boolean {
+    suspend fun writeGrant(publicKeyHex: String, expectedPairing: Long, write: suspend () -> Unit): Boolean {
         val marker = synchronized(storeLock) {
             val generation = currentPairing(publicKeyHex) ?: return false
+            if (generation != expectedPairing) return false
             if (publicKeyHex in pendingRevocations()) return false
             val marker = publicKeyHex to generation
             if (grantWritesInFlight.merge(marker, 1, Int::plus) == 1) {

@@ -18,8 +18,15 @@ import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * The peer list of [KeySharingBottomSheet] for one key: every paired device,
@@ -36,12 +43,28 @@ import kotlinx.coroutines.flow.combine
  * completes. A grant is bound to the pairing it was checked against
  * ([PairedDeviceRepository.writeGrant]): one that lands after that pairing
  * ended authorizes nothing and is deleted.
+ *
+ * Every edit of the key's peer rows made here (a grant, a withdrawal, the
+ * key-wide clear on leaving SELECTED_PEERS) runs through one queue per key,
+ * shared by every instance for that key, in the order the calls were made
+ * (#193), on [ioDispatcher]. A call takes its place in the queue before it
+ * first suspends, so a caller that starts it undispatched queues it in the
+ * order of the user's actions. Once queued, an edit completes even if its
+ * caller is cancelled: a withdrawal must not be dropped behind a grant.
  */
 class KeySharingPeers(
     private val keyId: String,
     private val policyDao: KeySharingPolicyDao,
-    private val repository: PairedDeviceRepository
+    private val repository: PairedDeviceRepository,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
+
+    private companion object {
+        /** The edit queue of each key id. Fair: waiters are served in arrival order. */
+        val queues = ConcurrentHashMap<String, Mutex>()
+    }
+
+    private val queue: Mutex = queues.computeIfAbsent(keyId) { Mutex() }
 
     /** One row of the list. [selectable] is false while the row must not be changed. */
     data class Peer(
@@ -71,15 +94,37 @@ class KeySharingPeers(
      * (the peer is not paired, or its revocation is pending), or written for
      * a pairing that ended meanwhile, which the grant cleanup then deletes.
      * Withdrawing is always allowed.
+     *
+     * [pairing] is the peer's [PairedDeviceRepository.pairingGeneration] read
+     * when the user acted: a grant is refused if the peer was not paired then,
+     * or that pairing ended before the grant's turn came.
      */
-    suspend fun setAllowed(peerPublicKeyHex: String, allowed: Boolean): Boolean {
-        if (allowed) {
-            return repository.writeGrant(peerPublicKeyHex) {
+    suspend fun setAllowed(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?): Boolean = inOrder {
+        if (!allowed) {
+            policyDao.removePolicy(keyId, peerPublicKeyHex)
+            true
+        } else if (pairing == null) {
+            false
+        } else {
+            repository.writeGrant(peerPublicKeyHex, pairing) {
                 policyDao.setPolicy(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
             }
-        } else {
-            policyDao.removePolicy(keyId, peerPublicKeyHex)
         }
-        return true
     }
+
+    /**
+     * Sets the key's sharing policy: runs [store], which writes the key's
+     * policy column, then, unless [selectedPeers], deletes every peer row of
+     * the key, so selecting peers again starts from nothing. Queued with the
+     * grants and withdrawals, so an earlier grant cannot land after the clear.
+     */
+    suspend fun setSharingPolicy(selectedPeers: Boolean, store: suspend () -> Unit) = inOrder {
+        store()
+        if (!selectedPeers) policyDao.clearPoliciesForKey(keyId)
+    }
+
+    private suspend fun <T> inOrder(change: suspend () -> T): T =
+        withContext(NonCancellable) {
+            queue.withLock { withContext(ioDispatcher) { change() } }
+        }
 }
