@@ -23,6 +23,7 @@ instead of emitting an `-unsigned.apk` that looks like a successful build.
 | `keystore.properties`, `*.jks` entries | `.gitignore` | Keep the credentials file and keystores out of version control |
 | `**/*.jks` entry | `.dockerignore` | Keeps keystores out of Docker build contexts |
 | Release signing section | `README.md` | Operator instructions |
+| `release-check` target | `Makefile`, `scripts/release-check.sh` | Builds `assembleRelease` with a throwaway keystore under `build/release-check/` and checks `apksigner verify --print-certs` reports that one certificate |
 
 ## Android entry points served
 
@@ -74,8 +75,21 @@ sequenceDiagram
 
 ## Tests
 
-No automated test covers release signing, and no CI workflow on main runs
-`assembleRelease` or `bundleRelease` or sets the `XKEY_*` variables.
+`make release-check` (`scripts/release-check.sh`) makes a one-day PKCS12
+keystore with a random password in `build/release-check/` (ignored by
+`/build/*`, deleted when the script exits), exports the four `XKEY_*`
+variables for it, and runs `assembleRelease`. It then runs
+`apksigner verify --print-certs` (build-tools `ANDROID_BUILD_TOOLS` from
+`scripts/tool-pins.sh` under `ANDROID_HOME`, or `APKSIGNER=`) and fails
+unless the APK has exactly one signer whose certificate SHA-256 digest is
+the throwaway certificate's. It refuses to run while `keystore.properties`
+exists, since the file would override the throwaway key.
+`RELEASE_CHECK_OMIT=<one XKEY_* name>` leaves that variable unset, so the
+release guard's refusal can be seen: the target then fails.
+
+No CI workflow on main runs the target, `assembleRelease` or
+`bundleRelease`, or sets the `XKEY_*` variables. `bundleRelease` is not
+verified.
 
 ## Related features
 
