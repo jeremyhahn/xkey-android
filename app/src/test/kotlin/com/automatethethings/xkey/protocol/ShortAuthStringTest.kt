@@ -81,6 +81,15 @@ class ShortAuthStringTest {
     // The format
     // -----------------------------------------------------------------
 
+    /**
+     * The shared vector: a fixed session binding gives the code pinned in
+     * [SasTestVectors], the one the phone-initiated SAS tests rely on.
+     */
+    @Test
+    fun theSharedFixedBindingGivesThePinnedCode() {
+        assertEquals(SasTestVectors.FIXED_BINDING_SAS, AttestTranscript.shortAuthString(SasTestVectors.fixedBinding()))
+    }
+
     /** The go-xkms conformance vector: 0x0001, 0x0203 and 0x0405. */
     @Test
     fun bindingBytesZeroToThirtyOneGiveTheConformanceVector() {
