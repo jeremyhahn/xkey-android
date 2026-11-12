@@ -30,7 +30,9 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkAll
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.toList
@@ -57,6 +59,7 @@ class KeySharingPeersTest {
         const val KEY = "k-1"
         val PEER_A = "a".repeat(64)
         val PEER_B = "b".repeat(64)
+        val PEER_C = "c".repeat(64)
     }
 
     /** The `key_sharing_policies` table; the DAO's Flow query re-emits on every change. */
@@ -107,6 +110,17 @@ class KeySharingPeersTest {
 
     private fun List<KeySharingPeers.Peer>.of(peer: String) = single { it.device.publicKeyHex == peer }
 
+    /** The request handler's SELECTED_PEERS check: refused while a revocation is pending, else the row decides. */
+    private fun hasAccess(peer: String) =
+        !repo.isRevocationPending(peer) && table.value.any { it.keyId == KEY && it.peerPublicKeyHex == peer && it.allowed }
+
+    /** What the grant cleanup does for [peer]'s pending revocation: delete its rows, then acknowledge. */
+    private suspend fun runCleanup(peer: String) {
+        val generation = repo.pendingRevocationGeneration(peer) ?: return
+        dao.clearPoliciesForPeer(peer)
+        repo.completeRevocation(peer, generation)
+    }
+
     @Test
     fun aRePairedPeerIsPendingAndUngrantableUntilItsRevocationCompletes() = runTest {
         // A is unpaired and re-paired; no cleanup has run, so its old row stays.
@@ -140,5 +154,61 @@ class KeySharingPeersTest {
         assertTrue(peers.setAllowed(PEER_A, true))
         assertTrue(seen.last().of(PEER_A).allowed)
         assertEquals(listOf(PEER_B, PEER_A), table.value.map { it.peerPublicKeyHex })
+    }
+
+    @Test
+    fun aGrantPausedAcrossARevocationDoesNotAuthorizeTheNextPairing() = runTest {
+        table.value = listOf(KeySharingPolicy(KEY, PEER_B))
+        val gate = CompletableDeferred<Unit>()
+        coEvery { dao.setPolicy(any()) } coAnswers {
+            gate.await()
+            val row = firstArg<KeySharingPolicy>()
+            table.value = table.value.filterNot {
+                it.keyId == row.keyId && it.peerPublicKeyHex == row.peerPublicKeyHex
+            } + row
+        }
+        val peers = KeySharingPeers(KEY, dao, repo)
+
+        // The grant passes its pending check and stops before its insert.
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true) }
+        assertFalse(grant.isCompleted)
+
+        // Meanwhile A is unpaired, and its revocation is cleaned up and acknowledged.
+        repo.removeDevice(PEER_A)
+        runCleanup(PEER_A)
+        assertFalse(repo.isRevocationPending(PEER_A))
+
+        // The insert lands after the revocation completed.
+        gate.complete(Unit)
+        assertFalse("a grant for an ended pairing does not stand", grant.await())
+
+        // The same static key pairs again: the old grant must not authorize it.
+        repo.addDevice(PEER_A, "desktop-a")
+        assertFalse("a grant written for an older pairing authorized a newer one", hasAccess(PEER_A))
+
+        // Once the cleanup has run, the row is gone and A is grantable again.
+        runCleanup(PEER_A)
+        assertFalse(repo.isRevocationPending(PEER_A))
+        assertFalse(table.value.any { it.peerPublicKeyHex == PEER_A })
+        assertFalse(hasAccess(PEER_A))
+    }
+
+    @Test
+    fun aDevicePairedAfterSubscribingAppearsInTheList() = runTest {
+        // The sheet subscribes when it opens, whatever the key's policy (PRIVATE
+        // here: nothing in the table changes below), and shows this list as soon
+        // as SELECTED_PEERS is chosen.
+        val peers = KeySharingPeers(KEY, dao, repo)
+        val seen = mutableListOf<List<KeySharingPeers.Peer>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
+        assertEquals(setOf(PEER_A, PEER_B), seen.last().map { it.device.publicKeyHex }.toSet())
+
+        // A new desktop pairs: no policy row and no revocation changes.
+        repo.addDevice(PEER_C, "desktop-c")
+
+        assertEquals(setOf(PEER_A, PEER_B, PEER_C), seen.last().map { it.device.publicKeyHex }.toSet())
+        val added = seen.last().of(PEER_C)
+        assertFalse(added.allowed)
+        assertTrue(added.selectable)
     }
 }
