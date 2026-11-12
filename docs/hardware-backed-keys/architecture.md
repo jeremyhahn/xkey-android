@@ -734,3 +734,32 @@ val auditLogDao = database.auditLogDao()
 | Converter | Type | Storage |
 |-----------|------|---------|
 | `AuditOperationTypeConverter` | `AuditOperationType` enum | String (enum name) |
+
+## local.setKeyPolicy
+
+`local.setKeyPolicy` sets whether a key can be shared with peers.
+
+| Param | Type | Meaning |
+|-------|------|---------|
+| `keyId` | string, required | The key to change |
+| `shareable` | boolean, optional | `true` opens the key to every peer (`ALL_PEERS`), `false` makes it `PRIVATE`; absent changes nothing |
+
+The result is `{"updated": true}`.
+
+Widening needs the owner's approval. A request with `shareable: true` on a key
+whose policy is not already `ALL_PEERS` would let any paired peer pass the
+sharing check in `local.shareSymmetric`, so the phone first requires a
+confirmed peer for the session, then shows a biometric prompt that names the
+key (its label, else its id). The policy is stored only when the owner
+approves. Narrowing (`shareable: false`), an absent `shareable` and a key
+already `ALL_PEERS` need no prompt.
+
+Every stored policy change is written to the audit log as
+`KEY_SHARING_CHANGED`, with the old and new policy.
+
+| Error | When |
+|-------|------|
+| `INVALID_PARAMS` | Params or `keyId` missing |
+| `KEY_NOT_FOUND` | No key with that `keyId` |
+| `OPERATION_DENIED` | Widening on a session with no confirmed peer |
+| `BIOMETRIC_FAILED` | Widening with no biometric prompt available, or the owner cancels or fails it; the stored policy is unchanged |
