@@ -45,6 +45,7 @@ import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -301,6 +302,36 @@ class SetKeyPolicyHandlerTest {
         coVerify(exactly = 1) {
             launcher.requestAuthentication(any(), match { it.contains("Work key") }, any(), any(), any())
         }
+        assertEquals(SharingPolicyType.ALL_PEERS, stored)
+        assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
+    }
+
+    @Test
+    fun `a request cancelled after its policy write commits still audits the change`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        // The store commits the write, then holds its answer back, as Room
+        // does between the SQLite commit and the caller resuming.
+        val committed = CompletableDeferred<Unit>()
+        val answer = CompletableDeferred<Unit>()
+        coEvery { keyDao.compareAndSetSharingPolicy(any(), keyId, any(), any(), any()) } coAnswers {
+            val policy = arg<SharingPolicyType>(4)
+            writes += policy
+            stored = policy
+            storedRevision++
+            committed.complete(Unit)
+            answer.await()
+            1
+        }
+
+        val call = async { handler().handleRequest(request(shareable = true)) }
+        runCurrent()
+        assertTrue(committed.isCompleted)
+
+        // The connection closes before the write's result reaches the request.
+        call.cancel()
+        answer.complete(Unit)
+        call.join()
+
         assertEquals(SharingPolicyType.ALL_PEERS, stored)
         assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
     }
