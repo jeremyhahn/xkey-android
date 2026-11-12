@@ -586,6 +586,104 @@ class RequestHandlerLocalKeyFamilyTest {
         }
     }
 
+    /**
+     * A credential `k` exists, then general keys named `k` are generated: the
+     * result and the stored row report each general key's own level, not the
+     * credential's. The credential's KeyInfo read fails, so a lookup that
+     * resolved to xkey_credential_k would turn the call into an error.
+     */
+    @Test
+    fun generateKeyReportsTheGeneralKeyLevelWhenACredentialSharesItsId() {
+        val keystoreManager = KeystoreManager(context)
+        val collidingHandler = RequestHandler(
+            context = context,
+            keystoreManager = keystoreManager,
+            biometricLauncher = null,
+            sessionAuthManager = SessionAuthManager()
+        )
+        listOf(
+            Pair(KeyTypes.SECRET, "AES256"),
+            Pair(KeyTypes.HMAC, "HMAC-SHA256"),
+            Pair(KeyTypes.SIGNING, "ES256")
+        ).forEach { (keyType, algorithm) ->
+            val keyId = "collide-${algorithm.lowercase()}-$runId"
+            createdKeyIds.add(keyId)
+            runBlocking { keystoreManager.generateKey(keyId, requireBiometric = false, requireStrongBox = false) }
+            try {
+                val real = keystoreManager.keyInfoReader
+                keystoreManager.keyInfoReader = { alias, key ->
+                    if (alias == "xkey_credential_$keyId") {
+                        throw java.security.spec.InvalidKeySpecException("credential KeyInfo unreadable")
+                    }
+                    real(alias, key)
+                }
+                val request = Request(
+                    nextRequestId.getAndIncrement(),
+                    "local.generateKey",
+                    JSONObject()
+                        .put("keyId", keyId)
+                        .put("keyType", keyType)
+                        .put("algorithm", algorithm)
+                        .put("requireUserVerification", false)
+                        .put("preferStrongBox", false)
+                )
+                val result = runBlocking { collidingHandler.handleRequest(request) }.ok()
+                keystoreManager.keyInfoReader = real
+
+                val level = keystoreManager.generalKeySecurityLevel(keyId)
+                    ?: throw AssertionError("$algorithm: the general key must have a level")
+                assertEquals(algorithm, level.wire, result.getString("securityLevel"))
+                assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
+                assertFalse(algorithm, storedKey(keyId).strongBoxBacked)
+            } finally {
+                keystoreManager.deleteKey(keyId)
+            }
+        }
+    }
+
+    /**
+     * A generated key whose KeyInfo cannot be read is an error: nothing is
+     * reported or persisted as software, and the key is not left behind.
+     */
+    @Test
+    fun aKeyInfoReadFailureDuringGenerateKeyIsAnErrorNotSoftware() {
+        val keystoreManager = KeystoreManager(context)
+        keystoreManager.keyInfoReader = { alias, _ ->
+            throw java.security.spec.InvalidKeySpecException("KeyInfo unreadable: $alias")
+        }
+        val failingHandler = RequestHandler(
+            context = context,
+            keystoreManager = keystoreManager,
+            biometricLauncher = null,
+            sessionAuthManager = SessionAuthManager()
+        )
+        listOf(
+            Pair(KeyTypes.SECRET, "AES256"),
+            Pair(KeyTypes.SIGNING, "ES256")
+        ).forEach { (keyType, algorithm) ->
+            val keyId = "keyinfo-fails-${algorithm.lowercase()}-$runId"
+            createdKeyIds.add(keyId)
+            val request = Request(
+                nextRequestId.getAndIncrement(),
+                "local.generateKey",
+                JSONObject()
+                    .put("keyId", keyId)
+                    .put("keyType", keyType)
+                    .put("algorithm", algorithm)
+                    .put("requireUserVerification", false)
+                    .put("preferStrongBox", false)
+            )
+            val response = runBlocking { failingHandler.handleRequest(request) }
+
+            assertFalse(algorithm + ": " + response.toJsonString(), response.isSuccess())
+            assertNull(
+                algorithm,
+                runBlocking { XKeyDatabase.getInstance(context).keyDao().getByKeyId(keyId) }
+            )
+            assertFalse(algorithm, keystoreManager.generalKeyExists(keyId))
+        }
+    }
+
     /** A hardware HMAC-SHA512 key reports 512 bits, like its software twin. */
     @Test
     fun aHardwareSha512HmacKeyReports512Bits() {

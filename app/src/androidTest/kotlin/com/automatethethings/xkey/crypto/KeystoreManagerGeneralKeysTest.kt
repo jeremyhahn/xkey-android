@@ -228,6 +228,61 @@ class KeystoreManagerGeneralKeysTest {
         assertNull(keystoreManager.keySecurityLevel("missing-${System.nanoTime()}"))
     }
 
+    /**
+     * A credential `k` (xkey_credential_k) and a general key `k` (xkey_key_k)
+     * can coexist; the general key's level is read from its own alias, never
+     * from the credential that [KeystoreManager.resolveKeystoreAlias] prefers.
+     * The credential's KeyInfo read is made to fail, so a lookup that strayed
+     * to the credential would throw on every device.
+     */
+    @Test
+    fun aGeneralKeyLevelIsReadFromItsOwnAliasWhenACredentialSharesItsId() {
+        val keyId = newKeyId("level-collision")
+        runBlocking { keystoreManager.generateKey(keyId, requireBiometric = false, requireStrongBox = false) }
+        try {
+            runBlocking { keystoreManager.generateSymmetricKey(keyId, 256, -1) }
+            keystoreManager.keyInfoReader = failingFor("xkey_credential_$keyId")
+
+            val level = keystoreManager.generalKeySecurityLevel(keyId)
+            assertNotNull(level)
+            assertNotEquals(KeySecurityLevel.STRONGBOX, level)
+            assertThrows(KeyInfoUnavailableException::class.java) {
+                keystoreManager.credentialSecurityLevel(keyId)
+            }
+        } finally {
+            keystoreManager.deleteKey(keyId)
+        }
+    }
+
+    /**
+     * A Keystore entry whose KeyInfo cannot be read is an error, never a
+     * software-backed key.
+     */
+    @Test
+    fun aKeyInfoReadFailureIsAnErrorNotSoftware() {
+        val (keyId, _) = generate("ES256", "level-keyinfo-fails")
+        keystoreManager.keyInfoReader = failingFor("xkey_key_$keyId")
+
+        assertThrows(KeyInfoUnavailableException::class.java) {
+            keystoreManager.generalKeySecurityLevel(keyId)
+        }
+        assertThrows(KeyInfoUnavailableException::class.java) {
+            keystoreManager.keySecurityLevel(keyId)
+        }
+        assertThrows(KeyInfoUnavailableException::class.java) {
+            keystoreManager.isKeyStrongBoxBacked(keyId)
+        }
+    }
+
+    /** A KeyInfo reader that throws for [alias] and reads every other key. */
+    private fun failingFor(alias: String): (String, java.security.Key) -> android.security.keystore.KeyInfo {
+        val real = keystoreManager.keyInfoReader
+        return { a, key ->
+            if (a == alias) throw java.security.spec.InvalidKeySpecException("KeyInfo unreadable: $a")
+            real(a, key)
+        }
+    }
+
     /** The KeyInfo mapping per API level, as docs/plans/198.md tabulates it. */
     @Test
     fun keyInfoMapsToTheWireLevelPerApiLevel() {
