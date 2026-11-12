@@ -268,6 +268,39 @@ class AndroidCARevocationTest {
             AuditLogger.logCertificateRevoked(row.serialNumber, row.subjectDN, AndroidCA.CRLReason.SUPERSEDED)
         }
     }
+
+    @Test
+    fun `second revocation keeps the first date and reason and writes no audit entry`() {
+        // A small fake over one row: revoke changes it only while revoked = 0,
+        // as CertificateDao's guard does, and reports the rows changed.
+        var row = revokedRow(leaf()).copy(revoked = false, revokedAt = null, revokedReason = null)
+        val serial = row.serialNumber
+        coEvery { dao.getBySerial(serial) } answers { row }
+        coEvery { dao.revoke(serial, any(), any()) } answers {
+            if (row.revoked) {
+                0
+            } else {
+                row = row.copy(revoked = true, revokedAt = secondArg(), revokedReason = thirdArg())
+                1
+            }
+        }
+
+        val first = runBlocking { ca.revoke(serial, AndroidCA.CRLReason.KEY_COMPROMISE) }
+        val firstRevokedAt = row.revokedAt
+        Thread.sleep(2)
+        val second = runBlocking { ca.revoke(serial, AndroidCA.CRLReason.SUPERSEDED) }
+
+        assertEquals(true, first)
+        assertEquals(false, second)
+        assertEquals(true, row.revoked)
+        assertEquals(firstRevokedAt, row.revokedAt)
+        assertEquals(AndroidCA.CRLReason.KEY_COMPROMISE, row.revokedReason)
+        coVerify(exactly = 2) { dao.revoke(serial, any(), any()) }
+        verify(exactly = 1) { AuditLogger.logCertificateRevoked(any(), any(), any()) }
+        verify(exactly = 0) {
+            AuditLogger.logCertificateRevoked(any(), any(), AndroidCA.CRLReason.SUPERSEDED)
+        }
+    }
 }
 
 /** In-memory KeyStore: private-key entries without passwords, like the Android Keystore's. */
