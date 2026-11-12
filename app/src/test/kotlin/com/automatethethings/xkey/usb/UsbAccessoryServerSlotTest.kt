@@ -254,4 +254,42 @@ class UsbAccessoryServerSlotTest {
 
         assertEquals("the old session's teardown cleared the new peer", "new-peer", peerKeyHex)
     }
+
+    @Test
+    fun `an open that throws leaves the slot empty and stops the detach watcher`() {
+        every { usbManager.openAccessory(any()) } throws SecurityException("no USB permission") andThenAnswer {
+            openableDescriptor()
+        }
+
+        val thrown = runCatching { attach() }.exceptionOrNull()
+        assertTrue(thrown is SecurityException)
+        assertNull(slot.current())
+        assertFalse(slot.isActive)
+        assertEquals(1, receivers.size)
+        verify(exactly = 1) { context.unregisterReceiver(receivers[0]) }
+
+        val next = attach()
+        assertNotNull(next)
+        assertSame(next, slot.current()?.first)
+    }
+
+    @Test
+    fun `a connect that throws after the open closes the descriptor`() {
+        val descriptors = mutableListOf<ParcelFileDescriptor>()
+        every { usbManager.openAccessory(any()) } answers { openableDescriptor().also { descriptors += it } }
+        every { handler.setSessionId(any()) } throws IllegalStateException("session id refused") andThenAnswer {
+            sessionId = firstArg()
+        }
+
+        val thrown = runCatching { attach() }.exceptionOrNull()
+        assertTrue(thrown is IllegalStateException)
+        assertNull(slot.current())
+        verify(exactly = 1) { descriptors[0].close() }
+        verify(exactly = 1) { context.unregisterReceiver(receivers[0]) }
+
+        val next = attach()
+        assertNotNull(next)
+        assertSame(next, slot.current()?.first)
+        assertEquals(2, descriptors.size)
+    }
 }
