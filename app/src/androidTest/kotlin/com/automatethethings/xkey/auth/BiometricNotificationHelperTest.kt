@@ -234,34 +234,76 @@ class BiometricNotificationHelperTest {
         )
     }
 
+    /** The notification posted under [key], or null when none is up. */
+    private fun postedUnder(key: String): StatusBarNotification? =
+        notificationManager.activeNotifications.firstOrNull { it.id == notificationId && it.tag == key }
+
+    private fun awaitGoneUnder(key: String, timeoutMs: Long = 5_000L) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (postedUnder(key) == null) return
+            Thread.sleep(25)
+        }
+        throw AssertionError("the notification under $key was still showing")
+    }
+
+    /** Waits [delayMs] on the main looper, where the helper's timeouts run. */
+    private fun passOnTheMainLooper(delayMs: Long) {
+        val passed = CountDownLatch(1)
+        Handler(Looper.getMainLooper()).postDelayed({ passed.countDown() }, delayMs)
+        assertTrue("the main looper never got that far", passed.await(10, TimeUnit.SECONDS))
+    }
+
+    private fun show(key: String, timeoutMs: Long, timedOut: CountDownLatch) =
+        helper.showBiometricRequiredNotification(
+            operationType = "sign",
+            rpName = key,
+            requestId = key,
+            timeoutMs = timeoutMs,
+            onTimeout = { timedOut.countDown() }
+        )
+
     @Test
-    fun aSecondRequestReplacesThePendingTimeout() {
+    fun differentRequestsExpireAndCancelIndependently() {
+        val first = "$requestId-a"
+        val second = "$requestId-b"
+        val third = "$requestId-c"
         val firstTimedOut = CountDownLatch(1)
         val secondTimedOut = CountDownLatch(1)
+        val thirdTimedOut = CountDownLatch(1)
+        try {
+            show(first, 600L, firstTimedOut)
+            show(second, 600L, secondTimedOut)
+            show(third, 1_500L, thirdTimedOut)
 
-        helper.showBiometricRequiredNotification(
-            operationType = "sign",
-            rpName = "First",
-            requestId = "request-a-${System.nanoTime()}",
-            timeoutMs = 600L,
-            onTimeout = { firstTimedOut.countDown() }
-        )
-        helper.showBiometricRequiredNotification(
-            operationType = "sign",
-            rpName = "Second",
-            requestId = "request-b-${System.nanoTime()}",
-            timeoutMs = 600L,
-            onTimeout = { secondTimedOut.countDown() }
-        )
+            assertTrue("the first request's callback never ran", firstTimedOut.await(10, TimeUnit.SECONDS))
+            assertTrue("the second request's callback never ran", secondTimedOut.await(10, TimeUnit.SECONDS))
+            awaitGoneUnder(first)
+            awaitGoneUnder(second)
+            assertNotNull("the others' expiry left the third request's notification up", postedUnder(third))
 
-        assertTrue(
-            "the surviving request's callback never ran",
-            secondTimedOut.await(10, TimeUnit.SECONDS)
-        )
-        assertEquals(
-            "the superseded request's callback should have been removed",
-            1L,
-            firstTimedOut.count
-        )
+            helper.cancelNotification(third)
+            passOnTheMainLooper(1_500L)
+
+            assertEquals("the third request's callback ran after its cancel", 1L, thirdTimedOut.count)
+            awaitGoneUnder(third)
+        } finally {
+            listOf(first, second, third).forEach(helper::cancelNotification)
+        }
+    }
+
+    @Test
+    fun repostingTheSameRequestReplacesItsTimeout() {
+        val replacedTimedOut = CountDownLatch(1)
+        val currentTimedOut = CountDownLatch(1)
+
+        show(requestId, 600L, replacedTimedOut)
+        show(requestId, 2_000L, currentTimedOut)
+        passOnTheMainLooper(900L)
+
+        assertEquals("the replaced timeout's callback ran", 1L, replacedTimedOut.count)
+        assertNotNull("the replaced timeout took the notification down", postedUnder(requestId))
+        assertTrue("the current timeout's callback never ran", currentTimedOut.await(10, TimeUnit.SECONDS))
+        awaitGoneUnder(requestId)
     }
 }
