@@ -182,6 +182,24 @@ class RemoteKeyClientPivTest {
     }
 
     @Test
+    fun `pivListSlots rejects a whitespace-only slot id`() = runTest {
+        sender.succeedWith("""{"slots":[{"slot":" ","has_key":false,"has_certificate":false}]}""")
+        expectMalformed { client.pivListSlots() }
+    }
+
+    @Test
+    fun `pivListSlots rejects a tab and newline slot id`() = runTest {
+        sender.succeedWith("""{"slots":[{"slot":"\t\n","has_key":false,"has_certificate":false}]}""")
+        expectMalformed { client.pivListSlots() }
+    }
+
+    @Test
+    fun `pivListSlots keeps a valid slot id verbatim and lowercase`() = runTest {
+        sender.succeedWith("""{"slots":[{"slot":"9a","has_key":false,"has_certificate":false}]}""")
+        assertEquals("9a", client.pivListSlots().single().slot)
+    }
+
+    @Test
     fun `pivListSlots rejects a numeric label`() = runTest {
         sender.succeedWith("""{"slots":[{"slot":"9a","label":7,"has_key":false,"has_certificate":false}]}""")
         expectMalformed { client.pivListSlots() }

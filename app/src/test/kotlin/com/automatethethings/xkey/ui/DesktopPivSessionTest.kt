@@ -144,6 +144,33 @@ class DesktopPivSessionTest {
         assertNull(outcome)
     }
 
+    // --- malformed slot ids -----------------------------------------------
+
+    @Test
+    fun `a blank slot id in the detail is a failure, not a crash`() = runTest {
+        sender.succeedWith("""{"certificate_der":"$TEST_CERT_B64"}""")
+
+        val detail = desktopPivSlotDetail(flowOf(client), " ").first()
+
+        assertTrue(detail is DesktopPivSlotDetail.Failed)
+        assertTrue(sender.sent.isEmpty())
+    }
+
+    @Test
+    fun `a blank slot id in the test sign is a failed outcome`() = runTest {
+        val outcome = DesktopPivSlotActions(client).trySignTest(" ")
+
+        assertTrue(outcome is DesktopSignTestOutcome.Failed)
+        assertTrue(sender.sent.isEmpty())
+    }
+
+    @Test
+    fun `a desktop listing a whitespace slot id shows no slots`() = runTest {
+        sender.succeedWith("""{"slots":[{"slot":" ","has_key":false,"has_certificate":false}]}""")
+
+        assertTrue(desktopPivSlots(flowOf(client)).first().isEmpty())
+    }
+
     // --- session ready / lost ---------------------------------------------
 
     @Test
