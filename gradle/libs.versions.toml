@@ -54,7 +54,10 @@ testRules = "1.7.0"
 mockk = "1.14.11"
 robolectric = "4.17"
 # The framework jar Robolectric 4.17 runs targetSdk 34's tests on
-# (DefaultSdkProvider); raise it with robolectric or targetSdk.
+# (DefaultSdkProvider); raise it with robolectric or targetSdk. The version
+# prefix is the API level (14 = API 34), so newer builds are other platforms:
+# the pin is exempted in scripts/deps-check-exempt.txt, and that line goes
+# with a targetSdk raise.
 robolectricAndroidAll = "14-robolectric-10818077-i7"
 uiautomator = "2.4.1"
 

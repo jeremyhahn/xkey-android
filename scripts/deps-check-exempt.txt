@@ -4,3 +4,4 @@
 #   group:name  reason, who decided, YYYY-MM-DD
 #
 # A line without a reason fails the check. Remove the line with the bump.
+org.robolectric:android-all-instrumented  the Robolectric framework jar for targetSdk 34 (API level is the version prefix; raise with targetSdk), xkey-android maintainers, 2026-11-12
