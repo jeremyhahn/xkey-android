@@ -32,9 +32,9 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.core.widget.NestedScrollView
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BottomSheetBehavior
@@ -197,7 +197,17 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         buildPeerSelectionSection()
         buildDesktopSection()
 
-        return rootLayout
+        // The whole sheet scrolls: on a short screen (landscape, enlarged
+        // text) the desktop section below the policies and the peer list
+        // would otherwise be cut off with no way to reach its send button.
+        return NestedScrollView(requireContext()).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setBackgroundColor(resolveThemeColor(com.google.android.material.R.attr.colorSurface))
+            addView(rootLayout)
+        }
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
@@ -449,8 +459,8 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         }
         peerSelectionContainer.addView(headerText)
 
-        // Scrollable peer list
-        val scrollView = ScrollView(requireContext()).apply {
+        // Scrollable peer list, nested in the sheet's own scrolling
+        val scrollView = NestedScrollView(requireContext()).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dpToPxInt(200)  // Max height for scrollable area
