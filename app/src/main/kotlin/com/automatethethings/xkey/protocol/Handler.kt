@@ -2725,6 +2725,11 @@ class RequestHandler(
                 if (peerPublicKeyHex == null) {
                     Log.w(TAG, "Cannot check SELECTED_PEERS policy without peer public key")
                     false
+                } else if (pairedDeviceRepository?.isRevocationPending(peerPublicKeyHex) == true) {
+                    // Fail closed (#174): this peer was unpaired and its old
+                    // grants may not be deleted yet; they must not authorize it.
+                    Log.w(TAG, "SELECTED_PEERS refused: grant revocation pending for peer")
+                    false
                 } else {
                     keySharingPolicyDao.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
                 }
