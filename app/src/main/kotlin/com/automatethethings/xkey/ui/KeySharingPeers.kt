@@ -103,6 +103,21 @@ class KeySharingPeers(
         edits.withLock { policyDao.clearPoliciesForKey(keyId) }
     }
 
+    /**
+     * Stores the key's sharing [policy] through [persist], in the same order
+     * as grants and withdrawals. Leaving [SharingPolicyType.SELECTED_PEERS]
+     * clears every per-peer row under that order too, so a grant the user
+     * made earlier lands first and is cleared, never after the clear.
+     */
+    suspend fun setKeyPolicy(policy: SharingPolicyType, persist: suspend () -> Unit) {
+        edits.withLock {
+            persist()
+            if (policy != SharingPolicyType.SELECTED_PEERS) {
+                policyDao.clearPoliciesForKey(keyId)
+            }
+        }
+    }
+
     private companion object {
         /** Orders every grant and withdrawal, across all sheets. */
         val edits = Mutex()

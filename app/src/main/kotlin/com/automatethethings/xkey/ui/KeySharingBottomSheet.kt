@@ -671,11 +671,8 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             SharingPolicyType.ALL_PEERS -> EntitySharingPolicyType.ALL_PEERS
             SharingPolicyType.SELECTED_PEERS -> EntitySharingPolicyType.SELECTED_PEERS
         }
-        keyDao.updateSharingPolicy(keyId, entityPolicy)
-
-        if (policy != SharingPolicyType.SELECTED_PEERS) {
-            keySharingPolicyDao.clearPoliciesForKey(keyId)
-        }
+        // In user-action order with the per-peer grants and withdrawals (#174).
+        sharingPeers.setKeyPolicy(policy) { keyDao.updateSharingPolicy(keyId, entityPolicy) }
     }
 
     /**
