@@ -42,6 +42,8 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -739,7 +741,9 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
 
 /**
  * The sheet's peer tap: [KeySharingPeers.setAllowed], then, if the change was
- * refused, [redraw] of the list from the stored state.
+ * refused, [redraw] of the list from the stored state, unless the caller was
+ * cancelled or the sheet is no longer [attached] by the time the queued edit
+ * completes.
  */
 internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     peerPublicKeyHex: String,
@@ -748,7 +752,10 @@ internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     attached: () -> Boolean,
     redraw: () -> Unit
 ) {
-    if (!setAllowed(peerPublicKeyHex, allowed, pairing)) {
-        redraw()
-    }
+    if (setAllowed(peerPublicKeyHex, allowed, pairing)) return
+    // The queued edit completes under NonCancellable, and returning from it
+    // does not check the caller's job: a sheet dismissed meanwhile has no
+    // context to draw with (#193 r2).
+    currentCoroutineContext().ensureActive()
+    if (attached()) redraw()
 }
