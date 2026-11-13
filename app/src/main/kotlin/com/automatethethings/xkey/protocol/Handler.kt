@@ -30,6 +30,7 @@ import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.DecryptionException
 import com.automatethethings.xkey.crypto.DeviceAttestationKey
 import com.automatethethings.xkey.crypto.ECDHException
+import com.automatethethings.xkey.crypto.KeystoreCapabilities
 import com.automatethethings.xkey.crypto.EncryptionException
 import com.automatethethings.xkey.crypto.HMACException
 import com.automatethethings.xkey.crypto.KeyGenerationException
@@ -1860,6 +1861,11 @@ class RequestHandler(
      * Handles local.ecdh - ECDH key agreement.
      */
     private suspend fun handleLocalECDH(request: Request): Response {
+        // Keystore key agreement is API 31+; refuse before touching the Keystore.
+        if (!KeystoreCapabilities.supportsEcdh(Build.VERSION.SDK_INT)) {
+            throw ECDHException(KeystoreCapabilities.ecdhUnsupportedReason(Build.VERSION.SDK_INT))
+        }
+
         // Check device attestation requirement
         if (!isDeviceAttestationCurrent(forKeyUse = true)) {
             throw ProtocolException(
@@ -2260,17 +2266,12 @@ class RequestHandler(
      */
     private suspend fun handleLocalGetCapabilities(request: Request): Response {
         val result = LocalGetCapabilitiesResult(
-            algorithms = listOf(
-                "ES256", "ES384", "ES512",
-                "RS256", "RS384", "RS512",
-                "AES128", "AES256",
-                "HMAC-SHA256", "HMAC-SHA512"
-            ),
+            algorithms = KeystoreCapabilities.supportedAlgorithms(Build.VERSION.SDK_INT),
             keyTypes = listOf("fido2", "tls", "signing", "encryption", "secret", "hmac", "ca", "attestation"),
             hasStrongBox = keystoreManager.isStrongBoxAvailable(),
             hasBiometrics = hasBiometrics(),
             supportsAttestation = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N,
-            supportsECDH = true,
+            supportsECDH = KeystoreCapabilities.supportsEcdh(Build.VERSION.SDK_INT),
             supportsSymmetric = true,
             supportsHMAC = true,
             maxKeys = 256, // Android Keystore practical limit
