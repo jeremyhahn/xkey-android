@@ -33,6 +33,11 @@ No entry carries key material.
 | `local.shareSymmetric` (material arrives) | `KEY_CREATED` | `algorithm`, `strongBox = false`, `source = shared`. A refused duplicate id records nothing. |
 | `local.sharePublicKey` (a public key arrives) | `CONTACT_IMPORTED` | `name`, `fingerprint`, `source = shared`. A key already in contacts records nothing. |
 
+An arriving key's write and its entry run together, outside cancellation
+(`persistAudited` in `RequestHandler`). If the connection drops mid-write,
+the stored key still gets its entry. A request cancelled before the write
+stores and records nothing.
+
 ## Index Strategy
 
 ### audit_logs

@@ -3762,6 +3762,27 @@ class RequestHandler(
     }
 
     /**
+     * Runs a share's write and the audit record that names it as one step
+     * that cancellation cannot split.
+     *
+     * A transport cancels a request's scope when its connection drops. A
+     * suspending write (a Room insert) can complete and then resume into that
+     * cancellation, which would skip the record and leave stored material no
+     * audit entry names. Under [NonCancellable] the record always follows a
+     * write that ran; cancellation before the write stores and records
+     * nothing, and the caller still sees the cancellation once this returns.
+     * Every share path that stores something goes through here.
+     *
+     * @param write stores the shared material and returns its result
+     * @param record writes the audit entry for what [write] stored
+     * @return the result of [write]
+     */
+    private suspend fun <T> persistAudited(write: suspend () -> T, record: (T) -> Unit): T =
+        withContext(NonCancellable) {
+            write().also(record)
+        }
+
+    /**
      * Imports a public key shared by the desktop, stored as a contact entry.
      */
     private suspend fun handleSharePublicKey(request: Request): Response {
@@ -3780,28 +3801,36 @@ class RequestHandler(
             val label = params.optString("label", "").ifBlank { keyId.ifBlank { "shared-key" } }
             val dao = XKeyDatabase.getInstance(context).contactDao()
             if (dao.getByFingerprint(fingerprint) == null) {
-                dao.insert(
-                    com.automatethethings.xkey.storage.entity.ContactEntity(
-                        name = label,
-                        publicKeyDer = der,
-                        publicKeyFingerprint = fingerprint,
-                        algorithm = params.optString("algorithm", "").ifBlank { "unknown" },
-                        source = "shared",
-                        notes = params.optString("backend", "").ifBlank { null }
-                    )
-                )
-                AuditLogger.logContactImported(
-                    name = label,
-                    fingerprint = fingerprint,
-                    source = "shared",
-                    deviceId = peerPublicKeyHex,
-                    deviceName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
+                persistAudited(
+                    write = {
+                        dao.insert(
+                            com.automatethethings.xkey.storage.entity.ContactEntity(
+                                name = label,
+                                publicKeyDer = der,
+                                publicKeyFingerprint = fingerprint,
+                                algorithm = params.optString("algorithm", "").ifBlank { "unknown" },
+                                source = "shared",
+                                notes = params.optString("backend", "").ifBlank { null }
+                            )
+                        )
+                    },
+                    record = {
+                        AuditLogger.logContactImported(
+                            name = label,
+                            fingerprint = fingerprint,
+                            source = "shared",
+                            deviceId = peerPublicKeyHex,
+                            deviceName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
+                        )
+                    }
                 )
             }
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
                 put("import_id", keyId.ifBlank { fingerprint })
             })
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "sharePublicKey failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "sharePublicKey failed: ${e.message}")
@@ -3836,30 +3865,38 @@ class RequestHandler(
                 return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
             }
             val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
-            store.put(
-                com.automatethethings.xkey.crypto.SoftwareKey(
-                    keyId = keyId,
-                    algorithm = algorithm,
-                    keyType = "symmetric",
-                    keySize = params.optInt("key_size", material.size * 8),
-                    exportable = false,
-                    shareable = false,
-                    material = material
-                )
-            )
-            AuditLogger.logKeyCreated(
-                keyId = keyId,
-                keyLabel = keyId,
-                keyType = "symmetric",
-                algorithm = algorithm,
-                source = "shared",
-                deviceId = peerPublicKeyHex,
-                deviceName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
+            persistAudited(
+                write = {
+                    store.put(
+                        com.automatethethings.xkey.crypto.SoftwareKey(
+                            keyId = keyId,
+                            algorithm = algorithm,
+                            keyType = "symmetric",
+                            keySize = params.optInt("key_size", material.size * 8),
+                            exportable = false,
+                            shareable = false,
+                            material = material
+                        )
+                    )
+                },
+                record = {
+                    AuditLogger.logKeyCreated(
+                        keyId = keyId,
+                        keyLabel = keyId,
+                        keyType = "symmetric",
+                        algorithm = algorithm,
+                        source = "shared",
+                        deviceId = peerPublicKeyHex,
+                        deviceName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
+                    )
+                }
             )
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
                 put("import_id", keyId)
             })
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "shareSymmetric failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "shareSymmetric failed: ${e.message}")
