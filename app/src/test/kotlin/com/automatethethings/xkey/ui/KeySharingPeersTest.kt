@@ -523,6 +523,31 @@ class KeySharingPeersTest {
     }
 
     /**
+     * Finding (2): a withdrawal whose grant delete fails is acknowledged only
+     * once the grant clear it owes is in the key's policy row: after a
+     * restart, with no in-memory retry left, the peer is still denied, and
+     * the next policy write deletes the grant.
+     */
+    @Test
+    fun aFailedWithdrawalIsRecordedDurablyBeforeItIsAcknowledged() = runTest {
+        rows(KEY to PEER_A)
+        tables.failing += "deleteGrant"
+        val peers = peersOf()
+
+        assertTrue(peers.setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A)))
+        runCurrent()
+
+        val row = tables.rows.value[KEY]!!
+        assertTrue("a failed withdrawal was acknowledged with no durable record", row.clearGrants)
+        assertEquals("a restart would authorize the withdrawn peer", StoredPolicy.PRIVATE, tables.enforced(KEY))
+
+        tables.failing.clear()
+        advanceUntilIdle()
+        assertTrue(peers.setKeyPolicy(SharingPolicyType.SELECTED_PEERS, instance))
+        assertTrue(table.none { it.first == KEY })
+    }
+
+    /**
      * The Private write fails while the stored policy stays Selected Peers,
      * so the reopened sheet shows Selected Peers. A grant then is refused
      * while the failed change's clear is owed, so no approved grant is ever

@@ -182,6 +182,42 @@ class KeyPolicyStoreTest {
         assertEquals(ALL_PEERS, store().enforcedPolicy(tables.key("k")!!))
     }
 
+    /**
+     * Finding (1): a Private whose write and denial write both fail is held
+     * in the process; the grant clear it owes is held with it, so the later
+     * Selected Peers write deletes the grants made before the Private.
+     */
+    @Test
+    fun anUnrecordedPrivateDenialKeepsItsOwedGrantClear() = runBlocking {
+        val instance = tables.addKey("k", SELECTED_PEERS)
+        tables.grant("k", PEER)
+        tables.failing += setOf("setKeyPolicy", "putPolicyRow")
+        expectFailure { store().setPolicy("k", instance, PRIVATE) }
+        tables.failing.clear()
+
+        assertTrue("the owed clear was not reported", store().setPolicy("k", instance, SELECTED_PEERS))
+        assertEquals("a grant from before the Private survived its owed clear", emptySet<String>(), tables.grantsOf("k"))
+    }
+
+    /**
+     * The bypass guard (#193, ruling 554): the denial and grant-clear
+     * columns are written only by [KeyPolicyStore]'s obligation choke point.
+     * A main source elsewhere that sets them (a Room entity argument, a
+     * migration's SQL) is a path that acknowledges a denial, withdrawal or
+     * fallback without it.
+     */
+    @Test
+    fun onlyTheStoreWritesTheDenialAndGrantClearColumns() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue("main sources not found from ${java.io.File(".").absolutePath}", root.isDirectory)
+        val writes = Regex("""clearGrants\s*=[^=]|`clear_grants`\s*=|`denial`\s*=|\bdenial\s*=[^=]""")
+        val bypasses = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "KeyPolicyStore.kt" }
+            .flatMap { file -> file.readLines().mapIndexedNotNull { i, line -> if (writes.containsMatchIn(line)) "${file.name}:${i + 1}" else null } }
+            .toList()
+        assertEquals("denial or grant-clear written outside the store's choke point", emptyList<String>(), bypasses)
+    }
+
     private suspend fun expectFailure(edit: suspend () -> Unit) {
         try {
             edit()

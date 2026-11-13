@@ -34,6 +34,7 @@ import java.io.IOException
 class KeyPolicyMigrationTest {
 
     private val statements = mutableListOf<String>()
+    private val bound = mutableListOf<Pair<String, List<Any?>>>()
     private val db = mockk<SupportSQLiteDatabase>(relaxed = true)
 
     @Before
@@ -42,13 +43,23 @@ class KeyPolicyMigrationTest {
         every { Log.e(any(), any<String>(), any()) } returns 0
         every { Log.e(any(), any<String>()) } returns 0
         every { db.execSQL(any()) } answers { statements += firstArg<String>() }
-        every { db.execSQL(any(), any()) } answers { statements += firstArg<String>() }
+        every { db.execSQL(any(), any()) } answers {
+            statements += firstArg<String>()
+            bound += firstArg<String>() to secondArg<Array<Any?>>().toList()
+        }
     }
 
     @After
     fun tearDown() {
         unmockkAll()
     }
+
+    /** The one key-wide update of the fallback: its SQL with any bound arguments substituted in order. */
+    private fun keyWideUpdates(): List<String> =
+        statements.filter { it.startsWith("UPDATE `key_policies` SET") && !it.contains("WHERE") }.map { sql ->
+            val args = bound.firstOrNull { it.first == sql }?.second.orEmpty().iterator()
+            sql.replace(Regex("""\?""")) { if (args.hasNext()) "'${args.next()}'" else "?" }
+        }
 
     @Test
     fun unreadableDenialRecordsDenyEveryKeyInsteadOfBeingDropped() {
@@ -57,9 +68,21 @@ class KeyPolicyMigrationTest {
         assertTrue("the key policy rows were not created", statements.any { it.startsWith("INSERT INTO `key_policies`") })
         assertTrue(
             "unreadable denial records were dropped: no deny-all marker",
-            statements.any {
-                it.startsWith("UPDATE `key_policies` SET") && it.contains("`denial` = 'PRIVATE'") && !it.contains("WHERE")
-            }
+            keyWideUpdates().any { it.contains("`denial` = 'PRIVATE'") }
+        )
+    }
+
+    /**
+     * Finding (3): an unreadable record may be a Private that owes its grant
+     * clear, so the fallback owes every key's clear too, not only a denial.
+     */
+    @Test
+    fun unreadableDenialRecordsKeepTheGrantClearsTheyMayOwe() {
+        XKeyDatabase.migration12To13 { throw IOException("unreadable") }.migrate(db)
+
+        assertTrue(
+            "the fallback dropped the grant-clear obligations: ${keyWideUpdates()}",
+            keyWideUpdates().any { it.contains("`denial` = 'PRIVATE'") && Regex("""`clear_grants` = '?(1|true)'?""").containsMatchIn(it) }
         )
     }
 
