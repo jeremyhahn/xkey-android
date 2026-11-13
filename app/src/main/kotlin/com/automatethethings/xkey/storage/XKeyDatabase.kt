@@ -66,6 +66,8 @@ import java.util.concurrent.atomic.AtomicReference
  * - v10: Added `passwords` table for the encrypted password manager.
  * - v11: Migrated key source token "keychaind" -> "xkmsd" (go-xkms daemon rename).
  * - v12: Added expires_at, shared and tenant_id columns to passwords table.
+ * - v13: Added policy_revision to keys, and the trigger that only lets it
+ *        move forward.
  *
  * Usage:
  * ```kotlin
@@ -96,7 +98,7 @@ import java.util.concurrent.atomic.AtomicReference
         PivSlotEntity::class,
         PasswordEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = true
 )
 @TypeConverters(AuditOperationTypeConverter::class)
@@ -579,6 +581,48 @@ abstract class XKeyDatabase : RoomDatabase() {
         }
 
         /**
+         * Moves a key's `policy_revision` past the stored one whenever an
+         * update of its policy or revision would leave the revision where it
+         * was or take it back. The DAO's policy writers bump the revision
+         * themselves, so this fires for none of them; it catches a whole-row
+         * `@Update` written from a copy read earlier, which would otherwise
+         * restore the revision an in-flight approval was taken at. With
+         * recursive triggers off (SQLite's default) its own update does not
+         * fire it again.
+         */
+        internal const val CREATE_POLICY_REVISION_TRIGGER =
+            "CREATE TRIGGER IF NOT EXISTS `keys_policy_revision_forward` " +
+                "AFTER UPDATE OF `sharing_policy`, `policy_revision` ON `keys` FOR EACH ROW " +
+                "WHEN NEW.`policy_revision` <= OLD.`policy_revision` " +
+                "BEGIN UPDATE `keys` SET `policy_revision` = OLD.`policy_revision` + 1 " +
+                "WHERE `id` = NEW.`id`; END"
+
+        /**
+         * Migration from v12 to v13: give every key a sharing-policy
+         * revision, starting at 0, and the trigger that keeps it moving
+         * forward ([CREATE_POLICY_REVISION_TRIGGER]). An approved policy
+         * write compares the revision it read, so a policy changed away and
+         * back no longer matches an approval taken before the change.
+         */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `keys` ADD COLUMN `policy_revision` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(CREATE_POLICY_REVISION_TRIGGER)
+            }
+        }
+
+        /**
+         * Creates what Room's schema does not carry on a fresh install: the
+         * policy revision trigger a migrated database gets from
+         * [MIGRATION_12_13].
+         */
+        internal val CREATE_TRIGGERS = object : RoomDatabase.Callback() {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                db.execSQL(CREATE_POLICY_REVISION_TRIGGER)
+            }
+        }
+
+        /**
          * Get the singleton database instance.
          *
          * Uses double-checked locking with AtomicReference for thread-safe
@@ -604,7 +648,8 @@ abstract class XKeyDatabase : RoomDatabase() {
                 XKeyDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
+                .addCallback(CREATE_TRIGGERS)
                 .build()
         }
 

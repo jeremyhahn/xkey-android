@@ -339,19 +339,17 @@ class KeyShareAuditTest {
     }
 
     /**
-     * A request that names no connection has no peer: the handler-wide peer
-     * is never borrowed, so the share is refused and nothing is recorded.
+     * A request that names no connection (an in-process caller) is answered
+     * for the handler-wide peer, the one fallback of
+     * `currentPeerPublicKeyHex`; a served connection never takes it.
      */
     @Test
-    fun aRequestWithNoConnectionNeverBorrowsTheGlobalPeer() = runTest {
+    fun aRequestWithNoConnectionFallsBackToTheHandlerWidePeer() = runTest {
         handler.setConnectedDevicePublicKeyHex(PEER)
-        givenSoftwareKey(exportable = true, shareable = true)
 
-        for (request in listOf(importSharedKey(), shareSymmetric(), sharePublicKey())) {
-            val response = Response.fromJson(handler.handleRawRequest(request))
-            assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
-        }
-        assertTrue("no entry without a caller peer: $entries", entries.isEmpty())
+        success(handler.handleRawRequest(sharePublicKey()))
+
+        assertEquals(PEER, single(AuditOperationType.CONTACT_IMPORTED).deviceId)
     }
 
     /**
@@ -421,7 +419,7 @@ class KeyShareAuditTest {
      * Every handler function that writes an audit record, and the share
      * gate, takes the peer from the request's own connection: none reads the
      * handler-wide peer, and every `deviceId` it records is the caller peer
-     * ([RequestHandler]'s `callerPeerPublicKeyHex`, directly or through
+     * ([RequestHandler]'s `currentPeerPublicKeyHex`, directly or through
      * `requireConfirmedPeer`). A new audit call that reads the global peer
      * fails here before it can record the wrong desktop.
      */
@@ -441,7 +439,7 @@ class KeyShareAuditTest {
         val functions = members.filter { nameOf(it) != null }
         val auditing = functions.filter { "AuditLogger.log" in it || nameOf(it) == "requireConfirmedPeer" }
         assertTrue("audit paths found: ${auditing.size}", auditing.size >= 8)
-        val allowedPeers = setOf("callerPeer", "peerPublicKeyHex", "null")
+        val allowedPeers = setOf("callerPeer", "peerPublicKeyHex", "peer", "null")
         for (fn in auditing) {
             val name = nameOf(fn)
             assertFalse("$name reads the handler-wide peer", "connectedDevicePublicKeyHex" in fn)
@@ -454,16 +452,22 @@ class KeyShareAuditTest {
                     Regex("val peerPublicKeyHex = requireConfirmedPeer\\(").containsMatchIn(fn)
                 )
             }
+            if (Regex("deviceId = peer\\b").containsMatchIn(fn)) {
+                assertTrue(
+                    "$name takes its peer from backupAuditPeer",
+                    "val peer = backupAuditPeer()" in fn
+                )
+            }
             if (Regex("deviceId = callerPeer\\b").containsMatchIn(fn)) {
                 assertTrue(
-                    "$name takes its peer from callerPeerPublicKeyHex",
-                    "val callerPeer = callerPeerPublicKeyHex()" in fn
+                    "$name takes its peer from currentPeerPublicKeyHex",
+                    "val callerPeer = currentPeerPublicKeyHex()" in fn
                 )
             }
         }
         // Beyond the audit paths: no sharing decision reads it either. Only
-        // its own setters and getter, and the attestation policy's
-        // no-session fallback, may touch the handler-wide peer.
+        // its own setters and getter, the attestation policy's no-session
+        // fallback, and the one peer resolver may touch the handler-wide peer.
         val readers = functions
             .filter { "connectedDevicePublicKeyHex" in it }
             .mapNotNull { nameOf(it) }
@@ -473,15 +477,16 @@ class KeyShareAuditTest {
                 "setSessionId",
                 "setConnectedDevicePublicKeyHex",
                 "getConnectedDevicePublicKeyHex",
-                "attestingPeerPublicKeyHex"
+                "attestingPeerPublicKeyHex",
+                "currentPeerPublicKeyHex"
             ),
             readers
         )
         val gate = auditing.single { nameOf(it) == "requireConfirmedPeer" }
-        assertTrue("requireConfirmedPeer reads the caller session", "callerPeerPublicKeyHex()" in gate)
-        val choke = functions.single { nameOf(it) == "callerPeerPublicKeyHex" }
-        assertTrue("the choke point reads the CallerSession", "[CallerSession]" in choke)
-        assertFalse("the choke point reads the handler-wide peer", "connectedDevicePublicKeyHex" in choke)
+        assertTrue("requireConfirmedPeer uses the one resolver", "currentPeerPublicKeyHex()" in gate)
+        assertFalse("the old caller-only resolver is gone", functions.any { nameOf(it) == "callerPeerPublicKeyHex" })
+        val choke = functions.single { nameOf(it) == "currentPeerPublicKeyHex" }
+        assertTrue("the choke point reads the CallerSession first", "[CallerSession] ?: return connectedDevicePublicKeyHex" in choke)
     }
 
     // -----------------------------------------------------------------
