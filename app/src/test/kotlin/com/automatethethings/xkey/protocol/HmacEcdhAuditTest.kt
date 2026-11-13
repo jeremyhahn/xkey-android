@@ -25,6 +25,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.audit.AuditOperationType
 import com.automatethethings.xkey.crypto.DecryptResult
 import com.automatethethings.xkey.crypto.HmacResult
+import com.automatethethings.xkey.crypto.KeystoreCapabilities
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
@@ -104,9 +105,6 @@ class HmacEcdhAuditTest {
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
-        // SDK_INT reads 0 on the JVM; local.ecdh needs API 31 (#206).
-        mockkObject(com.automatethethings.xkey.crypto.KeystoreCapabilities)
-        every { com.automatethethings.xkey.crypto.KeystoreCapabilities.supportsEcdh(any()) } returns true
 
         // Stored key types: ECDH runs on an EC key stored as signing, and the
         // Keystore HMAC key is stored as "secret"; neither matches the
@@ -127,6 +125,11 @@ class HmacEcdhAuditTest {
         }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
+
+        // local.ecdh runs only from API 31 (#206); Build.VERSION.SDK_INT
+        // reads as 0 on the JVM, so stand in a device that has it.
+        mockkObject(KeystoreCapabilities)
+        every { KeystoreCapabilities.supportsEcdh(any()) } returns true
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
