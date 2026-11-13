@@ -138,8 +138,8 @@ class CosignRequestHandlerTest {
         every { BiometricNotificationHelper.intentData(any()) } returns mockk(relaxed = true)
 
         keystoreManager = mockk(relaxed = true)
-        coEvery { keystoreManager.signWithAlgorithm(any(), any(), any()) } returns signature
-        every { keystoreManager.getPublicKeyDER(any()) } returns publicKeyDer
+        coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } returns signature
+        every { keystoreManager.publicKeyDERAt(any()) } returns publicKeyDer
 
         // The screen first: the launcher registers its result receivers with it.
         screen = FakeScreen()
@@ -196,7 +196,7 @@ class CosignRequestHandlerTest {
     }
 
     private fun assertNothingSigned() {
-        coVerify(exactly = 0) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+        coVerify(exactly = 0) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
     /** The broadcast the prompt activity sends when the owner answers [requestId]. */
@@ -407,7 +407,7 @@ class CosignRequestHandlerTest {
             subtitle.contains(hashHex.take(8))
         )
         coVerify(exactly = 1) {
-            keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256")
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), "SHA256withECDSA")
         }
     }
 
@@ -452,10 +452,10 @@ class CosignRequestHandlerTest {
 
         assertNull(response.error)
         coVerify(exactly = 1) {
-            keystoreManager.signWithAlgorithm(signingKey.keyId, any(), any())
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), any())
         }
         coVerify(exactly = 0) {
-            keystoreManager.signWithAlgorithm(fido2Key.keyId, any(), any())
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(fido2Key.keyId), any(), any(), any())
         }
     }
 
@@ -525,7 +525,7 @@ class CosignRequestHandlerTest {
 
         assertNull("BLE co-sign still answers: ${response.error?.message}", response.error)
         coVerify(exactly = 1) {
-            keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256")
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), "SHA256withECDSA")
         }
     }
 
@@ -578,7 +578,7 @@ class CosignRequestHandlerTest {
         assertEquals(1L, first.await().id)
         assertError(ErrorCodes.BIOMETRIC_FAILED, second.await())
         assertEquals(2L, second.await().id)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+        coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
     @Test
@@ -599,7 +599,7 @@ class CosignRequestHandlerTest {
         screen.answer(approved = true)
         assertNull(second.await().error)
         assertEquals(2L, second.await().id)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+        coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
     @Test
@@ -659,7 +659,7 @@ class CosignRequestHandlerTest {
         screen.answer(approved = true)
         assertNull(second.await().error)
         assertEquals(2L, second.await().id)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+        coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
     // The key chosen before the approval signs only as it still is after it.
@@ -700,7 +700,7 @@ class CosignRequestHandlerTest {
         val response = async { handler().handleRequest(request()) }
         runCurrent()
         checkNotNull(screen.visible) { "the co-sign's prompt is up" }
-        every { keystoreManager.getPublicKeyDER(signingKey.keyId) } returns ByteArray(91) { 9 }
+        every { keystoreManager.publicKeyDERAt(KeystoreManager.generalKeyAlias(signingKey.keyId)) } returns ByteArray(91) { 9 }
         screen.answer(approved = true)
         runCurrent()
         assertError(ErrorCodes.OPERATION_DENIED, response.getCompleted())
@@ -717,7 +717,7 @@ class CosignRequestHandlerTest {
             KeyIdReservations.process.withKeyLock("key:${signingKey.keyId}") {
                 held.complete(Unit)
                 done.await()
-                every { keystoreManager.getPublicKeyDER(signingKey.keyId) } returns ByteArray(91) { 9 }
+                every { keystoreManager.publicKeyDERAt(KeystoreManager.generalKeyAlias(signingKey.keyId)) } returns ByteArray(91) { 9 }
             }
         }
         held.await()
@@ -734,6 +734,59 @@ class CosignRequestHandlerTest {
         assertNothingSigned()
     }
 
+    /**
+     * A real [KeystoreManager] over an AndroidKeyStore stand-in holding
+     * [entries] (alias to key pair), served as the provider serves them.
+     */
+    private fun realKeystoreOver(entries: MutableMap<String, java.security.KeyPair>): KeystoreManager {
+        val store = mockk<java.security.KeyStore>(relaxed = true)
+        every { store.containsAlias(any()) } answers { entries.containsKey(firstArg<String>()) }
+        every { store.getCertificate(any()) } answers {
+            entries[firstArg<String>()]?.let { pair ->
+                mockk<java.security.cert.Certificate> { every { publicKey } returns pair.public }
+            }
+        }
+        every { store.getKey(any(), any()) } answers { entries[firstArg<String>()]?.private }
+        mockkStatic(java.security.KeyStore::class)
+        every { java.security.KeyStore.getInstance("AndroidKeyStore") } returns store
+        return KeystoreManager(mockk(relaxed = true))
+    }
+
+    @Test
+    fun `a key swapped under the signer's alias after its recheck is refused by the signer`() = runTest {
+        val approved = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val swapped = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val signingAlias = KeystoreManager.generalKeyAlias(signingKey.keyId)
+        // A passkey entry of the same id keeps the approved key, so a lookup
+        // that resolves aliases still finds it; the general alias is the one
+        // signed with, and its key is swapped right after the recheck reads it.
+        val entries = mutableMapOf(
+            "xkey_credential_${signingKey.keyId}" to approved,
+            signingAlias to approved
+        )
+        val real = realKeystoreOver(entries)
+        var signerAliasReads = 0
+        every { keystoreManager.publicKeyDERAt(any()) } answers {
+            val alias = firstArg<String>()
+            real.publicKeyDERAt(alias).also {
+                if (alias == signingAlias && ++signerAliasReads == 2) entries[signingAlias] = swapped
+            }
+        }
+        every { keystoreManager.getPublicKeyDER(any()) } answers { real.getPublicKeyDER(firstArg()) }
+        coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } coAnswers {
+            real.signApproved(arg(0), arg(1), arg(2), arg(3))
+        }
+        coEvery { keystoreManager.signWithAlgorithm(any(), any(), any()) } coAnswers {
+            real.signWithAlgorithm(arg(0), arg(1), arg(2))
+        }
+
+        val response = handler().handleRequest(request())
+
+        assertTrue("the owner approved", screen.shown.isNotEmpty())
+        assertError(ErrorCodes.OPERATION_DENIED, response)
+        assertEquals("the swap landed between the recheck and the signature", swapped, entries[signingAlias])
+    }
+
     private val approvedPair = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
     private val perOperationKey = key("cosign-per-op", "signing").copy(authDurationSeconds = 0)
 
@@ -747,7 +800,7 @@ class CosignRequestHandlerTest {
     /** A per-operation key whose keystore public key is [approvedPair]'s. */
     private fun perOperationRequest(): Request {
         coEvery { keyDao.getByKeyId(perOperationKey.keyId) } returns perOperationKey
-        every { keystoreManager.getPublicKeyDER(perOperationKey.keyId) } returns approvedPair.public.encoded
+        every { keystoreManager.publicKeyDERAt(KeystoreManager.generalKeyAlias(perOperationKey.keyId)) } returns approvedPair.public.encoded
         return request(keyId = perOperationKey.keyId)
     }
 
@@ -825,7 +878,7 @@ class CosignRequestHandlerTest {
     fun `a signing key only used elsewhere while its approval waits still signs`() = runTest {
         val used = signingKey.copy(useCount = signingKey.useCount + 1, lastUsedAt = 42L)
         assertNull(approvedWhileKeyBecomes(now = used).error)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256") }
+        coVerify(exactly = 1) { keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), "SHA256withECDSA") }
     }
 
     // F1: co-sign and FIDO2 prompts share the one queue, in either order.
@@ -882,7 +935,7 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = true)
         assertNull("the co-sign settles by its own prompt", cosign.await().error)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+        coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
     // F2: a withdrawal is the queue's, so an activity coming up late prompts for nothing.
@@ -917,7 +970,7 @@ class CosignRequestHandlerTest {
         screen.answer(approved = true)
         assertNull(second.await().error)
         assertEquals(2L, second.await().id)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+        coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
     // A locked phone's notification opens the co-sign's own queued prompt.
@@ -957,7 +1010,7 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = true)
         assertNull(response.await().error)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256") }
+        coVerify(exactly = 1) { keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), "SHA256withECDSA") }
         verify { anyConstructed<BiometricNotificationHelper>().cancelNotification(notifiedKey.captured) }
     }
 

@@ -17,6 +17,7 @@ package com.automatethethings.xkey.auth
 
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -185,7 +186,7 @@ class PromptEntryPointsTest {
         }.joinToString("\n")
         val approval = Regex("""requestAuthentication\(|\.approve\(|requireUserPresenceForAttestation\(|requestCryptoSignature\(""")
         val rowRead = Regex("""getByKeyId\(|\.getAll\(\)""")
-        val keyUse = Regex("""signWithAlgorithm\(|signWithoutBiometric\(""")
+        val keyUse = Regex("""signWithAlgorithm\(|signWithoutBiometric\(|signApproved\(|\.sign\(""")
         val functions = Regex("""\n    (?:private |internal |override )?(?:suspend )?fun (\w+)""").findAll(code).toList()
         val unchecked = functions.mapIndexedNotNull { i, fn ->
             val body = code.substring(fn.range.first, functions.getOrNull(i + 1)?.range?.first ?: code.length)
@@ -232,9 +233,52 @@ class PromptEntryPointsTest {
         val check = code.substringAfter("fun revalidateApprovedKey(", "").substringBefore("\n    }")
         // The row and the key material signed with: the keystore key under
         // the alias must still be the one read before the approval.
-        listOf("getByKeyId(", "isSameKeyAs(", "getPublicKeyDER(", "contentEquals(").forEach {
+        listOf("getByKeyId(", "isSameKeyAs(", "publicKeyDERAt(snapshot.alias)", "contentEquals(").forEach {
             assertTrue("revalidateApprovedKey does not call $it", it in check)
         }
+        assertFalse("revalidateApprovedKey resolves the alias again", "getPublicKeyDER(" in check)
+    }
+
+    /**
+     * The key an approval names and the key its signer signs with are one
+     * lookup: the snapshot reads the public key under one alias, and the only
+     * signer after an approval, `signApproved`, signs under that same alias
+     * and refuses when the key there is not the approved one. A function that
+     * prompts and then signs or reads a public key by a resolving lookup
+     * (`signWithAlgorithm`, `signWithoutBiometric`, `getPublicKeyDER`) splits
+     * the two and is a bypass.
+     */
+    @Test
+    fun everyApprovedSignatureUsesTheAliasItsApprovalRead() {
+        val strip = { text: String ->
+            text.lines().filterNot { line ->
+                line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+            }.joinToString("\n")
+        }
+        val code = strip(sourceRoot.resolve("protocol/Handler.kt").readText())
+        val approval = Regex("""requestAuthentication\(|\.approve\(|approvals\.sign\(|requireUserPresenceForAttestation\(""")
+        val splitLookup = Regex("""signWithAlgorithm\(|signWithoutBiometric\(|getPublicKeyDER\(""")
+        val functions = Regex("""\n    (?:private |internal |override )?(?:suspend )?fun (\w+)""").findAll(code).toList()
+        val split = functions.mapIndexedNotNull { i, fn ->
+            val body = code.substring(fn.range.first, functions.getOrNull(i + 1)?.range?.first ?: code.length)
+            val firstApproval = approval.find(body) ?: return@mapIndexedNotNull null
+            if (splitLookup.containsMatchIn(body.substring(firstApproval.range.last))) fn.groupValues[1] else null
+        }
+        assertTrue("signs or names a key after an approval by a second lookup: $split", split.isEmpty())
+
+        val snapshot = code.substringAfter("fun approvalSnapshot(", "").substringBefore("\n\n")
+        assertTrue("approvalSnapshot does not read the alias it records", "publicKeyDERAt(alias)" in snapshot)
+        val signer = code.substringAfter("class ApprovedKey(", "").substringBefore("\n}")
+        assertTrue("ApprovedKey.sign does not sign under the snapshot's alias", "signApproved(snapshot.alias" in signer)
+        val choke = code.substringAfter("fun <T> useApprovedKey(", "").substringBefore("\n\n")
+        assertTrue("useApprovedKey does not hand out an ApprovedKey", "ApprovedKey(" in choke)
+
+        val keystore = strip(sourceRoot.resolve("crypto/KeystoreManager.kt").readText())
+            .substringAfter("suspend fun signApproved(", "").substringBefore("\n    }")
+        assertTrue(
+            "signApproved signs before checking the key under the alias is the approved one",
+            keystore.indexOf("ApprovedKeyChangedException(") in 0 until keystore.indexOf("keyStore.getKey(alias")
+        )
         val same = code.substringAfter("fun KeyEntity.isSameKeyAs(", "").substringBefore("\n}")
         listOf("id ==", "keyType ==", "algorithm ==", "policyRevision ==", "publicKeyDer", "rpId ==").forEach {
             assertTrue("isSameKeyAs does not compare $it", it in same)
