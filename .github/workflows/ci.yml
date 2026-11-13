@@ -362,7 +362,10 @@ jobs:
       # scanned. trivy's cache (--cache-dir) and temp files (TMPDIR) go under
       # /src, the stage container's writable layer on the host's disk: those
       # jars need the Java DB, whose download and extraction overflow the
-      # container's 3 GiB /tmp.
+      # container's 3 GiB /tmp. Fleet Ops 11-13: the 952 MiB Java DB download
+      # hit trivy's default 5-minute timeout on the shared link, so the Java DB is
+      # fetched first with a 30-minute timeout and the scan then skips its
+      # update; the scan keeps the 30-minute timeout.
       - name: trivy image (integration image)
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
         env:
@@ -370,7 +373,7 @@ jobs:
         run: |
           docker save -o it-image.tar "$IT_IMAGE"
           scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" \
-            "mkdir -p /src/.trivy/tmp && TMPDIR=/src/.trivy/tmp trivy image --cache-dir /src/.trivy/cache --input it-image.tar --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1"
+            "mkdir -p /src/.trivy/tmp && export TMPDIR=/src/.trivy/tmp && trivy image --cache-dir /src/.trivy/cache --timeout 30m --download-java-db-only && trivy image --cache-dir /src/.trivy/cache --timeout 30m --skip-java-db-update --input it-image.tar --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1"
 
       - name: Tear down
         if: always()
