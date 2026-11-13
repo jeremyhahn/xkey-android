@@ -134,7 +134,7 @@ class KeyPolicyStore(
      * @throws KeyChangedException if the key does not exist.
      * @throws GrantRefusedException if the key's policy state refuses grants.
      */
-    suspend fun grant(keyId: String, peerPublicKeyHex: String) {
+    suspend fun grant(keyId: String, instance: Long, peerPublicKeyHex: String) {
         transactor.run {
             if (dao.keyInstance(keyId) == null) throw KeyChangedException(keyId)
             if (refusesGrants(dao.policyRow(keyId))) throw GrantRefusedException(keyId)

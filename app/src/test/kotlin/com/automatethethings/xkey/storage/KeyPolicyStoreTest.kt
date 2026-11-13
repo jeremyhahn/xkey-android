@@ -133,7 +133,7 @@ class KeyPolicyStoreTest {
         val store = store()
         val instance = store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS))
         assertEquals(KeyPolicyEntity("k", instance, SELECTED_PEERS), store.policy("k"))
-        store.grant("k", PEER)
+        store.grant("k", instance, PEER)
         assertEquals(setOf(PEER), tables.grantsOf("k"))
 
         assertTrue(store.deleteKey("k"))
@@ -151,11 +151,35 @@ class KeyPolicyStoreTest {
         tables.failing.clear()
 
         try {
-            store().grant("k", OTHER)
+            store().grant("k", instance, OTHER)
             fail("a grant landed while a clear is owed")
         } catch (expected: KeyPolicyStore.GrantRefusedException) {
         }
         assertEquals(setOf(PEER), tables.grantsOf("k"))
+    }
+
+    /**
+     * (1) The narrowing and then its denial write both fail: the edit is
+     * refused and every peer stays denied, never authorized by the old
+     * policy, until a later policy write lands.
+     */
+    @Test
+    fun aNarrowingWhoseDenialWriteAlsoFailsStillDeniesEveryPeer() = runBlocking {
+        val instance = tables.addKey("k", ALL_PEERS)
+        tables.failing += setOf("setKeyPolicy", "putPolicyRow")
+        expectFailure { store().setPolicy("k", instance, PRIVATE) }
+        tables.failing.clear()
+        assertEquals(null, tables.rows.value["k"]!!.denial)
+
+        assertEquals("a failed denial write left the peers authorized", PRIVATE, store().enforcedPolicy(tables.key("k")!!))
+        try {
+            store().grant("k", instance, PEER)
+            fail("a grant landed while the denial is held")
+        } catch (expected: KeyPolicyStore.GrantRefusedException) {
+        }
+
+        store().setPolicy("k", instance, ALL_PEERS)
+        assertEquals(ALL_PEERS, store().enforcedPolicy(tables.key("k")!!))
     }
 
     private suspend fun expectFailure(edit: suspend () -> Unit) {

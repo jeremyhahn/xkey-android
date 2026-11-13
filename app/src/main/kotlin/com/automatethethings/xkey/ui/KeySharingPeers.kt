@@ -71,6 +71,7 @@ import kotlinx.coroutines.withContext
  */
 class KeySharingPeers(
     private val keyId: String,
+    private val instance: Long,
     private val store: KeyPolicyStore,
     private val repository: PairedDeviceRepository,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -120,7 +121,7 @@ class KeySharingPeers(
             return accepted {
                 val granted = withContext(ioDispatcher) {
                     try {
-                        repository.writeGrant(peerPublicKeyHex, pairing) { store.grant(keyId, peerPublicKeyHex) }
+                        repository.writeGrant(peerPublicKeyHex, pairing) { store.grant(keyId, instance, peerPublicKeyHex) }
                     } catch (e: KeyPolicyStore.GrantRefusedException) {
                         false
                     }

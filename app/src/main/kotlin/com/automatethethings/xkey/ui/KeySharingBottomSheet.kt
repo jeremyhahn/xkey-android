@@ -103,7 +103,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     private val keyDao by lazy { XKeyDatabase.getInstance(requireContext()).keyDao() }
     private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(requireContext())) }
     private val pairedDeviceRepository by lazy { PairedDeviceRepository(requireContext()) }
-    private val sharingPeers by lazy { KeySharingPeers(keyId, keyPolicyStore, pairedDeviceRepository) }
+    private val sharingPeers by lazy { KeySharingPeers(keyId, checkNotNull(keyEntity).id, keyPolicyStore, pairedDeviceRepository) }
 
     private var keyId: String = ""
     private var keyEntity: KeyEntity? = null

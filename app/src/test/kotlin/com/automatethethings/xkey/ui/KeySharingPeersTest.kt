@@ -127,7 +127,7 @@ class KeySharingPeersTest {
     }
 
     /** The list for [KEY], its writes run unconfined on the test scheduler, its edits in the test scope. */
-    private fun TestScope.peersOf() = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+    private fun TestScope.peersOf() = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
     private fun List<KeySharingPeers.Peer>.of(peer: String) = single { it.device.publicKeyHex == peer }
 
@@ -154,7 +154,7 @@ class KeySharingPeersTest {
         repo.addDevice(PEER_A, "desktop-a")
         assertTrue(repo.isRevocationPending(PEER_A))
 
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler))
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler))
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
 
@@ -186,7 +186,7 @@ class KeySharingPeersTest {
     fun aGrantPausedAcrossARevocationDoesNotAuthorizeTheNextPairing() = runTest {
         rows(KEY to PEER_B)
         val gate = holdGrants()
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler))
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler))
 
         // The grant passes its pending check and stops before its insert.
         val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)) }
@@ -219,7 +219,7 @@ class KeySharingPeersTest {
         // The sheet subscribes when it opens, whatever the key's policy (PRIVATE
         // here: nothing in the table changes below), and shows this list as soon
         // as SELECTED_PEERS is chosen.
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler))
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler))
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
         assertEquals(setOf(PEER_A, PEER_B), seen.last().map { it.device.publicKeyHex }.toSet())
@@ -252,7 +252,7 @@ class KeySharingPeersTest {
             revokingDuringWrite = repo.isRevocationPending(PEER_A)
             gate.await()
         }
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler))
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler))
         val seen = mutableListOf<List<KeySharingPeers.Peer>>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { peers.peers().toList(seen) }
 
@@ -295,7 +295,7 @@ class KeySharingPeersTest {
 
         newSingleThreadContext("ui-main").use { main ->
             newSingleThreadContext("grant-io").use { io ->
-                val peers = KeySharingPeers(KEY, store, repo, io)
+                val peers = KeySharingPeers(KEY, instance, store, repo, io)
                 // The sheet calls setAllowed from lifecycleScope, on Main.
                 assertTrue(withContext(main) { peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)) })
             }
@@ -310,7 +310,7 @@ class KeySharingPeersTest {
     fun aWithdrawalAfterAHeldGrantLeavesThePeerWithoutAccess() = runTest {
         rows(KEY to PEER_B)
         val gate = holdGrants()
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler))
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler))
 
         // The user checks A; the grant is held before its insert.
         val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)) }
@@ -332,7 +332,7 @@ class KeySharingPeersTest {
         for (leaving in listOf(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)) {
             rows(KEY to PEER_B)
             val gate = holdGrants()
-            val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler))
+            val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler))
 
             // The user checks A; the grant is held before its insert.
             val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)) }
@@ -359,7 +359,7 @@ class KeySharingPeersTest {
     fun aQueuedGrantForAPeerRePairedMeanwhileIsRefused() = runTest {
         rows()
         val gate = holdGrants(peer = PEER_B)
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler))
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler))
 
         // The user checks B; its grant is held before its insert.
         val first = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
@@ -387,7 +387,7 @@ class KeySharingPeersTest {
     fun aWithdrawalQueuedBehindAGrantSurvivesTheSheetsDismissal() = runTest {
         rows(KEY to PEER_A)
         val gate = holdGrants()
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         // Another grant holds the edits lock.
         val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
@@ -410,7 +410,7 @@ class KeySharingPeersTest {
     fun aPrivatePolicyQueuedBehindAGrantSurvivesTheSheetsDismissal() = runTest {
         rows(KEY to PEER_A)
         val gate = holdGrants()
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
         assertFalse(grant.isCompleted)
@@ -436,7 +436,7 @@ class KeySharingPeersTest {
         var removals = 0
         tables.onDeleteGrant = { _, _ -> removals++ }
         tables.failing += "deleteGrant"
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
         val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
@@ -473,7 +473,7 @@ class KeySharingPeersTest {
         rows(KEY to PEER_A)
         val gate = holdGrants()
         tables.failing += "setKeyPolicy"
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
         val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
@@ -507,7 +507,7 @@ class KeySharingPeersTest {
     fun aGrantAfterAFailedWithdrawalIsNotUndoneByItsRetry() = runTest {
         rows(KEY to PEER_A)
         tables.failing += "deleteGrant"
-        val peers = KeySharingPeers(KEY, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(KEY, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         assertTrue(peers.setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A)))
         runCurrent()
@@ -535,7 +535,7 @@ class KeySharingPeersTest {
         val keyInstance = tables.addKey(key, StoredPolicy.SELECTED_PEERS)
         rows(key to PEER_A)
         tables.failing += "setKeyPolicy"
-        val peers = KeySharingPeers(key, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(key, keyInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         assertFalse("a failed Private was reported stored", peers.setKeyPolicy(SharingPolicyType.PRIVATE, keyInstance))
         tables.failing.clear()
@@ -568,7 +568,7 @@ class KeySharingPeersTest {
         val keyInstance = tables.addKey(key, StoredPolicy.SELECTED_PEERS)
         rows(key to PEER_A)
         tables.failing += "setKeyPolicy"
-        val peers = KeySharingPeers(key, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(key, keyInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         assertFalse(peers.setKeyPolicy(SharingPolicyType.ALL_PEERS, keyInstance))
         tables.failing.clear()
@@ -578,6 +578,28 @@ class KeySharingPeersTest {
         advanceUntilIdle()
         assertEquals("the older All Peers landed over the later Private", StoredPolicy.PRIVATE, tables.keyPolicy(key))
         assertTrue(table.none { it.first == key })
+    }
+
+    /** A grant queued while its key is deleted and generated again under its id is refused on the new key (#193). */
+    @Test
+    fun aQueuedGrantNeverLandsOnAKeyGeneratedAgainUnderItsId() = runTest {
+        val heldKey = "k-held"
+        val held = KeySharingPeers(heldKey, tables.addKey(heldKey, StoredPolicy.SELECTED_PEERS), store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val gate = holdGrants(peer = PEER_B)
+        val first = async(UnconfinedTestDispatcher(testScheduler)) { held.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
+        val peers = peersOf()
+        val queued = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)) }
+        assertFalse(queued.isCompleted)
+
+        // The key is deleted and generated again while the grant waits.
+        tables.deleteKey(KEY)
+        val recreated = tables.addKey(KEY, StoredPolicy.SELECTED_PEERS)
+        assertTrue(recreated != instance)
+        gate.complete(Unit)
+
+        assertTrue(first.await())
+        assertFalse("a grant made for the deleted key was reported stored", queued.await())
+        assertFalse("a grant made for the deleted key authorizes on its replacement", tables.isGranted(KEY, PEER_A))
     }
 
     /** An edit bound to a key row deleted and generated again under its id is refused and writes nothing (#193). */
@@ -766,7 +788,7 @@ class KeySharingPeersTest {
         val writer = AtomicReference<Thread>()
         tables.onPutGrant = { writer.set(Thread.currentThread()) }
         // The production dispatcher.
-        val peers = KeySharingPeers(KEY, store, repo)
+        val peers = KeySharingPeers(KEY, instance, store, repo)
 
         assertTrue(peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)))
 

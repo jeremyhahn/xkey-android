@@ -92,6 +92,7 @@ class KeySharingPendingIntentHandlerTest {
     private lateinit var keyDao: KeyDao
     private lateinit var context: Context
     private lateinit var handler: RequestHandler
+    private var otherInstance = 0L
 
     @Before
     fun setUp() {
@@ -106,7 +107,7 @@ class KeySharingPendingIntentHandlerTest {
         mockkObject(AuditLogger)
         every { AuditLogger.logDeviceUnpaired(any(), any()) } just runs
 
-        tables.addKey(OTHER_KEY, SharingPolicyType.SELECTED_PEERS)
+        otherInstance = tables.addKey(OTHER_KEY, SharingPolicyType.SELECTED_PEERS)
         dao = mockk()
         coEvery { dao.isPeerGranted(any(), any()) } answers { tables.isGranted(firstArg(), secondArg()) }
         keyDao = mockk()
@@ -187,6 +188,16 @@ class KeySharingPendingIntentHandlerTest {
         return suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
     }
 
+    /** Runs local.deleteKey through the handler, as a desktop's RPC does. */
+    private suspend fun rpcDeleteKey(keyId: String): Response {
+        val method = RequestHandler::class.java.getDeclaredMethod(
+            "handleLocalDeleteKey", Request::class.java, Continuation::class.java
+        )
+        method.isAccessible = true
+        val request = Request(id = 2, method = MethodNames.LOCAL_DELETE_KEY, params = JSONObject().put("keyId", keyId))
+        return suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+    }
+
     /**
      * A process restart: [KeySharingPeers]' pending withdrawals are gone, and
      * their retries with them; the tables stay.
@@ -206,7 +217,7 @@ class KeySharingPendingIntentHandlerTest {
     private fun TestScope.detached(edit: suspend () -> Unit) {
         val gate = CompletableDeferred<Unit>()
         tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
-        val other = KeySharingPeers(OTHER_KEY, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val other = KeySharingPeers(OTHER_KEY, otherInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
         val grant = async(UnconfinedTestDispatcher(testScheduler)) { other.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
         val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
         sheet.launch { edit() }
@@ -221,7 +232,7 @@ class KeySharingPendingIntentHandlerTest {
     fun aFailedDetachedNarrowingToSelectedPeersDeniesUngrantedPeersUntilALaterChangeLands() = runTest {
         val key = "k-narrow"
         val instance = tables.addKey(key, SharingPolicyType.ALL_PEERS)
-        val peers = KeySharingPeers(key, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(key, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
         assertTrue(shares(key, PEER_A))
         assertTrue(exports(key, PEER_A))
 
@@ -260,7 +271,7 @@ class KeySharingPendingIntentHandlerTest {
         val key = "k-rpc-private"
         val instance = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
         tables.grant(key, PEER_B)
-        val peers = KeySharingPeers(key, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(key, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         // The sheet's Selected Peers -> All Peers fails, and is refused.
         tables.failing += "setKeyPolicy"
@@ -286,7 +297,7 @@ class KeySharingPendingIntentHandlerTest {
         tables.grant(key, PEER_A)
         tables.grant(key, PEER_B)
         tables.failing += "deleteGrants"
-        val peers = KeySharingPeers(key, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(key, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         detached { peers.setKeyPolicy(SheetPolicy.PRIVATE, instance) }
         assertFalse(shares(key, PEER_A))
@@ -317,11 +328,11 @@ class KeySharingPendingIntentHandlerTest {
     @Test
     fun aFailedDetachedWithdrawalIsDeniedByTheHandlerUntilItsRetryLands() = runTest {
         val key = "k-withdraw"
-        tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        val instance = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
         tables.grant(key, PEER_A)
         tables.grant(key, PEER_B)
         tables.failing += "deleteGrant"
-        val peers = KeySharingPeers(key, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val peers = KeySharingPeers(key, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         detached { peers.setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A)) }
 
@@ -345,8 +356,8 @@ class KeySharingPendingIntentHandlerTest {
         val allInstance = tables.addKey(allKey, SharingPolicyType.ALL_PEERS)
         tables.grant(selectedKey, PEER_A)
         tables.failing += "setKeyPolicy"
-        val selected = KeySharingPeers(selectedKey, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
-        val all = KeySharingPeers(allKey, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val selected = KeySharingPeers(selectedKey, selectedInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val all = KeySharingPeers(allKey, allInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
 
         detached { selected.setKeyPolicy(SheetPolicy.PRIVATE, selectedInstance) }
         detached { all.setKeyPolicy(SheetPolicy.PRIVATE, allInstance) }
@@ -415,6 +426,38 @@ class KeySharingPendingIntentHandlerTest {
         // An edit still bound to the deleted key row is refused and writes nothing.
         assertFalse(KeySharingPeers.setKeyPolicy(key, store, SheetPolicy.ALL_PEERS, first, editScope = this))
         assertEquals(SharingPolicyType.PRIVATE, tables.keyPolicy(key))
+        assertTrue(tables.isGranted(key, PEER_A))
+    }
+
+    /**
+     * A local.deleteKey that waits behind another edit while its key is
+     * deleted and generated again under its id deletes nothing of the new
+     * key: it is bound to the key row it read (#193).
+     */
+    @Test
+    fun aDelayedDeleteNeverRemovesAKeyGeneratedAgainUnderItsId() = runTest {
+        val key = "k-delete-reuse"
+        // The software key store's cipher opens the platform keystore.
+        mockkStatic(java.security.KeyStore::class)
+        every { java.security.KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
+        val first = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        val gate = CompletableDeferred<Unit>()
+        tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
+        val other = KeySharingPeers(OTHER_KEY, otherInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val held = async(UnconfinedTestDispatcher(testScheduler)) { other.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
+        val delete = async(UnconfinedTestDispatcher(testScheduler)) { rpcDeleteKey(key) }
+        assertFalse(delete.isCompleted)
+
+        // The key is deleted elsewhere and generated again while the delete waits.
+        tables.deleteKey(key)
+        val second = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        tables.grant(key, PEER_A)
+        assertTrue(second != first)
+        gate.complete(Unit)
+        assertTrue(held.await())
+        delete.await()
+
+        assertEquals("the delayed delete removed the new key's metadata", second, tables.key(key)?.id)
         assertTrue(tables.isGranted(key, PEER_A))
     }
 }
