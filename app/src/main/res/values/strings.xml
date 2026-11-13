@@ -1183,6 +1183,14 @@
     <string name="piv_fingerprint_copied">Fingerprint copied to clipboard</string>
     <string name="piv_no_certificate">No certificate imported</string>
     <string name="piv_cert_parse_failed">Failed to parse certificate</string>
+    <string name="piv_section_desktop">PAIRED DESKTOP SLOTS</string>
+    <string name="piv_desktop_slot_empty">No key on the desktop</string>
+    <string name="piv_desktop_cert_subject">Certificate: %s</string>
+    <string name="piv_detail_location">Location</string>
+    <string name="piv_location_desktop">Paired desktop</string>
+    <string name="piv_desktop_not_connected">No desktop connected. Connect the paired desktop to see this slot.</string>
+    <string name="piv_desktop_cert_failed">The desktop could not return the certificate: %s</string>
+    <string name="piv_desktop_sign_test_success">The desktop signed the test data (%1$s, %2$d ms)</string>
     <string name="piv_public_key_der_copied">Public key DER copied to clipboard</string>
     <string name="piv_certificate_der_copied">Certificate DER copied to clipboard</string>
 
