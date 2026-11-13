@@ -30,7 +30,11 @@ import kotlin.coroutines.cancellation.CancellationException
  * file goes when its write step throws, when it is delivered (copied to
  * the target, whether the copy succeeds or not), when the save is cancelled
  * ([release]), when the activity goes ([shutdown]), and at a later start
- * ([sweep]) if the process died first.
+ * ([sweep]) if the process died first. Whatever a helper writes beside a
+ * staged file (`<staged>.<suffix>`, the XMP helper's `.xkeysig` sidecar)
+ * is its companion and goes with it, so no helper output escapes
+ * ownership; [stage] with a MIME type picks the extension the content
+ * requires, so the JPEG EXIF write lands in the staged file itself.
  *
  * Each instance is a session: its files are named `stage-<session>-*`, and
  * the session stays live from construction to [shutdown]. [sweep] removes
@@ -64,8 +68,16 @@ class FileOperationStaging(cacheDir: File) {
      * [shutdown] ran while [write] did, the file is deleted and this throws
      * [CancellationException].
      */
-    inline fun stage(displayName: String?, write: (File) -> Unit): File {
-        val file = create(displayName)
+    inline fun stage(displayName: String?, write: (File) -> Unit): File = stage(displayName, null, write)
+
+    /**
+     * [stage] for content of [mimeType]: the staged file takes the extension
+     * that content requires ([extensionFor]), whatever the display name
+     * says, so a helper that picks its output by extension (the XMP helper's
+     * EXIF write for `.jpg`) writes into the staged file, not beside it.
+     */
+    inline fun stage(displayName: String?, mimeType: String?, write: (File) -> Unit): File {
+        val file = create(extensionFor(displayName, mimeType))
         try {
             write(file)
         } catch (e: Throwable) {
@@ -110,32 +122,47 @@ class FileOperationStaging(cacheDir: File) {
         file.inputStream().also { held.add(file) }
     }
 
-    /** Create an empty staging file under a generated name and own it; refused after [shutdown]. */
+    /**
+     * Create an empty staging file under a generated name ending in
+     * [extension] (`.tmp` when null) and own it; refused after [shutdown].
+     */
     @PublishedApi
-    internal fun create(displayName: String?): File = synchronized(lock) {
+    internal fun create(extension: String?): File = synchronized(lock) {
         if (closed) throw CancellationException(CLOSED)
         directory.mkdirs()
-        File.createTempFile("$PREFIX$session-", safeExtension(displayName), directory).also { owned.add(it) }
+        File.createTempFile("$PREFIX$session-", extension, directory).also { owned.add(it) }
     }
 
     /** The write step returned: keep [file], unless [shutdown] ran meanwhile, then delete it and cancel. */
     @PublishedApi
     internal fun keepWritten(file: File) {
         if (synchronized(lock) { !closed }) return
-        file.delete()
+        delete(file)
         throw CancellationException(CLOSED)
     }
 
-    /** Delete a staged file, e.g. when the user cancels the save. */
+    /** Delete a staged file and its companions, e.g. when the user cancels the save. */
     fun release(file: File) {
         synchronized(lock) { owned.remove(file) }
-        file.delete()
+        delete(file)
     }
 
     /** Delete every file this instance staged and has not released, except one [deliverTo] holds. */
     fun releaseAll() {
         val files = synchronized(lock) { (owned - held).also { owned.removeAll(it) } }
-        files.forEach { it.delete() }
+        files.forEach { delete(it) }
+    }
+
+    /**
+     * Delete [file] and every companion a helper wrote beside it: any entry
+     * of [directory] named `<file name>.<suffix>`, such as the XMP helper's
+     * `<staged>.xkeysig` sidecar. A generated name ends in a dotless
+     * extension, so no other staged file's name has that form.
+     */
+    private fun delete(file: File) {
+        file.delete()
+        val companion = "${file.name}."
+        file.parentFile?.listFiles { _, name -> name.startsWith(companion) }?.forEach { it.deleteRecursively() }
     }
 
     /**
@@ -164,6 +191,7 @@ class FileOperationStaging(cacheDir: File) {
         private const val SESSION_LENGTH = 16
         private const val CLOSED = "file operation staging is shut down"
         private const val NO_TARGET = "Cannot open output file"
+        private const val JPEG_EXTENSION = ".jpg"
         private val EXTENSION = Regex("[A-Za-z0-9]{1,10}")
 
         /** Sessions of the instances in this process not yet [shutdown]. */
@@ -172,6 +200,18 @@ class FileOperationStaging(cacheDir: File) {
         /** The session tag of a staged file's name, or null when it has none. */
         private fun sessionOf(name: String): String? =
             if (name.startsWith(PREFIX)) name.removePrefix(PREFIX).substringBefore('-', "").ifEmpty { null } else null
+
+        /**
+         * The staged file's extension: `.jpg` for JPEG content, whatever its
+         * display name, since the XMP helper picks EXIF over a sidecar by
+         * extension; else [safeExtension] of the display name.
+         */
+        @PublishedApi
+        internal fun extensionFor(displayName: String?, mimeType: String?): String? {
+            val mime = mimeType?.lowercase()
+            if (mime != null && (mime.startsWith("image/jpeg") || mime.startsWith("image/jpg"))) return JPEG_EXTENSION
+            return safeExtension(displayName)
+        }
 
         /** `.ext` of [displayName] when it is short and alphanumeric, else null (`.tmp`). */
         internal fun safeExtension(displayName: String?): String? {
