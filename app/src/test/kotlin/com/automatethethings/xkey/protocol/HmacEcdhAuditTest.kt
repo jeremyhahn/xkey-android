@@ -29,6 +29,8 @@ import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.entity.KeyEntity
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -98,7 +100,17 @@ class HmacEcdhAuditTest {
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
+        // Stored key types: ECDH runs on an EC key stored as signing, and the
+        // Keystore HMAC key is stored as "secret"; neither matches the
+        // operation, so a hardcoded keyType shows up as a mismatch.
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.getByKeyId(any()) } returns null
+        coEvery { keyDao.getByKeyId("hw-ecdh") } returns
+            KeyEntity(keyId = "hw-ecdh", keyType = "signing", algorithm = "ES256", label = "ecdh", keySizeBits = 256, source = "local")
+        coEvery { keyDao.getByKeyId("hw-hmac") } returns
+            KeyEntity(keyId = "hw-hmac", keyType = "secret", algorithm = "HMAC-SHA256", label = "hmac", keySizeBits = 256, source = "local")
         val database = mockk<XKeyDatabase>(relaxed = true)
+        every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -172,6 +184,7 @@ class HmacEcdhAuditTest {
         val entries = inserted.filter { it.operationType == AuditOperationType.HMAC_REQUEST }
         assertEquals(1, entries.size)
         assertEquals("hw-hmac", entries[0].keyId)
+        assertEquals("the key's stored type", "secret", entries[0].keyType)
         assertTrue(entries[0].success)
         assertNoSecrets(response.getJSONObject("result").getString("mac"))
     }
@@ -184,6 +197,7 @@ class HmacEcdhAuditTest {
         val entries = inserted.filter { it.operationType == AuditOperationType.HMAC_REQUEST }
         assertEquals(1, entries.size)
         assertEquals("sw-hmac", entries[0].keyId)
+        assertEquals("the software key's stored type", "symmetric", entries[0].keyType)
         assertTrue(entries[0].success)
         assertNoSecrets(response.getJSONObject("result").getString("mac"))
     }
@@ -201,8 +215,22 @@ class HmacEcdhAuditTest {
         }
         assertEquals(1, entries.size)
         assertEquals("hw-ecdh", entries[0].keyId)
+        assertEquals("ECDH on a signing key is filed under signing", "signing", entries[0].keyType)
         assertTrue(entries[0].success)
         assertNoSecrets(response.getJSONObject("result").getString("sharedSecret"))
+    }
+
+    @Test
+    fun `a key with no stored metadata is recorded as unknown`() = runTest {
+        coEvery { keystore.performECDH("hw-bare", any()) } returns sharedSecret
+        val response = call(
+            MethodNames.LOCAL_ECDH,
+            """{"keyId":"hw-bare","peerPublicKey":"$peerKey"}"""
+        )
+
+        assertFalse(response.toString(), response.has("error"))
+        val entry = inserted.single { it.operationType == AuditOperationType.KEY_DERIVATION_REQUEST }
+        assertEquals("unknown", entry.keyType)
     }
 
     @Test
