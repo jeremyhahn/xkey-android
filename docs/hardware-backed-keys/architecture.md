@@ -762,3 +762,51 @@ val auditLogDao = database.auditLogDao()
 | Converter | Type | Storage |
 |-----------|------|---------|
 | `AuditOperationTypeConverter` | `AuditOperationType` enum | String (enum name) |
+
+## local.setKeyPolicy
+
+`local.setKeyPolicy` sets whether a key can be shared with peers.
+
+| Param | Type | Meaning |
+|-------|------|---------|
+| `keyId` | string, required | The key to change |
+| `shareable` | boolean, optional | `true` opens the key to every peer (`ALL_PEERS`), `false` makes it `PRIVATE`; absent changes nothing |
+
+The result is `{"updated": true}`.
+
+Widening needs the owner's approval. A request with `shareable: true` on a key
+whose policy is not already `ALL_PEERS` would let any paired peer pass the
+sharing check in `local.shareSymmetric`, so the phone first requires a
+confirmed peer for the session, then shows a biometric prompt that names the
+key (its label, else its id). The policy is stored only when the owner
+approves. Narrowing (`shareable: false`), an absent `shareable` and a key
+already `ALL_PEERS` need no prompt.
+
+Every stored policy change is written to the audit log as
+`KEY_SHARING_CHANGED`, with the old and new policy.
+
+The write is a compare-and-set (`KeyDao.compareAndSetSharingPolicy`) against
+the policy the decision was taken on, so a change that lands between the read
+and the write is never overwritten. A key already at the requested policy is
+not written or audited. If the policy moves while the approval prompt is up,
+the widening is refused with `OPERATION_DENIED`, since the approval covered
+the old state; a narrowing re-reads and narrows the new state. The audit
+entry names the policy the write actually replaced. The write is also bound to
+the row the request read (its immutable id): a key deleted and re-created under
+the same `keyId` meanwhile is another key, so it is not written and the
+request answers `OPERATION_DENIED`.
+
+On a locked phone the lock-screen notification opens the same prompt the
+biometric launcher is waiting on, under the launcher's own request id, so
+approving or cancelling from the lock screen completes the request.
+
+The confirmed peer is the one of the connection the request arrived on (its
+caller session); the handler-wide peer of the last served connection answers
+only for a request that names no connection.
+
+| Error | When |
+|-------|------|
+| `INVALID_PARAMS` | Params or `keyId` missing |
+| `KEY_NOT_FOUND` | No key with that `keyId` |
+| `OPERATION_DENIED` | Widening on a session with no confirmed peer, the policy changed while the prompt was up, or the key was replaced under the same `keyId` |
+| `BIOMETRIC_FAILED` | Widening with no biometric prompt available, or the owner cancels or fails it; the stored policy is unchanged |
