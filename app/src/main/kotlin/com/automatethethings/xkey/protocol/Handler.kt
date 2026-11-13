@@ -3047,25 +3047,15 @@ class RequestHandler(
      * @return True if the key can be shared with this peer.
      */
     private suspend fun canShareKeyWithPeer(entity: KeyEntity, peerPublicKeyHex: String?): Boolean {
-        return when (entity.sharingPolicy) {
-            SharingPolicyType.PRIVATE -> false
-            SharingPolicyType.ALL_PEERS -> true
-            SharingPolicyType.SELECTED_PEERS -> {
-                // Need peer public key to check selected peers policy
-                if (peerPublicKeyHex == null) {
-                    Log.w(TAG, "Cannot check SELECTED_PEERS policy without peer public key")
-                    false
-                } else if (pairedDeviceRepository?.isRevocationPending(peerPublicKeyHex) == true) {
-                    // Fail closed (#174): this peer was unpaired and its old
-                    // grants may not be deleted yet; they must not authorize it.
-                    Log.w(TAG, "SELECTED_PEERS refused: grant revocation pending for peer")
-                    false
-                } else {
-                    keySharingPolicyDao.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
-                }
-            }
+        val allowed = sharePermission.canShare(entity, peerPublicKeyHex)
+        if (!allowed && entity.sharingPolicy == SharingPolicyType.SELECTED_PEERS) {
+            Log.w(TAG, "SELECTED_PEERS refused: no peer, no grant, or grant revocation pending")
         }
+        return allowed
     }
+
+    /** The one share decision ([SharePermission]), shared with every outbound share path. */
+    private val sharePermission by lazy { SharePermission(keySharingPolicyDao, pairedDeviceRepository) }
 
     /**
      * Handles local.signFido2Assertion - sign a FIDO2 assertion with a shared credential.
@@ -3446,25 +3436,27 @@ class RequestHandler(
 
             val type = credential.optString("type", "totp").lowercase()
             val issuer = credential.optString("issuer", null)
-            // Build an otpauth:// URI and import it (handles Base32 decoding).
-            val uri = buildString {
-                append("otpauth://$type/")
-                if (issuer != null) append("$issuer:")
-                append(accountName)
-                append("?secret=$secret")
-                if (issuer != null) append("&issuer=$issuer")
-                append("&algorithm=${credential.optString("algorithm", "SHA1")}")
-                append("&digits=${credential.optInt("digits", 6)}")
-                append("&period=${credential.optInt("period", 30)}")
-                if (type == "hotp") append("&counter=${credential.optLong("counter", 0)}")
-            }
-            oathRepository.importFromUri(uri)
+            // The issuer and account arrive as separate fields: the structured
+            // import keeps a ':' inside either where it is (#152), as
+            // SyncEngine.mergeOath does. The id it returns is the one the
+            // credential is stored under: the `name` local.oathList reports
+            // and the credential_id oathGenerate/oathRemove accept.
+            val credentialId = oathRepository.importStructured(
+                type = type,
+                issuer = issuer,
+                accountName = accountName,
+                secret = secret,
+                algorithm = credential.optString("algorithm", "SHA1"),
+                digits = credential.optInt("digits", 6),
+                period = credential.optInt("period", 30),
+                counter = credential.optLong("counter", 0)
+            )
 
             AuditLogger.logOathCredentialCreated(name, issuer, accountName, type.uppercase())
 
             val result = JSONObject().apply {
                 put("success", true)
-                put("credential_id", name)
+                put("credential_id", credentialId)
             }
             Response.success(request.id, result)
         } catch (e: Exception) {
@@ -3655,6 +3647,13 @@ class RequestHandler(
             val bytes = decodeBase64Strict("backup_data", dataB64)
             val label = params.optString("label", "")
             val id = com.automatethethings.xkey.backup.BackupStore(context).store("", bytes)
+            val peer = backupAuditPeer()
+            AuditLogger.logBackupCreated(
+                backupId = id,
+                sizeBytes = bytes.size,
+                deviceId = peer?.publicKeyHex,
+                deviceName = peer?.deviceName
+            )
             Response.success(request.id, JSONObject().apply {
                 put("success", true)
                 put("backup_id", id)
@@ -3666,6 +3665,27 @@ class RequestHandler(
             Log.e(TAG, "createBackup failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "createBackup failed: ${e.message}")
         }
+    }
+
+    /** The peer a backup audit entry names: its static key and paired name. */
+    private class BackupAuditPeer(val publicKeyHex: String, val deviceName: String?)
+
+    /**
+     * Resolves the desktop a backup request came from, once per request.
+     *
+     * The peer is the one authenticated on the connection the request arrived
+     * on ([attestingPeerPublicKeyHex]), never the handler-wide last-connected
+     * key, which any other BLE/USB/TCP connection overwrites. The one snapshot
+     * feeds both the entry's device id and its paired-device name. A session
+     * that names no peer logs no device rather than failing the backup.
+     */
+    private suspend fun backupAuditPeer(): BackupAuditPeer? {
+        val key = try {
+            attestingPeerPublicKeyHex()
+        } catch (_: ProtocolException) {
+            null
+        } ?: return null
+        return BackupAuditPeer(key, pairedDeviceRepository?.getDevice(key)?.deviceName)
     }
 
     /**
@@ -3682,10 +3702,18 @@ class RequestHandler(
             }
             val bytes = store.load(id)
                 ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Backup not found: $id")
+            val createdAt = com.automatethethings.xkey.crypto.SyncCodec.toRfc3339(store.createdAtMillis(id))
+            val peer = backupAuditPeer()
+            AuditLogger.logBackupRestored(
+                backupId = id,
+                sizeBytes = bytes.size,
+                deviceId = peer?.publicKeyHex,
+                deviceName = peer?.deviceName
+            )
             Response.success(request.id, JSONObject().apply {
                 put("backup_data", java.util.Base64.getEncoder().encodeToString(bytes))
                 put("backup_id", id)
-                put("created_at", com.automatethethings.xkey.crypto.SyncCodec.toRfc3339(store.createdAtMillis(id)))
+                put("created_at", createdAt)
             })
         } catch (e: Exception) {
             Log.e(TAG, "restoreBackup failed", e)
@@ -3702,8 +3730,10 @@ class RequestHandler(
     //     public key recorded at pairing). Sharing with an anonymous peer is
     //     never authorized.
     //  2. The key's recorded sharing policy must admit that peer
-    //     ([canShareKeyWithPeer]): PRIVATE never, ALL_PEERS always,
-    //     SELECTED_PEERS only when key_sharing_policies lists the peer.
+    //     ([canShareKeyWithPeer], which asks [SharePermission], the decision
+    //     every outbound share also takes): PRIVATE never, ALL_PEERS always,
+    //     SELECTED_PEERS only when key_sharing_policies lists the peer and
+    //     the peer's grant revocation is not pending.
     //  3. A HARDWARE-backed key can only ever share its public half (Android
     //     Keystore private/symmetric material is non-exportable).
     //  4. A SOFTWARE-backed key may additionally share its private/symmetric

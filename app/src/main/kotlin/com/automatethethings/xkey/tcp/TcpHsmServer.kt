@@ -101,6 +101,13 @@ class TcpHsmServer(
     /** Observable state of the TCP server. */
     val state: StateFlow<TcpHsmState> = _state.asStateFlow()
 
+    /**
+     * The peer this connection's session confirmed, or null while none is
+     * established and confirmed. It ends with the session, unlike the request
+     * handler's peer, which every transport shares.
+     */
+    fun confirmedPeerKeyHex(): String? = pairingSession.confirmedPeerKeyHex()
+
     private var serverScope: CoroutineScope? = null
     private var serverSocket: ServerSocket? = null
     @Volatile private var activeSocket: Socket? = null
@@ -201,6 +208,18 @@ class TcpHsmServer(
     override suspend fun sendEncryptedMessage(data: ByteArray) {
         pairingSession.sendEncryptedMessage(data)
     }
+
+    /**
+     * Sends on [connection] alone, refused unless it is still the current TCP
+     * connection (see [StreamPairingSession.sendEncryptedMessageOn]).
+     */
+    override suspend fun sendEncryptedMessageOn(
+        connection: com.automatethethings.xkey.remote.ConfirmedConnection,
+        data: ByteArray
+    ) = pairingSession.sendEncryptedMessageOn(connection, data)
+
+    /** The TCP connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
+    override fun confirmedConnection() = pairingSession.confirmedConnection()
 
     private fun closeQuietly(closeable: java.io.Closeable?) {
         try {

@@ -90,6 +90,13 @@ class UsbAccessoryServer(
     /** Observable state of the USB accessory server. */
     val state: StateFlow<UsbAccessoryState> = _state.asStateFlow()
 
+    /**
+     * The peer this connection's session confirmed, or null while none is
+     * established and confirmed. It ends with the session, unlike the request
+     * handler's peer, which every transport shares.
+     */
+    fun confirmedPeerKeyHex(): String? = pairingSession.confirmedPeerKeyHex()
+
     private var serverScope: CoroutineScope? = null
     private var fileDescriptor: ParcelFileDescriptor? = null
     private var inputStream: FileInputStream? = null
@@ -186,6 +193,18 @@ class UsbAccessoryServer(
     override suspend fun sendEncryptedMessage(data: ByteArray) {
         pairingSession.sendEncryptedMessage(data)
     }
+
+    /**
+     * Sends on [connection] alone, refused unless it is still the current USB
+     * connection (see [StreamPairingSession.sendEncryptedMessageOn]).
+     */
+    override suspend fun sendEncryptedMessageOn(
+        connection: com.automatethethings.xkey.remote.ConfirmedConnection,
+        data: ByteArray
+    ) = pairingSession.sendEncryptedMessageOn(connection, data)
+
+    /** The USB connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
+    override fun confirmedConnection() = pairingSession.confirmedConnection()
 
     private fun closeStreams() {
         try {
