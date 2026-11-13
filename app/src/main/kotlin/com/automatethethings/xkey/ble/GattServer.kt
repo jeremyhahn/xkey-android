@@ -19,6 +19,7 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.MessageSender
+import com.automatethethings.xkey.remote.SessionSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -2785,12 +2786,28 @@ class GattServer(
      * authenticated.
      */
     fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
-        ConnectedDesktop.ifEstablished(
-            isSessionEstablished(),
-            authenticatedPeerKeyHex,
-            this,
-            router
-        )
+        ConnectedDesktop.ifEstablished(isSessionEstablished(), boundSender(), router)
+
+    /**
+     * The established session's authenticated peer key and a sender bound to
+     * that session and its device, read together, or null with no established
+     * session. The sender encrypts only on that session and fails with
+     * [java.io.IOException] once it is revoked, ends, or another session or
+     * device replaces it.
+     */
+    internal fun boundSender(): Pair<String, SessionSender>? {
+        val (session, device, peerKeyHex) = synchronized(revocationLock) {
+            val session = establishedSession?.takeIf { isCurrent(it) && it.isHandshakeComplete() } ?: return null
+            val device = connectedDevice ?: return null
+            val peerKeyHex = session.getRemoteStaticKey()?.toHexString() ?: return null
+            Triple(session, device, peerKeyHex)
+        }
+        return peerKeyHex to object : SessionSender {
+            override suspend fun sendEncryptedMessage(data: ByteArray) {
+                this@GattServer.sendEncryptedMessage(data)
+            }
+        }
+    }
 }
 
 /**

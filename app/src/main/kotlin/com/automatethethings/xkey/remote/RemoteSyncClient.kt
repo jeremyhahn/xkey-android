@@ -45,10 +45,12 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class RemoteSyncClient(
     context: Context,
-    private val messageSender: MessageSender,
-    private val messageRouter: BidirectionalMessageRouter,
+    desktop: ConnectedDesktop,
     private val requestTimeoutMs: Long = 30_000L
 ) {
+    /** Bound to [desktop]'s connection: a reply-awaiting call never reaches another desktop. */
+    private val messageSender: MessageSender = desktop.sender
+    private val messageRouter: BidirectionalMessageRouter = desktop.router
     private val engine = SyncEngine(context.applicationContext)
 
     /** Aggregate result of a sync run (items pushed to / pulled from the laptop). */

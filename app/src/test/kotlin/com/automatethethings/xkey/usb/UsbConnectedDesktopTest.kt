@@ -20,12 +20,16 @@ import android.hardware.usb.UsbManager
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.SessionSender
 import com.automatethethings.xkey.remote.stubAndroidLog
+import com.automatethethings.xkey.transport.StreamSessionHarness
 import com.automatethethings.xkey.ui.DesktopOathLinks
 import com.automatethethings.xkey.ui.OathDesktopActions
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
+import java.io.IOException
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -33,6 +37,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
@@ -124,19 +129,49 @@ class UsbConnectedDesktopTest {
             UsbAccessoryState.Handshaking,
             UsbAccessoryState.Error("Failed to open USB accessory")
         )) {
-            assertNull(state.toString(), server.connectedDesktop(state, PEER, router))
+            assertNull(state.toString(), server.connectedDesktop(state, PEER to bound, router))
         }
         assertNull(server.connectedDesktop(UsbAccessoryState.Connected("acc"), null, router))
-        assertNull(server.connectedDesktop(UsbAccessoryState.Connected("acc"), PEER, null))
+        assertNull(server.connectedDesktop(UsbAccessoryState.Connected("acc"), PEER to bound, null))
 
-        val desktop = server.connectedDesktop(UsbAccessoryState.Connected("acc"), PEER, router)
+        val desktop = server.connectedDesktop(UsbAccessoryState.Connected("acc"), PEER to bound, router)
         assertNotNull(desktop)
         assertEquals(PEER, desktop!!.peerKeyHex)
-        assertTrue(desktop.sender === server)
+        assertTrue("the sender is the session's, never the server", desktop.sender === bound)
         assertTrue(desktop.router === router)
+    }
+
+    /**
+     * The USB desktop is built from the stream session's bound sender: once
+     * desktop A's connection is replaced by paired desktop B's, a send
+     * captured for A fails and B receives nothing.
+     */
+    @Test
+    fun `a send captured for desktop A fails once B replaces it and B receives nothing`() = runBlocking {
+        StreamSessionHarness().use { harness ->
+            val a = harness.connectPaired()
+            val captured = server.connectedDesktop(UsbAccessoryState.Connected("acc"), harness.pairing.boundSender(), router)
+            assertEquals(a.publicKeyHex, captured!!.peerKeyHex)
+
+            val b = harness.connectPaired()
+            assertEquals(b.publicKeyHex, harness.pairing.boundSender()!!.first)
+
+            try {
+                captured.sender.sendEncryptedMessage(REQUEST)
+                fail("a send captured for A must not go out once B replaced it")
+            } catch (e: IOException) {
+                // A's connection is no longer the session's.
+            }
+            b.assertNoFrame()
+        }
+    }
+
+    private val bound = object : SessionSender {
+        override suspend fun sendEncryptedMessage(data: ByteArray) = Unit
     }
 
     private companion object {
         const val PEER = "aa01"
+        val REQUEST = """{"jsonrpc":"2.0","id":9,"method":"remote.oathAdd","params":{}}""".toByteArray()
     }
 }

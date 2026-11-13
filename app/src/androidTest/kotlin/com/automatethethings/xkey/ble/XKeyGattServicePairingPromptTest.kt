@@ -182,7 +182,7 @@ class XKeyGattServicePairingPromptTest {
         val peerKeyHex = "11".repeat(32)
         gatt.requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex)
         probe.requestHandler = gatt.requestHandler
-        // No gattServer, no TCP and no USB: activeTransport() has nothing to
+        // No gattServer, no TCP and no USB: connectedDesktop() has nothing to
         // hand back.
 
         assertFalse(probe.service.requestDeviceAttestation(peerKeyHex))
@@ -204,7 +204,7 @@ class XKeyGattServicePairingPromptTest {
         probe.requestHandler = gatt.requestHandler
         probe.gattServer = gatt.server
         probe.bleMessageRouter = gatt.messageRouter
-        assertNotNull("the BLE transport must be the active one", probe.activeTransport())
+        assertNotNull("the BLE transport must be the active one", probe.connectedDesktop())
 
         val attestation = callerScope.async { probe.service.requestDeviceAttestation(peerKeyHex) }
 

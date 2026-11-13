@@ -34,6 +34,7 @@ import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.MessageSender
+import com.automatethethings.xkey.remote.SessionSender
 import com.automatethethings.xkey.settings.PairedDeviceRemovalListener
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -856,6 +857,22 @@ class StreamPairingSession(
         val connection = activeConnection?.takeIf { it.established }
             ?: throw IOException("No active Noise session")
         send(connection, data, phoneInitiated = true)
+    }
+
+    /**
+     * The established connection's authenticated peer key and a sender bound
+     * to that one connection, read together, or null with no established,
+     * live connection. The sender writes only to that connection and fails
+     * with [IOException] once it ends or another connection replaces it.
+     */
+    fun boundSender(): Pair<String, SessionSender>? {
+        val connection = activeConnection?.takeIf { it.established && it.isLive } ?: return null
+        val peerKeyHex = connection.peerKeyHex ?: return null
+        return peerKeyHex to object : SessionSender {
+            override suspend fun sendEncryptedMessage(data: ByteArray) {
+                this@StreamPairingSession.sendEncryptedMessage(data)
+            }
+        }
     }
 
     /**

@@ -210,8 +210,7 @@ class TcpHsmServer(
     fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
         ConnectedDesktop.ifEstablished(
             state.value is TcpHsmState.Connected,
-            pairingSession.connectedPeerKeyHex,
-            this,
+            pairingSession.boundSender(),
             router
         )
 

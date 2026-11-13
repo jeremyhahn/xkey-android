@@ -765,18 +765,15 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
-     * Returns the active connection's message sender and router across whichever
-     * transport currently has an established session (BLE / TCP / USB), or null
-     * if no desktop is connected. Single source for outbound `remote.*` clients.
-     */
-    private fun activeTransport(): Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>? =
-        connectedDesktop()?.let { it.sender to it.router }
-
-    /**
      * The desktop with an established session (BLE, then TCP, then USB), with
      * the static key its Noise handshake authenticated, or null if none. Each
      * server answers only for a session it reports established: a USB server
      * that is handshaking, failed to open or has ended is no desktop.
+     *
+     * The single source for outbound `remote.*` clients: each is built from
+     * the returned desktop, whose sender is bound to the connection that
+     * authenticated its key, so a desktop that disconnects and is replaced
+     * mid-operation receives nothing meant for the other.
      */
     fun connectedDesktop(): com.automatethethings.xkey.remote.ConnectedDesktop? =
         gattServer?.connectedDesktop(bleMessageRouter)
@@ -790,9 +787,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * @throws IllegalStateException if no desktop is currently connected.
      */
     suspend fun syncNow(): com.automatethethings.xkey.remote.RemoteSyncClient.SyncResult {
-        val (sender, router) = activeTransport()
+        val desktop = connectedDesktop()
             ?: throw IllegalStateException("No desktop connected; pair and connect before syncing")
-        val client = com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, sender, router)
+        val client = com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, desktop)
         Log.i(TAG, "Starting phone-initiated sync")
         return client.syncAll()
     }
@@ -806,9 +803,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      *   error reply or a timeout.
      */
     suspend fun desktopSyncStatus(): com.automatethethings.xkey.remote.RemoteSyncClient.DesktopSyncStatus {
-        val (sender, router) = activeTransport()
+        val desktop = connectedDesktop()
             ?: throw IllegalStateException("No desktop connected; pair and connect first")
-        return com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, sender, router).syncStatus()
+        return com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, desktop).syncStatus()
     }
 
     /**
@@ -830,10 +827,10 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         include: RemoteBackupClient.Include
     ): RemoteBackupClient.CreateResult {
         try {
-            val (sender, router) = activeTransport()
+            val desktop = connectedDesktop()
                 ?: throw IllegalStateException("No desktop connected; pair and connect before a backup")
             Log.i(TAG, "Starting phone-initiated backup")
-            val result = RemoteBackupClient(sender, router)
+            val result = RemoteBackupClient(desktop)
                 .createBackup(password, include, "phone-${System.currentTimeMillis()}")
             withContext(Dispatchers.IO) {
                 BackupStore(applicationContext).store(result.backupId, result.backupData)
@@ -862,9 +859,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      *   error reply, a timeout or an unreadable reply.
      */
     suspend fun listDesktopBackups(): List<RemoteBackupClient.BackupInfo> {
-        val (sender, router) = activeTransport()
+        val desktop = connectedDesktop()
             ?: throw IllegalStateException("No desktop connected; pair and connect first")
-        return RemoteBackupClient(sender, router).listBackups()
+        return RemoteBackupClient(desktop).listBackups()
     }
 
     /**
@@ -882,12 +879,12 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      */
     suspend fun restoreDesktopBackup(backupId: String, password: CharArray): RemoteBackupClient.RestoreResult {
         try {
-            val (sender, router) = activeTransport()
+            val desktop = connectedDesktop()
                 ?: throw IllegalStateException("No desktop connected; pair and connect before a restore")
             val envelope = withContext(Dispatchers.IO) { BackupStore(applicationContext).load(backupId) }
                 ?: throw IllegalStateException("No stored backup $backupId")
             Log.i(TAG, "Starting phone-initiated restore")
-            return RemoteBackupClient(sender, router).restoreBackup(envelope, password)
+            return RemoteBackupClient(desktop).restoreBackup(envelope, password)
         } finally {
             password.fill('\u0000')
         }
@@ -910,13 +907,18 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             return false
         }
 
-        // Determine which transport is active and has a message router.
-        val (messageSender, messageRouter) = activeTransport() ?: run {
+        // The result is stored under publicKeyHex, so the session it is asked
+        // on must be the one whose handshake authenticated that key.
+        val desktop = connectedDesktop() ?: run {
             Log.e(TAG, "No active transport for device attestation")
             return false
         }
+        if (!desktop.peerKeyHex.equals(publicKeyHex, ignoreCase = true)) {
+            Log.w(TAG, "Cannot attest device $publicKeyHex - the connected session is another desktop")
+            return false
+        }
 
-        val remoteClient = RemoteKeyClient(messageSender, messageRouter)
+        val remoteClient = RemoteKeyClient(desktop)
 
         return try {
             // Generate random nonce

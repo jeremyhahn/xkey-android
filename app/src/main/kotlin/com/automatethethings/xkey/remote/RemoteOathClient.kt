@@ -34,10 +34,12 @@ import java.util.concurrent.atomic.AtomicLong
  * zeroed once the request has been sent (or has failed).
  */
 class RemoteOathClient(
-    private val messageSender: MessageSender,
-    private val messageRouter: BidirectionalMessageRouter,
+    desktop: ConnectedDesktop,
     private val requestTimeoutMs: Long = 30_000L
 ) {
+    /** Bound to [desktop]'s connection: a reply-awaiting call never reaches another desktop. */
+    private val messageSender: MessageSender = desktop.sender
+    private val messageRouter: BidirectionalMessageRouter = desktop.router
 
     /**
      * An OATHCredentialInfo to send. [secret] is Base32 (RFC 4648, upper

@@ -25,6 +25,7 @@ import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.MessageSender
+import com.automatethethings.xkey.remote.SessionSender
 import com.automatethethings.xkey.transport.StreamPairingSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -117,6 +118,15 @@ class UsbAccessoryServer(
             return
         }
 
+        open(context, fd, accessory.toString())
+        Log.i(TAG, "USB accessory opened: ${accessory.manufacturer} ${accessory.model}")
+    }
+
+    /**
+     * Starts the session over an opened accessory [fd]. Instrumented tests
+     * hand in one end of a socket pair in place of a USB accessory.
+     */
+    internal fun open(context: Context, fd: ParcelFileDescriptor, accessoryInfo: String) {
         fileDescriptor = fd
         inputStream = FileInputStream(fd.fileDescriptor)
         outputStream = FileOutputStream(fd.fileDescriptor)
@@ -125,10 +135,8 @@ class UsbAccessoryServer(
         serverScope = scope
 
         connectionJob = scope.launch {
-            handleConnection(context, accessory.toString())
+            handleConnection(context, accessoryInfo)
         }
-
-        Log.i(TAG, "USB accessory opened: ${accessory.manufacturer} ${accessory.model}")
     }
 
     /**
@@ -195,15 +203,18 @@ class UsbAccessoryServer(
      * existence alone says nothing.
      */
     fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
-        connectedDesktop(state.value, pairingSession.connectedPeerKeyHex, router)
+        connectedDesktop(state.value, pairingSession.boundSender(), router)
 
-    /** [connectedDesktop] for a given [state] and authenticated [peerKeyHex]. */
+    /**
+     * [connectedDesktop] for a given [state] and [session]: the authenticated
+     * peer key and a sender bound to its connection.
+     */
     internal fun connectedDesktop(
         state: UsbAccessoryState,
-        peerKeyHex: String?,
+        session: Pair<String, SessionSender>?,
         router: BidirectionalMessageRouter?
     ): ConnectedDesktop? =
-        ConnectedDesktop.ifEstablished(state is UsbAccessoryState.Connected, peerKeyHex, this, router)
+        ConnectedDesktop.ifEstablished(state is UsbAccessoryState.Connected, session, router)
 
     private fun closeStreams() {
         try {

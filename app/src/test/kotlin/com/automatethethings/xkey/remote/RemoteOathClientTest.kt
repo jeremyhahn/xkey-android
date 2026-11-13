@@ -12,6 +12,8 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.unmockkAll
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -52,7 +54,7 @@ class RemoteOathClientTest {
         unmockkAll()
     }
 
-    private fun client(s: MessageSender = sender) = RemoteOathClient(s, router)
+    private fun client(s: MessageSender = sender) = RemoteOathClient(desktopOf(s, router))
 
     private fun totp(secret: String = "JBSWY3DPEHPK3PXP") = RemoteOathClient.Credential(
         name = "GitHub:alice",
@@ -180,6 +182,27 @@ class RemoteOathClientTest {
     }
 
     @Test
+    fun `oathAdd zeroes the secret and the body while the reply is still pending`() = runTest {
+        sender.neverReply()
+        val capturing = BodyCapturingSender(sender)
+        val cred = totp()
+
+        val add = async { client(capturing).oathAdd(cred) }
+        runCurrent()
+
+        assertEquals("the request went out", 1, capturing.bodies.size)
+        assertFalse("the reply is still pending", add.isCompleted)
+        assertTrue("the caller's secret, once encoded", cred.secret.all { it == '\u0000' })
+        assertTrue("the body, once sent", capturing.bodies[0].all { it == 0.toByte() })
+
+        router.processMessage(
+            """{"id":${sender.lastRequest.id},"result":{"success":true,"credential_id":"desk-1"}}"""
+                .toByteArray(Charsets.UTF_8)
+        )
+        assertEquals("desk-1", add.await().credentialId)
+    }
+
+    @Test
     fun `oathAdd zeroes the caller secret when the desktop errors`() = runTest {
         sender.failWith(-32603, "boom")
         val cred = totp()
@@ -271,7 +294,7 @@ class RemoteOathClientTest {
     fun `oathAdd times out`() = runTest {
         sender.neverReply()
 
-        expectProtocolError { RemoteOathClient(sender, router, requestTimeoutMs = 1_000L).oathAdd(totp()) }
+        expectProtocolError { RemoteOathClient(desktopOf(sender, router), requestTimeoutMs = 1_000L).oathAdd(totp()) }
     }
 
     // --- remote.oathGenerate ---

@@ -1018,7 +1018,9 @@ class PrefsDesktopOathLinks(private val prefs: SharedPreferences) : DesktopOathL
  * The OATH screen's desktop actions, kept free of Android types so they unit
  * test on the JVM. [desktop] is null whenever no desktop has an established
  * session; then no entry is offered and nothing is sent. Links are read and
- * written for the desktop [desktop] returns at the time of each call.
+ * written for the desktop [desktop] returns at the time of each call, and
+ * each call's request goes out on that desktop's own connection: a peer that
+ * replaces it mid-call receives nothing, and no link is written.
  */
 class OathDesktopActions(
     private val desktop: () -> ConnectedDesktop?,
@@ -1050,7 +1052,7 @@ class OathDesktopActions(
     /** Sends remote.oathAdd for [credential] and remembers the desktop ID. */
     suspend fun copyToDesktop(credential: OathCredentialEntity): Outcome {
         val peer = desktop() ?: return Outcome.NotConnected
-        val remote = RemoteOathClient(peer.sender, peer.router)
+        val remote = RemoteOathClient(peer)
         return try {
             val raw = secretOf(credential)
             val secret = try {
@@ -1085,7 +1087,7 @@ class OathDesktopActions(
         val peer = desktop() ?: return Outcome.NotConnected
         val desktopId = links.get(peer.peerKeyHex, credential.oathId) ?: return Outcome.NotOnDesktop
         return try {
-            val result = RemoteOathClient(peer.sender, peer.router).oathGenerate(desktopId)
+            val result = RemoteOathClient(peer).oathGenerate(desktopId)
             Outcome.Code(result.code, result.expiresIn)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

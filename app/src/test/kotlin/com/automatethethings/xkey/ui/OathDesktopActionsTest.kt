@@ -10,8 +10,8 @@ import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
-import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.ScriptedMessageSender
+import com.automatethethings.xkey.remote.desktopOf
 import com.automatethethings.xkey.remote.stubAndroidLog
 import io.mockk.mockk
 import io.mockk.spyk
@@ -47,7 +47,7 @@ class OathDesktopActionsTest {
     }
 
     private fun actions() = OathDesktopActions(
-        desktop = { if (connected) ConnectedDesktop(peer, sender, router) else null },
+        desktop = { if (connected) desktopOf(sender, router, peer) else null },
         links = links,
         secretOf = { _ ->
             // "Hello!\xde\xad\xbe\xef" = JBSWY3DPEHPK3PXP
