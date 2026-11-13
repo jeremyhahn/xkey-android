@@ -21,6 +21,14 @@ MAC, shared secret, peer key) are never logged:
 | `local.hmac` (Keystore and software keys) | `HMAC_REQUEST` | `AuditLogger.logHmacRequest` |
 | `local.ecdh` | `KEY_DERIVATION_REQUEST` | `AuditLogger.logKeyDerivationRequest` |
 
+The entry's `keyType` is the type the key is stored with, never the
+operation: the operation type already names the operation, and the audit
+screen filters by `keyType`. An ECDH on an EC key stored as `signing` is
+recorded as `signing`; an HMAC as its key's stored type (the key row's,
+else the software key's). A key with no stored metadata is recorded as
+`unknown`. `RequestHandler.auditKeyType` is the one source of this value
+for sign, decrypt, encrypt, HMAC and ECDH entries.
+
 ## Index Strategy
 
 ### audit_logs

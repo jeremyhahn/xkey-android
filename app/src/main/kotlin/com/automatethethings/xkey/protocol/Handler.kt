@@ -139,6 +139,9 @@ class RequestHandler(
     companion object {
         private const val TAG = "RequestHandler"
 
+        /** keyType of a key-use audit entry whose key has no stored metadata. */
+        const val AUDIT_KEY_TYPE_UNKNOWN = "unknown"
+
         // Protocol version
         private const val PROTOCOL_VERSION = "1.0.0"
 
@@ -1518,7 +1521,7 @@ class RequestHandler(
         AuditLogger.logSigningRequest(
             keyId = signParams.keyId,
             keyLabel = signParams.keyId,
-            keyType = "signing",
+            keyType = auditKeyType(signParams.keyId),
             algorithm = signAlgorithm,
             deviceId = connectedDevicePublicKeyHex,
             deviceName = deviceInfo?.deviceName,
@@ -1563,7 +1566,7 @@ class RequestHandler(
         AuditLogger.logDecryptionRequest(
             keyId = decryptParams.keyId,
             keyLabel = decryptParams.keyId,
-            keyType = "rsa",
+            keyType = auditKeyType(decryptParams.keyId),
             algorithm = "RSA-OAEP",
             deviceId = connectedDevicePublicKeyHex,
             deviceName = deviceInfo?.deviceName,
@@ -1619,7 +1622,7 @@ class RequestHandler(
         AuditLogger.logEncryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
-            keyType = "symmetric",
+            keyType = auditKeyType(symParams.keyId),
             algorithm = "AES-GCM",
             deviceId = connectedDevicePublicKeyHex,
             deviceName = deviceInfo?.deviceName,
@@ -1676,7 +1679,7 @@ class RequestHandler(
         AuditLogger.logDecryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
-            keyType = "symmetric",
+            keyType = auditKeyType(symParams.keyId),
             algorithm = "AES-GCM",
             deviceId = connectedDevicePublicKeyHex,
             deviceName = deviceInfo?.deviceName,
@@ -1690,6 +1693,29 @@ class RequestHandler(
         )
         return Response.success(request.id, result.toJson())
     }
+
+    /**
+     * The keyType of a key-use audit entry: the type the key is stored with,
+     * never the operation (the entry's operation type already names that).
+     * The audit screen filters entries by this value, so an ECDH on a signing
+     * key must read "signing". It is the key-store row's type, else the
+     * software key's ([softwareKey], or looked up), else
+     * [AUDIT_KEY_TYPE_UNKNOWN] when the key has no stored metadata.
+     *
+     * Every key-use AuditLogger call in this file takes its keyType from
+     * here (AuditKeyTypeChokePointTest enforces it).
+     */
+    private suspend fun auditKeyType(
+        keyId: String,
+        softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
+    ): String =
+        keyDao.getByKeyId(keyId)?.keyType?.takeIf { it.isNotBlank() }
+            ?: (
+                softwareKey
+                    // The operation already succeeded; labelling it must not fail it.
+                    ?: runCatching { com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId) }.getOrNull()
+                )?.keyType?.takeIf { it.isNotBlank() }
+            ?: AUDIT_KEY_TYPE_UNKNOWN
 
     /**
      * Handles local.hmac - HMAC computation.
@@ -1710,11 +1736,15 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Log the HMAC request; the MAC and the data stay out of it.
-        fun logHmacRequest(keyType: String, algorithm: String?, durationMs: Long) {
+        suspend fun logHmacRequest(
+            softwareKey: com.automatethethings.xkey.crypto.SoftwareKey?,
+            algorithm: String?,
+            durationMs: Long
+        ) {
             AuditLogger.logHmacRequest(
                 keyId = hmacParams.keyId,
                 keyLabel = hmacParams.keyId,
-                keyType = keyType,
+                keyType = auditKeyType(hmacParams.keyId, softwareKey),
                 algorithm = algorithm,
                 deviceId = caller.peerPublicKeyHex,
                 deviceName = caller.deviceName,
@@ -1731,7 +1761,7 @@ class RequestHandler(
             )
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
-            logHmacRequest(sw.keyType, sw.algorithm, swDurationMs)
+            logHmacRequest(sw, sw.algorithm, swDurationMs)
             return Response.success(
                 request.id,
                 LocalHMACResult(mac = Base64.getEncoder().encodeToString(swMac)).toJson()
@@ -1743,7 +1773,7 @@ class RequestHandler(
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
-        logHmacRequest("hmac", keyDao.getByKeyId(hmacParams.keyId)?.algorithm, durationMs)
+        logHmacRequest(null, keyDao.getByKeyId(hmacParams.keyId)?.algorithm, durationMs)
 
         val result = LocalHMACResult(
             mac = Base64.getEncoder().encodeToString(mac)
@@ -1780,7 +1810,7 @@ class RequestHandler(
         AuditLogger.logKeyDerivationRequest(
             keyId = ecdhParams.keyId,
             keyLabel = ecdhParams.keyId,
-            keyType = "agreement",
+            keyType = auditKeyType(ecdhParams.keyId),
             algorithm = "ECDH",
             deviceId = caller.peerPublicKeyHex,
             deviceName = caller.deviceName,
