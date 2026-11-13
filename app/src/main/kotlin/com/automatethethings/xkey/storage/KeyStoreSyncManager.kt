@@ -16,6 +16,7 @@ package com.automatethethings.xkey.storage
 
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
@@ -34,6 +35,11 @@ import javax.crypto.SecretKey
  *    skipping any whose Keystore key is gone (step 3 would remove them again)
  * 2. Discovering orphaned Keystore entries not tracked in any table
  * 3. Removing stale keys table entries whose Keystore keys no longer exist
+ *
+ * PIV slot keys (`xkey_piv_*`) are not general keys: they belong to
+ * [com.automatethethings.xkey.piv.PivKeyManager] and its `piv_slots` rows, so
+ * they are never listed here, where the key management screen could delete
+ * them behind those rows.
  *
  * @param keystoreManager Manager for Android Keystore operations.
  * @param credentialDao DAO for the credential_metadata table.
@@ -136,6 +142,7 @@ class KeyStoreSyncManager(
         var discovered = 0
 
         for (alias in keyStore.aliases()) {
+            if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) continue
             val (keyId, isFido2, isCA) = when {
                 alias in CA_ALIASES -> {
                     Triple(alias, false, true)
@@ -170,6 +177,8 @@ class KeyStoreSyncManager(
      * Removes keys table entries for local keys whose Keystore entries no longer exist.
      *
      * Only removes entries with local sources (not "xkmsd" remote references).
+     * A PIV slot alias listed by an earlier sync is removed as well, because
+     * [KeystoreManager.resolveKeystoreAlias] never resolves a raw PIV alias.
      *
      * @return Number of stale entries removed.
      */
@@ -178,8 +187,10 @@ class KeyStoreSyncManager(
         var removed = 0
 
         for (key in localKeys) {
-            val alias = keystoreManager.resolveKeystoreAlias(key.keyId)
-            if (alias == null) {
+            // Classify by the resolved alias, never the logical id: a general
+            // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
+            // a raw PIV slot alias row never resolves and so is removed here.
+            if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
                 keyDao.deleteByKeyId(key.keyId)
                 removed++
                 Log.d(TAG, "Removed stale key entry: ${key.keyId}")

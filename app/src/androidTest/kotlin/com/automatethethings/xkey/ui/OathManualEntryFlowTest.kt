@@ -143,6 +143,32 @@ class OathManualEntryFlowTest {
         assertEquals(8, stored.digits)
     }
 
+    @Test
+    fun manualEntry_withAnIssuer_storesTheAccountWithoutTheIssuer() {
+        // The label separator was encoded as %3A with the rest of the label,
+        // so the importer stored "GitHub:alice@..." as the account (#156).
+        val account = "alice-$runId@example.com"
+
+        ActivityScenario.launch(OathActivity::class.java)
+        addManually(issuer = "GitHub", account = account)
+
+        val stored = awaitCredential(account)
+        assertNotNull(stored)
+        assertEquals("GitHub", stored!!.issuer)
+    }
+
+    @Test
+    fun manualEntry_withAColonInTheIssuer_keepsBothFields() {
+        val account = "colon-$runId@example.com"
+
+        ActivityScenario.launch(OathActivity::class.java)
+        addManually(issuer = "Corp:EU", account = account)
+
+        val stored = awaitCredential(account)
+        assertNotNull(stored)
+        assertEquals("Corp:EU", stored!!.issuer)
+    }
+
     // -------------------------------------------------------------------------
     // Validation
     // -------------------------------------------------------------------------

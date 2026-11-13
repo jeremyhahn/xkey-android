@@ -67,7 +67,23 @@ data class LockoutStatus(
  *
  * @param message Description of the PIN error.
  */
-class PinException(message: String) : Exception(message)
+open class PinException(message: String) : Exception(message)
+
+/**
+ * A PIN was supplied and verified against the stored hash, and it was wrong.
+ * The failed attempt has been counted.
+ *
+ * @param message Description of the PIN error.
+ */
+class PinIncorrectException(message: String = "Incorrect PIN") : PinException(message)
+
+/**
+ * The operation needs a PIN that is not set (or whose hash is not stored), or
+ * a current PIN that the caller did not supply. No attempt is counted.
+ *
+ * @param message Description of the PIN error.
+ */
+class PinRequiredException(message: String) : PinException(message)
 
 /**
  * Exception thrown when a PIN verification is attempted while the PIN is locked.
@@ -140,8 +156,8 @@ class PinManager(
      *
      * @param currentSOPIN The current SO PIN for verification, or `null` for first-time setup.
      * @param newSOPIN The new SO PIN to set.
-     * @throws PinException if the SO PIN is already set and [currentSOPIN] is null.
-     * @throws PinException if the current SO PIN verification fails.
+     * @throws PinRequiredException if the SO PIN is already set and [currentSOPIN] is null.
+     * @throws PinIncorrectException if the current SO PIN verification fails.
      * @throws PinLockedException if the SO PIN is currently locked out.
      * @throws IllegalArgumentException if the new SO PIN length is invalid.
      */
@@ -159,7 +175,7 @@ class PinManager(
 
         if (settings.soPinSet) {
             if (currentSOPIN == null) {
-                throw PinException("SO PIN is already set; current SO PIN is required to change it")
+                throw PinRequiredException("SO PIN is already set; current SO PIN is required to change it")
             }
             verifyPinInternal(currentSOPIN, PinType.SO_PIN, settings)
         }
@@ -190,8 +206,8 @@ class PinManager(
      *
      * @param currentSOPIN The current SO PIN for verification.
      * @param newSOPIN The new SO PIN to set.
-     * @throws PinException if the SO PIN has not been set yet.
-     * @throws PinException if the current SO PIN verification fails.
+     * @throws PinRequiredException if the SO PIN has not been set yet.
+     * @throws PinIncorrectException if the current SO PIN verification fails.
      * @throws PinLockedException if the SO PIN is currently locked out.
      * @throws IllegalArgumentException if the new SO PIN length is invalid.
      */
@@ -199,7 +215,7 @@ class PinManager(
         pinStateMutex.withLock {
             val settings = pinSettingsRepository.getSettings()
             if (!settings.soPinSet) {
-                throw PinException("SO PIN has not been set yet")
+                throw PinRequiredException("SO PIN has not been set yet")
             }
             setSOPINLocked(currentSOPIN, newSOPIN)
         }
@@ -214,14 +230,14 @@ class PinManager(
      *
      * @param pin The SO PIN to verify.
      * @return `true` if the PIN is correct.
-     * @throws PinException if the SO PIN has not been set.
+     * @throws PinRequiredException if the SO PIN has not been set.
      * @throws PinLockedException if the SO PIN is currently locked out.
-     * @throws PinException if the PIN verification fails (incorrect PIN).
+     * @throws PinIncorrectException if the PIN verification fails (incorrect PIN).
      */
     suspend fun verifySOPIN(pin: String): Boolean = pinStateMutex.withLock {
         val settings = pinSettingsRepository.getSettings()
         if (!settings.soPinSet) {
-            throw PinException("SO PIN has not been set")
+            throw PinRequiredException("SO PIN has not been set")
         }
         verifyPinInternal(pin, PinType.SO_PIN, settings)
     }
@@ -235,15 +251,15 @@ class PinManager(
      *
      * @param soPIN The SO PIN for administrative authentication.
      * @param newUserPIN The new User PIN to set.
-     * @throws PinException if the SO PIN has not been set.
-     * @throws PinException if the SO PIN verification fails.
+     * @throws PinRequiredException if the SO PIN has not been set.
+     * @throws PinIncorrectException if the SO PIN verification fails.
      * @throws PinLockedException if the SO PIN is currently locked out.
      * @throws IllegalArgumentException if the new User PIN length is invalid.
      */
     suspend fun setUserPIN(soPIN: String, newUserPIN: String) = pinStateMutex.withLock {
         val settings = pinSettingsRepository.getSettings()
         if (!settings.soPinSet) {
-            throw PinException("SO PIN must be set before setting User PIN")
+            throw PinRequiredException("SO PIN must be set before setting User PIN")
         }
 
         verifyPinInternal(soPIN, PinType.SO_PIN, settings)
@@ -273,15 +289,15 @@ class PinManager(
      *
      * @param currentUserPIN The current User PIN for verification.
      * @param newUserPIN The new User PIN to set.
-     * @throws PinException if the User PIN has not been set yet.
-     * @throws PinException if the current User PIN verification fails.
+     * @throws PinRequiredException if the User PIN has not been set yet.
+     * @throws PinIncorrectException if the current User PIN verification fails.
      * @throws PinLockedException if the User PIN is currently locked out.
      * @throws IllegalArgumentException if the new User PIN length is invalid.
      */
     suspend fun changeUserPIN(currentUserPIN: String, newUserPIN: String) = pinStateMutex.withLock {
         val settings = pinSettingsRepository.getSettings()
         if (!settings.userPinSet) {
-            throw PinException("User PIN has not been set yet")
+            throw PinRequiredException("User PIN has not been set yet")
         }
 
         verifyPinInternal(currentUserPIN, PinType.USER_PIN, settings)
@@ -313,14 +329,14 @@ class PinManager(
      *
      * @param pin The User PIN to verify.
      * @return `true` if the PIN is correct.
-     * @throws PinException if the User PIN has not been set.
+     * @throws PinRequiredException if the User PIN has not been set.
      * @throws PinLockedException if the User PIN is currently locked out.
-     * @throws PinException if the PIN verification fails (incorrect PIN).
+     * @throws PinIncorrectException if the PIN verification fails (incorrect PIN).
      */
     suspend fun verifyUserPIN(pin: String): Boolean = pinStateMutex.withLock {
         val settings = pinSettingsRepository.getSettings()
         if (!settings.userPinSet) {
-            throw PinException("User PIN has not been set")
+            throw PinRequiredException("User PIN has not been set")
         }
         verifyPinInternal(pin, PinType.USER_PIN, settings)
     }
@@ -343,14 +359,14 @@ class PinManager(
      * too many failed attempts, without needing to know the User PIN.
      *
      * @param soPIN The SO PIN for administrative authentication.
-     * @throws PinException if the SO PIN has not been set.
-     * @throws PinException if the SO PIN verification fails.
+     * @throws PinRequiredException if the SO PIN has not been set.
+     * @throws PinIncorrectException if the SO PIN verification fails.
      * @throws PinLockedException if the SO PIN is currently locked out.
      */
     suspend fun resetLockout(soPIN: String) = pinStateMutex.withLock {
         val settings = pinSettingsRepository.getSettings()
         if (!settings.soPinSet) {
-            throw PinException("SO PIN must be set to reset lockout")
+            throw PinRequiredException("SO PIN must be set to reset lockout")
         }
 
         verifyPinInternal(soPIN, PinType.SO_PIN, settings)
@@ -408,7 +424,7 @@ class PinManager(
      * @param settings The current PIN settings snapshot.
      * @return `true` if the PIN is correct.
      * @throws PinLockedException if the PIN is currently locked out.
-     * @throws PinException if the PIN is incorrect.
+     * @throws PinIncorrectException if the PIN is incorrect.
      */
     private suspend fun verifyPinInternal(
         pin: String,
@@ -428,15 +444,15 @@ class PinManager(
         when (pinType) {
             PinType.SO_PIN -> {
                 hashBase64 = settings.soPinHashBase64
-                    ?: throw PinException("SO PIN hash is not stored")
+                    ?: throw PinRequiredException("SO PIN hash is not stored")
                 saltBase64 = settings.soPinSaltBase64
-                    ?: throw PinException("SO PIN salt is not stored")
+                    ?: throw PinRequiredException("SO PIN salt is not stored")
             }
             PinType.USER_PIN -> {
                 hashBase64 = settings.userPinHashBase64
-                    ?: throw PinException("User PIN hash is not stored")
+                    ?: throw PinRequiredException("User PIN hash is not stored")
                 saltBase64 = settings.userPinSaltBase64
-                    ?: throw PinException("User PIN salt is not stored")
+                    ?: throw PinRequiredException("User PIN salt is not stored")
             }
         }
 
@@ -508,7 +524,7 @@ class PinManager(
                 System.currentTimeMillis() + (settings.lockoutDurationSeconds * 1000L)
             )
         }
-        throw PinException("Incorrect PIN")
+        throw PinIncorrectException()
     }
 
     /**
