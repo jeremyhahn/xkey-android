@@ -1834,15 +1834,7 @@ class KeystoreManager(private val context: Context) {
      * @return JCA signature algorithm name (e.g., "SHA256withECDSA").
      * @throws SigningException if the algorithm is not supported.
      */
-    private fun getJCASignatureAlgorithm(algorithm: String): String = when (algorithm) {
-        "ES256" -> SIG_ALGORITHM_ES256
-        "ES384" -> SIG_ALGORITHM_ES384
-        "ES512" -> SIG_ALGORITHM_ES512
-        "RS256" -> SIG_ALGORITHM_RS256
-        "RS384" -> SIG_ALGORITHM_RS384
-        "RS512" -> SIG_ALGORITHM_RS512
-        else -> throw SigningException("Unsupported algorithm: $algorithm")
-    }
+    private fun getJCASignatureAlgorithm(algorithm: String): String = jcaSignatureAlgorithm(algorithm)
 
     /**
      * Get the JCA digest property constant from a COSE/JOSE algorithm identifier.
@@ -1860,7 +1852,7 @@ class KeystoreManager(private val context: Context) {
     /**
      * Build the keystore alias for a general-purpose key.
      */
-    private fun buildGeneralAlias(keyId: String): String = KEY_ALIAS_PREFIX_GENERAL + keyId
+    private fun buildGeneralAlias(keyId: String): String = generalKeyAlias(keyId)
 
     // -------------------------------------------------------------------------
     // Private Helpers - SSH Key Encoding
@@ -1998,6 +1990,25 @@ class KeystoreManager(private val context: Context) {
     }
 
     companion object {
+        /** The full Keystore alias of general-purpose key [keyId]. */
+        fun generalKeyAlias(keyId: String): String = KEY_ALIAS_PREFIX_GENERAL + keyId
+
+        /**
+         * The JCA signature algorithm a key of COSE/JOSE [algorithm] signs with.
+         *
+         * @param algorithm "ES256", "ES384", "ES512", "RS256", "RS384", or "RS512".
+         * @throws SigningException if the algorithm is not supported.
+         */
+        fun jcaSignatureAlgorithm(algorithm: String): String = when (algorithm) {
+            "ES256" -> SIG_ALGORITHM_ES256
+            "ES384" -> SIG_ALGORITHM_ES384
+            "ES512" -> SIG_ALGORITHM_ES512
+            "RS256" -> SIG_ALGORITHM_RS256
+            "RS384" -> SIG_ALGORITHM_RS384
+            "RS512" -> SIG_ALGORITHM_RS512
+            else -> throw SigningException("Unsupported algorithm: $algorithm")
+        }
+
         /** Android Keystore provider name. */
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
 

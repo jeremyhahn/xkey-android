@@ -40,8 +40,16 @@ checks, in this order:
    down before the next prompt's turn starts.
 5. **The approved key signs.** The phone records the key's row and the
    public key under its keystore alias before the prompt, and rechecks both
-   after the approval: a key deleted meanwhile is `KEY_NOT_FOUND`, and one
-   changed or replaced under its id or alias is `OPERATION_DENIED`.
+   after the approval, holding the key's lock (which key creation and
+   `local.deleteKey` take) until the signature is made: a key deleted
+   meanwhile is `KEY_NOT_FOUND`, and one changed or replaced under its id or
+   alias is `OPERATION_DENIED`.
+6. **Per-operation keys sign in the prompt.** A key that needs the owner
+   for every use (`authDurationSeconds` 0) signs in the prompt itself: its
+   `BiometricPrompt` holds a `CryptoObject` over the key, which signs exactly
+   the requested hash once the owner authenticates. The phone answers only a
+   signature that verifies under the approved public key over that hash;
+   any other is `OPERATION_DENIED`.
 
 The success result is unchanged: `signature` (base64), `keyFingerprint`,
 `algorithm` and `signerName`.

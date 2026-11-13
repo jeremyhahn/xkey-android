@@ -388,6 +388,8 @@ class BiometricActivityLauncher(
      * @param showOnLockScreen Whether to show the prompt over the lock screen.
      * @param keyAlias A full Keystore alias to sign with instead of the
      *   credential's (the user verification key); null for a credential key.
+     * @param signatureAlgorithm The JCA signature algorithm of that key; null
+     *   for SHA256withECDSA.
      * @param onLaunch As for [requestAuthentication]: called with this
      *   request's notification key ([NotificationKeys.signature]) and prompt
      *   intent just before the prompt starts. The
@@ -412,6 +414,7 @@ class BiometricActivityLauncher(
         subtitle: String,
         showOnLockScreen: Boolean = false,
         keyAlias: String? = null,
+        signatureAlgorithm: String? = null,
         onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> }
     ): ByteArray {
         check(isRegistered) {
@@ -430,7 +433,8 @@ class BiometricActivityLauncher(
                 title = title,
                 subtitle = subtitle,
                 showOnLockScreen = showOnLockScreen,
-                keyAlias = keyAlias
+                keyAlias = keyAlias,
+                signatureAlgorithm = signatureAlgorithm
             )
             val key = NotificationKeys.signature(requestId)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

@@ -31,6 +31,21 @@ import kotlin.coroutines.cancellation.CancellationException
 class CosignNotApprovedException(message: String) : Exception(message)
 
 /**
+ * One co-signature as the owner is asked for it: the key [keyId], under
+ * Keystore alias [keyAlias], signs exactly [digest] with
+ * [signatureAlgorithm] (a JCA name).
+ */
+class CosignOperation(
+    val keyId: String,
+    val keyAlias: String,
+    digest: ByteArray,
+    val signatureAlgorithm: String
+) {
+    /** A copy taken at construction, so the caller's array cannot change it. */
+    val digest: ByteArray = digest.copyOf()
+}
+
+/**
  * Asks the owner to approve co-signatures (#177), each as one entry in the
  * process-wide [PromptOwnership] queue that every other prompt (FIDO2,
  * attestation, signing) takes its turn in.
@@ -64,15 +79,58 @@ class CosignApprovalPrompts(
         subtitle: String,
         locked: Boolean,
         onLaunch: (key: String, prompt: Intent) -> Unit = { _, _ -> }
-    ) {
+    ) = answered(onLaunch) { onTurn ->
+        launcher.requestAuthentication(
+            title = title,
+            subtitle = subtitle,
+            showOnLockScreen = locked,
+            onLaunch = onTurn
+        )
+    }
+
+    /**
+     * Signs [operation] in the owner's prompt and returns the signature.
+     *
+     * The approval is the signature: the prompt's `BiometricPrompt` holds a
+     * `CryptoObject` over [CosignOperation.keyAlias]'s private key, and only
+     * the authenticated object signs, over exactly [CosignOperation.digest].
+     * A key that needs the owner for every use (a per-operation key) signs
+     * nothing without that prompt, so no approval of another payload, and no
+     * approval given apart from the signature, can make it sign. Refusals and
+     * deadlines are as for [approve].
+     */
+    suspend fun sign(
+        operation: CosignOperation,
+        title: String,
+        subtitle: String,
+        locked: Boolean,
+        onLaunch: (key: String, prompt: Intent) -> Unit = { _, _ -> }
+    ): ByteArray = answered(onLaunch) { onTurn ->
+        launcher.requestCryptoSignature(
+            credentialId = operation.keyId,
+            dataHash = operation.digest.copyOf(),
+            title = title,
+            subtitle = subtitle,
+            showOnLockScreen = locked,
+            keyAlias = operation.keyAlias,
+            signatureAlgorithm = operation.signatureAlgorithm,
+            onLaunch = onTurn
+        )
+    }
+
+    /**
+     * Runs one prompt [request], giving the owner [timeoutMs] from its start
+     * to answer; [request] passes its launch callback the turn's key and
+     * prompt intent.
+     */
+    private suspend fun <T> answered(
+        onLaunch: (key: String, prompt: Intent) -> Unit,
+        request: suspend (onTurn: (key: String, prompt: Intent) -> Unit) -> T
+    ): T {
         val timedOut = AtomicBoolean(false)
         try {
-            coroutineScope {
-                launcher.requestAuthentication(
-                    title = title,
-                    subtitle = subtitle,
-                    showOnLockScreen = locked
-                ) { key, prompt ->
+            return coroutineScope {
+                val answer = request { key, prompt ->
                     onLaunch(key, prompt)
                     // The owner's time to answer starts with the prompt. Running
                     // out withdraws the request, which settles its queue entry.
@@ -83,6 +141,7 @@ class CosignApprovalPrompts(
                     }
                 }
                 coroutineContext.cancelChildren()
+                answer
             }
         } catch (e: CancellationException) {
             if (timedOut.get()) throw CosignNotApprovedException("no answer within ${timeoutMs / 1000} s")

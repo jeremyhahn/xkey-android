@@ -1260,7 +1260,7 @@ class RequestHandler(
         // Approval prompts take turns, so another creation of this id can pass
         // this check while this one waits; the reservation refuses it until
         // this creation ends.
-        val reservation = "key:${genParams.keyId}"
+        val reservation = keyLockId(genParams.keyId)
         if (keystoreManager.generalKeyExists(genParams.keyId) || !keyIds.tryReserve(reservation)) {
             throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
         }
@@ -1633,24 +1633,25 @@ class RequestHandler(
                 notice.close()
             }
         }
-        val signingKey = if (approved && selected != null) revalidateApprovedKey(selected) else selected?.row
         if (approved && selected == null && !keystoreManager.generalKeyExists(signParams.keyId)) {
             throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
         }
 
-        // `algorithm` is an optional override; default to the key's own
-        // algorithm from the key store.
-        val signAlgorithm = signParams.algorithm.ifEmpty {
-            signingKey?.algorithm
-                ?: throw ProtocolException(
-                    "Missing 'algorithm' and key has no recorded algorithm",
-                    errorCode = ErrorCodes.INVALID_PARAMS
-                )
+        // The key is rechecked and signed with under its lock.
+        val (signAlgorithm, signature, durationMs) = useApprovedKeyOrAlias(selected, signParams.keyId) { signingKey ->
+            // `algorithm` is an optional override; default to the key's own
+            // algorithm from the key store.
+            val signAlgorithm = signParams.algorithm.ifEmpty {
+                signingKey?.algorithm
+                    ?: throw ProtocolException(
+                        "Missing 'algorithm' and key has no recorded algorithm",
+                        errorCode = ErrorCodes.INVALID_PARAMS
+                    )
+            }
+            val startTime = System.currentTimeMillis()
+            val signature = keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm)
+            Triple(signAlgorithm, signature, System.currentTimeMillis() - startTime)
         }
-
-        val startTime = System.currentTimeMillis()
-        val signature = keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm)
-        val durationMs = System.currentTimeMillis() - startTime
 
         // Record usage
         keyDao.recordUsage(signParams.keyId)
@@ -2030,13 +2031,17 @@ class RequestHandler(
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
 
-        // Delete from Android Keystore and the software key store (only one
-        // of the two will actually hold the key).
-        keystoreManager.deleteGeneralKey(keyId)
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
+        // Under the key's lock, so an approved use already rechecking the key
+        // finishes with it before it goes.
+        keyIds.withKeyLock(keyLockId(keyId)) {
+            // Delete from Android Keystore and the software key store (only one
+            // of the two will actually hold the key).
+            keystoreManager.deleteGeneralKey(keyId)
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
 
-        // Delete from unified key store
-        keyDao.deleteByKeyId(keyId)
+            // Delete from unified key store
+            keyDao.deleteByKeyId(keyId)
+        }
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
@@ -3169,9 +3174,9 @@ class RequestHandler(
         // waited for its approval. Reload the credential under its lock and
         // hold the lock across the counter increment, the signature and the
         // counter write, so each assertion signs a distinct, increasing count.
-        val (newSignCount, authData, signature) = keyIds.withKeyLock("key:${assertionParams.credentialId}") {
-            // Still the passkey the owner approved; its counter may have moved.
-            val current = revalidateApprovedKey(asApproved)
+        // Still the passkey the owner approved (its row was read by this id);
+        // its counter may have moved.
+        val (newSignCount, authData, signature) = useApprovedKey(asApproved) { current ->
             if (!canShareKeyWithPeer(current, peerPublicKeyHex)) {
                 throw ProtocolException(
                     "Credential is not shareable with this peer",
@@ -3790,8 +3795,8 @@ class RequestHandler(
      * be deleted, re-policied or replaced under its id or keystore alias
      * meanwhile; what the owner approved is the row and the alias's public
      * key read before the prompt ([approvalSnapshot]), so the key is used
-     * only while it is still that key ([isSameKeyAs], same key material). Every approval-gated
-     * use of a stored key calls this between the approval and the use.
+     * only while it is still that key ([isSameKeyAs], same key material). Called only by
+     * [useApprovedKey], under the key's lock.
      *
      * @throws ProtocolException with [ErrorCodes.KEY_NOT_FOUND] when the key
      * is gone, or [ErrorCodes.OPERATION_DENIED] when it changed.
@@ -3812,6 +3817,55 @@ class RequestHandler(
             )
         }
         return current
+    }
+
+    /**
+     * Runs [use] with the key [snapshot] names, once the owner has approved
+     * it: the one way an approval-gated operation reaches its key. The key's
+     * lock ([keyLockId], which key creation and deletion take too) is held
+     * from the recheck ([revalidateApprovedKey]) through the end of [use], so
+     * no replacement or deletion lands between the check and the signature.
+     */
+    private suspend fun <T> useApprovedKey(snapshot: ApprovalSnapshot, use: suspend (KeyEntity) -> T): T =
+        keyIds.withKeyLock(keyLockId(snapshot.row.keyId)) { use(revalidateApprovedKey(snapshot)) }
+
+    /**
+     * [useApprovedKey] for a key that may have no stored row: with no
+     * [snapshot], [use] gets null and still runs holding [keyId]'s lock.
+     */
+    private suspend fun <T> useApprovedKeyOrAlias(
+        snapshot: ApprovalSnapshot?,
+        keyId: String,
+        use: suspend (KeyEntity?) -> T
+    ): T = if (snapshot != null) {
+        useApprovedKey(snapshot) { use(it) }
+    } else {
+        keyIds.withKeyLock(keyLockId(keyId)) { use(null) }
+    }
+
+    /** The [keyIds] lock of stored key [keyId]: its creation, deletion and approved uses. */
+    private fun keyLockId(keyId: String) = "key:$keyId"
+
+    /**
+     * Whether [signature] is one the key whose X.509 [publicKeyDer] this is
+     * made over exactly [payload] with JCA [signatureAlgorithm].
+     */
+    private fun signedBy(
+        publicKeyDer: ByteArray,
+        signatureAlgorithm: String,
+        payload: ByteArray,
+        signature: ByteArray
+    ): Boolean = try {
+        val keyAlgorithm = if (signatureAlgorithm.endsWith("RSA")) "RSA" else "EC"
+        val publicKey = java.security.KeyFactory.getInstance(keyAlgorithm)
+            .generatePublic(java.security.spec.X509EncodedKeySpec(publicKeyDer))
+        java.security.Signature.getInstance(signatureAlgorithm).run {
+            initVerify(publicKey)
+            update(payload)
+            verify(signature)
+        }
+    } catch (e: Exception) {
+        false
     }
 
     /**
@@ -4087,13 +4141,45 @@ class RequestHandler(
             )
         val notice = OwnNotifications(operationType = "sign", rpName = null)
         val asApproved = approvalSnapshot(signingKey)
-        try {
-            approvals.approve(
-                title = "Co-sign request",
-                subtitle = "Approve co-signing hash ${contentHash.take(8)}",
-                locked = keyguardManager.isKeyguardLocked,
-                onLaunch = notice.onLaunch
+        val publicKeyDer = asApproved.publicKeyDer
+            ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
+        val title = "Co-sign request"
+        val subtitle = "Approve co-signing hash ${contentHash.take(8)}"
+        // A key that needs the owner for every use signs in the prompt itself:
+        // the owner's authentication unlocks a CryptoObject that signs exactly
+        // this hash, so the approval cannot be spent on another payload.
+        val perOperation = signingKey.authDurationSeconds == 0
+        val jcaAlgorithm = runCatching { KeystoreManager.jcaSignatureAlgorithm(signingKey.algorithm) }.getOrNull()
+        if (perOperation && jcaAlgorithm == null) {
+            return Response.error(
+                request.id,
+                ErrorCodes.SIGNING_FAILED,
+                "Co-sign failed: unsupported algorithm ${signingKey.algorithm}"
             )
+        }
+        val promptSignature: ByteArray? = try {
+            if (perOperation) {
+                approvals.sign(
+                    CosignOperation(
+                        keyId = signingKey.keyId,
+                        keyAlias = KeystoreManager.generalKeyAlias(signingKey.keyId),
+                        digest = hashBytes,
+                        signatureAlgorithm = jcaAlgorithm!!
+                    ),
+                    title = title,
+                    subtitle = subtitle,
+                    locked = keyguardManager.isKeyguardLocked,
+                    onLaunch = notice.onLaunch
+                )
+            } else {
+                approvals.approve(
+                    title = title,
+                    subtitle = subtitle,
+                    locked = keyguardManager.isKeyguardLocked,
+                    onLaunch = notice.onLaunch
+                )
+                null
+            }
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -4106,17 +4192,35 @@ class RequestHandler(
         } finally {
             notice.close()
         }
-        // The owner approved the key as it was when the prompt went up.
-        val approvedKey = revalidateApprovedKey(asApproved)
 
-        // Sign the content hash
-        return try {
+        // The owner approved the key as it was when the prompt went up; it is
+        // rechecked and used under its lock, so nothing replaces it meanwhile.
+        return useApprovedKey(asApproved) { approvedKey ->
+            val signatureBytes = if (promptSignature != null) {
+                // The prompt signed with whatever key its alias held by then:
+                // only the approved key's signature over this hash is answered.
+                if (!signedBy(publicKeyDer, jcaAlgorithm!!, hashBytes, promptSignature)) {
+                    throw ProtocolException(
+                        "The co-signature is not the approved key's signature over this hash",
+                        errorCode = ErrorCodes.OPERATION_DENIED
+                    )
+                }
+                promptSignature
+            } else {
+                try {
+                    keystoreManager.signWithAlgorithm(approvedKey.keyId, hashBytes, approvedKey.algorithm)
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Co-sign failed", e)
+                    return@useApprovedKey Response.error(
+                        request.id,
+                        ErrorCodes.SIGNING_FAILED,
+                        "Co-sign failed: ${e.message}"
+                    )
+                }
+            }
             // The fingerprint answered is of the key approved and rechecked.
-            val publicKeyDer = asApproved.publicKeyDer
-                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
-            val signatureBytes = keystoreManager.signWithAlgorithm(
-                approvedKey.keyId, hashBytes, approvedKey.algorithm
-            )
             val fingerprint = computeFingerprint(publicKeyDer)
 
             AuditLogger.logCoSignReceived(
@@ -4131,9 +4235,6 @@ class RequestHandler(
                 put("signerName", approvedKey.label.ifEmpty { approvedKey.keyId })
             }
             Response.success(request.id, result)
-        } catch (e: Exception) {
-            Log.e(TAG, "Co-sign failed", e)
-            Response.error(request.id, ErrorCodes.SIGNING_FAILED, "Co-sign failed: ${e.message}")
         }
     }
 
