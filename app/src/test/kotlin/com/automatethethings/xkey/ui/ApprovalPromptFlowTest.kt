@@ -122,6 +122,8 @@ class ApprovalPromptFlowTest {
         coEvery { keyDao.getByKeyId(keyId) } answers { key() }
         // The policy store (#193) over the same stored row.
         val policyDao = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true)
+        // No key has a pending deletion.
+        io.mockk.coEvery { policyDao.deletion(any()) } returns null
         coEvery { policyDao.keyInstance(keyId) } returns 1L
         coEvery { policyDao.storedPolicy(keyId) } answers { stored }
         coEvery { policyDao.policyRevision(keyId) } answers { storedRevision }

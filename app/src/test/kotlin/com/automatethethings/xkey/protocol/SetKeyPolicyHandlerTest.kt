@@ -167,6 +167,8 @@ class SetKeyPolicyHandlerTest {
         // The policy store (#193) over the same stored row: its writes are
         // the ones these tests watch.
         policyDao = mockk(relaxed = true)
+        // No key has a pending deletion.
+        io.mockk.coEvery { policyDao.deletion(any()) } returns null
         coEvery { policyDao.keyInstance(keyId) } answers { stored?.let { storedRowId } }
         coEvery { policyDao.storedPolicy(keyId) } answers { stored }
         coEvery { policyDao.policyRevision(keyId) } answers { stored?.let { storedRevision } }
