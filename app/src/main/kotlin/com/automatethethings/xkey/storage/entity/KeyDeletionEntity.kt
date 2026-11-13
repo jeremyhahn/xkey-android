@@ -28,6 +28,10 @@ import androidx.room.PrimaryKey
  * [keyInstance] is the deleted `keys.id` (0 when the material had no row).
  * It outlives that row, so it has no foreign key. A key generated again
  * under [keyId] before the replay keeps its material.
+ *
+ * [generation] names the exact material the delete owes, read under the
+ * key's material lock before the row delete (#193 r12): the replay deletes
+ * that generation only, never whatever is stored under the id by then.
  */
 @Entity(tableName = "key_deletions")
 data class KeyDeletionEntity(
@@ -40,5 +44,13 @@ data class KeyDeletionEntity(
 
     /** The deleted row's `source`, which names where its material lives. */
     @ColumnInfo(name = "source")
-    val source: String?
+    val source: String?,
+
+    /**
+     * The material generation the delete owes (the app's encoding is
+     * `keyMaterialGeneration`'s); null only for a tombstone written before
+     * it was recorded, which owes no material it can name.
+     */
+    @ColumnInfo(name = "generation")
+    val generation: String? = null
 )

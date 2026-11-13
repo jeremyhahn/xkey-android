@@ -2077,9 +2077,8 @@ class KeyDetailActivity : AppCompatActivity() {
             // With its policy row and grant rows, in one transaction (#193);
             // the material only once the rows of this key row are deleted,
             // in the store's serialisation of its material (#193 r8).
-            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore, material = {
-                com.automatethethings.xkey.storage.deleteKeyMaterial(this@KeyDetailActivity, it, key.source)
-            })
+            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore, material =
+                com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyDetailActivity))
             finish()
         }
     }

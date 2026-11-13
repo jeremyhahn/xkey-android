@@ -102,7 +102,8 @@ class KeyPolicyMigrationTest {
             "no key_deletions table: $statements",
             statements.any {
                 it.startsWith("CREATE TABLE IF NOT EXISTS `key_deletions`") && "`key_instance` INTEGER NOT NULL" in it &&
-                    "PRIMARY KEY(`key_id`)" in it
+                    "PRIMARY KEY(`key_id`)" in it &&
+                    "`generation` TEXT" in it
             }
         )
     }

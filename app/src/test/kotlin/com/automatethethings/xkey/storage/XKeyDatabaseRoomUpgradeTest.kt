@@ -108,7 +108,7 @@ class XKeyDatabaseRoomUpgradeTest {
          * 2.7.0 in #42, holds 346118e31d0992f85496533bbc1b5d5b, which 2.8.5
          * reproduced for the v12 entities.)
          */
-        const val CURRENT_IDENTITY_HASH = "9131d18aa77079c253ca6bd2ee494e1f"
+        const val CURRENT_IDENTITY_HASH = "4767700443a01fcd0b33dbcf84d08b5d"
 
         /** The migrations `XKeyDatabase.buildDatabase` registers, in its order. */
         val APP_MIGRATIONS = listOf(

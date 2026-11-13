@@ -456,7 +456,7 @@ object LegacySchemas {
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_key_policies_key_instance` ON `key_policies` (`key_instance`)",
             "CREATE TRIGGER IF NOT EXISTS `keys_policy_revision_forward` AFTER UPDATE OF `sharing_policy`, `policy_revision` ON `keys` FOR EACH ROW WHEN NEW.`policy_revision` <= OLD.`policy_revision` BEGIN UPDATE `keys` SET `policy_revision` = OLD.`policy_revision` + 1 WHERE `id` = NEW.`id`; END",
             "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-            "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '9131d18aa77079c253ca6bd2ee494e1f')"
+            "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '4767700443a01fcd0b33dbcf84d08b5d')"
         )
     ).let {
         // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim

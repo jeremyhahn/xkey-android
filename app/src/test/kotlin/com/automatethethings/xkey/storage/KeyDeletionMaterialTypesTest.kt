@@ -21,6 +21,7 @@ import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
@@ -115,17 +116,23 @@ class KeyDeletionMaterialTypesTest {
 
     private fun held(id: String) = KeyPolicyStore.KeyMaterialHeld(id)
 
+    /** A delete of [id]'s material as it is now, as the store records and runs it. */
+    private fun delete(id: String, source: String): Boolean {
+        val generation = readKeyMaterialGeneration(context, held(id), source, keystore)
+        return deleteKeyMaterial(context, held(id), KeyDeletionEntity(id, 1L, source, generation), keystore)
+    }
+
     @Test
     fun anEcCredentialKeyIsDeleted() {
         keystoreKey("xkey_credential_k", certificate = true)
-        assertTrue(deleteKeyMaterial(context, held("k"), "android", keystore))
+        assertTrue(delete("k", "android"))
         assertTrue(entries.isEmpty())
     }
 
     @Test
     fun anRsaGeneralKeyIsDeleted() {
         keystoreKey("xkey_key_k", certificate = true)
-        assertTrue(deleteKeyMaterial(context, held("k"), "android", keystore))
+        assertTrue(delete("k", "android"))
         assertTrue(entries.isEmpty())
     }
 
@@ -134,8 +141,8 @@ class KeyDeletionMaterialTypesTest {
     fun aSymmetricKeystoreKeyIsDeleted() {
         keystoreKey("xkey_key_aes", certificate = false)
         keystoreKey("xkey_key_hmac", certificate = false)
-        assertTrue(deleteKeyMaterial(context, held("aes"), "android", keystore))
-        assertTrue(deleteKeyMaterial(context, held("hmac"), "android", keystore))
+        assertTrue(delete("aes", "android"))
+        assertTrue(delete("hmac", "android"))
         assertTrue(entries.isEmpty())
     }
 
@@ -143,14 +150,14 @@ class KeyDeletionMaterialTypesTest {
     @Test
     fun anEd25519KeyIsDeleted() {
         ed25519["xkey_key_k"] = "c2VjcmV0"
-        assertTrue("the deleter reported an Ed25519 key it cannot delete", deleteKeyMaterial(context, held("k"), "android", keystore))
+        assertTrue("the deleter reported an Ed25519 key it cannot delete", delete("k", "android"))
         assertTrue("the Ed25519 key is still stored", ed25519.isEmpty())
     }
 
     @Test
     fun aSoftwareKeyIsDeleted() {
         softwareKey("k")
-        assertTrue(deleteKeyMaterial(context, held("k"), "android", keystore))
+        assertTrue(delete("k", "android"))
         assertFalse(SoftwareKeyStore(context).contains("k"))
     }
 
@@ -160,7 +167,7 @@ class KeyDeletionMaterialTypesTest {
         keystoreKey("xkey_key_k", certificate = false)
         ed25519["xkey_key_k"] = "c2VjcmV0"
         softwareKey("k")
-        assertTrue(deleteKeyMaterial(context, held("k"), "android", keystore))
+        assertTrue(delete("k", "android"))
         assertTrue(entries.isEmpty())
         assertTrue(ed25519.isEmpty())
         assertFalse(SoftwareKeyStore(context).contains("k"))
@@ -177,7 +184,7 @@ class KeyDeletionMaterialTypesTest {
                 every { commit() } returns false
             }
         }
-        assertFalse(deleteKeyMaterial(context, held("k"), "android", keystore))
+        assertFalse(delete("k", "android"))
     }
 
     /** An internal key named like the user key's id stays. */
@@ -186,7 +193,7 @@ class KeyDeletionMaterialTypesTest {
         keystoreKey("xkey_key_xkey_seal_store_key", certificate = false)
         keystoreKey("xkey_seal_store_key", certificate = false)
         ed25519["xkey_seal_store_key"] = "c2VjcmV0"
-        assertTrue(deleteKeyMaterial(context, held("xkey_seal_store_key"), "android", keystore))
+        assertTrue(delete("xkey_seal_store_key", "android"))
         assertEquals(setOf("xkey_seal_store_key"), entries.keys)
         assertEquals(setOf("xkey_seal_store_key"), ed25519.keys)
 
@@ -200,7 +207,7 @@ class KeyDeletionMaterialTypesTest {
     @Test
     fun aDaemonKeyHoldsNoLocalMaterial() {
         keystoreKey("xkey_key_k", certificate = true)
-        assertTrue(deleteKeyMaterial(context, held("k"), "xkmsd", keystore))
+        assertTrue(delete("k", "xkmsd"))
         assertEquals(setOf("xkey_key_k"), entries.keys)
     }
 
@@ -225,5 +232,25 @@ class KeyDeletionMaterialTypesTest {
 
         assertTrue(deleteKeyMaterialGeneration(context, "k", old, keystore))
         assertEquals("a delete of the old generation reached the new one", now, keyMaterialGeneration(context, "k", keystore))
+    }
+
+    /**
+     * Round 12 (2): a tombstone's delete removes the generation it recorded,
+     * never what the alias holds now: a legacy credential generated again
+     * under the alias after the tombstone survives its replay.
+     */
+    @Test
+    fun aTombstoneLeavesACredentialGeneratedAgainUnderItsAlias() {
+        keystoreKey("xkey_credential_k", certificate = true)
+        val tombstone = KeyDeletionEntity("k", 1L, "android", readKeyMaterialGeneration(context, held("k"), "android", keystore))
+        keystoreKey("xkey_credential_k", certificate = true)
+        val now = entries.getValue("xkey_credential_k")
+
+        assertTrue(deleteKeyMaterial(context, held("k"), tombstone, keystore))
+        assertEquals("the replay deleted the credential generated after it", now, entries["xkey_credential_k"])
+
+        // A tombstone that recorded no generation deletes nothing.
+        assertTrue(deleteKeyMaterial(context, held("k"), KeyDeletionEntity("k", 1L, "android", null), keystore))
+        assertEquals(now, entries["xkey_credential_k"])
     }
 }

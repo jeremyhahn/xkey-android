@@ -415,7 +415,7 @@ class KeySharingPeers(
             keyId: String,
             instance: Long,
             store: KeyPolicyStore,
-            material: com.automatethethings.xkey.storage.MaterialDelete = { true }
+            material: com.automatethethings.xkey.storage.KeyMaterial = com.automatethethings.xkey.storage.KeyMaterial.NONE
         ): Boolean =
             accepted(acceptedEdits) {
                 store.deleteKey(keyId, instance, material).also { if (it) settle { it.keyId == keyId } }

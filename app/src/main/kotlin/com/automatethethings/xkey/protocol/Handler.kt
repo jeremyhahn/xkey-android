@@ -629,7 +629,12 @@ class RequestHandler(
                 if (keystoreManager.keyExists(generateParams.credentialId)) {
                     throw credentialExists()
                 }
-                createCredential(request, generateParams, authDurationSeconds)
+                // In the store's serialisation of the id's material, as
+                // local.generateKey: an owed delete under the id is settled
+                // first, and none ever reaches the credential made here.
+                keyPolicyStore.withKeyMaterial(generateParams.credentialId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) { held ->
+                    createCredential(request, generateParams, authDurationSeconds, held)
+                }
             }
         } finally {
             keyIds.release(reservation)
@@ -675,11 +680,13 @@ class RequestHandler(
         }
     }
 
-    /** Creates an approved `generateKey` credential; the caller holds its id's lock. */
+    /** Creates an approved `generateKey` credential; [held] proves its id's material lock. */
+    @Suppress("UNUSED_PARAMETER")
     private suspend fun createCredential(
         request: Request,
         generateParams: GenerateKeyParams,
-        authDurationSeconds: Int
+        authDurationSeconds: Int,
+        held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld
     ): Response {
         // Generate the key with appropriate authentication duration
         val cosePublicKey = keystoreManager.generateKeyWithAuthDuration(
@@ -2044,9 +2051,7 @@ class RequestHandler(
             return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "Key $keyId is not a user key; not deleted")
         }
         val entity = keyDao.getByKeyId(keyId)
-        val material: com.automatethethings.xkey.storage.MaterialDelete = {
-            com.automatethethings.xkey.storage.deleteKeyMaterial(context, it, entity?.source, keystoreManager)
-        }
+        val material = com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)
         if (entity == null) {
             // No key row: the material alone, in the store's serialisation,
             // and only if no key was generated under the id meanwhile (#193 r8).

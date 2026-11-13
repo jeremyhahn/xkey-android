@@ -136,7 +136,7 @@ class KeyStoreSyncManagerTest {
         coEvery { keyDao.getAll() } returns emptyList()
 
         val store = tables.store()
-        assertTrue(store.deleteMaterial("general-1") { false })
+        assertTrue(store.deleteMaterial("general-1", materialDelete { false }))
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, store).syncAll()
 
@@ -157,7 +157,7 @@ class KeyStoreSyncManagerTest {
         coEvery { keyDao.getAll() } returns emptyList()
 
         val store = tables.store()
-        assertTrue(store.deleteMaterial("cred-1") { false })
+        assertTrue(store.deleteMaterial("cred-1", materialDelete { false }))
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, store).syncAll()
 
@@ -179,7 +179,7 @@ class KeyStoreSyncManagerTest {
         var deletion: kotlinx.coroutines.Deferred<Boolean>? = null
         coEvery { keyDao.insert(match { it.keyId == "general-1" }) } coAnswers {
             // A delete of the id starts while the sync's insert is landing.
-            deletion = async(UnconfinedTestDispatcher(testScheduler)) { store.deleteMaterial("general-1") { false } }
+            deletion = async(UnconfinedTestDispatcher(testScheduler)) { store.deleteMaterial("general-1", materialDelete { false }) }
             tables.addKey("general-1", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
         }
 

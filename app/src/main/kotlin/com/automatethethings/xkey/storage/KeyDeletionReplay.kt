@@ -18,17 +18,20 @@ import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
 /**
- * The app's one [MaterialDelete] (#193 r9, r10): deletes [held]'s key
- * material wherever it lives, of every type the app stores: the Android
- * Keystore entries (EC, RSA, AES, HMAC) and the Ed25519 software keys of
- * the key's user-key namespace ([KeystoreManager.userKeyAliases]), and the
- * software key store; it returns true only once none holds any of it. A key from the KMS
- * daemon (`xkmsd`) holds no local material. Callable only under the key's
- * [KeyPolicyStore.withKeyMaterial] lock.
+ * The app's one material delete (#193 r9, r10, r12): deletes the material
+ * generation [tombstone] recorded for [held]'s key wherever it lives, of
+ * every type the app stores: the Android Keystore entries (EC, RSA, AES,
+ * HMAC) and the Ed25519 software keys of the key's user-key namespace
+ * ([KeystoreManager.userKeyAliases]), and the software key store; it
+ * returns true only once none holds any of that generation. Material
+ * written under the id since carries another generation and is left. A
+ * key from the KMS daemon (`xkmsd`) holds no local material. Callable only
+ * under the key's [KeyPolicyStore.withKeyMaterial] lock.
  *
  * Every key delete, direct or replayed, reaches material only here, so
  * this is where an internal key is refused (#193 r11): an id that resolves
@@ -39,12 +42,42 @@ import kotlinx.coroutines.withContext
 fun deleteKeyMaterial(
     context: Context,
     held: KeyPolicyStore.KeyMaterialHeld,
-    source: String?,
+    tombstone: KeyDeletionEntity,
     keystore: KeystoreManager = KeystoreManager(context)
 ): Boolean {
-    if (source == "xkmsd") return true
+    if (tombstone.source == "xkmsd") return true
     if (isInternalKey(held.keyId, keystore)) throw InternalKeyException(held.keyId)
-    return deleteKeyMaterialGeneration(context, held.keyId, keyMaterialGeneration(context, held.keyId, keystore), keystore)
+    val generation = tombstone.generation ?: run {
+        // Written before generations were recorded: it names no material,
+        // and deleting whatever is under the id now could be a later key's.
+        Log.w(TAG, "Deletion of ${held.keyId} recorded no material generation; nothing deleted")
+        return true
+    }
+    return deleteKeyMaterialGeneration(context, held.keyId, decodeGeneration(generation), keystore)
+}
+
+/**
+ * The encoded [keyMaterialGeneration] of [held]'s key, for its tombstone:
+ * read under the key's material lock. Throws [InternalKeyException] for an
+ * internal key, and any backend's read failure: the delete is refused.
+ */
+fun readKeyMaterialGeneration(
+    context: Context,
+    held: KeyPolicyStore.KeyMaterialHeld,
+    source: String?,
+    keystore: KeystoreManager = KeystoreManager(context)
+): String {
+    if (source == "xkmsd") return encodeGeneration(emptyMap())
+    if (isInternalKey(held.keyId, keystore)) throw InternalKeyException(held.keyId)
+    return encodeGeneration(keyMaterialGeneration(context, held.keyId, keystore))
+}
+
+private fun encodeGeneration(generation: Map<String, String>): String =
+    org.json.JSONObject(generation as Map<*, *>).toString()
+
+private fun decodeGeneration(encoded: String): Map<String, String> {
+    val json = org.json.JSONObject(encoded)
+    return json.keys().asSequence().associateWith { json.getString(it) }
 }
 
 /**
@@ -54,22 +87,12 @@ fun deleteKeyMaterial(
  * its software key store record ([SoftwareKeyStore.generation], entry
  * [SOFTWARE_ENTRY]). Each entry's tag changes when its material is
  * replaced, so a delete of this generation never reaches material written
- * under the id since. Empty when nothing is held.
+ * under the id since. Empty when nothing is held; throws if a backend
+ * cannot be read.
  */
 fun keyMaterialGeneration(context: Context, keyId: String, keystore: KeystoreManager): Map<String, String> {
-    val generation = LinkedHashMap<String, String>()
-    // A backend that cannot be read is owed as a whole ([UNREAD]): its
-    // delete is reported failed, and never stops the other's.
-    try {
-        generation.putAll(keystore.userKeyGeneration(keyId))
-    } catch (e: Exception) {
-        generation[KEYSTORE_UNREAD] = UNREAD
-    }
-    try {
-        SoftwareKeyStore(context).generation(keyId)?.let { generation[SOFTWARE_ENTRY] = it }
-    } catch (e: Exception) {
-        generation[SOFTWARE_ENTRY] = UNREAD
-    }
+    val generation = LinkedHashMap(keystore.userKeyGeneration(keyId))
+    SoftwareKeyStore(context).generation(keyId)?.let { generation[SOFTWARE_ENTRY] = it }
     return generation
 }
 
@@ -88,20 +111,13 @@ fun deleteKeyMaterialGeneration(
 ): Boolean {
     val keystoreGone = try {
         val held = generation - SOFTWARE_ENTRY
-        when {
-            KEYSTORE_UNREAD in held -> false
-            held.isEmpty() -> true
-            else -> keystore.deleteUserKeyGeneration(keyId, held).isEmpty()
-        }
+        held.isEmpty() || keystore.deleteUserKeyGeneration(keyId, held).isEmpty()
     } catch (e: Exception) {
         false
     }
     val softwareGone = try {
-        when (val tag = generation[SOFTWARE_ENTRY]) {
-            null -> true
-            UNREAD -> false
-            else -> SoftwareKeyStore(context).deleteGeneration(keyId, tag)
-        }
+        val tag = generation[SOFTWARE_ENTRY]
+        tag == null || SoftwareKeyStore(context).deleteGeneration(keyId, tag)
     } catch (e: Exception) {
         false
     }
@@ -111,11 +127,7 @@ fun deleteKeyMaterialGeneration(
 /** [keyMaterialGeneration] entry of a software key store record. */
 const val SOFTWARE_ENTRY = "software"
 
-/** [keyMaterialGeneration] entry of a Keystore backend that could not be read. */
-private const val KEYSTORE_UNREAD = "keystore-unread"
-
-/** The tag of a backend whose generation could not be read. */
-private const val UNREAD = "unread"
+private const val TAG = "KeyDeletionReplay"
 
 /**
  * True if [keyId] resolves to a Keystore alias outside its user-key
@@ -128,21 +140,26 @@ fun isInternalKey(keyId: String, keystore: KeystoreManager): Boolean {
 }
 
 /**
- * The app's one [TombstoneDelete]: [deleteKeyMaterial] for a deletion
- * tombstone, replayed ([replayKeyDeletions]) or settled before a write
- * under its id ([KeyPolicyStore.withKeyMaterial]). A tombstone of an
- * internal key is refused with nothing deleted and dropped: no user
- * material is owed (#193 r11).
+ * The app's one [KeyMaterial]: [readKeyMaterialGeneration] for a delete's
+ * tombstone and [deleteKeyMaterial] for it, direct, replayed
+ * ([replayKeyDeletions]) or settled before a write under its id
+ * ([KeyPolicyStore.withKeyMaterial]). A tombstone of an internal key is
+ * refused with nothing deleted and dropped: no user material is owed
+ * (#193 r11).
  */
-fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null): TombstoneDelete {
+fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null): KeyMaterial {
     val manager by lazy { keystore ?: KeystoreManager(context) }
-    return { held, source ->
-        try {
-            deleteKeyMaterial(context, held, source, manager)
-        } catch (e: InternalKeyException) {
-            Log.w("KeyDeletionReplay", "Refused deleting internal key ${e.keyId}; its tombstone is dropped")
-            true
-        }
+    return object : KeyMaterial {
+        override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String =
+            readKeyMaterialGeneration(context, held, source, manager)
+
+        override suspend fun delete(held: KeyPolicyStore.KeyMaterialHeld, tombstone: KeyDeletionEntity): Boolean =
+            try {
+                deleteKeyMaterial(context, held, tombstone, manager)
+            } catch (e: InternalKeyException) {
+                Log.w(TAG, "Refused deleting internal key ${e.keyId}; its tombstone is dropped")
+                true
+            }
     }
 }
 
@@ -162,10 +179,10 @@ suspend fun replayKeyDeletions(context: Context, store: KeyPolicyStore, keystore
         // sync cancelled mid-replay never stops a delete between its lock
         // and its tombstone drop.
         val left = withContext(NonCancellable) { store.replayDeletions(keyMaterialDeleter(context, keystore)) }
-        if (left > 0) Log.w("KeyDeletionReplay", "$left key material deletes are still owed; replayed next time")
+        if (left > 0) Log.w(TAG, "$left key material deletes are still owed; replayed next time")
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (e: Exception) {
-        Log.e("KeyDeletionReplay", "Replaying key material deletes failed; replayed next time", e)
+        Log.e(TAG, "Replaying key material deletes failed; replayed next time", e)
     }
 }

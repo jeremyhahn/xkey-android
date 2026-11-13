@@ -296,18 +296,18 @@ class KeyPolicyStoreTest {
         val release = CompletableDeferred<Unit>()
 
         val delete = async {
-            store.deleteKey("k", old) {
+            store.deleteKey("k", old, materialDelete {
                 window.complete(Unit)
                 release.await()
                 material -= "k"
                 true
-            }
+            })
         }
         window.await()
 
         // The rows are gone; the key is generated again under its id.
         val regenerate = async {
-            store.withKeyMaterial("k", { _, _ -> true }) {
+            store.withKeyMaterial("k", tombstoneDelete { _, _ -> true }) {
                 material += "k"
                 store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS))
             }
@@ -333,11 +333,11 @@ class KeyPolicyStoreTest {
         val material = mutableSetOf("k")
         val store = store()
 
-        assertTrue(store.deleteKey("k", key) { throw IOException("keystore busy") })
+        assertTrue(store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
         assertEquals(null, tables.keyInstance("k"))
         assertTrue("the material lost its record", store.isDeletionPending("k"))
 
-        store.replayDeletions { held, _ -> material -= held.keyId; true }
+        store.replayDeletions(tombstoneDelete { held, _ -> material -= held.keyId; true })
         assertTrue("the replay left the material behind", "k" !in material)
         assertTrue("the tombstone outlived the material", !store.isDeletionPending("k"))
     }
@@ -348,7 +348,7 @@ class KeyPolicyStoreTest {
         val key = tables.addKey("k", SELECTED_PEERS)
         val material = mutableSetOf("k")
         try {
-            store().deleteKey("k", key) { throw ProcessDeath() }
+            store().deleteKey("k", key, materialDelete { throw ProcessDeath() })
             fail("the process did not die")
         } catch (expected: ProcessDeath) {
         }
@@ -356,7 +356,7 @@ class KeyPolicyStoreTest {
 
         val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
         assertTrue("the material lost its record across the restart", restarted.isDeletionPending("k"))
-        restarted.replayDeletions { held, _ -> material -= held.keyId; true }
+        restarted.replayDeletions(tombstoneDelete { held, _ -> material -= held.keyId; true })
         assertTrue("the replay left the material behind", "k" !in material)
         assertTrue(!restarted.isDeletionPending("k"))
     }
@@ -367,16 +367,55 @@ class KeyPolicyStoreTest {
         val key = tables.addKey("k", SELECTED_PEERS)
         val material = mutableSetOf("k")
         val store = store()
-        assertTrue(store.deleteKey("k", key) { throw IOException("keystore busy") })
+        assertTrue(store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
         // The write settles the owed delete first, then writes its own material.
-        store.withKeyMaterial("k", { held, _ -> material -= held.keyId; true }) {
+        store.withKeyMaterial("k", tombstoneDelete { held, _ -> material -= held.keyId; true }) {
             material += "k"
             store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS))
         }
 
-        store.replayDeletions { held, _ -> material -= held.keyId; true }
+        store.replayDeletions(tombstoneDelete { held, _ -> material -= held.keyId; true })
         assertTrue("the new key's material was deleted by the replay", "k" in material)
         assertTrue(!store.isDeletionPending("k"))
+    }
+
+    /**
+     * Round 12 (2): the tombstone records the generation it deletes, and the
+     * replay deletes only that generation: material written under the same
+     * id since (a credential generated again under the alias) is left, even
+     * by a writer that never settled the owed delete.
+     */
+    @Test
+    fun theReplayDeletesOnlyTheGenerationItTombstoned() = runBlocking {
+        val key = tables.addKey("k", SELECTED_PEERS)
+        // id to generation: what the backend holds now.
+        val material = mutableMapOf("k" to "first")
+        var reachable = false
+        val generations = object : KeyMaterial {
+            override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?) = material.getValue(held.keyId)
+            override suspend fun delete(held: KeyPolicyStore.KeyMaterialHeld, tombstone: com.automatethethings.xkey.storage.entity.KeyDeletionEntity): Boolean {
+                if (!reachable) throw IOException("keystore busy")
+                // A generation matching delete; one recorded as nothing deletes nothing.
+                if (tombstone.generation != null && material[held.keyId] == tombstone.generation) material -= held.keyId
+                return true
+            }
+        }
+        val store = store()
+        assertTrue(store.deleteKey("k", key, generations))
+        assertTrue(store.isDeletionPending("k"))
+
+        // A credential generated again under the alias, outside the store.
+        material["k"] = "second"
+        reachable = true
+        assertEquals(0, store.replayDeletions(generations))
+        assertEquals("the replay deleted a generation written after its tombstone", "second", material["k"])
+
+        // The generation it did tombstone is deleted.
+        material["k"] = "first"
+        tables.addKey("j", SELECTED_PEERS).let { reachable = false; material["j"] = "j1"; assertTrue(store.deleteKey("j", it, generations)) }
+        reachable = true
+        store.replayDeletions(generations)
+        assertTrue("the replay left the tombstoned generation", "j" !in material)
     }
 
     /**
@@ -392,16 +431,16 @@ class KeyPolicyStoreTest {
         val store = store()
 
         // The Keystore delete is refused; the software key is deleted.
-        assertTrue(store.deleteKey("k", key) { held -> software -= held.keyId; held.keyId !in keystore })
+        assertTrue(store.deleteKey("k", key, materialDelete { held -> software -= held.keyId; held.keyId !in keystore }))
         assertTrue("a tombstone dropped while the Keystore still holds the key", store.isDeletionPending("k"))
 
-        assertEquals(0, store.replayDeletions { held, _ -> keystore -= held.keyId; held.keyId !in keystore })
+        assertEquals(0, store.replayDeletions(tombstoneDelete { held, _ -> keystore -= held.keyId; held.keyId !in keystore }))
         assertTrue(!store.isDeletionPending("k"))
     }
 
     /**
      * Round 10 (4) bypass guard: every key material delete handed to the
-     * store is the app's one confirming deleter, [deleteKeyMaterial].
+     * store is the app's one confirming deleter, [keyMaterialDeleter].
      */
     @Test
     fun everyMaterialDeleteIsTheConfirmingDeleter() {
@@ -415,7 +454,7 @@ class KeyPolicyStoreTest {
         assertEquals(
             "a material delete that does not confirm every backend",
             emptyList<String>(),
-            callers.filter { "deleteKeyMaterial(" !in it.readText() }.map { it.name }
+            callers.filter { "keyMaterialDeleter(" !in it.readText() }.map { it.name }
         )
     }
 
@@ -464,11 +503,11 @@ class KeyPolicyStoreTest {
     @Test
     fun aWriteUnderATombstoneSettlesItFirstOrIsRefused() = runBlocking {
         val store = store()
-        assertTrue(store.deleteMaterial("k") { false })
+        assertTrue(store.deleteMaterial("k", materialDelete { false }))
         val written = mutableSetOf<String>()
 
         try {
-            store.withKeyMaterial("k", { _, _ -> false }) { written += "k" }
+            store.withKeyMaterial("k", tombstoneDelete { _, _ -> false }) { written += "k" }
             fail("a write landed under an owed delete")
         } catch (expected: KeyPolicyStore.DeletionPendingException) {
         }
@@ -476,9 +515,9 @@ class KeyPolicyStoreTest {
         assertTrue(store.isDeletionPending("k"))
 
         // A rowless import, as local.shareSymmetric writes one.
-        store.withKeyMaterial("k", { _, _ -> true }) { written += "k" }
+        store.withKeyMaterial("k", tombstoneDelete { _, _ -> true }) { written += "k" }
         assertTrue(!store.isDeletionPending("k"))
-        assertEquals(0, store.replayDeletions { held, _ -> written -= held.keyId; true })
+        assertEquals(0, store.replayDeletions(tombstoneDelete { held, _ -> written -= held.keyId; true }))
         assertTrue("the replay deleted a write made after its tombstone", "k" in written)
     }
 

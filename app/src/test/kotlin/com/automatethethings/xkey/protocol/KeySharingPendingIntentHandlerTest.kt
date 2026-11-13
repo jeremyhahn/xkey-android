@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.protocol
 
+import com.automatethethings.xkey.storage.materialDelete
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
@@ -486,8 +487,7 @@ class KeySharingPendingIntentHandlerTest {
     @Test
     fun aCancelledQueuedDeleteStillDeletesTheKeyMaterial() = runTest {
         val key = "k-delete-cancel"
-        mockkStatic(java.security.KeyStore::class)
-        every { java.security.KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
         tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
         // The key's Keystore alias, gone once deleted.
         val alias = "xkey_key_$key"
@@ -543,7 +543,7 @@ class KeySharingPendingIntentHandlerTest {
         every { keystore.resolveKeystoreAlias(internal) } returns internal
         every { keystore.deleteByAlias(any()) } returns true
         val store = store
-        assertTrue(store.deleteMaterial(internal) { false })
+        assertTrue(store.deleteMaterial(internal, materialDelete { false }))
         assertTrue(store.isDeletionPending(internal))
 
         com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
@@ -566,6 +566,7 @@ class KeySharingPendingIntentHandlerTest {
         every { keystore.userKeyGeneration(id) } answers { if (userHeld) mapOf("keystore:$userAlias" to "1") else emptyMap() }
         every { keystore.deleteUserKeyGeneration(id, any()) } answers { userHeld = false; emptyMap() }
         every { keystore.deleteByAlias(any()) } returns true
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
         tables.addKey(id, SharingPolicyType.PRIVATE)
 
         assertEquals(null, rpcDeleteKey(id).error)
@@ -573,6 +574,15 @@ class KeySharingPendingIntentHandlerTest {
         io.mockk.verify { keystore.deleteUserKeyGeneration(id, mapOf("keystore:$userAlias" to "1")) }
         io.mockk.verify(exactly = 0) { keystore.deleteByAlias(any()) }
     }
+
+    /** The app's deleter, recording the generation, whose delete does not confirm: the tombstone is owed. */
+    private fun owedDelete(): com.automatethethings.xkey.storage.KeyMaterial =
+        object : com.automatethethings.xkey.storage.KeyMaterial by com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystore) {
+            override suspend fun delete(
+                held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld,
+                tombstone: com.automatethethings.xkey.storage.entity.KeyDeletionEntity
+            ) = false
+        }
 
     /**
      * The software key store as a set of key ids, its files under [files]:
@@ -612,8 +622,8 @@ class KeySharingPendingIntentHandlerTest {
         val software = fakeSoftwareKeyStore(files)
         try {
             val store = store
-            assertTrue(store.deleteMaterial(key) { false })
             software += key
+            assertTrue(store.deleteMaterial(key, owedDelete()))
             // A write of another key under the same id holds its lock.
             val gate = CompletableDeferred<Unit>()
             val holder = async(UnconfinedTestDispatcher(testScheduler)) { store.lockKeyMaterial(key) { gate.await() } }
@@ -649,7 +659,7 @@ class KeySharingPendingIntentHandlerTest {
             // An earlier delete of the id whose material delete did not
             // confirm: its tombstone is owed.
             val store = store
-            assertTrue(store.deleteMaterial(key) { false })
+            assertTrue(store.deleteMaterial(key, owedDelete()))
             assertTrue(store.isDeletionPending(key))
 
             handler.setConnectedDevicePublicKeyHex(PEER_A)

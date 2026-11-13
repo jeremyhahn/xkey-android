@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 15,
-    "identityHash": "9131d18aa77079c253ca6bd2ee494e1f",
+    "identityHash": "4767700443a01fcd0b33dbcf84d08b5d",
     "entities": [
       {
         "tableName": "credential_metadata",
@@ -1209,7 +1209,7 @@
       },
       {
         "tableName": "key_deletions",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, `source` TEXT, PRIMARY KEY(`key_id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, `source` TEXT, `generation` TEXT, PRIMARY KEY(`key_id`))",
         "fields": [
           {
             "fieldPath": "keyId",
@@ -1227,6 +1227,11 @@
             "fieldPath": "source",
             "columnName": "source",
             "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "TEXT"
           }
         ],
         "primaryKey": {
@@ -1239,7 +1244,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '9131d18aa77079c253ca6bd2ee494e1f')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '4767700443a01fcd0b33dbcf84d08b5d')"
     ]
   }
 }

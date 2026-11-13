@@ -75,7 +75,8 @@ import java.util.concurrent.atomic.AtomicReference
  * - v14: Added `key_policies` table: one row per key holding its sharing
  *        policy state, written only by [KeyPolicyStore] (#193).
  * - v15: Added `key_deletions`: a tombstone per key row deleted before its
- *        material is gone, replayed at start-up (#193).
+ *        material is gone, with the material generation it owes, replayed
+ *        at start-up (#193).
  *
  * Usage:
  * ```kotlin
@@ -680,7 +681,7 @@ abstract class XKeyDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `key_deletions` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, " +
-                        "`source` TEXT, PRIMARY KEY(`key_id`))"
+                        "`source` TEXT, `generation` TEXT, PRIMARY KEY(`key_id`))"
                 )
             }
         }
