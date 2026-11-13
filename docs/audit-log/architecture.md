@@ -27,7 +27,10 @@ A failed sync, a locked password vault included, records one entry with
 `success = false` and `error_message` set, and zero merge counts. Its count is
 0 when nothing reached the peer; an outbound sync whose local merge fails after
 the desktop answered keeps the count the desktop acknowledged. `device_id` and `device_name` name
-the desktop. See [store-sync](../store-sync/architecture.md#audit).
+the desktop. Both inbound handlers audit through one path
+(`RequestHandler.auditedInboundSync`): the id comes from the connection alone,
+and `device_name` is null when the paired-device store cannot be read, so the
+sync still runs and is audited. See [store-sync](../store-sync/architecture.md#audit).
 
 ## Index Strategy
 

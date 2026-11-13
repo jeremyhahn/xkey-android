@@ -3235,72 +3235,53 @@ class RequestHandler(
      * returns the phone's credentials (with decrypted Base32 secrets, for
      * replication over the Noise channel) so the desktop can merge them back.
      */
-    private suspend fun handleSyncOATH(request: Request): Response {
-        val (peerId, peerName) = syncPeer()
-        return try {
-            val params = request.params ?: JSONObject()
-            val engine = com.automatethethings.xkey.sync.SyncEngine(context)
-            val counts = engine.mergeOath(params.optJSONArray("credentials") ?: org.json.JSONArray())
-            val remote = engine.gatherOath()
-            engine.markSynced()
-            AuditLogger.logOathSyncPerformed(
-                deviceId = peerId,
-                deviceName = peerName,
-                count = remote.length(),
-                direction = AuditLogger.SYNC_INBOUND,
-                added = counts.added,
-                updated = counts.updated,
-                skipped = counts.skipped,
-                success = true,
-                errorMessage = null
-            )
-            Response.success(request.id, JSONObject().apply {
-                put("added", counts.added)
-                put("updated", counts.updated)
-                put("skipped", counts.skipped)
-                put("remote", remote)
-            })
-        } catch (e: Exception) {
-            Log.e(TAG, "syncOATH failed", e)
-            AuditLogger.logOathSyncPerformed(
-                deviceId = peerId,
-                deviceName = peerName,
-                count = 0,
-                direction = AuditLogger.SYNC_INBOUND,
-                added = 0,
-                updated = 0,
-                skipped = 0,
-                success = false,
-                // The exception class only: a merge error's message may quote a credential.
-                errorMessage = "syncOATH failed: ${e.javaClass.simpleName}"
-            )
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncOATH failed: ${e.message}")
+    private suspend fun handleSyncOATH(request: Request): Response =
+        auditedInboundSync(request, "syncOATH", "credentials", AuditLogger::logOathSyncPerformed) { engine, items ->
+            engine.mergeOath(items) to engine.gatherOath()
         }
-    }
 
     /**
      * Syncs passwords: imports/updates the desktop's passwords into the
      * encrypted password store and returns the phone's passwords so the desktop
      * can merge them back.
      */
-    private suspend fun handleSyncPasswords(request: Request): Response {
-        val (peerId, peerName) = syncPeer()
+    private suspend fun handleSyncPasswords(request: Request): Response =
+        auditedInboundSync(request, "syncPasswords", "passwords", AuditLogger::logPasswordSyncPerformed) { engine, items ->
+            engine.mergePasswords(items) to engine.gatherPasswords()
+        }
+
+    /**
+     * The one path every inbound store sync runs and is audited through:
+     * [sync] merges the desktop's `[key]` items and gathers the phone's, and
+     * [record] writes exactly one entry, success or failure, for the
+     * desktop that asked. The peer id comes from the connection alone; its
+     * paired name is looked up inside this path and is null when the lookup
+     * fails, so an unreadable paired-device store neither blocks the sync nor
+     * drops its entry. A failed entry holds a local description or the
+     * exception class only: a merge error's message may quote an entry.
+     * A locked password vault answers `PASSWORD_STORE_LOCKED`; merge runs
+     * first and is refused before it writes, so the store is untouched.
+     */
+    private suspend fun auditedInboundSync(
+        request: Request,
+        label: String,
+        key: String,
+        record: (String?, String?, Int, String, Int, Int, Int, Boolean, String?) -> Unit,
+        sync: suspend (com.automatethethings.xkey.sync.SyncEngine, org.json.JSONArray) ->
+            Pair<com.automatethethings.xkey.sync.SyncEngine.ItemCounts, org.json.JSONArray>
+    ): Response {
+        val peerId = syncPeerId()
+        val peerName = syncPeerName(peerId)
+        fun failed(why: String) =
+            record(peerId, peerName, 0, AuditLogger.SYNC_INBOUND, 0, 0, 0, false, why)
         return try {
             val params = request.params ?: JSONObject()
             val engine = com.automatethethings.xkey.sync.SyncEngine(context)
-            val counts = engine.mergePasswords(params.optJSONArray("passwords") ?: org.json.JSONArray())
-            val remote = engine.gatherPasswords()
+            val (counts, remote) = sync(engine, params.optJSONArray(key) ?: org.json.JSONArray())
             engine.markSynced()
-            AuditLogger.logPasswordSyncPerformed(
-                deviceId = peerId,
-                deviceName = peerName,
-                count = remote.length(),
-                direction = AuditLogger.SYNC_INBOUND,
-                added = counts.added,
-                updated = counts.updated,
-                skipped = counts.skipped,
-                success = true,
-                errorMessage = null
+            record(
+                peerId, peerName, remote.length(), AuditLogger.SYNC_INBOUND,
+                counts.added, counts.updated, counts.skipped, true, null
             )
             Response.success(request.id, JSONObject().apply {
                 put("added", counts.added)
@@ -3309,40 +3290,31 @@ class RequestHandler(
                 put("remote", remote)
             })
         } catch (e: PasswordStoreLockedException) {
-            // Merge runs first and is refused before it writes, so a locked
-            // vault leaves the store untouched and exports nothing.
-            logFailedPasswordSync(peerId, peerName, "password store is locked")
+            failed("password store is locked")
             Response.error(request.id, ErrorCodes.PASSWORD_STORE_LOCKED, e.message ?: "password store is locked")
         } catch (e: Exception) {
-            Log.e(TAG, "syncPasswords failed", e)
-            // The exception class only: a merge error's message may quote an entry.
-            logFailedPasswordSync(peerId, peerName, "syncPasswords failed: ${e.javaClass.simpleName}")
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncPasswords failed: ${e.message}")
+            Log.e(TAG, "$label failed", e)
+            failed("$label failed: ${e.javaClass.simpleName}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "$label failed: ${e.message}")
         }
-    }
-
-    private fun logFailedPasswordSync(peerId: String?, peerName: String?, errorMessage: String) {
-        AuditLogger.logPasswordSyncPerformed(
-            deviceId = peerId,
-            deviceName = peerName,
-            count = 0,
-            direction = AuditLogger.SYNC_INBOUND,
-            added = 0,
-            updated = 0,
-            skipped = 0,
-            success = false,
-            errorMessage = errorMessage
-        )
     }
 
     /**
      * The desktop a sync request came from, for its audit entry: the peer of
-     * the connection it arrived on, else the served peer, with its paired name.
+     * the connection it arrived on, else the served peer. Reads no store.
      */
-    private suspend fun syncPeer(): Pair<String?, String?> {
-        val peer = currentCoroutineContext()[CallerSession]?.peerPublicKeyHex?.takeIf { it.isNotEmpty() }
+    private suspend fun syncPeerId(): String? =
+        currentCoroutineContext()[CallerSession]?.peerPublicKeyHex?.takeIf { it.isNotEmpty() }
             ?: connectedDevicePublicKeyHex
-        return peer to peer?.let { pairedDeviceRepository?.getDevice(it)?.deviceName }
+
+    /** [peerId]'s paired name, or null when it has none or the store cannot be read. */
+    private fun syncPeerName(peerId: String?): String? = peerId?.let {
+        try {
+            pairedDeviceRepository?.getDevice(it)?.deviceName
+        } catch (e: Exception) {
+            Log.w(TAG, "paired device name unavailable for the sync audit: ${e.javaClass.simpleName}")
+            null
+        }
     }
 
     /**
