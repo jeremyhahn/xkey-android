@@ -23,6 +23,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.content.IntentCompat
 import com.automatethethings.xkey.auth.SessionAuthManager
+import com.automatethethings.xkey.ble.DesktopSessionTracker
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
@@ -37,8 +38,12 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -321,5 +326,74 @@ class UsbAccessoryServerSlotTest {
         assertNull("the cleared server started a session", discarded!!.sessionJob)
         assertTrue("the cleared server registered a detach receiver", receivers.isEmpty())
         verify(exactly = 0) { usbManager.openAccessory(any()) }
+    }
+
+    @Test
+    fun `a clear while a reattach waits for the old teardown publishes nothing`() {
+        val oldTeardown = CompletableDeferred<Unit>()
+        val sessions = AtomicInteger()
+        coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers {
+            if (sessions.incrementAndGet() == 1) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    withContext(NonCancellable) { oldTeardown.await() }
+                }
+            } else {
+                awaitCancellation()
+            }
+        }
+
+        assertNotNull(attach())
+        assertTrue(waitFor(5_000) { sessions.get() == 1 })
+        broadcastDetach(accessory)
+        assertTrue(waitFor(5_000) { !slot.isActive })
+
+        // The reattach waits in the old session's teardown; the service shuts
+        // down (clear) before that teardown ends.
+        var second: UsbAccessoryServer? = null
+        val reattach = thread { second = attach() }
+        assertTrue("the reattach never waited for the teardown", waitFor(5_000) {
+            reattach.state == Thread.State.WAITING || reattach.state == Thread.State.TIMED_WAITING
+        })
+        slot.clear()
+        oldTeardown.complete(Unit)
+        reattach.join(10_000)
+
+        assertFalse(reattach.isAlive)
+        assertNull("an open pending across the clear published its server", second)
+        assertNull(slot.current())
+        verify(exactly = 1) { usbManager.openAccessory(any()) }
+        assertEquals("a session started after the clear", 1, sessions.get())
+    }
+
+    @Test
+    fun `the slot's states follow each new server, not the first one observed`() {
+        // Ready while the slot's current server is in its handshake: the key
+        // load these sessions wait in.
+        val tracker = DesktopSessionTracker {
+            slot.current()?.takeIf { it.first.state.value is UsbAccessoryState.Handshaking }
+        }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            // One observer for the service's lifetime, installed before any attach.
+            tracker.follow(scope, slot.states)
+
+            val a = attach()
+            assertNotNull(a)
+            assertTrue("A's handshake did not refresh the session", waitFor(5_000) { tracker.session.value != null })
+            broadcastDetach(accessory)
+            assertTrue("A's detach did not refresh the session", waitFor(5_000) { tracker.session.value == null })
+            runBlocking { withTimeout(5_000) { a!!.sessionJob?.join() } }
+
+            val b = attach()
+            assertNotNull(b)
+            assertNotSame(a, b)
+            assertTrue("B's handshake did not refresh the session", waitFor(5_000) { tracker.session.value != null })
+            broadcastDetach(accessory)
+            assertTrue("B's detach did not refresh the session", waitFor(5_000) { tracker.session.value == null })
+        } finally {
+            scope.cancel()
+        }
     }
 }

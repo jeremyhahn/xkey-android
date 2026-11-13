@@ -54,6 +54,9 @@ class UsbAccessoryServerSlot(
     /** The session of the last server to leave the slot, until it ends. */
     private var retiring: Job? = null
 
+    /** Not yet wired: the states of the slot's current server. */
+    val states: kotlinx.coroutines.flow.Flow<UsbAccessoryState?> = kotlinx.coroutines.flow.emptyFlow()
+
     /** True while a server holds the slot. */
     val isActive: Boolean
         get() = synchronized(lock) { server != null }
