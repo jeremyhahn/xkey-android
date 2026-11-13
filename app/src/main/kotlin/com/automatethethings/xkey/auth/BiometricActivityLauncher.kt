@@ -602,10 +602,12 @@ internal object PromptRequestIds {
  *   there is one screen whichever launcher a request came through
  * @param expirePrompt ends a request's prompt unshown, so a late start of it
  *   prompts for nothing; false while the prompt is up
+ * @param cancelPrompt takes down the prompt up for a withdrawn request
  */
 internal class PendingAuthentications(
     private val prompts: PromptOwnership = PromptOwnership.process,
     private val expirePrompt: (requestId: String) -> Boolean = TransparentBiometricActivity::expireUnshown,
+    private val cancelPrompt: (requestId: String) -> Unit = TransparentBiometricActivity::withdraw,
 ) {
     private val pending =
         ConcurrentHashMap<Long, CancellableContinuation<BiometricActivityLauncher.BiometricResult>>()
@@ -690,10 +692,13 @@ internal class PendingAuthentications(
         } finally {
             queued.remove(id, turnCame)
             // Withdrawn, if it has not settled: off the screen or out of the
-            // line. One withdrawn on screen has its prompt ended unshown, so a
-            // late tap on its notification prompts for nothing; the prompt
-            // activity gives way to the next request it is started for.
-            prompts.end(key) { wasActive -> if (wasActive) expirePrompt(id.toString()) }
+            // line. One withdrawn with its turn has its prompt ended unshown,
+            // so a late tap on its notification prompts for nothing, and a
+            // prompt already up (a co-sign's timeout, a cancelled caller) is
+            // taken down here, before the next request's turn starts.
+            prompts.end(key) { wasActive ->
+                if (wasActive && !expirePrompt(id.toString())) cancelPrompt(id.toString())
+            }
         }
     }
 

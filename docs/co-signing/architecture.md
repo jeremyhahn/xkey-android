@@ -35,7 +35,13 @@ checks, in this order:
    attestation and signing prompts share: it waits its turn, shows only
    while its key is ACTIVE, and hands the screen on when it settles, by
    the owner's answer, by its 60 s timeout, or because the caller went away.
-   A request withdrawn before its prompt appears never shows.
+   A request withdrawn before its prompt appears never shows; one withdrawn
+   with its prompt up (its timeout, a caller gone) has that prompt taken
+   down before the next prompt's turn starts.
+5. **The approved key signs.** The phone records the key's row and the
+   public key under its keystore alias before the prompt, and rechecks both
+   after the approval: a key deleted meanwhile is `KEY_NOT_FOUND`, and one
+   changed or replaced under its id or alias is `OPERATION_DENIED`.
 
 The success result is unchanged: `signature` (base64), `keyFingerprint`,
 `algorithm` and `signerName`.

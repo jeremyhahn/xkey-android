@@ -1609,7 +1609,7 @@ class RequestHandler(
 
         // The stored key as it was before the approval, so the key signed
         // with is the one the owner approved.
-        val selected = keyDao.getByKeyId(signParams.keyId)
+        val selected = keyDao.getByKeyId(signParams.keyId)?.let { approvalSnapshot(it) }
         var approved = false
         if (biometricRequired && biometricLauncher != null) {
             val notice = OwnNotifications(operationType = "sign", rpName = null)
@@ -1626,7 +1626,7 @@ class RequestHandler(
                 notice.close()
             }
         }
-        val signingKey = if (approved && selected != null) revalidateApprovedKey(selected) else selected
+        val signingKey = if (approved && selected != null) revalidateApprovedKey(selected) else selected?.row
         if (approved && selected == null && !keystoreManager.generalKeyExists(signParams.keyId)) {
             throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
         }
@@ -3135,6 +3135,8 @@ class RequestHandler(
         // must report. The request asking for it is not evidence that it occurred.
         var userVerified = false
 
+        // The passkey as the owner approves it, rechecked under the lock.
+        val asApproved = approvalSnapshot(entity)
         if (biometricRequired && biometricLauncher != null) {
             val notice = OwnNotifications(operationType = "sign", rpName = entity.rpName)
             try {
@@ -3172,7 +3174,7 @@ class RequestHandler(
         // counter write, so each assertion signs a distinct, increasing count.
         val (newSignCount, authData, signature) = keyIds.withKeyLock("key:${assertionParams.credentialId}") {
             // Still the passkey the owner approved; its counter may have moved.
-            val current = revalidateApprovedKey(entity)
+            val current = revalidateApprovedKey(asApproved)
             if (!canShareKeyWithPeer(current, peerPublicKeyHex)) {
                 throw ProtocolException(
                     "Credential is not shareable with this peer",
@@ -3716,22 +3718,27 @@ class RequestHandler(
     }
 
     /**
-     * The stored key [approved] names, as it is once the owner has approved
+     * The stored key [snapshot] names, as it is once the owner has approved
      * its use. An approval can wait a minute for the owner, and the key can
-     * be deleted, re-policied or replaced under its id meanwhile; what the
-     * owner approved is the row read before the prompt, so the key is used
-     * only while it is still that key ([isSameKeyAs]). Every approval-gated
+     * be deleted, re-policied or replaced under its id or keystore alias
+     * meanwhile; what the owner approved is the row and the alias's public
+     * key read before the prompt ([approvalSnapshot]), so the key is used
+     * only while it is still that key ([isSameKeyAs], same key material). Every approval-gated
      * use of a stored key calls this between the approval and the use.
      *
      * @throws ProtocolException with [ErrorCodes.KEY_NOT_FOUND] when the key
      * is gone, or [ErrorCodes.OPERATION_DENIED] when it changed.
      */
-    private suspend fun revalidateApprovedKey(approved: KeyEntity): KeyEntity {
+    private suspend fun revalidateApprovedKey(snapshot: ApprovalSnapshot): KeyEntity {
+        val approved = snapshot.row
         val current = keyDao.getByKeyId(approved.keyId) ?: throw ProtocolException(
             "Key ${approved.keyId} was deleted while its approval waited",
             errorCode = ErrorCodes.KEY_NOT_FOUND
         )
-        if (!current.isSameKeyAs(approved)) {
+        // The row and the key material signed with: a key put under the
+        // alias while the prompt waited is not the key the owner approved.
+        val material = keystoreManager.getPublicKeyDER(approved.keyId)
+        if (!current.isSameKeyAs(approved) || !material.contentEquals(snapshot.publicKeyDer)) {
             throw ProtocolException(
                 "Key ${approved.keyId} changed while its approval waited",
                 errorCode = ErrorCodes.OPERATION_DENIED
@@ -3739,6 +3746,14 @@ class RequestHandler(
         }
         return current
     }
+
+    /**
+     * What the owner approves the use of: the stored row and the public key
+     * under its keystore alias, both read before the prompt goes up, and
+     * checked again by [revalidateApprovedKey] after it.
+     */
+    private fun approvalSnapshot(row: KeyEntity) =
+        ApprovalSnapshot(row, keystoreManager.getPublicKeyDER(row.keyId))
 
     /**
      * The confirmed peer of the connection this request arrived on.
@@ -4004,6 +4019,7 @@ class RequestHandler(
                 "Co-signing needs the owner's approval and no prompt is available"
             )
         val notice = OwnNotifications(operationType = "sign", rpName = null)
+        val asApproved = approvalSnapshot(signingKey)
         try {
             approvals.approve(
                 title = "Co-sign request",
@@ -4024,15 +4040,16 @@ class RequestHandler(
             notice.close()
         }
         // The owner approved the key as it was when the prompt went up.
-        val approvedKey = revalidateApprovedKey(signingKey)
+        val approvedKey = revalidateApprovedKey(asApproved)
 
         // Sign the content hash
         return try {
+            // The fingerprint answered is of the key approved and rechecked.
+            val publicKeyDer = asApproved.publicKeyDer
+                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
             val signatureBytes = keystoreManager.signWithAlgorithm(
                 approvedKey.keyId, hashBytes, approvedKey.algorithm
             )
-            val publicKeyDer = keystoreManager.getPublicKeyDER(approvedKey.keyId)
-                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
             val fingerprint = computeFingerprint(publicKeyDer)
 
             AuditLogger.logCoSignReceived(
@@ -4438,6 +4455,9 @@ class RequestHandler(
         return digest.digest(publicKeyDer).joinToString("") { "%02x".format(it) }
     }
 }
+
+/** A key as approved: its row and the public key under its keystore alias. */
+private class ApprovalSnapshot(val row: KeyEntity, val publicKeyDer: ByteArray?)
 
 /**
  * Whether this row is still the key [other] was: the same row, type,
