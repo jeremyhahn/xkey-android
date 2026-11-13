@@ -37,6 +37,7 @@ import android.widget.RadioGroup
 import android.widget.Spinner
 import com.automatethethings.xkey.settings.CertificateAuthoritySource
 import android.widget.TextView
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -74,6 +75,7 @@ import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.progressindicator.CircularProgressIndicator
 import com.google.android.material.snackbar.Snackbar
 import java.security.cert.X509Certificate
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -110,6 +112,15 @@ class SettingsActivity : AppCompatActivity() {
      * the flag is driven by [populateUi] rather than assigned at either site.
      */
     private var isInitializing: Boolean = true
+
+    /**
+     * The most recent user-verification policy write launched by the biometric
+     * switch, or null if none was. Main thread only. Lets a test wait for a
+     * write-back to finish instead of sleeping; nothing in the app reads it.
+     */
+    @VisibleForTesting
+    internal var uvPolicyWriteJob: Job? = null
+        private set
 
     /** Population passes currently in flight; see [populateUi]. */
     private var populationPasses: Int = 0
@@ -334,7 +345,7 @@ class SettingsActivity : AppCompatActivity() {
             switch.setOnCheckedChangeListener { _, isChecked ->
                 if (isInitializing) return@setOnCheckedChangeListener
                 updateAuthModeVisibility(isChecked)
-                lifecycleScope.launch {
+                uvPolicyWriteJob = lifecycleScope.launch {
                     val policy = if (isChecked) {
                         UserVerificationPolicy.REQUIRED
                     } else {
