@@ -21,6 +21,7 @@ import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.CompletableDeferred
@@ -267,9 +268,9 @@ enum class DesktopShareDecision {
  * The phone's `local.*` sharing rules applied to an outbound share:
  *
  *  1. a confirmed peer identity is required;
- *  2. the key's recorded policy must admit that peer (PRIVATE never,
- *     ALL_PEERS always, SELECTED_PEERS only when the peer is listed); a key
- *     with no record is unshareable;
+ *  2. the key's recorded policy must admit that peer, as [SharePermission]
+ *     decides it (the same decision the inbound handlers take, a pending
+ *     grant revocation included); a key with no record is unshareable;
  *  3. a hardware key shares its public half only;
  *  4. software material only when both stores mark it exportable and shareable.
  *
@@ -291,16 +292,11 @@ object DesktopShareGate {
         software: SoftwareKey?,
         publicKeyPem: String?,
         peerPublicKeyHex: String?,
-        isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean
+        permission: SharePermission
     ): DesktopShareDecision {
         if (peerPublicKeyHex.isNullOrEmpty()) return DesktopShareDecision.NO_PEER
         if (entity == null) return DesktopShareDecision.POLICY_DENIED
-        val admitted = when (entity.sharingPolicy) {
-            SharingPolicyType.PRIVATE -> false
-            SharingPolicyType.ALL_PEERS -> true
-            SharingPolicyType.SELECTED_PEERS -> isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
-        }
-        if (!admitted) return DesktopShareDecision.POLICY_DENIED
+        if (!permission.canShare(entity, peerPublicKeyHex)) return DesktopShareDecision.POLICY_DENIED
         if (software != null) {
             val exportable = entity.exportable && entity.shareable && software.exportable && software.shareable
             return if (!exportable) DesktopShareDecision.NOT_EXPORTABLE else DesktopShareDecision.SYMMETRIC_NO_WRAP_PATH
@@ -411,11 +407,11 @@ class DesktopKeyShare(
         software: SoftwareKey?,
         publicKeyPem: String?,
         certificatePem: String?,
-        isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean
+        permission: SharePermission
     ): Outcome {
         try {
             val decision = DesktopShareGate.decide(
-                entity, software, publicKeyPem, session.peerPublicKeyHex, isKeySharedWithPeer
+                entity, software, publicKeyPem, session.peerPublicKeyHex, permission
             )
             if (!session.isCurrent()) return Outcome.SessionChanged
             if (decision != DesktopShareDecision.PUBLIC_KEY || entity == null || publicKeyPem == null) {

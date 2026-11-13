@@ -51,6 +51,7 @@ import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopSectionRefresh
 import com.automatethethings.xkey.remote.DesktopShareDecision
 import com.automatethethings.xkey.remote.DesktopShareGate
+import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.remote.loadZeroedOnCancel
 import com.automatethethings.xkey.remote.shareSessionChanges
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -709,8 +710,8 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         ShareInputs(entity, software, pem)
     }
 
-    private suspend fun isSharedWithPeer(key: String, peer: String): Boolean =
-        keySharingPolicyDao.isKeySharedWithPeer(key, peer)
+    /** The one share decision, the inbound handlers' rule (a pending revocation refuses SELECTED_PEERS). */
+    private val sharePermission by lazy { SharePermission(keySharingPolicyDao, pairedDeviceRepository) }
 
     /**
      * Shows the desktop section when a desktop is connected, with the send
@@ -734,7 +735,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 try {
                     DesktopShareGate.decide(
                         inputs.entity, inputs.software, inputs.publicKeyPem,
-                        session.peerPublicKeyHex, ::isSharedWithPeer
+                        session.peerPublicKeyHex, sharePermission
                     )
                 } finally {
                     inputs.software?.material?.fill(0)
@@ -778,7 +779,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             val message: String? = try {
                 val inputs = loadShareInputs()
                 when (val out = DesktopKeyShare(session).send(
-                    inputs.entity, inputs.software, inputs.publicKeyPem, null, ::isSharedWithPeer
+                    inputs.entity, inputs.software, inputs.publicKeyPem, null, sharePermission
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->
                         getString(R.string.sharing_desktop_sent, out.result.importId)
