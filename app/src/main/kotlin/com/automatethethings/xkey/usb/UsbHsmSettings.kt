@@ -18,7 +18,6 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
 import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.flow.Flow
@@ -107,19 +106,18 @@ class UsbHsmSettingsRepository internal constructor(
     /**
      * Stores [enabled] under [key] and, when it differs from the stored value,
      * records the change: either toggle opens a path to the pairing responder.
+     * The write and its entry go through [AuditLogger.editAuditedSetting], so a
+     * caller cancelled after the commit still leaves the entry.
      */
     private suspend fun setAudited(key: Preferences.Key<Boolean>, settingName: String, enabled: Boolean) {
-        var oldValue = false
-        dataStore.edit { preferences ->
-            oldValue = preferences[key] ?: false
+        AuditLogger.editAuditedSetting(dataStore, settingName) { preferences ->
+            val oldValue = preferences[key] ?: false
             preferences[key] = enabled
-        }
-        if (oldValue != enabled) {
-            AuditLogger.logSettingsChanged(
-                settingName = settingName,
-                oldValue = oldValue.toString(),
-                newValue = enabled.toString()
-            )
+            if (oldValue == enabled) {
+                null
+            } else {
+                AuditLogger.SettingChange(oldValue.toString(), enabled.toString())
+            }
         }
     }
 

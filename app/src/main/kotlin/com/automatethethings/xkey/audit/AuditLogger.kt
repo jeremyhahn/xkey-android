@@ -16,11 +16,17 @@ package com.automatethethings.xkey.audit
 
 import android.content.Context
 import android.util.Log
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicReference
 
@@ -756,7 +762,50 @@ object AuditLogger {
     // -------------------------------------------------------------------------
 
     /**
+     * The audited change a settings write made: the values recorded in its
+     * `SETTINGS_CHANGED` entry.
+     */
+    data class SettingChange(val oldValue: String?, val newValue: String)
+
+    /**
+     * The one path for an audited settings write: runs [dataStore]'s edit
+     * with [transform] and then records the [SettingChange] it returns, both
+     * under [NonCancellable]. DataStore can commit a write while a caller
+     * cancelled mid-edit (an activity closed or recreated) stops `edit` from
+     * returning; running the pair as one non-cancellable unit means a
+     * committed write is always audited. A `null` change records nothing
+     * (the stored value did not change).
+     *
+     * Every `logSettingsChanged` call in the app goes through here
+     * (`AuditedSettingsChokePointTest`).
+     *
+     * @param dataStore The settings DataStore to write.
+     * @param settingName The setting name recorded in the audit entry.
+     * @param transform Applies the write and returns the change to audit, or null.
+     */
+    suspend fun editAuditedSetting(
+        dataStore: DataStore<Preferences>,
+        settingName: String,
+        transform: (MutablePreferences) -> SettingChange?
+    ) {
+        withContext(NonCancellable) {
+            var change: SettingChange? = null
+            dataStore.edit { preferences -> change = transform(preferences) }
+            change?.let {
+                logSettingsChanged(
+                    settingName = settingName,
+                    oldValue = it.oldValue,
+                    newValue = it.newValue
+                )
+            }
+        }
+    }
+
+    /**
      * Log a settings change.
+     *
+     * Settings repositories do not call this directly: they write through
+     * [editAuditedSetting], which keeps the write and the entry together.
      *
      * @param settingName The name of the setting that was changed.
      * @param oldValue The previous value (as a string).

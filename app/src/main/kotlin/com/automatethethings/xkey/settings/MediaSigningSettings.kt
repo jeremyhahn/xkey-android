@@ -58,15 +58,11 @@ class MediaSigningSettingsRepository(private val context: Context) {
     }
 
     suspend fun setAutoSignEnabled(enabled: Boolean) {
-        val oldValue = getSettings().autoSignEnabled
-        dataStore.edit { preferences ->
+        AuditLogger.editAuditedSetting(dataStore, "mediaAutoSign") { preferences ->
+            val oldValue = mapPreferencesToSettings(preferences).autoSignEnabled
             preferences[KEY_AUTO_SIGN_ENABLED] = enabled
+            AuditLogger.SettingChange(oldValue.toString(), enabled.toString())
         }
-        AuditLogger.logSettingsChanged(
-            settingName = "mediaAutoSign",
-            oldValue = oldValue.toString(),
-            newValue = enabled.toString()
-        )
     }
 
     suspend fun setSigningKeyId(keyId: String?) {

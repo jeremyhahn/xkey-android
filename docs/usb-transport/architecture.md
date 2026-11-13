@@ -28,7 +28,7 @@ method families, ahead of the `RequestHandler` that BLE and TCP share.
 | `MessageTooLargeException` | `app/src/main/kotlin/com/automatethethings/xkey/transport/MessageTooLargeException.kt` | Thrown by `writeMessage` for a payload over 65535 bytes |
 | `FrameBudget` | `app/src/main/kotlin/com/automatethethings/xkey/usb/FrameBudget.kt` | Sizes USB store results (Noise tag, JSON-RPC envelope, `GENERATION_RESERVE`) so a response fits one frame; pages lists with `page` |
 | `PasswordStoreMethods`, `SealStoreMethods` | `app/src/main/kotlin/com/automatethethings/xkey/usb/` | `TransportMethods` families served on USB only |
-| `UsbHsmSettingsRepository` / `UsbHsmSettingsData` | `app/src/main/kotlin/com/automatethethings/xkey/usb/UsbHsmSettings.kt` | DataStore flags `native_usb_enabled` (USB) and `tcp_hsm_enabled` (TCP), both default `false`; each change is audited as a `SETTINGS_CHANGED` entry with setting `nativeUsb` or `tcpPairing` and its old and new values |
+| `UsbHsmSettingsRepository` / `UsbHsmSettingsData` | `app/src/main/kotlin/com/automatethethings/xkey/usb/UsbHsmSettings.kt` | DataStore flags `native_usb_enabled` (USB) and `tcp_hsm_enabled` (TCP), both default `false`; each change is audited as a `SETTINGS_CHANGED` entry with setting `nativeUsb` or `tcpPairing` and its old and new values, written with the change through `AuditLogger.editAuditedSetting` so a committed write is audited even when its caller is cancelled |
 
 ## Wire methods and Android entry points
 
