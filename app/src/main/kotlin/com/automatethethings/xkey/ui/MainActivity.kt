@@ -765,14 +765,15 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Shows the newest audit entries in the Audit Log card's Recent Activity
-     * section; tapping the card opens the full audit screen.
+     * section; tapping the card opens the full audit screen. The relative
+     * times are recomputed once a minute while the activity is resumed.
      */
     private fun observeRecentActivity() {
         val dao = XKeyDatabase.getInstance(this).auditLogDao()
         lifecycleScope.launch {
-            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                dao.observeRecent(RecentActivityRows.DEFAULT_LIMIT).collectLatest { entries ->
-                    renderRecentActivity(RecentActivityRows.build(entries, Clock.systemDefaultZone()))
+            lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                RecentActivityRows.observe(dao, Clock.systemDefaultZone()).collectLatest { rows ->
+                    renderRecentActivity(rows)
                 }
             }
         }

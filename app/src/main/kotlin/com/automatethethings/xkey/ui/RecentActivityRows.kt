@@ -18,8 +18,12 @@ import androidx.annotation.StringRes
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditLogEntity
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onStart
 import java.time.Clock
 
 /** One row of the home screen's Recent Activity section. */
@@ -91,10 +95,18 @@ object RecentActivityRows {
         clock: Clock,
         ticks: Flow<Unit> = ticker(REFRESH_MILLIS),
         limit: Int = DEFAULT_LIMIT
-    ): Flow<List<RecentActivityRow>> = flowOf(emptyList())
+    ): Flow<List<RecentActivityRow>> =
+        combine(dao.observeRecent(limit), ticks.onStart { emit(Unit) }) { entries, _ ->
+            build(entries, clock, limit)
+        }.distinctUntilChanged()
 
     /** Emits every [periodMillis], forever. */
-    fun ticker(periodMillis: Long): Flow<Unit> = flowOf()
+    fun ticker(periodMillis: Long): Flow<Unit> = flow {
+        while (true) {
+            delay(periodMillis)
+            emit(Unit)
+        }
+    }
 
     /** How long ago [elapsedMillis] is; a time ahead of the clock reads "just now". */
     private fun age(elapsedMillis: Long): Pair<Int, Long> {
