@@ -41,12 +41,14 @@ covered by the sync feature, not here.
 | `local.oathRemove` | `LOCAL_OATH_REMOVE` | `credential_id` | `deleted: true` |
 
 `local.oathAdd` builds an `otpauth://<type>/<issuer>:<account>?secret=...`
-URI from the fields and passes it to `OathRepository.importFromUri`, which
-stores the credential under a new random UUID. The handler returns the
-caller's `name` as `credential_id`, not that UUID; the id that
-`local.oathGenerate` and `local.oathRemove` accept is the `name` field that
-`local.oathList` returns. The URI is built without percent-encoding the issuer
-or account name.
+URI from the fields with `otpauthUri` (sync/SyncEngine.kt), the builder
+`SyncEngine.mergeOath` uses: the issuer and account name are percent-encoded
+(RFC 3986, a space as `%20`) in the label and the `issuer` parameter, and
+`counter` is written for HOTP only. It passes the URI to
+`OathRepository.importFromUri`, which stores the credential under a new random
+UUID, and returns that UUID as `credential_id`. It is the `name` field
+`local.oathList` returns and the `credential_id` `local.oathGenerate` and
+`local.oathRemove` accept.
 
 ## Main flow
 
