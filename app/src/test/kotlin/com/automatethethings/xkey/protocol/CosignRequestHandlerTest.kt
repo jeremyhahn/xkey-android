@@ -33,6 +33,7 @@ import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import io.mockk.Runs
 
@@ -546,6 +547,60 @@ class CosignRequestHandlerTest {
         assertNull(second.await().error)
         assertEquals(2L, second.await().id)
         coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+    }
+
+    // The key chosen before the approval signs only as it still is after it.
+
+    /** Starts a co-sign, and once its prompt is up the stored key becomes [now]. */
+    private fun kotlinx.coroutines.test.TestScope.approvedWhileKeyBecomes(
+        now: KeyEntity?,
+        keyId: String? = signingKey.keyId
+    ): Response {
+        screen.autoAnswer = null
+        val response = async { handler().handleRequest(request(keyId = keyId)) }
+        runCurrent()
+        checkNotNull(screen.visible) { "the co-sign's prompt is up" }
+        coEvery { keyDao.getByKeyId(signingKey.keyId) } returns now
+        coEvery { keyDao.getAll() } returns listOfNotNull(now)
+        screen.answer(approved = true)
+        runCurrent()
+        return response.getCompleted()
+    }
+
+    @Test
+    fun `a signing key deleted while its approval waits signs nothing`() = runTest {
+        assertError(ErrorCodes.KEY_NOT_FOUND, approvedWhileKeyBecomes(now = null))
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `a signing key replaced under its id while its approval waits signs nothing`() = runTest {
+        val replaced = signingKey.copy(id = signingKey.id + 1, publicKeyDer = ByteArray(91) { 9 })
+        assertError(ErrorCodes.OPERATION_DENIED, approvedWhileKeyBecomes(now = replaced))
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `a signing key re-policied while its approval waits signs nothing`() = runTest {
+        val repolicied = signingKey.copy(
+            sharingPolicy = SharingPolicyType.ALL_PEERS,
+            policyRevision = signingKey.policyRevision + 1
+        )
+        assertError(ErrorCodes.OPERATION_DENIED, approvedWhileKeyBecomes(now = repolicied))
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `the fallback signing key is checked again after its approval`() = runTest {
+        assertError(ErrorCodes.KEY_NOT_FOUND, approvedWhileKeyBecomes(now = null, keyId = null))
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `a signing key only used elsewhere while its approval waits still signs`() = runTest {
+        val used = signingKey.copy(useCount = signingKey.useCount + 1, lastUsedAt = 42L)
+        assertNull(approvedWhileKeyBecomes(now = used).error)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256") }
     }
 
     // F1: co-sign and FIDO2 prompts share the one queue, in either order.

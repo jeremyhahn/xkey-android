@@ -170,6 +170,43 @@ class PromptEntryPointsTest {
         assertTrue("PendingAuthentications.await launches without a queue entry", enqueued in 0 until launched)
     }
 
+    /**
+     * An approval can wait a minute for the owner, and the stored key it was
+     * asked for can be deleted, re-policied or replaced under its id while it
+     * does. Every handler operation that reads a stored key row and uses a
+     * key after its approval runs the one post-approval check,
+     * `revalidateApprovedKey`, between the last approval and the first use,
+     * and that check compares what makes the row the same key.
+     */
+    @Test
+    fun everyApprovalGatedKeyUseRevalidatesTheKeyAfterTheApproval() {
+        val code = sourceRoot.resolve("protocol/Handler.kt").readLines().filterNot { line ->
+            line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+        }.joinToString("\n")
+        val approval = Regex("""requestAuthentication\(|\.approve\(|requireUserPresenceForAttestation\(|requestCryptoSignature\(""")
+        val rowRead = Regex("""getByKeyId\(|\.getAll\(\)""")
+        val keyUse = Regex("""signWithAlgorithm\(|withKeyLock\(""")
+        val functions = Regex("""\n    (?:private |internal |override )?(?:suspend )?fun (\w+)""").findAll(code).toList()
+        val unchecked = functions.mapIndexedNotNull { i, fn ->
+            val body = code.substring(fn.range.first, functions.getOrNull(i + 1)?.range?.first ?: code.length)
+            val lastApproval = approval.findAll(body).lastOrNull() ?: return@mapIndexedNotNull null
+            if (!rowRead.containsMatchIn(body)) return@mapIndexedNotNull null
+            val use = keyUse.find(body, lastApproval.range.last) ?: return@mapIndexedNotNull null
+            val between = body.substring(lastApproval.range.last, use.range.first)
+            if ("revalidateApprovedKey(" in between) null else fn.groupValues[1]
+        }
+        assertTrue("approval-gated key use without revalidateApprovedKey: $unchecked", unchecked.isEmpty())
+
+        val check = code.substringAfter("fun revalidateApprovedKey(", "").substringBefore("\n    }")
+        listOf("getByKeyId(", "isSameKeyAs(").forEach {
+            assertTrue("revalidateApprovedKey does not call $it", it in check)
+        }
+        val same = code.substringAfter("fun KeyEntity.isSameKeyAs(", "").substringBefore("\n}")
+        listOf("id ==", "keyType ==", "algorithm ==", "policyRevision ==", "publicKeyDer", "rpId ==").forEach {
+            assertTrue("isSameKeyAs does not compare $it", it in same)
+        }
+    }
+
     /** What lets a queue entry go from an activity's teardown (a media player's release is not one). */
     private val releases = Regex("""PromptOwnership\.process\.(end|settle|expire)\(|controller\??\.release\(""")
 
