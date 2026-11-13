@@ -33,10 +33,16 @@ import androidx.credentials.exceptions.GetCredentialInterruptedException
 import androidx.credentials.exceptions.GetCredentialUnknownException
 import androidx.credentials.provider.PendingIntentHandler
 import androidx.lifecycle.lifecycleScope
+import android.os.Handler
+import android.os.Looper
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.credential.handler.CreateCredentialHandler
 import com.automatethethings.xkey.credential.handler.GetCredentialHandler
 import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.databinding.ActivityCredentialSelectorBinding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -67,8 +73,25 @@ class CredentialSelectorActivity : AppCompatActivity() {
 
     private var currentAction: String? = null
 
+    /** The queue key of this activity's user-verification prompt, once it asked for a turn. */
+    private var promptKey: String? = null
+
+    /** The key a configuration change handed over from the instance before, while it still holds its entry. */
+    private var restoredKey: String? = null
+
+    /** Shows this instance's prompt on its key's turn ([onTurn]). */
+    private var launchPrompt: (() -> Unit)? = null
+
+    /** Cancels this instance's ceremony when its key's queue deadline passes ([onQueueExpired]). */
+    private var queueExpired: (() -> Unit)? = null
+
+    /** The key the instance before saved, whether or not it still holds its entry. */
+    private var savedKey: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        savedKey = savedInstanceState?.getString(STATE_PROMPT_KEY)
+        restoredKey = savedKey?.takeIf { PromptOwnership.process.holds(it) }
         binding = ActivityCredentialSelectorBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
@@ -244,16 +267,31 @@ class CredentialSelectorActivity : AppCompatActivity() {
 
         val executor = ContextCompat.getMainExecutor(this)
 
+        // The system Credential Manager starts this activity, but its prompt
+        // still takes a turn in the one prompt queue: it shows only once no
+        // other approval holds the screen, and hands the screen on when it
+        // is answered or the activity goes away for good. A configuration
+        // change keeps the entry: the AndroidX ceremony outlives the
+        // recreation, and the new instance takes the same key over.
+        val restored = restoredKey
+        val key = restored ?: PromptOwnership.promptKey(intent, "credentialSelector")
+        promptKey = key
+        val answered: (Boolean, Boolean) -> Unit = { cancelled, verified ->
+            forget(key)
+            PromptOwnership.process.end(key)
+            onResult(cancelled, verified)
+        }
+
         val biometricCallback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                 super.onAuthenticationSucceeded(result)
-                onResult(false, true)
+                answered(false, true)
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                 super.onAuthenticationError(errorCode, errString)
                 Log.e(TAG, "Biometric error: $errorCode - $errString")
-                onResult(true, false)
+                answered(true, false)
             }
 
             override fun onAuthenticationFailed() {
@@ -268,7 +306,61 @@ class CredentialSelectorActivity : AppCompatActivity() {
             .setAllowedAuthenticators(authenticators)
             .build()
 
-        BiometricPrompt(this, executor, biometricCallback).authenticate(promptInfo)
+        launchPrompt = { BiometricPrompt(this, executor, biometricCallback).authenticate(promptInfo) }
+        // Its turn never came within the queue deadline: the entry settled
+        // expired, so cancel without ending it.
+        queueExpired = { onResult(true, false) }
+        val saved = savedKey
+        if (restored == null && saved != null &&
+            PromptOwnership.process.outcome(saved) == PromptOwnership.Outcome.EXPIRED
+        ) {
+            // The deadline passed while no instance was up to hear it.
+            promptKey = null
+            onResult(true, false)
+            return
+        }
+        owners[key] = this
+        when {
+            restored == null -> PromptOwnership.process.enqueue(
+                key,
+                clock = deadlines,
+                onQueueExpired = { mainThread.post { onQueueExpired(key) } },
+            ) { mainThread.post { onTurn(key) } }
+            // The ceremony is still up: take its answer here.
+            key in shown -> BiometricPrompt(this, executor, biometricCallback)
+            key in due -> onTurn(key)
+            else -> Unit // still QUEUED; its turn finds this instance
+        }
+    }
+
+    /** [key]'s turn has come: its owner, if any instance is up, shows the prompt now. */
+    private fun showPrompt(key: String) {
+        if (isFinishing || isDestroyed) {
+            forget(key)
+            PromptOwnership.process.end(key)
+        } else {
+            shown += key
+            launchPrompt?.invoke()
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        promptKey?.let { outState.putString(STATE_PROMPT_KEY, it) }
+    }
+
+    override fun onDestroy() {
+        promptKey?.let { key ->
+            if (owners[key] === this) owners.remove(key)
+            // Gone for good, unanswered (or still waiting its turn): its
+            // entry hands the screen on rather than holding it. Recreated,
+            // the next instance keeps the entry and the live ceremony.
+            if (!isChangingConfigurations) {
+                forget(key)
+                PromptOwnership.process.end(key)
+            }
+        }
+        super.onDestroy()
     }
 
     /**
@@ -315,5 +407,45 @@ class CredentialSelectorActivity : AppCompatActivity() {
 
         const val EXTRA_REQUEST_JSON = "request_json"
         const val EXTRA_CREDENTIAL_ID = "credential_id"
+
+        private const val STATE_PROMPT_KEY = "prompt_key"
+
+        // Prompt ownership across recreation, by queue key; main thread only.
+
+        /** The instance that prompts on a key's turn; a recreated one takes the key over. */
+        private val owners = HashMap<String, CredentialSelectorActivity>()
+
+        /** Keys whose turn came between an instance going and its recreation arriving. */
+        private val due = HashSet<String>()
+
+        /** Keys whose ceremony is up; a recreated instance reattaches to it. */
+        private val shown = HashSet<String>()
+
+        private val mainThread = Handler(Looper.getMainLooper())
+
+        /** Times every queued key's deadline; process-wide, so a recreation does not stop it. */
+        private val deadlines = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+        /** [key] settled expired before its turn: its owner, if any instance is up, cancels. */
+        private fun onQueueExpired(key: String) {
+            val owner = owners[key]
+            forget(key)
+            owner?.queueExpired?.invoke()
+        }
+
+        private fun onTurn(key: String) {
+            due -= key
+            val owner = owners[key]
+            when {
+                owner != null -> owner.showPrompt(key)
+                PromptOwnership.process.holds(key) -> due += key
+            }
+        }
+
+        private fun forget(key: String) {
+            owners.remove(key)
+            due -= key
+            shown -= key
+        }
     }
 }

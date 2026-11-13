@@ -48,14 +48,25 @@ sequenceDiagram
 
 ## Entity Details
 
-> **Status: REFERENCE** · Last verified: 2026-08-10
-> As-built description of the xKey Room schema. STALE: the migration table stops at v7; `XKeyDatabase.kt` is at version 11. Read the code for v8-v11.
+> **Status: REFERENCE** · Last verified: 2026-11-12
+> As-built description of the contact table in the xKey Room schema (`XKeyDatabase.kt`, version 12; the table was added in v7). The full schema and migration history are in [hardware-backed-keys](../hardware-backed-keys/architecture.md#migration-history).
 
 ### ContactEntity (`contacts`)
 
 Recipient public keys for file encryption and signature verification. Each
 contact stores a DER-encoded public key with a SHA-256 fingerprint for
 deduplication (unique index on `public_key_fingerprint`).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER | Primary key, auto-generated |
+| `name` | TEXT | |
+| `public_key_der` | BLOB | DER-encoded public key |
+| `public_key_fingerprint` | TEXT | SHA-256 fingerprint, unique |
+| `algorithm` | TEXT | |
+| `imported_at` | INTEGER | Epoch milliseconds |
+| `source` | TEXT | |
+| `notes` | TEXT | Nullable |
 
 ## Index Strategy
 

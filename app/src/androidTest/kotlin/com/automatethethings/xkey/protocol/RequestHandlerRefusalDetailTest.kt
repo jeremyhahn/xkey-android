@@ -185,13 +185,13 @@ class RequestHandlerRefusalDetailTest {
         )
 
         assertTrue("a bad payload must produce an error frame", response.isError())
-        assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
+        assertEquals(ErrorCodes.INVALID_PARAMS, response.errorCode())
     }
 
     /**
      * Same shape on the PIV side: the slot and the certificate are validated
      * separately, and a certificate that is not base64 must be refused after
-     * the slot has been accepted.
+     * the slot has been accepted, as a bad parameter rather than a crash (#173).
      */
     @Test
     fun importingAPivCertificateThatIsNotBase64IsRejected() {
@@ -203,7 +203,7 @@ class RequestHandlerRefusalDetailTest {
         )
 
         assertTrue(response.isError())
-        assertEquals(ErrorCodes.INTERNAL_ERROR, response.errorCode())
+        assertEquals(ErrorCodes.INVALID_PARAMS, response.errorCode())
     }
 
     /**

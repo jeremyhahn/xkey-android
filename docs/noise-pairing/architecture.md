@@ -189,7 +189,13 @@ ChaCha20-Poly1305 using the derived transport keys:
 - **Initiator (Desktop)**: sends with `k1`, receives with `k2`
 
 Each direction maintains an independent 64-bit nonce counter, starting at 0
-and incrementing with each message. The 96-bit ChaCha20 nonce is formed as:
+and incrementing with each message. As in the Noise framework's
+DecryptWithAd, the receive counter advances only when a frame decrypts: a
+frame that fails authentication is dropped and leaves the counter where it
+was, so the next genuine frame still decrypts. The counter value 2^64-1 is
+reserved: a session whose send or receive counter reaches it refuses to
+encrypt or decrypt with a `NoiseException`.
+The 96-bit ChaCha20 nonce is formed as:
 
 ```
 [4 bytes: 0x00000000] [8 bytes: little-endian counter]

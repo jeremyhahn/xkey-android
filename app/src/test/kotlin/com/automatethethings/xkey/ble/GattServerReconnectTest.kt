@@ -25,6 +25,7 @@ import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -335,6 +336,92 @@ class GattServerReconnectTest {
         coVerify(exactly = 0) { callback.onPairingConfirmationRequired(any(), any(), any()) }
         coVerify(exactly = 0) { requestHandler.handleRawRequest(any<ByteArray>()) }
         assertFalse(repo.isDeviceKnown(keyHex))
+    }
+
+    // ---------------------------------------------------------------------
+    // Connection-scoped sends
+    // ---------------------------------------------------------------------
+
+    /**
+     * A send scoped to the current confirmed connection goes out on that
+     * connection's own session, and its desktop decrypts the request.
+     */
+    @Test
+    fun aScopedSendOnTheCurrentConfirmedConnectionReachesItsDesktop() = runBlocking<Unit> {
+        val desktop = NoiseInitiatorSession(randomKey())
+        val keyHex = desktop.getLocalStaticPublicKey().hex()
+        repo.addDevice(keyHex, "desktop")
+        reconnect(desktop, claimedPeerKeyHex = keyHex)
+        val confirmed = server.confirmedConnection() ?: error("the connection confirms no one")
+        assertEquals(keyHex, confirmed.peerPublicKeyHex)
+        val fragments = captureFragments()
+
+        server.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST)
+
+        val request = JSONObject(String(desktop.decrypt(reassemble(fragments).single())))
+        assertEquals("remote.backup.create", request.getString("method"))
+    }
+
+    /**
+     * Another paired desktop reconnects on the same transport before the
+     * send: the send scoped to the first desktop's connection is refused and
+     * nothing is encrypted to the new one.
+     */
+    @Test
+    fun aScopedSendAfterAnotherDesktopReconnectedIsRefused() = runBlocking<Unit> {
+        val first = NoiseInitiatorSession(randomKey())
+        val firstHex = first.getLocalStaticPublicKey().hex()
+        repo.addDevice(firstHex, "desktop")
+        reconnect(first, claimedPeerKeyHex = firstHex)
+        val confirmed = server.confirmedConnection() ?: error("the connection confirms no one")
+
+        val second = NoiseInitiatorSession(randomKey())
+        val secondHex = second.getLocalStaticPublicKey().hex()
+        repo.addDevice(secondHex, "second desktop")
+        val replacement = reconnect(second, claimedPeerKeyHex = secondHex)
+        val nonce = replacement.sendNonceForTest()
+
+        val outcome = runCatching { server.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST) }
+
+        assertTrue("got $outcome", outcome.exceptionOrNull() is ConnectionChangedException)
+        assertEquals("nothing is encrypted to the new desktop", nonce, replacement.sendNonceForTest())
+        assertNoNotification()
+    }
+
+    /**
+     * The reconnect lands after the early check and before encryption:
+     * admission itself refuses the send, and the desktop that reconnected
+     * receives nothing.
+     */
+    @Test
+    fun aScopedSendReplacedAfterTheEarlyCheckIsRefusedAtAdmission() = runBlocking<Unit> {
+        val first = NoiseInitiatorSession(randomKey())
+        val firstHex = first.getLocalStaticPublicKey().hex()
+        repo.addDevice(firstHex, "desktop")
+        reconnect(first, claimedPeerKeyHex = firstHex)
+        val confirmed = server.confirmedConnection() ?: error("the connection confirms no one")
+
+        val second = NoiseInitiatorSession(randomKey())
+        val secondHex = second.getLocalStaticPublicKey().hex()
+        repo.addDevice(secondHex, "second desktop")
+        var replacement: NoiseSession? = null
+        var nonce = -1L
+        server.beforeAdmissionForTest = {
+            if (replacement == null) {
+                replacement = reconnect(second, claimedPeerKeyHex = secondHex)
+                nonce = replacement!!.sendNonceForTest()
+            }
+        }
+
+        val outcome = runCatching {
+            withTimeout(TIMEOUT_MS) { server.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST) }
+        }
+        server.beforeAdmissionForTest = null
+
+        val late = replacement ?: error("the second desktop never reconnected")
+        assertTrue("got $outcome", outcome.exceptionOrNull() is ConnectionChangedException)
+        assertEquals("nothing is encrypted to the new desktop", nonce, late.sendNonceForTest())
+        assertNoNotification()
     }
 
     // ---------------------------------------------------------------------

@@ -286,7 +286,7 @@ class AttestationPolicyCallerPeerTest {
 
     private fun assertPrompts(expected: Int) {
         coVerify(exactly = expected) {
-            biometricLauncher.requestAuthentication(any(), any(), any(), any())
+            biometricLauncher.requestAuthentication(any(), any(), any(), any(), any())
         }
     }
 

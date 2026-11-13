@@ -92,7 +92,13 @@ sequenceDiagram
 | Unknown credential | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` |
 | Key is not `KeyTypes.FIDO2`; stored `rpId` differs from the request | `ProtocolException`, `ErrorCodes.INVALID_PARAMS` |
 | Sharing policy refuses this peer | `ProtocolException`, `ErrorCodes.OPERATION_DENIED` (list omits the credential instead) |
-| UV required but not performed, with strict user verification on | `UserVerificationRequiredException` from `UserVerificationCompliance.enforce`; its wire error code is not determined from the code read here |
+| UV required but not performed, with strict user verification on | `UserVerificationRequiredException` from `UserVerificationCompliance.enforce`; `RequestHandler.dispatch` answers `ErrorCodes.BIOMETRIC_FAILED` (-32003) with the exception's message |
+
+When the relying party requires user verification and none was performed, both
+`local.listFido2Credentials` and `local.signFido2Assertion` return
+`ErrorCodes.BIOMETRIC_FAILED`, through the one mapping in
+[`UserVerificationWireError.kt`](../../app/src/main/kotlin/com/automatethethings/xkey/protocol/UserVerificationWireError.kt)
+(only the sign path calls `enforce` today).
 
 If UV is required but `SessionAuthManager` reports no fresh biometric is needed,
 or no `BiometricActivityLauncher` is set, no prompt is shown and the UV flag is
@@ -105,6 +111,7 @@ clear; whether the ceremony then proceeds depends on `strictUserVerification`.
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/ProtocolConstantsTest.kt` | Method name constants |
+| `app/src/test/kotlin/com/automatethethings/xkey/protocol/UserVerificationWireErrorTest.kt` | Missing user verification answers `BIOMETRIC_FAILED` on both methods |
 
 ## Related features
 
