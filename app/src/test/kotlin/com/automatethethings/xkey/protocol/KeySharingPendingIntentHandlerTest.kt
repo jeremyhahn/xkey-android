@@ -606,6 +606,45 @@ class KeySharingPendingIntentHandlerTest {
         io.mockk.verify(exactly = 0) { keystore.deleteKey(any()) }
     }
 
+    /**
+     * Round 12 (1): a delete that reported success while its material is
+     * still owed (its tombstone pending) leaves the key unusable at once:
+     * every RPC naming it is refused as a deleted key, before it reaches
+     * the key's material.
+     */
+    @Test
+    fun aKeyWithAPendingDeletionRefusesEveryOperation() = runTest {
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        val id = "k-owed"
+        every { keystore.resolveKeystoreAlias(id) } returns "xkey_key_$id"
+        every { keystore.keyExists(id) } returns true
+        every { keystore.generalKeyExists(id) } returns true
+        every { keystore.userKeyGeneration(id) } returns mapOf("keystore:xkey_key_$id" to "1")
+        val instance = tables.addKey(id, SharingPolicyType.SELECTED_PEERS)
+
+        assertTrue(store.deleteKey(id, instance, owedDelete()))
+        assertTrue("the delete's material is not owed", store.isDeletionPending(id))
+
+        val data = java.util.Base64.getEncoder().encodeToString(ByteArray(32))
+        val keyed = listOf(
+            "sign", "loadKey",
+            MethodNames.LOCAL_SIGN, MethodNames.LOCAL_DECRYPT, MethodNames.LOCAL_SYMMETRIC_ENCRYPT,
+            MethodNames.LOCAL_SYMMETRIC_DECRYPT, MethodNames.LOCAL_HMAC, MethodNames.LOCAL_ECDH,
+            MethodNames.LOCAL_GET_PUBLIC_KEY, MethodNames.LOCAL_GET_KEY_INFO, MethodNames.LOCAL_SET_KEY_POLICY,
+            MethodNames.LOCAL_ATTEST_KEY, MethodNames.LOCAL_SIGN_FIDO2_ASSERTION, MethodNames.LOCAL_SHARE_SYMMETRIC,
+            MethodNames.LOCAL_IMPORT_SHARED_KEY, MethodNames.COSIGN_REQUEST
+        )
+        for (method in keyed) {
+            val params = JSONObject()
+                .put("keyId", id).put("credentialId", id).put("key_id", id)
+                .put("data", data).put("hash", "00".repeat(32)).put("shareable", true)
+            val response = handler.handleRequest(Request(id = 9, method = method, params = params))
+            assertEquals("$method answered ${response.error?.message}", ErrorCodes.KEY_NOT_FOUND, response.error?.code)
+            assertTrue("$method was not refused as a deleted key: ${response.error?.message}", "was deleted" in response.error!!.message)
+        }
+    }
+
     /** Runs the legacy deleteKey through the handler. */
     private suspend fun rpcLegacyDeleteKey(credentialId: String): Response {
         val method = RequestHandler::class.java.getDeclaredMethod("handleDeleteKey", Request::class.java, Continuation::class.java)
