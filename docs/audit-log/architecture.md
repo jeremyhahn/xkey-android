@@ -35,8 +35,11 @@ No entry carries key material.
 
 An arriving key's write and its entry run together, outside cancellation
 (`persistAudited` in `RequestHandler`). If the connection drops mid-write,
-the stored key still gets its entry. A request cancelled before the write
-stores and records nothing.
+the stored key still gets its entry. A request cancelled before the write,
+or already cancelled when it reaches it, stores and records nothing. The
+device name comes from `auditPeerName`, which every audit record uses: when
+the paired-device store cannot be read the entry still lands, with a null
+`device_name`.
 
 ### Sync events
 

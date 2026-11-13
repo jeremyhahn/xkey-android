@@ -59,6 +59,7 @@ import com.automatethethings.xkey.settings.UserVerificationPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
@@ -1641,14 +1642,13 @@ class RequestHandler(
 
         // Log signing request
         val callerPeer = currentPeerPublicKeyHex()
-        val deviceInfo = callerPeer?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logSigningRequest(
             keyId = signParams.keyId,
             keyLabel = signParams.keyId,
             keyType = "signing",
             algorithm = signAlgorithm,
             deviceId = callerPeer,
-            deviceName = deviceInfo?.deviceName,
+            deviceName = auditPeerName(callerPeer),
             success = true,
             durationMs = durationMs
         )
@@ -1687,14 +1687,13 @@ class RequestHandler(
 
         // Log decryption request
         val callerPeer = currentPeerPublicKeyHex()
-        val deviceInfo = callerPeer?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logDecryptionRequest(
             keyId = decryptParams.keyId,
             keyLabel = decryptParams.keyId,
             keyType = "rsa",
             algorithm = "RSA-OAEP",
             deviceId = callerPeer,
-            deviceName = deviceInfo?.deviceName,
+            deviceName = auditPeerName(callerPeer),
             success = true,
             durationMs = durationMs
         )
@@ -1744,14 +1743,13 @@ class RequestHandler(
 
         // Log encryption request
         val callerPeer = currentPeerPublicKeyHex()
-        val deviceInfo = callerPeer?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logEncryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
             keyType = "symmetric",
             algorithm = "AES-GCM",
             deviceId = callerPeer,
-            deviceName = deviceInfo?.deviceName,
+            deviceName = auditPeerName(callerPeer),
             success = true,
             durationMs = durationMs
         )
@@ -1802,14 +1800,13 @@ class RequestHandler(
 
         // Log decryption request
         val callerPeer = currentPeerPublicKeyHex()
-        val deviceInfo = callerPeer?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logDecryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
             keyType = "symmetric",
             algorithm = "AES-GCM",
             deviceId = callerPeer,
-            deviceName = deviceInfo?.deviceName,
+            deviceName = auditPeerName(callerPeer),
             success = true,
             durationMs = durationMs
         )
@@ -2077,19 +2074,20 @@ class RequestHandler(
         // after the commit and before its result arrives still audits it.
         suspend fun setPolicyFrom(from: KeyEntity, policy: SharingPolicyType): Boolean {
             val expected = from.sharingPolicy
-            return withContext(NonCancellable) {
-                if (keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy) == 0) {
-                    return@withContext false
+            return persistAudited(
+                write = { keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy) != 0 },
+                record = { changed ->
+                    if (changed) {
+                        AuditLogger.logKeySharingChanged(
+                            keyId = entity.keyId,
+                            keyLabel = entity.label,
+                            keyType = entity.keyType,
+                            oldPolicy = expected.name,
+                            newPolicy = policy.name
+                        )
+                    }
                 }
-                AuditLogger.logKeySharingChanged(
-                    keyId = entity.keyId,
-                    keyLabel = entity.label,
-                    keyType = entity.keyType,
-                    oldPolicy = expected.name,
-                    newPolicy = policy.name
-                )
-                true
-            }
+            )
         }
 
         // The read row as it is now. A different row under the same key id
@@ -3578,7 +3576,7 @@ class RequestHandler(
             Pair<com.automatethethings.xkey.sync.SyncEngine.ItemCounts, org.json.JSONArray>
     ): Response {
         val peerId = currentPeerPublicKeyHex()
-        val peerName = syncPeerName(peerId)
+        val peerName = auditPeerName(peerId)
         fun failed(why: String) =
             record(peerId, peerName, 0, AuditLogger.SYNC_INBOUND, 0, 0, 0, false, why)
         return try {
@@ -3606,12 +3604,17 @@ class RequestHandler(
         }
     }
 
-    /** [peerId]'s paired name, or null when it has none or the store cannot be read. */
-    private fun syncPeerName(peerId: String?): String? = peerId?.let {
+    /**
+     * [peerId]'s paired name for an audit record, or null when it has none or
+     * the store cannot be read. Every audit record names its peer through
+     * here: the lookup never throws, so a store that cannot be read (encrypted
+     * prefs without their keystore) never suppresses the record.
+     */
+    private fun auditPeerName(peerId: String?): String? = peerId?.let {
         try {
             pairedDeviceRepository?.getDevice(it)?.deviceName
         } catch (e: Exception) {
-            Log.w(TAG, "paired device name unavailable for the sync audit: ${e.javaClass.simpleName}")
+            Log.w(TAG, "paired device name unavailable for the audit: ${e.javaClass.simpleName}")
             null
         }
     }
@@ -3691,7 +3694,7 @@ class RequestHandler(
         } catch (_: ProtocolException) {
             null
         } ?: return null
-        return BackupAuditPeer(key, pairedDeviceRepository?.getDevice(key)?.deviceName)
+        return BackupAuditPeer(key, auditPeerName(key))
     }
 
     /**
@@ -3808,16 +3811,22 @@ class RequestHandler(
      * audit entry names. Under [NonCancellable] the record always follows a
      * write that ran; cancellation before the write stores and records
      * nothing, and the caller still sees the cancellation once this returns.
-     * Every share path that stores something goes through here.
+     * A request already cancelled when it arrives here is refused before the
+     * write: entering [NonCancellable] checks nothing, so without that check a
+     * cancelled request with no suspension point since its cancellation would
+     * still store. Every path that writes and records something, the share
+     * paths and the sharing-policy change, goes through here.
      *
      * @param write stores the shared material and returns its result
      * @param record writes the audit entry for what [write] stored
      * @return the result of [write]
      */
-    private suspend fun <T> persistAudited(write: suspend () -> T, record: (T) -> Unit): T =
-        withContext(NonCancellable) {
+    private suspend fun <T> persistAudited(write: suspend () -> T, record: (T) -> Unit): T {
+        currentCoroutineContext().ensureActive()
+        return withContext(NonCancellable) {
             write().also(record)
         }
+    }
 
     /**
      * Imports a public key shared by the desktop, stored as a contact entry.
@@ -3857,7 +3866,7 @@ class RequestHandler(
                             fingerprint = fingerprint,
                             source = "shared",
                             deviceId = peerPublicKeyHex,
-                            deviceName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
+                            deviceName = auditPeerName(peerPublicKeyHex)
                         )
                     }
                 )
@@ -3924,7 +3933,7 @@ class RequestHandler(
                         algorithm = algorithm,
                         source = "shared",
                         deviceId = peerPublicKeyHex,
-                        deviceName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
+                        deviceName = auditPeerName(peerPublicKeyHex)
                     )
                 }
             )
@@ -3963,7 +3972,7 @@ class RequestHandler(
                 return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key not found: $keyId")
             }
 
-            val peerName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
+            val peerName = auditPeerName(peerPublicKeyHex)
             val entity = authorizeShare(keyId, peerPublicKeyHex)
             if (entity == null) {
                 val message = "Key is not shareable with this peer: $keyId"

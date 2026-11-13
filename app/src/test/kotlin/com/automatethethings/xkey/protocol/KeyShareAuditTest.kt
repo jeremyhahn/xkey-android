@@ -250,10 +250,15 @@ class KeyShareAuditTest {
         }
     }
 
-    /** The same holds for the key use and sync records, which share the one name lookup. */
+    /**
+     * The same holds for a key use record, which shares the one name lookup.
+     * The attestation policy's read comes first and succeeds; the store then
+     * fails for the record's name lookup, after the key was used.
+     */
     @Test
-    fun anUnreadablePairedDeviceStoreStillRecordsAKeyUse() = runTest {
-        every { pairedDevices.getDevice(any()) } throws SecurityException("keystore unavailable")
+    fun aStoreFailingAfterAKeyUseStillRecordsIt() = runTest {
+        every { pairedDevices.getDevice(any()) } returns
+            PairedDeviceData(PEER, PEER_NAME, 0L) andThenThrows SecurityException("keystore unavailable")
         coEvery { keystoreManager.symmetricEncrypt(KEY_ID, any(), any()) } returns ByteArray(16)
 
         success(served(keyUse(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, "plaintext")))

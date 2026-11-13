@@ -240,7 +240,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     fun addDevice(publicKeyHex: String, deviceName: String, bleAddress: String? = null) {
         var stillPending = false
         val evicted = synchronized(storeLock) {
-            val devices = getAllDevices().toMutableList()
+            val devices = storedDevices().toMutableList()
             // Remove stale entries for this device. A re-pairing device will have a new Noise
             // static key, so we match by publicKeyHex, BLE address, OR device name to ensure
             // the old entry is replaced rather than duplicated.
@@ -273,7 +273,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     }
 
     fun updateDeviceBleAddress(publicKeyHex: String, bleAddress: String) = synchronized(storeLock) {
-        val devices = getAllDevices().toMutableList()
+        val devices = storedDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
             devices[idx] = devices[idx].copy(bleAddress = bleAddress)
@@ -290,7 +290,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      */
     fun removeDevice(publicKeyHex: String) {
         synchronized(storeLock) {
-            val devices = getAllDevices().toMutableList()
+            val devices = storedDevices().toMutableList()
             val deviceToRemove = devices.find { it.publicKeyHex == publicKeyHex }
             devices.removeAll { it.publicKeyHex == publicKeyHex }
             saveDevices(devices, revoke = listOf(publicKeyHex))
@@ -306,7 +306,26 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         notifyRemoved(listOf(publicKeyHex))
     }
 
+    /**
+     * Every paired device, or none when the store cannot be read: the prefs
+     * read itself sits in the try, so encrypted prefs whose keystore is
+     * unavailable read as empty instead of throwing into the caller.
+     */
     fun getAllDevices(): List<PairedDeviceData> = synchronized(storeLock) {
+        try {
+            storedDevices()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * The stored devices for a read-modify-write. Unlike [getAllDevices], a
+     * store that cannot be read throws: an update must never take an
+     * unreadable store for an empty one and write that back over every
+     * pairing.
+     */
+    private fun storedDevices(): List<PairedDeviceData> = synchronized(storeLock) {
         val jsonStr = prefs.getString(KEY_DEVICES, null) ?: return@synchronized emptyList()
         try {
             val arr = JSONArray(jsonStr)
@@ -318,7 +337,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
 
     fun clear() {
         val removed = synchronized(storeLock) {
-            val removed = getAllDevices().map { it.publicKeyHex }
+            val removed = storedDevices().map { it.publicKeyHex }
             prefs.edit()
                 .remove(KEY_DEVICES)
                 .remove(KEY_PAIRINGS)
@@ -348,7 +367,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         requireAttestationForKeyAttestation: Boolean,
         attestationGracePeriodMinutes: Int
     ) = synchronized(storeLock) {
-        val devices = getAllDevices().toMutableList()
+        val devices = storedDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
             devices[idx] = devices[idx].copy(
@@ -367,7 +386,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         bootStateVerified: Boolean,
         deviceFingerprint: String? = null
     ) = synchronized(storeLock) {
-        val devices = getAllDevices().toMutableList()
+        val devices = storedDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
             devices[idx] = devices[idx].copy(
@@ -394,7 +413,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * exactly what the desktop verified. No-op for an unknown peer.
      */
     fun updateDeviceFingerprint(publicKeyHex: String, deviceFingerprint: String) = synchronized(storeLock) {
-        val devices = getAllDevices().toMutableList()
+        val devices = storedDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
             devices[idx] = devices[idx].copy(deviceFingerprint = deviceFingerprint)
@@ -420,7 +439,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         subjectDN: String,
         notAfter: Long
     ) = synchronized(storeLock) {
-        val devices = getAllDevices().toMutableList()
+        val devices = storedDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
             devices[idx] = devices[idx].copy(
@@ -436,7 +455,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     }
 
     fun recordConnection(publicKeyHex: String) = synchronized(storeLock) {
-        val devices = getAllDevices().toMutableList()
+        val devices = storedDevices().toMutableList()
         val idx = devices.indexOfFirst { it.publicKeyHex == publicKeyHex }
         if (idx >= 0) {
             devices[idx] = devices[idx].copy(
@@ -640,7 +659,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         for (device in devices) {
             arr.put(device.toJson())
         }
-        val wasPaired = getAllDevices().map { it.publicKeyHex }.toSet()
+        val wasPaired = storedDevices().map { it.publicKeyHex }.toSet()
         val before = readPairings()
         var counter = prefs.getLong(KEY_PAIRING_GENERATION, 0L)
         val pairings = devices.map { it.publicKeyHex }.distinct().associateWith { key ->
