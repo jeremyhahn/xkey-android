@@ -90,7 +90,13 @@ class PerSessionApprovalReattachTest {
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
         mockkObject(XKeyDatabase.Companion)
-        every { XKeyDatabase.getInstance(any()) } returns mockk(relaxed = true)
+        every { XKeyDatabase.getInstance(any()) } returns mockk(relaxed = true) {
+            // No key here is deleted or carries a stored policy (#193 store).
+            every { keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+                io.mockk.coEvery { deletion(any()) } returns null
+                io.mockk.coEvery { policyRow(any()) } returns null
+            }
+        }
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
         val context = mockk<Context>(relaxed = true)
