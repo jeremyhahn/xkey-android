@@ -21,11 +21,13 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
-import kotlinx.coroutines.Dispatchers
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -42,25 +44,31 @@ class PasskeySignCounterTest {
     /**
      * The two stores a passkey's counter lives in, faked over in-memory
      * values. A null value means the store has no row for the passkey.
-     * [readDelayMs] widens the gap between a read and the writes that follow
-     * it, so an unguarded read-modify-write races.
+     * A read returns the value the store held when it was read.
+     *
+     * With [overlapReads] the key store read, the last read before the
+     * writes, holds every caller until a second caller has read too, so two
+     * unguarded read-modify-writes always overlap. A caller the lock keeps
+     * out never arrives; the first then goes on after [OVERLAP_WAIT_MS] of
+     * virtual time.
      */
     private class Stores(
         @Volatile var metadata: Long?,
         @Volatile var key: Long?,
-        private val readDelayMs: Long = 0
+        private val overlapReads: Boolean = false
     ) {
-        private val metadataEntity = mockk<CredentialMetadataEntity> {
-            every { signCount } answers { metadata ?: 0 }
-        }
-        private val keyEntity = mockk<KeyEntity> {
-            every { signCount } answers { key ?: 0 }
+        private val keyReaders = AtomicInteger()
+        private val bothRead = CompletableDeferred<Unit>()
+
+        private suspend fun overlap() {
+            if (!overlapReads) return
+            if (keyReaders.incrementAndGet() >= 2) bothRead.complete(Unit)
+            withTimeoutOrNull(OVERLAP_WAIT_MS) { bothRead.await() }
         }
 
         val credentialDao = mockk<CredentialMetadataDao> {
             coEvery { getByCredentialId(ID) } coAnswers {
-                delay(readDelayMs)
-                if (metadata == null) null else metadataEntity
+                metadata?.let { seen -> mockk<CredentialMetadataEntity> { every { signCount } returns seen } }
             }
             coEvery { updateSignCount(ID, any(), any()) } answers {
                 if (failMetadataWrite) throw IllegalStateException("metadata store unavailable")
@@ -70,8 +78,9 @@ class PasskeySignCounterTest {
 
         val keyDao = mockk<KeyDao> {
             coEvery { getByKeyId(ID) } coAnswers {
-                delay(readDelayMs)
-                if (key == null) null else keyEntity
+                val read = key?.let { seen -> mockk<KeyEntity> { every { signCount } returns seen } }
+                overlap()
+                read
             }
             coEvery { updateSignCount(ID, any(), any()) } answers {
                 if (failKeyWrite) throw IllegalStateException("key store unavailable")
@@ -109,10 +118,11 @@ class PasskeySignCounterTest {
     }
 
     @Test
-    fun concurrentAdvancesNeverShareAValue() = runBlocking {
-        val stores = Stores(metadata = 10, key = 10, readDelayMs = 20)
+    fun concurrentAdvancesNeverShareAValue() = runTest {
+        // Without the shared lock both callers read 10 before either writes.
+        val stores = Stores(metadata = 10, key = 10, overlapReads = true)
         val values = listOf(stores.counter(), stores.counter())
-            .map { counter -> async(Dispatchers.Default) { counter.next(ID) } }
+            .map { counter -> async { counter.next(ID) } }
             .awaitAll()
 
         assertEquals("two assertions signed one value: $values", 2, values.toSet().size)
@@ -204,5 +214,6 @@ class PasskeySignCounterTest {
 
     private companion object {
         const val ID = "credential-216"
+        const val OVERLAP_WAIT_MS = 1_000L
     }
 }
