@@ -193,17 +193,48 @@ class PromptEntryPointsTest {
             if (!rowRead.containsMatchIn(body)) return@mapIndexedNotNull null
             val use = keyUse.find(body, lastApproval.range.last) ?: return@mapIndexedNotNull null
             val between = body.substring(lastApproval.range.last, use.range.first)
-            if ("revalidateApprovedKey(" in between) null else fn.groupValues[1]
+            // The key material approved is read before the prompt goes up.
+            val before = body.substring(0, approval.find(body)!!.range.first)
+            if ("revalidateApprovedKey(" in between && "approvalSnapshot(" in before) null else fn.groupValues[1]
         }
         assertTrue("approval-gated key use without revalidateApprovedKey: $unchecked", unchecked.isEmpty())
 
         val check = code.substringAfter("fun revalidateApprovedKey(", "").substringBefore("\n    }")
-        listOf("getByKeyId(", "isSameKeyAs(").forEach {
+        // The row and the key material signed with: the keystore key under
+        // the alias must still be the one read before the approval.
+        listOf("getByKeyId(", "isSameKeyAs(", "getPublicKeyDER(", "contentEquals(").forEach {
             assertTrue("revalidateApprovedKey does not call $it", it in check)
         }
         val same = code.substringAfter("fun KeyEntity.isSameKeyAs(", "").substringBefore("\n}")
         listOf("id ==", "keyType ==", "algorithm ==", "policyRevision ==", "publicKeyDer", "rpId ==").forEach {
             assertTrue("isSameKeyAs does not compare $it", it in same)
+        }
+    }
+
+    /**
+     * A request withdrawn with its prompt on screen (a co-sign's timeout, a
+     * cancelled caller) has that prompt taken down before the queue starts
+     * the next one: every owner's withdrawal (`prompts.end`) in the launcher
+     * dismisses a shown prompt in the step that runs before the next turn,
+     * so no stale prompt is left answerable once its entry has gone.
+     */
+    @Test
+    fun everyWithdrawalDismissesAShownPromptBeforeTheNextTurn() {
+        listOf("auth/BiometricActivityLauncher.kt", "auth/PendingCryptoSignatures.kt").forEach { path ->
+            val code = sourceRoot.resolve(path).readLines().filterNot { line ->
+                line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+            }.joinToString("\n")
+            val ends = Regex("""prompts\.end\(key\)""").findAll(code).toList()
+            assertTrue("$path withdraws nothing through prompts.end", ends.isNotEmpty())
+            ends.forEach { end ->
+                val beforeNext = code.substring(end.range.last).substringBefore("\n        }")
+                assertTrue("$path withdraws a shown prompt without dismissing it: $beforeNext", "cancelPrompt(" in beforeNext)
+            }
+        }
+        val withdraw = sourceRoot.resolve("ui/TransparentBiometricActivity.kt").readText()
+            .substringAfter("fun withdraw(", "").substringBefore("\n        }")
+        listOf("expired.add(", "finishWithResult(").forEach {
+            assertTrue("TransparentBiometricActivity.withdraw does not call $it", it in withdraw)
         }
     }
 

@@ -239,6 +239,9 @@ class CosignRequestHandlerTest {
         val subtitles = mutableListOf<String>()
         val intents = mutableListOf<Intent>()
 
+        /** Launches and withdrawals of prompts, in the order they happened. */
+        val events = mutableListOf<String>()
+
         private val receivers = mutableListOf<BroadcastReceiver>()
         private val launchIds = mutableMapOf<Intent, String>()
         private val launching = ArrayDeque<String>()
@@ -272,9 +275,17 @@ class CosignRequestHandlerTest {
                     true
                 }
             }
+            every { TransparentBiometricActivity.withdraw(any()) } answers {
+                val requestId = firstArg<String>()
+                events += "withdrawn:$requestId"
+                endedUnshown += requestId
+                if (requestId == visible) visible = null
+                // The prompt was withdrawn, not answered: no result follows.
+            }
             every { context.startActivity(any()) } answers {
                 val intent = firstArg<Intent>()
                 val requestId = launchIds.getValue(intent)
+                events += "launched:$requestId"
                 launched += requestId
                 intents += intent
                 if (deferredCreate) launching.addLast(requestId) else create(requestId)
@@ -530,6 +541,46 @@ class CosignRequestHandlerTest {
     }
 
     @Test
+    fun `a lone co-sign that times out takes its shown prompt down`() = runTest {
+        screen.autoAnswer = null
+        val response = async { handler().handleRequest(request()) }
+        runCurrent()
+        val prompt = checkNotNull(screen.visible)
+
+        advanceTimeBy(PROMPT_TIMEOUT_MS + 1)
+        runCurrent()
+        assertError(ErrorCodes.BIOMETRIC_FAILED, response.await())
+        assertNull("no stale prompt is left to answer", screen.visible)
+        assertEquals(listOf("launched:$prompt", "withdrawn:$prompt"), screen.events)
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `a timed-out prompt is dismissed before the next co-sign takes the screen`() = runTest {
+        screen.autoAnswer = null
+        val handler = handler()
+        val first = async { handler.handleRequest(request(id = 1L)) }
+        runCurrent()
+        val firstPrompt = checkNotNull(screen.visible)
+        advanceTimeBy(PROMPT_TIMEOUT_MS / 2)
+        val second = async { handler.handleRequest(request(id = 2L)) }
+        runCurrent()
+
+        advanceTimeBy(PROMPT_TIMEOUT_MS / 2 + 1)
+        runCurrent()
+        assertError(ErrorCodes.BIOMETRIC_FAILED, first.await())
+        val secondPrompt = checkNotNull(screen.visible)
+        assertEquals(
+            "the stale prompt goes down before the next one is started",
+            listOf("launched:$firstPrompt", "withdrawn:$firstPrompt", "launched:$secondPrompt"),
+            screen.events
+        )
+
+        screen.answer(approved = true)
+        assertNull(second.await().error)
+    }
+
+    @Test
     fun `a cancelled caller's prompt is gone before the next co-sign shows its own`() = runTest {
         screen.autoAnswer = null
         val handler = handler()
@@ -577,6 +628,20 @@ class CosignRequestHandlerTest {
     fun `a signing key replaced under its id while its approval waits signs nothing`() = runTest {
         val replaced = signingKey.copy(id = signingKey.id + 1, publicKeyDer = ByteArray(91) { 9 })
         assertError(ErrorCodes.OPERATION_DENIED, approvedWhileKeyBecomes(now = replaced))
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `a keystore key replaced under the approved alias signs nothing`() = runTest {
+        // The row stays as it was; only the key material under its alias changes.
+        screen.autoAnswer = null
+        val response = async { handler().handleRequest(request()) }
+        runCurrent()
+        checkNotNull(screen.visible) { "the co-sign's prompt is up" }
+        every { keystoreManager.getPublicKeyDER(signingKey.keyId) } returns ByteArray(91) { 9 }
+        screen.answer(approved = true)
+        runCurrent()
+        assertError(ErrorCodes.OPERATION_DENIED, response.getCompleted())
         assertNothingSigned()
     }
 
