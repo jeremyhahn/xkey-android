@@ -2113,6 +2113,10 @@ class KeystoreManager(private val context: Context) {
         fun <T> withAliasGate(alias: String, block: () -> T): T =
             synchronized(aliasGates.computeIfAbsent(alias) { Any() }) { block() }
 
+        /** How many aliases the gate registry holds an entry for. */
+        @androidx.annotation.VisibleForTesting
+        internal fun aliasGateCount(): Int = aliasGates.size
+
         /** Android Keystore provider name. */
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
 
