@@ -67,6 +67,7 @@ import java.lang.ref.WeakReference
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import java.util.Base64
+import java.util.UUID
 import com.automatethethings.xkey.pin.PinManager
 import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinType
@@ -114,11 +115,10 @@ interface MessageSender {
  * // Update settings when they change
  * handler.updateSettings(newSettings)
  *
- * // Set session ID when BLE connection is established
- * handler.setSessionId(deviceAddress)
- *
- * // Handle requests
- * val response = handler.handleRequest(request)
+ * // Handle a request in the context of the connection it arrived on
+ * val response = withContext(RequestHandler.servedConnection(binding, peerKeyHex, connectionId)) {
+ *     handler.handleRequest(request)
+ * }
  * ```
  *
  * @param context Application context for device capability checks.
@@ -183,9 +183,15 @@ class RequestHandler(
          *
          * @param binding the binding of the connection the request arrived on
          * @param peerPublicKeyHex that connection's authenticated peer static key
+         * @param connectionId the id the transport assigned the connection when
+         *   it connected, unique to it and never reused; PER_SESSION approval
+         *   is checked and recorded against it
          */
-        fun servedConnection(binding: SessionBindingProvider, peerPublicKeyHex: String?): CoroutineContext =
-            CallerSession(binding, peerPublicKeyHex, served = true)
+        fun servedConnection(
+            binding: SessionBindingProvider,
+            peerPublicKeyHex: String?,
+            connectionId: String,
+        ): CoroutineContext = CallerSession(binding, peerPublicKeyHex, served = true, connectionId = connectionId)
     }
 
     // Unified key storage DAO
@@ -221,14 +227,6 @@ class RequestHandler(
     private var currentSettings: BiometricSettingsData = BiometricSettingsData()
 
     /**
-     * Current BLE session identifier (typically device address).
-     *
-     * Updated via [setSessionId] when BLE connection state changes.
-     */
-    @Volatile
-    private var currentSessionId: String? = null
-
-    /**
      * Public key hex of the currently connected device.
      *
      * Updated via [setConnectedDevicePublicKeyHex] after pairing confirmation.
@@ -236,6 +234,16 @@ class RequestHandler(
      */
     @Volatile
     private var connectedDevicePublicKeyHex: String? = null
+
+    /**
+     * The session that set [connectedDevicePublicKeyHex], or null when its
+     * setter named none. Only that session's teardown clears the identity, so
+     * a session ending late (a USB detach followed by a reattach, #134) does
+     * not clear the identity of the one that replaced it. Guarded by
+     * [connectedPeerLock].
+     */
+    private var connectedPeerOwner: Any? = null
+    private val connectedPeerLock = Any()
 
     /**
      * This device's persistent attested identity (go-xkms#129).
@@ -358,19 +366,22 @@ class RequestHandler(
     }
 
     /**
-     * Sets the current BLE session identifier.
+     * Ends the PER_SESSION approval and the connected peer's identity when
+     * called with null.
      *
-     * This should be called when a BLE connection is established (with the device
-     * address) or disconnected (with null). The session ID is used by
-     * [SessionAuthManager] for PER_SESSION authentication mode.
+     * A non-null id changes nothing: approval keys on the connection id each
+     * request carries ([servedConnection]), never on handler-wide state that
+     * another transport's connect would overwrite (#134).
      *
-     * @param sessionId The BLE device address, or null if disconnected.
+     * @param sessionId null when the session ended.
      */
     fun setSessionId(sessionId: String?) {
-        currentSessionId = sessionId
         if (sessionId == null) {
             sessionAuthManager?.clearSession()
-            connectedDevicePublicKeyHex = null
+            synchronized(connectedPeerLock) {
+                connectedDevicePublicKeyHex = null
+                connectedPeerOwner = null
+            }
         }
         Log.d(TAG, "Session ID updated: $sessionId")
     }
@@ -382,10 +393,31 @@ class RequestHandler(
      * PAIRED_DEVICES_SKIP attestation policy can check if the device is known.
      *
      * @param publicKeyHex The hex-encoded Noise static public key, or null on disconnect.
+     * @param owner The session setting it; pass the same object to
+     *   [clearConnectedDevicePublicKeyHex] when that session ends.
      */
-    fun setConnectedDevicePublicKeyHex(publicKeyHex: String?) {
-        connectedDevicePublicKeyHex = publicKeyHex
+    fun setConnectedDevicePublicKeyHex(publicKeyHex: String?, owner: Any? = null) {
+        synchronized(connectedPeerLock) {
+            connectedDevicePublicKeyHex = publicKeyHex
+            connectedPeerOwner = if (publicKeyHex == null) null else owner
+        }
         Log.d(TAG, "Connected device public key updated: ${publicKeyHex?.take(16) ?: "null"}")
+    }
+
+    /**
+     * Clears the connected device's public key if [owner] set it and no
+     * session has set one since.
+     *
+     * @return whether the key was cleared.
+     */
+    fun clearConnectedDevicePublicKeyHex(owner: Any): Boolean {
+        synchronized(connectedPeerLock) {
+            if (connectedPeerOwner !== owner) return false
+            connectedDevicePublicKeyHex = null
+            connectedPeerOwner = null
+        }
+        Log.d(TAG, "Connected device public key cleared by its session")
+        return true
     }
 
     /**
@@ -452,6 +484,7 @@ class RequestHandler(
         val binding: SessionBindingProvider,
         val peerPublicKeyHex: String?,
         val served: Boolean,
+        val connectionId: String? = null,
     ) : AbstractCoroutineContextElement(Key) {
         companion object Key : CoroutineContext.Key<CallerSession>
     }
@@ -490,17 +523,38 @@ class RequestHandler(
         return Response.error(id, code, message).toJson()
     }
 
+    suspend fun handleRequest(request: Request): Response {
+        val context = currentCoroutineContext()
+        val approval = context[ApprovalSession]
+            ?: ApprovalSession(context[CallerSession]?.connectionId ?: unsharedApprovalId())
+        return withContext(approval) {
+            dispatch(request).copy(generation = request.generation)
+        }
+    }
+
     /**
-     * Handles a parsed request.
+     * The connection id a request arrived with, captured once when it
+     * reaches [handleRequest] and carried in the coroutine context for the
+     * rest of the request (#134).
      *
-     * Every answer carries the request's `generation` (go-xkms#128), copied
-     * here rather than by each handler, so no method can drop it.
-     *
-     * @param request The parsed request
-     * @return Response to the request
+     * One handler serves BLE, TCP and USB, so the id comes from the request's
+     * own [CallerSession], which its transport set to the id it assigned the
+     * connection at connect; nothing handler-wide that another transport's
+     * connect could overwrite. Biometric approval is checked and recorded
+     * against this id alone, so an approval given on one connection never
+     * authenticates a request on another. A request with no connection id
+     * gets an id of its own, so it shares no approval.
      */
-    suspend fun handleRequest(request: Request): Response =
-        dispatch(request).copy(generation = request.generation)
+    private class ApprovalSession(val sessionId: String) : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<ApprovalSession>
+    }
+
+    /** An approval id no other request carries. */
+    private fun unsharedApprovalId(): String = "request:${UUID.randomUUID()}"
+
+    /** The [ApprovalSession] id of the request being handled. */
+    private suspend fun requestSessionId(): String =
+        currentCoroutineContext()[ApprovalSession]?.sessionId ?: unsharedApprovalId()
 
     private suspend fun dispatch(request: Request): Response {
         Log.d(TAG, "Handling request: id=${request.id}, method=${request.method}")
@@ -741,7 +795,7 @@ class RequestHandler(
 
         // Determine if biometric authentication is required
         val biometricRequired = if (signParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -831,7 +885,7 @@ class RequestHandler(
                     )
 
                     // Record successful authentication for session tracking
-                    sessionAuthManager?.recordAuthentication(currentSessionId)
+                    sessionAuthManager?.recordAuthentication(requestSessionId())
 
                     val signatureBase64 = Base64.getEncoder().encodeToString(signature)
                     val result = SignResult(
@@ -850,7 +904,13 @@ class RequestHandler(
                     // biometric auth. They require a GENERIC biometric prompt to authenticate the user,
                     // and then signWithoutBiometric() will work within the auth duration window.
                     // Only PER_OPERATION keys (authDuration = 0) support CryptoObject-bound signing.
-                    try {
+                    //
+                    // A PER_SESSION session that has not been approved yet always prompts: the
+                    // Keystore window may still be open from an earlier session (a USB detach and
+                    // reattach, #134), and that approval does not carry over.
+                    val sessionUnapproved = currentSettings.authMode == BiometricAuthMode.PER_SESSION &&
+                        sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) != false
+                    if (!sessionUnapproved) try {
                         Log.d(TAG, "Trying signWithoutBiometric (optimistic for TIME_WINDOW/PER_SESSION)")
                         val signature = keystoreManager.signWithoutBiometric(
                             credentialId = signParams.credentialId,
@@ -882,7 +942,7 @@ class RequestHandler(
                     )
 
                     // Record successful authentication for session tracking
-                    sessionAuthManager?.recordAuthentication(currentSessionId)
+                    sessionAuthManager?.recordAuthentication(requestSessionId())
 
                     // Now sign within the fresh auth window
                     Log.d(TAG, "Biometric succeeded, signing within auth window")
@@ -921,7 +981,7 @@ class RequestHandler(
             )
 
             // Record successful authentication for session tracking
-            sessionAuthManager?.recordAuthentication(currentSessionId)
+            sessionAuthManager?.recordAuthentication(requestSessionId())
 
             val signatureBase64 = Base64.getEncoder().encodeToString(signature)
             val result = SignResult(
@@ -1602,7 +1662,7 @@ class RequestHandler(
 
         // Check if biometric is needed
         val biometricRequired = if (signParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -1616,7 +1676,7 @@ class RequestHandler(
                     showOnLockScreen = keyguardManager.isKeyguardLocked,
                     onLaunch = notice.onLaunch
                 )
-                sessionAuthManager?.recordAuthentication(currentSessionId)
+                sessionAuthManager?.recordAuthentication(requestSessionId())
             } finally {
                 notice.close()
             }
@@ -3107,7 +3167,7 @@ class RequestHandler(
 
         // Biometric authentication if required
         val biometricRequired = if (assertionParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -3125,7 +3185,7 @@ class RequestHandler(
                     showOnLockScreen = keyguardManager.isKeyguardLocked,
                     onLaunch = notice.onLaunch
                 )
-                sessionAuthManager?.recordAuthentication(currentSessionId)
+                sessionAuthManager?.recordAuthentication(requestSessionId())
                 userVerified = true
             } finally {
                 notice.close()
