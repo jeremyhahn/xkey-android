@@ -63,6 +63,7 @@ internal class PendingCryptoSignatures(
     private val prompts: PromptOwnership = PromptOwnership.process,
     private val expirePrompt: (requestId: String) -> Boolean = CryptoSigningCancellations::expireUnshown,
     private val activeDeadlineMillis: Long = PendingAuthentications.ACTIVE_DEADLINE_MILLIS,
+    private val queueDeadlineMillis: Long = PendingAuthentications.QUEUE_DEADLINE_MILLIS,
 ) {
     private val pending = ConcurrentHashMap<Long, CancellableContinuation<CryptoSigningResult>>()
 
@@ -70,6 +71,8 @@ internal class PendingCryptoSignatures(
      * Allocates a request id, [launch]es the prompt for it when its turn
      * comes, and waits for its result. Cancelling the caller cancels the
      * prompt, or, while the request still waits for its turn, withdraws it.
+     * A request whose turn has not come within [queueDeadlineMillis] fails
+     * with [BiometricPrompt.ERROR_TIMEOUT] and is never shown.
      * A launched request whose prompt is still not up [activeDeadlineMillis]
      * after its launch fails with [BiometricPrompt.ERROR_TIMEOUT] and hands
      * the screen on ([expireUnshown]); one the owner is answering keeps
@@ -90,7 +93,23 @@ internal class PendingCryptoSignatures(
         try {
             suspendCancellableCoroutine { continuation ->
                 pending[id] = continuation
-                prompts.enqueue(key, PromptOwnership.Kind.CRYPTO_SIGNING) {
+                prompts.enqueue(
+                    key,
+                    PromptOwnership.Kind.CRYPTO_SIGNING,
+                    clock = this,
+                    queueDeadlineMillis = queueDeadlineMillis,
+                    onQueueExpired = {
+                        // Settled expired unshown: it never prompts.
+                        if (pending.remove(id, continuation)) {
+                            continuation.resume(
+                                CryptoSigningResult.Error(
+                                    BiometricPrompt.ERROR_TIMEOUT,
+                                    "Another approval prompt held the screen past this signature's deadline"
+                                )
+                            )
+                        }
+                    },
+                ) {
                     // Withdrawn as its turn came: its entry is released already.
                     if (pending[id] !== continuation) return@enqueue
                     try {

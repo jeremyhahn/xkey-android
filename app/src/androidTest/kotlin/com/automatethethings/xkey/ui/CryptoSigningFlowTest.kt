@@ -327,7 +327,11 @@ class CryptoSigningFlowTest {
      */
     private fun holdTheScreen(requestId: String) {
         val key = NotificationKeys.signature(requestId)
-        PromptOwnership.process.enqueue(key, PromptOwnership.Kind.CRYPTO_SIGNING) {}
+        PromptOwnership.process.enqueue(
+            key, PromptOwnership.Kind.CRYPTO_SIGNING,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
         heldKey = key
         assertEquals("nothing else holds the screen", key, PromptOwnership.process.activeKey)
     }

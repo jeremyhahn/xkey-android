@@ -20,7 +20,11 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * The owner of the one prompt queue: every approval, of either prompt family,
@@ -33,6 +37,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * - QUEUED to ACTIVE when its turn comes ([enqueue]'s `onActive` then
  *   launches its prompt or notification);
+ * - QUEUED to SETTLED expired when its turn has not come within the queue
+ *   deadline every [enqueue] arms ([enqueue]'s `onQueueExpired` then takes
+ *   its caller's cancel path, and `onActive` never runs);
  * - QUEUED or ACTIVE to SETTLED by its owner ([settle] with no event:
  *   the queue deadline, a launch failure; [end]: a withdrawal);
  * - ACTIVE to SETTLED by an intent naming it ([settle] with its [Event]: the
@@ -43,7 +50,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * ([NotificationKeys.approval], [NotificationKeys.signature]), unique across
  * both families.
  *
- * Callbacks (`onActive`, `beforeNext`) run outside the lock.
+ * Callbacks (`onActive`, `onQueueExpired`, `beforeNext`) run outside the lock.
  *
  * @param report learns every refusal
  */
@@ -63,7 +70,17 @@ internal class PromptOwnership(
     /** [event] (null for an owner's settle) refused for [key], which was in [state] (null: unknown). */
     data class Refusal(val key: String, val event: Event?, val state: State?)
 
-    private class Entry(val key: String, val kind: Kind, val connection: String?, val onActive: () -> Unit)
+    private class Entry(
+        val key: String,
+        val kind: Kind,
+        val connection: String?,
+        val onQueueExpired: () -> Unit,
+        val onActive: () -> Unit,
+    ) {
+        /** The queue deadline's clock while QUEUED; cancelled once it is ACTIVE or settled. */
+        @Volatile
+        var deadline: Job? = null
+    }
 
     /** QUEUED and ACTIVE entries, in arrival order. */
     private val open = LinkedHashMap<String, Entry>()
@@ -82,10 +99,26 @@ internal class PromptOwnership(
      * behind the entries ahead of it. [onActive] runs once, when it becomes
      * ACTIVE, and never for an approval settled while QUEUED.
      *
+     * Every entry waits at most [queueDeadlineMillis] for its turn, timed on
+     * [clock] (the caller's scope or dispatcher, so a test's virtual time
+     * runs it): one still QUEUED then settles [Outcome.EXPIRED], raises
+     * nothing, and [onQueueExpired] runs once, its caller's cancel path. A
+     * turn that comes as the deadline passes goes one way only: ACTIVE, or
+     * expired and handed straight on. Neither the clock nor the expiry path
+     * has a default, so no caller can enqueue without them.
+     *
      * @throws IllegalStateException if [key] was enqueued before
      */
-    fun enqueue(key: String, kind: Kind = Kind.GENERIC, connection: String? = null, onActive: () -> Unit) {
-        val entry = Entry(key, kind, connection, onActive)
+    fun enqueue(
+        key: String,
+        kind: Kind = Kind.GENERIC,
+        connection: String? = null,
+        clock: CoroutineScope,
+        queueDeadlineMillis: Long = PendingAuthentications.QUEUE_DEADLINE_MILLIS,
+        onQueueExpired: () -> Unit,
+        onActive: () -> Unit,
+    ) {
+        val entry = Entry(key, kind, connection, onQueueExpired, onActive)
         val activeNow = synchronized(this) {
             check(key !in open && key !in settled) { "Approval $key already owns a queue entry" }
             open[key] = entry
@@ -96,7 +129,30 @@ internal class PromptOwnership(
                 false
             }
         }
-        if (activeNow) entry.onActive()
+        if (activeNow) {
+            entry.onActive()
+            return
+        }
+        val deadline = clock.launch {
+            delay(queueDeadlineMillis)
+            expireQueued(entry)
+        }
+        // Its turn may have come (or it settled) before the clock was set.
+        val stillQueued = synchronized(this) {
+            (open[key] === entry && active !== entry).also { if (it) entry.deadline = deadline }
+        }
+        if (!stillQueued) deadline.cancel()
+    }
+
+    /** Settles [entry] expired if it is still QUEUED, then takes its caller's cancel path. */
+    private fun expireQueued(entry: Entry) {
+        synchronized(this) {
+            if (open[entry.key] !== entry || active === entry) return
+            open.remove(entry.key)
+            settledLocked(entry.key, Outcome.EXPIRED)
+            entry.deadline = null
+        }
+        entry.onQueueExpired()
     }
 
     /**
@@ -116,22 +172,31 @@ internal class PromptOwnership(
         kind: Kind = Kind.GENERIC,
         queueDeadlineMillis: Long = PendingAuthentications.QUEUE_DEADLINE_MILLIS,
         prompt: suspend () -> T,
-    ): T? {
-        val turnCame = CompletableDeferred<Unit>()
-        enqueue(key, kind) { turnCame.complete(Unit) }
+    ): T? = coroutineScope {
+        val turnCame = CompletableDeferred<Boolean>()
+        enqueue(
+            key,
+            kind,
+            clock = this,
+            queueDeadlineMillis = queueDeadlineMillis,
+            onQueueExpired = { turnCame.complete(false) },
+        ) { turnCame.complete(true) }
         var outcome = Outcome.WITHDRAWN
+        var expired = false
         try {
-            withTimeoutOrNull(queueDeadlineMillis) { turnCame.await() } ?: run {
-                outcome = Outcome.EXPIRED
-                return null
+            if (!turnCame.await()) {
+                // Settled expired by the queue deadline already.
+                expired = true
+                null
+            } else {
+                outcome = Outcome.FAILED
+                prompt().also { outcome = Outcome.APPROVED }
             }
-            outcome = Outcome.FAILED
-            return prompt().also { outcome = Outcome.APPROVED }
         } catch (e: CancellationException) {
             outcome = Outcome.WITHDRAWN
             throw e
         } finally {
-            settle(key, outcome)
+            if (!expired) settle(key, outcome)
         }
     }
 
@@ -197,17 +262,27 @@ internal class PromptOwnership(
     private fun release(key: String, outcome: Outcome, beforeNext: (wasActive: Boolean) -> Unit): Boolean {
         val wasActive: Boolean
         val next: Entry?
+        val stopped: List<Job>
         synchronized(this) {
             val entry = open.remove(key) ?: return false
-            settled[key] = outcome
-            while (settled.size > MAX_SETTLED) settled.remove(settled.keys.first())
+            settledLocked(key, outcome)
             wasActive = active === entry
             next = if (wasActive) open.values.firstOrNull() else null
             if (wasActive) active = next
+            stopped = listOfNotNull(entry.deadline, next?.deadline)
+            entry.deadline = null
+            next?.deadline = null
         }
+        // Off the queue: neither clock may expire it now.
+        stopped.forEach { it.cancel() }
         beforeNext(wasActive)
         next?.onActive()
         return true
+    }
+
+    private fun settledLocked(key: String, outcome: Outcome) {
+        settled[key] = outcome
+        while (settled.size > MAX_SETTLED) settled.remove(settled.keys.first())
     }
 
     /** Forgets the settled keys, as a freshly started process has none; open entries stay. */

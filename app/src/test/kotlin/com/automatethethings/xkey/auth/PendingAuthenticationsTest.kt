@@ -267,7 +267,11 @@ class PendingAuthenticationsTest {
     @Test
     fun aQueuedCryptoSignaturePastTheQueueDeadlineTimesOutUnseen() = runTest {
         // Another approval holds the screen and never lets go.
-        screen.enqueue("approval-held") {}
+        screen.enqueue(
+            "approval-held",
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
         val signatures = PendingCryptoSignatures(cancelPrompt = {}, prompts = screen, expirePrompt = { true })
         val signed = mutableListOf<String>()
         val queued = async { signatures.await { signed += it } }

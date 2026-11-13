@@ -21,7 +21,10 @@ import com.automatethethings.xkey.auth.PromptOwnership.Kind
 import com.automatethethings.xkey.auth.PromptOwnership.Outcome
 import com.automatethethings.xkey.auth.PromptOwnership.Refusal
 import com.automatethethings.xkey.auth.PromptOwnership.State
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -44,8 +47,78 @@ class PromptOwnershipTest {
     /** Keys in the order their approvals became ACTIVE. */
     private val activated = mutableListOf<String>()
 
-    private fun enqueue(key: String, kind: Kind = Kind.GENERIC, connection: String? = null) =
-        owner.enqueue(key, kind, connection) { activated += key }
+    /** Keys whose queue deadline passed before their turn, in order. */
+    private val expired = mutableListOf<String>()
+
+    /** A clock that never moves on its own: these tests' deadlines pass only when a test advances it. */
+    private val stillClock = TestScope()
+
+    private fun enqueue(
+        key: String,
+        kind: Kind = Kind.GENERIC,
+        connection: String? = null,
+        clock: CoroutineScope = stillClock,
+        queueDeadlineMillis: Long = PendingAuthentications.QUEUE_DEADLINE_MILLIS,
+    ) = owner.enqueue(
+        key,
+        kind,
+        connection,
+        clock = clock,
+        queueDeadlineMillis = queueDeadlineMillis,
+        onQueueExpired = { expired += key },
+    ) { activated += key }
+
+    // enqueue has no default clock or expiry path: an enqueue without a
+    // queue deadline does not compile, so every caller has one.
+
+    @Test
+    fun aQueuedEntryPastItsDeadlineSettlesExpiredTakesItsCancelPathAndNeverActivates() = runTest {
+        enqueue("approval-1")
+        enqueue("approval-2", clock = backgroundScope, queueDeadlineMillis = 1_000L)
+
+        advanceTimeBy(999L)
+        runCurrent()
+        assertEquals(State.QUEUED, owner.state("approval-2"))
+        assertTrue(expired.isEmpty())
+
+        advanceTimeBy(2L)
+        runCurrent()
+        assertEquals(Outcome.EXPIRED, owner.outcome("approval-2"))
+        assertEquals("its cancel path runs once", listOf("approval-2"), expired)
+        assertEquals(1, owner.entries)
+
+        assertTrue(owner.settle("approval-1", Outcome.APPROVED))
+        assertEquals("the freed screen never goes to it", listOf("approval-1"), activated)
+        assertNull(owner.activeKey)
+        assertTrue("its expiry is its own settle, no refusal", refused.isEmpty())
+    }
+
+    @Test
+    fun anEntryWhoseTurnComesBeforeItsDeadlineNeverExpires() = runTest {
+        enqueue("approval-1")
+        enqueue("approval-2", clock = backgroundScope, queueDeadlineMillis = 1_000L)
+
+        advanceTimeBy(500L)
+        assertTrue(owner.settle("approval-1", Outcome.APPROVED))
+        advanceTimeBy(5_000L)
+        runCurrent()
+
+        assertEquals(State.ACTIVE, owner.state("approval-2"))
+        assertTrue(expired.isEmpty())
+    }
+
+    @Test
+    fun aWithdrawnQueuedEntryNeverExpires() = runTest {
+        enqueue("approval-1")
+        enqueue("approval-2", clock = backgroundScope, queueDeadlineMillis = 1_000L)
+
+        assertTrue(owner.end("approval-2"))
+        advanceTimeBy(5_000L)
+        runCurrent()
+
+        assertEquals(Outcome.WITHDRAWN, owner.outcome("approval-2"))
+        assertTrue(expired.isEmpty())
+    }
 
     @Test
     fun everyKindHoldsOneEntryWhileQueuedOrActiveAndNoneAfterSettled() {

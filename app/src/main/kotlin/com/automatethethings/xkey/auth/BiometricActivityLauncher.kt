@@ -32,11 +32,12 @@ import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
@@ -610,7 +611,7 @@ internal class PendingAuthentications(
         ConcurrentHashMap<Long, CancellableContinuation<BiometricActivityLauncher.BiometricResult>>()
 
     /** Requests still waiting for their turn on screen, by id. */
-    private val queued = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
+    private val queued = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
 
     /**
      * Allocates a request id, [launch]es the prompt for it when its turn on
@@ -630,21 +631,25 @@ internal class PendingAuthentications(
     ): BiometricActivityLauncher.BiometricResult {
         val id = nextRequestId.incrementAndGet()
         val key = NotificationKeys.approval(id.toString())
-        val turnCame = CompletableDeferred<Unit>()
+        val turnCame = CompletableDeferred<Boolean>()
         queued[id] = turnCame
-        // Becoming ACTIVE only wakes this caller; the launch runs here, after
-        // the deadline check, so a turn that comes as the deadline passes is
-        // handed straight on.
-        prompts.enqueue(key, kind) { turnCame.complete(Unit) }
+        // Becoming ACTIVE only wakes this caller; the launch runs here. The
+        // queue deadline is the owner's: a turn that comes as it passes is
+        // either ACTIVE or expired and handed straight on.
+        prompts.enqueue(
+            key,
+            kind,
+            clock = CoroutineScope(currentCoroutineContext()),
+            queueDeadlineMillis = queueDeadlineMillis,
+            onQueueExpired = { turnCame.complete(false) },
+        ) { turnCame.complete(true) }
         try {
-            withTimeoutOrNull(queueDeadlineMillis) { turnCame.await() }
-                ?: run {
-                    prompts.settle(key, PromptOwnership.Outcome.EXPIRED)
-                    return BiometricActivityLauncher.BiometricResult.Error(
-                        BiometricPrompt.ERROR_TIMEOUT,
-                        "Another approval prompt held the screen past this request's deadline"
-                    )
-                }
+            if (!turnCame.await()) {
+                return BiometricActivityLauncher.BiometricResult.Error(
+                    BiometricPrompt.ERROR_TIMEOUT,
+                    "Another approval prompt held the screen past this request's deadline"
+                )
+            }
             // Still queued means not cancelled: cancelAll removes a request
             // from queued even once its turn has completed, so one cancelled
             // between its turn and this resume is withdrawn unlaunched.

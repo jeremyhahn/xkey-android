@@ -304,7 +304,11 @@ class TransparentBiometricActivityTest {
      * tearDown hands the screen on.
      */
     private fun newRequestId(): String = NotificationKeys.wakeOnly("uiTest-" + UUID.randomUUID()).also { key ->
-        PromptOwnership.process.enqueue(key) {}
+        PromptOwnership.process.enqueue(
+            key,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
         held += key
         assertEquals("another prompt holds the screen", PromptOwnership.State.ACTIVE, PromptOwnership.process.state(key))
     }

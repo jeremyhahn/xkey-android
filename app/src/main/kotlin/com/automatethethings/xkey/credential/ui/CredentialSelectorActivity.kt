@@ -40,6 +40,9 @@ import com.automatethethings.xkey.credential.handler.CreateCredentialHandler
 import com.automatethethings.xkey.credential.handler.GetCredentialHandler
 import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.databinding.ActivityCredentialSelectorBinding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -79,10 +82,16 @@ class CredentialSelectorActivity : AppCompatActivity() {
     /** Shows this instance's prompt on its key's turn ([onTurn]). */
     private var launchPrompt: (() -> Unit)? = null
 
+    /** Cancels this instance's ceremony when its key's queue deadline passes ([onQueueExpired]). */
+    private var queueExpired: (() -> Unit)? = null
+
+    /** The key the instance before saved, whether or not it still holds its entry. */
+    private var savedKey: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        restoredKey = savedInstanceState?.getString(STATE_PROMPT_KEY)
-            ?.takeIf { PromptOwnership.process.holds(it) }
+        savedKey = savedInstanceState?.getString(STATE_PROMPT_KEY)
+        restoredKey = savedKey?.takeIf { PromptOwnership.process.holds(it) }
         binding = ActivityCredentialSelectorBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
@@ -298,9 +307,25 @@ class CredentialSelectorActivity : AppCompatActivity() {
             .build()
 
         launchPrompt = { BiometricPrompt(this, executor, biometricCallback).authenticate(promptInfo) }
+        // Its turn never came within the queue deadline: the entry settled
+        // expired, so cancel without ending it.
+        queueExpired = { onResult(true, false) }
+        val saved = savedKey
+        if (restored == null && saved != null &&
+            PromptOwnership.process.outcome(saved) == PromptOwnership.Outcome.EXPIRED
+        ) {
+            // The deadline passed while no instance was up to hear it.
+            promptKey = null
+            onResult(true, false)
+            return
+        }
         owners[key] = this
         when {
-            restored == null -> PromptOwnership.process.enqueue(key) { mainThread.post { onTurn(key) } }
+            restored == null -> PromptOwnership.process.enqueue(
+                key,
+                clock = deadlines,
+                onQueueExpired = { mainThread.post { onQueueExpired(key) } },
+            ) { mainThread.post { onTurn(key) } }
             // The ceremony is still up: take its answer here.
             key in shown -> BiometricPrompt(this, executor, biometricCallback)
             key in due -> onTurn(key)
@@ -397,6 +422,16 @@ class CredentialSelectorActivity : AppCompatActivity() {
         private val shown = HashSet<String>()
 
         private val mainThread = Handler(Looper.getMainLooper())
+
+        /** Times every queued key's deadline; process-wide, so a recreation does not stop it. */
+        private val deadlines = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+        /** [key] settled expired before its turn: its owner, if any instance is up, cancels. */
+        private fun onQueueExpired(key: String) {
+            val owner = owners[key]
+            forget(key)
+            owner?.queueExpired?.invoke()
+        }
 
         private fun onTurn(key: String) {
             due -= key

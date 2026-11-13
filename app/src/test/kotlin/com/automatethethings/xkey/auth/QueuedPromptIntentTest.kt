@@ -46,7 +46,11 @@ class QueuedPromptIntentTest {
     fun `a relaunch of a queued intent takes a fresh key, never the one already enqueued`() {
         val intent = PromptOwnership.queued(Intent(), "credentialSelector")
         val first = PromptOwnership.promptKey(intent, "credentialSelector")
-        PromptOwnership.process.enqueue(first) {}
+        PromptOwnership.process.enqueue(
+            first,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
         try {
             assertNotEquals(first, PromptOwnership.promptKey(intent, "credentialSelector"))
         } finally {

@@ -80,7 +80,11 @@ class CredentialSelectorRotationTest {
 
         val second = NotificationKeys.wakeOnly("rotationTest").also { held += it }
         var secondShown = false
-        PromptOwnership.process.enqueue(second) { secondShown = true }
+        PromptOwnership.process.enqueue(
+            second,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) { secondShown = true }
         val entriesBefore = PromptOwnership.process.entries
 
         controller.configurationChange(Configuration(app.resources.configuration).apply {
@@ -120,7 +124,11 @@ class CredentialSelectorRotationTest {
 
         // Earlier approvals hold the screen past the registration's deadline.
         val holder = NotificationKeys.wakeOnly("deadlineTest").also { held += it }
-        PromptOwnership.process.enqueue(holder) {}
+        PromptOwnership.process.enqueue(
+            holder,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
 
         val intent = PromptOwnership.queued(
             Intent(app, CredentialSelectorActivity::class.java)

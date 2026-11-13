@@ -85,7 +85,11 @@ class BiometricNotificationHelperTest {
      * timeout or a cancel takes it down.
      */
     private fun <T> onTurn(key: String, post: () -> T): T {
-        PromptOwnership.process.enqueue(key) {}
+        PromptOwnership.process.enqueue(
+            key,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
         try {
             assertEquals(
                 "another prompt holds the screen",

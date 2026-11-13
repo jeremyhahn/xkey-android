@@ -363,7 +363,11 @@ class VerifyUserHandlerTest {
             userVerificationPrompt = prompt
         )
         val approval = NotificationKeys.approval("setKeyPolicy-held")
-        PromptOwnership.process.enqueue(approval, PromptOwnership.Kind.SHARING_APPROVAL, "first") {}
+        PromptOwnership.process.enqueue(
+            approval, PromptOwnership.Kind.SHARING_APPROVAL, "first",
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
         try {
             val response = async(UnconfinedTestDispatcher(testScheduler)) {
                 onConnection { Response.fromJson(locked.handleRawRequest(verifyUserRequest().toJson())) }
