@@ -23,6 +23,7 @@ import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.transport.StreamPairingSession
 import kotlinx.coroutines.CoroutineScope
@@ -186,6 +187,23 @@ class UsbAccessoryServer(
     override suspend fun sendEncryptedMessage(data: ByteArray) {
         pairingSession.sendEncryptedMessage(data)
     }
+
+    /**
+     * The desktop on this accessory for outbound `remote.*` clients, or null
+     * unless the session is [UsbAccessoryState.Connected]. The server object
+     * outlives the handshake, a refused open and the end of a session, so its
+     * existence alone says nothing.
+     */
+    fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
+        connectedDesktop(state.value, pairingSession.connectedPeerKeyHex, router)
+
+    /** [connectedDesktop] for a given [state] and authenticated [peerKeyHex]. */
+    internal fun connectedDesktop(
+        state: UsbAccessoryState,
+        peerKeyHex: String?,
+        router: BidirectionalMessageRouter?
+    ): ConnectedDesktop? =
+        ConnectedDesktop.ifEstablished(state is UsbAccessoryState.Connected, peerKeyHex, this, router)
 
     private fun closeStreams() {
         try {

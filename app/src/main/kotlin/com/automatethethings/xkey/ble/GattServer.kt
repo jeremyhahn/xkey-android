@@ -17,6 +17,7 @@ import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.MessageSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -2777,6 +2778,19 @@ class GattServer(
         val session = establishedSession ?: return false
         return isCurrent(session) && session.isHandshakeComplete()
     }
+
+    /**
+     * The desktop on this server for outbound `remote.*` clients, or null
+     * unless [isSessionEstablished]: its key is the one the Noise handshake
+     * authenticated.
+     */
+    fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
+        ConnectedDesktop.ifEstablished(
+            isSessionEstablished(),
+            authenticatedPeerKeyHex,
+            this,
+            router
+        )
 }
 
 /**

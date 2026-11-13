@@ -769,31 +769,19 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * transport currently has an established session (BLE / TCP / USB), or null
      * if no desktop is connected. Single source for outbound `remote.*` clients.
      */
-    private fun activeTransport(): Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>? {
-        gattServer?.let { server ->
-            if (server.isSessionEstablished()) {
-                bleMessageRouter?.let { return server to it }
-            }
-        }
-        tcpHsmServer?.let { server ->
-            if (server.state.value is com.automatethethings.xkey.tcp.TcpHsmState.Connected) {
-                tcpMessageRouter?.let { return server to it }
-            }
-        }
-        usbAccessoryServer?.let { server ->
-            usbMessageRouter?.let { return server to it }
-        }
-        return null
-    }
+    private fun activeTransport(): Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>? =
+        connectedDesktop()?.let { it.sender to it.router }
 
     /**
-     * A [com.automatethethings.xkey.remote.RemoteOathClient] on the active
-     * transport, or null if no desktop is connected.
+     * The desktop with an established session (BLE, then TCP, then USB), with
+     * the static key its Noise handshake authenticated, or null if none. Each
+     * server answers only for a session it reports established: a USB server
+     * that is handshaking, failed to open or has ended is no desktop.
      */
-    fun remoteOathClient(): com.automatethethings.xkey.remote.RemoteOathClient? =
-        activeTransport()?.let { (sender, router) ->
-            com.automatethethings.xkey.remote.RemoteOathClient(sender, router)
-        }
+    fun connectedDesktop(): com.automatethethings.xkey.remote.ConnectedDesktop? =
+        gattServer?.connectedDesktop(bleMessageRouter)
+            ?: tcpHsmServer?.connectedDesktop(tcpMessageRouter)
+            ?: usbAccessoryServer?.connectedDesktop(usbMessageRouter)
 
     /**
      * Runs a phone-initiated bidirectional sync (trust store, OATH, passwords)

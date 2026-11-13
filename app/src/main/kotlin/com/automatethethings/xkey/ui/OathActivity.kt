@@ -56,6 +56,7 @@ import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathCredentialWithCode
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.RemoteOathClient
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.card.MaterialCardView
@@ -156,7 +157,7 @@ class OathActivity : AppCompatActivity() {
         val db = XKeyDatabase.getInstance(this)
         repository = OathRepository(db.oathCredentialDao(), OathSecretManager())
         desktopActions = OathDesktopActions(
-            client = { gattService?.remoteOathClient() },
+            desktop = { gattService?.connectedDesktop() },
             links = PrefsDesktopOathLinks(
                 getSharedPreferences(PrefsDesktopOathLinks.PREFS_NAME, Context.MODE_PRIVATE)
             ),
@@ -985,18 +986,28 @@ class OathActivity : AppCompatActivity() {
     }
 }
 
-/** Phone oathId -> desktop credential_id, learned from remote.oathAdd replies. */
+/**
+ * (desktop, phone oathId) -> desktop credential_id, learned from
+ * remote.oathAdd replies. A desktop is named by its Noise-authenticated static
+ * key ([ConnectedDesktop.peerKeyHex]): a credential ID means nothing on any
+ * other desktop.
+ */
 interface DesktopOathLinks {
-    fun get(oathId: String): String?
-    fun put(oathId: String, desktopId: String)
+    fun get(peerKeyHex: String, oathId: String): String?
+    fun put(peerKeyHex: String, oathId: String, desktopId: String)
 }
 
 /** [DesktopOathLinks] in private SharedPreferences (IDs only, no secrets). */
 class PrefsDesktopOathLinks(private val prefs: SharedPreferences) : DesktopOathLinks {
-    override fun get(oathId: String): String? = prefs.getString(oathId, null)
-    override fun put(oathId: String, desktopId: String) {
-        prefs.edit().putString(oathId, desktopId).apply()
+    override fun get(peerKeyHex: String, oathId: String): String? =
+        prefs.getString(key(peerKeyHex, oathId), null)
+
+    override fun put(peerKeyHex: String, oathId: String, desktopId: String) {
+        prefs.edit().putString(key(peerKeyHex, oathId), desktopId).apply()
     }
+
+    /** Hex has no '/', so the first one ends the peer key. */
+    private fun key(peerKeyHex: String, oathId: String) = "${peerKeyHex.lowercase()}/$oathId"
 
     companion object {
         const val PREFS_NAME = "oath_desktop_links"
@@ -1005,11 +1016,12 @@ class PrefsDesktopOathLinks(private val prefs: SharedPreferences) : DesktopOathL
 
 /**
  * The OATH screen's desktop actions, kept free of Android types so they unit
- * test on the JVM. [client] is null whenever no desktop is connected; then
- * no entry is offered and nothing is sent.
+ * test on the JVM. [desktop] is null whenever no desktop has an established
+ * session; then no entry is offered and nothing is sent. Links are read and
+ * written for the desktop [desktop] returns at the time of each call.
  */
 class OathDesktopActions(
-    private val client: () -> RemoteOathClient?,
+    private val desktop: () -> ConnectedDesktop?,
     private val links: DesktopOathLinks,
     private val secretOf: suspend (OathCredentialEntity) -> ByteArray
 ) {
@@ -1023,12 +1035,12 @@ class OathDesktopActions(
         data class Failed(val message: String) : Outcome
     }
 
-    fun isConnected(): Boolean = client() != null
+    fun isConnected(): Boolean = desktop() != null
 
     /** Desktop entries for [credential]'s context menu; empty with no desktop. */
     fun menuEntries(credential: OathCredentialEntity): List<Entry> {
-        if (!isConnected()) return emptyList()
-        return if (links.get(credential.oathId) != null) {
+        val peer = desktop() ?: return emptyList()
+        return if (links.get(peer.peerKeyHex, credential.oathId) != null) {
             listOf(Entry.COPY, Entry.DESKTOP_CODE)
         } else {
             listOf(Entry.COPY)
@@ -1037,7 +1049,8 @@ class OathDesktopActions(
 
     /** Sends remote.oathAdd for [credential] and remembers the desktop ID. */
     suspend fun copyToDesktop(credential: OathCredentialEntity): Outcome {
-        val remote = client() ?: return Outcome.NotConnected
+        val peer = desktop() ?: return Outcome.NotConnected
+        val remote = RemoteOathClient(peer.sender, peer.router)
         return try {
             val raw = secretOf(credential)
             val secret = try {
@@ -1058,7 +1071,7 @@ class OathDesktopActions(
                     counter = credential.counter
                 )
             )
-            links.put(credential.oathId, result.credentialId)
+            links.put(peer.peerKeyHex, credential.oathId, result.credentialId)
             Outcome.Copied(result.credentialId)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -1069,10 +1082,10 @@ class OathDesktopActions(
 
     /** Sends remote.oathGenerate for the desktop copy of [credential]. */
     suspend fun desktopCode(credential: OathCredentialEntity): Outcome {
-        val remote = client() ?: return Outcome.NotConnected
-        val desktopId = links.get(credential.oathId) ?: return Outcome.NotOnDesktop
+        val peer = desktop() ?: return Outcome.NotConnected
+        val desktopId = links.get(peer.peerKeyHex, credential.oathId) ?: return Outcome.NotOnDesktop
         return try {
-            val result = remote.oathGenerate(desktopId)
+            val result = RemoteOathClient(peer.sender, peer.router).oathGenerate(desktopId)
             Outcome.Code(result.code, result.expiresIn)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

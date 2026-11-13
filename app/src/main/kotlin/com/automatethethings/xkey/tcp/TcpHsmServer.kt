@@ -19,6 +19,7 @@ import android.util.Log
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.transport.StreamPairingSession
 import kotlinx.coroutines.CoroutineScope
@@ -201,6 +202,18 @@ class TcpHsmServer(
     override suspend fun sendEncryptedMessage(data: ByteArray) {
         pairingSession.sendEncryptedMessage(data)
     }
+
+    /**
+     * The desktop on this server for outbound `remote.*` clients, or null
+     * unless a session is [TcpHsmState.Connected].
+     */
+    fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
+        ConnectedDesktop.ifEstablished(
+            state.value is TcpHsmState.Connected,
+            pairingSession.connectedPeerKeyHex,
+            this,
+            router
+        )
 
     private fun closeQuietly(closeable: java.io.Closeable?) {
         try {

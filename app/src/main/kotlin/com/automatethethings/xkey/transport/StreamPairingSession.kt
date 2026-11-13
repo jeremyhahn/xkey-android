@@ -838,6 +838,13 @@ class StreamPairingSession(
     }
 
     /**
+     * The Noise-authenticated static key (hex) of the established, live
+     * connection [sendEncryptedMessage] would send on, or null if there is none.
+     */
+    val connectedPeerKeyHex: String?
+        get() = activeConnection?.takeIf { it.established && it.isLive }?.peerKeyHex
+
+    /**
      * [MessageSender] entry point used by outbound `remote.*` clients. Encrypts
      * and frames [data] on the active connection, after revalidating that its
      * peer is still paired.
