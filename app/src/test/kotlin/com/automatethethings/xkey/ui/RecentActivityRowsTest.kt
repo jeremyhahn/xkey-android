@@ -15,8 +15,25 @@
 package com.automatethethings.xkey.ui
 
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditLogEntity
 import com.automatethethings.xkey.audit.AuditOperationType
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestCoroutineScheduler
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -24,6 +41,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import java.time.Clock
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 
 /**
@@ -146,6 +164,76 @@ class RecentActivityRowsTest {
             setOf("labelRes", "keyLabel", "success", "outcomeRes", "timeRes", "timeCount"),
             RecentActivityRow.Entry::class.java.declaredFields.map { it.name }.filterNot { it.startsWith("$") }.toSet()
         )
+    }
+
+    private fun daoOf(table: Flow<List<AuditLogEntity>>) = mockk<AuditLogDao> {
+        every { observeRecent(RecentActivityRows.DEFAULT_LIMIT) } returns table
+    }
+
+    /** A clock that reads the test scheduler's virtual time, starting at [now]. */
+    private class SchedulerClock(private val scheduler: TestCoroutineScheduler, private val start: Instant) : Clock() {
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId?): Clock = this
+        override fun instant(): Instant = start.plusMillis(scheduler.currentTime)
+    }
+
+    @Test
+    fun `the home screen binds the rows of the audit DAO's observeRecent`() = runTest {
+        val table = MutableStateFlow(listOf(entry(keyLabel = "first")))
+        val dao = daoOf(table)
+        val bound = mutableListOf<List<RecentActivityRow>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            RecentActivityRows.observe(dao, clock, ticks = emptyFlow()).toList(bound)
+        }
+
+        assertEquals(listOf(RecentActivityRows.build(table.value, clock)), bound)
+
+        table.value = listOf(entry(keyLabel = "first", agoMillis = MINUTE), entry(keyLabel = "second"))
+
+        assertEquals(listOf("second", "first"), bound.last().map { (it as RecentActivityRow.Entry).keyLabel })
+        verify { dao.observeRecent(RecentActivityRows.DEFAULT_LIMIT) }
+    }
+
+    @Test
+    fun `an empty audit table binds the empty-state row`() = runTest {
+        val rows = RecentActivityRows.observe(daoOf(flowOf(emptyList())), clock, ticks = emptyFlow()).first()
+
+        assertEquals(listOf(RecentActivityRow.Empty), rows)
+    }
+
+    @Test
+    fun `the bound labels age as the clock advances without an audit change`() = runTest {
+        val clock = SchedulerClock(testScheduler, now)
+        val dao = daoOf(MutableStateFlow(listOf(entry(agoMillis = 30_000))))
+        val bound = mutableListOf<List<RecentActivityRow>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            RecentActivityRows.observe(dao, clock).toList(bound)
+        }
+        fun shown() = bound.last().single() as RecentActivityRow.Entry
+
+        assertEquals(R.string.recent_activity_just_now, shown().timeRes)
+
+        advanceTimeBy(RecentActivityRows.REFRESH_MILLIS)
+        runCurrent()
+        assertEquals(R.string.recent_activity_minutes_ago, shown().timeRes)
+        assertEquals(1L, shown().timeCount)
+
+        advanceTimeBy(RecentActivityRows.REFRESH_MILLIS)
+        runCurrent()
+        assertEquals(2L, shown().timeCount)
+
+        advanceTimeBy(58 * RecentActivityRows.REFRESH_MILLIS)
+        runCurrent()
+        assertEquals(R.string.recent_activity_hours_ago, shown().timeRes)
+        assertEquals(1L, shown().timeCount)
+    }
+
+    @Test
+    fun `the ticker emits once per period`() = runTest {
+        val ticks = RecentActivityRows.ticker(MINUTE).take(3).toList()
+
+        assertEquals(3, ticks.size)
+        assertEquals(3 * MINUTE, testScheduler.currentTime)
     }
 
     private companion object {

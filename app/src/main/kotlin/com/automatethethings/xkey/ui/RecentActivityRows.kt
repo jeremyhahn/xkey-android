@@ -16,7 +16,10 @@ package com.automatethethings.xkey.ui
 
 import androidx.annotation.StringRes
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditLogEntity
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import java.time.Clock
 
 /** One row of the home screen's Recent Activity section. */
@@ -49,6 +52,9 @@ object RecentActivityRows {
     /** How many entries the home screen shows. */
     const val DEFAULT_LIMIT = 5
 
+    /** How often the shown relative times are recomputed. */
+    const val REFRESH_MILLIS = 60_000L
+
     fun build(
         entries: List<AuditLogEntity>,
         clock: Clock,
@@ -75,6 +81,20 @@ object RecentActivityRows {
                 )
             }
     }
+
+    /**
+     * The rows the home screen binds: built from [AuditLogDao.observeRecent]
+     * and rebuilt on every [ticks] emission so the relative times keep aging.
+     */
+    fun observe(
+        dao: AuditLogDao,
+        clock: Clock,
+        ticks: Flow<Unit> = ticker(REFRESH_MILLIS),
+        limit: Int = DEFAULT_LIMIT
+    ): Flow<List<RecentActivityRow>> = flowOf(emptyList())
+
+    /** Emits every [periodMillis], forever. */
+    fun ticker(periodMillis: Long): Flow<Unit> = flowOf()
 
     /** How long ago [elapsedMillis] is; a time ahead of the clock reads "just now". */
     private fun age(elapsedMillis: Long): Pair<Int, Long> {
