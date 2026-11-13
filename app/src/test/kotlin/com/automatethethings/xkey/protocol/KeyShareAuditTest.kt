@@ -115,6 +115,7 @@ class KeyShareAuditTest {
         keyDao = mockk(relaxed = true)
         coEvery { keyDao.getByKeyId(any()) } returns null
         contactDao = mockk(relaxed = true)
+        coEvery { contactDao.getByFingerprint(any()) } returns null
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
         every { database.contactDao() } returns contactDao

@@ -3416,7 +3416,7 @@ class RequestHandler(
         if (pem.isEmpty()) {
             return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing public_key_pem")
         }
-        requireConfirmedPeer("sharePublicKey")
+        val peerPublicKeyHex = requireConfirmedPeer("sharePublicKey")
         return try {
             val der = com.automatethethings.xkey.crypto.SyncCodec.pemToDer(pem)
                 ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid public_key_pem")
@@ -3434,6 +3434,13 @@ class RequestHandler(
                         source = "shared",
                         notes = params.optString("backend", "").ifBlank { null }
                     )
+                )
+                AuditLogger.logContactImported(
+                    name = label,
+                    fingerprint = fingerprint,
+                    source = "shared",
+                    deviceId = peerPublicKeyHex,
+                    deviceName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
                 )
             }
             Response.success(request.id, JSONObject().apply {
@@ -3463,7 +3470,7 @@ class RequestHandler(
         if (wrappedB64.isEmpty()) {
             return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing wrapped_key")
         }
-        requireConfirmedPeer("shareSymmetric")
+        val peerPublicKeyHex = requireConfirmedPeer("shareSymmetric")
         return try {
             val material = decodeBase64Strict("wrapped_key", wrappedB64)
             val keyId = params.optString("label", "").ifBlank {
@@ -3473,16 +3480,26 @@ class RequestHandler(
             if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
                 return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
             }
+            val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
             store.put(
                 com.automatethethings.xkey.crypto.SoftwareKey(
                     keyId = keyId,
-                    algorithm = params.optString("algorithm", "").ifBlank { "AES" },
+                    algorithm = algorithm,
                     keyType = "symmetric",
                     keySize = params.optInt("key_size", material.size * 8),
                     exportable = false,
                     shareable = false,
                     material = material
                 )
+            )
+            AuditLogger.logKeyCreated(
+                keyId = keyId,
+                keyLabel = keyId,
+                keyType = "symmetric",
+                algorithm = algorithm,
+                source = "shared",
+                deviceId = peerPublicKeyHex,
+                deviceName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
             )
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
@@ -3517,20 +3534,32 @@ class RequestHandler(
                 return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key not found: $keyId")
             }
 
+            val peerName = pairedDeviceRepository?.getDevice(peerPublicKeyHex)?.deviceName
             val entity = authorizeShare(keyId, peerPublicKeyHex)
-                ?: return Response.error(
-                    request.id,
-                    ErrorCodes.OPERATION_DENIED,
-                    "Key is not shareable with this peer: $keyId"
+            if (entity == null) {
+                val message = "Key is not shareable with this peer: $keyId"
+                AuditLogger.logKeyExported(
+                    keyId = keyId,
+                    keyLabel = keyId,
+                    keyType = software?.keyType ?: "public",
+                    format = if (software != null) "raw" else "public",
+                    deviceId = peerPublicKeyHex,
+                    deviceName = peerName,
+                    success = false,
+                    errorMessage = message
                 )
+                return Response.error(request.id, ErrorCodes.OPERATION_DENIED, message)
+            }
 
             val result = JSONObject()
+            val format: String
             if (software != null) {
                 // Software-backed key: may export raw material per policy.
                 result.put("algorithm", software.algorithm)
                 result.put("key_type", software.keyType)
                 val exportMaterial = entity.exportable && entity.shareable &&
                     software.exportable && software.shareable
+                format = if (exportMaterial) "raw" else "metadata"
                 if (exportMaterial) {
                     result.put("wrapped_key", android.util.Base64.encodeToString(software.material, android.util.Base64.NO_WRAP))
                     result.put("key_size", software.keySize)
@@ -3545,7 +3574,16 @@ class RequestHandler(
                 result.put("key_type", "public")
                 result.put("exportable", false)
                 result.put("algorithm", entity.algorithm)
+                format = "public"
             }
+            AuditLogger.logKeyExported(
+                keyId = keyId,
+                keyLabel = entity.label,
+                keyType = software?.keyType ?: entity.keyType,
+                format = format,
+                deviceId = peerPublicKeyHex,
+                deviceName = peerName
+            )
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "importSharedKey failed", e)

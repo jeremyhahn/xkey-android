@@ -111,17 +111,24 @@ object AuditLogger {
      * @param keyType The key type (e.g., "fido2", "signing").
      * @param algorithm The key algorithm (e.g., "ES256", "AES256").
      * @param strongBox Whether StrongBox hardware was used.
+     * @param source Where the key came from (e.g., "shared"), if not generated here.
+     * @param deviceId Remote device ID the key came from, if applicable.
+     * @param deviceName Remote device name, if applicable.
      */
     fun logKeyCreated(
         keyId: String,
         keyLabel: String,
         keyType: String,
         algorithm: String,
-        strongBox: Boolean = false
+        strongBox: Boolean = false,
+        source: String? = null,
+        deviceId: String? = null,
+        deviceName: String? = null
     ) {
         val details = JSONObject().apply {
             put("algorithm", algorithm)
             put("strongBox", strongBox)
+            if (source != null) put("source", source)
         }
         log(
             AuditLogEntity(
@@ -129,6 +136,8 @@ object AuditLogger {
                 keyId = keyId,
                 keyLabel = keyLabel,
                 keyType = keyType,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true,
                 details = details.toString()
             )
@@ -261,18 +270,28 @@ object AuditLogger {
     }
 
     /**
-     * Log a public key export event.
+     * Log a key export event: a key, or its public half, leaving the device.
+     *
+     * Never pass key material: the entry records the export, not its content.
      *
      * @param keyId The unique key identifier.
      * @param keyLabel Human-readable key label.
      * @param keyType The key type.
-     * @param format The export format (e.g., "PEM", "DER").
+     * @param format The export format (e.g., "PEM", "DER", "raw", "public").
+     * @param deviceId Remote device ID the key went to, if applicable.
+     * @param deviceName Remote device name, if applicable.
+     * @param success Whether the export was allowed.
+     * @param errorMessage Why the export was refused, if it was.
      */
     fun logKeyExported(
         keyId: String,
         keyLabel: String,
         keyType: String,
-        format: String
+        format: String,
+        deviceId: String? = null,
+        deviceName: String? = null,
+        success: Boolean = true,
+        errorMessage: String? = null
     ) {
         val details = JSONObject().apply {
             put("format", format)
@@ -283,7 +302,10 @@ object AuditLogger {
                 keyId = keyId,
                 keyLabel = keyLabel,
                 keyType = keyType,
-                success = true,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
                 details = details.toString()
             )
         )
@@ -1142,7 +1164,13 @@ object AuditLogger {
     // Contact Operations
     // -------------------------------------------------------------------------
 
-    fun logContactImported(name: String, fingerprint: String, source: String) {
+    fun logContactImported(
+        name: String,
+        fingerprint: String,
+        source: String,
+        deviceId: String? = null,
+        deviceName: String? = null
+    ) {
         val details = JSONObject().apply {
             put("name", name)
             put("fingerprint", fingerprint)
@@ -1151,6 +1179,8 @@ object AuditLogger {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.CONTACT_IMPORTED,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true,
                 details = details.toString()
             )
