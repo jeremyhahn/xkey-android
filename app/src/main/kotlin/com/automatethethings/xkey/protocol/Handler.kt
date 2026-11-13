@@ -598,17 +598,32 @@ class RequestHandler(
             )
         }
 
-        // Check if key already exists
-        if (keystoreManager.keyExists(generateParams.credentialId)) {
-            throw ProtocolException(
-                "Credential already exists",
-                errorCode = ErrorCodes.INVALID_PARAMS
-            )
+        // As in local.generateKey: the reservation holds the id from this check
+        // until the creation ends, and the creation rechecks after the approval.
+        val reservation = "credential:${generateParams.credentialId}"
+        if (keystoreManager.keyExists(generateParams.credentialId) || !keyIds.tryReserve(reservation)) {
+            throw credentialExists()
         }
+        try {
+            // Determine authentication duration based on settings
+            val authDurationSeconds = calculateAuthDuration(currentSettings)
+            approveRegistration(generateParams)
+            keyIds.withKeyLock(reservation) {
+                if (keystoreManager.keyExists(generateParams.credentialId)) {
+                    throw credentialExists()
+                }
+                createCredential(request, generateParams, authDurationSeconds)
+            }
+        } finally {
+            keyIds.release(reservation)
+        }
+    }
 
-        // Determine authentication duration based on settings
-        val authDurationSeconds = calculateAuthDuration(currentSettings)
+    private fun credentialExists() =
+        ProtocolException("Credential already exists", errorCode = ErrorCodes.INVALID_PARAMS)
 
+    /** Asks the owner to approve a `generateKey` registration when verification applies. */
+    private suspend fun approveRegistration(generateParams: GenerateKeyParams) {
         // If user verification required (not DISABLED), prompt for biometric BEFORE generating the key
         // This ensures user explicitly approves credential creation
         if (generateParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
@@ -641,7 +656,14 @@ class RequestHandler(
                 )
             }
         }
+    }
 
+    /** Creates an approved `generateKey` credential; the caller holds its id's lock. */
+    private suspend fun createCredential(
+        request: Request,
+        generateParams: GenerateKeyParams,
+        authDurationSeconds: Int
+    ): Response {
         // Generate the key with appropriate authentication duration
         val cosePublicKey = keystoreManager.generateKeyWithAuthDuration(
             credentialId = generateParams.credentialId,
@@ -670,7 +692,7 @@ class RequestHandler(
 
         Log.i(TAG, "Generated key for credential: ${generateParams.credentialId}, " +
                 "strongBox=$isStrongBoxBacked, authDuration=$authDurationSeconds")
-        Response.success(request.id, result.toJson())
+        return Response.success(request.id, result.toJson())
     }
 
     /**
@@ -1188,6 +1210,9 @@ class RequestHandler(
     // Extended local.* method handlers
     // ============================================================
 
+    /** Key ids claimed by a creation or locked by a request, across every connection. */
+    private val keyIds = KeyIdReservations.process
+
     /**
      * Handles local.generateKey - generate a key with specified algorithm.
      *
@@ -1205,13 +1230,34 @@ class RequestHandler(
         val genParams = LocalGenerateKeyParams.fromJson(params)
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
-        // Check if key already exists
-        if (keystoreManager.generalKeyExists(genParams.keyId)) {
+        // Approval prompts take turns, so another creation of this id can pass
+        // this check while this one waits; the reservation refuses it until
+        // this creation ends.
+        val reservation = "key:${genParams.keyId}"
+        if (keystoreManager.generalKeyExists(genParams.keyId) || !keyIds.tryReserve(reservation)) {
             throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
         }
+        try {
+            val authDurationSeconds = calculateAuthDuration(currentSettings)
+            approveLocalKeyGeneration(genParams)
+            // The approval waited: recheck under the id's lock, since every
+            // generator replaces an existing alias, destroying that key.
+            keyIds.withKeyLock(reservation) {
+                if (keystoreManager.generalKeyExists(genParams.keyId)) {
+                    throw ProtocolException(
+                        "Key already exists: ${genParams.keyId}",
+                        errorCode = ErrorCodes.KEY_EXISTS
+                    )
+                }
+                createLocalKey(request, genParams, algorithmName, authDurationSeconds)
+            }
+        } finally {
+            keyIds.release(reservation)
+        }
+    }
 
-        val authDurationSeconds = calculateAuthDuration(currentSettings)
-
+    /** Asks the owner to approve a `local.generateKey` when verification applies. */
+    private suspend fun approveLocalKeyGeneration(genParams: LocalGenerateKeyParams) {
         // Biometric verification before key generation
         if (genParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
             if (biometricLauncher != null) {
@@ -1240,12 +1286,20 @@ class RequestHandler(
                 )
             }
         }
+    }
 
+    /** Creates an approved `local.generateKey` key; the caller holds its id's lock. */
+    private suspend fun createLocalKey(
+        request: Request,
+        genParams: LocalGenerateKeyParams,
+        algorithmName: String,
+        authDurationSeconds: Int
+    ): Response {
         // Software-backed (exportable) keys take a separate path: the raw
         // material lives in SoftwareKeyStore (app-encrypted) so it can be
         // exported/shared, instead of the non-exportable hardware Keystore.
         if (genParams.exportable) {
-            return@withContext generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
+            return generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
         }
 
         // Generate key based on algorithm type
@@ -1297,7 +1351,7 @@ class RequestHandler(
                 keySizeBits = keySizeBits,
                 strongBoxBacked = keystoreManager.isStrongBoxAvailable()
             )
-            return@withContext Response.success(request.id, result.toJson())
+            return Response.success(request.id, result.toJson())
         }
 
         // Asymmetric key generation
@@ -1373,7 +1427,7 @@ class RequestHandler(
             )
         }
 
-        Response.success(request.id, result.toJson())
+        return Response.success(request.id, result.toJson())
     }
 
     /**
@@ -2998,46 +3052,70 @@ class RequestHandler(
             ceremony = "Passkey assertion for ${assertionParams.rpId}"
         )
 
-        // Increment sign count
-        val newSignCount = entity.signCount + 1
+        // Other assertions with this passkey may have signed while this one
+        // waited for its approval. Reload the credential under its lock and
+        // hold the lock across the counter increment, the signature and the
+        // counter write, so each assertion signs a distinct, increasing count.
+        val (newSignCount, authData, signature) = keyIds.withKeyLock("key:${assertionParams.credentialId}") {
+            val current = keyDao.getByKeyId(assertionParams.credentialId)
+                ?: throw ProtocolException(
+                    "Credential not found: ${assertionParams.credentialId}",
+                    errorCode = ErrorCodes.KEY_NOT_FOUND
+                )
+            if (current.keyType != KeyTypes.FIDO2 ||
+                (current.rpId != null && current.rpId != assertionParams.rpId)
+            ) {
+                throw ProtocolException("Credential changed during approval", errorCode = ErrorCodes.INVALID_PARAMS)
+            }
+            if (!canShareKeyWithPeer(current, peerPublicKeyHex)) {
+                throw ProtocolException(
+                    "Credential is not shareable with this peer",
+                    errorCode = ErrorCodes.OPERATION_DENIED
+                )
+            }
 
-        // Build authenticator data
-        // rpIdHash (32 bytes) || flags (1 byte) || signCount (4 bytes, big-endian)
-        val rpIdHash = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(assertionParams.rpId.toByteArray(Charsets.UTF_8))
+            // Increment sign count
+            val newSignCount = current.signCount + 1
 
-        val flags: Byte = UserVerificationCompliance.flags(
-            userPresent = true,
-            userVerified = userVerified,
-            attestedCredentialData = false
-        )
+            // Build authenticator data
+            // rpIdHash (32 bytes) || flags (1 byte) || signCount (4 bytes, big-endian)
+            val rpIdHash = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(assertionParams.rpId.toByteArray(Charsets.UTF_8))
 
-        val authData = ByteArray(37)
-        System.arraycopy(rpIdHash, 0, authData, 0, 32)
-        authData[32] = flags
-        // signCount as 4-byte big-endian
-        authData[33] = ((newSignCount shr 24) and 0xFF).toByte()
-        authData[34] = ((newSignCount shr 16) and 0xFF).toByte()
-        authData[35] = ((newSignCount shr 8) and 0xFF).toByte()
-        authData[36] = (newSignCount and 0xFF).toByte()
+            val flags: Byte = UserVerificationCompliance.flags(
+                userPresent = true,
+                userVerified = userVerified,
+                attestedCredentialData = false
+            )
 
-        // Sign: authenticatorData || clientDataHash
-        val clientDataHash = assertionParams.getClientDataHashBytes()
-        val signedData = ByteArray(authData.size + clientDataHash.size)
-        System.arraycopy(authData, 0, signedData, 0, authData.size)
-        System.arraycopy(clientDataHash, 0, signedData, authData.size, clientDataHash.size)
+            val authData = ByteArray(37)
+            System.arraycopy(rpIdHash, 0, authData, 0, 32)
+            authData[32] = flags
+            // signCount as 4-byte big-endian
+            authData[33] = ((newSignCount shr 24) and 0xFF).toByte()
+            authData[34] = ((newSignCount shr 16) and 0xFF).toByte()
+            authData[35] = ((newSignCount shr 8) and 0xFF).toByte()
+            authData[36] = (newSignCount and 0xFF).toByte()
 
-        // Hash the signed data for ECDSA (sign expects a hash)
-        val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
+            // Sign: authenticatorData || clientDataHash
+            val clientDataHash = assertionParams.getClientDataHashBytes()
+            val signedData = ByteArray(authData.size + clientDataHash.size)
+            System.arraycopy(authData, 0, signedData, 0, authData.size)
+            System.arraycopy(clientDataHash, 0, signedData, authData.size, clientDataHash.size)
 
-        // Sign using the credential key
-        val signature = keystoreManager.signWithoutBiometric(
-            credentialId = assertionParams.credentialId,
-            dataHash = dataHash
-        )
+            // Hash the signed data for ECDSA (sign expects a hash)
+            val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
 
-        // Update sign count in database
-        keyDao.updateSignCount(assertionParams.credentialId, newSignCount)
+            // Sign using the credential key
+            val signature = keystoreManager.signWithoutBiometric(
+                credentialId = assertionParams.credentialId,
+                dataHash = dataHash
+            )
+
+            // Update sign count in database
+            keyDao.updateSignCount(assertionParams.credentialId, newSignCount)
+            Triple(newSignCount, authData, signature)
+        }
 
         val result = LocalSignFido2AssertionResult(
             authenticatorData = Base64.getEncoder().encodeToString(authData),
