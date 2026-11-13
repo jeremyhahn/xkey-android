@@ -1637,15 +1637,13 @@ class RequestHandler(
 
         // Log signing request
         val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
-        AuditLogger.logSigningRequest(
-            keyId = signParams.keyId,
-            keyLabel = signParams.keyId,
-            keyType = auditKeyType(signParams.keyId),
-            algorithm = signAlgorithm,
-            deviceId = currentPeerPublicKeyHex(),
-            deviceName = deviceInfo?.deviceName,
-            success = true,
-            durationMs = durationMs
+        // signWithAlgorithm ran signAlgorithm (it refuses any other name).
+        logKeyUse(
+            KeyUse.SIGN, signParams.keyId,
+            executedAlgorithm = signAlgorithm,
+            durationMs = durationMs,
+            deviceId = connectedDevicePublicKeyHex,
+            deviceName = deviceInfo?.deviceName
         )
 
         val result = LocalSignResult(
@@ -1682,15 +1680,12 @@ class RequestHandler(
 
         // Log decryption request
         val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
-        AuditLogger.logDecryptionRequest(
-            keyId = decryptParams.keyId,
-            keyLabel = decryptParams.keyId,
-            keyType = auditKeyType(decryptParams.keyId),
-            algorithm = "RSA-OAEP",
-            deviceId = currentPeerPublicKeyHex(),
-            deviceName = deviceInfo?.deviceName,
-            success = true,
-            durationMs = durationMs
+        logKeyUse(
+            KeyUse.DECRYPT, decryptParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_RSA_OAEP,
+            durationMs = durationMs,
+            deviceId = connectedDevicePublicKeyHex,
+            deviceName = deviceInfo?.deviceName
         )
 
         val result = LocalDecryptResult(
@@ -1738,15 +1733,12 @@ class RequestHandler(
 
         // Log encryption request
         val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
-        AuditLogger.logEncryptionRequest(
-            keyId = symParams.keyId,
-            keyLabel = symParams.keyId,
-            keyType = auditKeyType(symParams.keyId),
-            algorithm = "AES-GCM",
-            deviceId = currentPeerPublicKeyHex(),
-            deviceName = deviceInfo?.deviceName,
-            success = true,
-            durationMs = durationMs
+        logKeyUse(
+            KeyUse.ENCRYPT, symParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+            durationMs = durationMs,
+            deviceId = connectedDevicePublicKeyHex,
+            deviceName = deviceInfo?.deviceName
         )
 
         val result = LocalSymmetricResult(
@@ -1795,15 +1787,12 @@ class RequestHandler(
 
         // Log decryption request
         val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
-        AuditLogger.logDecryptionRequest(
-            keyId = symParams.keyId,
-            keyLabel = symParams.keyId,
-            keyType = auditKeyType(symParams.keyId),
-            algorithm = "AES-GCM",
-            deviceId = currentPeerPublicKeyHex(),
-            deviceName = deviceInfo?.deviceName,
-            success = true,
-            durationMs = durationMs
+        logKeyUse(
+            KeyUse.DECRYPT, symParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+            durationMs = durationMs,
+            deviceId = connectedDevicePublicKeyHex,
+            deviceName = deviceInfo?.deviceName
         )
 
         val result = LocalSymmetricResult(
@@ -1836,6 +1825,56 @@ class RequestHandler(
                 )?.keyType?.takeIf { it.isNotBlank() }
             ?: AUDIT_KEY_TYPE_UNKNOWN
 
+    /** The key-use operations [logKeyUse] records. */
+    private enum class KeyUse { SIGN, DECRYPT, ENCRYPT, HMAC, KEY_DERIVATION }
+
+    /**
+     * The one writer of key-use audit entries (sign, decrypt, encrypt, HMAC,
+     * ECDH): one success entry naming the key, its stored type
+     * ([auditKeyType]) and the algorithm that ran.
+     *
+     * [executedAlgorithm] is the algorithm the operation executed, taken from
+     * the crypto path (an HmacResult, SoftwareKeyOps.hmacAlgorithm,
+     * KeystoreManager.EXECUTED_*) or the validated request algorithm the
+     * operation ran with, never the key's stored metadata: a stored name is
+     * not validated and need not be what ran. AuditKeyTypeChokePointTest
+     * fails on a key-use AuditLogger call outside this function, or a call of
+     * it with any other algorithm source.
+     */
+    private suspend fun logKeyUse(
+        use: KeyUse,
+        keyId: String,
+        executedAlgorithm: String,
+        durationMs: Long,
+        deviceId: String?,
+        deviceName: String?,
+        softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
+    ) {
+        val keyType = auditKeyType(keyId, softwareKey)
+        when (use) {
+            KeyUse.SIGN -> AuditLogger.logSigningRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.DECRYPT -> AuditLogger.logDecryptionRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.ENCRYPT -> AuditLogger.logEncryptionRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.HMAC -> AuditLogger.logHmacRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.KEY_DERIVATION -> AuditLogger.logKeyDerivationRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+            )
+        }
+    }
+
     /**
      * Handles local.hmac - HMAC computation.
      */
@@ -1854,24 +1893,6 @@ class RequestHandler(
         val hmacParams = LocalHMACParams.fromJson(params)
         val caller = auditCaller()
 
-        // Log the HMAC request; the MAC and the data stay out of it.
-        suspend fun logHmacRequest(
-            softwareKey: com.automatethethings.xkey.crypto.SoftwareKey?,
-            algorithm: String?,
-            durationMs: Long
-        ) {
-            AuditLogger.logHmacRequest(
-                keyId = hmacParams.keyId,
-                keyLabel = hmacParams.keyId,
-                keyType = auditKeyType(hmacParams.keyId, softwareKey),
-                algorithm = algorithm,
-                deviceId = caller.peerPublicKeyHex,
-                deviceName = caller.deviceName,
-                success = true,
-                durationMs = durationMs
-            )
-        }
-
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
             val swStart = System.currentTimeMillis()
@@ -1880,7 +1901,15 @@ class RequestHandler(
             )
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
-            logHmacRequest(sw, sw.algorithm, swDurationMs)
+            // The MAC and the data stay out of the entry.
+            logKeyUse(
+                KeyUse.HMAC, hmacParams.keyId,
+                executedAlgorithm = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmacAlgorithm(sw.algorithm),
+                durationMs = swDurationMs,
+                deviceId = caller.peerPublicKeyHex,
+                deviceName = caller.deviceName,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalHMACResult(mac = Base64.getEncoder().encodeToString(swMac)).toJson()
@@ -1888,14 +1917,20 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val mac = keystoreManager.computeHMAC(hmacParams.keyId, hmacParams.getDataBytes())
+        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
-        logHmacRequest(null, keyDao.getByKeyId(hmacParams.keyId)?.algorithm, durationMs)
+        logKeyUse(
+            KeyUse.HMAC, hmacParams.keyId,
+            executedAlgorithm = hmac.algorithm,
+            durationMs = durationMs,
+            deviceId = caller.peerPublicKeyHex,
+            deviceName = caller.deviceName
+        )
 
         val result = LocalHMACResult(
-            mac = Base64.getEncoder().encodeToString(mac)
+            mac = Base64.getEncoder().encodeToString(hmac.mac)
         )
         return Response.success(request.id, result.toJson())
     }
@@ -1926,15 +1961,12 @@ class RequestHandler(
         keyDao.recordUsage(ecdhParams.keyId)
 
         // Log the key agreement; the shared secret and peer key stay out of it.
-        AuditLogger.logKeyDerivationRequest(
-            keyId = ecdhParams.keyId,
-            keyLabel = ecdhParams.keyId,
-            keyType = auditKeyType(ecdhParams.keyId),
-            algorithm = "ECDH",
+        logKeyUse(
+            KeyUse.KEY_DERIVATION, ecdhParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_ECDH,
+            durationMs = durationMs,
             deviceId = caller.peerPublicKeyHex,
-            deviceName = caller.deviceName,
-            success = true,
-            durationMs = durationMs
+            deviceName = caller.deviceName
         )
 
         val result = LocalECDHResult(

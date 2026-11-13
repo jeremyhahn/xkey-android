@@ -39,6 +39,15 @@ else the software key's). A key with no stored metadata is recorded as
 `unknown`. `RequestHandler.auditKeyType` is the one source of this value
 for sign, decrypt, encrypt, HMAC and ECDH entries.
 
+The entry's `algorithm` (in `details`) is the algorithm the operation ran,
+never the key's stored metadata, which is not validated: the sign
+request's algorithm (`signWithAlgorithm` refuses any other), the Keystore
+HMAC's own MAC (`computeHMACWithAlgorithm`), the software HMAC's mapping
+(`SoftwareKeyOps.hmacAlgorithm`: `HMAC-SHA512` or `HMAC-SHA256`), and
+`RSA-OAEP-256`, `AES-GCM` and `ECDH` for the fixed transformations.
+`RequestHandler.logKeyUse` writes every key-use entry;
+`AuditKeyTypeChokePointTest` fails on a writer outside it.
+
 ## Index Strategy
 
 ### audit_logs

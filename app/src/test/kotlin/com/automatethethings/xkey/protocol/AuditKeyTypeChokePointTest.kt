@@ -55,7 +55,7 @@ class AuditKeyTypeChokePointTest {
     @Test
     fun `key-use audit calls sit only in logKeyUse, keyType from auditKeyType`() {
         val source = handlerSource()
-        val helper = Regex("""private fun logKeyUse\(""").find(source)
+        val helper = Regex("""private (suspend )?fun logKeyUse\(""").find(source)
             ?: return fail("RequestHandler.logKeyUse is gone; is the scan stale?")
         val helperBody = bodyRange(source, helper.range.last)
 
