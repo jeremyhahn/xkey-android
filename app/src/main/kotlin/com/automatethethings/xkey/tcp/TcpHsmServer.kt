@@ -20,7 +20,6 @@ import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectedDesktop
-import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.transport.StreamPairingSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,7 +63,7 @@ class TcpHsmServer(
     messageRouter: BidirectionalMessageRouter? = null,
     pairingCallback: com.automatethethings.xkey.ble.PairingConfirmationCallback? = null,
     pairedDeviceRepository: com.automatethethings.xkey.settings.PairedDeviceRepository? = null
-) : MessageSender {
+) {
     companion object {
         private const val TAG = "TcpHsmServer"
 
@@ -194,13 +193,6 @@ class TcpHsmServer(
                 _state.value = TcpHsmState.Listening(socket.localPort)
             }
         }
-    }
-
-    /**
-     * Sends an encrypted message to the connected desktop (outbound remote.*).
-     */
-    override suspend fun sendEncryptedMessage(data: ByteArray) {
-        pairingSession.sendEncryptedMessage(data)
     }
 
     /**

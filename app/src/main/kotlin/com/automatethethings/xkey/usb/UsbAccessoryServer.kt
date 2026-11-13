@@ -24,7 +24,6 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectedDesktop
-import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.remote.SessionSender
 import com.automatethethings.xkey.transport.StreamPairingSession
 import kotlinx.coroutines.CoroutineScope
@@ -73,7 +72,7 @@ class UsbAccessoryServer(
     pairingCallback: com.automatethethings.xkey.ble.PairingConfirmationCallback? = null,
     pairedDeviceRepository: com.automatethethings.xkey.settings.PairedDeviceRepository? = null,
     storeMethods: List<TransportMethods> = emptyList()
-) : MessageSender {
+) {
     companion object {
         private const val TAG = "UsbAccessoryServer"
     }
@@ -188,13 +187,6 @@ class UsbAccessoryServer(
      */
     internal suspend fun handlePlaintext(plaintext: ByteArray): ByteArray? =
         pairingSession.interceptOrRoute(plaintext)
-
-    /**
-     * Sends an encrypted message to the connected USB host (outbound remote.*).
-     */
-    override suspend fun sendEncryptedMessage(data: ByteArray) {
-        pairingSession.sendEncryptedMessage(data)
-    }
 
     /**
      * The desktop on this accessory for outbound `remote.*` clients, or null

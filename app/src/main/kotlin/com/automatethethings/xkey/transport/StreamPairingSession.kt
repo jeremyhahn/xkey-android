@@ -33,7 +33,6 @@ import com.automatethethings.xkey.protocol.SessionBinding
 import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
-import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.remote.SessionSender
 import com.automatethethings.xkey.settings.PairedDeviceRemovalListener
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -96,7 +95,7 @@ class StreamPairingSession(
     private val pairedDeviceRepository: PairedDeviceRepository?,
     private val transportLabel: String,
     private val transportMethods: List<TransportMethods> = emptyList(),
-) : MessageSender {
+) {
 
     companion object {
         private const val TAG = "StreamPairingSession"
@@ -845,24 +844,10 @@ class StreamPairingSession(
 
     /**
      * The Noise-authenticated static key (hex) of the established, live
-     * connection [sendEncryptedMessage] would send on, or null if there is none.
+     * connection, or null if there is none.
      */
     val connectedPeerKeyHex: String?
         get() = activeConnection?.takeIf { it.established && it.isLive }?.peerKeyHex
-
-    /**
-     * [MessageSender] entry point used by outbound `remote.*` clients. Encrypts
-     * and frames [data] on the active connection, after revalidating that its
-     * peer is still paired.
-     *
-     * @throws PeerNotPairedException if the peer is no longer paired; nothing
-     *   is written and no nonce is consumed.
-     */
-    override suspend fun sendEncryptedMessage(data: ByteArray) {
-        val connection = activeConnection?.takeIf { it.established }
-            ?: throw IOException("No active Noise session")
-        send(connection, data, phoneInitiated = true)
-    }
 
     /**
      * The established connection's authenticated peer key and a sender bound

@@ -25,6 +25,7 @@ import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -172,7 +173,7 @@ class GattServerReconnectTest {
 
         val pending = CompletableDeferred<Response>()
         router.registerPendingResponse(BACKUP_ID, pending)
-        server.sendEncryptedMessage(BACKUP_REQUEST)
+        server.sendOnBoundSession(BACKUP_REQUEST)
         call("handleApplicationMessage", device, desktop.encrypt(BACKUP_RESPONSE))
 
         val response = withTimeout(TIMEOUT_MS) { pending.await() }
@@ -202,7 +203,7 @@ class GattServerReconnectTest {
         val refusal = JSONObject(String(desktop.decrypt(reassemble(fragments).single())))
         assertEquals(ErrorCodes.PAIRING_REQUIRED, refusal.getJSONObject("error").getInt("code"))
         try {
-            server.sendEncryptedMessage(BACKUP_REQUEST)
+            server.sendOnBoundSession(BACKUP_REQUEST)
             fail("a send to an unconfirmed desktop must be refused")
         } catch (e: PeerNotPairedException) {
             assertEquals(keyHex, e.publicKeyHex)
@@ -228,7 +229,7 @@ class GattServerReconnectTest {
         val nonce = session.sendNonceForTest()
 
         try {
-            server.sendEncryptedMessage(BACKUP_REQUEST)
+            server.sendOnBoundSession(BACKUP_REQUEST)
             fail("a send to an unconfirmed desktop must be refused")
         } catch (e: PeerNotPairedException) {
             assertEquals(keyHex, e.publicKeyHex)

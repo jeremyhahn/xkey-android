@@ -37,6 +37,7 @@ import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -277,7 +278,7 @@ class VerifyUserPerConnectionTest {
         val peer = connectOverStream()
         val answer = CompletableDeferred<Response>()
         router.registerPendingResponse(REMOTE_ID, answer)
-        pairing.sendEncryptedMessage(
+        pairing.sendOnBoundSession(
             JSONObject().put("jsonrpc", "2.0").put("id", REMOTE_ID).put("method", "remote.backup.restore")
                 .put("params", JSONObject()).toString().toByteArray()
         )

@@ -23,6 +23,7 @@ import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -156,7 +157,7 @@ class StreamPairingSessionRevocationTest {
         phone.awaitServeEnded()
         keys.forEach { (name, key) -> assertTrue("$name must be zero", key.isAllZero()) }
         try {
-            pairing.sendEncryptedMessage(REQUEST)
+            pairing.sendOnBoundSession(REQUEST)
             fail("a send after the teardown must be refused")
         } catch (e: IOException) {
             // No session left to send on.
@@ -175,7 +176,7 @@ class StreamPairingSessionRevocationTest {
         val keys = phone.noise.secretArraysForTest().filterKeys { it in TRANSPORT_SECRETS }
 
         gate.armed = true
-        val send = scope.async { runCatching { pairing.sendEncryptedMessage(REQUEST) } }
+        val send = scope.async { runCatching { pairing.sendOnBoundSession(REQUEST) } }
         assertTrue("the send never reached the stream", gate.entered.await(5, TimeUnit.SECONDS))
         assertFalse("the keys are live while the frame is mid-send", keys.values.any { it.isAllZero() })
 
@@ -205,7 +206,7 @@ class StreamPairingSessionRevocationTest {
             paused.complete(Unit)
             resume.await()
         }
-        val send = scope.async { runCatching { pairing.sendEncryptedMessage(REQUEST) } }
+        val send = scope.async { runCatching { pairing.sendOnBoundSession(REQUEST) } }
         withTimeout(TIMEOUT_MS) { paused.await() }
         val writes = gate.writes.get()
         val nonce = phone.noise.sendNonceForTest()
@@ -236,7 +237,7 @@ class StreamPairingSessionRevocationTest {
             admitted.complete(Unit)
             release.await()
         }
-        val sender = scope.launch { pairing.sendEncryptedMessage(REQUEST) }
+        val sender = scope.launch { pairing.sendOnBoundSession(REQUEST) }
         withTimeout(TIMEOUT_MS) { admitted.await() }
 
         sender.cancel()
@@ -244,7 +245,7 @@ class StreamPairingSessionRevocationTest {
         withTimeout(TIMEOUT_MS) { sender.join() }
         pairing.afterAdmissionForTest = null
 
-        pairing.sendEncryptedMessage(REQUEST)
+        pairing.sendOnBoundSession(REQUEST)
         assertEquals("remote.sync", phone.desktop.readEncrypted().getString("method"))
         assertEquals("remote.sync", phone.desktop.readEncrypted().getString("method"))
     }
@@ -263,7 +264,7 @@ class StreamPairingSessionRevocationTest {
         assertEquals(TRANSPORT_SECRETS, keys.keys)
 
         gate.armed = true
-        val send = scope.async { runCatching { pairing.sendEncryptedMessage(REQUEST) } }
+        val send = scope.async { runCatching { pairing.sendOnBoundSession(REQUEST) } }
         assertTrue("the send never reached the stream", gate.entered.await(5, TimeUnit.SECONDS))
 
         phone.desktop.endOutput()
@@ -273,7 +274,7 @@ class StreamPairingSessionRevocationTest {
         assertTrue("the blocked send must fail: $result", result.exceptionOrNull() is IOException)
         keys.forEach { (name, key) -> assertTrue("$name must be zero", key.isAllZero()) }
         try {
-            pairing.sendEncryptedMessage(REQUEST)
+            pairing.sendOnBoundSession(REQUEST)
             fail("a send after the teardown must be refused")
         } catch (e: IOException) {
             // No session left to send on.
@@ -296,7 +297,7 @@ class StreamPairingSessionRevocationTest {
         val nonce = phone.noise.sendNonceForTest()
 
         try {
-            pairing.sendEncryptedMessage(REQUEST)
+            pairing.sendOnBoundSession(REQUEST)
             fail("the send must be refused")
         } catch (e: PeerNotPairedException) {
             assertEquals(phone.desktop.publicKeyHex, e.publicKeyHex)
@@ -348,7 +349,7 @@ class StreamPairingSessionRevocationTest {
         val reply = desktop.request("system.ping")
         assertEquals(ErrorCodes.PAIRING_REQUIRED, reply.getJSONObject("error").getInt("code"))
         try {
-            pairing.sendEncryptedMessage(REQUEST)
+            pairing.sendOnBoundSession(REQUEST)
             fail("the send must be refused")
         } catch (e: PeerNotPairedException) {
             // Nothing was written.
@@ -469,7 +470,7 @@ class StreamPairingSessionRevocationTest {
         val second = connectPaired(staticPrivateKey = key)
         assertEquals(first.desktop.publicKeyHex, second.desktop.publicKeyHex)
         assertTrue(second.desktop.request("system.ping").getJSONObject("result").getBoolean("ok"))
-        pairing.sendEncryptedMessage(REQUEST)
+        pairing.sendOnBoundSession(REQUEST)
         assertEquals("remote.sync", second.desktop.readEncrypted().getString("method"))
 
         repo.removeDevice(second.desktop.publicKeyHex)

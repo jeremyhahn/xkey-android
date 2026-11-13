@@ -18,7 +18,6 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectedDesktop
-import com.automatethethings.xkey.remote.MessageSender
 import com.automatethethings.xkey.remote.SessionSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -124,7 +123,7 @@ class GattServer(
     private val trustStoreRepository: TrustStoreRepository? = null,
     /** How long a send waits for the peer to write the CCCD before giving up. */
     private val notificationReadyTimeoutMs: Long = NOTIFICATION_READY_TIMEOUT_MS
-) : MessageSender {
+) {
     // Extension function for hex encoding
     private fun ByteArray.toHexString(): String = joinToString("") { "%02x".format(it) }
 
@@ -2452,27 +2451,6 @@ class GattServer(
         }
 
         return buffer.toByteArray()
-    }
-
-    /**
-     * Sends an encrypted message to the connected device.
-     *
-     * Used by [RemoteKeyClient] for outbound remote.* requests. The peer is
-     * revalidated against the paired-device store before the frame is
-     * encrypted, so a desktop unpaired since the handshake receives nothing.
-     *
-     * @param data The plaintext message bytes to encrypt and send.
-     * @throws PeerNotPairedException if the desktop is no longer paired.
-     * @throws java.io.IOException if no active session or device is connected,
-     *   or the connection's disconnect was seen and it is draining; nothing
-     *   is encrypted then.
-     */
-    override suspend fun sendEncryptedMessage(data: ByteArray) {
-        val session = noiseSession
-            ?: throw java.io.IOException("No active Noise session")
-        val device = connectedDevice
-            ?: throw java.io.IOException("No connected device")
-        sendOnSession(session, device, data, revalidatePeer = true)
     }
 
     /**
