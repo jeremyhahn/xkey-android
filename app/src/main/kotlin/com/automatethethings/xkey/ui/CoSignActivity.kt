@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.ui
 
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -42,21 +43,29 @@ import androidx.lifecycle.lifecycleScope
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.media.CoSignAppendResult
+import com.automatethethings.xkey.media.CoSignParseResult
+import com.automatethethings.xkey.media.CoSignPayload
+import com.automatethethings.xkey.media.CoSignPayloadError
+import com.automatethethings.xkey.media.CoSignRequest
+import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.SignatureEntry
-import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.qr.QrCodeGenerator
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.time.Instant
+import java.io.File
+import java.io.IOException
+import java.time.Clock
 
 class CoSignActivity : AppCompatActivity() {
 
@@ -74,14 +83,77 @@ class CoSignActivity : AppCompatActivity() {
     private lateinit var keySpinner: Spinner
     private var signingKeyIds = listOf<String>()
 
-    private val mediaPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+    private lateinit var witnessQrImage: ImageView
+    private lateinit var witnessQrLabel: TextView
+
+    // OpenDocument, not GetContent: the owner's co-sign is written back to this Uri.
+    private val mediaPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { onMediaSelected(it) }
+    }
+
+    private val requestScanner = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        onScanResult(QrScanResult.from(result)) { onRequestScanned(it) }
+    }
+
+    private val responseScanner = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        onScanResult(QrScanResult.from(result)) { onResponseScanned(it) }
+    }
+
+    /** The signing keys, once loaded; the request prompt waits for them after a recreation. */
+    private val signingKeysLoaded = CompletableDeferred<Unit>()
+
+    /** The key id to select once the key list loads (restored after a recreation). */
+    private var pendingKeyId: String? = null
+
+    /** The signature read of [selectedUri]; an append waits for it. */
+    private var mediaLoad: Job? = null
+
+    private fun coSignScanIntent(): Intent = Intent(this, QrScannerActivity::class.java)
+        .putExtra(QrScannerActivity.EXTRA_PAYLOAD_KIND, QrPayloadKind.COSIGN.name)
+
+    private fun onScanResult(scan: QrScanResult, onScanned: (String) -> Unit) {
+        when (scan) {
+            is QrScanResult.Scanned -> onScanned(scan.value)
+            QrScanResult.CameraDenied ->
+                Snackbar.make(rootLayout, getString(R.string.qr_camera_denied), Snackbar.LENGTH_LONG).show()
+            QrScanResult.Cancelled -> Unit
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         keystoreManager = KeystoreManager(this)
+        // Restored before buildUI loads the keys, and before onStart delivers a
+        // scan result that was pending when the previous instance went away.
+        pendingKeyId = savedInstanceState?.getString(STATE_KEY_ID)
         buildUI()
+        savedInstanceState?.let { restoreExchange(it) }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_MEDIA_URI, selectedUri?.toString())
+        outState.putBoolean(STATE_WITNESS_MODE, witnessSection.visibility == View.VISIBLE)
+        outState.putString(STATE_KEY_ID, selectedKeyId() ?: pendingKeyId)
+    }
+
+    private fun restoreExchange(state: Bundle) {
+        if (state.getBoolean(STATE_WITNESS_MODE)) {
+            initiatorSection.visibility = View.GONE
+            witnessSection.visibility = View.VISIBLE
+        }
+        state.getString(STATE_MEDIA_URI)?.let { uri ->
+            val restored = Uri.parse(uri)
+            selectedUri = restored
+            selectedFileText.text = restored.lastPathSegment ?: uri
+            loadSignatures(restored)
+        }
+    }
+
+    /** The key the spinner selects, or null before the key list has loaded. */
+    private fun selectedKeyId(): String? {
+        val index = keySpinner.selectedItemPosition
+        return if (signingKeysLoaded.isCompleted && index in signingKeyIds.indices) signingKeyIds[index] else null
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
@@ -176,7 +248,7 @@ class CoSignActivity : AppCompatActivity() {
         }
         selectMediaButton = Button(this).apply {
             text = getString(R.string.cosign_select_media)
-            setOnClickListener { mediaPicker.launch("image/*") }
+            setOnClickListener { mediaPicker.launch(arrayOf("image/jpeg")) }
         }
         contentPadding.addView(selectMediaButton)
         contentPadding.addView(selectedFileText)
@@ -330,6 +402,21 @@ class CoSignActivity : AppCompatActivity() {
         }
         section.addView(qrImageView)
 
+        val scanResponseButton = Button(this).apply {
+            text = getString(R.string.cosign_scan_response)
+            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp.topMargin = dpToPx(8)
+            layoutParams = lp
+            setOnClickListener {
+                if (currentSignatureData == null || selectedUri == null) {
+                    Snackbar.make(rootLayout, getString(R.string.cosign_select_media_first), Snackbar.LENGTH_SHORT).show()
+                } else {
+                    responseScanner.launch(coSignScanIntent())
+                }
+            }
+        }
+        section.addView(scanResponseButton)
+
         // Button to switch to witness mode
         val switchToWitnessButton = Button(this).apply {
             text = getString(R.string.cosign_witness_title)
@@ -370,41 +457,36 @@ class CoSignActivity : AppCompatActivity() {
             layoutParams = lp
         })
 
-        // Manual hash input for witness mode (simplified - in production would use QR scanner)
-        val hashInput = android.widget.EditText(this).apply {
-            hint = getString(R.string.cosign_hash_hint)
-            textSize = 14f
+        val scanRequestButton = Button(this).apply {
+            text = getString(R.string.cosign_scan_request)
             val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp.topMargin = dpToPx(12)
             layoutParams = lp
+            setOnClickListener { requestScanner.launch(coSignScanIntent()) }
         }
-        section.addView(hashInput)
+        section.addView(scanRequestButton)
 
-        val witnessQrImage = ImageView(this).apply {
+        witnessQrLabel = TextView(this).apply {
+            text = getString(R.string.cosign_show_response)
+            textSize = 13f
+            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+            gravity = Gravity.CENTER_HORIZONTAL
+            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp.topMargin = dpToPx(12)
+            layoutParams = lp
+            visibility = View.GONE
+        }
+        section.addView(witnessQrLabel)
+
+        witnessQrImage = ImageView(this).apply {
             val size = dpToPx(256)
             layoutParams = LinearLayout.LayoutParams(size, size).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
-                topMargin = dpToPx(12)
+                topMargin = dpToPx(8)
             }
             visibility = View.GONE
             tag = "witnessQr"
         }
-
-        val signButton = Button(this).apply {
-            text = getString(R.string.cosign_approve)
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.topMargin = dpToPx(8)
-            layoutParams = lp
-            setOnClickListener {
-                val hash = hashInput.text.toString().trim()
-                if (hash.isEmpty()) {
-                    Snackbar.make(rootLayout, getString(R.string.cosign_hash_required), Snackbar.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                signAsWitness(hash, witnessQrImage)
-            }
-        }
-        section.addView(signButton)
         section.addView(witnessQrImage)
 
         // Back to initiator button
@@ -425,9 +507,25 @@ class CoSignActivity : AppCompatActivity() {
 
     private fun onMediaSelected(uri: Uri) {
         selectedUri = uri
+        currentSignatureData = null
+        qrImageView.visibility = View.GONE
         selectedFileText.text = uri.lastPathSegment ?: uri.toString()
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {
+            // The provider grants no persistable permission; the session grant still covers this screen.
+        }
+
+        loadSignatures(uri)
+    }
+
+    /** Reads the media's signature data into [currentSignatureData] and the card. */
+    private fun loadSignatures(uri: Uri) {
+        mediaLoad = lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val mimeType = contentResolver.getType(uri)
                 val sigData = XmpMetadataHelper.readSignatureFromUri(contentResolver, uri, mimeType)
@@ -435,6 +533,9 @@ class CoSignActivity : AppCompatActivity() {
 
                 withContext(Dispatchers.Main) {
                     updateSignaturesDisplay(sigData)
+                    if (sigData == null) {
+                        Snackbar.make(rootLayout, getString(R.string.cosign_no_signature_data), Snackbar.LENGTH_LONG).show()
+                    }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -486,7 +587,8 @@ class CoSignActivity : AppCompatActivity() {
     private fun generateInitiatorQR() {
         val data = currentSignatureData
         if (data == null) {
-            Snackbar.make(rootLayout, getString(R.string.cosign_select_media_first), Snackbar.LENGTH_SHORT).show()
+            val message = if (selectedUri == null) R.string.cosign_select_media_first else R.string.cosign_no_signature_data
+            Snackbar.make(rootLayout, getString(message), Snackbar.LENGTH_SHORT).show()
             return
         }
 
@@ -499,12 +601,7 @@ class CoSignActivity : AppCompatActivity() {
         val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
         val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 
-        val qrPayload = JSONObject().apply {
-            put("v", 1)
-            put("hash", data.contentHash)
-            put("alg", data.hashAlgorithm)
-            put("from", fingerprint)
-        }.toString()
+        val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
 
         val bitmap = QrCodeGenerator.generate(qrPayload, dpToPx(256))
         qrImageView.setImageBitmap(bitmap)
@@ -513,44 +610,36 @@ class CoSignActivity : AppCompatActivity() {
         AuditLogger.logCoSignInitiated(data.contentHash)
     }
 
-    private fun signAsWitness(contentHash: String, qrImageView: ImageView) {
-        val selectedKeyIndex = keySpinner.selectedItemPosition
-        if (selectedKeyIndex < 0 || signingKeyIds.isEmpty()) {
-            Snackbar.make(rootLayout, getString(R.string.file_operation_no_keys), Snackbar.LENGTH_SHORT).show()
-            return
-        }
-
+    private fun signAsWitness(request: CoSignRequest, keyId: String) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val keyId = signingKeyIds[selectedKeyIndex]
                 val db = XKeyDatabase.getInstance(this@CoSignActivity)
                 val keyEntity = db.keyDao().getByKeyId(keyId)
                     ?: throw Exception("Key not found")
 
-                val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                val signature = keystoreManager.signWithAlgorithm(keyId, hashBytes, keyEntity.algorithm)
+                val signature = keystoreManager.signWithAlgorithm(keyId, request.hashBytes(), keyEntity.algorithm)
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
                 val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
                 val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 
-                val responsePayload = JSONObject().apply {
-                    put("v", 1)
-                    put("sig", signatureBase64)
-                    put("fp", fingerprint)
-                    put("name", keyEntity.label)
-                    put("alg", keyEntity.algorithm)
-                }.toString()
+                val responsePayload = CoSignResponse(
+                    signature = signatureBase64,
+                    fingerprint = fingerprint,
+                    signerName = keyEntity.label,
+                    algorithm = keyEntity.algorithm
+                ).toJsonString()
 
                 val bitmap = QrCodeGenerator.generate(responsePayload, dpToPx(256))
 
                 withContext(Dispatchers.Main) {
-                    qrImageView.setImageBitmap(bitmap)
-                    qrImageView.visibility = View.VISIBLE
+                    witnessQrImage.setImageBitmap(bitmap)
+                    witnessQrImage.visibility = View.VISIBLE
+                    witnessQrLabel.visibility = View.VISIBLE
                     Snackbar.make(rootLayout, getString(R.string.cosign_success), Snackbar.LENGTH_SHORT).show()
                 }
 
-                AuditLogger.logCoSignReceived(contentHash, fingerprint)
+                AuditLogger.logCoSignReceived(request.contentHash, fingerprint)
 
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -560,21 +649,182 @@ class CoSignActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Witness side: a scanned request QR is shown with its content hash and the
+     * owner's fingerprint; the witness signs only after approving.
+     */
+    private fun onRequestScanned(raw: String) {
+        val request = when (val parsed = CoSignPayload.parseRequest(raw)) {
+            is CoSignParseResult.Ok -> parsed.value
+            is CoSignParseResult.Failed -> {
+                Snackbar.make(
+                    rootLayout,
+                    getString(R.string.cosign_request_refused, payloadErrorText(parsed.error)),
+                    Snackbar.LENGTH_LONG
+                ).show()
+                return
+            }
+        }
+
+        // After a recreation the result arrives before the key list reloads.
+        lifecycleScope.launch {
+            signingKeysLoaded.await()
+            val keyId = selectedKeyId()
+            if (keyId == null) {
+                Snackbar.make(rootLayout, getString(R.string.file_operation_no_keys), Snackbar.LENGTH_SHORT).show()
+                return@launch
+            }
+            val keyLabel = keySpinner.selectedItem?.toString() ?: keyId
+            promptWitnessApproval(request, keyId, keyLabel)
+        }
+    }
+
+    private fun promptWitnessApproval(request: CoSignRequest, keyId: String, keyLabel: String) {
+        witnessQrImage.visibility = View.GONE
+        witnessQrLabel.visibility = View.GONE
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.cosign_approve_title)
+            .setMessage(
+                getString(
+                    R.string.cosign_approve_request_message,
+                    keyLabel,
+                    request.hashAlgorithm,
+                    request.contentHash,
+                    request.ownerFingerprint
+                )
+            )
+            .setPositiveButton(R.string.cosign_approve) { _, _ -> signAsWitness(request, keyId) }
+            .setNegativeButton(R.string.cosign_deny, null)
+            .show()
+    }
+
+    /**
+     * Owner side: a scanned response QR becomes an ATTESTOR entry appended to
+     * the selected media, unless its key has already signed.
+     */
+    private fun onResponseScanned(raw: String) {
+        // Only the Uri: after a recreation the signature data is still reloading,
+        // and the append reads the file's own data anyway.
+        val uri = selectedUri
+        if (uri == null) {
+            Snackbar.make(rootLayout, getString(R.string.cosign_select_media_first), Snackbar.LENGTH_SHORT).show()
+            return
+        }
+        val response = when (val parsed = CoSignPayload.parseResponse(raw)) {
+            is CoSignParseResult.Ok -> parsed.value
+            is CoSignParseResult.Failed -> {
+                Snackbar.make(
+                    rootLayout,
+                    getString(R.string.cosign_response_refused, payloadErrorText(parsed.error)),
+                    Snackbar.LENGTH_LONG
+                ).show()
+                return
+            }
+        }
+        val entry = response.toAttestorEntry(Clock.systemUTC())
+        val pendingLoad = mediaLoad
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                // A reload that finished after the append would show the old signatures.
+                pendingLoad?.join()
+                val result = appendToMedia(uri, entry)
+                withContext(Dispatchers.Main) {
+                    when (result) {
+                        is CoSignAppendResult.Appended -> {
+                            currentSignatureData = result.data
+                            updateSignaturesDisplay(result.data)
+                            Snackbar.make(
+                                rootLayout,
+                                getString(R.string.cosign_appended, response.signerName),
+                                Snackbar.LENGTH_SHORT
+                            ).show()
+                        }
+                        is CoSignAppendResult.DuplicateSigner -> {
+                            Snackbar.make(
+                                rootLayout,
+                                getString(R.string.cosign_duplicate_signer, result.fingerprint.take(16)),
+                                Snackbar.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+                if (result is CoSignAppendResult.Appended) {
+                    AuditLogger.logCoSignReceived(result.data.contentHash, entry.keyFingerprint)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Snackbar.make(
+                        rootLayout,
+                        getString(R.string.cosign_append_failed, e.message ?: e.javaClass.simpleName),
+                        Snackbar.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    /**
+     * Appends [entry] to the media at [uri]: copies it to a temp file under
+     * cacheDir, checks the file's own signature data for a duplicate signer,
+     * appends, and writes the file back over [uri]. The temp file is always
+     * deleted. A duplicate leaves the media untouched.
+     */
+    private fun appendToMedia(uri: Uri, entry: SignatureEntry): CoSignAppendResult {
+        val temp = File.createTempFile("cosign-", ".jpg", cacheDir)
+        try {
+            val input = contentResolver.openInputStream(uri)
+                ?: throw IOException("cannot read the selected media")
+            input.use { src -> temp.outputStream().use { dst -> src.copyTo(dst) } }
+
+            val existing = XmpMetadataHelper.readSignature(temp.absolutePath)
+                ?: throw IllegalStateException(getString(R.string.cosign_no_signature_data))
+            val result = CoSignPayload.appendAttestor(existing, entry)
+            if (result is CoSignAppendResult.Appended) {
+                XmpMetadataHelper.appendSignature(temp.absolutePath, entry)
+                val output = contentResolver.openOutputStream(uri, "rwt")
+                    ?: throw IOException("cannot write the selected media")
+                output.use { dst -> temp.inputStream().use { src -> src.copyTo(dst) } }
+            }
+            return result
+        } finally {
+            temp.delete()
+        }
+    }
+
+    private fun payloadErrorText(error: CoSignPayloadError): String = when (error) {
+        CoSignPayloadError.NotJson -> getString(R.string.cosign_error_not_json)
+        is CoSignPayloadError.UnsupportedVersion -> getString(R.string.cosign_error_version)
+        is CoSignPayloadError.MissingField -> getString(R.string.cosign_error_missing_field, error.field)
+        is CoSignPayloadError.UnsupportedHashAlgorithm -> getString(R.string.cosign_error_hash_algorithm, error.algorithm)
+        CoSignPayloadError.InvalidHash -> getString(R.string.cosign_error_hash)
+        CoSignPayloadError.InvalidSignature -> getString(R.string.cosign_error_signature)
+    }
+
     private fun loadSigningKeys() {
         lifecycleScope.launch(Dispatchers.IO) {
-            val db = XKeyDatabase.getInstance(this@CoSignActivity)
-            val keys = db.keyDao().getAll().filter {
-                !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh")
-            }
-            signingKeyIds = keys.map { it.keyId }
-            val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
+            try {
+                val db = XKeyDatabase.getInstance(this@CoSignActivity)
+                val keys = db.keyDao().getAll().filter {
+                    !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh")
+                }
+                val keyIds = keys.map { it.keyId }
+                val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
 
-            withContext(Dispatchers.Main) {
-                keySpinner.adapter = ArrayAdapter(
-                    this@CoSignActivity,
-                    android.R.layout.simple_spinner_dropdown_item,
-                    keyLabels
-                )
+                withContext(Dispatchers.Main) {
+                    signingKeyIds = keyIds
+                    keySpinner.adapter = ArrayAdapter(
+                        this@CoSignActivity,
+                        android.R.layout.simple_spinner_dropdown_item,
+                        keyLabels
+                    )
+                    // The key chosen before a recreation, if it still exists.
+                    pendingKeyId?.let { id -> keyIds.indexOf(id).takeIf { it >= 0 }?.let(keySpinner::setSelection) }
+                    pendingKeyId = null
+                }
+            } finally {
+                signingKeysLoaded.complete(Unit)
             }
         }
     }
@@ -591,4 +841,10 @@ class CoSignActivity : AppCompatActivity() {
      * Reads a colour from the xKey design-system palette.
      */
     private fun paletteColor(resId: Int): Int = ContextCompat.getColor(this, resId)
+
+    private companion object {
+        const val STATE_MEDIA_URI = "cosign_media_uri"
+        const val STATE_WITNESS_MODE = "cosign_witness_mode"
+        const val STATE_KEY_ID = "cosign_key_id"
+    }
 }

@@ -18,6 +18,7 @@ import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.auth.SessionAuthManager
+import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.credential.UserVerificationCompliance
 import com.automatethethings.xkey.credential.UserVerificationRequiredException
 import com.automatethethings.xkey.credential.UvRequirement
@@ -190,6 +191,12 @@ class RequestHandler(
 
     // Unified key storage DAO
     private val keyDao: KeyDao = XKeyDatabase.getInstance(context).keyDao()
+
+    // The one signature counter a passkey has, shared with the credential provider
+    private val passkeySignCounter = PasskeySignCounter(
+        XKeyDatabase.getInstance(context).credentialMetadataDao(),
+        keyDao
+    )
 
     // Per-key sharing policy DAO
     private val keySharingPolicyDao: KeySharingPolicyDao = XKeyDatabase.getInstance(context).keySharingPolicyDao()
@@ -3163,8 +3170,10 @@ class RequestHandler(
                 )
             }
 
-            // Increment sign count
-            val newSignCount = current.signCount + 1
+            // The credential provider serves this passkey too, so the counter
+            // comes from the one both paths share. It advances before signing:
+            // a failed signature leaves a gap, never a reused value.
+            val newSignCount = passkeySignCounter.next(assertionParams.credentialId)
 
             // Build authenticator data
             // rpIdHash (32 bytes) || flags (1 byte) || signCount (4 bytes, big-endian)
@@ -3201,8 +3210,6 @@ class RequestHandler(
                 dataHash = dataHash
             )
 
-            // Update sign count in database
-            keyDao.updateSignCount(assertionParams.credentialId, newSignCount)
             Triple(newSignCount, authData, signature)
         }
 
@@ -3529,37 +3536,57 @@ class RequestHandler(
      * returns the phone's credentials (with decrypted Base32 secrets, for
      * replication over the Noise channel) so the desktop can merge them back.
      */
-    private suspend fun handleSyncOATH(request: Request): Response {
-        return try {
-            val params = request.params ?: JSONObject()
-            val engine = com.automatethethings.xkey.sync.SyncEngine(context)
-            val counts = engine.mergeOath(params.optJSONArray("credentials") ?: org.json.JSONArray())
-            val remote = engine.gatherOath()
-            engine.markSynced()
-            Response.success(request.id, JSONObject().apply {
-                put("added", counts.added)
-                put("updated", counts.updated)
-                put("skipped", counts.skipped)
-                put("remote", remote)
-            })
-        } catch (e: Exception) {
-            Log.e(TAG, "syncOATH failed", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncOATH failed: ${e.message}")
+    private suspend fun handleSyncOATH(request: Request): Response =
+        auditedInboundSync(request, "syncOATH", "credentials", AuditLogger::logOathSyncPerformed) { engine, items ->
+            engine.mergeOath(items) to engine.gatherOath()
         }
-    }
 
     /**
      * Syncs passwords: imports/updates the desktop's passwords into the
      * encrypted password store and returns the phone's passwords so the desktop
      * can merge them back.
      */
-    private suspend fun handleSyncPasswords(request: Request): Response {
+    private suspend fun handleSyncPasswords(request: Request): Response =
+        auditedInboundSync(request, "syncPasswords", "passwords", AuditLogger::logPasswordSyncPerformed) { engine, items ->
+            engine.mergePasswords(items) to engine.gatherPasswords()
+        }
+
+    /**
+     * The one path every inbound store sync runs and is audited through:
+     * [sync] merges the desktop's `[key]` items and gathers the phone's, and
+     * [record] writes exactly one entry, success or failure, for the
+     * desktop that asked. The peer id is the request's own connection peer
+     * ([currentPeerPublicKeyHex]), never the handler-wide peer when the
+     * request names a connection, so concurrent desktops each audit their
+     * own; null when that connection authenticated no peer. Its
+     * paired name is looked up inside this path and is null when the lookup
+     * fails, so an unreadable paired-device store neither blocks the sync nor
+     * drops its entry. A failed entry holds a local description or the
+     * exception class only: a merge error's message may quote an entry.
+     * A locked password vault answers `PASSWORD_STORE_LOCKED`; merge runs
+     * first and is refused before it writes, so the store is untouched.
+     */
+    private suspend fun auditedInboundSync(
+        request: Request,
+        label: String,
+        key: String,
+        record: (String?, String?, Int, String, Int, Int, Int, Boolean, String?) -> Unit,
+        sync: suspend (com.automatethethings.xkey.sync.SyncEngine, org.json.JSONArray) ->
+            Pair<com.automatethethings.xkey.sync.SyncEngine.ItemCounts, org.json.JSONArray>
+    ): Response {
+        val peerId = currentPeerPublicKeyHex()
+        val peerName = syncPeerName(peerId)
+        fun failed(why: String) =
+            record(peerId, peerName, 0, AuditLogger.SYNC_INBOUND, 0, 0, 0, false, why)
         return try {
             val params = request.params ?: JSONObject()
             val engine = com.automatethethings.xkey.sync.SyncEngine(context)
-            val counts = engine.mergePasswords(params.optJSONArray("passwords") ?: org.json.JSONArray())
-            val remote = engine.gatherPasswords()
+            val (counts, remote) = sync(engine, params.optJSONArray(key) ?: org.json.JSONArray())
             engine.markSynced()
+            record(
+                peerId, peerName, remote.length(), AuditLogger.SYNC_INBOUND,
+                counts.added, counts.updated, counts.skipped, true, null
+            )
             Response.success(request.id, JSONObject().apply {
                 put("added", counts.added)
                 put("updated", counts.updated)
@@ -3567,12 +3594,22 @@ class RequestHandler(
                 put("remote", remote)
             })
         } catch (e: PasswordStoreLockedException) {
-            // Merge runs first and is refused before it writes, so a locked
-            // vault leaves the store untouched and exports nothing.
+            failed("password store is locked")
             Response.error(request.id, ErrorCodes.PASSWORD_STORE_LOCKED, e.message ?: "password store is locked")
         } catch (e: Exception) {
-            Log.e(TAG, "syncPasswords failed", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncPasswords failed: ${e.message}")
+            Log.e(TAG, "$label failed", e)
+            failed("$label failed: ${e.javaClass.simpleName}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "$label failed: ${e.message}")
+        }
+    }
+
+    /** [peerId]'s paired name, or null when it has none or the store cannot be read. */
+    private fun syncPeerName(peerId: String?): String? = peerId?.let {
+        try {
+            pairedDeviceRepository?.getDevice(it)?.deviceName
+        } catch (e: Exception) {
+            Log.w(TAG, "paired device name unavailable for the sync audit: ${e.javaClass.simpleName}")
+            null
         }
     }
 

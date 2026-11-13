@@ -1,0 +1,583 @@
+/*
+ * Copyright (c) 2025 Jeremy Hahn
+ * Copyright (c) 2025 Automate The Things, LLC
+ *
+ * This file is part of xKey.
+ *
+ * xKey is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+package com.automatethethings.xkey.ui
+
+import com.automatethethings.xkey.media.XmpMetadataHelper
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
+import kotlin.coroutines.cancellation.CancellationException
+
+/** JVM tests for [FileOperationStaging], the staging files behind sign, encrypt and decrypt. */
+class FileOperationStagingTest {
+
+    @get:Rule
+    val temp = TemporaryFolder()
+
+    private fun staging(): FileOperationStaging = FileOperationStaging(temp.root)
+
+    private fun FileOperationStaging.stageBytes(displayName: String?): File =
+        stage(displayName) { it.writeBytes(byteArrayOf(1, 2, 3)) }
+
+    private fun assertInsideStaging(staging: FileOperationStaging, file: File) {
+        assertEquals(staging.directory.canonicalFile, file.canonicalFile.parentFile)
+    }
+
+    @Test
+    fun `staged name never contains the display name`() {
+        val staging = staging()
+        val file = staging.stageBytes("holiday-photo.jpg")
+
+        assertFalse(file.name.contains("holiday-photo"))
+        // The extension stays, so the XMP helper still sees a JPEG.
+        assertTrue(file.name.endsWith(".jpg"))
+        assertInsideStaging(staging, file)
+    }
+
+    @Test
+    fun `a traversal display name stages inside the staging directory`() {
+        val staging = staging()
+        val file = staging.stageBytes("../../outside/evil.jpg")
+
+        assertInsideStaging(staging, file)
+        assertTrue(file.exists())
+        assertFalse(File(temp.root.parentFile, "outside").exists())
+        assertFalse(File(temp.root, "outside").exists())
+        assertEquals(listOf(staging.directory.name), temp.root.list()!!.toList())
+    }
+
+    @Test
+    fun `staged file is deleted when the write step throws`() {
+        val staging = staging()
+        var written: File? = null
+        try {
+            staging.stage("report.pdf") {
+                written = it
+                it.writeBytes(byteArrayOf(9, 9))
+                throw IOException("encrypt failed")
+            }
+            fail("stage should rethrow the write failure")
+        } catch (e: IOException) {
+            assertEquals("encrypt failed", e.message)
+        }
+
+        assertFalse(written!!.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `staged file is deleted when the save is cancelled`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "secret.txt")
+        val file = pending.file!!
+        assertTrue(file.exists())
+
+        pending.cancel()
+
+        assertFalse(file.exists())
+        assertEquals(null, pending.file)
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    /** A picker result as the encrypt and decrypt launchers deliver it: [result] null is a cancel. */
+    private fun deliverResult(pending: PendingStagedSave, result: String?): List<String> {
+        val saved = mutableListOf<String>()
+        pending.onResult(result) { saved += it }
+        return saved
+    }
+
+    @Test
+    fun `a cancelled decrypt picker deletes the staged plaintext and clears the pending file`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf", prepare = { /* recordUsage */ })
+        val file = pending.file!!
+
+        val saved = deliverResult(pending, null)
+
+        assertTrue(saved.isEmpty())
+        assertFalse(file.exists())
+        assertEquals(null, pending.file)
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a cancelled encrypt picker deletes the staged output and clears the pending file`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf.xkeyenc", prepare = { /* audit write */ })
+        val file = pending.file!!
+
+        val saved = deliverResult(pending, null)
+
+        assertTrue(saved.isEmpty())
+        assertFalse(file.exists())
+        assertEquals(null, pending.file)
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a chosen destination hands the result to the save and keeps the staged file for it`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf")
+        val file = pending.file!!
+
+        val saved = deliverResult(pending, "content://example/out")
+
+        assertEquals(listOf("content://example/out"), saved)
+        assertTrue(file.exists())
+        assertEquals(file, pending.file)
+    }
+
+    @Test
+    fun `staged file is deleted when the copy to the target throws`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.txt")
+
+        try {
+            staging.deliver(file) { throw IOException("target gone") }
+            fail("deliver should rethrow the copy failure")
+        } catch (e: IOException) {
+            assertEquals("target gone", e.message)
+        }
+
+        assertFalse(file.exists())
+    }
+
+    @Test
+    fun `two staged files have different paths`() {
+        val staging = staging()
+        val first = staging.stageBytes("same.bin")
+        val second = staging.stageBytes("same.bin")
+
+        assertNotEquals(first.canonicalPath, second.canonicalPath)
+        assertTrue(first.exists())
+        assertTrue(second.exists())
+
+        staging.releaseAll()
+
+        assertFalse(first.exists())
+        assertFalse(second.exists())
+    }
+
+    @Test
+    fun `startup sweep deletes leftovers only inside the staging directory`() {
+        val directory = File(temp.root, FileOperationStaging.DIRECTORY_NAME)
+        val leftover = File(directory, "stage-old.tmp")
+        val nested = File(directory, "nested/stage-old.tmp")
+        nested.parentFile!!.mkdirs()
+        leftover.writeBytes(byteArrayOf(1))
+        nested.writeBytes(byteArrayOf(2))
+        val sibling = temp.newFile("xkey_enc_temp_keep")
+        val otherCache = File(temp.newFolder("image_cache"), "thumb.png").apply { writeBytes(byteArrayOf(3)) }
+
+        staging().sweep()
+
+        assertFalse(leftover.exists())
+        assertFalse(nested.exists())
+        assertTrue(directory.list().isNullOrEmpty())
+        assertTrue(sibling.exists())
+        assertTrue(otherCache.exists())
+    }
+
+    @Test
+    fun `a second instance's sweep keeps the first instance's staged output`() {
+        val first = staging()
+        val file = first.stageBytes("report.pdf")
+
+        // A second share opens while the first waits on its save picker
+        val second = staging()
+        second.sweep()
+        second.stageBytes("other.pdf")
+
+        assertTrue(file.exists())
+        val target = File(temp.newFolder("picked"), "report.pdf")
+        first.deliver(file) { it.copyTo(target) }
+        assertArrayEquals(byteArrayOf(1, 2, 3), target.readBytes())
+        assertFalse(file.exists())
+    }
+
+    /** Stage a file and write the signature sidecar the XMP helper puts beside a non-JPEG path. */
+    private fun FileOperationStaging.stageWithCompanion(displayName: String?): Pair<File, File> {
+        var companion: File? = null
+        val file = stage(displayName) { staged ->
+            staged.writeBytes(byteArrayOf(1, 2, 3))
+            companion = File(XmpMetadataHelper.getSidecarPath(staged.absolutePath)).apply { writeText("{}") }
+        }
+        return file to companion!!
+    }
+
+    @Test
+    fun `a JPEG with an extensionless display name stages as jpg`() {
+        val staging = staging()
+
+        for (mime in listOf("image/jpeg", "image/jpg")) {
+            for (name in listOf("photo", null, "photo.png", "../x/evil")) {
+                val file = staging.stage(name, mime) { it.writeBytes(byteArrayOf(1)) }
+                assertTrue("$mime $name -> ${file.name}", file.name.endsWith(".jpg"))
+                assertInsideStaging(staging, file)
+            }
+        }
+        // Other content keeps the display name's extension.
+        assertTrue(staging.stage("doc.pdf", "application/pdf") { }.name.endsWith(".pdf"))
+        assertTrue(staging.stage("doc", "application/pdf") { }.name.endsWith(".tmp"))
+    }
+
+    @Test
+    fun `a delivered staged file leaves no companion behind`() {
+        val staging = staging()
+        val (file, companion) = staging.stageWithCompanion("clip")
+        val target = File(temp.newFolder("picked"), "clip")
+
+        staging.deliverTo(file) { FileOutputStream(target) }
+
+        assertArrayEquals(byteArrayOf(1, 2, 3), target.readBytes())
+        assertFalse(file.exists())
+        assertFalse(companion.exists())
+    }
+
+    @Test
+    fun `a failed write step leaves no companion behind`() {
+        val staging = staging()
+        var companion: File? = null
+
+        assertThrows(IOException::class.java) {
+            staging.stage("clip") { staged ->
+                companion = File(XmpMetadataHelper.getSidecarPath(staged.absolutePath)).apply { writeText("{}") }
+                throw IOException("exif failed")
+            }
+        }
+
+        assertFalse(companion!!.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `release releaseAll and shutdown leave no companion behind`() {
+        val staging = staging()
+        val (released, releasedCompanion) = staging.stageWithCompanion("a")
+        val (all, allCompanion) = staging.stageWithCompanion("b")
+
+        staging.release(released)
+        assertFalse(released.exists())
+        assertFalse(releasedCompanion.exists())
+
+        staging.releaseAll()
+        assertFalse(all.exists())
+        assertFalse(allCompanion.exists())
+
+        val (shut, shutCompanion) = staging.stageWithCompanion("c")
+        staging.shutdown()
+        assertFalse(shut.exists())
+        assertFalse(shutCompanion.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a companion written after shutdown is deleted with its file`() {
+        val staging = staging()
+        var companion: File? = null
+
+        assertThrows(CancellationException::class.java) {
+            staging.stage("clip") { staged ->
+                staging.shutdown()
+                companion = File(XmpMetadataHelper.getSidecarPath(staged.absolutePath)).apply { writeText("{}") }
+            }
+        }
+
+        assertFalse(companion!!.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `another session's sweep keeps a live companion and removes a dead one`() {
+        val live = staging()
+        val (liveFile, liveCompanion) = live.stageWithCompanion("live")
+        val dead = staging()
+        val (deadFile, deadCompanion) = dead.stageWithCompanion("dead")
+        // The dead session's process died: its files remain, its session is gone.
+        val saved = temp.newFolder("saved")
+        val deadCopy = File(saved, deadFile.name).also { deadFile.copyTo(it) }
+        val deadCompanionCopy = File(saved, deadCompanion.name).also { deadCompanion.copyTo(it) }
+        dead.shutdown()
+        deadCopy.renameTo(deadFile)
+        deadCompanionCopy.renameTo(deadCompanion)
+
+        staging().sweep()
+
+        assertTrue(liveFile.exists())
+        assertTrue(liveCompanion.exists())
+        assertFalse(deadFile.exists())
+        assertFalse(deadCompanion.exists())
+    }
+
+    @Test
+    fun `a writer blocked in input at teardown leaves no staged file`() {
+        val staging = staging()
+        val entered = CountDownLatch(1)
+        val inputReady = CountDownLatch(1)
+        var failure: Throwable? = null
+        val worker = thread {
+            try {
+                staging.stage("secret.txt") { staged ->
+                    // openInputStream blocks in the provider
+                    entered.countDown()
+                    inputReady.await()
+                    FileOutputStream(staged).use { it.write("plaintext".toByteArray()) }
+                }
+            } catch (e: Throwable) {
+                failure = e
+            }
+        }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+        staging.shutdown()
+        assertTrue(staging.directory.list().isNullOrEmpty())
+
+        inputReady.countDown()
+        worker.join(5_000)
+        assertFalse(worker.isAlive)
+
+        assertTrue(staging.directory.list().isNullOrEmpty())
+        assertTrue("stage should end cancelled, got $failure", failure is CancellationException)
+        try {
+            staging.stageBytes("late.txt")
+            fail("stage after shutdown should be refused")
+        } catch (e: CancellationException) {
+            // refused
+        }
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a destination open paused across teardown still completes from the staged file`() {
+        val staging = staging()
+        val target = temp.newFile("original.jpg").apply { writeText("original") }
+        val file = staging.stage("photo.jpg") { it.writeText("signed") }
+        val entered = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        var failure: Throwable? = null
+        val worker = thread {
+            try {
+                staging.deliverTo(file) {
+                    // openOutputStream blocks in the provider, then truncates the original
+                    entered.countDown()
+                    resume.await()
+                    FileOutputStream(target)
+                }
+            } catch (e: Throwable) {
+                failure = e
+            }
+        }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+        staging.shutdown()
+
+        resume.countDown()
+        worker.join(5_000)
+        assertFalse(worker.isAlive)
+
+        assertEquals("delivery should complete, got $failure", null, failure)
+        assertEquals("signed", target.readText())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    /** An output stream that records its close and, when [failWrite], fails every write. */
+    private class TrackedOutput(private val failWrite: Boolean) : ByteArrayOutputStream() {
+        var closed = false
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (failWrite) throw IOException("disk full")
+            super.write(b, off, len)
+        }
+
+        override fun write(b: Int) {
+            if (failWrite) throw IOException("disk full")
+            super.write(b)
+        }
+
+        override fun close() {
+            closed = true
+            super.close()
+        }
+    }
+
+    @Test
+    fun `deliverTo deletes the staged file when opening the destination throws`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.pdf")
+
+        val thrown = assertThrows(SecurityException::class.java) {
+            staging.deliverTo(file) { throw SecurityException("no grant") }
+        }
+
+        assertEquals("no grant", thrown.message)
+        assertFalse(file.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `deliverTo deletes the staged file when the destination opens as null`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.pdf")
+
+        assertThrows(IllegalStateException::class.java) {
+            staging.deliverTo(file) { null }
+        }
+
+        assertFalse(file.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `deliverTo closes the destination and deletes the staged file when the write fails`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.pdf")
+        val target = TrackedOutput(failWrite = true)
+
+        val thrown = assertThrows(IOException::class.java) {
+            staging.deliverTo(file) { target }
+        }
+
+        assertEquals("disk full", thrown.message)
+        assertTrue(target.closed)
+        assertFalse(file.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `deliverTo closes the destination after a successful copy`() {
+        val staging = staging()
+        val file = staging.stageBytes("secret.pdf")
+        val target = TrackedOutput(failWrite = false)
+
+        staging.deliverTo(file) { target }
+
+        assertTrue(target.closed)
+        assertArrayEquals(byteArrayOf(1, 2, 3), target.toByteArray())
+        assertFalse(file.exists())
+    }
+
+    /** One handoff as performDecrypt / performEncrypt run it: stage, [prepare], then the picker [launch]. */
+    private fun handOff(
+        staging: FileOperationStaging,
+        pending: PendingStagedSave,
+        displayName: String,
+        prepare: () -> Unit = {},
+        launch: () -> Unit = {}
+    ) = runBlocking {
+        stageForSave(
+            staging,
+            displayName,
+            write = { it.writeBytes(byteArrayOf(4, 5, 6)) },
+            prepare = prepare,
+            handOff = { pending.handOff(it, launch) }
+        )
+    }
+
+    private fun assertHandOffFailureLeavesNothing(displayName: String, prepare: () -> Unit, launch: () -> Unit) {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+
+        repeat(3) {
+            assertThrows(RuntimeException::class.java) {
+                handOff(staging, pending, displayName, prepare, launch)
+            }
+            assertEquals(null, pending.file)
+            assertTrue(staging.directory.list().isNullOrEmpty())
+        }
+    }
+
+    @Test
+    fun `decrypt handoff releases the staged plaintext when recordUsage throws`() {
+        assertHandOffFailureLeavesNothing(
+            "report.pdf",
+            prepare = { throw IllegalStateException("database or disk is full") },
+            launch = { fail("the picker must not open") }
+        )
+    }
+
+    @Test
+    fun `decrypt handoff releases the staged plaintext when the picker launch throws`() {
+        assertHandOffFailureLeavesNothing(
+            "report.pdf",
+            prepare = {},
+            launch = { throw IllegalStateException("no activity handles CREATE_DOCUMENT") }
+        )
+    }
+
+    @Test
+    fun `encrypt handoff releases the staged output when its prepare step throws`() {
+        assertHandOffFailureLeavesNothing(
+            "report.pdf.xkeyenc",
+            prepare = { throw IllegalStateException("audit log write failed") },
+            launch = { fail("the picker must not open") }
+        )
+    }
+
+    @Test
+    fun `encrypt handoff releases the staged output when the picker launch throws`() {
+        assertHandOffFailureLeavesNothing(
+            "report.pdf.xkeyenc",
+            prepare = {},
+            launch = { throw IllegalStateException("no activity handles CREATE_DOCUMENT") }
+        )
+    }
+
+    @Test
+    fun `a failed handoff after a successful one keeps nothing but the earlier pending file released`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf")
+        val first = pending.file!!
+        assertTrue(first.exists())
+
+        assertThrows(IllegalStateException::class.java) {
+            handOff(staging, pending, "report.pdf", launch = { throw IllegalStateException("launch failed") })
+        }
+
+        assertEquals(null, pending.file)
+        assertFalse(first.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a successful handoff keeps the staged file pending for the save callback`() {
+        val staging = staging()
+        val pending = PendingStagedSave(staging)
+        handOff(staging, pending, "report.pdf")
+
+        val file = pending.take()!!
+        assertArrayEquals(byteArrayOf(4, 5, 6), file.readBytes())
+        assertEquals(null, pending.file)
+    }
+}
