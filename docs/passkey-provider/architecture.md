@@ -11,6 +11,27 @@ Android Credential Provider service for FIDO2/WebAuthn passkey operations.
 Handles `CreateCredentialRequest` and `GetCredentialRequest` from the system
 credential manager.
 
+### The enable switch
+
+Settings > Passkey provider stores one value, `credential_provider_enabled`,
+in the `credential_provider_settings` DataStore
+(`CredentialProviderSettingsRepository`). It is **off** when nothing is
+stored: the user turns it on in xKey, then selects xKey in the system
+credential provider settings.
+
+The service reads the switch before every begin request, through
+`CredentialProviderEnableGate`. While it is off, `onBeginCreateCredentialRequest`
+answers an empty `BeginCreateCredentialResponse` (no create entries) and
+`onBeginGetCredentialRequest` an empty `BeginGetCredentialResponse` (no
+credential entries, even for a relying party with stored passkeys); the
+handlers are not called, so nothing is looked up and no PendingIntent is
+built. The system picker then shows no xKey entry, and with no entry offered
+the final create and get calls cannot be reached. Turning the switch back on
+takes effect on the next request; stored passkeys are kept either way.
+
+Instrumented tests that drive the service through the system picker
+(`WebAuthnE2ETest`) turn the switch on in their setup and restore it after.
+
 ## Entity Details
 
 > **Status: REFERENCE** · Last verified: 2026-08-10
