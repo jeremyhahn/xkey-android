@@ -21,6 +21,7 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import java.security.KeyPair
@@ -189,5 +190,90 @@ class SignerVerificationTest {
         )
         assertEquals(SignerVerification.Status.FAILED, result.status)
         assertEquals("key-without-publ...", result.displayName)
+    }
+
+    // The badge name comes from the key the signature was checked against;
+    // the name the file embeds is only a claim (#196).
+
+    @Test
+    fun `a contact match verifies under the contact name and reports the embedded name as a claim`() {
+        val pair = newKeyPair()
+        val result = verify(
+            entryFor(pair).copy(signerName = "Alice"),
+            contact = SignerVerification.Contact("Bob", pair.public.encoded)
+        )
+        assertEquals(SignerVerification.Status.VERIFIED, result.status)
+        assertEquals("Bob", result.displayName)
+        assertEquals("Alice", result.claimedName)
+    }
+
+    @Test
+    fun `a local key match with a differing embedded name verifies under the key label`() {
+        val pair = newKeyPair()
+        val result = verify(
+            entryFor(pair).copy(signerName = "Alice"),
+            localKeys = listOf(SignerVerification.LocalKey("k1", "My key", pair.public.encoded))
+        )
+        assertEquals(SignerVerification.Status.VERIFIED, result.status)
+        assertEquals("My key", result.displayName)
+        assertEquals("Alice", result.claimedName)
+    }
+
+    @Test
+    fun `no match with an embedded name is unknown under that name with no claim`() {
+        val result = verify(entryFor(newKeyPair()).copy(signerName = "Alice"))
+        assertEquals(SignerVerification.Status.UNKNOWN, result.status)
+        assertEquals("Alice", result.displayName)
+        assertNull(result.claimedName)
+    }
+
+    @Test
+    fun `a content hash mismatch with a matching contact fails under the contact name`() {
+        val pair = newKeyPair()
+        val result = verify(
+            entryFor(pair).copy(signerName = "Alice"),
+            contentHashMatches = false,
+            contact = SignerVerification.Contact("Bob", pair.public.encoded)
+        )
+        assertEquals(SignerVerification.Status.FAILED, result.status)
+        assertEquals("Bob", result.displayName)
+        assertEquals("Alice", result.claimedName)
+    }
+
+    @Test
+    fun `a content hash mismatch with a matching local key fails under the key label`() {
+        val pair = newKeyPair()
+        val result = verify(
+            entryFor(pair).copy(signerName = "Alice"),
+            contentHashMatches = false,
+            localKeys = listOf(SignerVerification.LocalKey("k1", "My key", pair.public.encoded))
+        )
+        assertEquals(SignerVerification.Status.FAILED, result.status)
+        assertEquals("My key", result.displayName)
+    }
+
+    @Test
+    fun `a contact whose key did not make the signature fails under the contact name`() {
+        val signer = newKeyPair()
+        val contactKey = newKeyPair()
+        val result = verify(
+            entryFor(signer, fingerprint = fingerprint(contactKey)).copy(signerName = "Alice"),
+            contact = SignerVerification.Contact("Bob", contactKey.public.encoded)
+        )
+        assertEquals(SignerVerification.Status.FAILED, result.status)
+        assertEquals("Bob", result.displayName)
+        assertEquals("Alice", result.claimedName)
+    }
+
+    @Test
+    fun `an embedded name equal to the matched name gives no claim`() {
+        val pair = newKeyPair()
+        val result = verify(
+            entryFor(pair).copy(signerName = "Bob"),
+            contact = SignerVerification.Contact("Bob", pair.public.encoded)
+        )
+        assertEquals(SignerVerification.Status.VERIFIED, result.status)
+        assertEquals("Bob", result.displayName)
+        assertNull(result.claimedName)
     }
 }

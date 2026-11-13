@@ -16,6 +16,7 @@ package com.automatethethings.xkey.audit
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -55,11 +56,21 @@ object AuditLogger {
 
     private const val TAG = "AuditLogger"
 
-    /** Default retention period: 90 days in milliseconds. */
-    private const val DEFAULT_RETENTION_MS = 90L * 24 * 60 * 60 * 1000
+    /**
+     * Default retention period: 90 days in milliseconds.
+     *
+     * `internal` only so the retention tests can apply the same cutoff.
+     */
+    @VisibleForTesting
+    internal const val DEFAULT_RETENTION_MS = 90L * 24 * 60 * 60 * 1000
 
-    /** Maximum number of audit entries to retain. */
-    private const val MAX_ENTRIES = 10000
+    /**
+     * Maximum number of audit entries to retain.
+     *
+     * `internal` only so the retention tests can apply the same limit.
+     */
+    @VisibleForTesting
+    internal const val MAX_ENTRIES = 10000
 
     private val daoRef = AtomicReference<AuditLogDao?>(null)
     private val scopeRef = AtomicReference<CoroutineScope?>(null)
@@ -574,6 +585,30 @@ object AuditLogger {
                 deviceId = deviceId,
                 deviceName = deviceName,
                 success = true
+            )
+        )
+    }
+
+    /**
+     * Log the per-key sharing grants dropped because a device stopped being
+     * paired: unpaired, cleared, or replaced by a re-pairing under a new key
+     * (#174). Separate from [logDeviceUnpaired], which fires before the grants
+     * are deleted and not at all for an eviction or a clear.
+     *
+     * @param deviceId The removed device's public key hex.
+     * @param droppedGrants The number of `key_sharing_policies` rows deleted.
+     */
+    fun logPeerGrantsDropped(deviceId: String, droppedGrants: Int) {
+        val details = JSONObject().apply {
+            put("reason", "peer_unpaired")
+            put("droppedGrants", droppedGrants)
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.KEY_SHARING_CHANGED,
+                deviceId = deviceId,
+                success = true,
+                details = details.toString()
             )
         )
     }

@@ -136,9 +136,22 @@ data class CACertificateInfo(
  *   - Intermediate CA (5 year validity, StrongBox-backed)
  *     - IDevID certificates (1 year validity)
  */
-class AndroidCA(private val context: Context) {
+class AndroidCA internal constructor(
+    private val context: Context,
+    /**
+     * Opens the KeyStore holding the CA keys. Production always uses the
+     * Android Keystore (the public constructor); JVM tests pass an in-memory
+     * store so issuance can run without StrongBox/TEE.
+     */
+    private val openKeyStore: () -> KeyStore
+) {
+    constructor(context: Context) : this(context, ::openAndroidKeyStore)
+
     companion object {
         private const val TAG = "AndroidCA"
+
+        private fun openAndroidKeyStore(): KeyStore =
+            KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
         const val ROOT_CA_ALIAS = "xkey_root_ca"
         const val INTERMEDIATE_CA_ALIAS = "xkey_intermediate_ca"
@@ -177,9 +190,7 @@ class AndroidCA(private val context: Context) {
     /** Optional CertificateDao for auto-persisting issued certs. */
     var certificateDao: CertificateDao? = null
 
-    private val keyStore: KeyStore by lazy {
-        KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    }
+    private val keyStore: KeyStore by lazy { openKeyStore() }
 
     /**
      * Check if the Root CA has been generated.
@@ -399,21 +410,22 @@ class AndroidCA(private val context: Context) {
         val signingCert = getStoredCertificate(
             if (signingAlias == ROOT_CA_ALIAS) PREF_ROOT_CERT_DER else PREF_INTERMEDIATE_CERT_DER
         ) ?: throw IllegalStateException("Signing CA certificate not found")
+        // Before anything is built or stored: a refused issuer stores nothing.
+        val validity = validityFor(
+            now = Date(),
+            validityDays = profile.validityDays,
+            issuerNotBefore = signingCert.notBefore,
+            issuerNotAfter = signingCert.notAfter
+        )
         val signingKey = keyStore.getKey(signingAlias, null) as PrivateKey
 
         val serialNumber = BigInteger(64, SecureRandom())
 
-        val notBefore = Date()
-        val calendar = Calendar.getInstance()
-        calendar.time = notBefore
-        calendar.add(Calendar.DAY_OF_YEAR, profile.validityDays)
-        val notAfter = calendar.time
-
         val certBuilder = JcaX509v3CertificateBuilder(
             issuerNameOf(signingCert),
             serialNumber,
-            notBefore,
-            notAfter,
+            validity.notBefore,
+            validity.notAfter,
             subject,
             publicKey
         )
@@ -904,7 +916,8 @@ class AndroidCA(private val context: Context) {
         return JcaX509CertificateConverter().getCertificate(certHolder)
     }
 
-    private fun generateIntermediateCertificate(
+    /** Internal, not private, so JVM tests can sign an intermediate under a given root. */
+    internal fun generateIntermediateCertificate(
         rootCert: X509Certificate,
         rootKey: PrivateKey,
         subject: X500Name
@@ -913,18 +926,23 @@ class AndroidCA(private val context: Context) {
         val intermediatePublicKey = keyEntry.certificate.publicKey
 
         val serialNumber = BigInteger(64, SecureRandom())
-        val notBefore = Date()
+        val now = Date()
         val calendar = Calendar.getInstance()
-        calendar.time = notBefore
+        calendar.time = now
         calendar.add(Calendar.YEAR, INTERMEDIATE_CA_VALIDITY_YEARS)
-        val notAfter = calendar.time
+        val validity = validityUntil(
+            now = now,
+            requestedNotAfter = calendar.time,
+            issuerNotBefore = rootCert.notBefore,
+            issuerNotAfter = rootCert.notAfter
+        )
 
         val extUtils = JcaX509ExtensionUtils()
         val certBuilder = JcaX509v3CertificateBuilder(
             issuerNameOf(rootCert),
             serialNumber,
-            notBefore,
-            notAfter,
+            validity.notBefore,
+            validity.notAfter,
             subject,
             intermediatePublicKey
         ).apply {

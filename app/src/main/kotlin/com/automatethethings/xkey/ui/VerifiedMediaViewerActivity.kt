@@ -400,7 +400,8 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                 SignerVerification.Status.VERIFIED -> VerificationStatus.VERIFIED
                 SignerVerification.Status.FAILED -> VerificationStatus.FAILED
                 SignerVerification.Status.UNKNOWN -> VerificationStatus.UNKNOWN
-            }
+            },
+            claimedName = result.claimedName
         )
     }
 
@@ -424,6 +425,9 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
      * - The signer name
      * - The signer role
      * - The signature timestamp
+     *
+     * A signer whose file-embedded name differs from the matched name gets a
+     * "Claims: <name>" line under its row.
      */
     private fun displayVerificationResults(results: List<VerificationResult>, totalSignatures: Int) {
         binding.textVerificationTitle.text = getString(R.string.verified_viewer_signers, totalSignatures)
@@ -526,6 +530,25 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
             row.addView(timestampView)
 
             binding.signerListContainer.addView(row)
+
+            // The name the file embeds is a claim, shown on its own line
+            // under the badge row and never as the badge name.
+            result.claimedName?.let { claimed ->
+                val claimView = TextView(this).apply {
+                    text = getString(R.string.verified_viewer_claims, claimed)
+                    setTextColor(onOverlayMuted)
+                    textSize = 12f
+                    setTypeface(null, Typeface.ITALIC)
+                    val lp = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    lp.marginStart = dpToPx(40)
+                    lp.bottomMargin = dpToPx(6)
+                    layoutParams = lp
+                }
+                binding.signerListContainer.addView(claimView)
+            }
         }
     }
 
@@ -569,6 +592,8 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
         val signerName: String,
         val role: String,
         val timestamp: String,
-        val status: VerificationStatus
+        val status: VerificationStatus,
+        /** The name the file embeds, when it differs from the matched [signerName]. */
+        val claimedName: String? = null
     )
 }

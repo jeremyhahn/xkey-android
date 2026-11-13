@@ -81,6 +81,26 @@ build has a sequence of at least 1, so it is later than any `XKB1` record or
 migrated legacy file. Storing an existing id again gives it a new sequence and
 makes it the latest.
 
+## Writes and failures
+
+`store()` (and the legacy migration) write a record to
+`.<sha256(id)>.backup.tmp` in the same directory, sync it, and rename it over
+`<sha256(id)>.backup`. A write that fails partway deletes the temp file and
+leaves the earlier record under that id loadable; a temp file left by a crash
+never matches the record name, and the next `BackupStore` deletes it instead of
+migrating it as a legacy blob.
+
+| Record | `latestId()` | `load(id)` |
+|--------|--------------|------------|
+| Shorter than a magic, or an unknown magic | Skipped | null |
+| `XKB2` magic, sequence or creation time cut short | Skipped | `IOException` |
+| Header whole, id length negative or past the end of the file | `IOException` | `IOException` |
+| Present but unreadable (open or read fails) | `IOException` | `IOException` |
+
+An unreadable or cut-short backup is never treated as absent: a restore
+without an id answers INTERNAL_ERROR rather than an older backup, and a
+restore by id answers INTERNAL_ERROR rather than "Backup not found".
+
 ## Main flow
 
 ```mermaid
@@ -94,7 +114,7 @@ sequenceDiagram
     RH->>RH: decodeBase64Strict("backup_data")
     RH->>BS: store("", bytes)
     BS->>BS: migrateLegacyRecords(), next sequence
-    BS->>FS: write <sha256(id)>.backup (XKB2 record)
+    BS->>FS: write .<sha256(id)>.backup.tmp (XKB2 record), rename to <sha256(id)>.backup
     BS-->>RH: backup-<millis>-<sequence>
     RH-->>Desk: {success, backup_id, message}
 
@@ -119,14 +139,14 @@ sequenceDiagram
 | The write fails | `ErrorCodes.INTERNAL_ERROR`, "createBackup failed: ..." |
 | `local.restoreBackup` with no id and no stored backup | `ErrorCodes.INVALID_PARAMS`, "No backup available" |
 | No backup under the id | `ErrorCodes.INVALID_PARAMS`, "Backup not found: <id>" |
-| A read failure | `ErrorCodes.INTERNAL_ERROR`, "restoreBackup failed: ..." |
+| A read failure, or a record cut short after its header | `ErrorCodes.INTERNAL_ERROR`, "restoreBackup failed: ..." |
 
 ## Tests
 
 | Test class | Covers |
 |------------|--------|
-| `BackupStoreIdTest` (`app/src/test/.../backup/`) | Unique generated ids (same millisecond, two instances), latest order with equal or reversed mtimes, creation time, `XKB1` and legacy records |
-| `BackupHandlerWireTest` (`app/src/test/.../protocol/`) | `local.*` backup params and results against the go-xkms structs: padded base64, `success`/`backup_id`, RFC 3339 `created_at`, latest when no id, INVALID_PARAMS cases |
+| `BackupStoreIdTest` (`app/src/test/.../backup/`) | Unique generated ids (same millisecond, two instances), latest order with equal or reversed mtimes, creation time, `XKB1` and legacy records, cut-short and unreadable records, a write that fails partway, stray temp files |
+| `BackupHandlerWireTest` (`app/src/test/.../protocol/`) | `local.*` backup params and results against the go-xkms structs: padded base64, `success`/`backup_id`, RFC 3339 `created_at`, latest when no id, INVALID_PARAMS cases, INTERNAL_ERROR on a cut-short newest record |
 | `BackupStoreTest` (`app/src/androidTest/.../backup/`) | Store and load, generated ids for blank ids |
 | `BackupStoreIdentityTest` (`app/src/androidTest/.../backup/`) | Id-to-file mapping; nothing written outside `backups/` |
 | `ProtocolIntegrationTest.backupRoundtrip` (`app/src/androidTest/.../e2e/`) | Create then restore over the protocol |
