@@ -83,6 +83,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.delay
+import com.automatethethings.xkey.auth.PromptOwnership
 import kotlinx.coroutines.withTimeoutOrNull
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
@@ -220,11 +222,16 @@ class VerifyUserPerConnectionTest {
             channelBinding(desktopA).contentEquals(channelBinding(desktopB.desktop.noise))
         )
 
-        // Both requests reach the prompt before either is answered.
-        prompt.holdUntil(prompts = 2)
+        // Both requests are in flight together, each holding its own entry in
+        // the one prompt queue: the first prompts, the second waits its turn.
+        prompt.holdUntil(prompts = 1)
         val answerA = scope.async { verifyUserOverBle(NONCE_A) }
         val answerB = scope.async { desktopB.desktop.request(MethodNames.LOCAL_VERIFY_USER, params = params(NONCE_B)) }
-        withTimeout(TIMEOUT_MS) { prompt.allArrived.await() }
+        withTimeout(TIMEOUT_MS) {
+            prompt.allArrived.await()
+            while (PromptOwnership.process.entries < 2) delay(10)
+        }
+        assertEquals("the second prompt waits for the first's turn to end", 1, prompt.prompts.get())
         prompt.release()
 
         assertSignedFor(desktopA, NONCE_A, withTimeout(TIMEOUT_MS) { answerA.await() })

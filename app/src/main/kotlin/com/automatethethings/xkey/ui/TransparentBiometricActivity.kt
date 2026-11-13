@@ -19,11 +19,14 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.OnBackPressedCallback
+import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 
 /**
  * Transparent activity for showing biometric prompts from background services.
@@ -38,6 +41,18 @@ import com.automatethethings.xkey.R
  * - Support for showing over the lock screen (when requested)
  * - Broadcasts authentication results via local broadcast
  * - Properly handles user cancellation and back press
+ * - Answers every request it was started for exactly once, including one
+ *   it gives way to and one whose activity goes away unanswered
+ *
+ * The activity is singleTop. The launcher starts one request at a time
+ * (PendingAuthentications), so a start that reaches this instance is either
+ * a repeat delivery of the request on screen (the lock-screen notification's
+ * full-screen intent or a tap on it), which is ignored, or a newer request
+ * after the one shown here was withdrawn, which this instance hands to a
+ * fresh one ([onNewIntent]). Request ids grow, so a late delivery of an older
+ * request never displaces the one on screen. Whichever intent delivers a
+ * launcher request, it prompts or is handed on only while
+ * [PromptOwnership.process] holds it ACTIVE.
  *
  * Usage from a service:
  * ```kotlin
@@ -59,6 +74,17 @@ class TransparentBiometricActivity : FragmentActivity() {
     private var biometricPrompt: BiometricPrompt? = null
     private var hasFinished = false
 
+    /** Whether this instance counts as its request's prompt being up. */
+    private var claimed = false
+
+    /**
+     * What the system tells the prompt on screen. Tests stand in for the
+     * owner through it; nothing else calls it.
+     */
+    @VisibleForTesting
+    internal var promptCallback: BiometricPrompt.AuthenticationCallback? = null
+        private set
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_transparent_biometric)
@@ -72,6 +98,16 @@ class TransparentBiometricActivity : FragmentActivity() {
             finish()
             return
         }
+
+        // Only the request that holds the screen prompts. One that expired
+        // unshown, or settled (answered, withdrawn), has handed the screen
+        // on: a late start of it prompts for nothing.
+        if (!claim(requestId)) {
+            hasFinished = true
+            finish()
+            return
+        }
+        claimed = true
 
         val title = intent.getStringExtra(EXTRA_TITLE) ?: DEFAULT_TITLE
         val subtitle = intent.getStringExtra(EXTRA_SUBTITLE) ?: DEFAULT_SUBTITLE
@@ -94,7 +130,48 @@ class TransparentBiometricActivity : FragmentActivity() {
         showBiometricPrompt(title, subtitle, description)
     }
 
+    /**
+     * A start that reached this instance instead of creating one. The
+     * request on screen, delivered again, keeps its prompt; an older request
+     * is a late delivery of one already settled and is dropped, as is a newer
+     * one the process owner does not hold ACTIVE. A newer ACTIVE
+     * request means the one shown here was withdrawn: this prompt answers
+     * cancelled (nobody waits on it) and goes away, and the newer request is
+     * started in a fresh instance, so it gets a prompt and a result of its own.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val next = intent.getStringExtra(EXTRA_REQUEST_ID) ?: return
+        if (!isNewer(next, requestId) || !ownsScreen(next)) return
+        if (!hasFinished) {
+            sendErrorResult(
+                errorCode = BiometricPrompt.ERROR_CANCELED,
+                errorMessage = "Replaced by a newer approval request"
+            )
+        }
+        finishWithResult()
+        biometricPrompt?.cancelAuthentication()
+        // Finishing first, so the start below creates an instance rather
+        // than reaching this one again.
+        startActivity(Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
     override fun onDestroy() {
+        // Going away unanswered (the task swiped away, the activity
+        // destroyed by the system) cancels the request, so its caller, and
+        // every request queued behind it, does not wait forever. A
+        // configuration change recreates the activity for the same request.
+        if (!hasFinished && !isChangingConfigurations && requestId.isNotEmpty()) {
+            sendErrorResult(
+                errorCode = BiometricPrompt.ERROR_CANCELED,
+                errorMessage = "The approval prompt went away unanswered"
+            )
+            hasFinished = true
+        }
+        if (claimed) {
+            release(requestId)
+            claimed = false
+        }
         super.onDestroy()
         biometricPrompt?.cancelAuthentication()
         biometricPrompt = null
@@ -138,12 +215,16 @@ class TransparentBiometricActivity : FragmentActivity() {
         val executor = ContextCompat.getMainExecutor(this)
 
         val callback = object : BiometricPrompt.AuthenticationCallback() {
+            // A prompt this activity already answered for (cancelled on
+            // hand-off or on destroy) reports nothing more.
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                if (hasFinished) return
                 sendSuccessResult()
                 finishWithResult()
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                if (hasFinished) return
                 sendErrorResult(errorCode, errString.toString())
                 finishWithResult()
             }
@@ -155,6 +236,7 @@ class TransparentBiometricActivity : FragmentActivity() {
             }
         }
 
+        promptCallback = callback
         biometricPrompt = BiometricPrompt(this, executor, callback)
 
         val promptInfoBuilder = BiometricPrompt.PromptInfo.Builder()
@@ -183,6 +265,7 @@ class TransparentBiometricActivity : FragmentActivity() {
      * Handles user cancellation (back press or negative button).
      */
     private fun handleCancellation() {
+        if (hasFinished) return
         biometricPrompt?.cancelAuthentication()
         sendErrorResult(
             errorCode = BiometricPrompt.ERROR_USER_CANCELED,
@@ -234,6 +317,71 @@ class TransparentBiometricActivity : FragmentActivity() {
     }
 
     companion object {
+        /**
+         * Whether [candidate] names a request issued after [current]. Launcher
+         * ids are increasing numbers; any other id (a wake-only notification's
+         * `verifyUser-…`, `sign-…`) answers no launcher request, so it never
+         * displaces a prompt, and a launcher request always displaces it.
+         */
+        private const val MAX_EXPIRED = 64
+
+        /** Prompt instances up, by request id. */
+        private val onScreen = HashMap<String, Int>()
+
+        /** Requests that expired unshown, newest last, so a late start of one never prompts. */
+        private val expired = LinkedHashSet<String>()
+
+        /**
+         * Ends [requestId]'s prompt unshown, so a start of it that comes later
+         * finishes without prompting. False while its prompt is up: the owner
+         * is answering it, and it is not taken away.
+         */
+        @Synchronized
+        internal fun expireUnshown(requestId: String): Boolean {
+            if (requestId in onScreen) return false
+            expired.add(requestId)
+            while (expired.size > MAX_EXPIRED) expired.remove(expired.first())
+            return true
+        }
+
+        /**
+         * Counts [requestId]'s prompt as up, unless it may not prompt here:
+         * one that expired unshown, or a launcher request the process owner
+         * does not hold ACTIVE (settled, still queued, or unknown), whichever
+         * intent, the launcher's start or its notification's, delivered it.
+         */
+        @Synchronized
+        private fun claim(requestId: String): Boolean {
+            if (requestId in expired || !ownsScreen(requestId)) return false
+            onScreen[requestId] = (onScreen[requestId] ?: 0) + 1
+            return true
+        }
+
+        @Synchronized
+        private fun release(requestId: String) {
+            val left = (onScreen[requestId] ?: return) - 1
+            if (left > 0) onScreen[requestId] = left else onScreen.remove(requestId)
+        }
+
+        /**
+         * Whether [requestId] may take the screen: only while the process
+         * owner holds its key ACTIVE, refused and reported otherwise. A
+         * launcher request (a number) is keyed [NotificationKeys.approval]; a
+         * wake-only notification's id is its queue key itself
+         * ([PromptOwnership.turn]), and any other id is unknown and refused.
+         */
+        private fun ownsScreen(requestId: String): Boolean =
+            PromptOwnership.process.accept(
+                if (requestId.toLongOrNull() != null) NotificationKeys.approval(requestId) else requestId,
+                PromptOwnership.Event.NOTIFICATION_TAP,
+            )
+
+        internal fun isNewer(candidate: String, current: String): Boolean {
+            val next = candidate.toLongOrNull() ?: return false
+            val shown = current.toLongOrNull() ?: return true
+            return next > shown
+        }
+
         /**
          * Broadcast action for biometric authentication results.
          */

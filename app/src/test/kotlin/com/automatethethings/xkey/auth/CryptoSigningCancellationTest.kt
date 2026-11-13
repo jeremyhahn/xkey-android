@@ -44,7 +44,8 @@ import java.util.concurrent.Executor
 class CryptoSigningCancellationTest {
 
     /** Its own line of prompts, so no other test's request can hold the screen. */
-    private val pending = PendingCryptoSignatures(prompts = SigningPromptQueue())
+    private val prompts = PromptOwnership()
+    private val pending = PendingCryptoSignatures(prompts = prompts)
 
     /** The activities launched, by request id. */
     private val activities = LinkedHashMap<String, FakeActivity>()
@@ -264,6 +265,44 @@ class CryptoSigningCancellationTest {
         assertEquals(CryptoSigningResult.Success(SIGNATURE_BASE64), third.await())
     }
 
+    /**
+     * The launch posts the lock-screen notification, then the direct start
+     * throws: the request fails and the next takes the screen. The
+     * notification's intent, already dispatched, then starts an activity for
+     * the failed request; it must neither prompt nor touch the key.
+     */
+    @Test
+    fun aNotificationDeliveredAfterAFailedDirectStartNeverPromptsOrSigns() = runTest {
+        var notified: String? = null
+        val failed = async {
+            runCatching {
+                pending.await { requestId ->
+                    notified = requestId
+                    throw IllegalStateException("the activity cannot start")
+                }
+            }
+        }
+        val next = async { pending.await(::launchActivity) }
+        runCurrent()
+        assertTrue(failed.await().exceptionOrNull() is IllegalStateException)
+        val nextActivity = activities.values.single()
+
+        val late = FakeActivity(notified!!)
+        assertFalse("a failed request's late delivery must not prompt", late.controller.start())
+        assertTrue(late.finished)
+        late.authenticate()
+        late.controller.release(recreating = false)
+        runCurrent()
+
+        assertEquals("the key is not used", 0, late.signings)
+        assertNull("nothing is delivered", late.delivered)
+        assertTrue("the request on screen is left alone", next.isActive)
+        assertEquals(0, nextActivity.prompt.cancellations)
+        nextActivity.authenticate()
+        runCurrent()
+        assertEquals(CryptoSigningResult.Success(SIGNATURE_BASE64), next.await())
+    }
+
     // -----------------------------------------------------------------
     // The activity goes away
     // -----------------------------------------------------------------
@@ -336,6 +375,75 @@ class CryptoSigningCancellationTest {
     }
 
     // -----------------------------------------------------------------
+    // The same request delivered again
+    // -----------------------------------------------------------------
+
+    /**
+     * On a locked phone the lock-screen notification carries the launcher's
+     * own prompt intent, so its full-screen intent, delivered after the
+     * direct launch, and a tap on it while the request is pending each start
+     * another activity for the same request id. Only the first prompts: the
+     * repeats finish unseen, and going away answers nothing, so the live
+     * request is neither failed nor dequeued.
+     */
+    @Test
+    fun aRepeatDeliveryOfALiveRequestLeavesExactlyOnePromptAndTheRequestAlone() = runTest {
+        val first = async { pending.await(::launchActivity) }
+        val second = async { pending.await(::launchActivity) }
+        runCurrent()
+        val live = activities.values.single()
+
+        val fullScreenDelivery = FakeActivity(live.controller.requestId)
+        val tap = FakeActivity(live.controller.requestId)
+        assertFalse("a repeat delivery must not prompt", fullScreenDelivery.controller.start())
+        assertFalse("a tap while pending must not prompt", tap.controller.start())
+        assertTrue(fullScreenDelivery.finished)
+        assertTrue(tap.finished)
+        // Their activities are destroyed for good.
+        fullScreenDelivery.controller.release(recreating = false)
+        tap.controller.release(recreating = false)
+        runCurrent()
+
+        assertNull("a repeat answers nothing", fullScreenDelivery.delivered)
+        assertNull(tap.delivered)
+        assertTrue("the live request is not failed", first.isActive)
+        assertEquals("the request still holds the screen", 1, activities.size)
+        assertEquals("the live prompt stays up", 0, live.prompt.cancellations)
+        assertFalse(live.finished)
+
+        // The live prompt still answers, and a cancel still reaches only it.
+        live.authenticate()
+        runCurrent()
+        assertEquals(CryptoSigningResult.Success(SIGNATURE_BASE64), first.await())
+        assertEquals(1, live.deliveries)
+        assertEquals("the next request comes up", 2, activities.size)
+        second.cancel()
+        runCurrent()
+        activities.values.last().mainThread.drain()
+        assertEquals(1, activities.values.last().prompt.cancellations)
+    }
+
+    /** A delivery that arrives after its request was answered and its activity went away never prompts. */
+    @Test
+    fun aDeliveryAfterTheRequestWasAnsweredNeverPrompts() = runTest {
+        val waiting = async { pending.await(::launchActivity) }
+        runCurrent()
+        val answered = activities.values.single()
+        answered.authenticate()
+        answered.controller.release(recreating = false)
+        runCurrent()
+        assertEquals(CryptoSigningResult.Success(SIGNATURE_BASE64), waiting.await())
+
+        val late = FakeActivity(answered.controller.requestId)
+        assertFalse("an answered request must not prompt again", late.controller.start())
+        assertTrue(late.finished)
+        late.authenticate()
+        late.controller.release(recreating = false)
+        assertEquals("the key is not used again", 0, late.signings)
+        assertNull(late.delivered)
+    }
+
+    // -----------------------------------------------------------------
     // An uncancelled request
     // -----------------------------------------------------------------
 
@@ -400,6 +508,7 @@ class CryptoSigningCancellationTest {
             deliverSuccess = { deliver(requestId, CryptoSigningResult.Success(it)) },
             deliverError = { code, message -> deliver(requestId, CryptoSigningResult.Error(code, message)) },
             finish = { finished = true },
+            holdsScreen = { prompts.accept(NotificationKeys.signature(it), PromptOwnership.Event.NOTIFICATION_TAP) },
         )
 
         /** `onAuthenticationSucceeded`: sign with the unlocked key. */
