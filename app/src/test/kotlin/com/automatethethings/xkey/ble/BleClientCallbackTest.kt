@@ -288,10 +288,12 @@ class BleClientCallbackTest {
     fun anEmptyNotificationIsIgnored(): Unit = runBlocking {
         val h = harness()
         h.client.connect(h.address, ByteArray(32) { it.toByte() })
+        val taken = h.inboundEventsTaken
 
         h.probe.gattCallback.onCharacteristicChanged(h.gatt, h.responseCharacteristic, ByteArray(0))
 
-        Thread.sleep(50)
+        // Dropped in the callback: nothing is queued for the consumer.
+        h.awaitInboundHandled(taken)
         assertEquals(0, h.probe.fragmentReassembler.getFragmentCount())
     }
 
@@ -305,19 +307,20 @@ class BleClientCallbackTest {
         val h = harness()
         h.client.connect(h.address, ByteArray(32) { it.toByte() })
 
+        var taken = h.inboundEventsTaken
         h.probe.gattCallback.onCharacteristicChanged(
             h.gatt, h.responseCharacteristic, byteArrayOf(0x01, 0x02, 0x03)
         )
-        Thread.sleep(50)
+        h.awaitInboundHandled(taken + 1)
         assertEquals(0, h.probe.fragmentReassembler.getFragmentCount())
 
+        taken = h.inboundEventsTaken
         h.probe.gattCallback.onCharacteristicChanged(
             h.gatt, h.responseCharacteristic, firstOfTwoFragments()
         )
 
-        awaitUntil("the client to buffer a valid fragment") {
-            h.probe.fragmentReassembler.getFragmentCount() == 1
-        }
+        h.awaitInboundHandled(taken + 1)
+        assertEquals("the client buffers a valid fragment", 1, h.probe.fragmentReassembler.getFragmentCount())
     }
 
     /**
@@ -331,12 +334,16 @@ class BleClientCallbackTest {
         val h = harness()
         h.client.connect(h.address, ByteArray(32) { it.toByte() })
         every { h.responseCharacteristic.value } returns firstOfTwoFragments()
+        val taken = h.inboundEventsTaken
 
         h.probe.gattCallback.onCharacteristicChanged(h.gatt, h.responseCharacteristic)
 
-        awaitUntil("the deprecated overload to buffer its fragment") {
-            h.probe.fragmentReassembler.getFragmentCount() == 1
-        }
+        h.awaitInboundHandled(taken + 1)
+        assertEquals(
+            "the deprecated overload buffers its fragment",
+            1,
+            h.probe.fragmentReassembler.getFragmentCount()
+        )
     }
 
     /**
@@ -351,13 +358,14 @@ class BleClientCallbackTest {
         val connecting = async(Dispatchers.Default) {
             runCatching { h.client.connect(h.address, ByteArray(32) { it.toByte() }) }
         }
-        awaitUntil("the identity frame's write") { h.heldWrites == 1 }
+        h.awaitUntil("the identity frame's write") { h.heldWrites == 1 }
         val pending = CompletableDeferred<ByteArray>()
         h.probe.pendingResponse = pending
 
         h.probe.handleCompleteMessage("handshake".toByteArray())
 
-        Thread.sleep(50)
+        // Routed on this thread: a handshake message handed to the waiter
+        // would have completed it before the call returned.
         assertFalse(
             "handshake traffic must never be handed to a request waiter",
             pending.isCompleted
@@ -424,10 +432,10 @@ class BleClientCallbackTest {
         h.client.connect(h.address, ByteArray(32) { it.toByte() })
         val pending = CompletableDeferred<ByteArray>()
         h.probe.pendingResponse = pending
+        val taken = h.inboundEventsTaken
         h.probe.gattCallback.onCharacteristicChanged(h.gatt, h.responseCharacteristic, firstOfTwoFragments())
-        awaitUntil("the client to buffer the first fragment") {
-            h.probe.fragmentReassembler.getFragmentCount() == 1
-        }
+        h.awaitInboundHandled(taken + 1)
+        assertEquals("the client buffers the first fragment", 1, h.probe.fragmentReassembler.getFragmentCount())
 
         h.probe.disconnectInternal()
 
@@ -475,14 +483,5 @@ class BleClientCallbackTest {
                 expected.message!!.contains(fragment)
             )
         }
-    }
-
-    private fun awaitUntil(message: String, timeoutMs: Long = 5_000, condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            if (condition()) return
-            Thread.sleep(5)
-        }
-        throw AssertionError("timed out waiting for: $message")
     }
 }
