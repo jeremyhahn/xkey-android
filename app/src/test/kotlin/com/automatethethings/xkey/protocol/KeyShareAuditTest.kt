@@ -49,11 +49,14 @@ import java.security.KeyStore
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -365,6 +368,102 @@ class KeyShareAuditTest {
 
         assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
         assertTrue("no entry without a caller peer: $entries", entries.isEmpty())
+    }
+
+    // -----------------------------------------------------------------
+    // Cancellation never splits a stored contact from its record
+    // -----------------------------------------------------------------
+
+    /**
+     * The connection drops (the request's job is cancelled) while the contact
+     * insert is in flight. Like a Room insert, the fake stores the row and
+     * then resumes into the cancellation. The row has landed, so its
+     * CONTACT_IMPORTED record must land too: both persist or neither does.
+     *
+     * The fake is a real override, not a mockk answer: mockk runs a
+     * suspending answer in its own runBlocking, so cancellation there never
+     * reaches the request.
+     */
+    @Test
+    fun aShareCancelledMidInsertStillRecordsTheStoredContact() = runTest {
+        val stored = mutableListOf<ContactEntity>()
+        lateinit var request: Job
+        givenContactDao(object : ContactDao by contactDao {
+            override suspend fun insert(contact: ContactEntity): Long {
+                stored += contact
+                request.cancel()
+                yield()
+                return 1L
+            }
+        })
+
+        request = launch { served(sharePublicKey()) }
+        request.join()
+
+        assertTrue("the request was cancelled", request.isCancelled)
+        assertEquals("the contact landed", 1, stored.size)
+        assertEquals(PEER, single(AuditOperationType.CONTACT_IMPORTED).deviceId)
+    }
+
+    /** Cancelled before the insert: neither the contact nor a record persists. */
+    @Test
+    fun aShareCancelledBeforeInsertStoresAndRecordsNothing() = runTest {
+        val stored = mutableListOf<ContactEntity>()
+        lateinit var request: Job
+        givenContactDao(object : ContactDao by contactDao {
+            override suspend fun getByFingerprint(fingerprint: String): ContactEntity? {
+                request.cancel()
+                yield()
+                return null
+            }
+
+            override suspend fun insert(contact: ContactEntity): Long {
+                stored += contact
+                return 1L
+            }
+        })
+
+        request = launch { served(sharePublicKey()) }
+        request.join()
+
+        assertTrue("the request was cancelled", request.isCancelled)
+        assertTrue("no contact: $stored", stored.isEmpty())
+        assertTrue("no entry: $entries", entries.isEmpty())
+    }
+
+    private fun givenContactDao(dao: ContactDao) {
+        val database = mockk<XKeyDatabase>(relaxed = true)
+        every { database.keyDao() } returns keyDao
+        every { database.contactDao() } returns dao
+        every { XKeyDatabase.getInstance(any()) } returns database
+    }
+
+    /**
+     * Every share write and the audit record naming it run inside the one
+     * non-cancellable choke point, `persistAudited`; a share handler that
+     * writes or records outside it fails here.
+     */
+    @Test
+    fun everyShareWriteRunsWithItsRecordInTheChokePoint() {
+        val source = handlerSource()
+        val choke = Regex(
+            "private suspend fun <T> persistAudited\\([^)]*\\)[^=]*=\\s*withContext\\(NonCancellable\\)"
+        )
+        assertTrue("persistAudited runs under NonCancellable", choke.containsMatchIn(source))
+        for ((fn, write, record) in listOf(
+            Triple("handleSharePublicKey", "dao.insert(", "AuditLogger.logContactImported("),
+            Triple("handleShareSymmetric", "store.put(", "AuditLogger.logKeyCreated(")
+        )) {
+            val start = source.indexOf("private suspend fun $fn(")
+            assertTrue("$fn found", start >= 0)
+            val body = source.substring(start, source.indexOf("\n    }\n", start))
+            val gate = body.indexOf("persistAudited(")
+            assertTrue("$fn uses persistAudited", gate >= 0)
+            for (call in listOf(write, record)) {
+                assertEquals("$fn makes one $call", 1, Regex(Regex.escape(call)).findAll(body).count())
+                assertTrue("$fn runs $call inside persistAudited", body.indexOf(call) > gate)
+            }
+        }
     }
 
     // -----------------------------------------------------------------
