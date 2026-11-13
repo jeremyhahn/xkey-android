@@ -21,10 +21,14 @@ import android.content.res.Configuration
 import android.hardware.biometrics.BiometricManager
 import android.os.Looper
 import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PendingAuthentications
 import com.automatethethings.xkey.auth.PromptOwnership
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
+import java.time.Duration
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -102,5 +106,50 @@ class CredentialSelectorRotationTest {
             PromptOwnership.State.ACTIVE,
             PromptOwnership.process.state(second),
         )
+    }
+
+    @Test
+    fun `a registration queued past the deadline times out and never shows`() {
+        val app = RuntimeEnvironment.getApplication()
+        val biometrics = app.getSystemService(BiometricManager::class.java)
+        val shadow = Shadow.extract<ShadowBiometricManager>(biometrics)
+        shadow.setCanAuthenticate(true)
+        shadow.setAuthenticatorType(
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        )
+
+        // Earlier approvals hold the screen past the registration's deadline.
+        val holder = NotificationKeys.wakeOnly("deadlineTest").also { held += it }
+        PromptOwnership.process.enqueue(holder) {}
+
+        val intent = PromptOwnership.queued(
+            Intent(app, CredentialSelectorActivity::class.java)
+                .setAction(CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL)
+                .putExtra(CredentialSelectorActivity.EXTRA_REQUEST_JSON, """{"rp":{"id":"example.com"}}"""),
+            "credentialSelector",
+        )
+        val registration = intent.getStringExtra(PromptOwnership.EXTRA_PROMPT_KEY)!!
+        held += registration
+        val controller = Robolectric.buildActivity(CredentialSelectorActivity::class.java, intent).setup()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals("the registration waits its turn", PromptOwnership.State.QUEUED, PromptOwnership.process.state(registration))
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(PendingAuthentications.QUEUE_DEADLINE_MILLIS + 1))
+
+        assertEquals(
+            "past the queue deadline the registration settles expired",
+            PromptOwnership.Outcome.EXPIRED,
+            PromptOwnership.process.outcome(registration),
+        )
+        assertTrue("the activity cancels the registration", controller.get().isFinishing)
+
+        PromptOwnership.process.end(holder)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertNotEquals(
+            "the freed screen never goes to the timed-out registration",
+            registration,
+            PromptOwnership.process.activeKey,
+        )
+        controller.pause().stop().destroy()
     }
 }

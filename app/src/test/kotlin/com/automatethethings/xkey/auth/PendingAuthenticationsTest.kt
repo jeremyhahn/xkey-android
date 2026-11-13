@@ -265,6 +265,30 @@ class PendingAuthenticationsTest {
     }
 
     @Test
+    fun aQueuedCryptoSignaturePastTheQueueDeadlineTimesOutUnseen() = runTest {
+        // Another approval holds the screen and never lets go.
+        screen.enqueue("approval-held") {}
+        val signatures = PendingCryptoSignatures(cancelPrompt = {}, prompts = screen, expirePrompt = { true })
+        val signed = mutableListOf<String>()
+        val queued = async { signatures.await { signed += it } }
+        runCurrent()
+
+        advanceTimeBy(PendingAuthentications.QUEUE_DEADLINE_MILLIS + 1)
+        runCurrent()
+
+        assertTrue("a queued signature settles at the queue deadline", queued.isCompleted)
+        val timedOut = queued.await()
+        assertEquals(
+            BiometricPrompt.ERROR_TIMEOUT,
+            (timedOut as BiometricActivityLauncher.CryptoSigningResult.Error).code
+        )
+        screen.end("approval-held")
+        runCurrent()
+        assertTrue("it never prompts, even once the screen frees", signed.isEmpty())
+        assertNull("it holds no entry", screen.activeKey)
+    }
+
+    @Test
     fun theDefaultQueueDeadlineIsFiniteAndOutlastsThePromptsOwnTimeout() {
         assertTrue(PendingAuthentications.QUEUE_DEADLINE_MILLIS in 30_001L..300_000L)
     }
