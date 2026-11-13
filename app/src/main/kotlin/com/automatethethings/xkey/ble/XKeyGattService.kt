@@ -697,13 +697,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             Log.e(TAG, "RequestHandler not initialized, cannot handle USB accessory")
             return
         }
-        // The desktop is ready only once the USB session is Connected, and is
-        // lost as soon as it ends, detached or not. One observer, installed on
-        // the first attach and kept for the service's lifetime, follows
-        // whichever server the slot holds, so no attach replaces it (#134).
-        if (usbStateJob == null) {
-            usbStateJob = desktopSessionTracker.follow(serviceScope, usbServerSlot.states)
-        }
+        // One observer of the slot's server for the service's lifetime (#134).
+        usbAttachPath.observe()
 
         // Check if native USB is enabled before accepting the accessory
         serviceScope.launch {
@@ -731,19 +726,20 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             )
             // The slot drops a server that closes, so the next attach builds
             // a fresh one without a service restart (#134).
-            usbServerSlot.open(
-                context = this@XKeyGattService,
-                accessory = accessory,
-                requestHandler = handler,
-                router = usbRouter,
-                pairingCallback = this@XKeyGattService,
-                pairedDeviceRepository = pairedDeviceRepository,
-                storeMethods = storeMethods,
-            ) ?: run {
+            usbAttachPath.attach {
+                open(
+                    context = this@XKeyGattService,
+                    accessory = accessory,
+                    requestHandler = handler,
+                    router = usbRouter,
+                    pairingCallback = this@XKeyGattService,
+                    pairedDeviceRepository = pairedDeviceRepository,
+                    storeMethods = storeMethods,
+                )
+            } ?: run {
                 Log.w(TAG, "USB accessory server already active, ignoring attach")
                 return@launch
             }
-            refreshDesktopSession()
             Log.i(TAG, "USB accessory server started")
             AuditLogger.logConnectionEstablished(
                 deviceId = accessory.toString(),
@@ -831,10 +827,13 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private var tcpStateJob: Job? = null
 
     /**
-     * Collects [UsbAccessoryServerSlot.states] into [desktopSession] from the
-     * first attach until [serviceScope] ends.
+     * The USB attach path: opens through [usbServerSlot] and keeps one
+     * observer of its server's state on [desktopSession] until [serviceScope]
+     * ends.
      */
-    private var usbStateJob: Job? = null
+    private val usbAttachPath by lazy {
+        UsbAttachPath(usbServerSlot, desktopSessionTracker, serviceScope)
+    }
 
     /**
      * Recomputes [desktopSession] from the active transport. Called on every
