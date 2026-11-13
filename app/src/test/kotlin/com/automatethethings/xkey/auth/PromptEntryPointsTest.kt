@@ -79,8 +79,9 @@ class PromptEntryPointsTest {
         ),
         "credential/handler/CredentialPendingIntentHelper.kt" to EntryPoint(
             mapOf(Raiser.PROMPT_ACTIVITY to 2),
-            emptyList(),
-            "pending intents handed to the system Credential Manager; the activity they open waits its turn",
+            listOf("PromptOwnership.queued("),
+            "pending intents handed to the system Credential Manager carry the queue key the activity they open " +
+                "enqueues under, and it prompts only on that key's turn",
         ),
         "auth/BiometricNotificationHelper.kt" to EntryPoint(
             mapOf(Raiser.FULL_SCREEN_NOTIFICATION to 1, Raiser.PROMPT_ACTIVITY to 1),
@@ -130,6 +131,7 @@ class PromptEntryPointsTest {
     @Test
     fun everyEntryPointKeepsTheQueueCallThatGatesIt() {
         registry.forEach { (path, entry) ->
+            assertTrue("$path is registered with no PromptOwnership guard: ${entry.reason}", entry.guards.isNotEmpty())
             val text = sourceRoot.resolve(path).readText()
             entry.guards.forEach { guard ->
                 assertTrue("$path raises a prompt without $guard: ${entry.reason}", guard in text)
