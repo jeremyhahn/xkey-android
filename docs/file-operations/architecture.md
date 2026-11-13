@@ -248,6 +248,31 @@ sequenceDiagram
     FOA-->>User: "File decrypted successfully"
 ```
 
+## Staging Files
+
+Sign (JPEG in-band), encrypt and decrypt write their output to a staging
+file before it is copied to its target. `FileOperationStaging` (in `ui/`)
+owns these files:
+
+- They live in `<cacheDir>/file-ops-staging/` and nowhere else.
+- Each name is generated (`stage-<random>.<ext>`). The shared file's display
+  name lends only its extension, and only when it is 1-10 letters or digits,
+  so a `../` in a display name cannot move the file, and two operations never
+  share a path. When the caller passes the content's MIME type, the
+  extension is the one that content requires instead: JPEG content stages as
+  `.jpg` whatever its display name, so the XMP helper's EXIF write lands in
+  the staged file and not in a sidecar beside it.
+- Companion rule: whatever a helper writes beside a staged file, named
+  `<staged name>.<suffix>` (the XMP helper's `<staged>.xkeysig` sidecar),
+  belongs to that file and is deleted with it at every point below, so no
+  helper output escapes ownership.
+- A staging file is deleted when its write step throws, once it is copied to
+  the target (whether the copy succeeds or throws), when the user cancels the
+  save picker, and when the activity finishes.
+- `onCreate` sweeps the staging directory first, so files left by a process
+  death or an activity recreation go at the next start. The sweep touches
+  nothing outside that directory.
+
 ## Verify a File
 
 Verify reads an embedded (in-band) signature block, or asks for a
