@@ -18,22 +18,25 @@ package com.automatethethings.xkey.protocol
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
+import android.net.Uri
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.KeystoreManager
-import com.automatethethings.xkey.oath.OathRepository
+import com.automatethethings.xkey.oath.OathCredentialDao
+import com.automatethethings.xkey.oath.OathCredentialEntity
+import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.pin.PinManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coEvery
-import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
-import io.mockk.slot
 import io.mockk.unmockkAll
+import java.net.URI
+import java.net.URLDecoder
 import java.security.KeyStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -45,21 +48,31 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
 /**
- * local.oathAdd hands `OathRepository.importFromUri` an `otpauth://` URI
- * whose issuer and account are percent-encoded the way SyncEngine.mergeOath
- * encodes them, carries `counter` for HOTP only, and answers with the id
- * importFromUri stored the credential under (#152).
+ * local.oathAdd imports through the real `OathRepository`: an `otpauth://`
+ * URI whose issuer and account are percent-encoded the way
+ * SyncEngine.mergeOath encodes them, `counter` for HOTP only, read back on
+ * the structured-label path, and answers with the id the credential was
+ * stored under (#152).
+ *
+ * The DAO records what is inserted, the secret manager passes the secret
+ * through, and `Uri.parse` is backed by [URI] (the JVM has no android.net)
+ * and records the URI it was handed.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class OathAddHandlerTest {
 
     private lateinit var handler: RequestHandler
-    private val uri = slot<String>()
+    private val parsed = mutableListOf<String>()
+    private val inserted = mutableListOf<OathCredentialEntity>()
+
+    /** The one URI the importer parsed. */
+    private val parsedUri get() = parsed.single()
 
     @Before
     fun setUp() {
@@ -78,15 +91,21 @@ class OathAddHandlerTest {
         mockkObject(AuditLogger)
         every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
 
+        val dao = mockk<OathCredentialDao>()
+        coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }
         val database = mockk<XKeyDatabase>(relaxed = true)
+        every { database.oathCredentialDao() } returns dao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
         // OathSecretManager opens the AndroidKeyStore when it is built.
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
-        mockkConstructor(OathRepository::class)
-        coEvery { anyConstructed<OathRepository>().importFromUri(capture(uri)) } returns STORED_ID
+        mockkConstructor(OathSecretManager::class)
+        every { anyConstructed<OathSecretManager>().encryptSecret(any()) } answers { firstArg() }
+
+        mockkStatic(Uri::class)
+        every { Uri.parse(any()) } answers { parsed += firstArg<String>(); jvmUri(firstArg()) }
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
@@ -120,7 +139,7 @@ class OathAddHandlerTest {
         assertEquals(
             "otpauth://totp/$issuer:a%20b%3Ac%26d%3Fe%23f%2Fg%40example.com" +
                 "?secret=$SECRET&issuer=$issuer&algorithm=SHA1&digits=6&period=30",
-            uri.captured
+            parsedUri
         )
     }
 
@@ -131,7 +150,7 @@ class OathAddHandlerTest {
         assertEquals(
             "otpauth://totp/Caf%C3%A9:j%C3%BCrgen" +
                 "?secret=$SECRET&issuer=Caf%C3%A9&algorithm=SHA1&digits=6&period=30",
-            uri.captured
+            parsedUri
         )
     }
 
@@ -141,7 +160,7 @@ class OathAddHandlerTest {
 
         assertEquals(
             "otpauth://totp/a%20b?secret=$SECRET&algorithm=SHA1&digits=6&period=30",
-            uri.captured
+            parsedUri
         )
     }
 
@@ -149,7 +168,7 @@ class OathAddHandlerTest {
     fun `a TOTP add passes no counter`() = runTest {
         add(credential(account = "alice").put("type", "totp").put("counter", 9))
 
-        assertFalse(uri.captured, uri.captured.contains("counter="))
+        assertFalse(parsedUri, parsedUri.contains("counter="))
     }
 
     @Test
@@ -159,7 +178,7 @@ class OathAddHandlerTest {
         assertEquals(
             "otpauth://hotp/Acme:alice" +
                 "?secret=$SECRET&issuer=Acme&algorithm=SHA1&digits=6&period=30&counter=42",
-            uri.captured
+            parsedUri
         )
     }
 
@@ -167,17 +186,36 @@ class OathAddHandlerTest {
     fun `a HOTP add without a counter passes counter 0`() = runTest {
         add(credential(account = "alice").put("type", "hotp"))
 
-        assertTrue(uri.captured, uri.captured.endsWith("&counter=0"))
+        assertTrue(parsedUri, parsedUri.endsWith("&counter=0"))
     }
 
     @Test
-    fun `credential_id is the id importFromUri returned`() = runTest {
+    fun `credential_id is the id the credential was stored under`() = runTest {
         val response = add(credential(account = "alice"))
 
         assertTrue(response.toString(), response.has("result"))
         val result = response.getJSONObject("result")
         assertTrue(result.getBoolean("success"))
-        assertEquals(STORED_ID, result.getString("credential_id"))
+        assertEquals(1, inserted.size)
+        assertEquals(inserted[0].oathId, result.getString("credential_id"))
+    }
+
+    @Test
+    fun `an issuerless account with a colon is stored whole`() = runTest {
+        add(credential(issuer = null, account = "host:user"))
+
+        assertEquals(1, inserted.size)
+        assertNull(inserted[0].issuer)
+        assertEquals("host:user", inserted[0].accountName)
+    }
+
+    @Test
+    fun `an issuer and account with colons are stored whole`() = runTest {
+        add(credential(issuer = "Corp:EU", account = "host:user"))
+
+        assertEquals(1, inserted.size)
+        assertEquals("Corp:EU", inserted[0].issuer)
+        assertEquals("host:user", inserted[0].accountName)
     }
 
     @Test
@@ -193,7 +231,21 @@ class OathAddHandlerTest {
             assertEquals("Missing required credential fields", response.getJSONObject("error").getString("message"))
         }
         assertEquals(ErrorCodes.INVALID_PARAMS, noCredential.getJSONObject("error").getInt("code"))
-        coVerify(exactly = 0) { anyConstructed<OathRepository>().importFromUri(any()) }
+        assertTrue(inserted.isEmpty())
+    }
+
+    /** An android [Uri] answering what the importer reads, from [URI]. */
+    private fun jvmUri(uriString: String): Uri {
+        val uri = URI(uriString)
+        val params = uri.rawQuery.orEmpty().split("&").filter { it.isNotEmpty() }
+            .map { it.split("=", limit = 2) }
+            .associate { it[0] to URLDecoder.decode(it.getOrElse(1) { "" }, Charsets.UTF_8.name()) }
+        return mockk {
+            every { scheme } returns uri.scheme
+            every { host } returns uri.host
+            every { encodedPath } returns uri.rawPath
+            every { getQueryParameter(any()) } answers { params[firstArg()] }
+        }
     }
 
     private fun credential(issuer: String? = "Acme", account: String): JSONObject =
@@ -215,6 +267,5 @@ class OathAddHandlerTest {
     private companion object {
         const val SECRET = "JBSWY3DPEHPK3PXP"
         const val CALLER_NAME = "caller-chosen-name"
-        const val STORED_ID = "3f2b8c1e-stored-oath-id"
     }
 }
