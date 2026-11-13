@@ -14,18 +14,24 @@
  */
 package com.automatethethings.xkey.usb
 
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditLogEntity
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.audit.AuditOperationType
 import io.mockk.coEvery
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -134,4 +140,61 @@ class UsbHsmSettingsAuditTest {
         assertChange(inserted[0], "tcpPairing", "false", "true")
         assertEquals(false, repository.getSettings().nativeUsbEnabled)
     }
+
+    /**
+     * Commits every write to [delegate], then holds `updateData` from
+     * returning until [release] completes: the window in which a caller
+     * cancelled after the commit used to skip the audit entry.
+     */
+    private class CommitThenStall(
+        private val delegate: DataStore<Preferences>
+    ) : DataStore<Preferences> {
+        val committed = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+
+        override val data: Flow<Preferences> get() = delegate.data
+
+        override suspend fun updateData(
+            transform: suspend (t: Preferences) -> Preferences
+        ): Preferences {
+            val result = delegate.updateData(transform)
+            committed.complete(Unit)
+            release.await()
+            return result
+        }
+    }
+
+    private fun stalledRepository(): Pair<UsbHsmSettingsRepository, CommitThenStall> {
+        val file = tmp.newFile("stalled.preferences_pb").apply { delete() }
+        val store = CommitThenStall(
+            PreferenceDataStoreFactory.create(scope = CoroutineScope(Dispatchers.IO + job)) { file }
+        )
+        return UsbHsmSettingsRepository(store) to store
+    }
+
+    private fun assertCancelledCommitIsAudited(
+        setting: String,
+        set: suspend UsbHsmSettingsRepository.(Boolean) -> Unit,
+        read: (UsbHsmSettingsData) -> Boolean
+    ) = runBlocking {
+        val (stalled, store) = stalledRepository()
+        val caller = CoroutineScope(Dispatchers.Default).launch { stalled.set(true) }
+        withTimeout(10_000) { store.committed.await() }
+
+        caller.cancel()
+        store.release.complete(Unit)
+        withTimeout(10_000) { caller.join() }
+
+        assertEquals(true, read(stalled.getSettings()))
+        assertEquals(1, inserted.size)
+        assertChange(inserted[0], setting, "false", "true")
+    }
+
+    @Test
+    fun `TCP pairing write committed before its caller is cancelled is still audited`() =
+        assertCancelledCommitIsAudited("tcpPairing", { setTcpHsmEnabled(it) }) { it.tcpHsmEnabled }
+
+    @Test
+    fun `native USB write committed before its caller is cancelled is still audited`() =
+        assertCancelledCommitIsAudited("nativeUsb", { setNativeUsbEnabled(it) }) { it.nativeUsbEnabled }
 }
