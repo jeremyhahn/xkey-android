@@ -14,12 +14,15 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.content.ComponentName
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.IBinder
 import android.view.Gravity
 import android.view.MenuItem
 import android.view.View
@@ -37,17 +40,27 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.ble.XKeyGattService
 import com.automatethethings.xkey.piv.PivAlgorithm
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivSlotEntity
+import com.automatethethings.xkey.remote.RemoteKeyClient
+import com.automatethethings.xkey.remote.RemotePivSlot
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
@@ -97,8 +110,27 @@ class PivActivity : AppCompatActivity() {
     private lateinit var retiredSlotsContainer: LinearLayout
     private lateinit var retiredToggleText: TextView
     private lateinit var emptyStateContainer: LinearLayout
+    private lateinit var desktopSectionHeader: TextView
+    private lateinit var desktopSlotsContainer: LinearLayout
 
     private var retiredSlotsExpanded = false
+
+    /**
+     * The bound service, which holds the connected desktop's transport, or
+     * null while unbound.
+     */
+    private val boundService = MutableStateFlow<XKeyGattService?>(null)
+    private var serviceBound = false
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            boundService.value = (binder as? XKeyGattService.LocalBinder)?.getService()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            boundService.value = null
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Lifecycle
@@ -113,6 +145,18 @@ class PivActivity : AppCompatActivity() {
         buildUI()
         setContentView(rootLayout)
         observeSlots()
+        // Bind without creating: the desktop's slots show only while the
+        // service is already running with a connected desktop.
+        serviceBound = bindService(Intent(this, XKeyGattService::class.java), serviceConnection, 0)
+        observeDesktopSlots()
+    }
+
+    override fun onDestroy() {
+        if (serviceBound) {
+            unbindService(serviceConnection)
+            serviceBound = false
+        }
+        super.onDestroy()
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
@@ -179,6 +223,7 @@ class PivActivity : AppCompatActivity() {
         buildEmptyState()
         buildPrimarySlotsSection()
         buildRetiredSlotsSection()
+        buildDesktopSlotsSection()
 
         scrollView.addView(contentLayout)
         mainContent.addView(scrollView)
@@ -958,6 +1003,150 @@ class PivActivity : AppCompatActivity() {
     }
 
     // -------------------------------------------------------------------------
+    // Paired desktop slots (remote.pivListSlots), read-only
+    // -------------------------------------------------------------------------
+
+    private fun buildDesktopSlotsSection() {
+        desktopSectionHeader = TextView(this).apply {
+            text = getString(R.string.piv_section_desktop)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
+            setTextColor(UIHelpers.resolveThemeColor(
+                this@PivActivity,
+                com.google.android.material.R.attr.colorOnSurfaceVariant
+            ))
+            letterSpacing = 0.05f
+            setPadding(
+                UIHelpers.dpToPxInt(this@PivActivity, 20),
+                UIHelpers.dpToPxInt(this@PivActivity, 16),
+                UIHelpers.dpToPxInt(this@PivActivity, 20),
+                UIHelpers.dpToPxInt(this@PivActivity, 8)
+            )
+            visibility = View.GONE
+        }
+        contentLayout.addView(desktopSectionHeader)
+
+        desktopSlotsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            visibility = View.GONE
+        }
+        contentLayout.addView(desktopSlotsContainer)
+    }
+
+    /**
+     * Follows the desktop session while the screen is started: a desktop that
+     * connects shows its slots, one that is lost clears them, and each start
+     * asks again.
+     */
+    private fun observeDesktopSlots() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                desktopPivSlots(desktopSessions(boundService)).collect { slots ->
+                    showDesktopSlots(slots)
+                }
+            }
+        }
+    }
+
+    private fun showDesktopSlots(slots: List<RemotePivSlot>) {
+        if (!::desktopSlotsContainer.isInitialized) return
+        desktopSlotsContainer.removeAllViews()
+        slots.forEach { desktopSlotsContainer.addView(buildDesktopSlotCard(it)) }
+        val visibility = if (slots.isEmpty()) View.GONE else View.VISIBLE
+        desktopSectionHeader.visibility = visibility
+        desktopSlotsContainer.visibility = visibility
+    }
+
+    private fun buildDesktopSlotCard(info: RemotePivSlot): MaterialCardView {
+        val card = PremiumCardFactory.createElevatedCard(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(
+                    UIHelpers.dpToPxInt(this@PivActivity, 16),
+                    UIHelpers.dpToPxInt(this@PivActivity, 4),
+                    UIHelpers.dpToPxInt(this@PivActivity, 16),
+                    UIHelpers.dpToPxInt(this@PivActivity, 4)
+                )
+            }
+        }
+
+        val cardContent = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(
+                UIHelpers.dpToPxInt(this@PivActivity, 16),
+                UIHelpers.dpToPxInt(this@PivActivity, 16),
+                UIHelpers.dpToPxInt(this@PivActivity, 16),
+                UIHelpers.dpToPxInt(this@PivActivity, 16)
+            )
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        cardContent.addView(createSlotIdBadge(info.slot.uppercase(Locale.ROOT), info.hasKey))
+
+        val infoSection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply {
+                marginStart = UIHelpers.dpToPxInt(this@PivActivity, 12)
+            }
+        }
+        infoSection.addView(TextView(this).apply {
+            text = info.label ?: PivSlot.fromHexId(info.slot)?.label ?: info.slot
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
+            setTextColor(UIHelpers.resolveThemeColor(
+                this@PivActivity,
+                com.google.android.material.R.attr.colorOnSurface
+            ))
+        })
+        if (info.hasKey) {
+            info.algorithm?.let { infoSection.addView(createAlgorithmBadge(it)) }
+        } else {
+            infoSection.addView(TextView(this).apply {
+                text = getString(R.string.piv_desktop_slot_empty)
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+                setTextColor(UIHelpers.resolveThemeColor(
+                    this@PivActivity,
+                    com.google.android.material.R.attr.colorOnSurfaceVariant
+                ))
+            })
+        }
+        info.certSubject?.let { subject ->
+            infoSection.addView(TextView(this).apply {
+                text = getString(R.string.piv_desktop_cert_subject, subject)
+                textSize = 11f
+                setTextColor(UIHelpers.resolveThemeColor(
+                    this@PivActivity,
+                    com.google.android.material.R.attr.colorOnSurfaceVariant
+                ))
+            })
+        }
+        cardContent.addView(infoSection)
+        card.addView(cardContent)
+
+        if (info.hasKey || info.hasCertificate) {
+            card.setOnClickListener { navigateToDesktopDetail(info) }
+        }
+        return card
+    }
+
+    private fun navigateToDesktopDetail(info: RemotePivSlot) {
+        val intent = Intent(this, PivSlotDetailActivity::class.java).apply {
+            putExtra(PivSlotDetailActivity.EXTRA_SLOT_ID, info.slot)
+            putExtra(PivSlotDetailActivity.EXTRA_DESKTOP, true)
+            putExtra(PivSlotDetailActivity.EXTRA_DESKTOP_ALGORITHM, info.algorithm)
+            putExtra(PivSlotDetailActivity.EXTRA_DESKTOP_HAS_KEY, info.hasKey)
+        }
+        startActivity(intent)
+    }
+
+    // -------------------------------------------------------------------------
     // Utility
     // -------------------------------------------------------------------------
 
@@ -975,3 +1164,42 @@ class PivActivity : AppCompatActivity() {
             ?: dn
     }
 }
+
+/**
+ * The paired desktop's PIV slots for [PivActivity], from `remote.pivListSlots`.
+ *
+ * [load] never fails: when no desktop is connected ([clientProvider] returns
+ * null), or the desktop errors, times out or sends a malformed reply, it
+ * returns no slots, so the screen still shows the phone's own slots and no error.
+ */
+class DesktopPivSlots(private val clientProvider: () -> RemoteKeyClient?) {
+
+    /** The desktop's slots, or an empty list when there are none to show. */
+    suspend fun load(): List<RemotePivSlot> {
+        val client = clientProvider() ?: return emptyList()
+        return try {
+            client.pivListSlots()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+}
+
+/**
+ * The desktop session of the bound [XKeyGattService]: its shared client while
+ * a desktop is connected, null while none is or the service is unbound.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+fun desktopSessions(service: Flow<XKeyGattService?>): Flow<RemoteKeyClient?> =
+    service.flatMapLatest { it?.desktopSession ?: flowOf(null) }
+
+/**
+ * The desktop slots to show for each desktop session: none while no desktop is
+ * connected, the desktop's slots (via [DesktopPivSlots]) once one is. A newer
+ * session cancels a load still running for the older one.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+fun desktopPivSlots(sessions: Flow<RemoteKeyClient?>): Flow<List<RemotePivSlot>> =
+    sessions.mapLatest { client -> DesktopPivSlots { client }.load() }
