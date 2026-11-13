@@ -20,7 +20,11 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.PromptOwnership
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -153,8 +157,15 @@ class BiometricHelper(
         onTurn: (key: String) -> Unit = {}
     ) = inTurn(onTurn) { prompt(title, subtitle, description, cryptoObject = null) }
 
-    /** Runs [prompt] on a queue turn of its own, after [onTurn]. */
+    /**
+     * Runs [prompt] on a queue turn of its own, after [onTurn]; inside a turn
+     * its caller already holds ([inOneTurn]), on that turn.
+     */
     private suspend fun inTurn(onTurn: (key: String) -> Unit, prompt: suspend () -> Unit) {
+        currentCoroutineContext()[HeldTurn]?.let { held ->
+            onTurn(held.turnKey)
+            return prompt()
+        }
         val key = NotificationKeys.wakeOnly("biometric")
         PromptOwnership.process.turn(key) {
             onTurn(key)
@@ -272,7 +283,38 @@ class BiometricHelper(
         }
     }
 
+    /** A queue turn [inOneTurn] holds for the coroutine it runs. */
+    private class HeldTurn(val turnKey: String) : AbstractCoroutineContextElement(HeldTurn) {
+        companion object : CoroutineContext.Key<HeldTurn>
+    }
+
     companion object {
+        /**
+         * Runs [block] on one queue turn of its own: every prompt [authenticate]
+         * and [authenticateWithoutCrypto] show inside it shows on that turn,
+         * so whatever [block] does after the first prompt (a passkey's
+         * counter, then its signature) happens while no other approval holds
+         * the screen.
+         *
+         * @throws BiometricException [BiometricPrompt.ERROR_TIMEOUT] when the turn never came.
+         */
+        suspend fun <T> inOneTurn(operation: String, block: suspend () -> T): T {
+            val key = NotificationKeys.wakeOnly(operation)
+            var ran = false
+            val result = PromptOwnership.process.turn(key) {
+                ran = true
+                withContext(HeldTurn(key)) { block() }
+            }
+            if (!ran) {
+                throw BiometricException(
+                    BiometricPrompt.ERROR_TIMEOUT,
+                    "Another approval prompt held the screen past this request's deadline"
+                )
+            }
+            @Suppress("UNCHECKED_CAST")
+            return result as T
+        }
+
         private const val DEFAULT_TITLE = "xKey Authentication"
         private const val DEFAULT_SUBTITLE = "Verify your identity"
         private const val NEGATIVE_BUTTON_TEXT = "Cancel"
