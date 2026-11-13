@@ -42,6 +42,7 @@ import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -182,10 +183,12 @@ class VerifiedMediaViewerFlowTest {
 
     /**
      * A key the device owns but has no public key material for cannot be
-     * checked cryptographically, so it is trusted by association.
+     * checked cryptographically, so it never matches: its keyId and the
+     * file's fingerprint both come from data under test. The signer is
+     * unknown, never verified.
      */
     @Test
-    fun aLocalKeyWithoutPublicKeyMaterialIsTrustedByAssociation() {
+    fun aLocalKeyWithoutPublicKeyMaterialIsNotShownAsVerified() {
         runBlocking {
             keyDao.insert(
                 KeyEntity(
@@ -205,7 +208,15 @@ class VerifiedMediaViewerFlowTest {
         val scenario = launchView(jpegFile, "image/jpeg")
 
         assertSignerCount(scenario, 1)
-        assertSignerRow(scenario, associatedKeyLabel, VERIFIED_GLYPH)
+        assertSignerRow(scenario, "${associatedKeyId.take(16)}...", UNKNOWN_GLYPH)
+        assertFalse(
+            "a key without public key material must never be shown as verified",
+            withActivity(scenario) { activity ->
+                val container = activity.findViewById<ViewGroup>(R.id.signerListContainer)
+                findShownTextView(container, VERIFIED_GLYPH) != null ||
+                    findShownTextView(container, associatedKeyLabel) != null
+            }
+        )
     }
 
     // -----------------------------------------------------------------
@@ -239,7 +250,7 @@ class VerifiedMediaViewerFlowTest {
                 signerName = contactName,
                 value = "!!! not base64 !!!"
             ),
-            contentHash = MediaHasher.hashBytes(pngFile.readBytes())
+            contentHash = canonicalHash(pngFile)
         )
 
         val scenario = launchView(pngFile, "image/png")
@@ -254,7 +265,7 @@ class VerifiedMediaViewerFlowTest {
             pngFile,
             PNG_EXTENSION,
             signedEntry(pngFile).copy(algorithm = "Ed25519"),
-            contentHash = MediaHasher.hashBytes(pngFile.readBytes())
+            contentHash = canonicalHash(pngFile)
         )
 
         val scenario = launchView(pngFile, "image/png")
@@ -263,20 +274,16 @@ class VerifiedMediaViewerFlowTest {
     }
 
     /**
-     * Content that changed after it was signed must not verify.
-     *
-     * This is also what a file signed by `FileOperationActivity` looks like:
-     * that screen hashes the file, then embeds the signature into it, which
-     * changes the very bytes the hash covered. Anything signed in-band by xKey
-     * therefore lands on this branch when it is opened here.
+     * Content that changed after it was signed must not verify: a valid
+     * signature over one photo's canonical hash, embedded in a different photo.
      */
     @Test
     fun contentThatChangedAfterSigningIsShownAsFailed() {
-        val hashBeforeEmbedding = MediaHasher.hashBytes(jpegFile.readBytes())
+        val otherPhoto = jpeg("xkey-media-flow-other-$suffix.jpg", Color.rgb(0x11, 0x66, 0x22))
         embedSignature(
             jpegFile,
-            signedEntry(jpegFile),
-            contentHash = hashBeforeEmbedding
+            signedEntry(otherPhoto),
+            contentHash = canonicalHash(otherPhoto)
         )
 
         val scenario = launchView(jpegFile, "image/jpeg")
@@ -298,7 +305,7 @@ class VerifiedMediaViewerFlowTest {
                 signedEntry(pngFile),
                 entry(fingerprint = stranger, signerName = "Second Signer $suffix")
             ),
-            contentHash = MediaHasher.hashBytes(pngFile.readBytes())
+            contentHash = canonicalHash(pngFile)
         )
 
         val scenario = launchView(pngFile, "image/png")
@@ -316,7 +323,7 @@ class VerifiedMediaViewerFlowTest {
             pngFile,
             PNG_EXTENSION,
             signedEntry(pngFile).copy(timestamp = millis.toString()),
-            contentHash = MediaHasher.hashBytes(pngFile.readBytes())
+            contentHash = canonicalHash(pngFile)
         )
 
         val scenario = launchView(pngFile, "image/png")
@@ -335,7 +342,7 @@ class VerifiedMediaViewerFlowTest {
             pngFile,
             PNG_EXTENSION,
             signedEntry(pngFile).copy(timestamp = stamp),
-            contentHash = MediaHasher.hashBytes(pngFile.readBytes())
+            contentHash = canonicalHash(pngFile)
         )
 
         val scenario = launchView(pngFile, "image/png")
@@ -483,9 +490,9 @@ class VerifiedMediaViewerFlowTest {
         role = SignerRole.CREATOR
     )
 
-    /** A signature entry genuinely produced over [file]'s current content hash. */
+    /** A signature entry genuinely produced over [file]'s canonical content hash. */
     private fun signedEntry(file: File): SignatureEntry {
-        val contentHash = MediaHasher.hashBytes(file.readBytes())
+        val contentHash = canonicalHash(file)
         val signature = Signature.getInstance("SHA256withECDSA").apply {
             initSign(signerKeyPair.private)
             update(hexToBytes(contentHash))
@@ -497,11 +504,21 @@ class VerifiedMediaViewerFlowTest {
         )
     }
 
+
+    /**
+     * The content hash xKey signs for [file] ([MediaHasher.hashCanonical]):
+     * metadata-free for a JPEG, the whole file otherwise. An in-band
+     * signature verifies against this alone.
+     */
+    private fun canonicalHash(file: File): String {
+        val mimeType = if (file.extension.lowercase() in setOf("jpg", "jpeg")) "image/jpeg" else null
+        return MediaHasher.hashCanonical(file.readBytes(), mimeType)
+    }
     /** Embeds signature metadata in a JPEG's EXIF, the way a signed photo carries it. */
     private fun embedSignature(
         file: File,
         entry: SignatureEntry,
-        contentHash: String = MediaHasher.hashBytes(file.readBytes())
+        contentHash: String = canonicalHash(file)
     ) {
         XmpMetadataHelper.writeSignature(
             file.path,
@@ -520,7 +537,7 @@ class VerifiedMediaViewerFlowTest {
         file: File,
         extension: String,
         entry: SignatureEntry,
-        contentHash: String = MediaHasher.hashBytes(file.readBytes())
+        contentHash: String = canonicalHash(file)
     ) {
         plantSidecar(file, extension, listOf(entry), contentHash)
     }
@@ -529,7 +546,7 @@ class VerifiedMediaViewerFlowTest {
         file: File,
         extension: String,
         entries: List<SignatureEntry>,
-        contentHash: String = MediaHasher.hashBytes(file.readBytes())
+        contentHash: String = canonicalHash(file)
     ) {
         File(context.cacheDir, "$TEMP_BASE$extension.xkeysig").writeText(
             ContentAuthenticityData(contentHash = contentHash, signatures = entries).toJsonString()
@@ -551,10 +568,10 @@ class VerifiedMediaViewerFlowTest {
         return file
     }
 
-    private fun jpeg(name: String): File {
+    private fun jpeg(name: String, color: Int = Color.rgb(0x99, 0x33, 0x11)): File {
         val file = scratchFile(name)
         val bitmap = Bitmap.createBitmap(24, 24, Bitmap.Config.ARGB_8888)
-        bitmap.eraseColor(Color.rgb(0x99, 0x33, 0x11))
+        bitmap.eraseColor(color)
         FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
         bitmap.recycle()
         return file
