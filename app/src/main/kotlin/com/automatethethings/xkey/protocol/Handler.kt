@@ -152,6 +152,20 @@ class RequestHandler(
 
         // Method names
         private const val METHOD_GENERATE_KEY = "generateKey"
+        /** Every request parameter naming a user key. */
+        private val KEY_ID_PARAMS = listOf("keyId", "credentialId", "key_id")
+
+        /**
+         * The methods whose key id names a key they write or delete, not one
+         * they use: exempt from the deleted-key gate. local.sharePublicKey's
+         * key_id labels a contact.
+         */
+        private val KEY_WRITING_METHODS = setOf(
+            METHOD_GENERATE_KEY, METHOD_DELETE_KEY,
+            MethodNames.LOCAL_GENERATE_KEY, MethodNames.LOCAL_DELETE_KEY,
+            MethodNames.LOCAL_SHARE_SYMMETRIC, MethodNames.LOCAL_SHARE_PUBLIC_KEY
+        )
+
         private const val METHOD_SIGN = "sign"
         private const val METHOD_DELETE_KEY = "deleteKey"
         private const val METHOD_LOAD_KEY = "loadKey"
@@ -508,6 +522,19 @@ class RequestHandler(
     suspend fun handleRequest(request: Request): Response =
         dispatch(request).copy(generation = request.generation)
 
+    /**
+     * The key ids [request] uses, each refused by the store's deleted-key
+     * gate ([KeyPolicyStore.requireUsable]) before its handler runs: every
+     * key id parameter of every method but [KEY_WRITING_METHODS], whose
+     * writes the store serialises in [KeyPolicyStore.withKeyMaterial] and
+     * whose deletes settle a tombstone themselves.
+     */
+    private fun keyIdsUsedBy(request: Request): List<String> {
+        if (request.method in KEY_WRITING_METHODS) return emptyList()
+        val params = request.params ?: return emptyList()
+        return KEY_ID_PARAMS.mapNotNull { name -> params.optString(name, "").takeIf { it.isNotEmpty() } }.distinct()
+    }
+
     private suspend fun dispatch(request: Request): Response {
         Log.d(TAG, "Handling request: id=${request.id}, method=${request.method}")
 
@@ -522,7 +549,12 @@ class RequestHandler(
         }
 
         return try {
+            // The deleted-key gate, before any handler reads the key (#193 r12).
+            for (keyId in keyIdsUsedBy(request)) keyPolicyStore.requireUsable(keyId)
             handler(request)
+        } catch (e: KeyPolicyStore.KeyDeletedException) {
+            Log.w(TAG, "Deleted key refused: ${e.message}")
+            Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, e.message ?: "Key was deleted")
         } catch (e: ProtocolException) {
             Log.e(TAG, "Handler error: ${e.message}")
             Response.error(request.id, e.errorCode, e.message ?: "Handler error")

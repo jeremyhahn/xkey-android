@@ -485,6 +485,21 @@ class KeyPolicyStore(
     suspend fun isDeletionPending(keyId: String): Boolean = dao.deletion(keyId) != null
 
     /**
+     * The one gate every use of a key passes (#193 r12): a key whose delete
+     * reported success refuses every operation from that moment, though its
+     * material may not be deleted yet (its tombstone still owed). Throws
+     * [KeyDeletedException] if [keyId] has a deletion tombstone. A write of
+     * the id's material takes [withKeyMaterial] instead, which settles the
+     * tombstone first.
+     */
+    suspend fun requireUsable(keyId: String) {
+        if (isDeletionPending(keyId)) throw KeyDeletedException(keyId)
+    }
+
+    /** A use of a deleted key refused by [requireUsable]. */
+    class KeyDeletedException(keyId: String) : IOException("Key $keyId was deleted")
+
+    /**
      * Replays every deletion tombstone (#193 r9): at start-up and before a
      * key sync, so material whose delete failed, or whose process died after
      * the row commit, is deleted, never rediscovered with default metadata

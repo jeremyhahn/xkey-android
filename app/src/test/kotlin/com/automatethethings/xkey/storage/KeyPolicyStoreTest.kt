@@ -468,6 +468,75 @@ class KeyPolicyStoreTest {
     }
 
     /**
+     * Round 12 (1): a key whose delete reported success is refused by the
+     * store's gate from that moment, while its material is still owed, and
+     * stays refused until a write under the id settles the tombstone.
+     */
+    @Test
+    fun aKeyWithAPendingDeletionIsRefusedOnceItsDeleteSucceeds() = runBlocking {
+        val key = tables.addKey("k", SELECTED_PEERS)
+        val store = store()
+        store.requireUsable("k")
+
+        assertTrue(store.deleteKey("k", key, materialDelete { false }))
+        try {
+            store.requireUsable("k")
+            fail("a key with a pending deletion was usable")
+        } catch (expected: KeyPolicyStore.KeyDeletedException) {
+        }
+        assertTrue(store.deleteMaterial("bare", materialDelete { false }))
+        try {
+            store.requireUsable("bare")
+            fail("material with a pending deletion was usable")
+        } catch (expected: KeyPolicyStore.KeyDeletedException) {
+        }
+
+        assertEquals(0, store.replayDeletions(materialDelete { true }))
+        store.requireUsable("k")
+    }
+
+    /**
+     * Round 12 (1) bypass guard: the RPC dispatcher refuses every key id
+     * parameter of every method through the store's gate, but the methods
+     * that write or delete the key; the passkey assertion, which signs from
+     * its credential row, not the key row, takes the gate too. Every other
+     * use of a key reads its key row first, which a deletion tombstone never
+     * outlives.
+     */
+    @Test
+    fun everyKeyUseWithoutAKeyRowTakesTheDeletedKeyGate() {
+        val root = java.io.File("src/main/kotlin/com/automatethethings/xkey")
+        val handler = java.io.File(root, "protocol/Handler.kt").readText()
+        val dispatch = handler.substringAfter("private suspend fun dispatch(").substringBefore("\n    }\n")
+        val gate = dispatch.indexOf("keyPolicyStore.requireUsable(")
+        assertTrue("dispatch does not take the deleted-key gate", gate >= 0)
+        assertTrue("dispatch runs a handler before the gate", gate < dispatch.indexOf("handler(request)"))
+        assertTrue(Regex("""KEY_ID_PARAMS = listOf\("keyId", "credentialId", "key_id"\)""").containsMatchIn(handler))
+        val exempt = handler.substringAfter("KEY_WRITING_METHODS = setOf(").substringBefore(")")
+            .split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        assertEquals(
+            setOf(
+                "METHOD_GENERATE_KEY", "METHOD_DELETE_KEY", "MethodNames.LOCAL_GENERATE_KEY",
+                "MethodNames.LOCAL_DELETE_KEY", "MethodNames.LOCAL_SHARE_SYMMETRIC", "MethodNames.LOCAL_SHARE_PUBLIC_KEY"
+            ),
+            exempt
+        )
+        // A key id parameter a handler reads under another name escapes the
+        // gate; credential_id names an OATH credential, not a key.
+        val names = Regex("""(?:optString|getString|getStringOrNull)\("([A-Za-z_]*(?:[kK]ey_?[iI]d|[cC]redential_?[iI]d))"""")
+            .findAll(handler + java.io.File(root, "protocol/Messages.kt").readText())
+            .map { it.groupValues[1] }.toSet()
+        assertEquals(setOf("keyId", "credentialId", "key_id", "credential_id"), names)
+
+        val passkey = java.io.File(root, "credential/handler/GetCredentialHandler.kt").readText()
+        val assertion = passkey.substringAfter("suspend fun handleGetCredential(")
+        assertTrue(
+            "the passkey assertion signs before the deleted-key gate",
+            assertion.indexOf("keyPolicyStore.requireUsable(credentialId)") in 0 until assertion.indexOf("keystoreManager.sign")
+        )
+    }
+
+    /**
      * Round 10 (4): a material delete that returns with material still in a
      * backend (a refused Keystore delete, a software key left) keeps the
      * tombstone, and the replay deletes the rest before dropping it.

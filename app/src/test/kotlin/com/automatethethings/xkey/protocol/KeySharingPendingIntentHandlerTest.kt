@@ -632,7 +632,7 @@ class KeySharingPendingIntentHandlerTest {
             MethodNames.LOCAL_SIGN, MethodNames.LOCAL_DECRYPT, MethodNames.LOCAL_SYMMETRIC_ENCRYPT,
             MethodNames.LOCAL_SYMMETRIC_DECRYPT, MethodNames.LOCAL_HMAC, MethodNames.LOCAL_ECDH,
             MethodNames.LOCAL_GET_PUBLIC_KEY, MethodNames.LOCAL_GET_KEY_INFO, MethodNames.LOCAL_SET_KEY_POLICY,
-            MethodNames.LOCAL_ATTEST_KEY, MethodNames.LOCAL_SIGN_FIDO2_ASSERTION, MethodNames.LOCAL_SHARE_SYMMETRIC,
+            MethodNames.LOCAL_ATTEST_KEY, MethodNames.LOCAL_SIGN_FIDO2_ASSERTION,
             MethodNames.LOCAL_IMPORT_SHARED_KEY, MethodNames.COSIGN_REQUEST
         )
         for (method in keyed) {
