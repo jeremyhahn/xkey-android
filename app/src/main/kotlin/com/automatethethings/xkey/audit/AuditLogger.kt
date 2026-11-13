@@ -354,6 +354,93 @@ object AuditLogger {
     }
 
     /**
+     * Log an HMAC request. The MAC and the authenticated data are never logged.
+     *
+     * @param keyId The unique key identifier.
+     * @param keyLabel Human-readable key label.
+     * @param keyType The key type.
+     * @param algorithm The HMAC algorithm used.
+     * @param deviceId Remote device ID if applicable.
+     * @param deviceName Remote device name if applicable.
+     * @param success Whether the operation succeeded.
+     * @param errorMessage Error message if failed.
+     * @param durationMs Operation duration in milliseconds.
+     */
+    fun logHmacRequest(
+        keyId: String,
+        keyLabel: String,
+        keyType: String,
+        algorithm: String? = null,
+        deviceId: String? = null,
+        deviceName: String? = null,
+        success: Boolean = true,
+        errorMessage: String? = null,
+        durationMs: Long? = null
+    ) {
+        val details = algorithm?.let {
+            JSONObject().apply { put("algorithm", it) }.toString()
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.HMAC_REQUEST,
+                keyId = keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = details,
+                durationMs = durationMs
+            )
+        )
+    }
+
+    /**
+     * Log a key derivation (ECDH key agreement) request. The shared secret and
+     * the peer public key are never logged.
+     *
+     * @param keyId The unique key identifier.
+     * @param keyLabel Human-readable key label.
+     * @param keyType The key type.
+     * @param algorithm The key agreement algorithm used.
+     * @param deviceId Remote device ID if applicable.
+     * @param deviceName Remote device name if applicable.
+     * @param success Whether the operation succeeded.
+     * @param errorMessage Error message if failed.
+     * @param durationMs Operation duration in milliseconds.
+     */
+    fun logKeyDerivationRequest(
+        keyId: String,
+        keyLabel: String,
+        keyType: String,
+        algorithm: String? = null,
+        deviceId: String? = null,
+        deviceName: String? = null,
+        success: Boolean = true,
+        errorMessage: String? = null,
+        durationMs: Long? = null
+    ) {
+        val details = algorithm?.let {
+            JSONObject().apply { put("algorithm", it) }.toString()
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.KEY_DERIVATION_REQUEST,
+                keyId = keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = details,
+                durationMs = durationMs
+            )
+        )
+    }
+
+    /**
      * Log an encryption request.
      *
      * @param keyId The unique key identifier.
