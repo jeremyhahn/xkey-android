@@ -15,6 +15,8 @@
 package com.automatethethings.xkey.remote
 
 import android.content.Context
+import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -26,8 +28,10 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
+import io.mockk.mockkObject
 import io.mockk.slot
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -35,6 +39,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -260,6 +265,169 @@ class RemoteSyncClientTest {
         coVerify(exactly = 0) { anyConstructed<SyncEngine>().gatherPasswords() }
     }
 
+    // --- Audit (issue #221) -------------------------------------------------
+
+    private fun auditedClient() =
+        RemoteSyncClient(context, sender, router, requestTimeoutMs = 5_000L, peerDeviceId = DESK_PEER, peerDeviceName = DESK_NAME)
+
+    @Test
+    fun `syncOath records one outbound entry`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().mergeOath(any()) } returns
+            SyncEngine.ItemCounts(added = 1, updated = 2, skipped = 4)
+        sender.succeedWith("""{"added":3,"updated":0,"local":[]}""")
+
+        auditedClient().syncOath()
+
+        verify(exactly = 1) {
+            AuditLogger.logOathSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 3, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 1, updated = 2, skipped = 4, success = true, errorMessage = null
+            )
+        }
+    }
+
+    @Test
+    fun `syncPasswords records one outbound entry`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().mergePasswords(any()) } returns
+            SyncEngine.ItemCounts(added = 2, updated = 0, skipped = 1)
+        sender.succeedWith("""{"added":1,"updated":1,"local":[]}""")
+
+        auditedClient().syncPasswords()
+
+        verify(exactly = 1) {
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 2, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 2, updated = 0, skipped = 1, success = true, errorMessage = null
+            )
+        }
+    }
+
+    @Test
+    fun `a peer error records a failed outbound entry and still throws`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        sender.failWith(code = -32603, message = "oath store locked")
+
+        expectProtocolException { auditedClient().syncOath() }
+
+        verify(exactly = 1) {
+            AuditLogger.logOathSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 0, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = false,
+                errorMessage = "remote sync error, code -32603"
+            )
+        }
+    }
+
+    @Test
+    fun `a peer error quoting credentials stores only the local description and code`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        val secrets = listOf("hunter2-pass", "JBSWY3DPEHPK3PXP", "bank.example.com", "alice-user")
+        sender.failWith(code = -32001, message = "refused ${secrets.joinToString(" ")}")
+        val stored = mutableListOf<String?>()
+
+        val e = expectProtocolException { auditedClient().syncPasswords() }
+
+        assertEquals(-32001, e.errorCode)
+        assertEquals("Remote sync error: refused ${secrets.joinToString(" ")}", e.message)
+        verify(exactly = 1) {
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 0, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = false, errorMessage = captureNullable(stored)
+            )
+        }
+        val entry = stored.single()
+        assertEquals("remote sync error, code -32001", entry)
+        secrets.forEach { assertFalse("audit entry holds $it", entry!!.contains(it)) }
+    }
+
+    @Test
+    fun `an OATH merge failing after the desktop acknowledged records the pushed count`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().mergeOath(any()) } throws IllegalArgumentException("bad Base32")
+        sender.succeedWith("""{"added":2,"updated":1,"local":[{"id":"x","secret":"!!"}]}""")
+
+        try {
+            auditedClient().syncOath()
+            fail("expected the merge failure")
+        } catch (_: IllegalArgumentException) {
+        }
+
+        verify(exactly = 1) {
+            AuditLogger.logOathSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 3, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = false, errorMessage = "IllegalArgumentException"
+            )
+        }
+    }
+
+    @Test
+    fun `a password merge failing after the desktop acknowledged records the pushed count`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().mergePasswords(any()) } throws IllegalStateException("bad row")
+        sender.succeedWith("""{"added":1,"updated":3,"local":[{"id":"p"}]}""")
+
+        try {
+            auditedClient().syncPasswords()
+            fail("expected the merge failure")
+        } catch (_: IllegalStateException) {
+        }
+
+        verify(exactly = 1) {
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 4, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = false, errorMessage = "IllegalStateException"
+            )
+        }
+    }
+
+    @Test
+    fun `syncAll with a locked vault records the failed password leg and syncs the other stores`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().gatherPasswords() } throws PasswordStoreLockedException()
+        sender.succeedWith("""{"added":0,"updated":0,"local":[]}""")
+
+        val result = auditedClient().syncAll()
+
+        assertEquals(listOf("remote.syncTrustStore", "remote.syncOATH"), sender.sent.map { it.method })
+        assertEquals(0, result.passwordsPushed)
+        coVerify(exactly = 1) { anyConstructed<SyncEngine>().markSynced() }
+        verify(exactly = 1) {
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 0, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = false, errorMessage = "password store is locked"
+            )
+        }
+        verify(exactly = 1) {
+            AuditLogger.logOathSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 0, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = true, errorMessage = null
+            )
+        }
+    }
+
+    @Test
+    fun `sync answers as before when the audit logger is not initialized`() = runTest {
+        assertFalse(AuditLogger.isInitialized())
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().gatherPasswords() } throws PasswordStoreLockedException()
+        sender.succeedWith("""{"added":1,"updated":0,"local":[]}""")
+
+        val result = client.syncAll()
+
+        assertEquals(1, result.certsPushed)
+        assertEquals(1, result.oathPushed)
+        assertEquals(0, result.passwordsPushed)
+    }
+
     // --- syncStatus (go-xkms RemoteSyncStatus*) -----------------------------
 
     @Test
@@ -443,5 +611,10 @@ class RemoteSyncClientTest {
 
         assertEquals(21, result.totalPushed)
         assertEquals(42, result.totalPulled)
+    }
+
+    private companion object {
+        const val DESK_PEER = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11"
+        const val DESK_NAME = "desk.example.com"
     }
 }
