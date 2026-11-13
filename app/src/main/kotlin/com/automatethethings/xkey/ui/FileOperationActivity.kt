@@ -124,27 +124,41 @@ class FileOperationActivity : AppCompatActivity() {
     // Activity result launchers
     private val createSignatureFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
-    ) { uri -> uri?.let { saveSignatureToUri(it) } }
+    ) { uri ->
+        if (uri != null) {
+            saveSignatureToUri(uri)
+        } else {
+            pendingSignatureJson = null
+        }
+    }
 
     private val createEncryptedFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri -> uri?.let { saveEncryptedToUri(it) } }
+    ) { uri -> pendingEncryptedSave.onResult(uri, ::saveEncryptedToUri) }
 
     private val createDecryptedFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("*/*")
-    ) { uri -> uri?.let { saveDecryptedToUri(it) } }
+    ) { uri -> pendingDecryptedSave.onResult(uri, ::saveDecryptedToUri) }
 
     private val pickSidecarLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { verifySidecarSignature(it) } }
 
-    // Temp buffers for deferred writes
+    // Deferred writes: the sidecar JSON, or staged files awaiting a save location
     private var pendingSignatureJson: String? = null
-    private var pendingEncryptedUri: Uri? = null
-    private var pendingDecryptedUri: Uri? = null
+
+    // Staging files for sign, encrypt and decrypt (see FileOperationStaging)
+    private lateinit var staging: FileOperationStaging
+    private lateinit var pendingEncryptedSave: PendingStagedSave
+    private lateinit var pendingDecryptedSave: PendingStagedSave
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // This instance's staging session; onDestroy shuts it down
+        staging = FileOperationStaging(cacheDir)
+        pendingEncryptedSave = PendingStagedSave(staging)
+        pendingDecryptedSave = PendingStagedSave(staging)
 
         // Initialize database and crypto
         val db = XKeyDatabase.getInstance(this)
@@ -160,6 +174,10 @@ class FileOperationActivity : AppCompatActivity() {
             return
         }
 
+        // Only a valid share sweeps: it removes what a dead process or a
+        // shut-down instance left, never a live instance's staged output
+        staging.sweep()
+
         // Build and set the programmatic UI
         setContentView(buildUI())
 
@@ -168,6 +186,16 @@ class FileOperationActivity : AppCompatActivity() {
 
         // Load keys and contacts
         loadKeysAndContacts()
+    }
+
+    override fun onDestroy() {
+        // Every teardown (finish or recreation) drops this instance's staged
+        // files and fences its writers: a worker still blocked in its input
+        // deletes its file when it returns
+        pendingEncryptedSave.take()
+        pendingDecryptedSave.take()
+        staging.shutdown()
+        super.onDestroy()
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
@@ -923,22 +951,19 @@ class FileOperationActivity : AppCompatActivity() {
                 val fileName = getFileName(uri) ?: "file"
 
                 if (mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg")) {
-                    // Copy to temp, write EXIF, then copy back
-                    val tempFile = File(cacheDir, "xkey_sign_temp_$fileName")
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        FileOutputStream(tempFile).use { output ->
-                            input.copyTo(output)
-                        }
+                    // Copy to a staging file, write EXIF, then copy back. The MIME
+                    // type makes it a .jpg, so the EXIF write lands in it.
+                    val tempFile = staging.stage(fileName, mimeType) { staged ->
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            FileOutputStream(staged).use { output ->
+                                input.copyTo(output)
+                            }
+                        } ?: throw IllegalStateException("Cannot open input file")
+                        XmpMetadataHelper.writeSignature(staged.absolutePath, cad)
                     }
-                    XmpMetadataHelper.writeSignature(tempFile.absolutePath, cad)
 
-                    // Copy signed temp file back to the original URI
-                    contentResolver.openOutputStream(uri)?.use { output ->
-                        tempFile.inputStream().use { input ->
-                            input.copyTo(output)
-                        }
-                    }
-                    tempFile.delete()
+                    // Copy the signed staging file back to the original URI
+                    staging.deliverTo(tempFile) { contentResolver.openOutputStream(uri) }
 
                     // Record usage and audit
                     keyDao.recordUsage(key.keyId)
@@ -1191,72 +1216,59 @@ class FileOperationActivity : AppCompatActivity() {
 
         val recipient = contacts[selectedIndex]
         val uri = fileUris.first()
-        pendingEncryptedUri = uri
-
         val fileName = getFileName(uri) ?: "file"
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // Encrypt to temp file
-                val tempFile = File(cacheDir, "xkey_enc_temp")
+                // Encrypt to a staging file
                 val fileEncryptor = FileEncryptor(keystoreManager)
-
-                contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(tempFile).use { output ->
-                        fileEncryptor.encryptForRecipient(
-                            recipient.publicKeyDer,
-                            input,
-                            output
+                stageForSave(
+                    staging,
+                    "$fileName.xkeyenc",
+                    write = { staged ->
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            FileOutputStream(staged).use { output ->
+                                fileEncryptor.encryptForRecipient(
+                                    recipient.publicKeyDer,
+                                    input,
+                                    output
+                                )
+                            }
+                        } ?: throw IllegalStateException("Cannot open input file")
+                    },
+                    prepare = {
+                        AuditLogger.logFileEncrypted(
+                            recipientFingerprint = recipient.publicKeyFingerprint,
+                            fileName = fileName
                         )
+                    },
+                    handOff = { tempFile ->
+                        withContext(Dispatchers.Main) {
+                            // Keep the staging file for the launcher callback
+                            pendingEncryptedSave.handOff(tempFile) {
+                                createEncryptedFileLauncher.launch("$fileName.xkeyenc")
+                            }
+                        }
                     }
-                } ?: throw IllegalStateException("Cannot open input file")
-
-                AuditLogger.logFileEncrypted(
-                    recipientFingerprint = recipient.publicKeyFingerprint,
-                    fileName = fileName
                 )
-
-                withContext(Dispatchers.Main) {
-                    // Store temp file path for the launcher callback
-                    pendingEncryptedUri = Uri.fromFile(tempFile)
-                    createEncryptedFileLauncher.launch("$fileName.xkeyenc")
-                }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { showError(e) }
             }
         }
     }
 
-    /**
-     * Save the encrypted temp file to the user-selected output URI.
-     */
     private fun saveEncryptedToUri(outputUri: Uri) {
-        val tempUri = pendingEncryptedUri ?: return
+        val tempFile = pendingEncryptedSave.take() ?: return
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val tempFile = if (tempUri.scheme == "file") {
-                    File(tempUri.path!!)
-                } else {
-                    null
-                }
-
-                if (tempFile != null && tempFile.exists()) {
-                    contentResolver.openOutputStream(outputUri)?.use { output ->
-                        tempFile.inputStream().use { input ->
-                            input.copyTo(output)
-                        }
-                    }
-                    tempFile.delete()
-                }
+                staging.deliverTo(tempFile) { contentResolver.openOutputStream(outputUri) }
 
                 withContext(Dispatchers.Main) {
                     showResult(getString(R.string.file_operation_encrypt_success))
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { showError(e) }
-            } finally {
-                pendingEncryptedUri = null
             }
         }
     }
@@ -1288,8 +1300,6 @@ class FileOperationActivity : AppCompatActivity() {
 
         val key = encryptionKeys[selectedIndex]
         val uri = fileUris.first()
-        pendingDecryptedUri = uri
-
         val originalName = getFileName(uri) ?: "file"
         // Strip .xkeyenc extension for the output name
         val outputName = if (originalName.endsWith(".xkeyenc")) {
@@ -1300,59 +1310,48 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // Decrypt to temp file
-                val tempFile = File(cacheDir, "xkey_dec_temp")
+                // Decrypt to a staging file
                 val fileEncryptor = FileEncryptor(keystoreManager)
-
-                contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(tempFile).use { output ->
-                        fileEncryptor.decryptWithKey(key.keyId, input, output)
+                stageForSave(
+                    staging,
+                    outputName,
+                    write = { staged ->
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            FileOutputStream(staged).use { output ->
+                                fileEncryptor.decryptWithKey(key.keyId, input, output)
+                            }
+                        } ?: throw IllegalStateException("Cannot open input file")
+                    },
+                    prepare = {
+                        keyDao.recordUsage(key.keyId)
+                        AuditLogger.logFileDecrypted(key.keyId, originalName)
+                    },
+                    handOff = { tempFile ->
+                        withContext(Dispatchers.Main) {
+                            pendingDecryptedSave.handOff(tempFile) {
+                                createDecryptedFileLauncher.launch(outputName)
+                            }
+                        }
                     }
-                } ?: throw IllegalStateException("Cannot open input file")
-
-                keyDao.recordUsage(key.keyId)
-                AuditLogger.logFileDecrypted(key.keyId, originalName)
-
-                withContext(Dispatchers.Main) {
-                    pendingDecryptedUri = Uri.fromFile(tempFile)
-                    createDecryptedFileLauncher.launch(outputName)
-                }
+                )
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { showError(e) }
             }
         }
     }
 
-    /**
-     * Save the decrypted temp file to the user-selected output URI.
-     */
     private fun saveDecryptedToUri(outputUri: Uri) {
-        val tempUri = pendingDecryptedUri ?: return
+        val tempFile = pendingDecryptedSave.take() ?: return
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val tempFile = if (tempUri.scheme == "file") {
-                    File(tempUri.path!!)
-                } else {
-                    null
-                }
-
-                if (tempFile != null && tempFile.exists()) {
-                    contentResolver.openOutputStream(outputUri)?.use { output ->
-                        tempFile.inputStream().use { input ->
-                            input.copyTo(output)
-                        }
-                    }
-                    tempFile.delete()
-                }
+                staging.deliverTo(tempFile) { contentResolver.openOutputStream(outputUri) }
 
                 withContext(Dispatchers.Main) {
                     showResult(getString(R.string.file_operation_decrypt_success))
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { showError(e) }
-            } finally {
-                pendingDecryptedUri = null
             }
         }
     }
@@ -1377,5 +1376,66 @@ class FileOperationActivity : AppCompatActivity() {
             i += 2
         }
         return data
+    }
+}
+
+/** The staged file one save picker is open for. */
+internal class PendingStagedSave(private val staging: FileOperationStaging) {
+
+    @Volatile
+    var file: File? = null
+        private set
+
+    /**
+     * Make [staged] the pending file, releasing the one it replaces, and run
+     * [launch] (the picker). When [launch] throws, [staged] is released and
+     * nothing is left pending.
+     */
+    fun handOff(staged: File, launch: () -> Unit) {
+        file?.takeIf { it != staged }?.let { staging.release(it) }
+        file = staged
+        try {
+            launch()
+        } catch (e: Throwable) {
+            if (file == staged) file = null
+            staging.release(staged)
+            throw e
+        }
+    }
+
+    /** Take the pending file for the save callback, leaving nothing pending. */
+    fun take(): File? = file.also { file = null }
+
+    /** The user cancelled the picker: delete the pending file. */
+    fun cancel() {
+        take()?.let { staging.release(it) }
+    }
+
+    /** A save picker's result: a destination goes to [save]; null is a cancel. */
+    fun <T : Any> onResult(result: T?, save: (T) -> Unit) {
+        if (result != null) save(result) else cancel()
+    }
+}
+
+/**
+ * Stage [write]'s output, run [prepare] (usage record, audit), then
+ * [handOff] it to a save picker. Until the handoff returns the staged file
+ * is this call's: when [prepare] or [handOff] throws it is released, so a
+ * failed attempt never leaves plaintext behind for the session's lifetime.
+ */
+internal suspend fun stageForSave(
+    staging: FileOperationStaging,
+    displayName: String?,
+    write: suspend (File) -> Unit,
+    prepare: suspend () -> Unit,
+    handOff: suspend (File) -> Unit
+) {
+    val file = staging.stage(displayName) { write(it) }
+    try {
+        prepare()
+        handOff(file)
+    } catch (e: Throwable) {
+        staging.release(file)
+        throw e
     }
 }

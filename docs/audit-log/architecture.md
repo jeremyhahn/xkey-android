@@ -8,7 +8,7 @@
 
 ### AuditLogEntity (`audit_logs`)
 
-Security event log with 58 operation types (`AuditOperationType`) covering key
+Security event log with 59 operation types (`AuditOperationType`) covering key
 lifecycle, cryptographic operations, FIDO2 events, pairing and connection
 events, configuration, certificate operations, file/media operations, contact
 management, OATH, co-signing, PIN and PIV.
@@ -37,6 +37,26 @@ An arriving key's write and its entry run together, outside cancellation
 (`persistAudited` in `RequestHandler`). If the connection drops mid-write,
 the stored key still gets its entry. A request cancelled before the write
 stores and records nothing.
+
+### Sync events
+
+Operation types are stored by name (the type converter in `XKeyDatabase.kt`),
+so a new type needs no migration.
+
+| Operation type | Logger | Recorded when | Details |
+|----------------|--------|---------------|---------|
+| `OATH_SYNC_PERFORMED` | `AuditLogger.logOathSyncPerformed` | each `local.syncOATH` (`RequestHandler.handleSyncOATH`) and `remote.syncOATH` (`RemoteSyncClient.syncOath`) | `direction` (`inbound` / `outbound`), `credentialCount` (sent to the peer), `added`, `updated`, `skipped` |
+| `PASSWORD_SYNC_PERFORMED` | `AuditLogger.logPasswordSyncPerformed` | each `local.syncPasswords` (`RequestHandler.handleSyncPasswords`) and `remote.syncPasswords` (`RemoteSyncClient.syncPasswords`) | `direction`, `passwordCount` (sent to the peer), `added`, `updated`, `skipped`; never a password, site or user name |
+
+A failed sync, a locked password vault included, records one entry with
+`success = false` and `error_message` set, and zero merge counts. Its count is
+0 when nothing reached the peer; an outbound sync whose local merge fails after
+the desktop answered keeps the count the desktop acknowledged. `device_id` and `device_name` name
+the desktop. Both inbound handlers audit through one path
+(`RequestHandler.auditedInboundSync`): the id is the peer of the request's own
+connection, never the phone's last served desktop, so two desktops syncing at
+once each get their own entry; and `device_name` is null when the paired-device store cannot be read, so the
+sync still runs and is audited. See [store-sync](../store-sync/architecture.md#audit).
 
 ## Index Strategy
 
