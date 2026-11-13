@@ -92,4 +92,18 @@ class KeyPolicyMigrationTest {
 
         assertTrue(statements.none { it.startsWith("UPDATE `key_policies` SET") })
     }
+
+    /** Round 9 (2): 13 -> 14 creates the deletion tombstone table, keyed by key id. */
+    @Test
+    fun migration13To14CreatesTheDeletionTombstoneTable() {
+        XKeyDatabase.MIGRATION_13_14.migrate(db)
+
+        assertTrue(
+            "no key_deletions table: $statements",
+            statements.any {
+                it.startsWith("CREATE TABLE IF NOT EXISTS `key_deletions`") && "`key_instance` INTEGER NOT NULL" in it &&
+                    "PRIMARY KEY(`key_id`)" in it
+            }
+        )
+    }
 }

@@ -117,4 +117,18 @@ class KeyStoreSyncManagerTest {
 
         coVerify(exactly = 0) { keyDao.deleteByKeyId(generalId) }
     }
+
+    /**
+     * Round 9 (2): material whose key row is deleted and whose material
+     * delete is still owed (a deletion tombstone) is never listed again as a
+     * key with default metadata; the replay deletes it.
+     */
+    @Test
+    fun `a key with a pending deletion is not rediscovered`() = runTest {
+        coEvery { keyDao.getAll() } returns emptyList()
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, pendingDeletion = { it == "general-1" }).syncAll()
+
+        coVerify(exactly = 0) { keyDao.insert(match { it.keyId == "general-1" }) }
+    }
 }

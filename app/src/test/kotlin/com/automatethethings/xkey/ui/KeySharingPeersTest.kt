@@ -46,6 +46,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -889,6 +890,82 @@ class KeySharingPeersTest {
         advanceUntilIdle()
         assertFalse("a landed retry still shows unsaved", peersOf().peers().first().of(PEER_A).unsaved)
         assertEquals(emptySet<String>(), KeySharingPeers.unsavedWithdrawalKeys.first())
+    }
+
+    /**
+     * Round 9 (1): a sheet kept open across a key replacement (deleted and
+     * generated again under its id) is told it is stale, shows none of the
+     * replacement's grants, and refuses its edits with the stale outcome,
+     * never REMOVED or STOOD: the replacement's grant stays.
+     */
+    @Test
+    fun aStaleSheetsWithdrawalIsRefusedAndKeepsTheReplacementsGrant() = runTest {
+        rows(KEY to PEER_A)
+        val sheet = peersOf()
+        assertFalse(sheet.stale.first())
+
+        assertTrue(store.deleteKey(KEY, instance))
+        val replaced = store.withKeyMaterial(KEY) { store.insertKey(FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS)) }
+        tables.grant(KEY, PEER_A)
+
+        assertTrue("the sheet was not told its key was replaced", sheet.stale.first())
+        assertTrue("the stale sheet shows the replacement's grant", sheet.peers().first().none { it.allowed })
+
+        var stale = 0
+        var unsaved = 0
+        val stood = sheet.setAllowedOrRedraw(
+            PEER_A,
+            false,
+            repo.pairingGeneration(PEER_A),
+            attached = { true },
+            redraw = {},
+            unsaved = { unsaved++ },
+            stale = { stale++ }
+        )
+        runCurrent()
+        assertFalse(stood)
+        assertEquals("the stale edit was not shown stale", 1, stale)
+        assertEquals(0, unsaved)
+        assertEquals(KeySharingPeers.Outcome.STALE, sheet.setAllowedOutcome(PEER_A, false, repo.pairingGeneration(PEER_A)))
+        assertEquals(KeySharingPeers.Outcome.STALE, sheet.setAllowedOutcome(PEER_B, true, repo.pairingGeneration(PEER_B)))
+
+        assertEquals("the replacement's grant was withdrawn", setOf(PEER_A), tables.grantsOf(KEY))
+        assertTrue(hasAccess(PEER_A, keyInstance = replaced))
+    }
+
+    /**
+     * Round 9 (3): a Private policy from a dismissed sheet whose policy write
+     * and denial write both fail is tracked outside the sheet: the key list
+     * and a sheet opened later warn until its denial is retried durably, and
+     * a restart that clears the process's obligations still denies.
+     */
+    @Test
+    fun aDismissedSheetsUnsavedPolicyDenialIsRetriedAndShownUntilDurable() = runTest {
+        rows(KEY to PEER_A)
+        tables.failing += setOf("setKeyPolicy", "putPolicyRow")
+        val peers = peersOf()
+        val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
+        sheet.launch { peers.setKeyPolicy(SharingPolicyType.PRIVATE, instance) }
+        sheet.cancel()
+        runCurrent()
+
+        val key = FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS, id = instance)
+        assertEquals("the unsaved denial was dropped", StoredPolicy.PRIVATE, store.enforcedPolicy(key))
+        assertEquals("the key list does not warn of the unsaved denial", setOf(KEY), KeySharingPeers.unsavedKeys.first())
+        assertTrue("a sheet opened later does not warn", peersOf().policyUnsaved.first())
+
+        // Still failing: still owed, still shown.
+        advanceTimeBy(5_000)
+        runCurrent()
+        assertEquals(setOf(KEY), KeySharingPeers.unsavedKeys.first())
+
+        tables.failing.clear()
+        advanceUntilIdle()
+        assertEquals("a durable denial is still shown unsaved", emptySet<String>(), KeySharingPeers.unsavedKeys.first())
+        assertFalse(peersOf().policyUnsaved.first())
+
+        val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
+        assertEquals("the denial was not retried durably", StoredPolicy.PRIVATE, restarted.enforcedPolicy(key))
     }
 
     /**

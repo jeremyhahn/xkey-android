@@ -321,6 +321,96 @@ class KeyPolicyStoreTest {
     }
 
     /**
+     * Round 9 (2): a material delete that throws after the rows are gone
+     * leaves a tombstone bound to the key instance, and the replay deletes
+     * the material: no material is left without a record.
+     */
+    @Test
+    fun aThrowingMaterialDeleteIsReplayed() = runBlocking {
+        val key = tables.addKey("k", SELECTED_PEERS)
+        tables.grant("k", PEER)
+        val material = mutableSetOf("k")
+        val store = store()
+
+        assertTrue(store.deleteKey("k", key) { throw IOException("keystore busy") })
+        assertEquals(null, tables.keyInstance("k"))
+        assertTrue("the material lost its record", store.isDeletionPending("k"))
+
+        store.replayDeletions { held, _ -> material -= held.keyId }
+        assertTrue("the replay left the material behind", "k" !in material)
+        assertTrue("the tombstone outlived the material", !store.isDeletionPending("k"))
+    }
+
+    /** Round 9 (2): the process dies after the row commit, before the material delete. */
+    @Test
+    fun aRestartAfterTheRowDeleteReplaysTheMaterialDelete() = runBlocking {
+        val key = tables.addKey("k", SELECTED_PEERS)
+        val material = mutableSetOf("k")
+        try {
+            store().deleteKey("k", key) { throw ProcessDeath() }
+            fail("the process did not die")
+        } catch (expected: ProcessDeath) {
+        }
+        assertEquals(null, tables.keyInstance("k"))
+
+        val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
+        assertTrue("the material lost its record across the restart", restarted.isDeletionPending("k"))
+        restarted.replayDeletions { held, _ -> material -= held.keyId }
+        assertTrue("the replay left the material behind", "k" !in material)
+        assertTrue(!restarted.isDeletionPending("k"))
+    }
+
+    /** Round 9 (2): a key generated again under a tombstoned id keeps its material. */
+    @Test
+    fun theReplayKeepsTheMaterialOfAKeyGeneratedAgain() = runBlocking {
+        val key = tables.addKey("k", SELECTED_PEERS)
+        val material = mutableSetOf("k")
+        val store = store()
+        assertTrue(store.deleteKey("k", key) { throw IOException("keystore busy") })
+        store.withKeyMaterial("k") { store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS)) }
+
+        store.replayDeletions { held, _ -> material -= held.keyId }
+        assertTrue("the new key's material was deleted by the replay", "k" in material)
+        assertTrue(!store.isDeletionPending("k"))
+    }
+
+    /** Round 9 (1): a withdrawal bound to a replaced key is stale, not REMOVED, and keeps the new grant. */
+    @Test
+    fun aWithdrawalBoundToAReplacedKeyIsStale() = runBlocking {
+        val old = tables.addKey("k", SELECTED_PEERS)
+        val store = store()
+        assertTrue(store.deleteKey("k", old))
+        tables.addKey("k", SELECTED_PEERS)
+        tables.grant("k", PEER)
+
+        assertEquals(KeyPolicyStore.Withdrawal.STALE, store.withdraw("k", old, PEER))
+        assertEquals("the new key's grant was withdrawn", setOf(PEER), tables.grantsOf("k"))
+    }
+
+    /**
+     * Round 9 (2) bypass guard: the only key-row delete in the main sources
+     * is the store's, and it writes the tombstone in the same transaction.
+     */
+    @Test
+    fun everyKeyRowDeleteWritesATombstone() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue(root.isDirectory)
+        val rowDelete = Regex("""\bdao\.deleteKey\(""")
+        val outside = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "KeyPolicyStore.kt" }
+            .flatMap { file -> file.readLines().mapIndexedNotNull { i, l -> if (rowDelete.containsMatchIn(l)) "${file.name}:${i + 1}" else null } }
+            .toList()
+        assertEquals("a key-row delete outside the store", emptyList<String>(), outside)
+        val store = java.io.File(root, "com/automatethethings/xkey/storage/KeyPolicyStore.kt").readText()
+        val transactions = Regex("""transactor\.run \{(.*?)\n {12}\}""", RegexOption.DOT_MATCHES_ALL).findAll(store).map { it.groupValues[1] }
+        val deletes = transactions.filter { rowDelete.containsMatchIn(it) }.toList()
+        assertTrue("no key-row delete found", deletes.isNotEmpty())
+        assertTrue("a key-row delete without its tombstone", deletes.all { "putDeletion(" in it })
+    }
+
+    private class ProcessDeath : Error("process died")
+
+    /**
      * Round 8 (2) bypass guard (ruling 554): every keyId-scoped key-material
      * write or delete in the main sources runs inside the store's one
      * serialisation: a [KeyPolicyStore.withKeyMaterial] block, or a
