@@ -21,6 +21,46 @@ no certificate chain writes one failed `KEY_ATTESTED` entry before the
 (missing parameters, a stale device attestation, a refused user-presence
 check) records none.
 
+Key-use requests write one entry per successful operation, naming the key,
+the requesting device and the duration; the output and the inputs (data,
+MAC, shared secret, peer key) are never logged:
+
+| Request | Operation type | Writer |
+|---------|----------------|--------|
+| `local.sign` | `SIGNING_REQUEST` | `AuditLogger.logSigningRequest` |
+| `local.hmac` (Keystore and software keys) | `HMAC_REQUEST` | `AuditLogger.logHmacRequest` |
+| `local.ecdh` | `KEY_DERIVATION_REQUEST` | `AuditLogger.logKeyDerivationRequest` |
+
+The entry's `keyType` is the type the key is stored with, never the
+operation: the operation type already names the operation, and the audit
+screen filters by `keyType`. An ECDH on an EC key stored as `signing` is
+recorded as `signing`; an HMAC as its key's stored type (the key row's,
+else the software key's). A key with no stored metadata is recorded as
+`unknown`. `RequestHandler.auditKeyType` is the one source of this value
+for sign, decrypt, encrypt, HMAC and ECDH entries.
+
+The entry's `algorithm` (in `details`) is the algorithm the operation ran,
+never the key's stored metadata, which is not validated: the sign
+request's algorithm (`signWithAlgorithm` refuses any other), the Keystore
+HMAC's own MAC (`computeHMACWithAlgorithm`), the software HMAC's mapping
+(`SoftwareKeyOps.hmacAlgorithm`: `HMAC-SHA512` or `HMAC-SHA256`), and
+the RSA decrypt's OAEP parameters, named from the one explicit spec its
+cipher is initialised with (`KeystoreManager.rsaOaepSpec`: SHA-256 OAEP
+with SHA-1 MGF1, passed explicitly because the MGF1 default differs by
+provider, so the entry reads `RSA-OAEP-SHA-256-MGF1-SHA-1`; JOSE
+`RSA-OAEP-256` would mean SHA-256 for both), and `AES-GCM` and `ECDH` for the fixed transformations.
+`RequestHandler.logKeyUse` writes every key-use entry;
+`AuditKeyTypeChokePointTest` fails on a writer outside it.
+
+The entry's `deviceId` and `deviceName` name the desktop that sent the
+request: each key-use handler captures it once with
+`RequestHandler.auditCaller` (the peer of the session the request arrived
+on) before any prompt or crypto call, and `logKeyUse` takes the device from
+that capture alone. The handler-wide connected device is never used: a
+second desktop confirming over another transport overwrites it while the
+first request is still running. The same scan test fails on a call that
+passes its own device or captures the caller late.
+
 ### Sync events
 
 Operation types are stored by name (the type converter in `XKeyDatabase.kt`),
