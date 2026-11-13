@@ -77,11 +77,6 @@ class GattServerQueueLifecycleTest {
         // caused by one expiring.
         const val PROMPTLY_MS = 2_000L
 
-        // Long enough for the consumer to reach a wait, or to have handled an
-        // event. The wait is the check: a consumer blocked on a lock shows no
-        // signal, and "nothing reopened" or "nothing sent" has no event to await.
-        const val SETTLE_MS = 300L
-
         val ENABLE = byteArrayOf(0x01, 0x00)
 
         fun randomKey(): ByteArray = ByteArray(32).also { SecureRandom().nextBytes(it) }
@@ -94,6 +89,7 @@ class GattServerQueueLifecycleTest {
     private lateinit var status: BluetoothGattCharacteristic
     private lateinit var cccd: BluetoothGattDescriptor
     private lateinit var server: GattServer
+    private lateinit var signals: TrackingDispatcher
     private lateinit var desktop: NoiseInitiatorSession
     private val fragments = Collections.synchronizedList(mutableListOf<ByteArray>())
 
@@ -133,6 +129,7 @@ class GattServerQueueLifecycleTest {
             pairingCallback = mockk(),
             pairedDeviceRepository = PairedDeviceRepository(InMemorySharedPreferences()),
         )
+        signals = trackScope(server)
         setField("gattServer", gatt)
         setField("responseCharacteristic", response)
         desktop = NoiseInitiatorSession(randomKey())
@@ -215,7 +212,7 @@ class GattServerQueueLifecycleTest {
         mtu(MTU)
         writeFragment(byteArrayOf(0x01), requestId = 1, responseNeeded = true)
         cccdWrite(ENABLE, requestId = 2, responseNeeded = true)
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("the callbacks after destroy() are handled")
 
         assertEquals("no queue opens after destroy()", 0, queueCount())
         assertEquals("no consumer starts after destroy()", 0, coroutineCount())
@@ -233,7 +230,7 @@ class GattServerQueueLifecycleTest {
             // The consumer takes the connect and waits on the state lock
             // while the writes fill the queue.
             callback.onConnectionStateChange(device, 0, BluetoothProfile.STATE_CONNECTED)
-            Thread.sleep(SETTLE_MS)
+            signals.awaitIdle("the consumer waits on the state lock")
             repeat(EVENT_QUEUE_CAPACITY + 1) { writeFragment(byteArrayOf(0)) }
             verify(exactly = 1) { gatt.cancelConnection(device) }
 
@@ -302,7 +299,7 @@ class GattServerQueueLifecycleTest {
         val first = getField<NoiseSession?>("noiseSession")
         assertNotNull(first)
         write(identityFrame())
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("the identity frame is handled up to its wait")
 
         val reconnected = System.currentTimeMillis()
         callback.onConnectionStateChange(device, 0, BluetoothProfile.STATE_CONNECTED)
@@ -316,7 +313,7 @@ class GattServerQueueLifecycleTest {
         eventually("only the new consumer runs") { coroutineCount() == 1 }
 
         cccdWrite(ENABLE)
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("the enable is handled")
         assertEquals("the old connection's acknowledgement is not sent on the new one", 0, messages().size)
 
         disconnect()
@@ -333,7 +330,7 @@ class GattServerQueueLifecycleTest {
         connect()
         mtu(MTU)
         write(identityFrame())
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("the identity frame is handled up to its wait")
 
         val disconnected = System.currentTimeMillis()
         disconnect()
@@ -343,7 +340,7 @@ class GattServerQueueLifecycleTest {
 
         cccdWrite(ENABLE, requestId = 12, responseNeeded = true)
         verify { gatt.sendResponse(device, 12, BluetoothGatt.GATT_FAILURE, 0, null) }
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("the enable is handled")
         assertEquals("nothing is sent for the ended connection", 0, messages().size)
         assertNothingRetained()
     }
@@ -415,18 +412,13 @@ class GattServerQueueLifecycleTest {
     /** No queue, no consumer and no drain deadline is left, nor does one appear after. */
     private fun assertNothingRetained(timeoutMs: Long = TIMEOUT_MS) {
         eventually("no queue and no coroutine is left", timeoutMs) { queueCount() == 0 && coroutineCount() == 0 }
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("nothing is left to run")
         assertEquals("no queue reopened", 0, queueCount())
         assertEquals("no coroutine started", 0, coroutineCount())
     }
 
-    private fun eventually(what: String, timeoutMs: Long = TIMEOUT_MS, check: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (!check()) {
-            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting until $what")
-            Thread.sleep(10)
-        }
-    }
+    private fun eventually(what: String, timeoutMs: Long = TIMEOUT_MS, check: () -> Boolean) =
+        signals.eventually(what, timeoutMs, check)
 
     private fun setField(name: String, value: Any?) {
         GattServer::class.java.getDeclaredField(name).apply { isAccessible = true }.set(server, value)
