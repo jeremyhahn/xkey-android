@@ -716,6 +716,32 @@ class KeyManagementActivity : AppCompatActivity() {
                 }
             }
         }
+        observeUnsavedWithdrawals()
+    }
+
+    /**
+     * Shows, for as long as one stands, that a withdrawal is held only in
+     * the process: a sheet dismissed before its withdrawal was saved leaves
+     * it here (#193 r8).
+     */
+    private fun observeUnsavedWithdrawals() {
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                var shown: com.google.android.material.snackbar.Snackbar? = null
+                try {
+                    KeySharingPeers.unsavedWithdrawalKeys.collectLatest { keys ->
+                        shown?.dismiss()
+                        shown = if (keys.isEmpty()) null else com.google.android.material.snackbar.Snackbar.make(
+                            findViewById(android.R.id.content),
+                            getString(R.string.key_sharing_withdrawal_not_saved),
+                            com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE,
+                        ).also { it.show() }
+                    }
+                } finally {
+                    shown?.dismiss()
+                }
+            }
+        }
     }
 
     /**
@@ -1127,50 +1153,54 @@ class KeyManagementActivity : AppCompatActivity() {
                 var publicKeyDer: ByteArray? = null
                 var keySizeBits = 0
 
-                when (keyType) {
-                    "signing", "tls", "ssh" -> {
-                        publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
-                        keySizeBits = actualKeySizeBits(publicKeyDer)
-                            ?: nominalKeySizeBits(algorithm)
-                    }
-                    "encryption" -> {
-                        // Generated at the requested modulus size. The size is
-                        // still read back off the key rather than assumed, so a
-                        // row can never describe something that was not produced.
-                        val requestedBits = if (algorithm == "RSA-OAEP-4096") 4096 else 2048
-                        publicKeyDer = keystoreManager.generateRSAEncryptionKey(
-                            keyId,
-                            requestedBits,
-                            authDuration
-                        )
-                        keySizeBits = actualKeySizeBits(publicKeyDer) ?: requestedBits
-                    }
-                    "secret" -> {
-                        keySizeBits = when (algorithm) {
-                            "AES-128" -> 128
-                            "AES-256" -> 256
-                            else -> 256
+                // The material write and its row insert in the store's one
+                // serialisation of this id's key material (#193 r8).
+                keyPolicyStore.withKeyMaterial(keyId) {
+                    when (keyType) {
+                        "signing", "tls", "ssh" -> {
+                            publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
+                            keySizeBits = actualKeySizeBits(publicKeyDer)
+                                ?: nominalKeySizeBits(algorithm)
                         }
-                        keystoreManager.generateSymmetricKey(keyId, keySizeBits, authDuration)
+                        "encryption" -> {
+                            // Generated at the requested modulus size. The size is
+                            // still read back off the key rather than assumed, so a
+                            // row can never describe something that was not produced.
+                            val requestedBits = if (algorithm == "RSA-OAEP-4096") 4096 else 2048
+                            publicKeyDer = keystoreManager.generateRSAEncryptionKey(
+                                keyId,
+                                requestedBits,
+                                authDuration
+                            )
+                            keySizeBits = actualKeySizeBits(publicKeyDer) ?: requestedBits
+                        }
+                        "secret" -> {
+                            keySizeBits = when (algorithm) {
+                                "AES-128" -> 128
+                                "AES-256" -> 256
+                                else -> 256
+                            }
+                            keystoreManager.generateSymmetricKey(keyId, keySizeBits, authDuration)
+                        }
+                        "hmac" -> {
+                            keySizeBits = if (algorithm.contains("512")) 512 else 256
+                            keystoreManager.generateHMACKey(keyId, algorithm)
+                        }
                     }
-                    "hmac" -> {
-                        keySizeBits = if (algorithm.contains("512")) 512 else 256
-                        keystoreManager.generateHMACKey(keyId, algorithm)
-                    }
-                }
 
-                val entity = KeyEntity(
-                    keyId = keyId,
-                    keyType = keyType,
-                    algorithm = algorithm,
-                    label = label,
-                    publicKeyDer = publicKeyDer,
-                    keySizeBits = keySizeBits,
-                    biometricRequired = biometric,
-                    source = "local",
-                    createdAt = System.currentTimeMillis()
-                )
-                keyPolicyStore.insertKey(entity)
+                    val entity = KeyEntity(
+                        keyId = keyId,
+                        keyType = keyType,
+                        algorithm = algorithm,
+                        label = label,
+                        publicKeyDer = publicKeyDer,
+                        keySizeBits = keySizeBits,
+                        biometricRequired = biometric,
+                        source = "local",
+                        createdAt = System.currentTimeMillis()
+                    )
+                    keyPolicyStore.insertKey(entity)
+                }
                 Snackbar.make(rootLayout, getString(R.string.key_create_success), Snackbar.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 android.util.Log.e("KeyManagement", "Key creation failed", e)
@@ -1259,14 +1289,14 @@ class KeyManagementActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            if (key.source != "xkmsd") {
-                val alias = keystoreManager.resolveKeystoreAlias(key.keyId)
-                if (alias != null) {
-                    keystoreManager.deleteByAlias(alias)
+            // With its policy row and grant rows, in one transaction (#193);
+            // the material only once the rows of this key row are deleted,
+            // in the store's serialisation of its material (#193 r8).
+            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore, material = {
+                if (key.source != "xkmsd") {
+                    keystoreManager.resolveKeystoreAlias(key.keyId)?.let { keystoreManager.deleteByAlias(it) }
                 }
-            }
-            // With its policy row and grant rows, in one transaction (#193)
-            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore)
+            })
             Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
         }
     }

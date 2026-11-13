@@ -523,6 +523,17 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             textLayout.addView(lastConnectedText)
         }
 
+        // A withdrawal held only in the process, from this sheet or one
+        // dismissed before it finished (#193 r8).
+        if (peer.unsaved) {
+            val unsavedText = TextView(requireContext()).apply {
+                text = getString(R.string.key_sharing_withdrawal_not_saved)
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelSmall)
+                setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorError))
+            }
+            textLayout.addView(unsavedText)
+        }
+
         contentLayout.addView(textLayout)
 
         // Checkbox

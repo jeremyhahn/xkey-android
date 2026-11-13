@@ -332,9 +332,10 @@ class KeyPolicyStoreTest {
         val root = java.io.File("src/main/kotlin")
         assertTrue("main sources not found from ${java.io.File(".").absolutePath}", root.isDirectory)
         val materialCall = Regex(
-            """\.(generateSymmetricKey|generateHMACKey|generateKeyForAlgorithm|generateRSAEncryptionKey|deleteGeneralKey|deleteByAlias)\(|SoftwareKeyStore\([^)]*\)\.(put|delete)\(|\bstore\.put\("""
+            """\.(generateSymmetricKey|generateHMACKey|generateKeyForAlgorithm|generateRSAEncryptionKey|deleteGeneralKey|deleteByAlias)\(|SoftwareKeyStore\([^)]*\)\.(put|delete)\(|\bsoftwareStore\.(put|delete)\(|\bKeyMaterialHeld\("""
         )
-        val opener = Regex("""withKeyMaterial\(|material(: suspend \(\) -> Unit)? = \{""")
+        // A block, a material delete, or a helper taking the block's proof.
+        val opener = Regex("""withKeyMaterial\(|material(: suspend \(\) -> Unit)? = \{|: KeyPolicyStore\.KeyMaterialHeld\b""")
         val bypasses = root.walkTopDown()
             .filter { it.isFile && it.extension == "kt" && it.name !in setOf("KeystoreManager.kt", "SoftwareKeyStore.kt", "KeyPolicyStore.kt") }
             .flatMap { file ->
@@ -346,7 +347,9 @@ class KeyPolicyStoreTest {
                     if (open == 0 && opener.containsMatchIn(line)) open = depth + 1
                     val inside = open != 0
                     depth += line.count { it == '{' } - line.count { it == '}' }
-                    if (open != 0 && depth < open) open = 0
+                    // Closed only by a brace: a helper's proof parameter
+                    // opens on its signature, before its body's brace.
+                    if (open != 0 && depth < open && '}' in line) open = 0
                     if (materialCall.containsMatchIn(line) && !inside) "${file.name}:${i + 1}" else null
                 }
             }

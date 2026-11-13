@@ -2074,14 +2074,14 @@ class KeyDetailActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            if (key.source != "xkmsd") {
-                val alias = keystoreManager.resolveKeystoreAlias(key.keyId)
-                if (alias != null) {
-                    keystoreManager.deleteByAlias(alias)
+            // With its policy row and grant rows, in one transaction (#193);
+            // the material only once the rows of this key row are deleted,
+            // in the store's serialisation of its material (#193 r8).
+            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore, material = {
+                if (key.source != "xkmsd") {
+                    keystoreManager.resolveKeystoreAlias(key.keyId)?.let { keystoreManager.deleteByAlias(it) }
                 }
-            }
-            // With its policy row and grant rows, in one transaction (#193)
-            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore)
+            })
             finish()
         }
     }

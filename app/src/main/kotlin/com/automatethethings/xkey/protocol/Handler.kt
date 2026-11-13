@@ -1189,11 +1189,28 @@ class RequestHandler(
             }
         }
 
+        // The material write and its row insert in the store's one
+        // serialisation of this key id's material, which every delete takes
+        // (#193 r8): a delete of an earlier key under this id never deletes
+        // the material generated here.
+        keyPolicyStore.withKeyMaterial(genParams.keyId) { held ->
+            generateKeyMaterial(request, genParams, algorithmName, authDurationSeconds, held)
+        }
+    }
+
+    /** local.generateKey's material write and row insert, inside [KeyPolicyStore.withKeyMaterial]. */
+    private suspend fun generateKeyMaterial(
+        request: Request,
+        genParams: LocalGenerateKeyParams,
+        algorithmName: String,
+        authDurationSeconds: Int,
+        held: KeyPolicyStore.KeyMaterialHeld
+    ): Response {
         // Software-backed (exportable) keys take a separate path: the raw
         // material lives in SoftwareKeyStore (app-encrypted) so it can be
         // exported/shared, instead of the non-exportable hardware Keystore.
         if (genParams.exportable) {
-            return@withContext generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
+            return generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds, held)
         }
 
         // Generate key based on algorithm type
@@ -1252,7 +1269,7 @@ class RequestHandler(
                 keySizeBits = keySizeBits,
                 level = level
             )
-            return@withContext Response.success(request.id, result.toJson())
+            return Response.success(request.id, result.toJson())
         }
 
         // Asymmetric key generation
@@ -1333,7 +1350,7 @@ class RequestHandler(
             )
         }
 
-        Response.success(request.id, result.toJson())
+        return Response.success(request.id, result.toJson())
     }
 
     /**
@@ -1376,7 +1393,8 @@ class RequestHandler(
         request: Request,
         genParams: LocalGenerateKeyParams,
         algorithmName: String,
-        authDurationSeconds: Int
+        authDurationSeconds: Int,
+        held: KeyPolicyStore.KeyMaterialHeld
     ): Response {
         val isSymmetric = algorithmName.startsWith("AES") || algorithmName.startsWith("HMAC")
         if (!isSymmetric) {
@@ -1909,7 +1927,11 @@ class RequestHandler(
         }
         val entity = keyDao.getByKeyId(keyId)
         if (entity == null) {
-            material()
+            // No key row: the material alone, in the store's serialisation,
+            // and only if no key was generated under the id meanwhile (#193 r8).
+            if (!keyPolicyStore.deleteMaterial(keyId, material)) {
+                return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
+            }
         } else if (!KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = material)) {
             return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
         }
@@ -2795,7 +2817,7 @@ class RequestHandler(
      * @return True if the key can be shared with this peer.
      */
     private suspend fun canShareKeyWithPeer(entity: KeyEntity, peerPublicKeyHex: String?): Boolean {
-        if (KeySharingPeers.isWithdrawalPending(entity.keyId, peerPublicKeyHex)) {
+        if (KeySharingPeers.isWithdrawalPending(entity.keyId, entity.id, peerPublicKeyHex)) {
             // Fail closed (#174): the user withdrew this peer and that write
             // is still being retried.
             Log.w(TAG, "Key sharing refused: withdrawal pending persistence")
@@ -3513,21 +3535,25 @@ class RequestHandler(
             val keyId = params.optString("label", "").ifBlank {
                 params.optString("key_id", "").ifBlank { "shared-sym-${System.currentTimeMillis()}" }
             }
-            val store = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
-            if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
-                return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
-            }
-            store.put(
-                com.automatethethings.xkey.crypto.SoftwareKey(
-                    keyId = keyId,
-                    algorithm = params.optString("algorithm", "").ifBlank { "AES" },
-                    keyType = "symmetric",
-                    keySize = params.optInt("key_size", material.size * 8),
-                    exportable = false,
-                    shareable = false,
-                    material = material
+            val softwareStore = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
+            // The check and the write in the store's one serialisation of
+            // this id's key material (#193 r8).
+            keyPolicyStore.withKeyMaterial(keyId) {
+                if (softwareStore.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
+                    return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
+                }
+                softwareStore.put(
+                    com.automatethethings.xkey.crypto.SoftwareKey(
+                        keyId = keyId,
+                        algorithm = params.optString("algorithm", "").ifBlank { "AES" },
+                        keyType = "symmetric",
+                        keySize = params.optInt("key_size", material.size * 8),
+                        exportable = false,
+                        shareable = false,
+                        material = material
+                    )
                 )
-            )
+            }
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
                 put("import_id", keyId)

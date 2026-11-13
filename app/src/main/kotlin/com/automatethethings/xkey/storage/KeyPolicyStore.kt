@@ -24,6 +24,8 @@ import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 
 /**
@@ -228,14 +230,56 @@ class KeyPolicyStore(
      * nothing deleted, if the key is gone or was generated again under its id.
      * Once the rows are deleted, [material] deletes the key's material in
      * the same call: a caller that queues this and is cancelled meanwhile
-     * never leaves the material of a deleted key behind (#193 r6).
+     * never leaves the material of a deleted key behind (#193 r6). The row
+     * check, the delete and [material] run in [withKeyMaterial], the
+     * serialisation every generation takes: material is deleted only for
+     * the key row [instance] whose rows were just deleted (#193 r8).
      */
     suspend fun deleteKey(keyId: String, instance: Long, material: suspend () -> Unit = {}): Boolean =
-        transactor.run {
-            if (dao.keyInstance(keyId) != instance) return@run false
-            dao.deleteGrants(keyId)
-            dao.deleteKey(keyId) > 0
-        }.also { if (it) material() }
+        withKeyMaterial(keyId) {
+            transactor.run {
+                if (dao.keyInstance(keyId) != instance) return@run false
+                dao.deleteGrants(keyId)
+                dao.deleteKey(keyId) > 0
+            }.also { if (it) material() }
+        }
+
+    /**
+     * Deletes the material of [keyId] when it has no key row ([material]),
+     * inside [withKeyMaterial]: only if no key row appeared meanwhile, so a
+     * key generated under the id while this waited keeps its material.
+     * Returns whether [material] ran.
+     */
+    suspend fun deleteMaterial(keyId: String, material: suspend () -> Unit): Boolean =
+        withKeyMaterial(keyId) {
+            if (dao.keyInstance(keyId) != null) return@withKeyMaterial false
+            material()
+            true
+        }
+
+    /**
+     * The one serialisation of [keyId]'s key material (#193 r8, ruling 554):
+     * every write of it (a generation with its row insert, an import) and
+     * every delete of it ([deleteKey], [deleteMaterial]) runs in [block]
+     * under [keyId]'s lock, one at a time, so a delete never removes the
+     * material of a key generated again under its id between its row delete
+     * and its material delete. Not reentrant: [block] must not call
+     * [deleteKey], [deleteMaterial] or this for the same id. A helper that
+     * writes material for its caller takes the [KeyMaterialHeld] handed to
+     * [block], so it is callable only from inside one.
+     */
+    suspend inline fun <T> withKeyMaterial(keyId: String, block: (KeyMaterialHeld) -> T): T =
+        materialLock(keyId).withLock { block(KeyMaterialHeld(keyId)) }
+
+    /**
+     * Proof that [keyId]'s [withKeyMaterial] lock is held: only that block
+     * makes one.
+     */
+    class KeyMaterialHeld @PublishedApi internal constructor(val keyId: String)
+
+    /** [keyId]'s lock for [withKeyMaterial]. */
+    @PublishedApi
+    internal fun materialLock(keyId: String): Mutex = materialLocks.computeIfAbsent(keyId) { Mutex() }
 
     /**
      * The policy to enforce for [key]: its policy row's, which carries a
@@ -255,6 +299,9 @@ class KeyPolicyStore(
     companion object {
         /** Obligations whose write failed, by key id, for the life of the process. */
         private val processObligations: MutableMap<String, Held> = java.util.concurrent.ConcurrentHashMap()
+
+        /** Each key id's material lock ([withKeyMaterial]), shared by every store in the process. */
+        private val materialLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
 
         /**
          * The rule every obligation is recorded by: a failed withdrawal

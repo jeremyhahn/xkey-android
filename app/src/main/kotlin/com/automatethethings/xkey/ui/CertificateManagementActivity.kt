@@ -56,6 +56,7 @@ import com.automatethethings.xkey.ca.AndroidCA
 import com.automatethethings.xkey.ca.CertificateEntity
 import com.automatethethings.xkey.ca.CertificateProfile
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.truststore.TrustStoreRepository
@@ -140,6 +141,7 @@ class CertificateManagementActivity : AppCompatActivity() {
     private val androidCA by lazy { AndroidCA(this) }
     private val keystoreManager by lazy { KeystoreManager(this) }
     private val keyDao by lazy { XKeyDatabase.getInstance(this).keyDao() }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this)) }
 
     // -------------------------------------------------------------------------
     // UI Components
@@ -1206,8 +1208,11 @@ class CertificateManagementActivity : AppCompatActivity() {
 
                 val keyId = UUID.randomUUID().toString()
                 val keystoreAlias = "xkey_key_$keyId"
-                val publicKeyDer = withContext(Dispatchers.IO) {
-                    keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1)
+                // In the store's one serialisation of this id's key material (#193 r8).
+                val publicKeyDer = keyPolicyStore.withKeyMaterial(keyId) {
+                    withContext(Dispatchers.IO) {
+                        keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1)
+                    }
                 }
 
                 // The signing key now exists, but the certificate that gives it
@@ -1294,9 +1299,11 @@ class CertificateManagementActivity : AppCompatActivity() {
      */
     private suspend fun discardIssuanceKey(keyId: String, keystoreAlias: String) {
         try {
-            withContext(Dispatchers.IO) {
-                keyDao.deleteByKeyId(keyId)
-                keystoreManager.deleteByAlias(keystoreAlias)
+            keyPolicyStore.withKeyMaterial(keyId) {
+                withContext(Dispatchers.IO) {
+                    keyDao.deleteByKeyId(keyId)
+                    keystoreManager.deleteByAlias(keystoreAlias)
+                }
             }
         } catch (e: Exception) {
             android.util.Log.e("CertManagement", "Rollback of key $keyId failed", e)
