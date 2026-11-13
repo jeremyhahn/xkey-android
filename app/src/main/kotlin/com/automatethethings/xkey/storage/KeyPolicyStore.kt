@@ -40,10 +40,14 @@ import java.io.IOException
  * until a later policy write lands. A Private change, or any change away from
  * Selected Peers, also leaves the grant clear it owes: the next policy write
  * deletes the key's grant rows first, and no grant is written meanwhile.
+ * If that denial cannot be written either, it is held in the process
+ * ([unrecordedDenials], by key id and instance): every peer is denied and
+ * every grant refused until a later policy write for the key lands.
  */
 class KeyPolicyStore(
     private val dao: KeyPolicyDao,
-    private val transactor: Transactor
+    private val transactor: Transactor,
+    private val unrecordedDenials: MutableMap<String, Long> = processDenials
 ) {
 
     /** Runs a block in one database transaction, rolled back if it throws. */
@@ -89,7 +93,7 @@ class KeyPolicyStore(
                 if (dao.setKeyPolicy(keyId, policy) != 1) throw KeyChangedException(keyId)
                 dao.putPolicyRow(KeyPolicyEntity(keyId, instance, policy))
                 clear
-            }
+            }.also { unrecordedDenials.remove(keyId, instance) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: KeyChangedException) {
@@ -101,6 +105,8 @@ class KeyPolicyStore(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (denial: Exception) {
+                    // Fail closed: denied in this process until a later write lands.
+                    unrecordedDenials[keyId] = instance
                     e.addSuppressed(denial)
                 }
             }
@@ -137,7 +143,7 @@ class KeyPolicyStore(
     suspend fun grant(keyId: String, instance: Long, peerPublicKeyHex: String) {
         transactor.run {
             if (dao.keyInstance(keyId) == null) throw KeyChangedException(keyId)
-            if (refusesGrants(dao.policyRow(keyId))) throw GrantRefusedException(keyId)
+            if (unrecordedDenials[keyId] == instance || refusesGrants(dao.policyRow(keyId))) throw GrantRefusedException(keyId)
             dao.putGrant(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
         }
     }
@@ -171,7 +177,8 @@ class KeyPolicyStore(
      * missing or belongs to another key row.
      */
     suspend fun enforcedPolicy(key: KeyEntity): SharingPolicyType =
-        dao.policyRow(key.keyId)?.takeIf { it.keyInstance == key.id }?.enforced ?: key.sharingPolicy
+        if (unrecordedDenials[key.keyId] == key.id) SharingPolicyType.PRIVATE
+        else dao.policyRow(key.keyId)?.takeIf { it.keyInstance == key.id }?.enforced ?: key.sharingPolicy
 
     /** [keyId]'s policy row, after checking its key row is [instance]. */
     private suspend fun bound(keyId: String, instance: Long): KeyPolicyEntity? {
@@ -180,6 +187,9 @@ class KeyPolicyStore(
     }
 
     companion object {
+        /** Denials whose write failed, by key id and instance, for the life of the process. */
+        private val processDenials: MutableMap<String, Long> = java.util.concurrent.ConcurrentHashMap()
+
         /** A grant written under [row] would be deleted by its owed clear, or deny-all would hide it. */
         fun refusesGrants(row: KeyPolicyEntity?): Boolean =
             row != null && (row.clearGrants || row.denial == SharingPolicyType.PRIVATE)
