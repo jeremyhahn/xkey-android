@@ -50,6 +50,14 @@ checks, in this order:
    the requested hash once the owner authenticates. The phone answers only a
    signature that verifies under the approved public key over that hash;
    any other is `OPERATION_DENIED`.
+7. **The key approved is the key signed with.** The approval snapshot reads
+   the public key under one Keystore alias, the general key alias the signer
+   uses, and keeps that alias. Every signature after an approval goes through
+   `KeystoreManager.signApproved` under that alias, which refuses
+   (`OPERATION_DENIED`) when the key there is no longer the approved one. No
+   resolving lookup (such as a FIDO2 alias of the same id) can name one key
+   while another signs. The witness QR path in `CoSignActivity` names and
+   signs with the same alias.
 
 The success result is unchanged: `signature` (base64), `keyFingerprint`,
 `algorithm` and `signerName`.

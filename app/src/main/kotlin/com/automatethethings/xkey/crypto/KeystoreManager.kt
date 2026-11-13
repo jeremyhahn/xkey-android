@@ -1227,6 +1227,50 @@ class KeystoreManager(private val context: Context) {
         }
     }
 
+    /**
+     * The X.509 public key of the entry under Keystore [alias] exactly, with
+     * no alias resolution: what an approval snapshots and rechecks for the
+     * alias its signer ([signApproved]) signs with.
+     *
+     * @return DER-encoded public key bytes, or null if [alias] holds no key.
+     */
+    fun publicKeyDERAt(alias: String): ByteArray? =
+        keyStore.getCertificate(alias)?.publicKey?.encoded
+
+    /**
+     * Signs [data] with JCA [jcaAlgorithm] using the key under [alias], only
+     * if that key is still the one the owner approved: the public key under
+     * [alias] must equal [approvedPublicKeyDer]. The key approved and the key
+     * signed with are read from the one alias, so no other entry (such as a
+     * FIDO2 alias of the same id) can stand in for it.
+     *
+     * @throws KeyNotFoundException if [alias] holds no key.
+     * @throws ApprovedKeyChangedException if the key under [alias] is not the approved one.
+     * @throws BiometricRequiredException if the key requires user authentication.
+     * @throws SigningException if signing fails.
+     */
+    suspend fun signApproved(
+        alias: String,
+        approvedPublicKeyDer: ByteArray,
+        data: ByteArray,
+        jcaAlgorithm: String
+    ): ByteArray {
+        val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
+        if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+            ?: throw KeyNotFoundException(alias)
+        try {
+            val signature = Signature.getInstance(jcaAlgorithm)
+            signature.initSign(privateKey)
+            signature.update(data)
+            return signature.sign()
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            throw BiometricRequiredException()
+        } catch (e: Exception) {
+            throw SigningException("Signing with $jcaAlgorithm failed", e)
+        }
+    }
+
     // -------------------------------------------------------------------------
     // RSA Decryption
     // -------------------------------------------------------------------------
@@ -2008,6 +2052,9 @@ class KeystoreManager(private val context: Context) {
             "RS512" -> SIG_ALGORITHM_RS512
             else -> throw SigningException("Unsupported algorithm: $algorithm")
         }
+
+        /** The JCA algorithm passkey assertions sign their hash with. */
+        const val PASSKEY_SIGNATURE_ALGORITHM = "SHA256withECDSA"
 
         /** Android Keystore provider name. */
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"

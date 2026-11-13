@@ -263,15 +263,21 @@ class MediaSigningService : Service() {
                 }
                 val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
-                // Sign with the configured key
-                val signature = keystoreManager.signWithAlgorithm(keyId, hashBytes, keyEntity.algorithm)
+                // Sign with the configured key. The key fingerprinted and the
+                // key signed with are one lookup: the public key under the
+                // alias the signature is made with.
+                val alias = KeystoreManager.generalKeyAlias(keyId)
+                val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
+                    ?: throw com.automatethethings.xkey.crypto.KeyNotFoundException(keyId)
+                val signature = keystoreManager.signApproved(
+                    alias,
+                    pubKeyDer,
+                    hashBytes,
+                    KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
+                )
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
-                // Compute key fingerprint
-                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
-                val keyFingerprint = if (pubKeyDer != null) {
-                    MediaHasher.hashBytes(pubKeyDer)
-                } else keyId
+                val keyFingerprint = MediaHasher.hashBytes(pubKeyDer)
 
                 // Build signature data
                 val entry = SignatureEntry(

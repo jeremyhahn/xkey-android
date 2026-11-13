@@ -598,7 +598,8 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
+        // The fingerprint of the key under the alias the signatures use.
+        val pubKeyDer = keystoreManager.publicKeyDERAt(KeystoreManager.generalKeyAlias(keyId))
         val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
@@ -617,11 +618,20 @@ class CoSignActivity : AppCompatActivity() {
                 val keyEntity = db.keyDao().getByKeyId(keyId)
                     ?: throw Exception("Key not found")
 
-                val signature = keystoreManager.signWithAlgorithm(keyId, request.hashBytes(), keyEntity.algorithm)
+                // The key named and the key signed with are one lookup: the
+                // public key under the alias the signature is made with.
+                val alias = KeystoreManager.generalKeyAlias(keyId)
+                val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
+                    ?: throw Exception("Key not found")
+                val signature = keystoreManager.signApproved(
+                    alias,
+                    pubKeyDer,
+                    request.hashBytes(),
+                    KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
+                )
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
-                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
-                val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
+                val fingerprint = MediaHasher.hashBytes(pubKeyDer)
 
                 val responsePayload = CoSignResponse(
                     signature = signatureBase64,
