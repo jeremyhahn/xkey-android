@@ -9,10 +9,11 @@ TMP=$(mktemp -d)
 # shellcheck disable=SC2064  # expand TMP now
 trap "rm -rf '${TMP}'" EXIT INT TERM
 
-# release name date-offset version...: publishes com.example:name, each
-# version's POM dated by its offset ("10 days ago").
+# release name date-offset version...: publishes GROUP:name (GROUP defaults
+# to com.example), each version's POM dated by its offset ("10 days ago").
 release() {
-	local name=$1 dir="${TMP}/repo/com/example/$1" spec v when
+	local name=$1 group=${GROUP:-com.example} dir spec v when
+	dir="${TMP}/repo/${group//.//}/$1"
 	shift
 	mkdir -p "${dir}"
 	{
@@ -27,12 +28,13 @@ release() {
 	done
 }
 
-# report file name current latest...: a dependencyUpdates JSON report.
+# report file name current latest...: a dependencyUpdates JSON report of
+# GROUP's libraries (GROUP defaults to com.example).
 report() {
 	local file=$1
 	shift
-	jq -n --args '{unresolved: {dependencies: []}, outdated: {dependencies: [$ARGS.positional | _nwise(3)
-		| {group: "com.example", name: .[0], version: .[1], available: {release: .[2]}}]}}' "$@" > "${file}"
+	jq -n --arg group "${GROUP:-com.example}" --args '{unresolved: {dependencies: []}, outdated: {dependencies: [$ARGS.positional | _nwise(3)
+		| {group: $group, name: .[0], version: .[1], available: {release: .[2]}}]}}' "$@" > "${file}"
 }
 
 release young "1.0@40 days ago" "1.1@3 days ago"
@@ -56,6 +58,12 @@ release sep "1.0-1@40 days ago" "1.0.1@10 days ago" "1.0.2@3 days ago"
 release beta "1.0@40 days ago" "1.1-Beta2@8 days ago"
 release betayoung "1.0@40 days ago" "1.0.1@3 days ago" "1.1-Beta2@10 days ago"
 release betaold "1.0@40 days ago" "1.0.1@10 days ago" "1.1-Beta2@8 days ago"
+# The project's own exemption (#225): android-all-instrumented's version names
+# the API level, so its newest is a newer API, not a newer build. The rest of
+# org.robolectric is not exempt.
+GROUP=org.robolectric release android-all-instrumented "14-robolectric-10818077-i7@400 days ago" \
+	"16-robolectric-13921718-i7@60 days ago"
+GROUP=org.robolectric release robolectric "4.14@400 days ago" "4.16@60 days ago"
 rm "${TMP}/repo/com/example/undated/1.1/undated-1.1.pom"
 mkdir -p "${TMP}/repo/com/example/empty"
 echo "<metadata><versioning></versioning></metadata>" > "${TMP}/repo/com/example/empty/maven-metadata.xml"
@@ -118,6 +126,14 @@ expect 1 FAIL "${TMP}/exempt" undated 1.0 1.2             # 1.1 has no release d
 expect 1 FAIL "${TMP}/exempt" absent 1.0 1.1              # no repository serves its metadata
 expect 1 FAIL "${TMP}/exempt" empty 1.0 1.1               # metadata without versions
 expect 1 FAIL "${TMP}/exempt" sep 1.0-1 1.0.2             # 1.0.1 is newer than 1.0-1, and old
+
+# Against the project's exempt file: the exemption names one artifact, and its
+# versioned name (14-robolectric-*) matches by group:name alone.
+GROUP=org.robolectric expect 0 exempt "${SCRIPT_DIR}/deps-check-exempt.txt" \
+	android-all-instrumented 14-robolectric-10818077-i7 16-robolectric-13921718-i7
+GROUP=org.robolectric expect 1 FAIL "${SCRIPT_DIR}/deps-check-exempt.txt" robolectric 4.14 4.16
+GROUP=org.robolectric expect 1 exempt "${SCRIPT_DIR}/deps-check-exempt.txt" \
+	android-all-instrumented 14-robolectric-10818077-i7 16-robolectric-13921718-i7 robolectric 4.14 4.16
 
 # A metadata fetch that fails, not a missing file: curl refuses the protocol.
 report "${TMP}/report.json" young 1.0 1.1

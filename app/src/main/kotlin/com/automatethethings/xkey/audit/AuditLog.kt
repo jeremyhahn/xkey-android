@@ -183,7 +183,13 @@ enum class AuditOperationType {
     /** A password entry was added on the phone. */
     PASSWORD_CREATED,
     /** A password entry was deleted on the phone. */
-    PASSWORD_DELETED
+    PASSWORD_DELETED,
+
+    // Desktop backups (local.createBackup / local.restoreBackup)
+    /** A paired desktop stored an encrypted backup on the phone. */
+    BACKUP_CREATED,
+    /** A paired desktop fetched a stored backup from the phone. */
+    BACKUP_RESTORED
 }
 
 /**
