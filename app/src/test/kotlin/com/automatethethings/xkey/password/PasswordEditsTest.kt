@@ -26,7 +26,11 @@ import io.mockk.mockk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -34,6 +38,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.io.File
+import java.lang.reflect.Modifier
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -177,5 +183,93 @@ class PasswordEditsTest {
                 assertFalse("${entry.operationType} holds \"$secret\"", written.contains(secret))
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation between the commit and the audit
+    // -----------------------------------------------------------------------
+
+    /**
+     * Cancels the caller once the DAO has committed, then suspends the way
+     * Room does when it resumes the caller after a write, so a cancellable
+     * caller sees the cancellation before its next line runs.
+     */
+    private suspend fun cancelAfterCommit(caller: () -> Job) {
+        caller().cancel()
+        yield()
+    }
+
+    @Test
+    fun `an add cancelled after its commit is still audited`() = runTest {
+        var committed = false
+        lateinit var job: Job
+        coEvery { passwordDao.insert(any()) } coAnswers {
+            committed = true
+            cancelAfterCommit { job }
+            1L
+        }
+
+        job = launch { edits.add(record()) }
+        advanceUntilIdle()
+
+        assertTrue("the add must have committed", committed)
+        assertEquals(
+            "a committed add must be audited even when its caller is cancelled",
+            listOf(AuditOperationType.PASSWORD_CREATED),
+            audited.map { it.operationType }
+        )
+    }
+
+    @Test
+    fun `a delete cancelled after its commit is still audited`() = runTest {
+        lateinit var job: Job
+        coEvery { passwordDao.deleteByPasswordId("pwd-1") } coAnswers {
+            cancelAfterCommit { job }
+            1
+        }
+
+        job = launch { edits.delete(record()) }
+        advanceUntilIdle()
+
+        assertEquals(
+            "a committed delete must be audited even when its caller is cancelled",
+            listOf(AuditOperationType.PASSWORD_DELETED),
+            audited.map { it.operationType }
+        )
+    }
+
+    @Test
+    fun `every password write on PasswordEdits is one of the audited paths`() {
+        // Each public method here is a vault write covered by the cancellation
+        // tests above. A new write method fails this test until it runs through
+        // the audited choke point and gains its own cancellation test.
+        val writes = PasswordEdits::class.java.declaredMethods
+            .filter { Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+            .map { it.name }
+            .toSet()
+        assertEquals(setOf("add", "delete"), writes)
+    }
+
+    @Test
+    fun `no main source writes a password through the repository outside the audited paths`() {
+        // The phone's password writes go through PasswordEdits. The desktop
+        // paths (USB verbs, sync) write through the repository and are
+        // audited by their own request handling.
+        val allowed = setOf(
+            "password/PasswordEdits.kt",
+            "password/PasswordRepository.kt",
+            "usb/PasswordStoreMethods.kt"
+        )
+        val root = File("src/main/kotlin/com/automatethethings/xkey")
+        assertTrue("run from the app module: ${root.absolutePath}", root.isDirectory)
+        val write = Regex("""\b\w*[rR]epository\??\.(upsert|delete)\(""")
+        val offenders = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" }
+            .filter { it.readText().contains("PasswordRepository") }
+            .map { it.relativeTo(root).invariantSeparatorsPath }
+            .filter { it !in allowed && !it.startsWith("sync/") }
+            .filter { write.containsMatchIn(File(root, it).readText()) }
+            .toList()
+        assertEquals("password writes that bypass PasswordEdits", emptyList<String>(), offenders)
     }
 }
