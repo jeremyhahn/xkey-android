@@ -785,7 +785,22 @@ class OathActivity : AppCompatActivity() {
             }
             dialog.setMessage(render())
         }
-        dialog.setOnDismissListener { ticker.cancel() }
+        val refresh = { dialog.setMessage(render()) }
+        desktopCodeRefresh = refresh
+        dialog.setOnDismissListener {
+            ticker.cancel()
+            if (desktopCodeRefresh === refresh) desktopCodeRefresh = null
+        }
+    }
+
+    /** The open desktop code dialog's re-render, run on resume. */
+    private var desktopCodeRefresh: (() -> Unit)? = null
+
+    override fun onResume() {
+        super.onResume()
+        // The ticker's delay runs on uptime, which stops in deep sleep: show
+        // the code's state on the sleep-inclusive deadline at once.
+        desktopCodeRefresh?.invoke()
     }
 
     private fun showCredentialDetails(item: OathCredentialWithCode) {

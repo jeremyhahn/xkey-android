@@ -6,12 +6,19 @@
 
 package com.automatethethings.xkey.ui
 
-/** Milliseconds on a clock that never goes back (not wall time). */
+import android.os.SystemClock
+
+/**
+ * Milliseconds on a clock that never goes back (not wall time) and keeps
+ * counting in deep sleep, as an OTP's or approval's validity does. This is
+ * the one clock for user-visible expiry: never System.nanoTime() or
+ * SystemClock.uptimeMillis(), which stop while the device sleeps.
+ */
 fun interface MonotonicClock {
     fun nowMillis(): Long
 
     companion object {
-        val SYSTEM = MonotonicClock { System.nanoTime() / 1_000_000 }
+        val SYSTEM = MonotonicClock { SystemClock.elapsedRealtimeNanos() / 1_000_000 }
     }
 }
 
