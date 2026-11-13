@@ -20,6 +20,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
+import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -84,27 +85,48 @@ class UsbHsmSettingsRepository internal constructor(
     /**
      * Enable or disable native USB accessory mode.
      *
+     * A change is audited as setting `nativeUsb`; writing the stored value is not.
+     *
      * @param enabled True to enable native USB, false to disable.
      */
     suspend fun setNativeUsbEnabled(enabled: Boolean) {
-        dataStore.edit { preferences ->
-            preferences[KEY_NATIVE_USB_ENABLED] = enabled
-        }
+        setAudited(KEY_NATIVE_USB_ENABLED, AUDIT_NATIVE_USB, enabled)
     }
 
     /**
      * Enable or disable the TCP pairing server (loopback :8444).
      *
+     * A change is audited as setting `tcpPairing`; writing the stored value is not.
+     *
      * @param enabled True to enable the TCP server, false to disable.
      */
     suspend fun setTcpHsmEnabled(enabled: Boolean) {
+        setAudited(KEY_TCP_HSM_ENABLED, AUDIT_TCP_PAIRING, enabled)
+    }
+
+    /**
+     * Stores [enabled] under [key] and, when it differs from the stored value,
+     * records the change: either toggle opens a path to the pairing responder.
+     */
+    private suspend fun setAudited(key: Preferences.Key<Boolean>, settingName: String, enabled: Boolean) {
+        var oldValue = false
         dataStore.edit { preferences ->
-            preferences[KEY_TCP_HSM_ENABLED] = enabled
+            oldValue = preferences[key] ?: false
+            preferences[key] = enabled
+        }
+        if (oldValue != enabled) {
+            AuditLogger.logSettingsChanged(
+                settingName = settingName,
+                oldValue = oldValue.toString(),
+                newValue = enabled.toString()
+            )
         }
     }
 
     private companion object {
         val KEY_NATIVE_USB_ENABLED = booleanPreferencesKey("native_usb_enabled")
         val KEY_TCP_HSM_ENABLED = booleanPreferencesKey("tcp_hsm_enabled")
+        const val AUDIT_NATIVE_USB = "nativeUsb"
+        const val AUDIT_TCP_PAIRING = "tcpPairing"
     }
 }
