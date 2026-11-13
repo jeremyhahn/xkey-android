@@ -1707,17 +1707,17 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val hmacParams = LocalHMACParams.fromJson(params)
+        val caller = auditCaller()
 
         // Log the HMAC request; the MAC and the data stay out of it.
-        suspend fun logHmacRequest(keyType: String, algorithm: String?, durationMs: Long) {
-            val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        fun logHmacRequest(keyType: String, algorithm: String?, durationMs: Long) {
             AuditLogger.logHmacRequest(
                 keyId = hmacParams.keyId,
                 keyLabel = hmacParams.keyId,
                 keyType = keyType,
                 algorithm = algorithm,
-                deviceId = connectedDevicePublicKeyHex,
-                deviceName = deviceInfo?.deviceName,
+                deviceId = caller.peerPublicKeyHex,
+                deviceName = caller.deviceName,
                 success = true,
                 durationMs = durationMs
             )
@@ -1767,6 +1767,7 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val ecdhParams = LocalECDHParams.fromJson(params)
+        val caller = auditCaller()
         val startTime = System.currentTimeMillis()
         val sharedSecret = keystoreManager.performECDH(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
@@ -1776,14 +1777,13 @@ class RequestHandler(
         keyDao.recordUsage(ecdhParams.keyId)
 
         // Log the key agreement; the shared secret and peer key stay out of it.
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logKeyDerivationRequest(
             keyId = ecdhParams.keyId,
             keyLabel = ecdhParams.keyId,
             keyType = "agreement",
             algorithm = "ECDH",
-            deviceId = connectedDevicePublicKeyHex,
-            deviceName = deviceInfo?.deviceName,
+            deviceId = caller.peerPublicKeyHex,
+            deviceName = caller.deviceName,
             success = true,
             durationMs = durationMs
         )
@@ -1792,6 +1792,26 @@ class RequestHandler(
             sharedSecret = Base64.getEncoder().encodeToString(sharedSecret)
         )
         return Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The requesting peer an audit entry names, resolved once per request.
+     *
+     * @property peerPublicKeyHex the peer's static key hex, or null when unknown
+     * @property deviceName its paired-device name, when it is paired
+     */
+    private class AuditCaller(val peerPublicKeyHex: String?, val deviceName: String?)
+
+    /**
+     * Resolves the peer of the session this request arrived on, see
+     * [attestingPeerPublicKeyHex], and its paired-device name in one snapshot.
+     * Audit entries take the device from here, never from the handler-wide
+     * connected device: every confirmed BLE, USB or TCP connection overwrites
+     * that one, so it can name another desktop, or none after a disconnect.
+     */
+    private suspend fun auditCaller(): AuditCaller {
+        val peer = attestingPeerPublicKeyHex()
+        return AuditCaller(peer, peer?.let { pairedDeviceRepository?.getDevice(it) }?.deviceName)
     }
 
     /**
