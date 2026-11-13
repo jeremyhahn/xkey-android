@@ -225,16 +225,53 @@ data class PairedDeviceData(
     }
 }
 
+/** The result of [PairedDeviceRepository.lookupDevice]: a read failure is never an absent record. */
+sealed interface DeviceLookup {
+    data class Paired(val device: PairedDeviceData) : DeviceLookup
+    data object NotPaired : DeviceLookup
+    data class Unreadable(val cause: Exception) : DeviceLookup
+}
+
 class PairedDeviceRepository internal constructor(private val prefs: SharedPreferences) {
 
     constructor(context: Context) : this(openPrefs(context))
 
+    /**
+     * True only when [publicKeyHex] is read back as paired. A store that
+     * cannot be read knows no device, so every caller (send-time
+     * revalidation, pairing adoption, the attestation biometric skip) stays
+     * gated rather than trusting a peer it cannot check.
+     */
     fun isDeviceKnown(publicKeyHex: String): Boolean {
-        return getAllDevices().any { it.publicKeyHex == publicKeyHex }
+        return lookupDevice(publicKeyHex) is DeviceLookup.Paired
     }
 
-    fun getDevice(publicKeyHex: String): PairedDeviceData? {
-        return getAllDevices().find { it.publicKeyHex == publicKeyHex }
+    /**
+     * The device paired under [publicKeyHex], or null when none is. A store
+     * that cannot be read throws, so null always means "not paired" and never
+     * "could not tell": see [lookupDevice] for a read that never throws.
+     */
+    fun getDevice(publicKeyHex: String): PairedDeviceData? = when (val found = lookupDevice(publicKeyHex)) {
+        is DeviceLookup.Paired -> found.device
+        DeviceLookup.NotPaired -> null
+        is DeviceLookup.Unreadable -> throw found.cause
+    }
+
+    /**
+     * The one read of a single device: [DeviceLookup.Paired],
+     * [DeviceLookup.NotPaired], or [DeviceLookup.Unreadable] when the
+     * encrypted prefs cannot be read (the keystore is unavailable). A security
+     * decision treats Unreadable as a refusal, never as an absent record.
+     */
+    fun lookupDevice(publicKeyHex: String): DeviceLookup {
+        val devices = try {
+            storedDevices()
+        } catch (e: Exception) {
+            return DeviceLookup.Unreadable(e)
+        }
+        return devices.find { it.publicKeyHex == publicKeyHex }
+            ?.let { DeviceLookup.Paired(it) }
+            ?: DeviceLookup.NotPaired
     }
 
     fun addDevice(publicKeyHex: String, deviceName: String, bleAddress: String? = null) {
@@ -307,9 +344,9 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     }
 
     /**
-     * Every paired device, or none when the store cannot be read: the prefs
-     * read itself sits in the try, so encrypted prefs whose keystore is
-     * unavailable read as empty instead of throwing into the caller.
+     * Every paired device, for display: none when the store cannot be read,
+     * so the device list never throws into a screen. Never a security
+     * decision; those go through [lookupDevice].
      */
     fun getAllDevices(): List<PairedDeviceData> = synchronized(storeLock) {
         try {

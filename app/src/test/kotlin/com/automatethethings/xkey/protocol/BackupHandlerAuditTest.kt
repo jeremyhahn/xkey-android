@@ -25,6 +25,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.audit.AuditOperationType
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.settings.PairedDeviceData
+import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coEvery
@@ -126,7 +127,8 @@ class BackupHandlerAuditTest {
         val device = mockk<PairedDeviceData>(relaxed = true)
         every { device.deviceName } returns deviceName
         repository = mockk(relaxed = true)
-        every { repository.getDevice(deviceKeyHex) } returns device
+        every { repository.lookupDevice(any()) } returns DeviceLookup.NotPaired
+        every { repository.lookupDevice(deviceKeyHex) } returns DeviceLookup.Paired(device)
 
         handler = RequestHandler(
             context = context,
@@ -244,8 +246,8 @@ class BackupHandlerAuditTest {
         every { deviceA.deviceName } returns "Desktop A"
         val deviceB = mockk<PairedDeviceData>(relaxed = true)
         every { deviceB.deviceName } returns "Desktop B"
-        every { repository.getDevice(keyA) } returns deviceA
-        every { repository.getDevice(keyB) } returns deviceB
+        every { repository.lookupDevice(keyA) } returns DeviceLookup.Paired(deviceA)
+        every { repository.lookupDevice(keyB) } returns DeviceLookup.Paired(deviceB)
 
         val bleA = mockk<SessionBindingProvider>(relaxed = true)
         // B (USB) is the connection made last.

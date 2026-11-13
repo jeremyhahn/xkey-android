@@ -29,6 +29,7 @@ import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.ContactDao
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -154,8 +155,10 @@ class KeyShareAuditTest {
             mockk<NotificationManager>(relaxed = true)
 
         pairedDevices = mockk(relaxed = true)
-        every { pairedDevices.getDevice(PEER) } returns PairedDeviceData(PEER, PEER_NAME, 0L)
-        every { pairedDevices.getDevice(USB_PEER) } returns PairedDeviceData(USB_PEER, USB_PEER_NAME, 0L)
+        every { pairedDevices.lookupDevice(any()) } returns DeviceLookup.NotPaired
+        every { pairedDevices.lookupDevice(PEER) } returns DeviceLookup.Paired(PairedDeviceData(PEER, PEER_NAME, 0L))
+        every { pairedDevices.lookupDevice(USB_PEER) } returns
+            DeviceLookup.Paired(PairedDeviceData(USB_PEER, USB_PEER_NAME, 0L))
 
         keystoreManager = mockk(relaxed = true)
         every { keystoreManager.getPublicKeyPEM(any()) } returns null
@@ -235,7 +238,8 @@ class KeyShareAuditTest {
      */
     @Test
     fun anUnreadablePairedDeviceStoreStillRecordsEveryTransfer() = runTest {
-        every { pairedDevices.getDevice(any()) } throws SecurityException("keystore unavailable")
+        every { pairedDevices.lookupDevice(any()) } returns
+            DeviceLookup.Unreadable(SecurityException("keystore unavailable"))
         givenSoftwareKey(exportable = true, shareable = true)
 
         success(served(sharePublicKey()))
@@ -264,8 +268,9 @@ class KeyShareAuditTest {
      */
     @Test
     fun aStoreFailingAfterAKeyUseStillRecordsIt() = runTest {
-        every { pairedDevices.getDevice(any()) } returns
-            PairedDeviceData(PEER, PEER_NAME, 0L) andThenThrows SecurityException("keystore unavailable")
+        every { pairedDevices.lookupDevice(any()) } returns
+            DeviceLookup.Paired(PairedDeviceData(PEER, PEER_NAME, 0L)) andThen
+            DeviceLookup.Unreadable(SecurityException("keystore unavailable"))
         coEvery { keystoreManager.symmetricEncrypt(KEY_ID, any(), any()) } returns ByteArray(16)
 
         success(served(keyUse(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, "plaintext")))
@@ -663,15 +668,24 @@ class KeyShareAuditTest {
         val memberFun = Regex("^\\s*(?:(?:private|internal|public|override) )*(?:suspend )?fun (\\w+)")
         fun nameOf(chunk: String) = memberFun.find(chunk)?.groupValues?.get(1)
 
-        // The attestation policy reads the store to decide, never to record.
+        // One device read, lookupDevice, which keeps "unreadable" apart from
+        // "not paired": the attestation policy reads it to decide (and fails
+        // closed), the audit name best-effort. Nothing reads getDevice, whose
+        // null cannot say which.
+        assertFalse("the handler never reads getDevice", ".getDevice(" in source)
         assertEquals(
             setOf("auditPeerName", "isDeviceAttestationCurrent"),
-            members.filter { "pairedDeviceRepository?.getDevice(" in it }.mapNotNull { nameOf(it) }.toSet()
+            members.filter { ".lookupDevice(" in it }.mapNotNull { nameOf(it) }.toSet()
         )
         val lookup = members.single { nameOf(it) == "auditPeerName" }
         assertTrue("auditPeerName catches a failed lookup", "catch (e: Exception)" in lookup)
         val attestation = members.single { nameOf(it) == "isDeviceAttestationCurrent" }
         assertFalse("the attestation policy records nothing", "AuditLogger.log" in attestation)
+        assertTrue(
+            "the attestation policy refuses an unreadable store",
+            Regex("is DeviceLookup\\.Unreadable\\) \\{[^}]*return false", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(attestation)
+        )
 
         val allowed = Regex("(?:auditPeerName\\(\\w+\\)|peerName|peer\\?\\.deviceName|Build\\.MODEL|deviceName)\\)*")
         val auditing = members.filter { "AuditLogger.log" in it }

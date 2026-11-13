@@ -52,6 +52,7 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricAuthMode
 import com.automatethethings.xkey.settings.BiometricSettingsData
+import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -1105,11 +1106,21 @@ class RequestHandler(
      * is one, see [attestingPeerPublicKeyHex].
      *
      * @param forKeyUse True if checking for key use, false for key attestation.
-     * @return True if attestation is current or not required, false if attestation is required but expired.
+     * A paired-device store that cannot be read fails closed: the peer's
+     * settings may require an attestation the phone cannot check.
+     *
+     * @return True if attestation is current or not required, false if attestation is required but expired
+     *   or the peer's record cannot be read.
      */
     private suspend fun isDeviceAttestationCurrent(forKeyUse: Boolean): Boolean {
         val publicKeyHex = attestingPeerPublicKeyHex() ?: return true  // Unknown device, allow
-        val device = pairedDeviceRepository?.getDevice(publicKeyHex) ?: return true  // Not in repo, allow
+        val repo = pairedDeviceRepository ?: return true
+        val found = repo.lookupDevice(publicKeyHex)
+        if (found is DeviceLookup.Unreadable) {
+            Log.w(TAG, "Paired-device store unreadable; refusing until attestation can be checked", found.cause)
+            return false
+        }
+        val device = (found as? DeviceLookup.Paired)?.device ?: return true  // Not in repo, no device policy
 
         val requiresAttestation = if (forKeyUse) {
             device.requireAttestationForKeyUse
@@ -3607,12 +3618,20 @@ class RequestHandler(
     /**
      * [peerId]'s paired name for an audit record, or null when it has none or
      * the store cannot be read. Every audit record names its peer through
-     * here: the lookup never throws, so a store that cannot be read (encrypted
-     * prefs without their keystore) never suppresses the record.
+     * here, and it is the one paired-device read that is best-effort: it
+     * never throws, so a store that cannot be read (encrypted prefs without
+     * their keystore) never suppresses the record.
      */
     private fun auditPeerName(peerId: String?): String? = peerId?.let {
         try {
-            pairedDeviceRepository?.getDevice(it)?.deviceName
+            when (val found = pairedDeviceRepository?.lookupDevice(it)) {
+                is DeviceLookup.Paired -> found.device.deviceName
+                is DeviceLookup.Unreadable -> {
+                    Log.w(TAG, "paired device name unavailable for the audit: ${found.cause.javaClass.simpleName}")
+                    null
+                }
+                else -> null
+            }
         } catch (e: Exception) {
             Log.w(TAG, "paired device name unavailable for the audit: ${e.javaClass.simpleName}")
             null

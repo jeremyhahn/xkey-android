@@ -6,15 +6,16 @@ import io.mockk.mockk
 import io.mockk.verify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * A paired-device store whose encrypted prefs cannot be read (the keystore
- * is unavailable) reads as empty: the failure never escapes into a caller
- * such as an audit record. An update still refuses it, so the empty read is
- * never written back over every pairing.
+ * is unavailable) is never taken for a store with no record: the one device
+ * read, lookupDevice, says Unreadable, getDevice throws rather than answer
+ * null, and an update refuses it, so the failed read is never written back
+ * over every pairing. Only the display list reads it as empty.
  */
 class PairedDeviceStoreReadTest {
 
@@ -23,12 +24,22 @@ class PairedDeviceStoreReadTest {
     }
 
     @Test
-    fun anUnreadableStoreReadsAsNoDevices() {
+    fun anUnreadableStoreIsNeverReadAsNoRecord() {
         val repo = PairedDeviceRepository(unreadable)
 
+        assertTrue(repo.lookupDevice(PEER) is DeviceLookup.Unreadable)
+        assertThrows(SecurityException::class.java) { repo.getDevice(PEER) }
+        assertFalse("an unreadable store confirms no peer", repo.isDeviceKnown(PEER))
         assertEquals(emptyList<PairedDeviceData>(), repo.getAllDevices())
-        assertNull(repo.getDevice(PEER))
-        assertFalse(repo.isDeviceKnown(PEER))
+    }
+
+    @Test
+    fun aReadableStoreWithoutThePeerIsNotPaired() {
+        val empty = mockk<SharedPreferences>(relaxed = true).also {
+            every { it.getString(any(), any()) } returns null
+        }
+
+        assertEquals(DeviceLookup.NotPaired, PairedDeviceRepository(empty).lookupDevice(PEER))
     }
 
     @Test
