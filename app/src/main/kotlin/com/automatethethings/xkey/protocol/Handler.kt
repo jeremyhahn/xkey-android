@@ -2748,7 +2748,7 @@ class RequestHandler(
         val listParams = LocalListFido2CredentialsParams.fromJson(params)
 
         // Get connected device's public key for per-key policy checks
-        val peerPublicKeyHex = connectedDevicePublicKeyHex
+        val peerPublicKeyHex = callerPeerPublicKeyHex()
 
         // Query all FIDO2 credentials for this rpId
         val allEntities = keyDao.getFido2ByRpId(listParams.rpId)
@@ -2840,7 +2840,7 @@ class RequestHandler(
         }
 
         // Check per-key sharing policy
-        val peerPublicKeyHex = connectedDevicePublicKeyHex
+        val peerPublicKeyHex = callerPeerPublicKeyHex()
         if (!canShareKeyWithPeer(entity, peerPublicKeyHex)) {
             throw ProtocolException("Credential is not shareable with this peer", errorCode = ErrorCodes.OPERATION_DENIED)
         }
