@@ -59,14 +59,16 @@ import java.security.MessageDigest
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 class GetCredentialHandler(
     private val context: Context,
-    private val biometricHelper: BiometricHelper? = null
+    private val biometricHelper: BiometricHelper? = null,
+    // Parameters so a unit test can pass fakes: AndroidKeyStore and DataStore
+    // do not exist on the JVM.
+    private val keystoreManager: KeystoreManager = KeystoreManager(context),
+    private val settingsRepository: BiometricSettingsRepository = BiometricSettingsRepository(context)
 ) {
-    private val keystoreManager = KeystoreManager(context)
     private val database = XKeyDatabase.getInstance(context)
     private val credentialDao = database.credentialMetadataDao()
     private val keyDao = database.keyDao()
     private val signCounter = PasskeySignCounter(credentialDao, keyDao)
-    private val settingsRepository = BiometricSettingsRepository(context)
 
     /**
      * Handle the begin phase of credential assertion.
