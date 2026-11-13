@@ -3318,12 +3318,12 @@ class RequestHandler(
             val bytes = decodeBase64Strict("backup_data", dataB64)
             val label = params.optString("label", "")
             val id = com.automatethethings.xkey.backup.BackupStore(context).store("", bytes)
-            val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+            val peer = backupAuditPeer()
             AuditLogger.logBackupCreated(
                 backupId = id,
                 sizeBytes = bytes.size,
-                deviceId = connectedDevicePublicKeyHex,
-                deviceName = deviceInfo?.deviceName
+                deviceId = peer?.publicKeyHex,
+                deviceName = peer?.deviceName
             )
             Response.success(request.id, JSONObject().apply {
                 put("success", true)
@@ -3336,6 +3336,27 @@ class RequestHandler(
             Log.e(TAG, "createBackup failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "createBackup failed: ${e.message}")
         }
+    }
+
+    /** The peer a backup audit entry names: its static key and paired name. */
+    private class BackupAuditPeer(val publicKeyHex: String, val deviceName: String?)
+
+    /**
+     * Resolves the desktop a backup request came from, once per request.
+     *
+     * The peer is the one authenticated on the connection the request arrived
+     * on ([attestingPeerPublicKeyHex]), never the handler-wide last-connected
+     * key, which any other BLE/USB/TCP connection overwrites. The one snapshot
+     * feeds both the entry's device id and its paired-device name. A session
+     * that names no peer logs no device rather than failing the backup.
+     */
+    private suspend fun backupAuditPeer(): BackupAuditPeer? {
+        val key = try {
+            attestingPeerPublicKeyHex()
+        } catch (_: ProtocolException) {
+            null
+        } ?: return null
+        return BackupAuditPeer(key, pairedDeviceRepository?.getDevice(key)?.deviceName)
     }
 
     /**
@@ -3353,12 +3374,12 @@ class RequestHandler(
             val bytes = store.load(id)
                 ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Backup not found: $id")
             val createdAt = com.automatethethings.xkey.crypto.SyncCodec.toRfc3339(store.createdAtMillis(id))
-            val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+            val peer = backupAuditPeer()
             AuditLogger.logBackupRestored(
                 backupId = id,
                 sizeBytes = bytes.size,
-                deviceId = connectedDevicePublicKeyHex,
-                deviceName = deviceInfo?.deviceName
+                deviceId = peer?.publicKeyHex,
+                deviceName = peer?.deviceName
             )
             Response.success(request.id, JSONObject().apply {
                 put("backup_data", java.util.Base64.getEncoder().encodeToString(bytes))
