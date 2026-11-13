@@ -90,7 +90,9 @@ class BleClientTeardownTest {
 
         h.client.disconnect()
 
-        awaitUntil("the link to be torn down") { h.probe.gattConnection == null }
+        // The teardown clears the link before it closes the GATT object, and
+        // the harness signals each close.
+        h.awaitUntil("the link to be torn down") { h.probe.gattConnection == null }
         assertNull("the session must not outlive the link", h.probe.noiseSession)
         assertFalse(h.client.isConnected())
         verify { h.gatt.close() }
@@ -166,15 +168,6 @@ class BleClientTeardownTest {
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
-
-    private fun awaitUntil(message: String, condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
-            if (condition()) return
-            Thread.sleep(10)
-        }
-        throw AssertionError("timed out waiting for: $message")
-    }
 
     private fun randomKey(): ByteArray = ByteArray(32).also { SecureRandom().nextBytes(it) }
 }
