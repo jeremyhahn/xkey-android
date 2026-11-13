@@ -70,7 +70,7 @@ vault is locked.
   or the PEM does not decode; otherwise imported with the `purpose` field as its
   label (`sync` when blank).
 - **OATH:** an entry without an id (or name), secret or `account_name` is
-  skipped; the rest are imported through `OathRepository.importFromUri`, counted
+  skipped; the rest are imported through `OathRepository.importStructured`, counted
   as updated when the id already existed.
 - **Passwords:** `PasswordSync.merge` patches an existing entry in place or adds
   a new personal, non-expiring entry in the default tenant. `PasswordSync.gather`

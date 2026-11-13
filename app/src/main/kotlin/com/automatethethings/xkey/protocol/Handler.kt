@@ -3446,25 +3446,27 @@ class RequestHandler(
 
             val type = credential.optString("type", "totp").lowercase()
             val issuer = credential.optString("issuer", null)
-            // Build an otpauth:// URI and import it (handles Base32 decoding).
-            val uri = buildString {
-                append("otpauth://$type/")
-                if (issuer != null) append("$issuer:")
-                append(accountName)
-                append("?secret=$secret")
-                if (issuer != null) append("&issuer=$issuer")
-                append("&algorithm=${credential.optString("algorithm", "SHA1")}")
-                append("&digits=${credential.optInt("digits", 6)}")
-                append("&period=${credential.optInt("period", 30)}")
-                if (type == "hotp") append("&counter=${credential.optLong("counter", 0)}")
-            }
-            oathRepository.importFromUri(uri)
+            // The issuer and account arrive as separate fields: the structured
+            // import keeps a ':' inside either where it is (#152), as
+            // SyncEngine.mergeOath does. The id it returns is the one the
+            // credential is stored under: the `name` local.oathList reports
+            // and the credential_id oathGenerate/oathRemove accept.
+            val credentialId = oathRepository.importStructured(
+                type = type,
+                issuer = issuer,
+                accountName = accountName,
+                secret = secret,
+                algorithm = credential.optString("algorithm", "SHA1"),
+                digits = credential.optInt("digits", 6),
+                period = credential.optInt("period", 30),
+                counter = credential.optLong("counter", 0)
+            )
 
             AuditLogger.logOathCredentialCreated(name, issuer, accountName, type.uppercase())
 
             val result = JSONObject().apply {
                 put("success", true)
-                put("credential_id", name)
+                put("credential_id", credentialId)
             }
             Response.success(request.id, result)
         } catch (e: Exception) {
