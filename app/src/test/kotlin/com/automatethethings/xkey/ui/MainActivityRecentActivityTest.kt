@@ -16,10 +16,14 @@ package com.automatethethings.xkey.ui
 
 import android.app.Application
 import android.content.Context
+import android.graphics.Rect
 import android.os.Looper
+import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.children
+import androidx.core.widget.NestedScrollView
+import com.google.android.material.bottomnavigation.BottomNavigationView
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -32,6 +36,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -172,13 +178,61 @@ class MainActivityRecentActivityTest {
 
     private fun ago(duration: Duration) = clock.now.minus(duration).toEpochMilli()
 
-    private fun shownRows(scenario: ActivityScenario<MainActivity>): List<String> {
+    /**
+     * The one way these tests read the Recent Activity rows: it opens [tab]
+     * through the bottom navigation, as a user does, scrolls to the Audit Log
+     * card and fails unless the section and every row are on screen with a
+     * size. [alter] runs on the activity after the tab is opened, so a test
+     * can break the screen and see this fail.
+     */
+    private fun shownRows(
+        scenario: ActivityScenario<MainActivity>,
+        tab: Int = R.id.nav_management,
+        alter: (MainActivity) -> Unit = {},
+    ): List<String> {
+        scenario.onActivity { activity ->
+            activity.findViewById<BottomNavigationView>(R.id.bottomNavigation).selectedItemId = tab
+            alter(activity)
+        }
+        idleMainLooper()
+        scenario.onActivity { activity ->
+            val scroll = activity.findViewById<NestedScrollView>(R.id.nestedScrollView)
+            val card = activity.findViewById<View>(R.id.cardAuditLog)
+            val offset = Rect()
+            scroll.offsetDescendantRectToMyCoords(card, offset)
+            scroll.scrollTo(0, offset.top)
+        }
+        idleMainLooper()
         var texts = emptyList<String>()
         scenario.onActivity { activity ->
-            texts = activity.findViewById<LinearLayout>(R.id.layoutRecentActivityRows)
-                .children.map { (it as TextView).text.toString() }.toList()
+            listOf(R.id.containerManagement, R.id.cardAuditLog, R.id.layoutRecentActivity).forEach { id ->
+                assertShown(activity.resources.getResourceEntryName(id), activity.findViewById(id))
+            }
+            val rows = activity.findViewById<LinearLayout>(R.id.layoutRecentActivityRows)
+            assertShown("layoutRecentActivityRows", rows)
+            assertTrue("Recent Activity shows no rows", rows.childCount > 0)
+            texts = rows.children.map { row ->
+                val text = (row as TextView).text.toString()
+                assertShown("row \"$text\"", row)
+                text
+            }.toList()
         }
         return texts
+    }
+
+    private fun assertShown(name: String, view: View) {
+        assertTrue("$name is not shown", view.isShown)
+        assertTrue("$name has no size (${view.width}x${view.height})", view.width > 0 && view.height > 0)
+    }
+
+    /** Asserts that [shownRows] refuses to read rows the user cannot see. */
+    private fun assertNotShown(
+        scenario: ActivityScenario<MainActivity>,
+        tab: Int = R.id.nav_management,
+        alter: (MainActivity) -> Unit = {},
+    ) {
+        val error = assertThrows(AssertionError::class.java) { shownRows(scenario, tab, alter) }
+        assertTrue(error.message, error.message.orEmpty().contains("is not shown"))
     }
 
     private fun idleMainLooper(duration: Duration = Duration.ZERO) {
@@ -298,6 +352,36 @@ class MainActivityRecentActivityTest {
                 shownRows(scenario)
             )
             shownRows(scenario).forEach { text -> assertFalse(text, text.contains(keyId)) }
+        }
+    }
+
+    @Test
+    fun `rows the user cannot see never pass as shown`() {
+        runBlocking {
+            database.auditLogDao().insertAll(
+                listOf(
+                    AuditLogEntity(
+                        timestamp = ago(Duration.ofMinutes(5)),
+                        operationType = AuditOperationType.SIGNING_REQUEST,
+                        keyId = null,
+                        keyLabel = null,
+                        success = true
+                    )
+                )
+            )
+        }
+
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            idleMainLooper()
+
+            // On the Manage tab the row is on screen.
+            assertEquals(context.getString(R.string.audit_log_op_signing), shownRows(scenario).first())
+            // The Dashboard tab hides the Audit Log card's container.
+            assertNotShown(scenario, tab = R.id.nav_dashboard)
+            // A hidden Recent Activity section fails even on the Manage tab.
+            assertNotShown(scenario) { activity ->
+                activity.findViewById<View>(R.id.layoutRecentActivity).visibility = View.GONE
+            }
         }
     }
 }

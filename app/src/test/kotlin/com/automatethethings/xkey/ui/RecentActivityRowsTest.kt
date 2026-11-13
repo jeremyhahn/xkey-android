@@ -80,6 +80,11 @@ class RecentActivityRowsTest {
         assertEquals(R.string.audit_log_op_signing, AuditOperationLabels.labelRes(AuditOperationType.SIGNING_REQUEST))
         assertEquals(R.string.audit_log_op_fido2, AuditOperationLabels.labelRes(AuditOperationType.FIDO2_AUTHENTICATION))
         assertEquals(R.string.audit_log_op_piv_key_deleted, AuditOperationLabels.labelRes(AuditOperationType.PIV_KEY_DELETED))
+        assertEquals(R.string.audit_log_op_oath_sync, AuditOperationLabels.labelRes(AuditOperationType.OATH_SYNC_PERFORMED))
+        assertEquals(
+            R.string.audit_log_op_password_sync,
+            AuditOperationLabels.labelRes(AuditOperationType.PASSWORD_SYNC_PERFORMED)
+        )
     }
 
     @Test
@@ -87,6 +92,12 @@ class RecentActivityRowsTest {
         AuditOperationType.entries.forEach {
             assertNotEquals("no label for $it", 0, AuditOperationLabels.labelRes(it))
         }
+    }
+
+    @Test
+    fun `no two operation types share a label`() {
+        val byLabel = AuditOperationType.entries.groupBy { AuditOperationLabels.labelRes(it) }
+        assertEquals(emptyMap<Int, List<AuditOperationType>>(), byLabel.filterValues { it.size > 1 })
     }
 
     @Test
