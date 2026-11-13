@@ -37,16 +37,22 @@ import java.util.concurrent.TimeUnit
  * [SessionAuthManager.invalidateAuth] (drops it), and the zero/negative window
  * boundaries.
  *
- * The class is pure JVM state (atomics + a volatile flag), so no Android
- * stubbing is needed.
+ * The class is pure JVM state (atomics + a volatile flag). Its default clock is
+ * android.jar's `SystemClock.elapsedRealtime`, which throws in plain JVM
+ * tests, so every test drives a fake monotonic clock through [now].
  */
 class SessionAuthManagerTest {
 
     private lateinit var manager: SessionAuthManager
 
+    /** The fake clock's reading, in milliseconds. */
+    @Volatile
+    private var now: Long = BOOT_PLUS_AN_HOUR_MS
+
     @Before
     fun setUp() {
-        manager = SessionAuthManager()
+        now = BOOT_PLUS_AN_HOUR_MS
+        manager = SessionAuthManager(clock = { now })
     }
 
     private fun settings(
@@ -139,6 +145,77 @@ class SessionAuthManagerTest {
 
         manager.invalidateAuth()
 
+        assertTrue(manager.isBiometricRequired(timeWindow, "device-a"))
+    }
+
+    @Test
+    fun `time window stays open until one millisecond before it ends`() {
+        val timeWindow = settings(BiometricAuthMode.TIME_WINDOW)
+        manager.recordAuthentication("device-a")
+
+        now += WINDOW_MS - 1
+
+        assertFalse(manager.isBiometricRequired(timeWindow, "device-a"))
+    }
+
+    @Test
+    fun `time window requires biometric at and after its end`() {
+        val timeWindow = settings(BiometricAuthMode.TIME_WINDOW)
+        manager.recordAuthentication("device-a")
+
+        now += WINDOW_MS
+        assertTrue("the window is half-open", manager.isBiometricRequired(timeWindow, "device-a"))
+
+        now += 1
+        assertTrue(manager.isBiometricRequired(timeWindow, "device-a"))
+    }
+
+    @Test
+    fun `a clock reading below the recorded authentication counts as expired`() {
+        val timeWindow = settings(BiometricAuthMode.TIME_WINDOW)
+        manager.recordAuthentication("device-a")
+
+        now -= 1
+
+        assertTrue(
+            "a clock that went backwards must not keep the window open",
+            manager.isBiometricRequired(timeWindow, "device-a")
+        )
+    }
+
+    @Test
+    fun `time window requires biometric just after boot before any authentication`() {
+        now = 1_000L
+
+        assertTrue(
+            "never authenticated is not a timestamp at zero",
+            manager.isBiometricRequired(settings(BiometricAuthMode.TIME_WINDOW), "device-a")
+        )
+    }
+
+    @Test
+    fun `time window requires biometric just after boot after invalidateAuth`() {
+        val timeWindow = settings(BiometricAuthMode.TIME_WINDOW)
+        now = 1_000L
+        manager.recordAuthentication("device-a")
+
+        manager.invalidateAuth()
+
+        assertTrue(manager.isBiometricRequired(timeWindow, "device-a"))
+    }
+
+    @Test
+    fun `recordAuthentication after invalidateAuth opens a fresh window`() {
+        val timeWindow = settings(BiometricAuthMode.TIME_WINDOW)
+        manager.recordAuthentication("device-a")
+        manager.invalidateAuth()
+        now += WINDOW_MS
+
+        manager.recordAuthentication("device-a")
+
+        now += WINDOW_MS - 1
+        assertFalse(manager.isBiometricRequired(timeWindow, "device-a"))
+        now += 1
         assertTrue(manager.isBiometricRequired(timeWindow, "device-a"))
     }
 
@@ -250,5 +327,11 @@ class SessionAuthManagerTest {
     private companion object {
         const val THREADS = 8
         const val ITERATIONS = 500
+
+        /** A fake elapsed-realtime reading well past any window length. */
+        const val BOOT_PLUS_AN_HOUR_MS = 3_600_000L
+
+        /** The default [settings] window in milliseconds. */
+        val WINDOW_MS = AuthTimeWindow.MINUTES_10.seconds * 1000L
     }
 }

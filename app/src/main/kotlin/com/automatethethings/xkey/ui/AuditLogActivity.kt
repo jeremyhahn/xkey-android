@@ -1077,6 +1077,7 @@ class AuditLogActivity : AppCompatActivity() {
         AuditOperationType.OATH_CREDENTIAL_DELETED -> getString(R.string.audit_log_op_oath_deleted)
         AuditOperationType.OATH_CODE_GENERATED -> getString(R.string.audit_log_op_oath_code)
         AuditOperationType.OATH_SYNC_PERFORMED -> getString(R.string.audit_log_op_oath_sync)
+        AuditOperationType.PASSWORD_SYNC_PERFORMED -> getString(R.string.audit_log_op_password_sync)
         AuditOperationType.COSIGN_INITIATED -> getString(R.string.audit_log_op_cosign_initiated)
         AuditOperationType.COSIGN_RECEIVED -> getString(R.string.audit_log_op_cosign_received)
         AuditOperationType.PIN_SO_SET -> getString(R.string.audit_log_op_pin_so_set)
@@ -1091,6 +1092,8 @@ class AuditLogActivity : AppCompatActivity() {
         AuditOperationType.PIV_CERT_IMPORTED -> getString(R.string.audit_log_op_piv_cert_imported)
         AuditOperationType.PIV_SIGN_REQUEST -> getString(R.string.audit_log_op_piv_sign_request)
         AuditOperationType.PIV_KEY_DELETED -> getString(R.string.audit_log_op_piv_key_deleted)
+        AuditOperationType.BACKUP_CREATED -> getString(R.string.audit_log_op_backup_created)
+        AuditOperationType.BACKUP_RESTORED -> getString(R.string.audit_log_op_backup_restored)
     }
 
     private fun getOperationTypeColor(type: AuditOperationType): Pair<Int, Int> = when (type) {

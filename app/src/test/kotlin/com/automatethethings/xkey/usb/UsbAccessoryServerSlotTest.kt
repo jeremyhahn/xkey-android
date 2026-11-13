@@ -197,7 +197,7 @@ class UsbAccessoryServerSlotTest {
 
     @Test
     fun `a per-session approval does not carry over a detach and reattach`() {
-        val auth = SessionAuthManager()
+        val auth = SessionAuthManager(clock = { 0L })
         val perSession = BiometricSettingsData(
             uvPolicy = UserVerificationPolicy.REQUIRED,
             authMode = BiometricAuthMode.PER_SESSION,
@@ -372,7 +372,7 @@ class UsbAccessoryServerSlotTest {
     fun `the slot's states follow each new server, not the first one observed`() {
         // Ready while the slot's current server is in its handshake: the key
         // load these sessions wait in.
-        val tracker = DesktopSessionTracker {
+        val tracker = DesktopSessionTracker.ofTransport {
             slot.current()?.takeIf { it.first.state.value is UsbAccessoryState.Handshaking }
         }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

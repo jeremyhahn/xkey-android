@@ -153,7 +153,7 @@ class UsbAttachPathTest {
     @Test
     fun `an attach paused after its open does not take the observer from the replacement`() {
         // Ready while the slot's current server is in its handshake.
-        val tracker = DesktopSessionTracker {
+        val tracker = DesktopSessionTracker.ofTransport {
             slot.current()?.takeIf { it.first.state.value is UsbAccessoryState.Handshaking }
         }
         val aOpened = CompletableDeferred<UsbAccessoryServer>()

@@ -1225,20 +1225,89 @@ object AuditLogger {
         )
     }
 
-    fun logOathSyncPerformed(deviceId: String, deviceName: String, count: Int) {
+    /** A sync the desktop started (`local.sync*`). */
+    const val SYNC_INBOUND = "inbound"
+
+    /** A sync the phone started (`remote.sync*`). */
+    const val SYNC_OUTBOUND = "outbound"
+
+    /**
+     * Records one OATH sync with a paired device.
+     *
+     * @param count Credentials sent to the peer (inbound: returned to it;
+     *   outbound: the ones it took).
+     * @param added Credentials the merge added to the phone.
+     * @param updated Credentials the merge updated on the phone.
+     * @param skipped Credentials the merge skipped.
+     */
+    fun logOathSyncPerformed(
+        deviceId: String?,
+        deviceName: String?,
+        count: Int,
+        direction: String = SYNC_INBOUND,
+        added: Int = 0,
+        updated: Int = 0,
+        skipped: Int = 0,
+        success: Boolean = true,
+        errorMessage: String? = null
+    ) {
         val details = JSONObject().apply {
+            put("direction", direction)
             put("credentialCount", count)
+            put("added", added)
+            put("updated", updated)
+            put("skipped", skipped)
         }
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.OATH_SYNC_PERFORMED,
                 deviceId = deviceId,
                 deviceName = deviceName,
-                success = true,
+                success = success,
+                errorMessage = errorMessage,
                 details = details.toString()
             )
         )
     }
+
+    /**
+     * Records one password sync with a paired device. Only counts are
+     * recorded: never a password, site or user name.
+     *
+     * @param count Passwords sent to the peer (inbound: returned to it;
+     *   outbound: the ones it took).
+     */
+    fun logPasswordSyncPerformed(
+        deviceId: String?,
+        deviceName: String?,
+        count: Int,
+        direction: String = SYNC_INBOUND,
+        added: Int = 0,
+        updated: Int = 0,
+        skipped: Int = 0,
+        success: Boolean = true,
+        errorMessage: String? = null
+    ) {
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.PASSWORD_SYNC_PERFORMED,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = passwordSyncDetails(direction, count, added, updated, skipped)
+            )
+        )
+    }
+
+    internal fun passwordSyncDetails(direction: String, count: Int, added: Int, updated: Int, skipped: Int): String =
+        JSONObject().apply {
+            put("direction", direction)
+            put("passwordCount", count)
+            put("added", added)
+            put("updated", updated)
+            put("skipped", skipped)
+        }.toString()
 
     // -------------------------------------------------------------------------
     // Co-Signing Operations
@@ -1344,6 +1413,34 @@ object AuditLogger {
     fun logPivKeyDeleted(slotId: String) {
         val details = JSONObject().apply { put("slotId", slotId) }
         log(AuditLogEntity(operationType = AuditOperationType.PIV_KEY_DELETED, keyId = "piv_$slotId", keyType = "piv", success = true, details = details.toString()))
+    }
+
+    // -------------------------------------------------------------------------
+    // Desktop Backups
+    // -------------------------------------------------------------------------
+
+    /**
+     * Log a backup a paired desktop stored on the phone. Records the id and
+     * size only; the backup bytes never enter the log.
+     */
+    fun logBackupCreated(backupId: String, sizeBytes: Int, deviceId: String?, deviceName: String?) {
+        val details = JSONObject().apply {
+            put("backupId", backupId)
+            put("sizeBytes", sizeBytes)
+        }
+        log(AuditLogEntity(operationType = AuditOperationType.BACKUP_CREATED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
+    }
+
+    /**
+     * Log a stored backup a paired desktop fetched from the phone. Records the
+     * id and size only; the backup bytes never enter the log.
+     */
+    fun logBackupRestored(backupId: String, sizeBytes: Int, deviceId: String?, deviceName: String?) {
+        val details = JSONObject().apply {
+            put("backupId", backupId)
+            put("sizeBytes", sizeBytes)
+        }
+        log(AuditLogEntity(operationType = AuditOperationType.BACKUP_RESTORED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
     }
 
     // -------------------------------------------------------------------------

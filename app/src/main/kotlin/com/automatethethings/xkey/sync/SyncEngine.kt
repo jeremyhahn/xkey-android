@@ -21,7 +21,6 @@ import com.automatethethings.xkey.truststore.TrustStoreRepository
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.net.URLEncoder
 
 /**
  * Single source of truth for bidirectional store synchronization. Owns the
@@ -138,19 +137,16 @@ class SyncEngine(
                 continue
             }
             val existed = db.oathCredentialDao().getByOathId(id) != null
-            val type = obj.optString("type", "totp").lowercase()
-            val issuer = obj.optString("issuer", "").ifBlank { null }
-            val uri = otpauthUri(
-                type = type,
-                issuer = issuer,
+            oathRepo.importStructured(
+                type = obj.optString("type", "totp"),
+                issuer = obj.optString("issuer", "").ifBlank { null },
                 accountName = accountName,
                 secret = secret,
                 algorithm = obj.optString("algorithm", "SHA1"),
                 digits = obj.optInt("digits", 6),
                 period = obj.optInt("period", 30),
-                counter = if (type == "hotp") obj.optLong("counter", 0) else null
+                counter = obj.optLong("counter", 0)
             )
-            oathRepo.importFromUri(uri, structuredLabel = true)
             if (existed) updated++ else added++
         }
         return ItemCounts(added, updated, skipped)
@@ -224,39 +220,3 @@ class SyncEngine(
         const val TAG = "SyncEngine"
     }
 }
-
-/**
- * The `otpauth://` URI ([Key Uri Format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format))
- * that [SyncEngine.mergeOath] hands to `OathRepository.importFromUri` for a
- * synced OATH credential. The issuer and account are percent-encoded
- * (RFC 3986, a space as `%20`) in the label and the `issuer` parameter.
- * [counter] is written for HOTP only (non-null).
- */
-internal fun otpauthUri(
-    type: String,
-    issuer: String?,
-    accountName: String,
-    secret: String,
-    algorithm: String,
-    digits: Int,
-    period: Int,
-    counter: Long?
-): String = buildString {
-    val encodedIssuer = issuer?.let(::percentEncode)
-    append("otpauth://$type/")
-    if (encodedIssuer != null) append("$encodedIssuer:")
-    append(percentEncode(accountName))
-    append("?secret=$secret")
-    if (encodedIssuer != null) append("&issuer=$encodedIssuer")
-    append("&algorithm=$algorithm")
-    append("&digits=$digits")
-    append("&period=$period")
-    if (counter != null) append("&counter=$counter")
-}
-
-/**
- * Uses the charset-name overload: `URLEncoder.encode(String, Charset)` is
- * API 33, above minSdk 28, and throws NoSuchMethodError below it.
- */
-private fun percentEncode(value: String): String =
-    URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")

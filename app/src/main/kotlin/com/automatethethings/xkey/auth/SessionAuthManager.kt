@@ -14,10 +14,11 @@
  */
 package com.automatethethings.xkey.auth
 
+import android.os.SystemClock
 import com.automatethethings.xkey.settings.BiometricAuthMode
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.UserVerificationPolicy
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Manages authentication state across different biometric modes.
@@ -30,8 +31,14 @@ import java.util.concurrent.atomic.AtomicLong
  * - **PER_SESSION**: Biometric required once per connection; each live
  *   connection (USB, BLE, TCP) keeps its own approval (#134)
  *
+ * Clock:
+ * - The TIME_WINDOW window is measured on [clock], by default
+ *   `SystemClock.elapsedRealtime()`: milliseconds since boot, monotonic, and
+ *   unaffected by the user or the network setting the wall clock
+ * - A reading below the recorded authentication counts as expired
+ *
  * Thread Safety:
- * - [lastAuthTime] uses [AtomicLong] for lock-free timestamp updates
+ * - [lastAuthTime] uses [AtomicReference] for lock-free timestamp updates
  * - [authenticatedSessions] is guarded by its own monitor
  *
  * Usage:
@@ -49,18 +56,21 @@ import java.util.concurrent.atomic.AtomicLong
  * authManager.clearSession()
  * ```
  *
+ * @param clock Monotonic milliseconds; tests pass a fake one.
  * @see BiometricSettingsData
  * @see BiometricAuthMode
  */
-class SessionAuthManager {
+class SessionAuthManager(
+    private val clock: () -> Long = SystemClock::elapsedRealtime
+) {
 
     /**
-     * Timestamp (in milliseconds) of the last successful biometric authentication.
+     * [clock] reading (in milliseconds) at the last successful biometric authentication.
      *
      * Used by [BiometricAuthMode.TIME_WINDOW] to determine if the authentication
-     * window has expired. A value of 0 indicates no prior authentication.
+     * window has expired. Null means never authenticated, or invalidated.
      */
-    private val lastAuthTime: AtomicLong = AtomicLong(0L)
+    private val lastAuthTime: AtomicReference<Long?> = AtomicReference(null)
 
     /**
      * The connection ids approved for [BiometricAuthMode.PER_SESSION], oldest
@@ -102,10 +112,12 @@ class SessionAuthManager {
             }
 
             BiometricAuthMode.TIME_WINDOW -> {
-                // Check if the time window has expired
-                val elapsedMs = System.currentTimeMillis() - lastAuthTime.get()
+                // Check if the time window has expired; a clock below the
+                // recorded reading cannot vouch for the window, so it has
+                val authTime = lastAuthTime.get() ?: return true
+                val now = clock()
                 val windowMs = settings.timeWindowSeconds * MILLIS_PER_SECOND
-                elapsedMs >= windowMs
+                now < authTime || now - authTime >= windowMs
             }
 
             BiometricAuthMode.PER_SESSION -> {
@@ -120,13 +132,13 @@ class SessionAuthManager {
      *
      * This method should be called after the user successfully completes
      * biometric verification. It updates:
-     * - [lastAuthTime] to the current timestamp (for TIME_WINDOW mode)
+     * - [lastAuthTime] to the current [clock] reading (for TIME_WINDOW mode)
      * - [authenticatedSessions] to include [sessionId] (for PER_SESSION mode)
      *
      * @param sessionId The id of the connection the user approved, or null.
      */
     fun recordAuthentication(sessionId: String?) {
-        lastAuthTime.set(System.currentTimeMillis())
+        lastAuthTime.set(clock())
         synchronized(authenticatedSessions) {
             val id = key(sessionId)
             authenticatedSessions.remove(id)
@@ -156,7 +168,7 @@ class SessionAuthManager {
      * Invalidates all authentication state, forcing re-authentication.
      *
      * This method clears:
-     * - [lastAuthTime] to 0 (invalidating any TIME_WINDOW grace period)
+     * - [lastAuthTime] to null (invalidating any TIME_WINDOW grace period)
      * - [authenticatedSessions] (requiring PER_SESSION re-auth on every connection)
      *
      * Use cases:
@@ -165,7 +177,7 @@ class SessionAuthManager {
      * - Administrative action to force re-verification
      */
     fun invalidateAuth() {
-        lastAuthTime.set(0L)
+        lastAuthTime.set(null)
         synchronized(authenticatedSessions) { authenticatedSessions.clear() }
     }
 

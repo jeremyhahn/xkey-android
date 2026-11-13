@@ -108,16 +108,16 @@ class PerSessionApprovalReattachTest {
             ByteArray(64) { 7 }
         }
         biometricLauncher = mockk(relaxed = true)
-        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any()) } answers {
+        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any(), any()) } answers {
             keystoreWindowOpen = true
-            mockk(relaxed = true)
+            Unit
         }
 
         handler = RequestHandler(
             context = context,
             keystoreManager = keystore,
             biometricLauncher = biometricLauncher,
-            sessionAuthManager = SessionAuthManager(),
+            sessionAuthManager = SessionAuthManager(clock = { 0L }),
         )
         handler.updateSettings(
             BiometricSettingsData(
@@ -151,10 +151,10 @@ class PerSessionApprovalReattachTest {
     @Test
     fun `a prompt pending on another transport during a reattach approves only its own connection`() = runTest {
         val bleApproval = CompletableDeferred<Unit>()
-        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any()) } coAnswers {
+        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any(), any()) } coAnswers {
             bleApproval.await()
             keystoreWindowOpen = true
-            mockk(relaxed = true)
+            Unit
         }
         attachUsb(USB_FIRST)
 
@@ -233,10 +233,10 @@ class PerSessionApprovalReattachTest {
     @Test
     fun `a cancelled BLE prompt between two USB requests keeps the USB approval`() = runTest {
         var cancel = false
-        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any()) } answers {
+        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any(), any()) } answers {
             if (cancel) throw UserCancelledException()
             keystoreWindowOpen = true
-            mockk(relaxed = true)
+            Unit
         }
         attachUsb(USB_FIRST)
         sign(USB_FIRST)
@@ -299,7 +299,7 @@ class PerSessionApprovalReattachTest {
 
     private fun assertPrompts(expected: Int) {
         coVerify(exactly = expected) {
-            biometricLauncher.requestAuthentication(any(), any(), any(), any())
+            biometricLauncher.requestAuthentication(any(), any(), any(), any(), any())
         }
     }
 }

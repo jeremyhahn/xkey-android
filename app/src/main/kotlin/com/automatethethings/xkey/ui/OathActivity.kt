@@ -14,12 +14,10 @@
  */
 package com.automatethethings.xkey.ui
 
-import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -47,7 +45,6 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.oath.OathCredentialWithCode
-import com.automatethethings.xkey.oath.manualOtpauthUri
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -100,25 +97,12 @@ class OathActivity : AppCompatActivity() {
     private val qrScanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            val uri = result.data?.getStringExtra(QrScannerActivity.EXTRA_SCANNED_URI)
-            if (uri != null && uri.startsWith("otpauth://")) {
-                importScannedUri(uri)
-            }
-        }
-    }
-
-    private val cameraPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            launchQrScanner()
-        } else {
-            Snackbar.make(
-                rootLayout,
-                R.string.error_permission_denied,
-                Snackbar.LENGTH_SHORT
-            ).show()
+        // The scanner asks for CAMERA itself; a denial comes back as a result.
+        when (val scan = QrScanResult.from(result)) {
+            is QrScanResult.Scanned -> if (scan.value.startsWith("otpauth://")) importScannedUri(scan.value)
+            QrScanResult.CameraDenied ->
+                Snackbar.make(rootLayout, R.string.qr_camera_denied, Snackbar.LENGTH_LONG).show()
+            QrScanResult.Cancelled -> Unit
         }
     }
 
@@ -793,21 +777,11 @@ class OathActivity : AppCompatActivity() {
                 )
             ) { _, which ->
                 when (which) {
-                    0 -> requestCameraAndScan()
+                    0 -> launchQrScanner()
                     1 -> showManualEntryDialog()
                 }
             }
             .show()
-    }
-
-    private fun requestCameraAndScan() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED
-        ) {
-            launchQrScanner()
-        } else {
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
     }
 
     private fun launchQrScanner() {
@@ -834,17 +808,14 @@ class OathActivity : AppCompatActivity() {
         AddOathDialog.show(this) { issuer, accountName, secret, type, algorithm, digits, period ->
             lifecycleScope.launch {
                 try {
-                    repository.importFromUri(
-                        buildOtpauthUri(
-                            issuer = issuer,
-                            accountName = accountName,
-                            secret = secret,
-                            type = type,
-                            algorithm = algorithm,
-                            digits = digits,
-                            period = period
-                        ),
-                        structuredLabel = true
+                    repository.importStructured(
+                        type = type,
+                        issuer = issuer,
+                        accountName = accountName,
+                        secret = secret,
+                        algorithm = algorithm,
+                        digits = digits,
+                        period = period
                     )
                     Snackbar.make(
                         rootLayout,
@@ -857,21 +828,4 @@ class OathActivity : AppCompatActivity() {
             }
         }
     }
-
-    /**
-     * Assembles the `otpauth://` URI the importer parses, from hand-entered
-     * values, with [manualOtpauthUri]: every value is percent-encoded, so an
-     * issuer or account containing `&`, `?`, `#`, `=` or `:` is not read back
-     * as URI structure, and the label's issuer and account are joined by the
-     * literal `:` the importer splits on (#156).
-     */
-    private fun buildOtpauthUri(
-        issuer: String?,
-        accountName: String,
-        secret: String,
-        type: String,
-        algorithm: String,
-        digits: Int,
-        period: Int
-    ): String = manualOtpauthUri(issuer, accountName, secret, type, algorithm, digits, period)
 }

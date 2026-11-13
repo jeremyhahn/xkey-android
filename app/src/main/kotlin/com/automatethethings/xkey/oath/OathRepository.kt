@@ -17,6 +17,7 @@ package com.automatethethings.xkey.oath
 import android.net.Uri
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import java.net.URLEncoder
 import java.util.UUID
 
 /**
@@ -35,6 +36,45 @@ data class OathCredentialWithCode(
     val code: String,
     val secondsRemaining: Int
 )
+
+/**
+ * The `otpauth://` URI ([Key Uri Format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format))
+ * that [OathRepository.importStructured] builds from separate fields. Every
+ * value is percent-encoded (RFC 3986, a space as `%20`); the issuer and the
+ * account are joined by a literal `:`. [counter] is written when non-null.
+ *
+ * Read it back only through [OathRepository.importStructured]: the
+ * external-import parser behind [OathRepository.importFromUri] also splits
+ * an issuerless label on an encoded `%3A`.
+ */
+internal fun otpauthUri(
+    type: String,
+    issuer: String?,
+    accountName: String,
+    secret: String,
+    algorithm: String,
+    digits: Int,
+    period: Int,
+    counter: Long?
+): String = buildString {
+    val encodedIssuer = issuer?.let(::percentEncode)
+    append("otpauth://$type/")
+    if (encodedIssuer != null) append("$encodedIssuer:")
+    append(percentEncode(accountName))
+    append("?secret=${percentEncode(secret)}")
+    if (encodedIssuer != null) append("&issuer=$encodedIssuer")
+    append("&algorithm=${percentEncode(algorithm)}")
+    append("&digits=$digits")
+    append("&period=$period")
+    if (counter != null) append("&counter=$counter")
+}
+
+/**
+ * Uses the charset-name overload: `URLEncoder.encode(String, Charset)` is
+ * API 33, above minSdk 28, and throws NoSuchMethodError below it.
+ */
+private fun percentEncode(value: String): String =
+    URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
 /**
  * High-level API for managing OATH (TOTP/HOTP) credentials.
@@ -148,17 +188,57 @@ class OathRepository(
      * The `secret` query parameter is required and must be Base32-encoded (RFC 4648).
      * All other query parameters are optional with sensible defaults.
      *
+     * This is the path for a URI that comes from outside the app (a scanned
+     * QR code): its label also splits on an encoded `%3A` ([parseOathLabel]).
+     * A credential the app holds as separate issuer and account fields goes
+     * through [importStructured] instead, never through a URI built here.
+     *
      * @param uri The `otpauth://` URI string to parse.
-     * @param structuredLabel True when the app built [uri] from separate
-     *        issuer and account fields (manual entry, sync): only a literal
-     *        `:` then separates the label ([parseStructuredOathLabel]).
-     *        False for an external import, whose label also splits on an
-     *        encoded `%3A` ([parseOathLabel]).
      * @return The generated unique oath identifier for the imported credential.
      * @throws IllegalArgumentException if the URI scheme is not `otpauth`,
      *         the type is not `totp` or `hotp`, or the `secret` parameter is missing.
      */
-    suspend fun importFromUri(uri: String, structuredLabel: Boolean = false): String {
+    suspend fun importFromUri(uri: String): String = importParsed(uri, structuredLabel = false)
+
+    /**
+     * Import an OATH credential the app holds as separate fields (local.oathAdd,
+     * sync, manual entry): the one path for an app-built URI. It builds the
+     * percent-encoded URI with [otpauthUri] and reads its label back with
+     * [parseStructuredOathLabel], where only a literal `:` separates the
+     * issuer from the account, so an issuerless account `host:user` stays
+     * whole (#152, #156).
+     *
+     * @param type `totp` or `hotp`, in any case.
+     * @param secret The Base32-encoded secret.
+     * @param counter The HOTP counter; ignored for TOTP.
+     * @return The generated unique oath identifier for the imported credential.
+     * @throws IllegalArgumentException as [importFromUri] does.
+     */
+    suspend fun importStructured(
+        type: String,
+        issuer: String?,
+        accountName: String,
+        secret: String,
+        algorithm: String = "SHA1",
+        digits: Int = 6,
+        period: Int = 30,
+        counter: Long? = null
+    ): String {
+        val otpType = type.lowercase()
+        val uri = otpauthUri(
+            type = otpType,
+            issuer = issuer,
+            accountName = accountName,
+            secret = secret,
+            algorithm = algorithm,
+            digits = digits,
+            period = period,
+            counter = if (otpType == "hotp") counter ?: 0L else null
+        )
+        return importParsed(uri, structuredLabel = true)
+    }
+
+    private suspend fun importParsed(uri: String, structuredLabel: Boolean): String {
         val parsed = Uri.parse(uri)
 
         require(parsed.scheme == "otpauth") {

@@ -1092,6 +1092,7 @@
     <string name="audit_log_op_oath_deleted">OATH Credential Deleted</string>
     <string name="audit_log_op_oath_code">OATH Code Generated</string>
     <string name="audit_log_op_oath_sync">OATH Sync Performed</string>
+    <string name="audit_log_op_password_sync">Password Sync Performed</string>
     <string name="audit_log_op_cosign_initiated">Co-Sign Initiated</string>
     <string name="audit_log_op_cosign_received">Co-Sign Received</string>
 
@@ -1110,6 +1111,8 @@
     <string name="audit_log_op_piv_cert_imported">PIV Cert Imported</string>
     <string name="audit_log_op_piv_sign_request">PIV Sign Request</string>
     <string name="audit_log_op_piv_key_deleted">PIV Key Deleted</string>
+    <string name="audit_log_op_backup_created">Backup Stored</string>
+    <string name="audit_log_op_backup_restored">Backup Restored</string>
 
     <!-- PIV Smart Card -->
     <string name="piv_title">PIV Smart Card</string>

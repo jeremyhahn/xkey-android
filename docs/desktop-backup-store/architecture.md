@@ -38,6 +38,24 @@ and encodes it with `java.util.Base64`.
 `handleCreateBackup` always calls `BackupStore.store("", bytes)`, so the phone
 generates the id; the `label` is only echoed in the message.
 
+## Audit
+
+Each successful call writes one audit log entry: `local.createBackup` a
+`BACKUP_CREATED` entry (`AuditLogger.logBackupCreated`), `local.restoreBackup`
+a `BACKUP_RESTORED` entry (`AuditLogger.logBackupRestored`). The entry names
+the requesting device: `backupAuditPeer()` resolves it once per request from
+the request's caller session (`attestingPeerPublicKeyHex()`), so `deviceId` is
+the Noise static key hex of the peer on the connection the request arrived on,
+served or phone-initiated, and `deviceName` its name in
+`PairedDeviceRepository`. The handler-wide last-connected key is never read,
+so a second desktop connecting over another transport cannot take the entry.
+A session that names no peer logs no device and the call still succeeds.
+`details` holds `backupId` and `sizeBytes` only; the backup bytes, their
+base64 and the desktop's `label` never enter the log. A failed call (missing
+or invalid `backup_data`, no backup stored, an unknown id, an unreadable or
+cut-short record) writes no entry. Backups `XKeyGattService` stores directly are not
+audited here.
+
 ## Backup ids
 
 A generated id is `backup-<creation unix millis>-<sequence>`. The sequence is
@@ -147,6 +165,7 @@ sequenceDiagram
 |------------|--------|
 | `BackupStoreIdTest` (`app/src/test/.../backup/`) | Unique generated ids (same millisecond, two instances), latest order with equal or reversed mtimes, creation time, `XKB1` and legacy records, cut-short and unreadable records, a write that fails partway, stray temp files |
 | `BackupHandlerWireTest` (`app/src/test/.../protocol/`) | `local.*` backup params and results against the go-xkms structs: padded base64, `success`/`backup_id`, RFC 3339 `created_at`, latest when no id, INVALID_PARAMS cases, INTERNAL_ERROR on a cut-short newest record |
+| `BackupHandlerAuditTest` (`app/src/test/.../protocol/`) | One `BACKUP_CREATED`/`BACKUP_RESTORED` entry per success, none per failure, no backup bytes in the log; the entry names the request's own peer when another desktop connected last |
 | `BackupStoreTest` (`app/src/androidTest/.../backup/`) | Store and load, generated ids for blank ids |
 | `BackupStoreIdentityTest` (`app/src/androidTest/.../backup/`) | Id-to-file mapping; nothing written outside `backups/` |
 | `ProtocolIntegrationTest.backupRoundtrip` (`app/src/androidTest/.../e2e/`) | Create then restore over the protocol |
