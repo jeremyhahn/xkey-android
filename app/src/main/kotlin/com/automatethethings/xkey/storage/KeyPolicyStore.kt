@@ -44,10 +44,11 @@ import java.io.IOException
  * deletes the key's grant rows first, and no grant is written meanwhile.
  * A withdrawal whose grant delete fails owes the same grant clear.
  *
- * Every such obligation, from a failed narrowing, a failed withdrawal or the
- * 12 -> 13 migration's fallback, is recorded through one choke point,
- * [owe] (or [owedAtMigration] inside the migration, by the same rule
- * [obligation]), before the failure is acknowledged. If the row cannot be
+ * Every such obligation, from a failed narrowing, a failed withdrawal
+ * ([withdraw]) or the 12 -> 13 migration's fallback, is recorded through one
+ * choke point, [owe] (or [owedAtMigration] inside the migration, by the same
+ * rule [obligation]), before the failure is acknowledged; a withdrawal is
+ * reported done only if its delete or its obligation is durable. If the row cannot be
  * written, the obligation is held in the process with its clear
  * ([unrecorded], by key id): every peer is denied, every grant refused, and
  * the next policy write for the key row deletes its grants first.
@@ -118,17 +119,40 @@ class KeyPolicyStore(
             throw e
         }
 
-    /**
-     * A withdrawal of a grant of [keyId]'s key row [instance] failed to
-     * write: records the grant clear it owes ([owe]), so every peer is
-     * denied, a restart included, until the next policy write deletes the
-     * key's grants. Returns once it is recorded or held in the process;
-     * nothing is owed if the key row is gone or replaced (its grants went
-     * with it).
-     */
-    suspend fun oweWithdrawal(keyId: String, instance: Long) {
-        owe(keyId, instance, null, null)
+    /** How a [withdraw] ended. Only [REMOVED] and [OWED] may be reported done: both are durable. */
+    enum class Withdrawal {
+        /** The grant is deleted, or its key row is gone or replaced, its grants with it. */
+        REMOVED,
+
+        /** The delete failed; the grant clear it owes is in the policy row, so the peer stays denied after a restart too. */
+        OWED,
+
+        /** The delete failed and so did the obligation's write: it is held in the process only, which a restart loses. */
+        HELD
     }
+
+    /**
+     * Withdraws [peerPublicKeyHex]'s grant of [keyId]'s key row [instance]:
+     * deletes it, bound to the key row, or, if that fails, records the grant
+     * clear it owes through the choke point ([owe]), which denies every peer
+     * of the key until its next policy write. The caller reports the
+     * withdrawal done only on a durable result (#193 r6, ruling 554). Never
+     * throws but for cancellation.
+     */
+    suspend fun withdraw(keyId: String, instance: Long, peerPublicKeyHex: String): Withdrawal =
+        try {
+            transactor.run {
+                if (dao.keyInstance(keyId) != instance) throw KeyChangedException(keyId)
+                dao.deleteGrant(keyId, peerPublicKeyHex)
+            }
+            Withdrawal.REMOVED
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: KeyChangedException) {
+            Withdrawal.REMOVED
+        } catch (e: Exception) {
+            if (owe(keyId, instance, null, e)) Withdrawal.OWED else Withdrawal.HELD
+        }
 
     /**
      * The choke point (#193, ruling 554): records the obligation of a failed
@@ -136,10 +160,11 @@ class KeyPolicyStore(
      * (null), in [keyId]'s policy row, if its key row is still [instance],
      * by [obligation]; an owed clear, recorded or held, is kept. If the row
      * cannot be written, or there is none, the obligation is held in the
-     * process instead; the write's failure is added to [failure]. Never
-     * throws but for cancellation.
+     * process instead; the write's failure is added to [failure]. Returns
+     * whether the obligation is durable: recorded in the row, or owed by no
+     * key row (it is gone or replaced). Never throws but for cancellation.
      */
-    private suspend fun owe(keyId: String, instance: Long, narrowing: SharingPolicyType?, failure: Exception?) {
+    private suspend fun owe(keyId: String, instance: Long, narrowing: SharingPolicyType?, failure: Exception?): Boolean {
         val heldClear = held(keyId, instance)?.clearGrants == true
         var owed = obligation(narrowing, heldClear)
         try {
@@ -152,14 +177,17 @@ class KeyPolicyStore(
                 true
             }
             if (!recorded) unrecorded[keyId] = Held(instance, owed.clearGrants)
+            return recorded
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (gone: KeyChangedException) {
             // The key row is gone or replaced: its grants went with it.
+            return true
         } catch (write: Exception) {
             // Fail closed: denied in this process, clear owed, until a later write lands.
             unrecorded[keyId] = Held(instance, owed.clearGrants)
             failure?.addSuppressed(write)
+            return false
         }
     }
 
@@ -183,11 +211,6 @@ class KeyPolicyStore(
         }
     }
 
-    /** Deletes [peerPublicKeyHex]'s grant for [keyId], if any. */
-    suspend fun removeGrant(keyId: String, peerPublicKeyHex: String) {
-        transactor.run { dao.deleteGrant(keyId, peerPublicKeyHex) }
-    }
-
     /**
      * Inserts [key], replacing a key row under its id, with its policy row,
      * in one transaction. Returns the new row's instance.
@@ -203,13 +226,16 @@ class KeyPolicyStore(
      * Deletes [keyId]'s grant rows, policy row and key row in one
      * transaction, if its key row is still [instance]. Returns false, with
      * nothing deleted, if the key is gone or was generated again under its id.
+     * Once the rows are deleted, [material] deletes the key's material in
+     * the same call: a caller that queues this and is cancelled meanwhile
+     * never leaves the material of a deleted key behind (#193 r6).
      */
-    suspend fun deleteKey(keyId: String, instance: Long): Boolean =
+    suspend fun deleteKey(keyId: String, instance: Long, material: suspend () -> Unit = {}): Boolean =
         transactor.run {
             if (dao.keyInstance(keyId) != instance) return@run false
             dao.deleteGrants(keyId)
             dao.deleteKey(keyId) > 0
-        }
+        }.also { if (it) material() }
 
     /**
      * The policy to enforce for [key]: its policy row's, which carries a

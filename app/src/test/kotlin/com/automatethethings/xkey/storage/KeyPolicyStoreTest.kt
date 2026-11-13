@@ -205,7 +205,7 @@ class KeyPolicyStoreTest {
         val instance = tables.addKey("k", SELECTED_PEERS)
         tables.grant("k", PEER)
         tables.failing += "deleteGrant"
-        store().oweWithdrawal("k", instance)
+        assertEquals(KeyPolicyStore.Withdrawal.OWED, store().withdraw("k", instance, PEER))
         tables.failing.clear()
 
         val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
@@ -221,7 +221,7 @@ class KeyPolicyStoreTest {
         val instance = tables.addKey("k", SELECTED_PEERS)
         tables.grant("k", PEER)
         tables.failing += setOf("deleteGrant", "putPolicyRow")
-        store().oweWithdrawal("k", instance)
+        assertEquals(KeyPolicyStore.Withdrawal.HELD, store().withdraw("k", instance, PEER))
         tables.failing.clear()
 
         assertEquals(PRIVATE, store().enforcedPolicy(tables.key("k")!!))

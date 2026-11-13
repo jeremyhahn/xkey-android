@@ -108,7 +108,9 @@ class KeySharingPeers(
      * a pairing that ended meanwhile, which the grant cleanup then deletes.
      * A grant is also refused while the key's policy row denies every peer
      * or still owes a grant clear ([KeyPolicyStore.grant]). Withdrawing is
-     * always allowed, and stands even if its write fails ([withdraw]).
+     * always allowed, and is enforced even if its write fails ([withdraw]);
+     * it returns false if neither its delete nor the denial it then owes
+     * could be stored durably.
      *
      * [pairing] is the peer's [PairedDeviceRepository.pairingGeneration] read
      * when the user acted, before any wait (#193): a grant is refused if the
@@ -134,8 +136,7 @@ class KeySharingPeers(
                 granted
             }
         }
-        accepted { withdraw(entry) { store.removeGrant(keyId, peerPublicKeyHex) } }
-        return true
+        return accepted { withdraw(entry) }
     }
 
     /**
@@ -150,44 +151,38 @@ class KeySharingPeers(
     private suspend fun <T> accepted(edit: suspend () -> T): T = accepted(editScope, edit)
 
     /**
-     * Runs [write], a withdrawal, under the edits lock already held. Its
-     * caller may be gone (the sheet was dismissed), so a failure is handled
-     * here, not left in an abandoned Deferred: the grant clear it owes is
-     * recorded first ([KeyPolicyStore.oweWithdrawal]), which denies every
-     * peer of the key until its next policy write, a restart included; then
-     * [entry] is recorded as a pending withdrawal, which denies the peer ([isWithdrawalPending]) from
-     * that moment, and [write] is retried in [editScope] until it lands, or
-     * until the key row it was made for is gone or replaced (#193).
+     * Withdraws [entry]'s grant under the edits lock already held, through
+     * the store's choke point ([KeyPolicyStore.withdraw]). Its caller may be
+     * gone (the sheet was dismissed), so a failure is handled here, not left
+     * in an abandoned Deferred: the store has already recorded the grant
+     * clear it owes, which denies every peer of the key until its next policy
+     * write; then [entry] is recorded as a pending withdrawal, which denies
+     * the peer ([isWithdrawalPending]) from that moment, and the withdrawal
+     * is retried in [editScope] until its delete lands, or until the key row
+     * it was made for is gone or replaced (#193).
+     *
+     * Returns true only once the withdrawal is durable, its delete or its
+     * owed clear stored: one whose denial is held in the process alone, which
+     * a restart loses, is reported not done (#193 r6, ruling 554).
      */
-    private suspend fun withdraw(entry: Pair<String, String>, write: suspend () -> Unit) {
-        try {
-            write()
+    private suspend fun withdraw(entry: Pair<String, String>): Boolean {
+        val result = store.withdraw(keyId, instance, entry.second)
+        if (result == KeyPolicyStore.Withdrawal.REMOVED) {
             settle { it == entry }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Withdrawing key access failed; every peer is denied until the key's next policy write", e)
-            // Acknowledged only once the clear it owes is recorded (#193):
-            // durably in the policy row, else held in the process.
-            store.oweWithdrawal(keyId, instance)
-            val token = Any()
-            // Unbound if the key row cannot be read: a retried removal only
-            // ever deletes a grant, so it fails closed on a recreated key.
-            val instance = try {
-                store.instance(keyId)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                null
-            }
-            pendingWithdrawals.update { it + (entry to token) }
-            editScope.launch {
-                retry({ pendingWithdrawals.value[entry] === token }) {
-                    if (instance == null || store.instance(keyId) == instance) write()
-                    pendingWithdrawals.update { if (it[entry] === token) it - entry else it }
+            return true
+        }
+        Log.e(TAG, "Withdrawing key access failed ($result); every peer is denied until the key's next policy write")
+        val token = Any()
+        pendingWithdrawals.update { it + (entry to token) }
+        editScope.launch {
+            retry({ pendingWithdrawals.value[entry] === token }) {
+                if (store.withdraw(keyId, instance, entry.second) != KeyPolicyStore.Withdrawal.REMOVED) {
+                    throw java.io.IOException("Withdrawing key access failed again")
                 }
+                pendingWithdrawals.update { if (it[entry] === token) it - entry else it }
             }
         }
+        return result == KeyPolicyStore.Withdrawal.OWED
     }
 
     companion object {
@@ -266,10 +261,18 @@ class KeySharingPeers(
          * [instance] the delete was approved for is deleted: false, with
          * nothing deleted, if the key is gone or was generated again under
          * its id meanwhile. Throws if the delete failed.
+         * [material], the delete of the key's material, runs in the same
+         * queued edit once the rows are deleted ([KeyPolicyStore.deleteKey]):
+         * a caller cancelled while the delete waits never leaves it behind.
          */
-        suspend fun forgetKey(keyId: String, instance: Long, store: KeyPolicyStore): Boolean =
+        suspend fun forgetKey(
+            keyId: String,
+            instance: Long,
+            store: KeyPolicyStore,
+            material: suspend () -> Unit = {}
+        ): Boolean =
             accepted(acceptedEdits) {
-                store.deleteKey(keyId, instance).also { if (it) settle { it.first == keyId } }
+                store.deleteKey(keyId, instance, material).also { if (it) settle { it.first == keyId } }
             }
 
         /**

@@ -91,6 +91,7 @@ class KeySharingPeersTest {
     fun setUp() {
         mockkStatic(Log::class)
         every { Log.e(any(), any<String>(), any()) } returns 0
+        every { Log.e(any(), any<String>()) } returns 0
         every { Log.i(any(), any<String>()) } returns 0
         mockkObject(AuditLogger)
         every { AuditLogger.logDeviceUnpaired(any(), any()) } just runs

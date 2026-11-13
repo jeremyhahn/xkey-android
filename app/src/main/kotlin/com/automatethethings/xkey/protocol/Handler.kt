@@ -1899,15 +1899,20 @@ class RequestHandler(
         // the key row is still the one this request found: a delete queued
         // behind other edits never removes a key generated again under its
         // id. A failed delete throws to the caller, never a logged success.
+        // The key's material, in the Android Keystore or the software key
+        // store (only one of the two holds it), is deleted in the same queued
+        // edit once the rows are: a request cancelled while the delete waits
+        // never leaves it behind (#193 r6, ruling 554).
+        val material: suspend () -> Unit = {
+            keystoreManager.deleteGeneralKey(keyId)
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
+        }
         val entity = keyDao.getByKeyId(keyId)
-        if (entity != null && !KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore)) {
+        if (entity == null) {
+            material()
+        } else if (!KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = material)) {
             return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
         }
-
-        // Delete from Android Keystore and the software key store (only one
-        // of the two will actually hold the key).
-        keystoreManager.deleteGeneralKey(keyId)
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
