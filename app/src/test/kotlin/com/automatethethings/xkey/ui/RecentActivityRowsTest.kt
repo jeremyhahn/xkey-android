@@ -39,6 +39,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
@@ -282,5 +284,57 @@ class RecentActivityRowsTest {
         const val MINUTE = 60_000L
         const val HOUR = 60 * MINUTE
         const val DAY = 24 * HOUR
+    }
+}
+
+/**
+ * Every source of a row's key text passes the one raw key id filter in
+ * [RecentActivityRows.build]: one case per source, each failing if that
+ * source reaches [RecentActivityRow.Entry.keyLabel] around the filter.
+ */
+@RunWith(Parameterized::class)
+class RecentActivityRowsKeyTextSourceTest(
+    private val source: String,
+    private val keyId: String?,
+    private val loggedLabel: String?,
+    private val keyLabels: Map<String, String>,
+    private val expected: String?
+) {
+
+    @Test
+    fun `no raw key id reaches a row's key text`() {
+        val entry = AuditLogEntity(
+            timestamp = 0L,
+            operationType = AuditOperationType.KEY_CREATED,
+            keyId = keyId,
+            keyLabel = loggedLabel,
+            success = true
+        )
+        val row = RecentActivityRows.build(listOf(entry), Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), keyLabels = keyLabels)
+            .single() as RecentActivityRow.Entry
+
+        assertEquals(source, expected, row.keyLabel)
+        (keyLabels.keys + listOfNotNull(keyId)).forEach { id ->
+            assertFalse("$source shows raw key id $id", row.toString().contains(id))
+        }
+    }
+
+    companion object {
+        private const val KEY = "key-0123456789abcdef"
+        private const val OTHER = "key-fedcba9876543210"
+
+        @JvmStatic
+        @Parameterized.Parameters(name = "{0}")
+        fun cases(): List<Array<Any?>> = listOf(
+            arrayOf("key-table label equal to its keyId", KEY, KEY, mapOf(KEY to KEY), null),
+            arrayOf("key created without a label (label defaults to keyId)", KEY, null, mapOf(KEY to KEY), null),
+            arrayOf("discovered general key labelled by keyId", KEY, "example.com", mapOf(KEY to KEY), "example.com"),
+            arrayOf("key-table label equal to another key's keyId", KEY, null, mapOf(KEY to OTHER, OTHER to "Work key"), null),
+            arrayOf("audit keyLabel equal to its keyId", KEY, KEY, emptyMap<String, String>(), null),
+            arrayOf("audit keyLabel equal to another key's keyId", KEY, OTHER, mapOf(OTHER to "Work key"), null),
+            arrayOf("audit entry with no key table row", null, KEY, mapOf(KEY to "Work key"), null),
+            arrayOf("a real stored label still shows", KEY, KEY, mapOf(KEY to "Work key"), "Work key"),
+            arrayOf("a real logged label still shows", KEY, "example.com", emptyMap<String, String>(), "example.com")
+        )
     }
 }

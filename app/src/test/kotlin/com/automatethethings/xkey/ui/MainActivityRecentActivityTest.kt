@@ -255,4 +255,49 @@ class MainActivityRecentActivityTest {
             )
         }
     }
+
+    @Test
+    fun `a key created without a label shows no raw key id on the home screen`() {
+        val keyId = "key-0123456789abcdef"
+        runBlocking {
+            // A key generated without a label stores its key id as the label.
+            database.keyDao().insert(
+                KeyEntity(
+                    keyId = keyId,
+                    keyType = "signing",
+                    algorithm = "ES256",
+                    label = keyId,
+                    keySizeBits = 256,
+                    source = "generated"
+                )
+            )
+            database.auditLogDao().insertAll(
+                listOf(
+                    AuditLogEntity(
+                        timestamp = ago(Duration.ofMinutes(5)),
+                        operationType = AuditOperationType.KEY_CREATED,
+                        keyId = keyId,
+                        keyLabel = keyId,
+                        success = true
+                    )
+                )
+            )
+        }
+
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            idleMainLooper()
+
+            assertEquals(
+                listOf(
+                    context.getString(R.string.audit_log_op_key_created),
+                    pair(
+                        context.getString(R.string.recent_activity_succeeded),
+                        context.getString(R.string.recent_activity_minutes_ago, 5L)
+                    )
+                ),
+                shownRows(scenario)
+            )
+            shownRows(scenario).forEach { text -> assertFalse(text, text.contains(keyId)) }
+        }
+    }
 }
