@@ -33,7 +33,7 @@ import io.mockk.mockkStatic
 class ScriptedMessageSender(
     private val router: BidirectionalMessageRouter,
     private var script: (Request) -> String? = { null }
-) : MessageSender {
+) : SessionSender {
 
     /** Every request handed to the transport, in order. */
     val sent: MutableList<Request> = mutableListOf()

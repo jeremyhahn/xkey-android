@@ -26,6 +26,7 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.RemoteKeyClient
 import com.automatethethings.xkey.remote.ScriptedMessageSender
+import com.automatethethings.xkey.remote.desktopOf
 import com.automatethethings.xkey.remote.stubAndroidLog
 import io.mockk.mockk
 import io.mockk.unmockkAll
@@ -332,7 +333,7 @@ class DesktopKeysControllerTest {
         try {
             val router = BidirectionalMessageRouter(mockk<RequestHandler>())
             val sender = ScriptedMessageSender(router)
-            val session = DesktopSession(desktopA, DesktopKeysSource.of(RemoteKeyClient(sender, router, 5_000L)))
+            val session = DesktopSession(desktopA, DesktopKeysSource.of(RemoteKeyClient(desktopOf(sender, router), 5_000L)))
             val wire = DesktopKeysController(desktopA, { session })
             sender.succeedWith(
                 """{"backends":[{"name":"tpm2","type":"tpm2","hardwareBacked":true,"signing":true,""" +

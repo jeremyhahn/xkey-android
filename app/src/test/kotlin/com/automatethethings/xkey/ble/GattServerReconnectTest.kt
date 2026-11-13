@@ -26,6 +26,7 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectionChangedException
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -173,7 +174,7 @@ class GattServerReconnectTest {
 
         val pending = CompletableDeferred<Response>()
         router.registerPendingResponse(BACKUP_ID, pending)
-        server.sendEncryptedMessage(BACKUP_REQUEST)
+        server.sendOnBoundSession(BACKUP_REQUEST)
         call("handleApplicationMessage", device, desktop.encrypt(BACKUP_RESPONSE))
 
         val response = withTimeout(TIMEOUT_MS) { pending.await() }
@@ -203,7 +204,7 @@ class GattServerReconnectTest {
         val refusal = JSONObject(String(desktop.decrypt(reassemble(fragments).single())))
         assertEquals(ErrorCodes.PAIRING_REQUIRED, refusal.getJSONObject("error").getInt("code"))
         try {
-            server.sendEncryptedMessage(BACKUP_REQUEST)
+            server.sendOnBoundSession(BACKUP_REQUEST)
             fail("a send to an unconfirmed desktop must be refused")
         } catch (e: PeerNotPairedException) {
             assertEquals(keyHex, e.publicKeyHex)
@@ -229,7 +230,7 @@ class GattServerReconnectTest {
         val nonce = session.sendNonceForTest()
 
         try {
-            server.sendEncryptedMessage(BACKUP_REQUEST)
+            server.sendOnBoundSession(BACKUP_REQUEST)
             fail("a send to an unconfirmed desktop must be refused")
         } catch (e: PeerNotPairedException) {
             assertEquals(keyHex, e.publicKeyHex)
@@ -353,10 +354,12 @@ class GattServerReconnectTest {
         repo.addDevice(keyHex, "desktop")
         reconnect(desktop, claimedPeerKeyHex = keyHex)
         val confirmed = server.confirmedConnection() ?: error("the connection confirms no one")
+        // The only scoped send path: a sender bound to this connection.
+        val bound = server.boundSender()?.second ?: error("no bound sender")
         assertEquals(keyHex, confirmed.peerPublicKeyHex)
         val fragments = captureFragments()
 
-        server.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST)
+        bound.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST)
 
         val request = JSONObject(String(desktop.decrypt(reassemble(fragments).single())))
         assertEquals("remote.backup.create", request.getString("method"))
@@ -374,6 +377,8 @@ class GattServerReconnectTest {
         repo.addDevice(firstHex, "desktop")
         reconnect(first, claimedPeerKeyHex = firstHex)
         val confirmed = server.confirmedConnection() ?: error("the connection confirms no one")
+        // The only scoped send path: a sender bound to this connection.
+        val bound = server.boundSender()?.second ?: error("no bound sender")
 
         val second = NoiseInitiatorSession(randomKey())
         val secondHex = second.getLocalStaticPublicKey().hex()
@@ -381,7 +386,7 @@ class GattServerReconnectTest {
         val replacement = reconnect(second, claimedPeerKeyHex = secondHex)
         val nonce = replacement.sendNonceForTest()
 
-        val outcome = runCatching { server.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST) }
+        val outcome = runCatching { bound.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST) }
 
         assertTrue("got $outcome", outcome.exceptionOrNull() is ConnectionChangedException)
         assertEquals("nothing is encrypted to the new desktop", nonce, replacement.sendNonceForTest())
@@ -400,6 +405,8 @@ class GattServerReconnectTest {
         repo.addDevice(firstHex, "desktop")
         reconnect(first, claimedPeerKeyHex = firstHex)
         val confirmed = server.confirmedConnection() ?: error("the connection confirms no one")
+        // The only scoped send path: a sender bound to this connection.
+        val bound = server.boundSender()?.second ?: error("no bound sender")
 
         val second = NoiseInitiatorSession(randomKey())
         val secondHex = second.getLocalStaticPublicKey().hex()
@@ -414,7 +421,7 @@ class GattServerReconnectTest {
         }
 
         val outcome = runCatching {
-            withTimeout(TIMEOUT_MS) { server.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST) }
+            withTimeout(TIMEOUT_MS) { bound.sendEncryptedMessageOn(confirmed, BACKUP_REQUEST) }
         }
         server.beforeAdmissionForTest = null
 

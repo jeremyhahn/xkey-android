@@ -20,6 +20,7 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.RemoteKeyClient
 import com.automatethethings.xkey.remote.ScriptedMessageSender
+import com.automatethethings.xkey.remote.desktopOf
 import com.automatethethings.xkey.remote.stubAndroidLog
 import io.mockk.mockk
 import io.mockk.unmockkAll
@@ -50,7 +51,7 @@ class DesktopPivSlotsTest {
         stubAndroidLog()
         router = BidirectionalMessageRouter(mockk<RequestHandler>())
         sender = ScriptedMessageSender(router)
-        client = RemoteKeyClient(sender, router, requestTimeoutMs = 5_000L)
+        client = RemoteKeyClient(desktopOf(sender, router), requestTimeoutMs = 5_000L)
     }
 
     @After

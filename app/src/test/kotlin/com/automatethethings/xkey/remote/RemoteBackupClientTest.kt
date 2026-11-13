@@ -67,7 +67,7 @@ class RemoteBackupClientTest {
         router = spyk(BidirectionalMessageRouter(mockk<RequestHandler>()))
         sender = ScriptedMessageSender(router)
         transport = CapturingSender(sender)
-        client = RemoteBackupClient(transport, router, requestTimeoutMs = 5_000L)
+        client = RemoteBackupClient(desktopOf(transport, router), requestTimeoutMs = 5_000L)
     }
 
     @After
@@ -445,7 +445,7 @@ class RemoteBackupClientTest {
     @Test
     fun `request ids are unique across client instances and above the other clients' bases`() = runTest {
         sender.succeedWith("""{"success":true,"restored":[]}""")
-        val other = RemoteBackupClient(transport, router, requestTimeoutMs = 5_000L)
+        val other = RemoteBackupClient(desktopOf(transport, router), requestTimeoutMs = 5_000L)
 
         client.restoreBackup(envelope, password())
         other.restoreBackup(envelope, password())

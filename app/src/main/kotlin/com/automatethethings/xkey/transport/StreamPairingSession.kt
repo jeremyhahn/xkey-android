@@ -35,7 +35,7 @@ import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConfirmedConnection
 import com.automatethethings.xkey.remote.ConnectionChangedException
-import com.automatethethings.xkey.remote.MessageSender
+import com.automatethethings.xkey.remote.SessionSender
 import com.automatethethings.xkey.settings.PairedDeviceRemovalListener
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -97,7 +97,7 @@ class StreamPairingSession(
     private val pairedDeviceRepository: PairedDeviceRepository?,
     private val transportLabel: String,
     private val transportMethods: List<TransportMethods> = emptyList(),
-) : MessageSender {
+) {
 
     companion object {
         private const val TAG = "StreamPairingSession"
@@ -267,7 +267,12 @@ class StreamPairingSession(
             ensureLive()
             if (!established) throw IOException("No active Noise session")
             if (expected != null && !expected.sameAs(confirmedHere())) throw ConnectionChangedException()
-            if (phoneInitiated) pairedDeviceRepository?.requirePaired(peerKeyHex)
+            if (phoneInitiated) {
+                // A phone-initiated frame goes only to the connection that
+                // holds the server, checked with the encryption it admits.
+                if (activeConnection !== this) throw IOException("Another desktop's connection replaced this one")
+                pairedDeviceRepository?.requirePaired(peerKeyHex)
+            }
             noise.encrypt(plaintext)
         }
 
@@ -868,35 +873,53 @@ class StreamPairingSession(
      * is confirmed and neither revoked nor ended. Read under the connection's
      * lock, which a revocation also takes.
      */
-    override fun confirmedConnection(): ConfirmedConnection? {
+    fun confirmedConnection(): ConfirmedConnection? {
         val connection = activeConnection ?: return null
         return synchronized(connection.state) { connection.confirmedHere() }
     }
 
     /**
-     * [MessageSender] entry point used by outbound `remote.*` clients. Encrypts
-     * and frames [data] on the active connection, after revalidating that its
-     * peer is still paired.
-     *
-     * @throws PeerNotPairedException if the peer is no longer paired; nothing
-     *   is written and no nonce is consumed.
+     * The Noise-authenticated static key (hex) of the established, live
+     * connection, or null if there is none.
      */
-    override suspend fun sendEncryptedMessage(data: ByteArray) {
-        val connection = activeConnection?.takeIf { it.established }
-            ?: throw IOException("No active Noise session")
-        send(connection, data, phoneInitiated = true)
+    val connectedPeerKeyHex: String?
+        get() = activeConnection?.takeIf { it.established && it.isLive }?.peerKeyHex
+
+    /**
+     * The established connection's authenticated peer key and a sender bound
+     * to that one connection, read together, or null with no established,
+     * live connection. The sender writes only to that connection and fails
+     * with [IOException] once it ends or another connection replaces it.
+     */
+    fun boundSender(): Pair<String, SessionSender>? {
+        val connection = activeConnection?.takeIf { it.established && it.isLive } ?: return null
+        val peerKeyHex = connection.peerKeyHex ?: return null
+        return peerKeyHex to object : SessionSender {
+            override suspend fun sendEncryptedMessage(data: ByteArray) {
+                send(connection, data, phoneInitiated = true)
+            }
+
+            // Only the bound connection's own peer, and only while it is current.
+            override fun confirmedConnection(): ConfirmedConnection? =
+                synchronized(connection.state) { connection.confirmedHere() }
+
+            override suspend fun sendEncryptedMessageOn(confirmed: ConfirmedConnection, data: ByteArray) {
+                if (confirmed.connection !== connection) throw ConnectionChangedException()
+                this@StreamPairingSession.sendEncryptedMessageOn(confirmed, data)
+            }
+        }
     }
 
     /**
-     * [MessageSender] entry point for a send scoped to one connection: the
-     * frame is encrypted on [connection]'s own session, and admission refuses
-     * it unless that is still the current connection, confirmed for the same
-     * peer. A reconnect, even of another paired desktop, gets nothing.
+     * A send scoped to one connection, reached only through a [boundSender]:
+     * the frame is encrypted on [connection]'s own session, and admission
+     * refuses it unless that is still the current connection, confirmed for
+     * the same peer. A reconnect, even of another paired desktop, gets nothing.
      *
      * @throws ConnectionChangedException if [connection] is not current;
      *   nothing is written and no nonce is consumed.
      */
-    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+    private suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
         val target = connection.connection as? Connection ?: throw ConnectionChangedException()
         // Only this transport's own current connection; never another one's.
         if (target !== activeConnection) throw ConnectionChangedException()

@@ -72,15 +72,17 @@ import java.util.concurrent.atomic.AtomicLong
  * from the same counter, so no two of them register the same pending id.
  * Pending requests are tracked by [BidirectionalMessageRouter].
  *
- * @param messageSender Transport for sending encrypted messages to the laptop.
- * @param messageRouter Router for correlating responses with outbound requests.
+ * @param desktop The laptop's established session: a sender bound to its
+ *   connection and the router that correlates responses with requests.
  * @param requestTimeoutMs Timeout for each request in milliseconds (default: 30s).
  */
 class RemoteKeyClient(
-    private val messageSender: MessageSender,
-    private val messageRouter: BidirectionalMessageRouter,
+    desktop: ConnectedDesktop,
     private val requestTimeoutMs: Long = 30_000L
 ) {
+    /** Bound to [desktop]'s connection: a reply-awaiting call never reaches another desktop. */
+    private val messageSender: MessageSender = desktop.sender
+    private val messageRouter: BidirectionalMessageRouter = desktop.router
     companion object {
         private const val TAG = "RemoteKeyClient"
 

@@ -88,8 +88,8 @@ class RemoteClientInteropTest {
 
         router = BidirectionalMessageRouter(mockk<RequestHandler>())
         sender = ScriptedMessageSender(router)
-        keyClient = RemoteKeyClient(sender, router, requestTimeoutMs = 5_000L)
-        syncClient = RemoteSyncClient(context, sender, router, requestTimeoutMs = 5_000L)
+        keyClient = RemoteKeyClient(desktopOf(sender, router), requestTimeoutMs = 5_000L)
+        syncClient = RemoteSyncClient(context, desktopOf(sender, router), requestTimeoutMs = 5_000L)
     }
 
     @After
@@ -148,7 +148,7 @@ class RemoteClientInteropTest {
                 "remote.restoreBackup" to """{"success":true,"restored":[]}"""
             )
         )
-        val backupClient = RemoteBackupClient(sender, router, requestTimeoutMs = 5_000L)
+        val backupClient = RemoteBackupClient(desktopOf(sender, router), requestTimeoutMs = 5_000L)
 
         keyClient.listBackends()
         backupClient.restoreBackup(bytes("{}"), "pw".toCharArray())
@@ -164,8 +164,8 @@ class RemoteClientInteropTest {
     @Test
     fun `a backup reply resolves only the backup request in flight beside a sync`() = runTest {
         val holding = HoldingMessageSender()
-        val backupClient = RemoteBackupClient(holding, router, requestTimeoutMs = 5_000L)
-        val sync = RemoteSyncClient(context, holding, router, requestTimeoutMs = 5_000L)
+        val backupClient = RemoteBackupClient(desktopOf(holding, router), requestTimeoutMs = 5_000L)
+        val sync = RemoteSyncClient(context, desktopOf(holding, router), requestTimeoutMs = 5_000L)
 
         val restore = async { backupClient.restoreBackup(bytes("{}"), "pw".toCharArray()) }
         val certs = async { sync.syncTrustStore() }
@@ -201,7 +201,7 @@ class RemoteClientInteropTest {
     @Test
     fun `concurrent requests are resolved by id whatever order the peer answers in`() = runTest {
         val holding = HoldingMessageSender()
-        val client = RemoteKeyClient(holding, router, requestTimeoutMs = 5_000L)
+        val client = RemoteKeyClient(desktopOf(holding, router), requestTimeoutMs = 5_000L)
 
         val backends = async { client.listBackends() }
         val keys = async { client.listKeys("tpm2") }
@@ -223,7 +223,7 @@ class RemoteClientInteropTest {
     @Test
     fun `an error for one in-flight request does not disturb the other`() = runTest {
         val holding = HoldingMessageSender()
-        val client = RemoteKeyClient(holding, router, requestTimeoutMs = 5_000L)
+        val client = RemoteKeyClient(desktopOf(holding, router), requestTimeoutMs = 5_000L)
 
         // runCatching keeps the failure inside its own coroutine; letting an
         // `async` throw would cancel the whole test scope before the assertion.
@@ -245,7 +245,7 @@ class RemoteClientInteropTest {
     @Test
     fun `a sync reply cannot resolve a key-client request`() = runTest {
         val holding = HoldingMessageSender()
-        val client = RemoteKeyClient(holding, router, requestTimeoutMs = 5_000L)
+        val client = RemoteKeyClient(desktopOf(holding, router), requestTimeoutMs = 5_000L)
 
         val pending = async { client.listBackends() }
         runCurrent()

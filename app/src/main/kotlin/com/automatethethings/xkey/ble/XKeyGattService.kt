@@ -38,7 +38,6 @@ import com.automatethethings.xkey.usb.PasswordStoreMethods
 import com.automatethethings.xkey.usb.SealStoreMethods
 import com.automatethethings.xkey.storage.SealStore
 import com.automatethethings.xkey.usb.UsbAccessoryServer
-import com.automatethethings.xkey.usb.UsbAccessoryState
 import com.automatethethings.xkey.password.FilePasswordVaultFactorStore
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordVault
@@ -802,56 +801,37 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
-     * Returns the active connection's message sender and router across whichever
-     * transport currently has an established session (BLE / TCP / USB), or null
-     * if no desktop is connected. Single source for outbound `remote.*` clients.
+     * The desktop with an established session (BLE, then TCP, then USB), with
+     * the static key its Noise handshake authenticated, or null if none. Each
+     * server answers only for a session it reports established: a USB server
+     * that is handshaking, failed to open or has ended is no desktop.
+     *
+     * The single source for outbound `remote.*` clients: each is built from
+     * the returned desktop, whose sender is bound to the connection that
+     * authenticated its key, so a desktop that disconnects and is replaced
+     * mid-operation receives nothing meant for the other.
      */
-    private fun activeTransport(): Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>? {
-        gattServer?.let { server ->
-            if (server.isSessionEstablished()) {
-                bleMessageRouter?.let { return server to it }
-            }
-        }
-        tcpHsmServer?.let { server ->
-            if (server.state.value is com.automatethethings.xkey.tcp.TcpHsmState.Connected) {
-                tcpMessageRouter?.let { return server to it }
-            }
-        }
-        usbAccessoryServer?.let { server ->
-            usbDesktopTransport(server.state.value, server, usbMessageRouter)?.let { return it }
-        }
-        return null
-    }
+    fun connectedDesktop(): com.automatethethings.xkey.remote.ConnectedDesktop? =
+        gattServer?.connectedDesktop(bleMessageRouter)
+            ?: tcpHsmServer?.connectedDesktop(tcpMessageRouter)
+            ?: usbAccessoryServer?.connectedDesktop(usbMessageRouter)
 
     /**
-     * Every transport with a desktop connection, established or still
-     * handshaking, in the priority order of [activeTransport].
+     * Every transport with an established desktop session, in the priority
+     * order of [connectedDesktop], each with the [ConnectedDesktop] its own
+     * session authenticated, so every client [desktopSessions] builds sends
+     * through that connection's bound sender. A transport still handshaking
+     * has no bound sender, and no client goes out on it.
      */
     private fun desktopTransports(): List<DesktopTransport> = buildList {
-        gattServer?.let { server ->
-            val router = bleMessageRouter ?: return@let
-            val established = server.isSessionEstablished()
-            if (established || server.connectionState.value is ConnectionState.Connected) {
-                add(DesktopTransport(server, router, established, server.confirmedPeerKeyHex()))
-            }
+        gattServer?.connectedDesktop(bleMessageRouter)?.let { desktop ->
+            add(DesktopTransport(desktop, true, gattServer?.confirmedPeerKeyHex()))
         }
         tcpHsmServer?.let { server ->
-            val router = tcpMessageRouter ?: return@let
-            when (server.state.value) {
-                is com.automatethethings.xkey.tcp.TcpHsmState.Connected ->
-                    add(DesktopTransport(server, router, true, server.confirmedPeerKeyHex()))
-                is com.automatethethings.xkey.tcp.TcpHsmState.Handshaking -> add(DesktopTransport(server, router, false, null))
-                else -> Unit
-            }
+            server.connectedDesktop(tcpMessageRouter)?.let { add(DesktopTransport(it, true, server.confirmedPeerKeyHex())) }
         }
         usbAccessoryServer?.let { server ->
-            val router = usbMessageRouter ?: return@let
-            when (server.state.value) {
-                is com.automatethethings.xkey.usb.UsbAccessoryState.Connected ->
-                    add(DesktopTransport(server, router, true, server.confirmedPeerKeyHex()))
-                is com.automatethethings.xkey.usb.UsbAccessoryState.Handshaking -> add(DesktopTransport(server, router, false, null))
-                else -> Unit
-            }
+            server.connectedDesktop(usbMessageRouter)?.let { add(DesktopTransport(it, true, server.confirmedPeerKeyHex())) }
         }
     }
 
@@ -882,7 +862,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     /**
      * The desktop session a key share would go out on, with the peer
      * confirmed on it, or null when no desktop is connected. Transports are
-     * taken in [activeTransport]'s order. The peer is the one confirmed on
+     * taken in [connectedDesktop]'s order. The peer is the one confirmed on
      * that transport's own connection, never the handler-wide peer key.
      * [ShareSession.isCurrent] re-reads this snapshot.
      */
@@ -891,26 +871,13 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             snapshot.sameAs(shareSession())
         }
 
-    private fun liveShareTransports(): List<ShareSession.Transport> {
-        val live = mutableListOf<ShareSession.Transport>()
-        gattServer?.let { server ->
-            val router = bleMessageRouter
-            if (server.isSessionEstablished() && router != null) live += ShareSession.Transport(server, router)
-        }
-        tcpHsmServer?.let { server ->
-            val router = tcpMessageRouter
-            if (server.state.value is com.automatethethings.xkey.tcp.TcpHsmState.Connected && router != null) {
-                live += ShareSession.Transport(server, router)
-            }
-        }
-        usbAccessoryServer?.let { server ->
-            val router = usbMessageRouter
-            if (server.state.value is com.automatethethings.xkey.usb.UsbAccessoryState.Connected && router != null) {
-                live += ShareSession.Transport(server, router)
-            }
-        }
-        return live
-    }
+    /** The established desktops as share transports, each on its own connection's bound sender. */
+    private fun liveShareTransports(): List<ShareSession.Transport> =
+        listOfNotNull(
+            gattServer?.connectedDesktop(bleMessageRouter),
+            tcpHsmServer?.connectedDesktop(tcpMessageRouter),
+            usbAccessoryServer?.connectedDesktop(usbMessageRouter),
+        ).map { ShareSession.Transport(it.sender, it.router) }
 
     /** Collects the TCP server's state into [desktopSession] while it runs. */
     private var tcpStateJob: Job? = null
@@ -932,9 +899,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * @throws IllegalStateException if no desktop is currently connected.
      */
     suspend fun syncNow(): com.automatethethings.xkey.remote.RemoteSyncClient.SyncResult {
-        val (sender, router) = activeTransport()
+        val desktop = connectedDesktop()
             ?: throw IllegalStateException("No desktop connected; pair and connect before syncing")
-        val client = com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, sender, router)
+        val client = com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, desktop)
         Log.i(TAG, "Starting phone-initiated sync")
         return client.syncAll()
     }
@@ -948,9 +915,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      *   error reply or a timeout.
      */
     suspend fun desktopSyncStatus(): com.automatethethings.xkey.remote.RemoteSyncClient.DesktopSyncStatus {
-        val (sender, router) = activeTransport()
+        val desktop = connectedDesktop()
             ?: throw IllegalStateException("No desktop connected; pair and connect first")
-        return com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, sender, router).syncStatus()
+        return com.automatethethings.xkey.remote.RemoteSyncClient(applicationContext, desktop).syncStatus()
     }
 
     /**
@@ -972,10 +939,10 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         include: RemoteBackupClient.Include
     ): RemoteBackupClient.CreateResult {
         try {
-            val (sender, router) = activeTransport()
+            val desktop = connectedDesktop()
                 ?: throw IllegalStateException("No desktop connected; pair and connect before a backup")
             Log.i(TAG, "Starting phone-initiated backup")
-            val result = RemoteBackupClient(sender, router)
+            val result = RemoteBackupClient(desktop)
                 .createBackup(password, include, "phone-${System.currentTimeMillis()}")
             withContext(Dispatchers.IO) {
                 BackupStore(applicationContext).store(result.backupId, result.backupData)
@@ -1004,9 +971,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      *   error reply, a timeout or an unreadable reply.
      */
     suspend fun listDesktopBackups(): List<RemoteBackupClient.BackupInfo> {
-        val (sender, router) = activeTransport()
+        val desktop = connectedDesktop()
             ?: throw IllegalStateException("No desktop connected; pair and connect first")
-        return RemoteBackupClient(sender, router).listBackups()
+        return RemoteBackupClient(desktop).listBackups()
     }
 
     /**
@@ -1024,12 +991,12 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      */
     suspend fun restoreDesktopBackup(backupId: String, password: CharArray): RemoteBackupClient.RestoreResult {
         try {
-            val (sender, router) = activeTransport()
+            val desktop = connectedDesktop()
                 ?: throw IllegalStateException("No desktop connected; pair and connect before a restore")
             val envelope = withContext(Dispatchers.IO) { BackupStore(applicationContext).load(backupId) }
                 ?: throw IllegalStateException("No stored backup $backupId")
             Log.i(TAG, "Starting phone-initiated restore")
-            return RemoteBackupClient(sender, router).restoreBackup(envelope, password)
+            return RemoteBackupClient(desktop).restoreBackup(envelope, password)
         } finally {
             password.fill('\u0000')
         }
@@ -1168,10 +1135,12 @@ sealed class ServiceState {
  * null once it is lost. [source] gives the ready desktop's client, or null.
  *
  * The service's source is its [DesktopSessions], so the published client is
- * the one bound to the connection its peer was confirmed on. [ofTransport]
- * builds a tracker from a bare transport instead: callers on one router share
- * a single client, and when the desktop is lost the client is dropped, so the
- * next session gets a fresh one.
+ * the one bound to the connection its peer was confirmed on. [ofDesktop]
+ * builds a tracker from the ready [ConnectedDesktop][com.automatethethings.xkey.remote.ConnectedDesktop]
+ * instead: callers on one desktop session share a single client, so their
+ * request ids never collide, and its sender stays bound to the connection
+ * that authenticated the key; when the desktop is lost the client is
+ * dropped, so the next session gets a fresh one.
  */
 class DesktopSessionTracker(
     private val source: () -> RemoteKeyClient?
@@ -1203,33 +1172,23 @@ class DesktopSessionTracker(
         private const val TRACKER_TAG = "DesktopSessionTracker"
 
         /**
-         * A tracker whose client is built on [activeTransport]'s ready
-         * transport: one client per router, dropped when no transport is ready.
+         * A tracker whose client is built from [connectedDesktop]'s ready
+         * desktop: one client per router and authenticated key, dropped when
+         * no desktop is ready.
          */
-        fun ofTransport(
-            activeTransport: () -> Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>?
+        fun ofDesktop(
+            connectedDesktop: () -> com.automatethethings.xkey.remote.ConnectedDesktop?
         ): DesktopSessionTracker {
-            var cache: Pair<BidirectionalMessageRouter, RemoteKeyClient>? = null
+            var cache: Triple<BidirectionalMessageRouter, String, RemoteKeyClient>? = null
             return DesktopSessionTracker {
-                val (sender, router) = activeTransport() ?: run {
+                val desktop = connectedDesktop() ?: run {
                     cache = null
                     return@DesktopSessionTracker null
                 }
-                cache?.takeIf { it.first === router }?.second
-                    ?: RemoteKeyClient(sender, router).also { cache = router to it }
+                cache?.takeIf { (router, peer, _) -> router === desktop.router && peer == desktop.peerKeyHex }?.third
+                    ?: RemoteKeyClient(desktop).also { cache = Triple(desktop.router, desktop.peerKeyHex, it) }
             }
         }
     }
 }
 
-/**
- * The USB transport as a desktop transport: only while its session is
- * [UsbAccessoryState.Connected]. Attached but handshaking, ended or failed is
- * no desktop.
- */
-fun usbDesktopTransport(
-    state: UsbAccessoryState,
-    sender: com.automatethethings.xkey.remote.MessageSender,
-    router: BidirectionalMessageRouter?
-): Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>? =
-    if (state is UsbAccessoryState.Connected && router != null) sender to router else null

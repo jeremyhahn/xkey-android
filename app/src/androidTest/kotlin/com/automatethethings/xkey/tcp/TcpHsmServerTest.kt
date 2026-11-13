@@ -21,6 +21,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.UserVerificationPolicy
@@ -30,12 +31,11 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertThrows
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -209,15 +209,14 @@ class TcpHsmServerTest {
     }
 
     @Test
-    fun sendingAfterStopFails() {
+    fun aStoppedServerOffersNoDesktopToSendTo() {
         val server = newServer()
         server.start(context, PRIMARY_PORT)
         awaitListening(server)
         server.stop()
 
-        assertThrows(IOException::class.java) {
-            runBlocking { server.sendEncryptedMessage("{}".toByteArray()) }
-        }
+        // Sends go only through a ConnectedDesktop's bound sender.
+        assertNull(server.connectedDesktop(BidirectionalMessageRouter(newHandler())))
     }
 
     // ------------------------------------------------------------------
@@ -225,7 +224,9 @@ class TcpHsmServerTest {
     // ------------------------------------------------------------------
 
     /** A server registered for teardown, built with every optional argument defaulted. */
-    private fun newServer(): TcpHsmServer {
+    private fun newServer(): TcpHsmServer = TcpHsmServer(newHandler()).also { servers.add(it) }
+
+    private fun newHandler(): RequestHandler {
         val handler = RequestHandler(
             context = context,
             keystoreManager = KeystoreManager(context),
@@ -239,7 +240,7 @@ class TcpHsmServerTest {
                 )
             )
         }
-        return TcpHsmServer(handler).also { servers.add(it) }
+        return handler
     }
 
     private fun awaitListening(server: TcpHsmServer): TcpHsmState = runBlocking {

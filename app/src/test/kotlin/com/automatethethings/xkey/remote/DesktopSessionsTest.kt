@@ -45,7 +45,7 @@ class DesktopSessionsTest {
         /** A snapshot of this transport; its live connection confirms [peer] too. */
         fun transport(established: Boolean = true, peer: String? = null): DesktopTransport {
             sender.confirmedPeer = peer
-            return DesktopTransport(sender, router, established, peer)
+            return DesktopTransport(ConnectedDesktop(peer ?: "", sender, router), established, peer)
         }
 
         /** The server's live connection is replaced by a new one confirming [peer]. */

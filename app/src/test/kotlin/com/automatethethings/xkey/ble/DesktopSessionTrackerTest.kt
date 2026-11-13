@@ -16,8 +16,11 @@ package com.automatethethings.xkey.ble
 
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.RemoteKeyClient
 import com.automatethethings.xkey.remote.ScriptedMessageSender
+import com.automatethethings.xkey.remote.TEST_PEER_KEY_HEX
+import com.automatethethings.xkey.remote.desktopOf
 import com.automatethethings.xkey.remote.stubAndroidLog
 import com.automatethethings.xkey.usb.UsbAccessoryState
 import io.mockk.mockk
@@ -62,21 +65,14 @@ class DesktopSessionTrackerTest {
         unmockkAll()
     }
 
-    @Test
-    fun `a USB accessory only counts as a desktop once Connected`() {
-        assertNull(usbDesktopTransport(UsbAccessoryState.Disconnected, sender, router))
-        assertNull(usbDesktopTransport(UsbAccessoryState.Handshaking, sender, router))
-        assertNull(usbDesktopTransport(UsbAccessoryState.Error("boom"), sender, router))
-        assertNull(usbDesktopTransport(UsbAccessoryState.Connected("acc"), sender, null))
-        val transport = usbDesktopTransport(UsbAccessoryState.Connected("acc"), sender, router)
-        assertSame(sender, transport?.first)
-        assertSame(router, transport?.second)
-    }
+    /** The USB desktop as UsbAccessoryServer hands it out: only while Connected. */
+    private fun usbDesktop(state: UsbAccessoryState, peer: String = TEST_PEER_KEY_HEX): ConnectedDesktop? =
+        if (state is UsbAccessoryState.Connected) desktopOf(sender, router, peer) else null
 
     @Test
     fun `the USB session publishes the client on Connected and drops it when it ends`() = runTest {
         val usbState = MutableStateFlow<UsbAccessoryState>(UsbAccessoryState.Handshaking)
-        val tracker = DesktopSessionTracker.ofTransport { usbDesktopTransport(usbState.value, sender, router) }
+        val tracker = DesktopSessionTracker.ofDesktop { usbDesktop(usbState.value) }
         val seen = mutableListOf<RemoteKeyClient?>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { tracker.session.toList(seen) }
         tracker.follow(backgroundScope, usbState)
@@ -110,5 +106,15 @@ class DesktopSessionTrackerTest {
 
         // The PIV screens saw every transition: none, ready, lost, ready, lost.
         assertEquals(5, seen.size)
+    }
+
+    @Test
+    fun `another desktop on the same router gets its own client`() {
+        var peer = "aa01"
+        val tracker = DesktopSessionTracker.ofDesktop { desktopOf(sender, router, peer) }
+        val first = tracker.client()
+        assertSame(first, tracker.client())
+        peer = "bb02"
+        assertNotSame(first, tracker.client())
     }
 }

@@ -20,8 +20,9 @@ import java.util.Base64
 import java.util.WeakHashMap
 
 /**
- * A desktop transport with a connection on it: what sends to the desktop and
- * the router its replies come back on.
+ * A desktop transport with a connection on it: the [desktop] its session
+ * authenticated, whose sender is bound to that connection, and the router its
+ * replies come back on.
  *
  * @property established whether the encrypted session is up; false while the
  *   handshake still runs
@@ -29,11 +30,15 @@ import java.util.WeakHashMap
  *   confirmed, or null while it has none
  */
 class DesktopTransport(
-    val sender: MessageSender,
-    val router: BidirectionalMessageRouter,
+    val desktop: ConnectedDesktop,
     val established: Boolean,
     val confirmedPeer: String?
-)
+) {
+    /** The sender bound to [desktop]'s connection. */
+    val sender: SessionSender get() = desktop.sender
+
+    val router: BidirectionalMessageRouter get() = desktop.router
+}
 
 /** The desktop the phone serves now: its confirmed peer key and the key client on its own transport. */
 class DesktopPeerSession(val peerPublicKeyHex: String, val client: RemoteKeyClient)
@@ -127,7 +132,7 @@ class DesktopSessions(
     private fun clientFor(transport: DesktopTransport, bound: ConfirmedConnection?): RemoteKeyClient {
         clients[transport.router]?.clientFor(bound)?.let { return it }
         val sender = bound?.let { ConnectionBoundSender(transport.sender, it) } ?: transport.sender
-        return RemoteKeyClient(sender, transport.router)
+        return RemoteKeyClient(ConnectedDesktop(transport.desktop.peerKeyHex, sender, transport.router))
             .also { clients[transport.router] = Entry(bound, it) }
     }
 
@@ -139,7 +144,7 @@ class DesktopSessions(
     private class ConnectionBoundSender(
         private val sender: MessageSender,
         private val connection: ConfirmedConnection
-    ) : MessageSender {
+    ) : SessionSender {
         override suspend fun sendEncryptedMessage(data: ByteArray) =
             sender.sendEncryptedMessageOn(connection, data)
     }

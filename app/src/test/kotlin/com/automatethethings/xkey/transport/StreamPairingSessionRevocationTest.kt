@@ -27,6 +27,7 @@ import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.RemoteShareClient
 import com.automatethethings.xkey.remote.ShareSession
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -161,7 +162,7 @@ class StreamPairingSessionRevocationTest {
         phone.awaitServeEnded()
         keys.forEach { (name, key) -> assertTrue("$name must be zero", key.isAllZero()) }
         try {
-            pairing.sendEncryptedMessage(REQUEST)
+            pairing.sendOnBoundSession(REQUEST)
             fail("a send after the teardown must be refused")
         } catch (e: IOException) {
             // No session left to send on.
@@ -180,7 +181,7 @@ class StreamPairingSessionRevocationTest {
         val keys = phone.noise.secretArraysForTest().filterKeys { it in TRANSPORT_SECRETS }
 
         gate.armed = true
-        val send = scope.async { runCatching { pairing.sendEncryptedMessage(REQUEST) } }
+        val send = scope.async { runCatching { pairing.sendOnBoundSession(REQUEST) } }
         assertTrue("the send never reached the stream", gate.entered.await(5, TimeUnit.SECONDS))
         assertFalse("the keys are live while the frame is mid-send", keys.values.any { it.isAllZero() })
 
@@ -210,7 +211,7 @@ class StreamPairingSessionRevocationTest {
             paused.complete(Unit)
             resume.await()
         }
-        val send = scope.async { runCatching { pairing.sendEncryptedMessage(REQUEST) } }
+        val send = scope.async { runCatching { pairing.sendOnBoundSession(REQUEST) } }
         withTimeout(TIMEOUT_MS) { paused.await() }
         val writes = gate.writes.get()
         val nonce = phone.noise.sendNonceForTest()
@@ -241,7 +242,7 @@ class StreamPairingSessionRevocationTest {
             admitted.complete(Unit)
             release.await()
         }
-        val sender = scope.launch { pairing.sendEncryptedMessage(REQUEST) }
+        val sender = scope.launch { pairing.sendOnBoundSession(REQUEST) }
         withTimeout(TIMEOUT_MS) { admitted.await() }
 
         sender.cancel()
@@ -249,7 +250,7 @@ class StreamPairingSessionRevocationTest {
         withTimeout(TIMEOUT_MS) { sender.join() }
         pairing.afterAdmissionForTest = null
 
-        pairing.sendEncryptedMessage(REQUEST)
+        pairing.sendOnBoundSession(REQUEST)
         assertEquals("remote.sync", phone.desktop.readEncrypted().getString("method"))
         assertEquals("remote.sync", phone.desktop.readEncrypted().getString("method"))
     }
@@ -268,7 +269,7 @@ class StreamPairingSessionRevocationTest {
         assertEquals(TRANSPORT_SECRETS, keys.keys)
 
         gate.armed = true
-        val send = scope.async { runCatching { pairing.sendEncryptedMessage(REQUEST) } }
+        val send = scope.async { runCatching { pairing.sendOnBoundSession(REQUEST) } }
         assertTrue("the send never reached the stream", gate.entered.await(5, TimeUnit.SECONDS))
 
         phone.desktop.endOutput()
@@ -278,7 +279,7 @@ class StreamPairingSessionRevocationTest {
         assertTrue("the blocked send must fail: $result", result.exceptionOrNull() is IOException)
         keys.forEach { (name, key) -> assertTrue("$name must be zero", key.isAllZero()) }
         try {
-            pairing.sendEncryptedMessage(REQUEST)
+            pairing.sendOnBoundSession(REQUEST)
             fail("a send after the teardown must be refused")
         } catch (e: IOException) {
             // No session left to send on.
@@ -301,7 +302,7 @@ class StreamPairingSessionRevocationTest {
         val nonce = phone.noise.sendNonceForTest()
 
         try {
-            pairing.sendEncryptedMessage(REQUEST)
+            pairing.sendOnBoundSession(REQUEST)
             fail("the send must be refused")
         } catch (e: PeerNotPairedException) {
             assertEquals(phone.desktop.publicKeyHex, e.publicKeyHex)
@@ -353,7 +354,7 @@ class StreamPairingSessionRevocationTest {
         val reply = desktop.request("system.ping")
         assertEquals(ErrorCodes.PAIRING_REQUIRED, reply.getJSONObject("error").getInt("code"))
         try {
-            pairing.sendEncryptedMessage(REQUEST)
+            pairing.sendOnBoundSession(REQUEST)
             fail("the send must be refused")
         } catch (e: PeerNotPairedException) {
             // Nothing was written.
@@ -493,7 +494,7 @@ class StreamPairingSessionRevocationTest {
         // The check (same connection, same peer) has passed for the first
         // desktop when this runs; the second one, paired alongside it (so the
         // first is not revoked), connects in that window.
-        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) {
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) {
             if (second == null) second = runBlocking { connectPaired(deviceName = "second desktop") }
             true
         }!!
@@ -523,10 +524,33 @@ class StreamPairingSessionRevocationTest {
     fun aScopedSendOnTheCurrentConfirmedConnectionReachesItsPeer() = runBlocking<Unit> {
         val phone = connectPaired()
         val confirmed = pairing.confirmedConnection() ?: error("the connection confirms no one")
+        // The only scoped send path: a sender bound to this connection.
+        val bound = pairing.boundSender()?.second ?: error("no bound sender")
 
-        pairing.sendEncryptedMessageOn(confirmed, REQUEST)
+        bound.sendEncryptedMessageOn(confirmed, REQUEST)
 
         assertEquals("remote.sync", phone.desktop.readEncrypted().getString("method"))
+    }
+
+    /**
+     * A bound sender carries only its own connection's scoped send: handed
+     * the confirmation of a later connection, even the current one, it
+     * refuses, and neither desktop receives a frame.
+     */
+    @Test
+    fun aBoundSenderRefusesAnotherConnectionsConfirmation() = runBlocking<Unit> {
+        val first = connectPaired()
+        val bound = pairing.boundSender()?.second ?: error("no bound sender")
+        val second = connectPaired(deviceName = "second desktop")
+        val current = pairing.confirmedConnection() ?: error("the connection confirms no one")
+        assertEquals(second.desktop.publicKeyHex, current.peerPublicKeyHex)
+        assertNull("the first connection no longer confirms anyone", bound.confirmedConnection())
+
+        val outcome = runCatching { bound.sendEncryptedMessageOn(current, REQUEST) }
+
+        assertTrue("got $outcome", outcome.exceptionOrNull() is ConnectionChangedException)
+        second.desktop.assertNoFrame()
+        first.desktop.assertNoFrame()
     }
 
     /**
@@ -538,7 +562,7 @@ class StreamPairingSessionRevocationTest {
     fun aShareOnTheCurrentConnectionReachesTheConfirmedDesktop() = runBlocking<Unit> {
         val phone = connectPaired()
         val router = BidirectionalMessageRouter(requestHandler)
-        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) { true }!!
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!
         assertEquals(phone.desktop.publicKeyHex, session.peerPublicKeyHex)
 
         val share = RemoteShareClient.PublicKeyShare("k1", "-----BEGIN PUBLIC KEY-----", null, "ECDSA-P256", null, null)
@@ -560,12 +584,14 @@ class StreamPairingSessionRevocationTest {
     fun aScopedSendReplacedAfterTheEarlyCheckIsRefusedAtAdmission() = runBlocking<Unit> {
         val first = connectPaired()
         val confirmed = pairing.confirmedConnection() ?: error("the connection confirms no one")
+        // The only scoped send path: a sender bound to this connection.
+        val bound = pairing.boundSender()?.second ?: error("no bound sender")
         var second: Phone? = null
         pairing.beforeAdmissionForTest = {
             if (second == null) second = connectPaired(deviceName = "second desktop")
         }
 
-        val outcome = runCatching { pairing.sendEncryptedMessageOn(confirmed, REQUEST) }
+        val outcome = runCatching { bound.sendEncryptedMessageOn(confirmed, REQUEST) }
         pairing.beforeAdmissionForTest = null
 
         val late = second ?: error("the second desktop never connected")
@@ -597,7 +623,7 @@ class StreamPairingSessionRevocationTest {
         val second = connectPaired(staticPrivateKey = key)
         assertEquals(first.desktop.publicKeyHex, second.desktop.publicKeyHex)
         assertTrue(second.desktop.request("system.ping").getJSONObject("result").getBoolean("ok"))
-        pairing.sendEncryptedMessage(REQUEST)
+        pairing.sendOnBoundSession(REQUEST)
         assertEquals("remote.sync", second.desktop.readEncrypted().getString("method"))
 
         repo.removeDevice(second.desktop.publicKeyHex)
