@@ -317,9 +317,33 @@ class RemoteSyncClientTest {
         verify(exactly = 1) {
             AuditLogger.logOathSyncPerformed(
                 deviceId = DESK_PEER, deviceName = DESK_NAME, count = 0, direction = AuditLogger.SYNC_OUTBOUND,
-                added = 0, updated = 0, skipped = 0, success = false, errorMessage = any()
+                added = 0, updated = 0, skipped = 0, success = false,
+                errorMessage = "remote sync error, code -32603"
             )
         }
+    }
+
+    @Test
+    fun `a peer error quoting credentials stores only the local description and code`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        val secrets = listOf("hunter2-pass", "JBSWY3DPEHPK3PXP", "bank.example.com", "alice-user")
+        sender.failWith(code = -32001, message = "refused ${secrets.joinToString(" ")}")
+        val stored = mutableListOf<String?>()
+
+        val e = expectProtocolException { auditedClient().syncPasswords() }
+
+        assertEquals(-32001, e.errorCode)
+        assertEquals("Remote sync error: refused ${secrets.joinToString(" ")}", e.message)
+        verify(exactly = 1) {
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 0, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = false, errorMessage = captureNullable(stored)
+            )
+        }
+        val entry = stored.single()
+        assertEquals("remote sync error, code -32001", entry)
+        secrets.forEach { assertFalse("audit entry holds $it", entry!!.contains(it)) }
     }
 
     @Test
