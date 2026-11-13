@@ -147,11 +147,28 @@ the counts and the `remote` array.
   `ErrorCodes.INTERNAL_ERROR` with the method name in the message.
 - `markSynced()` logs and ignores a failure to record the sync time.
 
+## Audit
+
+Every OATH and password sync, in either direction, records one audit entry,
+success or failure (see [audit-log](../audit-log/architecture.md#sync-events)):
+
+| Leg | Recorded by | Operation type | Device |
+|-----|-------------|----------------|--------|
+| `local.syncOATH` | `handleSyncOATH` | `OATH_SYNC_PERFORMED`, `direction` `inbound` | the request's connection peer (else the served peer) and its paired name |
+| `local.syncPasswords` | `handleSyncPasswords` | `PASSWORD_SYNC_PERFORMED`, `direction` `inbound` | as above |
+| `remote.syncOATH` | `RemoteSyncClient.syncOath` | `OATH_SYNC_PERFORMED`, `direction` `outbound` | the client's `peerDeviceId` / `peerDeviceName` (null when the caller passes none; `XKeyGattService.syncNow` passes none yet) |
+| `remote.syncPasswords` | `RemoteSyncClient.syncPasswords` | `PASSWORD_SYNC_PERFORMED`, `direction` `outbound` | as above |
+
+A locked vault is recorded as a failed password entry, inbound and outbound
+(`syncAll()` still syncs the other stores). Entries hold counts only, never a
+secret, password, site or user name. Trust-store syncs record no entry yet.
+
 ## Tests
 
 | Test class | Covers |
 |------------|--------|
-| `RemoteSyncClientTest` (`app/src/test/.../remote/`) | Outbound legs and push counts; `remote.syncStatus` params, result parsing and malformed replies; distinct ids for a status request beside a store leg |
+| `RemoteSyncClientTest` (`app/src/test/.../remote/`) | Outbound legs and push counts; `remote.syncStatus` params, result parsing and malformed replies; distinct ids for a status request beside a store leg; one outbound audit entry per OATH and password leg |
+| `SyncAuditTest` (`app/src/test/.../protocol/`) | One inbound audit entry per `local.syncOATH` / `local.syncPasswords`, failures and a locked vault included; no password data in the entry |
 | `RemoteClientInteropTest` (`app/src/test/.../remote/`) | Outbound client wire interop |
 | `SyncEngineStatusTest`, `SyncEngineTrustStoreTest`, `PasswordSyncTest` (`app/src/test/.../sync/`) | Status checksums, certificate merge, password gather and merge |
 | `SyncCodecTest` (`app/src/test/.../crypto/`) | Codec helpers |

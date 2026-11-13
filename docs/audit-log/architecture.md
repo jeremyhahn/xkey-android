@@ -11,6 +11,20 @@ Comprehensive security event log with 35+ operation types covering key lifecycle
 cryptographic operations, FIDO2 events, connection events, certificate operations,
 file/media operations, contact management, and co-signing.
 
+### Sync events
+
+Operation types are stored by name (the type converter in `XKeyDatabase.kt`),
+so a new type needs no migration.
+
+| Operation type | Logger | Recorded when | Details |
+|----------------|--------|---------------|---------|
+| `OATH_SYNC_PERFORMED` | `AuditLogger.logOathSyncPerformed` | each `local.syncOATH` (`RequestHandler.handleSyncOATH`) and `remote.syncOATH` (`RemoteSyncClient.syncOath`) | `direction` (`inbound` / `outbound`), `credentialCount` (sent to the peer), `added`, `updated`, `skipped` |
+| `PASSWORD_SYNC_PERFORMED` | `AuditLogger.logPasswordSyncPerformed` | each `local.syncPasswords` (`RequestHandler.handleSyncPasswords`) and `remote.syncPasswords` (`RemoteSyncClient.syncPasswords`) | `direction`, `passwordCount` (sent to the peer), `added`, `updated`, `skipped`; never a password, site or user name |
+
+A failed sync, a locked password vault included, records one entry with
+`success = false` and `error_message` set. `device_id` and `device_name` name
+the desktop. See [store-sync](../store-sync/architecture.md#audit).
+
 ## Index Strategy
 
 ### audit_logs
