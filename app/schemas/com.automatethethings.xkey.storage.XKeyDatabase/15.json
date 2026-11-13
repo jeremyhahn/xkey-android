@@ -1,8 +1,8 @@
 {
   "formatVersion": 1,
   "database": {
-    "version": 14,
-    "identityHash": "0205ffe280f25a96b4ab622ad954f87e",
+    "version": 15,
+    "identityHash": "9131d18aa77079c253ca6bd2ee494e1f",
     "entities": [
       {
         "tableName": "credential_metadata",
@@ -120,7 +120,7 @@
       },
       {
         "tableName": "keys",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `key_id` TEXT NOT NULL, `key_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `label` TEXT NOT NULL, `public_key_der` BLOB, `public_key_cose` BLOB, `key_size_bits` INTEGER NOT NULL, `strongbox_backed` INTEGER NOT NULL, `biometric_required` INTEGER NOT NULL, `auth_duration_seconds` INTEGER NOT NULL, `exportable` INTEGER NOT NULL, `shareable` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `source` TEXT NOT NULL, `remote_backend` TEXT, `use_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `rp_id` TEXT, `rp_name` TEXT, `user_id` TEXT, `user_name` TEXT, `user_display_name` TEXT, `is_discoverable` INTEGER NOT NULL, `sign_count` INTEGER NOT NULL, `is_system_key` INTEGER NOT NULL)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `key_id` TEXT NOT NULL, `key_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `label` TEXT NOT NULL, `public_key_der` BLOB, `public_key_cose` BLOB, `key_size_bits` INTEGER NOT NULL, `strongbox_backed` INTEGER NOT NULL, `biometric_required` INTEGER NOT NULL, `auth_duration_seconds` INTEGER NOT NULL, `exportable` INTEGER NOT NULL, `shareable` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `policy_revision` INTEGER NOT NULL DEFAULT 0, `source` TEXT NOT NULL, `remote_backend` TEXT, `use_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `rp_id` TEXT, `rp_name` TEXT, `user_id` TEXT, `user_name` TEXT, `user_display_name` TEXT, `is_discoverable` INTEGER NOT NULL, `sign_count` INTEGER NOT NULL, `is_system_key` INTEGER NOT NULL)",
         "fields": [
           {
             "fieldPath": "id",
@@ -203,6 +203,13 @@
             "columnName": "sharing_policy",
             "affinity": "TEXT",
             "notNull": true
+          },
+          {
+            "fieldPath": "policyRevision",
+            "columnName": "policy_revision",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
           },
           {
             "fieldPath": "source",
@@ -1232,7 +1239,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '0205ffe280f25a96b4ab622ad954f87e')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '9131d18aa77079c253ca6bd2ee494e1f')"
     ]
   }
 }

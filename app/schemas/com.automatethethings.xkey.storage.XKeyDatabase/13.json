@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 13,
-    "identityHash": "5bc6a9db461776feb5f780a0098afbed",
+    "identityHash": "e02480570d8c7a895d2410493d8e9e08",
     "entities": [
       {
         "tableName": "credential_metadata",
@@ -120,7 +120,7 @@
       },
       {
         "tableName": "keys",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `key_id` TEXT NOT NULL, `key_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `label` TEXT NOT NULL, `public_key_der` BLOB, `public_key_cose` BLOB, `key_size_bits` INTEGER NOT NULL, `strongbox_backed` INTEGER NOT NULL, `biometric_required` INTEGER NOT NULL, `auth_duration_seconds` INTEGER NOT NULL, `exportable` INTEGER NOT NULL, `shareable` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `source` TEXT NOT NULL, `remote_backend` TEXT, `use_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `rp_id` TEXT, `rp_name` TEXT, `user_id` TEXT, `user_name` TEXT, `user_display_name` TEXT, `is_discoverable` INTEGER NOT NULL, `sign_count` INTEGER NOT NULL, `is_system_key` INTEGER NOT NULL)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `key_id` TEXT NOT NULL, `key_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `label` TEXT NOT NULL, `public_key_der` BLOB, `public_key_cose` BLOB, `key_size_bits` INTEGER NOT NULL, `strongbox_backed` INTEGER NOT NULL, `biometric_required` INTEGER NOT NULL, `auth_duration_seconds` INTEGER NOT NULL, `exportable` INTEGER NOT NULL, `shareable` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `policy_revision` INTEGER NOT NULL DEFAULT 0, `source` TEXT NOT NULL, `remote_backend` TEXT, `use_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `rp_id` TEXT, `rp_name` TEXT, `user_id` TEXT, `user_name` TEXT, `user_display_name` TEXT, `is_discoverable` INTEGER NOT NULL, `sign_count` INTEGER NOT NULL, `is_system_key` INTEGER NOT NULL)",
         "fields": [
           {
             "fieldPath": "id",
@@ -203,6 +203,13 @@
             "columnName": "sharing_policy",
             "affinity": "TEXT",
             "notNull": true
+          },
+          {
+            "fieldPath": "policyRevision",
+            "columnName": "policy_revision",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
           },
           {
             "fieldPath": "source",
@@ -1129,81 +1136,11 @@
             "createSql": "CREATE INDEX IF NOT EXISTS `index_passwords_source` ON `${TABLE_NAME}` (`source`)"
           }
         ]
-      },
-      {
-        "tableName": "key_policies",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `pending_policy` TEXT, `denial` TEXT, `clear_grants` INTEGER NOT NULL, PRIMARY KEY(`key_id`), FOREIGN KEY(`key_instance`) REFERENCES `keys`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
-        "fields": [
-          {
-            "fieldPath": "keyId",
-            "columnName": "key_id",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "keyInstance",
-            "columnName": "key_instance",
-            "affinity": "INTEGER",
-            "notNull": true
-          },
-          {
-            "fieldPath": "sharingPolicy",
-            "columnName": "sharing_policy",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "pendingPolicy",
-            "columnName": "pending_policy",
-            "affinity": "TEXT"
-          },
-          {
-            "fieldPath": "denial",
-            "columnName": "denial",
-            "affinity": "TEXT"
-          },
-          {
-            "fieldPath": "clearGrants",
-            "columnName": "clear_grants",
-            "affinity": "INTEGER",
-            "notNull": true
-          }
-        ],
-        "primaryKey": {
-          "autoGenerate": false,
-          "columnNames": [
-            "key_id"
-          ]
-        },
-        "indices": [
-          {
-            "name": "index_key_policies_key_instance",
-            "unique": true,
-            "columnNames": [
-              "key_instance"
-            ],
-            "orders": [],
-            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_key_policies_key_instance` ON `${TABLE_NAME}` (`key_instance`)"
-          }
-        ],
-        "foreignKeys": [
-          {
-            "table": "keys",
-            "onDelete": "CASCADE",
-            "onUpdate": "NO ACTION",
-            "columns": [
-              "key_instance"
-            ],
-            "referencedColumns": [
-              "id"
-            ]
-          }
-        ]
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '5bc6a9db461776feb5f780a0098afbed')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e02480570d8c7a895d2410493d8e9e08')"
     ]
   }
 }

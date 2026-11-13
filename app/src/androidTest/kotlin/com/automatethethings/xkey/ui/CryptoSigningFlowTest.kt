@@ -26,6 +26,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
@@ -41,6 +43,7 @@ import org.junit.runner.RunWith
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.util.Base64
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -62,6 +65,10 @@ import java.util.concurrent.TimeUnit
  * The activity has no visible UI of its own, so every assertion is on the
  * [CryptoSigningActivity.ACTION_CRYPTO_SIGNING_RESULT] broadcast.
  *
+ * The activity only serves a request whose signature entry the process
+ * [PromptOwnership] holds ACTIVE, so each test holds that entry first, as the
+ * launcher's request does, and lets go in `@After`.
+ *
  * Both keys use a per-run id and are deleted in `@After`, along with the audit
  * rows key generation writes.
  */
@@ -77,7 +84,10 @@ class CryptoSigningFlowTest {
 
     private lateinit var keystoreManager: KeystoreManager
     private var receiver: BroadcastReceiver? = null
-    private val results = mutableListOf<Intent>()
+    private val results: MutableList<Intent> = Collections.synchronizedList(mutableListOf())
+
+    /** The prompt owner's entry this test holds ACTIVE, if any. */
+    private var heldKey: String? = null
 
     @Before
     fun setUp() {
@@ -87,6 +97,8 @@ class CryptoSigningFlowTest {
 
     @After
     fun tearDown() {
+        heldKey?.let { PromptOwnership.process.end(it) }
+        heldKey = null
         receiver?.let { context.unregisterReceiver(it) }
         receiver = null
 
@@ -122,6 +134,7 @@ class CryptoSigningFlowTest {
             keystoreManager.generateKey(credentialId = ecCredentialId, requireBiometric = false)
         }
         val requestId = "flow-ec-$suffix"
+        holdTheScreen(requestId)
 
         awaitResultFor(
             CryptoSigningActivity.createIntent(
@@ -164,16 +177,27 @@ class CryptoSigningFlowTest {
         runBlocking {
             keystoreManager.generateKey(credentialId = ecCredentialId, requireBiometric = false)
         }
+        val requestId = "flow-finish-$suffix"
+        holdTheScreen(requestId)
 
-        val scenario = ActivityScenario.launch<CryptoSigningActivity>(
+        val scenario = awaitResultFor(
             CryptoSigningActivity.createIntent(
                 context = context,
-                requestId = "flow-finish-$suffix",
+                requestId = requestId,
                 credentialId = ecCredentialId,
                 dataHashBase64 = encodedHash()
             )
         )
 
+        val result = lastResult()
+        assertEquals(requestId, result.getStringExtra(CryptoSigningActivity.EXTRA_REQUEST_ID))
+        val errorCode = result.getIntExtra(CryptoSigningActivity.EXTRA_ERROR_CODE, Int.MIN_VALUE)
+        assertFalse(
+            "the run must resolve at the prompt, not before it (was $errorCode)",
+            errorCode == CryptoSigningActivity.ERROR_CODE_KEY_NOT_FOUND ||
+                errorCode == CryptoSigningActivity.ERROR_CODE_INVALID_REQUEST ||
+                errorCode == CryptoSigningActivity.ERROR_CODE_CRYPTO_ERROR
+        )
         val deadline = System.currentTimeMillis() + BROADCAST_TIMEOUT_SECONDS * 1_000
         while (System.currentTimeMillis() < deadline &&
             scenario.state != Lifecycle.State.DESTROYED
@@ -199,19 +223,23 @@ class CryptoSigningFlowTest {
     @Test
     fun anRsaCredentialIsReportedAsACryptoError() {
         generateRsaCredentialKey(rsaCredentialId)
+        val requestId = "flow-rsa-$suffix"
+        holdTheScreen(requestId)
 
         awaitResultFor(
             CryptoSigningActivity.createIntent(
                 context = context,
-                requestId = "flow-rsa-$suffix",
+                requestId = requestId,
                 credentialId = rsaCredentialId,
                 dataHashBase64 = encodedHash()
             )
         )
 
+        val result = lastResult()
+        assertEquals(requestId, result.getStringExtra(CryptoSigningActivity.EXTRA_REQUEST_ID))
         assertEquals(
             CryptoSigningActivity.ERROR_CODE_CRYPTO_ERROR,
-            lastResult().getIntExtra(CryptoSigningActivity.EXTRA_ERROR_CODE, Int.MIN_VALUE)
+            result.getIntExtra(CryptoSigningActivity.EXTRA_ERROR_CODE, Int.MIN_VALUE)
         )
     }
 
@@ -226,6 +254,7 @@ class CryptoSigningFlowTest {
     @Test
     fun aLockScreenRequestIsHandledLikeAnyOther() {
         val requestId = "flow-lock-$suffix"
+        holdTheScreen(requestId)
 
         awaitResultFor(
             CryptoSigningActivity.createIntent(
@@ -292,10 +321,26 @@ class CryptoSigningFlowTest {
     }
 
     /**
+     * Makes [requestId]'s signature entry ACTIVE in the process prompt owner,
+     * as the launcher's request holds it while its prompt is up: the activity
+     * refuses a request the owner does not hold ACTIVE. [tearDown] lets go.
+     */
+    private fun holdTheScreen(requestId: String) {
+        val key = NotificationKeys.signature(requestId)
+        PromptOwnership.process.enqueue(
+            key, PromptOwnership.Kind.CRYPTO_SIGNING,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
+        heldKey = key
+        assertEquals("nothing else holds the screen", key, PromptOwnership.process.activeKey)
+    }
+
+    /**
      * Registers a receiver for the signing-result broadcast, launches [intent],
      * and blocks until a result arrives or the timeout elapses.
      */
-    private fun awaitResultFor(intent: Intent) {
+    private fun awaitResultFor(intent: Intent): ActivityScenario<CryptoSigningActivity> {
         val latch = CountDownLatch(1)
         val broadcastReceiver = object : BroadcastReceiver() {
             override fun onReceive(receivedContext: Context?, received: Intent?) {
@@ -311,16 +356,17 @@ class CryptoSigningFlowTest {
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
 
-        ActivityScenario.launch<CryptoSigningActivity>(intent)
+        val scenario = ActivityScenario.launch<CryptoSigningActivity>(intent)
 
         assertTrue(
             "Expected a ${CryptoSigningActivity.ACTION_CRYPTO_SIGNING_RESULT} broadcast",
             latch.await(BROADCAST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         )
+        return scenario
     }
 
     private fun lastResult(): Intent {
-        val result = results.lastOrNull()
+        val result = synchronized(results) { results.lastOrNull() }
         assertNotNull("No signing result broadcast was received", result)
         return result!!
     }

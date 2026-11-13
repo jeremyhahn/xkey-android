@@ -63,7 +63,7 @@ class KeyPolicyMigrationTest {
 
     @Test
     fun unreadableDenialRecordsDenyEveryKeyInsteadOfBeingDropped() {
-        XKeyDatabase.migration12To13 { throw IOException("unreadable") }.migrate(db)
+        XKeyDatabase.migration13To14 { throw IOException("unreadable") }.migrate(db)
 
         assertTrue("the key policy rows were not created", statements.any { it.startsWith("INSERT INTO `key_policies`") })
         assertTrue(
@@ -78,7 +78,7 @@ class KeyPolicyMigrationTest {
      */
     @Test
     fun unreadableDenialRecordsKeepTheGrantClearsTheyMayOwe() {
-        XKeyDatabase.migration12To13 { throw IOException("unreadable") }.migrate(db)
+        XKeyDatabase.migration13To14 { throw IOException("unreadable") }.migrate(db)
 
         assertTrue(
             "the fallback dropped the grant-clear obligations: ${keyWideUpdates()}",
@@ -88,7 +88,7 @@ class KeyPolicyMigrationTest {
 
     @Test
     fun readableRecordsAddNoDenyAllMarker() {
-        XKeyDatabase.migration12To13 { emptyMap() }.migrate(db)
+        XKeyDatabase.migration13To14 { emptyMap() }.migrate(db)
 
         assertTrue(statements.none { it.startsWith("UPDATE `key_policies` SET") })
     }
@@ -96,7 +96,7 @@ class KeyPolicyMigrationTest {
     /** Round 9 (2): 13 -> 14 creates the deletion tombstone table, keyed by key id. */
     @Test
     fun migration13To14CreatesTheDeletionTombstoneTable() {
-        XKeyDatabase.MIGRATION_13_14.migrate(db)
+        XKeyDatabase.MIGRATION_14_15.migrate(db)
 
         assertTrue(
             "no key_deletions table: $statements",

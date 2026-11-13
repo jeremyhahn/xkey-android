@@ -70,8 +70,12 @@ import java.util.concurrent.atomic.AtomicReference
  * - v10: Added `passwords` table for the encrypted password manager.
  * - v11: Migrated key source token "keychaind" -> "xkmsd" (go-xkms daemon rename).
  * - v12: Added expires_at, shared and tenant_id columns to passwords table.
- * - v13: Added `key_policies` table: one row per key holding its sharing
+ * - v13: Added policy_revision to keys, and the trigger that only lets it
+ *        move forward.
+ * - v14: Added `key_policies` table: one row per key holding its sharing
  *        policy state, written only by [KeyPolicyStore] (#193).
+ * - v15: Added `key_deletions`: a tombstone per key row deleted before its
+ *        material is gone, replayed at start-up (#193).
  *
  * Usage:
  * ```kotlin
@@ -104,7 +108,7 @@ import java.util.concurrent.atomic.AtomicReference
         KeyPolicyEntity::class,
         KeyDeletionEntity::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = true
 )
 @TypeConverters(AuditOperationTypeConverter::class)
@@ -593,7 +597,49 @@ abstract class XKeyDatabase : RoomDatabase() {
         }
 
         /**
-         * Migration from v12 to v13: every key gets its policy row (#193),
+         * Moves a key's `policy_revision` past the stored one whenever an
+         * update of its policy or revision would leave the revision where it
+         * was or take it back. The DAO's policy writers bump the revision
+         * themselves, so this fires for none of them; it catches a whole-row
+         * `@Update` written from a copy read earlier, which would otherwise
+         * restore the revision an in-flight approval was taken at. With
+         * recursive triggers off (SQLite's default) its own update does not
+         * fire it again.
+         */
+        internal const val CREATE_POLICY_REVISION_TRIGGER =
+            "CREATE TRIGGER IF NOT EXISTS `keys_policy_revision_forward` " +
+                "AFTER UPDATE OF `sharing_policy`, `policy_revision` ON `keys` FOR EACH ROW " +
+                "WHEN NEW.`policy_revision` <= OLD.`policy_revision` " +
+                "BEGIN UPDATE `keys` SET `policy_revision` = OLD.`policy_revision` + 1 " +
+                "WHERE `id` = NEW.`id`; END"
+
+        /**
+         * Migration from v12 to v13: give every key a sharing-policy
+         * revision, starting at 0, and the trigger that keeps it moving
+         * forward ([CREATE_POLICY_REVISION_TRIGGER]). An approved policy
+         * write compares the revision it read, so a policy changed away and
+         * back no longer matches an approval taken before the change.
+         */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `keys` ADD COLUMN `policy_revision` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(CREATE_POLICY_REVISION_TRIGGER)
+            }
+        }
+
+        /**
+         * Creates what Room's schema does not carry on a fresh install: the
+         * policy revision trigger a migrated database gets from
+         * [MIGRATION_12_13].
+         */
+        internal val CREATE_TRIGGERS = object : RoomDatabase.Callback() {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                db.execSQL(CREATE_POLICY_REVISION_TRIGGER)
+            }
+        }
+
+        /**
+         * Migration from v13 to v14: every key gets its policy row (#193),
          * bound to its key row and holding its stored policy, and a denial a
          * failed narrowing recorded outside the database is moved into it.
          * [denials] gives those records by key id, each "instance@POLICY"
@@ -605,7 +651,7 @@ abstract class XKeyDatabase : RoomDatabase() {
          * stay where they were. Recorded through the store's choke point,
          * [KeyPolicyStore.owedAtMigration].
          */
-        fun migration12To13(denials: () -> Map<String, String>): Migration = object : Migration(12, 13) {
+        fun migration13To14(denials: () -> Map<String, String>): Migration = object : Migration(13, 14) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `key_policies` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, " +
@@ -621,16 +667,16 @@ abstract class XKeyDatabase : RoomDatabase() {
             }
         }
 
-        /** [migration12To13] with no recorded denials. */
-        val MIGRATION_12_13: Migration = migration12To13 { emptyMap() }
+        /** [migration13To14] with no recorded denials. */
+        val MIGRATION_13_14: Migration = migration13To14 { emptyMap() }
 
         /**
-         * Migration from version 13 to 14: the deletion tombstones (#193). A
+         * Migration from version 14 to 15: the deletion tombstones (#193). A
          * key row deleted before its material is gone keeps one, so a failed
          * or interrupted material delete is replayed instead of leaving
          * material with no record.
          */
-        val MIGRATION_13_14 = object : Migration(13, 14) {
+        val MIGRATION_14_15 = object : Migration(14, 15) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `key_deletions` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, " +
@@ -670,12 +716,12 @@ abstract class XKeyDatabase : RoomDatabase() {
                 XKeyDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
                 .addMigrations(
-                    migration12To13 {
+                    migration13To14 {
                         pairedDevices.value.legacyKeyPolicyDenials().also { moved.set(it.keys) }
                     },
-                    MIGRATION_13_14
+                    MIGRATION_14_15
                 )
                 .addCallback(object : Callback() {
                     override fun onOpen(db: SupportSQLiteDatabase) {
@@ -683,6 +729,7 @@ abstract class XKeyDatabase : RoomDatabase() {
                         if (keyIds.isNotEmpty()) pairedDevices.value.dropLegacyKeyPolicyDenials(keyIds)
                     }
                 })
+                .addCallback(CREATE_TRIGGERS)
                 .build()
         }
 
