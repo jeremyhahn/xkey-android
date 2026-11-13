@@ -523,6 +523,7 @@
     <string name="sharing_no_devices_selected">No devices selected for sharing</string>
     <string name="sharing_selected_count_desc">Shared with %1$d paired device(s)</string>
     <string name="key_sharing_policy_not_saved">The sharing change was not saved. Try again.</string>
+    <string name="key_sharing_withdrawal_not_saved">Access removal not saved. The device stays blocked while xKey retries, but a restart could restore its access. Set the key to Private to make sure.</string>
     <string name="key_detail_status">Status</string>
 
     <!-- CA Bootstrap Settings -->

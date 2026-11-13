@@ -116,10 +116,30 @@ class KeySharingPeers(
      * when the user acted, before any wait (#193): a grant is refused if the
      * peer was not paired then, or that pairing ended before the grant's turn.
      */
-    suspend fun setAllowed(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?): Boolean {
+    suspend fun setAllowed(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?): Boolean =
+        setAllowedOutcome(peerPublicKeyHex, allowed, pairing) == Outcome.STOOD
+
+    /** How a peer tap ended; the sheet shows it through `setAllowedOrRedraw` alone. */
+    enum class Outcome {
+        /** The grant or withdrawal is stored, durably. */
+        STOOD,
+
+        /** The grant was refused or does not stand. */
+        REFUSED,
+
+        /**
+         * The withdrawal's delete and the denial it then owes both failed to
+         * write: the peer is denied in this process and the delete is
+         * retried, but a restart would lose that, so it is not saved (#193 r7).
+         */
+        UNSAVED
+    }
+
+    /** [setAllowed], telling a refused grant from a withdrawal that is not saved. */
+    suspend fun setAllowedOutcome(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?): Outcome {
         val entry = keyId to peerPublicKeyHex
         if (allowed) {
-            if (pairing == null) return false
+            if (pairing == null) return Outcome.REFUSED
             return accepted {
                 val granted = withContext(ioDispatcher) {
                     try {
@@ -133,7 +153,7 @@ class KeySharingPeers(
                 }
                 // The later choice stands: an earlier failed withdrawal is not retried over it.
                 if (granted) settle { it.first == keyId && it.second == peerPublicKeyHex }
-                granted
+                if (granted) Outcome.STOOD else Outcome.REFUSED
             }
         }
         return accepted { withdraw(entry) }
@@ -161,15 +181,15 @@ class KeySharingPeers(
      * is retried in [editScope] until its delete lands, or until the key row
      * it was made for is gone or replaced (#193).
      *
-     * Returns true only once the withdrawal is durable, its delete or its
-     * owed clear stored: one whose denial is held in the process alone, which
-     * a restart loses, is reported not done (#193 r6, ruling 554).
+     * Returns [Outcome.STOOD] only once the withdrawal is durable, its delete
+     * or its owed clear stored: one whose denial is held in the process
+     * alone, which a restart loses, is [Outcome.UNSAVED] (#193 r6, r7, ruling 554).
      */
-    private suspend fun withdraw(entry: Pair<String, String>): Boolean {
+    private suspend fun withdraw(entry: Pair<String, String>): Outcome {
         val result = store.withdraw(keyId, instance, entry.second)
         if (result == KeyPolicyStore.Withdrawal.REMOVED) {
             settle { it == entry }
-            return true
+            return Outcome.STOOD
         }
         Log.e(TAG, "Withdrawing key access failed ($result); every peer is denied until the key's next policy write")
         val token = Any()
@@ -182,7 +202,7 @@ class KeySharingPeers(
                 pendingWithdrawals.update { if (it[entry] === token) it - entry else it }
             }
         }
-        return result == KeyPolicyStore.Withdrawal.OWED
+        return if (result == KeyPolicyStore.Withdrawal.OWED) Outcome.STOOD else Outcome.UNSAVED
     }
 
     companion object {

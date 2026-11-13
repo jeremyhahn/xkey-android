@@ -688,7 +688,12 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             allowed,
             pairing,
             attached = { isAdded && view != null },
-            redraw = { populatePeerList(peersFlow.value) }
+            redraw = { populatePeerList(peersFlow.value) },
+            unsaved = {
+                context?.let {
+                    Toast.makeText(it, R.string.key_sharing_withdrawal_not_saved, Toast.LENGTH_LONG).show()
+                }
+            }
         )
     }
 
@@ -739,10 +744,13 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
 }
 
 /**
- * The sheet's peer tap: [KeySharingPeers.setAllowed], then, if the change was
- * refused, [redraw] of the list from the stored state, unless the caller was
- * cancelled or the sheet is no longer [attached] by the time the queued edit
- * completes.
+ * The sheet's peer tap, and the one place its result is shown (#193 r7,
+ * ruling 554): [KeySharingPeers.setAllowedOutcome], then, if the change was
+ * refused, [redraw] of the list from the stored state; a withdrawal that is
+ * not saved ([KeySharingPeers.Outcome.UNSAVED]) is redrawn too, the peer
+ * still denied in the process, and [unsaved] tells the user so. Nothing is
+ * drawn if the caller was cancelled or the sheet is no longer [attached] by
+ * the time the queued edit completes. Returns whether the change stood.
  */
 internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     peerPublicKeyHex: String,
@@ -750,12 +758,17 @@ internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     pairing: Long?,
     attached: () -> Boolean,
     redraw: () -> Unit,
-    @Suppress("UNUSED_PARAMETER") unsaved: () -> Unit = {}
-) {
-    if (setAllowed(peerPublicKeyHex, allowed, pairing)) return
+    unsaved: () -> Unit
+): Boolean {
+    val outcome = setAllowedOutcome(peerPublicKeyHex, allowed, pairing)
+    if (outcome == KeySharingPeers.Outcome.STOOD) return true
     // The queued edit completes in the edit scope, whatever the caller's job;
     // check it before drawing: a sheet dismissed meanwhile has no context to
     // draw with (#193 r2).
     currentCoroutineContext().ensureActive()
-    if (attached()) redraw()
+    if (attached()) {
+        redraw()
+        if (outcome == KeySharingPeers.Outcome.UNSAVED) unsaved()
+    }
+    return false
 }

@@ -790,7 +790,8 @@ class KeySharingPeersTest {
                 tapped,
                 attached = { attached },
                 // What requireContext() does once the sheet is detached.
-                redraw = { check(attached) { "redrew a detached sheet" }; redraws++ }
+                redraw = { check(attached) { "redrew a detached sheet" }; redraws++ },
+                unsaved = { error("a refused grant was shown as an unsaved withdrawal") }
             )
         }
         assertFalse(tap.isCompleted)
