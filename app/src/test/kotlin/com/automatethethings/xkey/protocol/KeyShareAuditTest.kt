@@ -44,6 +44,7 @@ import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkAll
 import io.mockk.unmockkObject
+import io.mockk.verify
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.util.Base64
@@ -85,6 +86,7 @@ class KeyShareAuditTest {
     private lateinit var keyDao: KeyDao
     private lateinit var contactDao: ContactDao
     private lateinit var keystoreManager: KeystoreManager
+    private lateinit var pairedDevices: PairedDeviceRepository
     private lateinit var handler: RequestHandler
     private val entries = mutableListOf<AuditLogEntity>()
 
@@ -144,7 +146,7 @@ class KeyShareAuditTest {
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
 
-        val pairedDevices = mockk<PairedDeviceRepository>(relaxed = true)
+        pairedDevices = mockk(relaxed = true)
         every { pairedDevices.getDevice(PEER) } returns PairedDeviceData(PEER, PEER_NAME, 0L)
         every { pairedDevices.getDevice(USB_PEER) } returns PairedDeviceData(USB_PEER, USB_PEER_NAME, 0L)
 
@@ -199,6 +201,66 @@ class KeyShareAuditTest {
         assertTrue(entry.success)
         assertEquals(PEER, entry.deviceId)
         assertEquals("public", JSONObject(entry.details!!).getString("format"))
+    }
+
+    /** A shareable software key that is not exportable leaves as metadata, and is recorded as such. */
+    @Test
+    fun sharingASoftwareKeyWithoutItsMaterialRecordsOneMetadataExport() = runTest {
+        givenSoftwareKey(exportable = false, shareable = true)
+
+        val result = success(served(importSharedKey()))
+
+        assertFalse(result.getBoolean("exportable"))
+        assertFalse("no material leaves: $result", result.has("wrapped_key"))
+        val entry = single(AuditOperationType.KEY_EXPORTED)
+        assertTrue(entry.success)
+        assertEquals(KEY_ID, entry.keyId)
+        assertEquals(PEER, entry.deviceId)
+        assertEquals(PEER_NAME, entry.deviceName)
+        assertEquals("metadata", JSONObject(entry.details!!).getString("format"))
+        assertNoKeyBytes(entry)
+    }
+
+    /**
+     * The paired-device store cannot be read (encrypted prefs throw). Every
+     * transfer still runs and is recorded against its peer, with no name:
+     * the record never depends on the name lookup.
+     */
+    @Test
+    fun anUnreadablePairedDeviceStoreStillRecordsEveryTransfer() = runTest {
+        every { pairedDevices.getDevice(any()) } throws SecurityException("keystore unavailable")
+        givenSoftwareKey(exportable = true, shareable = true)
+
+        success(served(sharePublicKey()))
+        success(served(shareSymmetric(keyId = "other-sym")))
+        success(served(importSharedKey()))
+
+        assertEquals(
+            listOf(
+                AuditOperationType.CONTACT_IMPORTED,
+                AuditOperationType.KEY_CREATED,
+                AuditOperationType.KEY_EXPORTED
+            ),
+            entries.map { it.operationType }
+        )
+        entries.forEach {
+            assertTrue("recorded: $it", it.success)
+            assertEquals("entry names the peer: $it", PEER, it.deviceId)
+            assertNull("no name without the store: $it", it.deviceName)
+        }
+    }
+
+    /** The same holds for the key use and sync records, which share the one name lookup. */
+    @Test
+    fun anUnreadablePairedDeviceStoreStillRecordsAKeyUse() = runTest {
+        every { pairedDevices.getDevice(any()) } throws SecurityException("keystore unavailable")
+        coEvery { keystoreManager.symmetricEncrypt(KEY_ID, any(), any()) } returns ByteArray(16)
+
+        success(served(keyUse(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, "plaintext")))
+
+        val entry = single(AuditOperationType.ENCRYPTION_REQUEST)
+        assertEquals(PEER, entry.deviceId)
+        assertNull(entry.deviceName)
     }
 
     @Test
@@ -431,6 +493,53 @@ class KeyShareAuditTest {
         assertTrue("no entry: $entries", entries.isEmpty())
     }
 
+    /**
+     * Cancelled with no suspension point between the cancellation and the
+     * write: the request is already cancelled when it reaches the
+     * non-cancellable step, which must refuse it rather than store a contact
+     * the caller never sees accepted.
+     */
+    @Test
+    fun aContactShareAlreadyCancelledAtTheWriteStoresAndRecordsNothing() = runTest {
+        val stored = mutableListOf<ContactEntity>()
+        lateinit var request: Job
+        givenContactDao(object : ContactDao by contactDao {
+            override suspend fun getByFingerprint(fingerprint: String): ContactEntity? {
+                request.cancel()
+                return null
+            }
+
+            override suspend fun insert(contact: ContactEntity): Long {
+                stored += contact
+                return 1L
+            }
+        })
+
+        request = launch { served(sharePublicKey()) }
+        request.join()
+
+        assertTrue("the request was cancelled", request.isCancelled)
+        assertTrue("no contact: $stored", stored.isEmpty())
+        assertTrue("no entry: $entries", entries.isEmpty())
+    }
+
+    /** The same for arriving key material: a cancelled request stores no key. */
+    @Test
+    fun aSymmetricShareAlreadyCancelledAtTheWriteStoresAndRecordsNothing() = runTest {
+        lateinit var request: Job
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } answers {
+            request.cancel()
+            false
+        }
+
+        request = launch { served(shareSymmetric()) }
+        request.join()
+
+        assertTrue("the request was cancelled", request.isCancelled)
+        verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().put(any()) }
+        assertTrue("no entry: $entries", entries.isEmpty())
+    }
+
     private fun givenContactDao(dao: ContactDao) {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
@@ -447,9 +556,23 @@ class KeyShareAuditTest {
     fun everyShareWriteRunsWithItsRecordInTheChokePoint() {
         val source = handlerSource()
         val choke = Regex(
-            "private suspend fun <T> persistAudited\\([^)]*\\)[^=]*=\\s*withContext\\(NonCancellable\\)"
+            "private suspend fun <T> persistAudited\\([^)]*\\)[^{]*\\{\\s*" +
+                "currentCoroutineContext\\(\\)\\.ensureActive\\(\\)\\s*" +
+                "return withContext\\(NonCancellable\\)"
         )
-        assertTrue("persistAudited runs under NonCancellable", choke.containsMatchIn(source))
+        assertTrue(
+            "persistAudited refuses a cancelled request, then runs under NonCancellable",
+            choke.containsMatchIn(source)
+        )
+        assertEquals(
+            "persistAudited is the one non-cancellable write and record",
+            1,
+            Regex("withContext\\(NonCancellable\\)").findAll(source).count()
+        )
+        assertTrue(
+            "the sharing-policy change records through persistAudited",
+            Regex("persistAudited\\(\\s*write = \\{\\s*keyDao\\.compareAndSetSharingPolicy\\(").containsMatchIn(source)
+        )
         for ((fn, write, record) in listOf(
             Triple("handleSharePublicKey", "dao.insert(", "AuditLogger.logContactImported("),
             Triple("handleShareSymmetric", "store.put(", "AuditLogger.logKeyCreated(")
@@ -464,6 +587,50 @@ class KeyShareAuditTest {
                 assertTrue("$fn runs $call inside persistAudited", body.indexOf(call) > gate)
             }
         }
+    }
+
+    /**
+     * Every audit record takes the peer's paired name from `auditPeerName`,
+     * which never throws: no audit path reads the paired-device store itself,
+     * so a store that cannot be read never suppresses a record.
+     */
+    @Test
+    fun everyAuditDeviceNameGoesThroughAuditPeerName() {
+        val source = handlerSource()
+            .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("//[^\n]*"), "")
+        val members = source.split(Regex("\n(?=    (?:(?:private|internal|public|override) )*(?:suspend )?fun )"))
+        val memberFun = Regex("^\\s*(?:(?:private|internal|public|override) )*(?:suspend )?fun (\\w+)")
+        fun nameOf(chunk: String) = memberFun.find(chunk)?.groupValues?.get(1)
+
+        // The attestation policy reads the store to decide, never to record.
+        assertEquals(
+            setOf("auditPeerName", "isDeviceAttestationCurrent"),
+            members.filter { "pairedDeviceRepository?.getDevice(" in it }.mapNotNull { nameOf(it) }.toSet()
+        )
+        val lookup = members.single { nameOf(it) == "auditPeerName" }
+        assertTrue("auditPeerName catches a failed lookup", "catch (e: Exception)" in lookup)
+        val attestation = members.single { nameOf(it) == "isDeviceAttestationCurrent" }
+        assertFalse("the attestation policy records nothing", "AuditLogger.log" in attestation)
+
+        val allowed = Regex("(?:auditPeerName\\(\\w+\\)|peerName|peer\\?\\.deviceName|Build\\.MODEL|deviceName)\\)*")
+        val auditing = members.filter { "AuditLogger.log" in it }
+        assertTrue("audit paths found: ${auditing.size}", auditing.size >= 8)
+        for (fn in auditing) {
+            Regex("deviceName = ([^,\n]+)").findAll(fn).forEach {
+                assertTrue(
+                    "${nameOf(fn)} records deviceName = ${it.groupValues[1]}",
+                    allowed.matches(it.groupValues[1].trim())
+                )
+            }
+            Regex("val peerName = ([^\n]+)").findAll(fn).forEach {
+                assertTrue("${nameOf(fn)} names its peer through auditPeerName", it.groupValues[1].startsWith("auditPeerName("))
+            }
+        }
+        assertTrue(
+            "a backup peer is named through auditPeerName",
+            "BackupAuditPeer(key, auditPeerName(key))" in source
+        )
     }
 
     // -----------------------------------------------------------------
