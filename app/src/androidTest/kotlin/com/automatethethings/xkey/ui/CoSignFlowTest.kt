@@ -529,7 +529,9 @@ class CoSignFlowTest {
         }
         waitForIdle()
     }
-$1
+
+    // -----------------------------------------------------------------
+    // Helpers: launching and picking
     // -----------------------------------------------------------------
 
     private fun launch(): ActivityScenario<CoSignActivity> =
