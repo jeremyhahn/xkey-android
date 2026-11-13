@@ -65,6 +65,22 @@ class SharePermissionChokePointTest {
             setOf("SharePermission.kt"),
             filesCalling(".isKeySharedWithPeer(")
         )
+        assertEquals(
+            "a share decision outside SharePermission reads a grant row",
+            setOf("SharePermission.kt"),
+            filesCalling(".isPeerGranted(")
+        )
+    }
+
+    @Test
+    fun onlySharePermissionEnforcesAPendingWithdrawal() {
+        // KeySharingPeers' own definition is the only other mention. The
+        // enforced policy lives in KeyPolicyStore (#193); local.setKeyPolicy
+        // reads it to decide a policy change, not a share.
+        assertEquals(
+            setOf("SharePermission.kt"),
+            filesCalling(".isWithdrawalPending(") - "KeySharingPeers.kt"
+        )
     }
 
     @Test
