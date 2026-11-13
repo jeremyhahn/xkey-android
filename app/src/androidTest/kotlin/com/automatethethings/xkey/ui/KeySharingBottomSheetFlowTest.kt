@@ -15,7 +15,9 @@
 package com.automatethethings.xkey.ui
 
 import android.content.Context
+import android.graphics.Rect
 import android.view.View
+import android.widget.Button
 import android.widget.CheckBox
 import android.widget.RadioButton
 import android.widget.TextView
@@ -387,6 +389,62 @@ class KeySharingBottomSheetFlowTest {
     }
 
     // -----------------------------------------------------------------
+    // Short screens
+    // -----------------------------------------------------------------
+
+    /**
+     * On a sheet shorter than its content (landscape, enlarged text), the
+     * desktop send button below the policy options and the 200 dp peer list
+     * can still be scrolled into view and is then fully visible.
+     */
+    @Test
+    fun shortSheet_desktopSendButtonCanBeScrolledIntoView() {
+        val keyId = seedKey("short-screen", SharingPolicyType.SELECTED_PEERS)
+        grantPeer(keyId, PEER_A_HEX)
+        val scenario = openSheetFor(keyId)
+        assertSheetShows(scenario, PEER_A_NAME)
+        waitForIdle()
+        val sendText = context.getString(R.string.sharing_desktop_send_public)
+
+        // Show the desktop section as a connected desktop would, and shrink
+        // the sheet to a short screen's height.
+        val shrunk = onSheet(scenario) { root ->
+            val button = findTextView(root, sendText) as? Button
+            val sheet = root?.rootView?.findViewById<View>(
+                com.google.android.material.R.id.design_bottom_sheet
+            )
+            if (button == null || sheet == null) {
+                false
+            } else {
+                button.visibility = View.VISIBLE
+                (button.parent as View).visibility = View.VISIBLE
+                sheet.layoutParams = sheet.layoutParams.apply {
+                    height = (SHORT_SHEET_DP * sheet.resources.displayMetrics.density).toInt()
+                }
+                true
+            }
+        }
+        assertTrue("Precondition: the sheet has a send button and a bottom sheet", shrunk)
+        waitForIdle()
+
+        onSheet(scenario) { root ->
+            val button = findTextView(root, sendText)!!
+            button.requestRectangleOnScreen(Rect(0, 0, button.width, button.height), true)
+        }
+        waitForIdle()
+
+        val visible = onSheet(scenario) { root ->
+            val button = findTextView(root, sendText)!!
+            val rect = Rect()
+            button.isShown && button.getGlobalVisibleRect(rect) && rect.height() == button.height
+        }
+        assertTrue(
+            "The desktop send button must be reachable on a ${SHORT_SHEET_DP} dp sheet",
+            visible
+        )
+    }
+
+    // -----------------------------------------------------------------
     // Missing key
     // -----------------------------------------------------------------
 
@@ -614,6 +672,9 @@ class KeySharingBottomSheetFlowTest {
     private companion object {
         /** Characters of the public key the peer card renders as a fingerprint. */
         const val FINGERPRINT_LENGTH = 16
+
+        /** A sheet height well under its content: policies plus the peer list. */
+        const val SHORT_SHEET_DP = 240
 
         const val LAST_CONNECTED_PREFIX = "Last connected:"
 

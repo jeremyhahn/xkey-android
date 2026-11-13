@@ -3047,25 +3047,15 @@ class RequestHandler(
      * @return True if the key can be shared with this peer.
      */
     private suspend fun canShareKeyWithPeer(entity: KeyEntity, peerPublicKeyHex: String?): Boolean {
-        return when (entity.sharingPolicy) {
-            SharingPolicyType.PRIVATE -> false
-            SharingPolicyType.ALL_PEERS -> true
-            SharingPolicyType.SELECTED_PEERS -> {
-                // Need peer public key to check selected peers policy
-                if (peerPublicKeyHex == null) {
-                    Log.w(TAG, "Cannot check SELECTED_PEERS policy without peer public key")
-                    false
-                } else if (pairedDeviceRepository?.isRevocationPending(peerPublicKeyHex) == true) {
-                    // Fail closed (#174): this peer was unpaired and its old
-                    // grants may not be deleted yet; they must not authorize it.
-                    Log.w(TAG, "SELECTED_PEERS refused: grant revocation pending for peer")
-                    false
-                } else {
-                    keySharingPolicyDao.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
-                }
-            }
+        val allowed = sharePermission.canShare(entity, peerPublicKeyHex)
+        if (!allowed && entity.sharingPolicy == SharingPolicyType.SELECTED_PEERS) {
+            Log.w(TAG, "SELECTED_PEERS refused: no peer, no grant, or grant revocation pending")
         }
+        return allowed
     }
+
+    /** The one share decision ([SharePermission]), shared with every outbound share path. */
+    private val sharePermission by lazy { SharePermission(keySharingPolicyDao, pairedDeviceRepository) }
 
     /**
      * Handles local.signFido2Assertion - sign a FIDO2 assertion with a shared credential.
@@ -3705,8 +3695,10 @@ class RequestHandler(
     //     public key recorded at pairing). Sharing with an anonymous peer is
     //     never authorized.
     //  2. The key's recorded sharing policy must admit that peer
-    //     ([canShareKeyWithPeer]): PRIVATE never, ALL_PEERS always,
-    //     SELECTED_PEERS only when key_sharing_policies lists the peer.
+    //     ([canShareKeyWithPeer], which asks [SharePermission], the decision
+    //     every outbound share also takes): PRIVATE never, ALL_PEERS always,
+    //     SELECTED_PEERS only when key_sharing_policies lists the peer and
+    //     the peer's grant revocation is not pending.
     //  3. A HARDWARE-backed key can only ever share its public half (Android
     //     Keystore private/symmetric material is non-exportable).
     //  4. A SOFTWARE-backed key may additionally share its private/symmetric

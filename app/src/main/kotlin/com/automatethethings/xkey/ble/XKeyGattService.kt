@@ -28,6 +28,10 @@ import com.automatethethings.xkey.ui.MainActivity
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.remote.RemoteKeyClient
+import com.automatethethings.xkey.remote.DesktopPeerSession
+import com.automatethethings.xkey.remote.DesktopSessions
+import com.automatethethings.xkey.remote.DesktopTransport
+import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.remote.RemoteBackupClient
 import com.automatethethings.xkey.backup.BackupStore
 import com.automatethethings.xkey.usb.PasswordStoreMethods
@@ -142,8 +146,11 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private val _serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     val serviceState: StateFlow<ServiceState> = _serviceState.asStateFlow()
 
-    /** The shared desktop client and its ready/lost publication. */
-    private val desktopSessionTracker = DesktopSessionTracker { activeTransport() }
+    /**
+     * The shared desktop client and its ready/lost publication; the client is
+     * [desktopSessions]', bound to the connection its peer was confirmed on.
+     */
+    private val desktopSessionTracker = DesktopSessionTracker { desktopSessions.client() }
 
     /**
      * The connected desktop's session: the shared [remoteKeyClient] while a
@@ -817,12 +824,93 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
-     * The `remote.*` key client for the connected desktop, or null if no
-     * desktop is connected. Callers on one transport share a single client, so
-     * their requests draw ids from one counter and never collide in the
-     * router's pending table.
+     * Every transport with a desktop connection, established or still
+     * handshaking, in the priority order of [activeTransport].
      */
-    fun remoteKeyClient(): RemoteKeyClient? = desktopSessionTracker.client()
+    private fun desktopTransports(): List<DesktopTransport> = buildList {
+        gattServer?.let { server ->
+            val router = bleMessageRouter ?: return@let
+            val established = server.isSessionEstablished()
+            if (established || server.connectionState.value is ConnectionState.Connected) {
+                add(DesktopTransport(server, router, established, server.confirmedPeerKeyHex()))
+            }
+        }
+        tcpHsmServer?.let { server ->
+            val router = tcpMessageRouter ?: return@let
+            when (server.state.value) {
+                is com.automatethethings.xkey.tcp.TcpHsmState.Connected ->
+                    add(DesktopTransport(server, router, true, server.confirmedPeerKeyHex()))
+                is com.automatethethings.xkey.tcp.TcpHsmState.Handshaking -> add(DesktopTransport(server, router, false, null))
+                else -> Unit
+            }
+        }
+        usbAccessoryServer?.let { server ->
+            val router = usbMessageRouter ?: return@let
+            when (server.state.value) {
+                is com.automatethethings.xkey.usb.UsbAccessoryState.Connected ->
+                    add(DesktopTransport(server, router, true, server.confirmedPeerKeyHex()))
+                is com.automatethethings.xkey.usb.UsbAccessoryState.Handshaking -> add(DesktopTransport(server, router, false, null))
+                else -> Unit
+            }
+        }
+    }
+
+    /** The key clients per router, and which desktop each reaches; every `remote.*` key call goes through it. */
+    private val desktopSessions = DesktopSessions(::desktopTransports)
+
+    /**
+     * The `remote.*` key client for the active desktop session, or null when
+     * no desktop is connected. One client is kept per router, so every key
+     * call on a router numbers its requests from one counter.
+     */
+    fun remoteKeyClient(): RemoteKeyClient? = desktopSessions.client()
+
+    /**
+     * The confirmed desktop and the key client of its own transport, read in
+     * one snapshot, or null while the active session is not up and
+     * confirmed. Use this, never [getConnectedDevicePublicKeyHex] beside
+     * [remoteKeyClient]: with two transports up those can name two desktops.
+     */
+    fun desktopSession(): DesktopPeerSession? = desktopSessions.session()
+
+    /**
+     * The confirmed peer public key hex of the desktop session that is up, or
+     * null while the active session is not up or its peer is not yet confirmed.
+     */
+    fun desktopSessionPeer(): String? = desktopSession()?.peerPublicKeyHex
+
+    /**
+     * The desktop session a key share would go out on, with the peer
+     * confirmed on it, or null when no desktop is connected. Transports are
+     * taken in [activeTransport]'s order. The peer is the one confirmed on
+     * that transport's own connection, never the handler-wide peer key.
+     * [ShareSession.isCurrent] re-reads this snapshot.
+     */
+    fun shareSession(): ShareSession? =
+        ShareSession.of(liveShareTransports()) { snapshot ->
+            snapshot.sameAs(shareSession())
+        }
+
+    private fun liveShareTransports(): List<ShareSession.Transport> {
+        val live = mutableListOf<ShareSession.Transport>()
+        gattServer?.let { server ->
+            val router = bleMessageRouter
+            if (server.isSessionEstablished() && router != null) live += ShareSession.Transport(server, router)
+        }
+        tcpHsmServer?.let { server ->
+            val router = tcpMessageRouter
+            if (server.state.value is com.automatethethings.xkey.tcp.TcpHsmState.Connected && router != null) {
+                live += ShareSession.Transport(server, router)
+            }
+        }
+        usbAccessoryServer?.let { server ->
+            val router = usbMessageRouter
+            if (server.state.value is com.automatethethings.xkey.usb.UsbAccessoryState.Connected && router != null) {
+                live += ShareSession.Transport(server, router)
+            }
+        }
+        return live
+    }
 
     /** Collects the TCP server's state into [desktopSession] while it runs. */
     private var tcpStateJob: Job? = null
@@ -964,21 +1052,18 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             return false
         }
 
-        // Determine which transport is active and has a message router.
-        // The shared client: its requests draw ids from the router's counter.
-        val remoteClient = remoteKeyClient() ?: run {
-            Log.e(TAG, "No active transport for device attestation")
-            return false
-        }
-
         return try {
             // Generate random nonce
             val nonce = ByteArray(32)
             java.security.SecureRandom().nextBytes(nonce)
-            val nonceB64 = java.util.Base64.getEncoder().encodeToString(nonce)
 
             Log.d(TAG, "Requesting device attestation for $publicKeyHex")
-            val result = remoteClient.attestDevice(nonceB64)
+            // The confirmed peer and its own transport's client, read together;
+            // that router's one client, since a second would reuse its request ids.
+            val result = desktopSessions.attestDevice(publicKeyHex, nonce) ?: run {
+                Log.e(TAG, "No single confirmed session with $publicKeyHex for device attestation")
+                return false
+            }
 
             // Store the PEER's boot state. deviceFingerprint is intentionally
             // omitted: it is the phone's own attested-key SPKI bound at pairing
@@ -1080,35 +1165,25 @@ sealed class ServiceState {
 /**
  * The shared `remote.*` client for whichever desktop transport is ready, and
  * its publication as [session]: a client while a desktop session is ready,
- * null once it is lost. [activeTransport] names the ready transport, or null.
+ * null once it is lost. [source] gives the ready desktop's client, or null.
  *
- * Callers on one router share a single client, so their request ids never
- * collide; when the desktop is lost the client is dropped, and the next
- * session gets a fresh one.
+ * The service's source is its [DesktopSessions], so the published client is
+ * the one bound to the connection its peer was confirmed on. [ofTransport]
+ * builds a tracker from a bare transport instead: callers on one router share
+ * a single client, and when the desktop is lost the client is dropped, so the
+ * next session gets a fresh one.
  */
 class DesktopSessionTracker(
-    private val activeTransport: () -> Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>?
+    private val source: () -> RemoteKeyClient?
 ) {
     private val _session = MutableStateFlow<RemoteKeyClient?>(null)
 
     /** The ready desktop's client, or null when no desktop session is ready. */
     val session: StateFlow<RemoteKeyClient?> = _session.asStateFlow()
 
-    /** The client [client] last built, with the router it was built on. */
-    private var cache: Pair<BidirectionalMessageRouter, RemoteKeyClient>? = null
-
-    /** The client for the ready transport, or null (dropping the cache) if none. */
+    /** The client for the ready desktop, or null if none. */
     @Synchronized
-    fun client(): RemoteKeyClient? {
-        val (sender, router) = activeTransport() ?: run {
-            cache = null
-            return null
-        }
-        cache?.let { (cachedRouter, client) ->
-            if (cachedRouter === router) return client
-        }
-        return RemoteKeyClient(sender, router).also { cache = router to it }
-    }
+    fun client(): RemoteKeyClient? = source()
 
     /** Recomputes [session] from the ready transport. */
     @Synchronized
@@ -1124,8 +1199,26 @@ class DesktopSessionTracker(
     fun follow(scope: CoroutineScope, states: Flow<*>): Job =
         scope.launch { states.collect { refresh() } }
 
-    private companion object {
-        const val TRACKER_TAG = "DesktopSessionTracker"
+    companion object {
+        private const val TRACKER_TAG = "DesktopSessionTracker"
+
+        /**
+         * A tracker whose client is built on [activeTransport]'s ready
+         * transport: one client per router, dropped when no transport is ready.
+         */
+        fun ofTransport(
+            activeTransport: () -> Pair<com.automatethethings.xkey.remote.MessageSender, BidirectionalMessageRouter>?
+        ): DesktopSessionTracker {
+            var cache: Pair<BidirectionalMessageRouter, RemoteKeyClient>? = null
+            return DesktopSessionTracker {
+                val (sender, router) = activeTransport() ?: run {
+                    cache = null
+                    return@DesktopSessionTracker null
+                }
+                cache?.takeIf { it.first === router }?.second
+                    ?: RemoteKeyClient(sender, router).also { cache = router to it }
+            }
+        }
     }
 }
 
