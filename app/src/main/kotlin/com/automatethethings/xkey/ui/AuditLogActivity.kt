@@ -1091,6 +1091,8 @@ class AuditLogActivity : AppCompatActivity() {
         AuditOperationType.PIV_CERT_IMPORTED -> getString(R.string.audit_log_op_piv_cert_imported)
         AuditOperationType.PIV_SIGN_REQUEST -> getString(R.string.audit_log_op_piv_sign_request)
         AuditOperationType.PIV_KEY_DELETED -> getString(R.string.audit_log_op_piv_key_deleted)
+        AuditOperationType.PASSWORD_CREATED -> getString(R.string.audit_log_op_password_created)
+        AuditOperationType.PASSWORD_DELETED -> getString(R.string.audit_log_op_password_deleted)
     }
 
     private fun getOperationTypeColor(type: AuditOperationType): Pair<Int, Int> = when (type) {

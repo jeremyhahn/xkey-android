@@ -177,7 +177,13 @@ enum class AuditOperationType {
     /** A PIV signing request was processed. */
     PIV_SIGN_REQUEST,
     /** A PIV key was deleted from a slot. */
-    PIV_KEY_DELETED
+    PIV_KEY_DELETED,
+
+    // Password vault operations
+    /** A password entry was added on the phone. */
+    PASSWORD_CREATED,
+    /** A password entry was deleted on the phone. */
+    PASSWORD_DELETED
 }
 
 /**
