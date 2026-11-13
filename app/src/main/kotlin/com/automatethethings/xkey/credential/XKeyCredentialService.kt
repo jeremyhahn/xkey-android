@@ -61,9 +61,11 @@ import kotlinx.coroutines.launch
  * querying by relying party.
  *
  * To enable this service:
- * 1. Go to Settings > Passwords & accounts
- * 2. Select "xKey" as a credential provider
- * 3. The app will now handle passkey requests from browsers and apps
+ * 1. Turn on the passkey provider switch in xKey's Settings (off by default;
+ *    while it is off both begin calls answer with no entries)
+ * 2. Go to Settings > Passwords & accounts
+ * 3. Select "xKey" as a credential provider
+ * 4. The app will now handle passkey requests from browsers and apps
  */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 class XKeyCredentialService : CredentialProviderService() {
@@ -72,6 +74,11 @@ class XKeyCredentialService : CredentialProviderService() {
 
     private val createHandler by lazy { CreateCredentialHandler(this) }
     private val getHandler by lazy { GetCredentialHandler(this) }
+
+    /** The user's enable switch, read before every begin request. */
+    private val enableGate by lazy {
+        CredentialProviderEnableGate(CredentialProviderSettingsRepository(this)::isEnabled)
+    }
 
     /**
      * Handle the begin phase of credential creation.
@@ -88,8 +95,10 @@ class XKeyCredentialService : CredentialProviderService() {
         Log.d(TAG, "Request type: ${request::class.simpleName}")
         serviceScope.launch {
             try {
-                val response = createHandler.handleBeginCreateCredential(request)
-                Log.i(TAG, "onBeginCreateCredentialRequest SUCCESS - returning CreateEntry")
+                val response = enableGate.beginCreate(request) {
+                    createHandler.handleBeginCreateCredential(it)
+                }
+                Log.i(TAG, "onBeginCreateCredentialRequest SUCCESS - ${response.createEntries.size} CreateEntry")
                 callback.onResult(response)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in onBeginCreateCredentialRequest", e)
@@ -112,7 +121,9 @@ class XKeyCredentialService : CredentialProviderService() {
         Log.i(TAG, "=== onBeginGetCredentialRequest INVOKED ===")
         serviceScope.launch {
             try {
-                val response = getHandler.handleBeginGetCredential(request)
+                val response = enableGate.beginGet(request) {
+                    getHandler.handleBeginGetCredential(it)
+                }
                 Log.i(TAG, "onBeginGetCredentialRequest SUCCESS")
                 callback.onResult(response)
             } catch (e: Exception) {

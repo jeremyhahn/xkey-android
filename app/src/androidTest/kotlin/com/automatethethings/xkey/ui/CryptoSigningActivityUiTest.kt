@@ -23,6 +23,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,6 +34,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.Base64
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -53,6 +56,11 @@ import java.util.concurrent.TimeUnit
  * - Undecodable data hash reported as an invalid request
  * - A credential with no keystore key reported as key-not-found, with the
  *   request id echoed back so the caller can correlate it
+ * - A request the prompt owner does not hold ACTIVE finishing silently
+ *
+ * The activity only serves a request whose signature entry the process
+ * [PromptOwnership] holds ACTIVE, so each test that expects a result holds that
+ * entry first, as the launcher's request does, and lets go in [tearDown].
  */
 @RunWith(AndroidJUnit4::class)
 class CryptoSigningActivityUiTest {
@@ -62,6 +70,9 @@ class CryptoSigningActivityUiTest {
 
     private var receiver: BroadcastReceiver? = null
 
+    /** The prompt owner's entry this test holds ACTIVE, if any. */
+    private var heldKey: String? = null
+
     @Before
     fun setUp() {
         results.clear()
@@ -69,6 +80,8 @@ class CryptoSigningActivityUiTest {
 
     @After
     fun tearDown() {
+        heldKey?.let { PromptOwnership.process.end(it) }
+        heldKey = null
         receiver?.let { context.unregisterReceiver(it) }
         receiver = null
     }
@@ -140,56 +153,95 @@ class CryptoSigningActivityUiTest {
 
     @Test
     fun missingCredentialId_reportsAnInvalidRequest() {
+        val requestId = "req-missing-credential-" + UUID.randomUUID()
+        holdTheScreen(requestId)
         awaitResultFor(
             Intent(context, CryptoSigningActivity::class.java).apply {
-                putExtra(CryptoSigningActivity.EXTRA_REQUEST_ID, "req-missing-credential")
+                putExtra(CryptoSigningActivity.EXTRA_REQUEST_ID, requestId)
                 putExtra(CryptoSigningActivity.EXTRA_DATA_HASH, encodedHash())
             }
         )
 
-        assertErrorCode(CryptoSigningActivity.ERROR_CODE_INVALID_REQUEST)
+        assertErrorCode(requestId, CryptoSigningActivity.ERROR_CODE_INVALID_REQUEST)
     }
 
     @Test
     fun missingDataHash_reportsAnInvalidRequest() {
+        val requestId = "req-missing-hash-" + UUID.randomUUID()
+        holdTheScreen(requestId)
         awaitResultFor(
             Intent(context, CryptoSigningActivity::class.java).apply {
-                putExtra(CryptoSigningActivity.EXTRA_REQUEST_ID, "req-missing-hash")
+                putExtra(CryptoSigningActivity.EXTRA_REQUEST_ID, requestId)
                 putExtra(CryptoSigningActivity.EXTRA_CREDENTIAL_ID, "cred-1")
             }
         )
 
-        assertErrorCode(CryptoSigningActivity.ERROR_CODE_INVALID_REQUEST)
+        assertErrorCode(requestId, CryptoSigningActivity.ERROR_CODE_INVALID_REQUEST)
     }
 
     @Test
     fun undecodableDataHash_reportsAnInvalidRequest() {
+        val requestId = "req-bad-hash-" + UUID.randomUUID()
+        holdTheScreen(requestId)
         awaitResultFor(
             CryptoSigningActivity.createIntent(
                 context = context,
-                requestId = "req-bad-hash",
+                requestId = requestId,
                 credentialId = "cred-1",
                 dataHashBase64 = "!!!not-base64!!!"
             )
         )
 
-        assertErrorCode(CryptoSigningActivity.ERROR_CODE_INVALID_REQUEST)
+        assertErrorCode(requestId, CryptoSigningActivity.ERROR_CODE_INVALID_REQUEST)
     }
 
+    /**
+     * A credential with no Keystore key is reported as key-not-found, with the
+     * request id echoed back, and the activity finishes.
+     */
     @Test
     fun activity_finishesGracefullyWhenSigningKeyMissing() {
-        val intent = CryptoSigningActivity.createIntent(
-            context = context,
-            requestId = "ui-test-" + UUID.randomUUID(),
-            credentialId = "ui-test-missing-" + UUID.randomUUID(),
-            dataHashBase64 = encodedHash()
+        val requestId = "ui-test-" + UUID.randomUUID()
+        holdTheScreen(requestId)
+
+        val scenario = awaitResultFor(
+            CryptoSigningActivity.createIntent(
+                context = context,
+                requestId = requestId,
+                credentialId = "ui-test-missing-" + UUID.randomUUID(),
+                dataHashBase64 = encodedHash()
+            )
         )
 
-        val scenario = ActivityScenario.launch<CryptoSigningActivity>(intent)
+        assertErrorCode(requestId, CryptoSigningActivity.ERROR_CODE_KEY_NOT_FOUND)
+        awaitDestroyed(scenario, "Activity should finish gracefully when the signing key is missing")
+    }
 
+    /**
+     * A request the prompt owner does not hold ACTIVE never prompts and never
+     * reports: the activity finishes and the owner's request keeps its say.
+     */
+    @Test
+    fun aRequestWithoutAnActiveEntry_finishesWithoutABroadcast() {
+        val requestId = "ui-test-unheld-" + UUID.randomUUID()
+
+        val scenario = launchListening(
+            CryptoSigningActivity.createIntent(
+                context = context,
+                requestId = requestId,
+                credentialId = "ui-test-missing-" + UUID.randomUUID(),
+                dataHashBase64 = encodedHash()
+            )
+        )
+
+        awaitDestroyed(scenario, "an unheld request must finish")
+        // Anything the activity sent would have arrived within the window.
+        Thread.sleep(QUIET_PERIOD_MS)
         assertTrue(
-            "Activity should finish gracefully when the signing key is missing",
-            scenario.state == Lifecycle.State.DESTROYED
+            "an unheld request must deliver nothing",
+            synchronized(results) {
+                results.none { it.getStringExtra(CryptoSigningActivity.EXTRA_REQUEST_ID) == requestId }
+            }
         )
     }
 
@@ -200,11 +252,29 @@ class CryptoSigningActivityUiTest {
     private fun encodedHash(): String = Base64.getEncoder().encodeToString(ByteArray(32))
 
     /**
-     * Registers a receiver for the signing-result broadcast, launches [intent],
-     * and blocks until a result arrives or the timeout elapses.
+     * Makes [requestId]'s signature entry ACTIVE in the process prompt owner,
+     * as the launcher's request holds it while its prompt is up: the activity
+     * refuses a request the owner does not hold ACTIVE. [tearDown] lets go.
      */
-    private fun awaitResultFor(intent: Intent) {
-        val latch = CountDownLatch(1)
+    private fun holdTheScreen(requestId: String) {
+        val key = NotificationKeys.signature(requestId)
+        PromptOwnership.process.enqueue(
+            key, PromptOwnership.Kind.CRYPTO_SIGNING,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
+        heldKey = key
+        assertEquals("nothing else holds the screen", key, PromptOwnership.process.activeKey)
+    }
+
+    /**
+     * Registers a receiver for the signing-result broadcast and launches
+     * [intent]; the returned latch opens on the first result.
+     */
+    private fun launchListening(
+        intent: Intent,
+        latch: CountDownLatch = CountDownLatch(1)
+    ): ActivityScenario<CryptoSigningActivity> {
         val broadcastReceiver = object : BroadcastReceiver() {
             override fun onReceive(receivedContext: Context?, received: Intent?) {
                 received?.let { results.add(it) }
@@ -219,20 +289,39 @@ class CryptoSigningActivityUiTest {
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
 
-        ActivityScenario.launch<CryptoSigningActivity>(intent)
+        return ActivityScenario.launch(intent)
+    }
+
+    /**
+     * Launches [intent] listening for the signing-result broadcast, and blocks
+     * until a result arrives or the timeout elapses.
+     */
+    private fun awaitResultFor(intent: Intent): ActivityScenario<CryptoSigningActivity> {
+        val latch = CountDownLatch(1)
+        val scenario = launchListening(intent, latch)
 
         assertTrue(
             "Expected a ${CryptoSigningActivity.ACTION_CRYPTO_SIGNING_RESULT} broadcast",
             latch.await(BROADCAST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         )
+        return scenario
     }
 
-    private fun assertErrorCode(expected: Int) {
-        val result = results.lastOrNull()
+    private fun awaitDestroyed(scenario: ActivityScenario<*>, message: String) {
+        val deadline = System.currentTimeMillis() + BROADCAST_TIMEOUT_SECONDS * 1_000
+        while (scenario.state != Lifecycle.State.DESTROYED && System.currentTimeMillis() < deadline) {
+            Thread.sleep(POLL_INTERVAL_MS)
+        }
+        assertEquals(message, Lifecycle.State.DESTROYED, scenario.state)
+    }
+
+    private fun assertErrorCode(requestId: String, expected: Int) {
+        val result = synchronized(results) { results.lastOrNull() }
         assertNotNull("No signing result broadcast was received", result)
+        assertEquals(requestId, result!!.getStringExtra(CryptoSigningActivity.EXTRA_REQUEST_ID))
         assertFalse(
             "The broadcast should report failure",
-            result!!.getBooleanExtra(CryptoSigningActivity.EXTRA_SUCCESS, true)
+            result.getBooleanExtra(CryptoSigningActivity.EXTRA_SUCCESS, true)
         )
         assertEquals(
             expected,
@@ -242,8 +331,10 @@ class CryptoSigningActivityUiTest {
 
     private companion object {
         const val BROADCAST_TIMEOUT_SECONDS = 10L
+        const val QUIET_PERIOD_MS = 2_000L
+        const val POLL_INTERVAL_MS = 50L
 
         /** Results captured by the registered receiver for the current test. */
-        val results = mutableListOf<Intent>()
+        val results: MutableList<Intent> = Collections.synchronizedList(mutableListOf())
     }
 }
