@@ -66,7 +66,8 @@ sequenceDiagram
     R->>R: parse label and params, base32Decode(secret)
     R->>SM: encryptSecret(secret)
     R->>DB: insert(OathCredentialEntity oathId = UUID)
-    H-->>D: {success, credential_id = name}
+    R-->>H: oathId
+    H-->>D: {success, credential_id = oathId}
 
     D->>H: local.oathList
     H->>DB: getAll()
