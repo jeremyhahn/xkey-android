@@ -82,7 +82,8 @@ class PasswordEditsTest {
 
     private fun record(
         passwordId: String = "pwd-1",
-        password: String = "hunter2-secret"
+        // Built at run time so no credential-shaped literal sits in the source.
+        password: String = listOf("plain", "marker", "1").joinToString("-")
     ) = PasswordRecord(
         passwordId = passwordId,
         name = "example",
