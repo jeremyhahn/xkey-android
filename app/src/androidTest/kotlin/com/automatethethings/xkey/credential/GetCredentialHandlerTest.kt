@@ -409,7 +409,13 @@ class GetCredentialHandlerTest {
             "The message should explain that no prompt was available: ${failure.message}",
             failure.message!!.contains("no biometric prompt is available")
         )
-        assertEquals(0L, storedSignCount(credential.credentialId))
+        // The refusal comes before anything is signed, so the counter, which
+        // is reserved only once the assertion is going to be signed, stays put.
+        assertEquals(
+            "A refused ceremony must not advance the signature counter",
+            0L,
+            storedSignCount(credential.credentialId)
+        )
     }
 
     @Test

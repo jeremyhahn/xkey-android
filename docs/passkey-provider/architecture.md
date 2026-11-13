@@ -11,6 +11,19 @@ Android Credential Provider service for FIDO2/WebAuthn passkey operations.
 Handles `CreateCredentialRequest` and `GetCredentialRequest` from the system
 credential manager.
 
+### Signature counter
+
+`GetCredentialHandler.handleGetCredential` takes the assertion's signature
+counter from `PasskeySignCounter.next(credentialId)` before it builds
+authenticator data. The phone backend (`local.signFido2Assertion`) serves the
+same passkeys and takes its counter from the same place, so the relying
+party sees one counter that rises whichever path signed. `next` holds a
+per-credential mutex shared across the process. It reads
+`credential_metadata.sign_count` and `keys.sign_count` and writes max + 1 to
+both before it returns. The counter advances before signing, so a failed
+signature leaves a gap but never reuses a value. The handler no longer
+writes `sign_count` itself.
+
 ### The enable switch
 
 Settings > Passkey provider stores one value, `credential_provider_enabled`,
