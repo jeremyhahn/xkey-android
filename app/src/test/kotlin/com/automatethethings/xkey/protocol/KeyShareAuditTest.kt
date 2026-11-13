@@ -31,6 +31,7 @@ import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.ContactDao
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -87,6 +88,7 @@ class KeyShareAuditTest {
     private lateinit var contactDao: ContactDao
     private lateinit var keystoreManager: KeystoreManager
     private lateinit var pairedDevices: PairedDeviceRepository
+    private lateinit var grants: KeySharingPolicyDao
     private lateinit var handler: RequestHandler
     private val entries = mutableListOf<AuditLogEntity>()
 
@@ -125,6 +127,9 @@ class KeyShareAuditTest {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
         every { database.contactDao() } returns contactDao
+        grants = mockk(relaxed = true)
+        coEvery { grants.isKeySharedWithPeer(any(), any()) } returns false
+        every { database.keySharingPolicyDao() } returns grants
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -406,6 +411,28 @@ class KeyShareAuditTest {
         val entry = single(AuditOperationType.CONTACT_IMPORTED)
         assertEquals(USB_PEER, entry.deviceId)
         assertEquals(USB_PEER_NAME, entry.deviceName)
+    }
+
+    /**
+     * A SELECTED_PEERS key granted to A alone. A, served on its own
+     * connection while B is the handler-wide peer, gets the key; B, served on
+     * its own connection while A is the handler-wide peer, is refused. The
+     * grant is checked for the caller, never for the handler-wide peer.
+     */
+    @Test
+    fun aSelectedPeerGrantFollowsTheCallerNotTheHandlerWidePeer() = runTest {
+        givenSoftwareKey(exportable = true, shareable = true, policy = SharingPolicyType.SELECTED_PEERS)
+        coEvery { grants.isKeySharedWithPeer(KEY_ID, PEER) } returns true
+
+        handler.setConnectedDevicePublicKeyHex(USB_PEER)
+        val granted = success(served(importSharedKey(), peer = PEER))
+        assertEquals(Base64.getEncoder().encodeToString(MATERIAL), granted.getString("wrapped_key"))
+
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val refused = Response.fromJson(served(importSharedKey(), peer = USB_PEER))
+        assertEquals(ErrorCodes.OPERATION_DENIED, refused.error?.code)
+
+        assertEquals(listOf(true to PEER, false to USB_PEER), entries.map { it.success to it.deviceId })
     }
 
     /**
