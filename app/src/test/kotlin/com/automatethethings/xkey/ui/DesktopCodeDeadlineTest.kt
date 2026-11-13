@@ -6,13 +6,16 @@
 
 package com.automatethethings.xkey.ui
 
+import android.os.SystemClock
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ScriptedMessageSender
 import com.automatethethings.xkey.remote.desktopOf
 import com.automatethethings.xkey.remote.stubAndroidLog
+import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkStatic
 import io.mockk.spyk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.test.runTest
@@ -145,6 +148,32 @@ class DesktopCodeDeadlineTest {
             }
             assertTrue("${type.simpleName} exposes the code without the deadline: $leaks", leaks.isEmpty())
         }
+    }
+
+    @Test
+    fun `deep sleep with the dialog open leaves the code expired on resume`() = runTest {
+        // The device's two time bases: awake time moves uptime (and
+        // System.nanoTime on a device), sleep moves only elapsedRealtime.
+        var awakeMs = 7_000L
+        var asleepMs = 0L
+        mockkStatic(SystemClock::class)
+        every { SystemClock.uptimeMillis() } answers { awakeMs }
+        every { SystemClock.elapsedRealtime() } answers { awakeMs + asleepMs }
+        every { SystemClock.elapsedRealtimeNanos() } answers { (awakeMs + asleepMs) * 1_000_000 }
+
+        val deadline = DesktopCodeDeadline("492039", 30, MonotonicClock.SYSTEM)
+        assertEquals(DesktopCodeDeadline.View.Live("492039", 30), deadline.view())
+        awakeMs += 1_000
+        assertEquals(DesktopCodeDeadline.View.Live("492039", 29), deadline.view())
+
+        // The screen goes off with the dialog open; 60 s pass in deep sleep.
+        asleepMs += 60_000
+        assertEquals(
+            "a deadline on a clock that stops in deep sleep still shows the code",
+            DesktopCodeDeadline.View.Expired,
+            deadline.view()
+        )
+        assertNull(deadline.millisUntilChange())
     }
 
     private class MapLinks : DesktopOathLinks {
