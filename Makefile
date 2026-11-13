@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test code-review-test build-image-test image-tag-test fetch-test
+	reaper-test revert-red-main-test code-review-test build-image-test image-tag-test fetch-test release-check
 
 .DEFAULT_GOAL := help
 
@@ -80,6 +80,15 @@ build: ## Build debug APK
 	$(GRADLE) assembleDebug
 	@echo ""
 	@echo "APK: $(DEBUG_APK)"
+
+# A throwaway keystore in build/release-check/ (deleted on exit, never
+# committed) signs the release; the check fails unless apksigner reports that
+# one certificate. RELEASE_CHECK_OMIT=XKEY_KEY_ALIAS (any of the four) builds
+# without that variable, so the target fails: the script exits 1 when the
+# release guard refuses the build with its own message (make reports Error 1),
+# 2 with GUARD BROKEN when it does not (Error 2).
+release-check: ## Build a release APK signed with a throwaway key and verify its signer with apksigner
+	GRADLE="$(GRADLE)" ./scripts/release-check.sh
 
 # build/docker/ is tracked source (the devcontainer image), so the root build/
 # is emptied around it, never removed. Gradle's clean is app:clean (the root

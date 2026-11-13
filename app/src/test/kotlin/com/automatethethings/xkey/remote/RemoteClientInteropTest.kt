@@ -130,10 +130,12 @@ class RemoteClientInteropTest {
         syncClient.syncAll()
 
         val ids = sender.sent.map { it.id }
-        assertEquals(
-            listOf(1_000_000L, 2_000_000L, 1_000_001L, 2_000_001L, 2_000_002L, 2_000_003L),
-            ids
-        )
+        assertEquals(listOf(1_000_000L, 1_000_001L), listOf(ids[0], ids[2]))
+        // The sync counter is shared by every RemoteSyncClient in the process,
+        // so its ids are consecutive from wherever earlier tests left it.
+        val syncIds = listOf(ids[1], ids[3], ids[4], ids[5])
+        assertTrue(syncIds.all { it >= RemoteSyncClient.BASE_REQUEST_ID })
+        assertEquals((syncIds[0] until syncIds[0] + 4).toList(), syncIds)
         assertEquals("every id on the shared router is unique", ids.size, ids.toSet().size)
     }
 

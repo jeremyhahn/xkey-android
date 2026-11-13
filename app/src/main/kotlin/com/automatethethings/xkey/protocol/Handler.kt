@@ -17,6 +17,7 @@ import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.credential.UserVerificationCompliance
+import com.automatethethings.xkey.credential.UserVerificationRequiredException
 import com.automatethethings.xkey.credential.UvRequirement
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricUnavailableException
@@ -31,6 +32,8 @@ import com.automatethethings.xkey.crypto.HMACException
 import com.automatethethings.xkey.crypto.KeyGenerationException
 import com.automatethethings.xkey.crypto.KeyInvalidatedException
 import com.automatethethings.xkey.crypto.KeyNotFoundException
+import com.automatethethings.xkey.crypto.KeyInfoUnavailableException
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SigningException
@@ -61,6 +64,7 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import java.util.Base64
 import com.automatethethings.xkey.pin.PinManager
+import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinType
 import com.automatethethings.xkey.pin.PinException
 import com.automatethethings.xkey.pin.PinLockedException
@@ -555,6 +559,12 @@ class RequestHandler(
         } catch (e: UnsupportedAlgorithmException) {
             Log.e(TAG, "Unsupported algorithm: ${e.message}")
             Response.error(request.id, ErrorCodes.INVALID_ALGORITHM, e.message ?: "Unsupported algorithm")
+        } catch (e: UserVerificationRequiredException) {
+            // local.signFido2Assertion refused a ceremony the peer required
+            // user verification for. Explicit mapping (#135): the code and
+            // why it was chosen are documented at UserVerificationWireError.
+            Log.e(TAG, "User verification required: ${e.message}")
+            UserVerificationWireError.response(request.id, e)
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected handler error", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}")
@@ -632,7 +642,13 @@ class RequestHandler(
         )
 
         val publicKeyBase64 = Base64.getEncoder().encodeToString(cosePublicKey)
-        val isStrongBoxBacked = keystoreManager.isKeyStrongBoxBacked(generateParams.credentialId)
+        // The credential just generated, read by its exact alias; a KeyInfo
+        // read that fails is an error, never a software-backed key.
+        val level = generatedKeyLevel(
+            generateParams.credentialId,
+            read = { keystoreManager.credentialSecurityLevel(generateParams.credentialId) },
+            discard = { keystoreManager.deleteKey(generateParams.credentialId) }
+        )
 
         // The leaf of the Keystore chain is the key attestation certificate; the
         // issuing chain is served by local.attestKey. Devices without hardware
@@ -644,14 +660,14 @@ class RequestHandler(
                 ?.let { Base64.getEncoder().encodeToString(it) }
         }.getOrNull()
 
-        val result = GenerateKeyResult(
+        val result = GenerateKeyResult.withLevel(
             publicKey = publicKeyBase64,
             attestation = attestationBase64,
-            strongBoxBacked = isStrongBoxBacked
+            level = level
         )
 
         Log.i(TAG, "Generated key for credential: ${generateParams.credentialId}, " +
-                "strongBox=$isStrongBoxBacked, authDuration=$authDurationSeconds")
+                "securityLevel=${level.wire}, authDuration=$authDurationSeconds")
         Response.success(request.id, result.toJson())
     }
 
@@ -1187,9 +1203,16 @@ class RequestHandler(
                 keySizeBits = bits
             } else {
                 keystoreManager.generateHMACKey(genParams.keyId, algorithmName)
-                keySizeBits = 256
+                keySizeBits = if (algorithmName.contains("512")) 512 else 256
             }
             publicKeyDer = ByteArray(0) // No public key for symmetric/HMAC
+            // The exact alias just generated (xkey_key_<id>), never a
+            // credential that shares the id.
+            val level = generatedKeyLevel(
+                genParams.keyId,
+                read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
+                discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
+            )
 
             // Store in unified key store
             keyDao.insert(
@@ -1199,7 +1222,7 @@ class RequestHandler(
                     algorithm = algorithmName,
                     label = genParams.label,
                     keySizeBits = keySizeBits,
-                    strongBoxBacked = keystoreManager.isStrongBoxAvailable(),
+                    strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
                     biometricRequired = genParams.requireUserVerification,
                     authDurationSeconds = authDurationSeconds,
                     shareable = genParams.shareable,
@@ -1215,13 +1238,13 @@ class RequestHandler(
                 )
             )
 
-            val result = LocalGenerateKeyResult(
+            val result = LocalGenerateKeyResult.withLevel(
                 keyId = genParams.keyId,
                 publicKey = "",
                 publicKeyCose = null,
                 algorithm = algorithmName,
                 keySizeBits = keySizeBits,
-                strongBoxBacked = keystoreManager.isStrongBoxAvailable()
+                level = level
             )
             return@withContext Response.success(request.id, result.toJson())
         }
@@ -1234,7 +1257,12 @@ class RequestHandler(
             preferStrongBox = genParams.preferStrongBox
         )
         keySizeBits = CoseAlgorithms.getKeySizeBits(genParams.algorithm)
-        val isStrongBoxBacked = keystoreManager.isStrongBoxAvailable()
+        val level = generatedKeyLevel(
+            genParams.keyId,
+            read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
+            discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
+        )
+        val isStrongBoxBacked = level == KeySecurityLevel.STRONGBOX
 
         // Get COSE-encoded public key for FIDO2 keys
         val publicKeyCose = if (genParams.keyType == KeyTypes.FIDO2 && algorithmName.startsWith("ES")) {
@@ -1278,13 +1306,13 @@ class RequestHandler(
         val publicKeyBase64 = Base64.getEncoder().encodeToString(publicKeyDer)
         val publicKeyCoseBase64 = publicKeyCose?.let { Base64.getEncoder().encodeToString(it) }
 
-        val result = LocalGenerateKeyResult(
+        val result = LocalGenerateKeyResult.withLevel(
             keyId = genParams.keyId,
             publicKey = publicKeyBase64,
             publicKeyCose = publicKeyCoseBase64,
             algorithm = algorithmName,
             keySizeBits = keySizeBits,
-            strongBoxBacked = isStrongBoxBacked
+            level = level
         )
 
         Log.i(TAG, "Generated key: ${genParams.keyId}, algo=$algorithmName, type=${genParams.keyType}")
@@ -1300,6 +1328,32 @@ class RequestHandler(
         }
 
         Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The security level of the key generateKey or local.generateKey just
+     * made, read by [read] from its exact alias. A missing key or a KeyInfo
+     * read that fails is an error, never a software-backed key: the key is
+     * discarded so nothing is reported or persisted with a level it may not
+     * have, and the caller can retry under the same id.
+     */
+    private fun generatedKeyLevel(
+        keyId: String,
+        read: () -> KeySecurityLevel?,
+        discard: () -> Unit
+    ): KeySecurityLevel {
+        val failure = try {
+            read()?.let { return it }
+            null
+        } catch (e: KeyInfoUnavailableException) {
+            e
+        }
+        runCatching { discard() }
+        Log.e(TAG, "Cannot read the security level of generated key $keyId", failure)
+        throw ProtocolException(
+            "Cannot read the security level of generated key $keyId",
+            errorCode = ErrorCodes.INTERNAL_ERROR
+        )
     }
 
     /**
@@ -2717,6 +2771,11 @@ class RequestHandler(
                 if (peerPublicKeyHex == null) {
                     Log.w(TAG, "Cannot check SELECTED_PEERS policy without peer public key")
                     false
+                } else if (pairedDeviceRepository?.isRevocationPending(peerPublicKeyHex) == true) {
+                    // Fail closed (#174): this peer was unpaired and its old
+                    // grants may not be deleted yet; they must not authorize it.
+                    Log.w(TAG, "SELECTED_PEERS refused: grant revocation pending for peer")
+                    false
                 } else {
                     keySharingPolicyDao.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
                 }
@@ -3127,9 +3186,13 @@ class RequestHandler(
         return try {
             val db = XKeyDatabase.getInstance(context)
             val cred = db.oathCredentialDao().getByOathId(credentialId)
+            if (cred == null) {
+                // Nothing has that id: say so rather than claim a deletion.
+                return Response.success(request.id, JSONObject().apply { put("deleted", false) })
+            }
             db.oathCredentialDao().deleteByOathId(credentialId)
 
-            AuditLogger.logOathCredentialDeleted(credentialId, cred?.issuer, cred?.accountName ?: "")
+            AuditLogger.logOathCredentialDeleted(credentialId, cred.issuer, cred.accountName)
 
             val result = JSONObject().apply { put("deleted", true) }
             Response.success(request.id, result)
@@ -3260,6 +3323,8 @@ class RequestHandler(
                 put("backup_id", id)
                 if (label.isNotEmpty()) put("message", "stored backup '$label'")
             })
+        } catch (e: ProtocolException) {
+            Response.error(request.id, e.errorCode, e.message ?: "Invalid backup_data")
         } catch (e: Exception) {
             Log.e(TAG, "createBackup failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "createBackup failed: ${e.message}")
@@ -3281,7 +3346,7 @@ class RequestHandler(
             val bytes = store.load(id)
                 ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Backup not found: $id")
             Response.success(request.id, JSONObject().apply {
-                put("backup_data", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+                put("backup_data", java.util.Base64.getEncoder().encodeToString(bytes))
                 put("backup_id", id)
                 put("created_at", com.automatethethings.xkey.crypto.SyncCodec.toRfc3339(store.createdAtMillis(id)))
             })
@@ -3635,6 +3700,7 @@ class RequestHandler(
         val currentPin = params.optString("currentPin", "").ifEmpty { null }
         val newPin = params.optString("newPin", "")
         if (newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "New PIN is required")
+        newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
                 "SO_PIN" -> pm.setSOPIN(currentPin, newPin)
@@ -3646,6 +3712,8 @@ class RequestHandler(
                 else -> return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid pinType: $pinType")
             }
             Response.success(request.id, JSONObject().apply { put("success", true) })
+        } catch (e: PinLockedException) {
+            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
         } catch (e: PinException) {
             Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN set failed")
         } catch (e: Exception) {
@@ -3660,6 +3728,7 @@ class RequestHandler(
         val currentPin = params.optString("currentPin", "")
         val newPin = params.optString("newPin", "")
         if (currentPin.isEmpty() || newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Current and new PINs required")
+        newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
                 "SO_PIN" -> pm.changeSOPIN(currentPin, newPin)
@@ -3684,12 +3753,27 @@ class RequestHandler(
         return try {
             pm.resetLockout(soPin)
             Response.success(request.id, JSONObject().apply { put("success", true) })
+        } catch (e: PinLockedException) {
+            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
         } catch (e: PinException) {
             Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "Reset failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "Reset error")
         }
     }
+
+    /**
+     * INVALID_PARAMS when [newPin] is outside the allowed
+     * [PinHasher.MIN_PIN_LENGTH]..[PinHasher.MAX_PIN_LENGTH] UTF-8 bytes,
+     * checked before the [PinManager] is asked to store it; null when it fits.
+     */
+    private fun newPinLengthError(request: Request, newPin: String): Response? =
+        try {
+            PinHasher.validatePinLength(newPin)
+            null
+        } catch (e: IllegalArgumentException) {
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, e.message ?: "Invalid PIN length")
+        }
 
     // -------------------------------------------------------------------------
     // PIV Handlers
@@ -3789,10 +3873,18 @@ class RequestHandler(
         val certBase64 = params.optString("certificate_der").ifEmpty { params.optString("certificate") }
         val slot = PivSlot.fromHexId(slotId) ?: return Response.error(request.id, ErrorCodes.PIV_INVALID_SLOT, "Invalid slot: $slotId")
         if (certBase64.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Certificate is required")
+        val certDer = try {
+            Base64.getDecoder().decode(certBase64)
+        } catch (_: IllegalArgumentException) {
+            return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Certificate is not valid base64")
+        }
         return try {
-            val certDer = Base64.getDecoder().decode(certBase64)
             pkm.importCertificate(slot, certDer)
             Response.success(request.id, JSONObject().apply { put("success", true) })
+        } catch (e: com.automatethethings.xkey.piv.PivCertificateRejectedException) {
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, e.message ?: "Certificate refused")
+        } catch (e: com.automatethethings.xkey.piv.PivSlotEmptyException) {
+            Response.error(request.id, ErrorCodes.PIV_SLOT_NOT_FOUND, e.message ?: "No key in slot $slotId")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "Certificate import failed")
         }
