@@ -138,4 +138,41 @@ class PromptEntryPointsTest {
             }
         }
     }
+
+    /** What lets a queue entry go from an activity's teardown (a media player's release is not one). */
+    private val releases = Regex("""PromptOwnership\.process\.(end|settle|expire)\(|controller\??\.release\(""")
+
+    /**
+     * A biometric ceremony outlives a configuration change, so an activity
+     * whose onDestroy lets its queue entry go does so only when it is not
+     * being recreated: otherwise a rotation hands the screen to the next
+     * approval while its own prompt is still up.
+     */
+    @Test
+    fun noActivityReleasesItsQueueEntryOnAConfigurationChange() {
+        val activities = sourceRoot.walkTopDown().filter { it.isFile && it.name.endsWith("Activity.kt") }.toList()
+        assertTrue("no activities scanned", activities.isNotEmpty())
+        val unguarded = activities.mapNotNull { file ->
+            val body = onDestroyBody(file.readText()) ?: return@mapNotNull null
+            val code = body.lines().filterNot { it.trimStart().startsWith("//") }.joinToString("\n")
+            val path = file.relativeTo(sourceRoot).invariantSeparatorsPath
+            if (releases.containsMatchIn(code) && "isChangingConfigurations" !in code) path else null
+        }
+        assertTrue("onDestroy releases a prompt's queue entry on a configuration change: $unguarded", unguarded.isEmpty())
+    }
+
+    /** The braces-balanced body of `override fun onDestroy()`, or null when there is none. */
+    private fun onDestroyBody(text: String): String? {
+        val start = Regex("""override fun onDestroy\(\)\s*\{""").find(text) ?: return null
+        var depth = 1
+        var i = start.range.last + 1
+        while (i < text.length && depth > 0) {
+            when (text[i]) {
+                '{' -> depth++
+                '}' -> depth--
+            }
+            i++
+        }
+        return text.substring(start.range.last + 1, i - 1)
+    }
 }
