@@ -301,3 +301,55 @@ class MainActivityRecentActivityTest {
         }
     }
 }
+
+/**
+ * The unit tests run Robolectric offline (app/build.gradle.kts sets
+ * robolectric.offline and points robolectric.dependency.dir at the one
+ * android-all jar pinned as robolectricAndroidAll). A Robolectric test that
+ * asks for another SDK makes Robolectric fetch that jar from Maven Central,
+ * which fails in the offline CI container. This test fails first, locally.
+ */
+class RobolectricOfflinePinTest {
+
+    private val moduleDir: java.io.File = java.io.File(requireNotNull(System.getProperty("user.dir")))
+
+    /** The API level of the pinned jar: "14-robolectric-..." is Android 14, API 34. */
+    private fun pinnedApi(): Int {
+        val toml = java.io.File(moduleDir.parentFile, "gradle/libs.versions.toml").readText()
+        val version = Regex("""(?m)^robolectricAndroidAll\s*=\s*"([^"]+)"""").find(toml)
+            ?.groupValues?.get(1)
+            ?: error("robolectricAndroidAll is missing from gradle/libs.versions.toml")
+        return version.substringBefore('-').toInt() + 20
+    }
+
+    @Test
+    fun `unit tests run Robolectric offline from the pinned android-all jar`() {
+        assertEquals("true", System.getProperty("robolectric.offline"))
+        val dir = java.io.File(
+            System.getProperty("robolectric.dependency.dir")
+                ?: error("robolectric.dependency.dir is not set"),
+        )
+        val jars = dir.listFiles().orEmpty().map { it.name }
+        org.junit.Assert.assertTrue(
+            "no android-all jar in $dir: $jars",
+            jars.any { it.startsWith("android-all-instrumented-") && it.endsWith(".jar") },
+        )
+    }
+
+    @Test
+    fun `every Robolectric test asks for the pinned SDK`() {
+        val api = pinnedApi()
+        val sdkList = Regex("""@Config\([^)]*\bsdk\s*=\s*\[([^\]]*)]""")
+        val offenders = moduleDir.resolve("src/test").walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.readText().contains("RobolectricTestRunner") }
+            .flatMap { file ->
+                sdkList.findAll(file.readText()).flatMap { match ->
+                    match.groupValues[1].split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                        .filter { it.toIntOrNull() != api }
+                        .map { "${file.name}: sdk = $it" }
+                }
+            }
+            .toList()
+        assertEquals("Robolectric tests on an SDK other than the pinned API $api", emptyList<String>(), offenders)
+    }
+}
