@@ -269,8 +269,9 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
      * it in the Room database only when its SubjectPublicKeyInfo equals the
      * public key the Android Keystore holds for the slot, read under the slot
      * lock. The row's cached public key is not trusted; it is refreshed from
-     * the Keystore on success. A refused import stores nothing: a certificate
-     * imported earlier stays.
+     * the Keystore on success, and the import is audited with the slot and the
+     * certificate's subject. A refused import stores and audits nothing: a
+     * certificate imported earlier stays.
      *
      * @param slot The PIV slot to import the certificate into.
      * @param certDer DER-encoded X.509 certificate bytes.
@@ -298,6 +299,8 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
 
         val updated = existing.copy(publicKeyDer = slotPublicKey, certificateDer = certDer)
         pivSlotDao.upsert(updated)
+
+        AuditLogger.logPivCertImported(slot.hexId, certificate.subjectX500Principal.name)
 
         Log.i(TAG, "Imported certificate for PIV slot ${slot.hexId} (${slot.label})")
     }
