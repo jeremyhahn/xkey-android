@@ -892,6 +892,16 @@ class NoiseSession {
     fun getStaticPublicKey(): ByteArray? = staticPublicKey?.copyOf()
 
     /**
+     * Test seam (#236): sets the transport counters, so that a test can put a
+     * session at the reserved counter value without sending 2^64 messages;
+     * production code must not call this.
+     */
+    internal fun setTransportNoncesForTest(send: Long, recv: Long) {
+        sendNonce = send
+        recvNonce = recv
+    }
+
+    /**
      * Test seam (#6): the secret arrays this session holds right now, by field
      * name. These are the live arrays, not copies, so that a test can watch
      * them being overwritten; production code must not call this.
