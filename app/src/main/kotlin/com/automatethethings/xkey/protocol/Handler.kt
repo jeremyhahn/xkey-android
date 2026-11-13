@@ -30,6 +30,7 @@ import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.DecryptionException
 import com.automatethethings.xkey.crypto.DeviceAttestationKey
 import com.automatethethings.xkey.crypto.ECDHException
+import com.automatethethings.xkey.crypto.KeystoreCapabilities
 import com.automatethethings.xkey.crypto.EncryptionException
 import com.automatethethings.xkey.crypto.HMACException
 import com.automatethethings.xkey.crypto.KeyGenerationException
@@ -143,6 +144,9 @@ class RequestHandler(
 ) {
     companion object {
         private const val TAG = "RequestHandler"
+
+        /** keyType of a key-use audit entry whose key has no stored metadata. */
+        const val AUDIT_KEY_TYPE_UNKNOWN = "unknown"
 
         // Protocol version
         private const val PROTOCOL_VERSION = "1.0.0"
@@ -1653,6 +1657,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val signParams = LocalSignParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         if (!keystoreManager.generalKeyExists(signParams.keyId)) {
             throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
@@ -1700,16 +1706,12 @@ class RequestHandler(
         keyDao.recordUsage(signParams.keyId)
 
         // Log signing request
-        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
-        AuditLogger.logSigningRequest(
-            keyId = signParams.keyId,
-            keyLabel = signParams.keyId,
-            keyType = "signing",
-            algorithm = signAlgorithm,
-            deviceId = currentPeerPublicKeyHex(),
-            deviceName = deviceInfo?.deviceName,
-            success = true,
-            durationMs = durationMs
+        // signWithAlgorithm ran signAlgorithm (it refuses any other name).
+        logKeyUse(
+            KeyUse.SIGN, signParams.keyId,
+            executedAlgorithm = signAlgorithm,
+            durationMs = durationMs,
+            caller = caller
         )
 
         val result = LocalSignResult(
@@ -1738,27 +1740,26 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val decryptParams = LocalDecryptParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val plaintext = keystoreManager.rsaDecrypt(decryptParams.keyId, decryptParams.getCiphertextBytes())
+        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(
+            decryptParams.keyId, decryptParams.getCiphertextBytes()
+        )
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(decryptParams.keyId)
 
-        // Log decryption request
-        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
-        AuditLogger.logDecryptionRequest(
-            keyId = decryptParams.keyId,
-            keyLabel = decryptParams.keyId,
-            keyType = "rsa",
-            algorithm = "RSA-OAEP",
-            deviceId = currentPeerPublicKeyHex(),
-            deviceName = deviceInfo?.deviceName,
-            success = true,
-            durationMs = durationMs
+        // The OAEP parameters the cipher ran (KeystoreManager.rsaOaepSpec).
+        logKeyUse(
+            KeyUse.DECRYPT, decryptParams.keyId,
+            executedAlgorithm = decrypted.algorithm,
+            durationMs = durationMs,
+            caller = caller
         )
 
         val result = LocalDecryptResult(
-            plaintext = Base64.getEncoder().encodeToString(plaintext)
+            plaintext = Base64.getEncoder().encodeToString(decrypted.plaintext)
         )
         return Response.success(request.id, result.toJson())
     }
@@ -1779,6 +1780,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val symParams = LocalSymmetricParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
@@ -1801,16 +1804,11 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log encryption request
-        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
-        AuditLogger.logEncryptionRequest(
-            keyId = symParams.keyId,
-            keyLabel = symParams.keyId,
-            keyType = "symmetric",
-            algorithm = "AES-GCM",
-            deviceId = currentPeerPublicKeyHex(),
-            deviceName = deviceInfo?.deviceName,
-            success = true,
-            durationMs = durationMs
+        logKeyUse(
+            KeyUse.ENCRYPT, symParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+            durationMs = durationMs,
+            caller = caller
         )
 
         val result = LocalSymmetricResult(
@@ -1836,6 +1834,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val symParams = LocalSymmetricParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
@@ -1858,16 +1858,11 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log decryption request
-        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
-        AuditLogger.logDecryptionRequest(
-            keyId = symParams.keyId,
-            keyLabel = symParams.keyId,
-            keyType = "symmetric",
-            algorithm = "AES-GCM",
-            deviceId = currentPeerPublicKeyHex(),
-            deviceName = deviceInfo?.deviceName,
-            success = true,
-            durationMs = durationMs
+        logKeyUse(
+            KeyUse.DECRYPT, symParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+            durationMs = durationMs,
+            caller = caller
         )
 
         val result = LocalSymmetricResult(
@@ -1875,6 +1870,85 @@ class RequestHandler(
             payloadField = LocalSymmetricResult.FIELD_PLAINTEXT
         )
         return Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The keyType of a key-use audit entry: the type the key is stored with,
+     * never the operation (the entry's operation type already names that).
+     * The audit screen filters entries by this value, so an ECDH on a signing
+     * key must read "signing". It is the key-store row's type, else the
+     * software key's ([softwareKey], or looked up), else
+     * [AUDIT_KEY_TYPE_UNKNOWN] when the key has no stored metadata.
+     *
+     * Every key-use AuditLogger call in this file takes its keyType from
+     * here (AuditKeyTypeChokePointTest enforces it).
+     */
+    private suspend fun auditKeyType(
+        keyId: String,
+        softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
+    ): String =
+        keyDao.getByKeyId(keyId)?.keyType?.takeIf { it.isNotBlank() }
+            ?: (
+                softwareKey
+                    // The operation already succeeded; labelling it must not fail it.
+                    ?: runCatching { com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId) }.getOrNull()
+                )?.keyType?.takeIf { it.isNotBlank() }
+            ?: AUDIT_KEY_TYPE_UNKNOWN
+
+    /** The key-use operations [logKeyUse] records. */
+    private enum class KeyUse { SIGN, DECRYPT, ENCRYPT, HMAC, KEY_DERIVATION }
+
+    /**
+     * The one writer of key-use audit entries (sign, decrypt, encrypt, HMAC,
+     * ECDH): one success entry naming the key, its stored type
+     * ([auditKeyType]) and the algorithm that ran.
+     *
+     * [executedAlgorithm] is the algorithm the operation executed, taken from
+     * the crypto path (an HmacResult, SoftwareKeyOps.hmacAlgorithm,
+     * KeystoreManager.EXECUTED_*) or the validated request algorithm the
+     * operation ran with, never the key's stored metadata: a stored name is
+     * not validated and need not be what ran. AuditKeyTypeChokePointTest
+     * fails on a key-use AuditLogger call outside this function, or a call of
+     * it with any other algorithm source.
+     *
+     * [caller] is the requesting desktop its handler captured with
+     * [auditCaller] on entry, before any prompt or crypto call can suspend
+     * it: the entry's deviceId and deviceName come from it alone, never from
+     * the handler-wide connected device, which a second desktop's connection
+     * overwrites while this request runs. The scan test fails on a call that
+     * passes its own device or captures the caller late.
+     */
+    private suspend fun logKeyUse(
+        use: KeyUse,
+        keyId: String,
+        executedAlgorithm: String,
+        durationMs: Long,
+        caller: AuditCaller,
+        softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
+    ) {
+        val keyType = auditKeyType(keyId, softwareKey)
+        when (use) {
+            KeyUse.SIGN -> AuditLogger.logSigningRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.DECRYPT -> AuditLogger.logDecryptionRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.ENCRYPT -> AuditLogger.logEncryptionRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.HMAC -> AuditLogger.logHmacRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.KEY_DERIVATION -> AuditLogger.logKeyDerivationRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+        }
     }
 
     /**
@@ -1893,25 +1967,44 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val hmacParams = LocalHMACParams.fromJson(params)
+        val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
+            val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
                 sw.material, hmacParams.getDataBytes(), sw.algorithm
             )
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
+            // The MAC and the data stay out of the entry.
+            logKeyUse(
+                KeyUse.HMAC, hmacParams.keyId,
+                executedAlgorithm = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmacAlgorithm(sw.algorithm),
+                durationMs = swDurationMs,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalHMACResult(mac = Base64.getEncoder().encodeToString(swMac)).toJson()
             )
         }
 
-        val mac = keystoreManager.computeHMAC(hmacParams.keyId, hmacParams.getDataBytes())
+        val startTime = System.currentTimeMillis()
+        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
+        val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
+        logKeyUse(
+            KeyUse.HMAC, hmacParams.keyId,
+            executedAlgorithm = hmac.algorithm,
+            durationMs = durationMs,
+            caller = caller
+        )
 
         val result = LocalHMACResult(
-            mac = Base64.getEncoder().encodeToString(mac)
+            mac = Base64.getEncoder().encodeToString(hmac.mac)
         )
         return Response.success(request.id, result.toJson())
     }
@@ -1920,6 +2013,11 @@ class RequestHandler(
      * Handles local.ecdh - ECDH key agreement.
      */
     private suspend fun handleLocalECDH(request: Request): Response {
+        // Keystore key agreement is API 31+; refuse before touching the Keystore.
+        if (!KeystoreCapabilities.supportsEcdh(Build.VERSION.SDK_INT)) {
+            throw ECDHException(KeystoreCapabilities.ecdhUnsupportedReason(Build.VERSION.SDK_INT))
+        }
+
         // Check device attestation requirement
         if (!isDeviceAttestationCurrent(forKeyUse = true)) {
             throw ProtocolException(
@@ -1932,16 +2030,47 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val ecdhParams = LocalECDHParams.fromJson(params)
+        val caller = auditCaller()
+        val startTime = System.currentTimeMillis()
         val sharedSecret = keystoreManager.performECDH(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
         )
+        val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(ecdhParams.keyId)
+
+        // Log the key agreement; the shared secret and peer key stay out of it.
+        logKeyUse(
+            KeyUse.KEY_DERIVATION, ecdhParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_ECDH,
+            durationMs = durationMs,
+            caller = caller
+        )
 
         val result = LocalECDHResult(
             sharedSecret = Base64.getEncoder().encodeToString(sharedSecret)
         )
         return Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The requesting peer an audit entry names, resolved once per request.
+     *
+     * @property peerPublicKeyHex the peer's static key hex, or null when unknown
+     * @property deviceName its paired-device name, when it is paired
+     */
+    private class AuditCaller(val peerPublicKeyHex: String?, val deviceName: String?)
+
+    /**
+     * Resolves the peer of the session this request arrived on, see
+     * [attestingPeerPublicKeyHex], and its paired-device name in one snapshot.
+     * Audit entries take the device from here, never from the handler-wide
+     * connected device: every confirmed BLE, USB or TCP connection overwrites
+     * that one, so it can name another desktop, or none after a disconnect.
+     */
+    private suspend fun auditCaller(): AuditCaller {
+        val peer = attestingPeerPublicKeyHex()
+        return AuditCaller(peer, peer?.let { pairedDeviceRepository?.getDevice(it) }?.deviceName)
     }
 
     /**
@@ -2320,17 +2449,12 @@ class RequestHandler(
      */
     private suspend fun handleLocalGetCapabilities(request: Request): Response {
         val result = LocalGetCapabilitiesResult(
-            algorithms = listOf(
-                "ES256", "ES384", "ES512",
-                "RS256", "RS384", "RS512",
-                "AES128", "AES256",
-                "HMAC-SHA256", "HMAC-SHA512"
-            ),
+            algorithms = KeystoreCapabilities.supportedAlgorithms(Build.VERSION.SDK_INT),
             keyTypes = listOf("fido2", "tls", "signing", "encryption", "secret", "hmac", "ca", "attestation"),
             hasStrongBox = keystoreManager.isStrongBoxAvailable(),
             hasBiometrics = hasBiometrics(),
             supportsAttestation = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N,
-            supportsECDH = true,
+            supportsECDH = KeystoreCapabilities.supportsEcdh(Build.VERSION.SDK_INT),
             supportsSymmetric = true,
             supportsHMAC = true,
             maxKeys = 256, // Android Keystore practical limit
