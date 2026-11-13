@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.ui
 
+import com.automatethethings.xkey.media.XmpMetadataHelper
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -223,6 +224,120 @@ class FileOperationStagingTest {
         first.deliver(file) { it.copyTo(target) }
         assertArrayEquals(byteArrayOf(1, 2, 3), target.readBytes())
         assertFalse(file.exists())
+    }
+
+    /** Stage a file and write the signature sidecar the XMP helper puts beside a non-JPEG path. */
+    private fun FileOperationStaging.stageWithCompanion(displayName: String?): Pair<File, File> {
+        var companion: File? = null
+        val file = stage(displayName) { staged ->
+            staged.writeBytes(byteArrayOf(1, 2, 3))
+            companion = File(XmpMetadataHelper.getSidecarPath(staged.absolutePath)).apply { writeText("{}") }
+        }
+        return file to companion!!
+    }
+
+    @Test
+    fun `a JPEG with an extensionless display name stages as jpg`() {
+        val staging = staging()
+
+        for (mime in listOf("image/jpeg", "image/jpg")) {
+            for (name in listOf("photo", null, "photo.png", "../x/evil")) {
+                val file = staging.stage(name, mime) { it.writeBytes(byteArrayOf(1)) }
+                assertTrue("$mime $name -> ${file.name}", file.name.endsWith(".jpg"))
+                assertInsideStaging(staging, file)
+            }
+        }
+        // Other content keeps the display name's extension.
+        assertTrue(staging.stage("doc.pdf", "application/pdf") { }.name.endsWith(".pdf"))
+        assertTrue(staging.stage("doc", "application/pdf") { }.name.endsWith(".tmp"))
+    }
+
+    @Test
+    fun `a delivered staged file leaves no companion behind`() {
+        val staging = staging()
+        val (file, companion) = staging.stageWithCompanion("clip")
+        val target = File(temp.newFolder("picked"), "clip")
+
+        staging.deliverTo(file) { FileOutputStream(target) }
+
+        assertArrayEquals(byteArrayOf(1, 2, 3), target.readBytes())
+        assertFalse(file.exists())
+        assertFalse(companion.exists())
+    }
+
+    @Test
+    fun `a failed write step leaves no companion behind`() {
+        val staging = staging()
+        var companion: File? = null
+
+        assertThrows(IOException::class.java) {
+            staging.stage("clip") { staged ->
+                companion = File(XmpMetadataHelper.getSidecarPath(staged.absolutePath)).apply { writeText("{}") }
+                throw IOException("exif failed")
+            }
+        }
+
+        assertFalse(companion!!.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `release releaseAll and shutdown leave no companion behind`() {
+        val staging = staging()
+        val (released, releasedCompanion) = staging.stageWithCompanion("a")
+        val (all, allCompanion) = staging.stageWithCompanion("b")
+
+        staging.release(released)
+        assertFalse(released.exists())
+        assertFalse(releasedCompanion.exists())
+
+        staging.releaseAll()
+        assertFalse(all.exists())
+        assertFalse(allCompanion.exists())
+
+        val (shut, shutCompanion) = staging.stageWithCompanion("c")
+        staging.shutdown()
+        assertFalse(shut.exists())
+        assertFalse(shutCompanion.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a companion written after shutdown is deleted with its file`() {
+        val staging = staging()
+        var companion: File? = null
+
+        assertThrows(CancellationException::class.java) {
+            staging.stage("clip") { staged ->
+                staging.shutdown()
+                companion = File(XmpMetadataHelper.getSidecarPath(staged.absolutePath)).apply { writeText("{}") }
+            }
+        }
+
+        assertFalse(companion!!.exists())
+        assertTrue(staging.directory.list().isNullOrEmpty())
+    }
+
+    @Test
+    fun `another session's sweep keeps a live companion and removes a dead one`() {
+        val live = staging()
+        val (liveFile, liveCompanion) = live.stageWithCompanion("live")
+        val dead = staging()
+        val (deadFile, deadCompanion) = dead.stageWithCompanion("dead")
+        // The dead session's process died: its files remain, its session is gone.
+        val saved = temp.newFolder("saved")
+        val deadCopy = File(saved, deadFile.name).also { deadFile.copyTo(it) }
+        val deadCompanionCopy = File(saved, deadCompanion.name).also { deadCompanion.copyTo(it) }
+        dead.shutdown()
+        deadCopy.renameTo(deadFile)
+        deadCompanionCopy.renameTo(deadCompanion)
+
+        staging().sweep()
+
+        assertTrue(liveFile.exists())
+        assertTrue(liveCompanion.exists())
+        assertFalse(deadFile.exists())
+        assertFalse(deadCompanion.exists())
     }
 
     @Test
