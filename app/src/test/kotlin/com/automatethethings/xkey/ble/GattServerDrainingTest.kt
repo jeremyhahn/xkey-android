@@ -49,7 +49,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
@@ -84,12 +83,6 @@ class GattServerDrainingTest {
         const val MTU = 247
         const val TIMEOUT_MS = 5_000L
 
-        // Long enough for a coroutine to reach the lock it waits on, or for a
-        // send that was let through to have gone out. The wait is the check,
-        // not a stand-in for a signal: a Mutex shows no waiter, and "nothing
-        // is sent" has no event to await.
-        const val SETTLE_MS = 300L
-
         val ENABLE = byteArrayOf(0x01, 0x00)
         val DISABLE = byteArrayOf(0x00, 0x00)
 
@@ -114,6 +107,7 @@ class GattServerDrainingTest {
     private lateinit var status: BluetoothGattCharacteristic
     private lateinit var cccd: BluetoothGattDescriptor
     private lateinit var server: GattServer
+    private lateinit var signals: TrackingDispatcher
     private lateinit var desktop: NoiseInitiatorSession
     private val fragments = Collections.synchronizedList(mutableListOf<ByteArray>())
 
@@ -160,6 +154,7 @@ class GattServerDrainingTest {
             pairingCallback = mockk(),
             pairedDeviceRepository = repo,
         )
+        signals = trackScope(server)
         setField("gattServer", gatt)
         setField("responseCharacteristic", response)
         setField("statusCharacteristic", status)
@@ -198,13 +193,15 @@ class GattServerDrainingTest {
                 onThread { write(reply) }
                 onThread { disconnect() }
                 // The consumer waits on the Noise lock to decrypt the reply.
-                Thread.sleep(SETTLE_MS)
-                val send = async(Dispatchers.Default) {
+                signals.awaitIdle("the consumer waits on the Noise lock")
+                // On the server's dispatcher, so the next wait covers the
+                // send reaching the lock.
+                val send = async(signals) {
                     runCatching { server.sendOnBoundSession(request(9, "remote.sign")) }
                 }
                 withTimeout(TIMEOUT_MS) { atAdmission.await() }
                 // The send waits on the Noise lock behind the consumer.
-                Thread.sleep(SETTLE_MS)
+                signals.awaitIdle("the send waits on the Noise lock")
                 send
             }
             val refused = withTimeout(TIMEOUT_MS) { send.await() }.exceptionOrNull()
@@ -250,7 +247,8 @@ class GattServerDrainingTest {
         server.afterAdmissionForTest = null
         try {
             assertTrue("the undelivered frame fails its send: $failed", failed is IOException)
-            Thread.sleep(SETTLE_MS)
+            // A refusal that settled the request would have done so by now.
+            signals.awaitIdle("the consumer waits on the Noise lock")
             assertFalse("the queued reply's request is not settled as lost", answered.isCompleted)
         } finally {
             noise.unlock()
@@ -280,7 +278,7 @@ class GattServerDrainingTest {
         withStateHeld {
             onThread { write(desktop.encrypt(request(9, "local.ping"))) }
             assertTrue("the answer reaches admission", atAdmission.await(TIMEOUT_MS, TimeUnit.MILLISECONDS))
-            Thread.sleep(SETTLE_MS)
+            signals.awaitIdle("the answer waits behind the disconnect")
         }
 
         eventually("the drain finishes") { getField<NoiseSession?>("noiseSession") == null }
@@ -306,7 +304,7 @@ class GattServerDrainingTest {
         release.countDown()
 
         eventually("the drain finishes") { getField<NoiseSession?>("noiseSession") == null }
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("nothing is left to run")
         assertEquals("nothing is sent for the ended connection", 0, messages().size)
     }
 
@@ -320,12 +318,12 @@ class GattServerDrainingTest {
         withNoiseHeld {
             onThread { write(desktop.createHandshakeMessage1()) }
             // The consumer waits on the Noise lock to process the handshake.
-            Thread.sleep(SETTLE_MS)
+            signals.awaitIdle("the consumer waits on the Noise lock")
             onThread { disconnect() }
         }
 
         eventually("the drain finishes") { getField<NoiseSession?>("noiseSession") == null }
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("nothing is left to run")
         assertEquals("nothing is sent for the ended connection", 0, messages().size)
     }
 
@@ -341,12 +339,12 @@ class GattServerDrainingTest {
 
         withNoiseHeld {
             onThread { write(desktop.createHandshakeMessage3()) }
-            Thread.sleep(SETTLE_MS)
+            signals.awaitIdle("the consumer waits on the Noise lock")
             onThread { disconnect() }
         }
 
         eventually("the drain finishes") { getField<NoiseSession?>("noiseSession") == null }
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("nothing is left to run")
         verify(exactly = 0) { gatt.notifyCharacteristicChanged(device, status, any()) }
         verify(exactly = 0) { gatt.notifyCharacteristicChanged(device, status, any(), any<ByteArray>()) }
     }
@@ -521,13 +519,7 @@ class GattServerDrainingTest {
         verify(exactly = 0) { gatt.notifyCharacteristicChanged(any(), any(), any(), any<ByteArray>()) }
     }
 
-    private fun eventually(what: String, check: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + TIMEOUT_MS
-        while (!check()) {
-            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting until $what")
-            Thread.sleep(10)
-        }
-    }
+    private fun eventually(what: String, check: () -> Boolean) = signals.eventually(what, TIMEOUT_MS, check)
 
     private fun setField(name: String, value: Any?) {
         GattServer::class.java.getDeclaredField(name).apply { isAccessible = true }.set(server, value)
