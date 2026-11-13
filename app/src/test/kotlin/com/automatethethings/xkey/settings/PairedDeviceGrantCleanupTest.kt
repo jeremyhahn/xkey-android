@@ -453,6 +453,13 @@ class PairedDeviceGrantCleanupTest {
             val peer = secondArg<String>()
             table.any { it.keyId == keyId && it.peerPublicKeyHex == peer }
         }
+        // SharePermission asks the stored-policy query for a stored Selected
+        // Peers key; these tests store only Selected Peers keys, so it is the row.
+        coEvery { dao.isKeySharedWithPeer(any(), any()) } answers {
+            val keyId = firstArg<String>()
+            val peer = secondArg<String>()
+            table.any { it.keyId == keyId && it.peerPublicKeyHex == peer }
+        }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keySharingPolicyDao() } returns dao
         mockkObject(XKeyDatabase.Companion)
