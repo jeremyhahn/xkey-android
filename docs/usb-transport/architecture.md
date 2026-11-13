@@ -23,7 +23,7 @@ method families, ahead of the `RequestHandler` that BLE and TCP share.
 | `XKeyGattService.onUsbAccessoryAttached` / `onUsbAccessoryDetached` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | Checks `nativeUsbEnabled`, builds the per-session `BidirectionalMessageRouter`, `PasswordVault`, `PasswordStoreMethods` and `SealStoreMethods`, and opens a server through `UsbAccessoryServerSlot.open`; `onUsbAccessoryDetached` (also called from `cleanupComponents` on service shutdown) calls `UsbAccessoryServerSlot.clear` |
 | `UsbAccessoryServerSlot` | `app/src/main/kotlin/com/automatethethings/xkey/usb/UsbAccessoryServerSlot.kt` | Holds the service's one `UsbAccessoryServer` and its router under a lock; publishes a new server before it connects, drops it when it reports a close (`onClosed`), and waits for the previous server's session to end (up to `TEARDOWN_WAIT_MS`, 5 s) before opening the next one |
 | `AccessoryDetachWatcher` / `BroadcastAccessoryDetachWatcher` | `app/src/main/kotlin/com/automatethethings/xkey/usb/AccessoryDetachWatcher.kt` | Receiver for `UsbManager.ACTION_USB_ACCESSORY_DETACHED`, registered at runtime on the application context with `RECEIVER_NOT_EXPORTED` while an accessory is open; passes the `EXTRA_ACCESSORY` it names to the server |
-| `UsbAccessoryServer` | `app/src/main/kotlin/com/automatethethings/xkey/usb/UsbAccessoryServer.kt` | Accessory lifecycle: starts the detach watch, `UsbManager.openAccessory`, file streams, a coroutine scope, `UsbAccessoryState`; sets a fresh `usb:<uuid>` session id on the `RequestHandler` for each opened connection; on a detach of its accessory closes the streams, cancels the session and calls `onClosed`, as it does when the session ends by itself or the open is refused; delegates the protocol to `StreamPairingSession` with `transportLabel = "USB"`; implements `MessageSender` for outbound `remote.*` |
+| `UsbAccessoryServer` | `app/src/main/kotlin/com/automatethethings/xkey/usb/UsbAccessoryServer.kt` | Accessory lifecycle: starts the detach watch, `UsbManager.openAccessory`, file streams, a coroutine scope, `UsbAccessoryState`; gives each opened accessory an immutable `usb:<uuid>` connection id, which it passes to `StreamPairingSession.serve` so every request on that connection carries it (no handler-wide session id); on a detach of its accessory closes the streams, cancels the session and calls `onClosed`, as it does when the session ends by itself or the open is refused; delegates the protocol to `StreamPairingSession` with `transportLabel = "USB"`; implements `MessageSender` for outbound `remote.*` |
 | `UsbAccessoryState` | same file | `Disconnected`, `Handshaking`, `Connected(accessoryInfo)`, `Error(message)` |
 | `StreamPairingSession` | `app/src/main/kotlin/com/automatethethings/xkey/transport/StreamPairingSession.kt` | Responder shared with TCP: identity exchange, Noise XX handshake, pairing gate, message loop, revocation |
 | `StreamMessageFraming` | `app/src/main/kotlin/com/automatethethings/xkey/transport/StreamMessageFraming.kt` | `readMessage` / `writeMessage`; `LENGTH_PREFIX_SIZE = 2`, `MAX_MESSAGE_SIZE = 65535` |
@@ -78,8 +78,8 @@ sequenceDiagram
     Slot->>USB: connect(context, accessory)
     USB->>OS: register USB_ACCESSORY_DETACHED receiver
     USB->>OS: openAccessory(accessory)
-    USB->>RH: setSessionId("usb:<uuid>")
-    USB->>SPS: serve(input, output, NoiseSession, ...)
+    USB->>USB: connectionId = "usb:<uuid>"
+    USB->>SPS: serve(input, output, NoiseSession, ..., connectionId)
     Desk->>SPS: [0x01 | publicKey]
     SPS-->>Desk: [0x01 | fingerprint] or [0x00]
     Desk->>SPS: Noise msg1
@@ -157,7 +157,7 @@ sequenceDiagram
     USB->>USB: close streams, cancel session scope (Disconnected)
     USB->>Slot: onClosed()
     Slot->>Slot: drop server, remember its session job
-    USB->>RH: session teardown: setConnectedDevicePublicKeyHex(null)
+    USB->>RH: session teardown: clearConnectedDevicePublicKeyHex(owner)
     Desk->>OS: AOA start again
     OS->>MA: USB_ACCESSORY_ATTACHED
     MA->>Svc: onUsbAccessoryAttached(accessory)
@@ -165,8 +165,8 @@ sequenceDiagram
     Slot->>Slot: join old session job (up to 5 s)
     Slot->>New: UsbAccessoryServer(...); connect(context, accessory)
     New->>OS: register detach receiver; openAccessory(accessory)
-    New->>RH: setSessionId("usb:<new uuid>")
-    Note over New,RH: Noise handshake; the new peer identity is set,<br/>and a PER_SESSION request prompts again
+    New->>New: connectionId = "usb:<new uuid>"
+    Note over New,RH: Noise handshake; the new session sets its peer identity<br/>(setConnectedDevicePublicKeyHex(key, owner)); requests carry the<br/>new connection id, so a PER_SESSION request prompts again
 ```
 
 ## Errors and refusals
