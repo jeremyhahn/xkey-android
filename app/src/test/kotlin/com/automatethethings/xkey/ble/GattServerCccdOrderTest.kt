@@ -60,8 +60,9 @@ import org.junit.runners.Parameterized
  *
  * The rule: the acknowledgement goes out the first moment, within the wait,
  * that the latest CCCD write of the frame's connection is an enable, and
- * never after that connection's disconnect. Events after `I` are spaced so
- * the waiting send sees each one.
+ * never after that connection's disconnect. Each event after `I` waits
+ * until the server has nothing left to run, so the waiting send sees each
+ * one before the next lands.
  */
 @Suppress("DEPRECATION")
 @RunWith(Parameterized::class)
@@ -78,17 +79,8 @@ class GattServerCccdOrderTest(private val row: String) {
         private const val NOTIFICATION_READY_TIMEOUT_MS = 600L
 
         // Well inside the wait, so what happens in it was not caused by the
-        // wait expiring: a row's releasing write or disconnect comes at most
-        // three settles after the frame, which leaves the wait more than
-        // 400 ms.
+        // wait expiring.
         private const val PROMPTLY_MS = 300L
-
-        // Long enough for the consumer to reach the wait, and for a send that
-        // was released to have gone out. The spacing is the row itself: the
-        // waiting send must see each CCCD write before the next one lands.
-        // Four settles, the most a row spends after the frame, stay inside
-        // the wait.
-        private const val SETTLE_MS = 50L
 
         private val ENABLE = byteArrayOf(0x01, 0x00)
         private val DISABLE = byteArrayOf(0x00, 0x00)
@@ -180,6 +172,7 @@ class GattServerCccdOrderTest(private val row: String) {
     private lateinit var controlPoint: BluetoothGattCharacteristic
     private lateinit var cccd: BluetoothGattDescriptor
     private lateinit var server: GattServer
+    private lateinit var signals: TrackingDispatcher
     private lateinit var desktop: NoiseInitiatorSession
     private val fragments = Collections.synchronizedList(mutableListOf<ByteArray>())
 
@@ -218,6 +211,7 @@ class GattServerCccdOrderTest(private val row: String) {
             pairedDeviceRepository = PairedDeviceRepository(InMemorySharedPreferences()),
             notificationReadyTimeoutMs = NOTIFICATION_READY_TIMEOUT_MS,
         )
+        signals = trackScope(server)
         setField("gattServer", gatt)
         setField("responseCharacteristic", response)
         desktop = NoiseInitiatorSession(randomKey())
@@ -259,13 +253,15 @@ class GattServerCccdOrderTest(private val row: String) {
                     messages().isNotEmpty()
                 }
             } else if (frameAt in 0..i) {
-                Thread.sleep(SETTLE_MS)
+                // The consumer has reached the wait, or the waiting send has
+                // seen this event, and a send it released has gone out.
+                signals.awaitIdle("$row: event ${i + 1} is handled")
             }
         }
 
         when {
             releasedBy >= 0 -> {
-                Thread.sleep(SETTLE_MS)
+                signals.awaitIdle("$row: the rest of the row is handled")
                 assertEquals("$row: one acknowledgement", 1, messages().size)
                 assertArrayEquals(IDENTITY_ACK_UNKNOWN, messages()[0])
             }
@@ -326,13 +322,8 @@ class GattServerCccdOrderTest(private val row: String) {
         return synchronized(fragments) { fragments.toList() }.mapNotNull { reassembler.addFragment(it) }
     }
 
-    private fun eventually(what: String, timeoutMs: Long = TIMEOUT_MS, check: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (!check()) {
-            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting until $what")
-            Thread.sleep(10)
-        }
-    }
+    private fun eventually(what: String, timeoutMs: Long = TIMEOUT_MS, check: () -> Boolean) =
+        signals.eventually(what, timeoutMs, check)
 
     private fun setField(name: String, value: Any?) {
         GattServer::class.java.getDeclaredField(name).apply { isAccessible = true }.set(server, value)
