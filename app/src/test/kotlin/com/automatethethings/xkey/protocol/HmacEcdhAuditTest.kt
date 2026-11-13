@@ -23,6 +23,7 @@ import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditLogEntity
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.audit.AuditOperationType
+import com.automatethethings.xkey.crypto.DecryptResult
 import com.automatethethings.xkey.crypto.HmacResult
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
@@ -257,14 +258,39 @@ class HmacEcdhAuditTest {
     }
 
     @Test
-    fun `rsa decrypt records the OAEP SHA-256 it runs`() = runTest {
-        val ct = Base64.getEncoder().encodeToString(ByteArray(256) { 5 })
-        coEvery { keystore.rsaDecrypt("hw-ecdh", any()) } returns ByteArray(16) { 6 }
-        val response = call(MethodNames.LOCAL_DECRYPT, """{"keyId":"hw-ecdh","ciphertext":"$ct"}""")
+    fun `rsa decrypt records the OAEP parameters the cipher ran with`() = runTest {
+        // A peer encrypts with SHA-256 OAEP and the default SHA-1 MGF1; the
+        // decrypt runs the real cipher step, not a canned answer.
+        val pair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.genKeyPair()
+        val plaintext = "rsa oaep payload".toByteArray()
+        val ct = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding").run {
+            init(
+                javax.crypto.Cipher.ENCRYPT_MODE, pair.public,
+                javax.crypto.spec.OAEPParameterSpec(
+                    "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA1,
+                    javax.crypto.spec.PSource.PSpecified.DEFAULT
+                )
+            )
+            doFinal(plaintext)
+        }
+        coEvery { keystore.rsaDecrypt("hw-ecdh", any()) } answers {
+            KeystoreManager.rsaOaepDecrypt(pair.private, secondArg()).plaintext
+        }
+        coEvery { keystore.rsaDecryptWithAlgorithm("hw-ecdh", any()) } answers {
+            KeystoreManager.rsaOaepDecrypt(pair.private, secondArg())
+        }
+        val response = call(
+            MethodNames.LOCAL_DECRYPT,
+            """{"keyId":"hw-ecdh","ciphertext":"${Base64.getEncoder().encodeToString(ct)}"}"""
+        )
 
         assertFalse(response.toString(), response.has("error"))
+        assertEquals(
+            Base64.getEncoder().encodeToString(plaintext),
+            response.getJSONObject("result").getString("plaintext")
+        )
         val entry = inserted.single { it.operationType == AuditOperationType.DECRYPTION_REQUEST }
-        assertEquals("RSA-OAEP-256", algorithmOf(entry))
+        assertEquals("SHA-256 OAEP with SHA-1 MGF1", "RSA-OAEP-SHA-256-MGF1-SHA-1", algorithmOf(entry))
     }
 
     @Test
@@ -340,6 +366,9 @@ class HmacEcdhAuditTest {
             pauseFirst(); ByteArray(64) { 8 }
         }
         coEvery { keystore.rsaDecrypt("hw-ecdh", any()) } coAnswers { pauseFirst(); ByteArray(16) { 6 } }
+        coEvery { keystore.rsaDecryptWithAlgorithm("hw-ecdh", any()) } coAnswers {
+            pauseFirst(); DecryptResult(ByteArray(16) { 6 }, "RSA-OAEP-SHA-256-MGF1-SHA-1")
+        }
         coEvery { keystore.symmetricEncrypt("hw-sym", any(), any()) } coAnswers { pauseFirst(); ByteArray(44) { 1 } }
         coEvery { keystore.symmetricDecrypt("hw-sym", any(), any()) } coAnswers { pauseFirst(); ByteArray(16) { 2 } }
         coEvery { keystore.computeHMACWithAlgorithm("hw-hmac", any()) } coAnswers {

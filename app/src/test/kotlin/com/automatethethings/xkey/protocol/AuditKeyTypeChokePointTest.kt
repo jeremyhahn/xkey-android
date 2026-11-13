@@ -49,8 +49,30 @@ class AuditKeyTypeChokePointTest {
         Regex("""^signAlgorithm$"""),
         Regex("""^hmac\.algorithm$"""),
         Regex("""^com\.automatethethings\.xkey\.crypto\.SoftwareKeyOps\.hmacAlgorithm\(|^SoftwareKeyOps\.hmacAlgorithm\("""),
-        Regex("""^(com\.automatethethings\.xkey\.crypto\.)?KeystoreManager\.EXECUTED_[A-Z_]+$""")
+        Regex("""^decrypted\.algorithm$"""),
+        Regex("""^(com\.automatethethings\.xkey\.crypto\.)?KeystoreManager\.EXECUTED_(AES_GCM|ECDH)$""")
     )
+
+    @Test
+    fun `rsa decrypt audits the OAEP parameters the cipher ran, never a constant`() {
+        val handler = handlerSource()
+        val keystore = sourceFile("src/main/kotlin/com/automatethethings/xkey/crypto/KeystoreManager.kt")
+        val offenders = buildList {
+            Regex("""keystoreManager\.rsaDecrypt\(""").findAll(handler).forEach {
+                add("Handler.kt line ${lineOf(handler, it.range.first)}: rsaDecrypt drops the algorithm that ran")
+            }
+            Regex("""EXECUTED_RSA\w*""").findAll(handler).forEach {
+                add("Handler.kt line ${lineOf(handler, it.range.first)}: ${it.value}")
+            }
+            Regex("""const val EXECUTED_RSA\w*""").findAll(keystore).forEach {
+                add("KeystoreManager.kt line ${lineOf(keystore, it.range.first)}: ${it.value}")
+            }
+            if (!Regex("""keystoreManager\.rsaDecryptWithAlgorithm\(""").containsMatchIn(handler)) {
+                add("Handler.kt never calls rsaDecryptWithAlgorithm")
+            }
+        }
+        if (offenders.isNotEmpty()) fail("RSA decrypt audits a fixed name:\n" + offenders.joinToString("\n"))
+    }
 
     @Test
     fun `key-use audit calls sit only in logKeyUse, keyType from auditKeyType`() {
@@ -191,10 +213,12 @@ class AuditKeyTypeChokePointTest {
     private fun lineOf(source: String, offset: Int): Int =
         source.substring(0, offset).count { it == '\n' } + 1
 
-    private fun handlerSource(): String {
-        val rel = "src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt"
+    private fun handlerSource(): String =
+        sourceFile("src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt")
+
+    private fun sourceFile(rel: String): String {
         val file = listOf(File(rel), File("app/$rel")).firstOrNull { it.isFile }
-            ?: error("Handler.kt not found from ${File(".").absolutePath}")
+            ?: error("$rel not found from ${File(".").absolutePath}")
         return file.readText()
     }
 }

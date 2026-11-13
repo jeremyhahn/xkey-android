@@ -73,6 +73,12 @@ class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
 class HmacResult(val mac: ByteArray, val algorithm: String)
 
 /**
+ * An RSA decryption's plaintext and the audit name of the OAEP
+ * parameterisation the cipher ran with.
+ */
+class DecryptResult(val plaintext: ByteArray, val algorithm: String)
+
+/**
  * Manages cryptographic keys in Android Keystore for FIDO2 operations.
  *
  * This class provides hardware-backed key storage with StrongBox support
@@ -1247,16 +1253,21 @@ class KeystoreManager(private val context: Context) {
      * @throws BiometricRequiredException if key requires biometric authentication.
      * @throws DecryptionException if decryption fails.
      */
-    suspend fun rsaDecrypt(keyId: String, ciphertext: ByteArray): ByteArray {
+    suspend fun rsaDecrypt(keyId: String, ciphertext: ByteArray): ByteArray =
+        rsaDecryptWithAlgorithm(keyId, ciphertext).plaintext
+
+    /**
+     * [rsaDecrypt], also naming the OAEP parameterisation that ran, for the
+     * audit entry.
+     */
+    suspend fun rsaDecryptWithAlgorithm(keyId: String, ciphertext: ByteArray): DecryptResult {
         val alias = buildGeneralAlias(keyId)
 
         val privateKey = keyStore.getKey(alias, null) as? PrivateKey
             ?: throw KeyNotFoundException(keyId)
 
         try {
-            val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, privateKey)
-            return cipher.doFinal(ciphertext)
+            return rsaOaepDecrypt(privateKey, ciphertext)
         } catch (e: android.security.keystore.UserNotAuthenticatedException) {
             throw BiometricRequiredException()
         } catch (e: Exception) {
@@ -2068,6 +2079,16 @@ class KeystoreManager(private val context: Context) {
         const val EXECUTED_RSA_OAEP = "RSA-OAEP-256"
         const val EXECUTED_AES_GCM = "AES-GCM"
         const val EXECUTED_ECDH = "ECDH"
+
+        /**
+         * Decrypts [ciphertext] with [privateKey] under [RSA_OAEP_TRANSFORMATION]:
+         * the decrypt step of [rsaDecryptWithAlgorithm].
+         */
+        fun rsaOaepDecrypt(privateKey: PrivateKey, ciphertext: ByteArray): DecryptResult {
+            val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, privateKey)
+            return DecryptResult(cipher.doFinal(ciphertext), EXECUTED_RSA_OAEP)
+        }
 
         /** PEM line length for Base64 encoding. */
         private const val PEM_LINE_LENGTH = 64
