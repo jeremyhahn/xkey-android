@@ -72,6 +72,10 @@ class NoiseSession {
         private const val NONCE_SIZE = 8  // ChaCha20-Poly1305 uses 8-byte counter
         private const val TAG_SIZE = 16
 
+        // Noise reserves the counter value 2^64-1 (-1 as a signed Long):
+        // no message is encrypted or decrypted with it (#236)
+        private const val RESERVED_NONCE = -1L
+
         // SharedPreferences keys
         private const val PREFS_NAME = "xkey_noise_keys"
         private const val KEY_STATIC_PRIVATE = "static_private_key"
@@ -159,6 +163,8 @@ class NoiseSession {
     // Session keys after handshake
     private var sendKey: ByteArray? = null
     private var recvKey: ByteArray? = null
+    // Transport counters: recvNonce advances only on a frame that decrypts,
+    // and neither is ever used at RESERVED_NONCE (#236)
     private var sendNonce: Long = 0
     private var recvNonce: Long = 0
 
@@ -758,6 +764,8 @@ class NoiseSession {
      * Encrypts plaintext using ChaCha20-Poly1305 and mixes ciphertext into hash.
      */
     private fun encryptAndHash(plaintext: ByteArray): ByteArray {
+        if (handshakeNonce == RESERVED_NONCE) throw NoiseException("Handshake nonce exhausted")
+
         // Noise uses 12-byte nonce: 4 bytes of zeros + 8-byte little-endian counter
         // Per Noise spec: "96-bit nonce is formed by encoding 32 bits of zeros
         // followed by little-endian encoding of n"
@@ -788,6 +796,8 @@ class NoiseSession {
      * Decrypts ciphertext using ChaCha20-Poly1305 and mixes it into hash.
      */
     private fun decryptAndHash(ciphertext: ByteArray): ByteArray {
+        if (handshakeNonce == RESERVED_NONCE) throw NoiseException("Handshake nonce exhausted")
+
         // Noise uses 12-byte nonce: 4 bytes of zeros + 8-byte little-endian counter
         // Per Noise spec: "96-bit nonce is formed by encoding 32 bits of zeros
         // followed by little-endian encoding of n"
@@ -836,6 +846,7 @@ class NoiseSession {
      */
     fun encrypt(plaintext: ByteArray): ByteArray {
         val key = sendKey ?: throw NoiseException("Session not established")
+        if (sendNonce == RESERVED_NONCE) throw NoiseException("Send nonce exhausted")
 
         // Noise spec: "96-bit nonce is formed by encoding 32 bits of zeros
         // followed by little-endian encoding of n"
@@ -858,13 +869,14 @@ class NoiseSession {
      */
     fun decrypt(ciphertext: ByteArray): ByteArray {
         val key = recvKey ?: throw NoiseException("Session not established")
+        if (recvNonce == RESERVED_NONCE) throw NoiseException("Receive nonce exhausted")
 
         // Noise spec: "96-bit nonce is formed by encoding 32 bits of zeros
         // followed by little-endian encoding of n"
         val nonce = ByteBuffer.allocate(12)
             .order(ByteOrder.LITTLE_ENDIAN)
             .putInt(0)             // bytes 0-3: 32 bits of zeros
-            .putLong(recvNonce++)  // bytes 4-11: counter in little-endian
+            .putLong(recvNonce)    // bytes 4-11: counter in little-endian
             .array()
 
         val cipher = Cipher.getInstance("ChaCha20-Poly1305")
@@ -872,7 +884,12 @@ class NoiseSession {
         val ivSpec = IvParameterSpec(nonce)
         cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
 
-        return cipher.doFinal(ciphertext)
+        // Noise DecryptWithAd: a frame that fails authentication throws
+        // here and leaves recvNonce unchanged, so the next genuine frame
+        // still decrypts (#236)
+        val plaintext = cipher.doFinal(ciphertext)
+        recvNonce++
+        return plaintext
     }
 
     /**
