@@ -28,6 +28,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.biometric.BiometricManager
 import androidx.core.content.ContextCompat
@@ -763,6 +764,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    companion object {
+        /** The clock the Recent Activity times are measured against; tests replace it. */
+        @VisibleForTesting
+        internal var recentActivityClock: Clock = Clock.systemDefaultZone()
+    }
+
     /**
      * Shows the newest audit entries in the Audit Log card's Recent Activity
      * section; tapping the card opens the full audit screen. The relative
@@ -772,7 +779,7 @@ class MainActivity : AppCompatActivity() {
         val dao = XKeyDatabase.getInstance(this).auditLogDao()
         lifecycleScope.launch {
             lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                RecentActivityRows.observe(dao, Clock.systemDefaultZone()).collectLatest { rows ->
+                RecentActivityRows.observe(dao, recentActivityClock).collectLatest { rows ->
                     renderRecentActivity(rows)
                 }
             }

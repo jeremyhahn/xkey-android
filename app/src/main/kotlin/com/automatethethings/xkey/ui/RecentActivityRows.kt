@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.onStart
 import java.time.Clock
 
@@ -62,7 +63,8 @@ object RecentActivityRows {
     fun build(
         entries: List<AuditLogEntity>,
         clock: Clock,
-        limit: Int = DEFAULT_LIMIT
+        limit: Int = DEFAULT_LIMIT,
+        keyLabels: Map<String, String> = emptyMap()
     ): List<RecentActivityRow> {
         if (entries.isEmpty() || limit <= 0) return listOf(RecentActivityRow.Empty)
         val nowMillis = clock.millis()
@@ -94,7 +96,8 @@ object RecentActivityRows {
         dao: AuditLogDao,
         clock: Clock,
         ticks: Flow<Unit> = ticker(REFRESH_MILLIS),
-        limit: Int = DEFAULT_LIMIT
+        limit: Int = DEFAULT_LIMIT,
+        keyLabels: Flow<Map<String, String>> = flowOf(emptyMap())
     ): Flow<List<RecentActivityRow>> =
         combine(dao.observeRecent(limit), ticks.onStart { emit(Unit) }) { entries, _ ->
             build(entries, clock, limit)

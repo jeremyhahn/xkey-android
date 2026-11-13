@@ -115,6 +115,11 @@ android {
         jacocoVersion = libs.versions.jacoco.get()
     }
 
+    // Robolectric tests (activities on the JVM) read the merged resources.
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     lint {
         abortOnError = true
         warningsAsErrors = false

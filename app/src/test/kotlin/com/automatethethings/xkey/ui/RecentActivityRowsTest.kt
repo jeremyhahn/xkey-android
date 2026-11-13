@@ -166,6 +166,48 @@ class RecentActivityRowsTest {
         )
     }
 
+    @Test
+    fun `a key label that is the raw key id shows the stored key's label or nothing`() {
+        // Signing, decryption and FIDO2 creation entries log the key id as the label.
+        val rows = RecentActivityRows.build(
+            listOf(
+                entry(keyId = "key-0123456789abcdef", keyLabel = "key-0123456789abcdef"),
+                entry(keyId = "key-fedcba9876543210", keyLabel = "key-fedcba9876543210", agoMillis = 1),
+                entry(keyId = null, keyLabel = "key-0123456789abcdef", agoMillis = 2),
+                entry(keyId = "key-0123456789abcdef", keyLabel = "example.com", agoMillis = 3)
+            ),
+            clock,
+            keyLabels = mapOf("key-0123456789abcdef" to "Work key")
+        ).map { it as RecentActivityRow.Entry }
+
+        assertEquals("Work key", rows[0].keyLabel)
+        assertNull(rows[1].keyLabel)
+        assertNull(rows[2].keyLabel)
+        assertEquals("Work key", rows[3].keyLabel)
+        rows.forEach { row ->
+            assertFalse(row.toString().contains("key-0123456789abcdef"))
+            assertFalse(row.toString().contains("key-fedcba9876543210"))
+        }
+    }
+
+    @Test
+    fun `the bound rows follow the stored keys' labels`() = runTest {
+        val dao = daoOf(flowOf(listOf(entry(keyId = "key-01", keyLabel = "key-01"))))
+        val labels = MutableStateFlow(mapOf("key-01" to "Work key"))
+        val bound = mutableListOf<List<RecentActivityRow>>()
+        val job = launch(UnconfinedTestDispatcher(testScheduler)) {
+            RecentActivityRows.observe(dao, clock, ticks = emptyFlow(), keyLabels = labels).toList(bound)
+        }
+
+        labels.value = mapOf("key-01" to "Renamed key")
+        job.cancel()
+
+        assertEquals(
+            listOf("Work key", "Renamed key"),
+            bound.map { (it.single() as RecentActivityRow.Entry).keyLabel }
+        )
+    }
+
     private fun daoOf(table: Flow<List<AuditLogEntity>>) = mockk<AuditLogDao> {
         every { observeRecent(RecentActivityRows.DEFAULT_LIMIT) } returns table
     }
