@@ -8,6 +8,7 @@ package com.automatethethings.xkey.remote
 
 import android.content.Context
 import android.util.Log
+import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
@@ -42,12 +43,16 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Requires an active paired connection: [messageSender] and [messageRouter]
  * come from the live transport (BLE / USB-AOA / TCP) for the connected desktop.
+ * [peerDeviceId] and [peerDeviceName] name that desktop in the audit entry
+ * each OATH and password sync records.
  */
 class RemoteSyncClient(
     context: Context,
     private val messageSender: MessageSender,
     private val messageRouter: BidirectionalMessageRouter,
-    private val requestTimeoutMs: Long = 30_000L
+    private val requestTimeoutMs: Long = 30_000L,
+    private val peerDeviceId: String? = null,
+    private val peerDeviceName: String? = null
 ) {
     private val engine = SyncEngine(context.applicationContext)
 
@@ -106,20 +111,63 @@ class RemoteSyncClient(
         return acceptedByPeer(resp) to merged.added
     }
 
-    /** Pushes the phone's OATH credentials and merges the laptop's. Returns (pushed, pulled). */
-    suspend fun syncOath(): Pair<Int, Int> {
-        val mine = engine.gatherOath()
-        val resp = sendRequest(MethodNames.REMOTE_SYNC_OATH, JSONObject().put("credentials", mine))
-        val merged = engine.mergeOath(resp.result?.optJSONArray("local") ?: JSONArray())
-        return acceptedByPeer(resp) to (merged.added + merged.updated)
-    }
+    /**
+     * Pushes the phone's OATH credentials and merges the laptop's. Returns
+     * (pushed, pulled). Records one outbound audit entry, failed or not.
+     */
+    suspend fun syncOath(): Pair<Int, Int> = audited(
+        AuditLogger::logOathSyncPerformed,
+        send = { sendRequest(MethodNames.REMOTE_SYNC_OATH, JSONObject().put("credentials", engine.gatherOath())) },
+        merge = { engine.mergeOath(it) }
+    )
 
-    /** Pushes the phone's passwords and merges the laptop's. Returns (pushed, pulled). */
-    suspend fun syncPasswords(): Pair<Int, Int> {
-        val mine = engine.gatherPasswords()
-        val resp = sendRequest(MethodNames.REMOTE_SYNC_PASSWORDS, JSONObject().put("passwords", mine))
-        val merged = engine.mergePasswords(resp.result?.optJSONArray("local") ?: JSONArray())
-        return acceptedByPeer(resp) to (merged.added + merged.updated)
+    /**
+     * Pushes the phone's passwords and merges the laptop's. Returns (pushed,
+     * pulled). Records one outbound audit entry, failed or not; the entry
+     * holds counts only.
+     */
+    suspend fun syncPasswords(): Pair<Int, Int> = audited(
+        AuditLogger::logPasswordSyncPerformed,
+        send = { sendRequest(MethodNames.REMOTE_SYNC_PASSWORDS, JSONObject().put("passwords", engine.gatherPasswords())) },
+        merge = { engine.mergePasswords(it) }
+    )
+
+    /**
+     * Runs one store's sync in two phases and records it through [record]:
+     * [send] gathers the phone's items and returns the desktop's reply, then
+     * [merge] merges the reply's `local` array. The pushed count is what the
+     * desktop acknowledged ([acceptedByPeer]) and is taken as soon as [send]
+     * returns, so a failed [merge] still records what the desktop took; it is
+     * 0 only when [send] itself fails. On success the entry carries the merge
+     * counts; on failure a failed entry and the rethrown error. The entry
+     * never copies an exception message: a peer's error text could quote a
+     * password, OATH secret, site or user name, so it holds a local
+     * description, the protocol error code or the exception class.
+     */
+    private suspend fun audited(
+        record: (String?, String?, Int, String, Int, Int, Int, Boolean, String?) -> Unit,
+        send: suspend () -> Response,
+        merge: suspend (JSONArray) -> SyncEngine.ItemCounts
+    ): Pair<Int, Int> {
+        var pushed = 0
+        val merged = try {
+            val resp = send()
+            pushed = acceptedByPeer(resp)
+            merge(resp.result?.optJSONArray("local") ?: JSONArray())
+        } catch (e: Exception) {
+            val why = when (e) {
+                is PasswordStoreLockedException -> "password store is locked"
+                is ProtocolException -> "remote sync error, code ${e.errorCode}"
+                else -> e.javaClass.simpleName
+            }
+            record(peerDeviceId, peerDeviceName, pushed, AuditLogger.SYNC_OUTBOUND, 0, 0, 0, false, why)
+            throw e
+        }
+        record(
+            peerDeviceId, peerDeviceName, pushed, AuditLogger.SYNC_OUTBOUND,
+            merged.added, merged.updated, merged.skipped, true, null
+        )
+        return pushed to (merged.added + merged.updated)
     }
 
     /**

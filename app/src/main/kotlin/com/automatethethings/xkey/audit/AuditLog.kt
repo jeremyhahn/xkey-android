@@ -145,6 +145,9 @@ enum class AuditOperationType {
     /** OATH credentials were synced with a paired device. */
     OATH_SYNC_PERFORMED,
 
+    /** Passwords were synced with a paired device. */
+    PASSWORD_SYNC_PERFORMED,
+
     // Co-signing operations
     /** A co-sign request was initiated. */
     COSIGN_INITIATED,
