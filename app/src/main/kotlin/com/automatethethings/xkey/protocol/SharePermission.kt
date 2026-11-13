@@ -31,6 +31,7 @@ class SharePermission(
             SharingPolicyType.ALL_PEERS -> true
             SharingPolicyType.SELECTED_PEERS -> when {
                 peerPublicKeyHex.isNullOrEmpty() -> false
+                pairedDevices?.isRevocationPending(peerPublicKeyHex) == true -> false
                 else -> grants.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
             }
         }
