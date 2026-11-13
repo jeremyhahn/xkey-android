@@ -825,4 +825,38 @@ class AuditLoggerDispatchTest {
         assertEquals("piv", entry.keyType)
         assertEquals("9d", details(entry).getString("slotId"))
     }
+
+    // -----------------------------------------------------------------------
+    // Password vault
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `logPasswordCreated records the entry id and display name only`() {
+        AuditLogger.logPasswordCreated("pwd-1", "Example Login")
+        val entry = only()
+        assertEquals(AuditOperationType.PASSWORD_CREATED, entry.operationType)
+        assertEquals("pwd-1", entry.keyId)
+        assertEquals("Example Login", entry.keyLabel)
+        assertEquals("password", entry.keyType)
+        assertTrue(entry.success)
+        assertNull(entry.deviceId)
+        assertNull(entry.errorMessage)
+        assertEquals(listOf("name"), details(entry).keys().asSequence().toList())
+        assertEquals("Example Login", details(entry).getString("name"))
+    }
+
+    @Test
+    fun `logPasswordDeleted records the entry id and display name only`() {
+        AuditLogger.logPasswordDeleted("pwd-1", "Example Login")
+        val entry = only()
+        assertEquals(AuditOperationType.PASSWORD_DELETED, entry.operationType)
+        assertEquals("pwd-1", entry.keyId)
+        assertEquals("Example Login", entry.keyLabel)
+        assertEquals("password", entry.keyType)
+        assertTrue(entry.success)
+        assertNull(entry.deviceId)
+        assertNull(entry.errorMessage)
+        assertEquals(listOf("name"), details(entry).keys().asSequence().toList())
+        assertEquals("Example Login", details(entry).getString("name"))
+    }
 }
