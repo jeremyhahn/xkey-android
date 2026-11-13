@@ -1708,21 +1708,42 @@ class RequestHandler(
 
         val hmacParams = LocalHMACParams.fromJson(params)
 
+        // Log the HMAC request; the MAC and the data stay out of it.
+        suspend fun logHmacRequest(keyType: String, algorithm: String?, durationMs: Long) {
+            val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+            AuditLogger.logHmacRequest(
+                keyId = hmacParams.keyId,
+                keyLabel = hmacParams.keyId,
+                keyType = keyType,
+                algorithm = algorithm,
+                deviceId = connectedDevicePublicKeyHex,
+                deviceName = deviceInfo?.deviceName,
+                success = true,
+                durationMs = durationMs
+            )
+        }
+
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
+            val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
                 sw.material, hmacParams.getDataBytes(), sw.algorithm
             )
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
+            logHmacRequest(sw.keyType, sw.algorithm, swDurationMs)
             return Response.success(
                 request.id,
                 LocalHMACResult(mac = Base64.getEncoder().encodeToString(swMac)).toJson()
             )
         }
 
+        val startTime = System.currentTimeMillis()
         val mac = keystoreManager.computeHMAC(hmacParams.keyId, hmacParams.getDataBytes())
+        val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
+        logHmacRequest("hmac", keyDao.getByKeyId(hmacParams.keyId)?.algorithm, durationMs)
 
         val result = LocalHMACResult(
             mac = Base64.getEncoder().encodeToString(mac)
@@ -1746,11 +1767,26 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val ecdhParams = LocalECDHParams.fromJson(params)
+        val startTime = System.currentTimeMillis()
         val sharedSecret = keystoreManager.performECDH(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
         )
+        val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(ecdhParams.keyId)
+
+        // Log the key agreement; the shared secret and peer key stay out of it.
+        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        AuditLogger.logKeyDerivationRequest(
+            keyId = ecdhParams.keyId,
+            keyLabel = ecdhParams.keyId,
+            keyType = "agreement",
+            algorithm = "ECDH",
+            deviceId = connectedDevicePublicKeyHex,
+            deviceName = deviceInfo?.deviceName,
+            success = true,
+            durationMs = durationMs
+        )
 
         val result = LocalECDHResult(
             sharedSecret = Base64.getEncoder().encodeToString(sharedSecret)

@@ -34,6 +34,7 @@ import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import java.security.KeyStore
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
@@ -109,6 +110,9 @@ class HmacEcdhAuditTest {
         holder<AuditLogDao>("daoRef").set(dao)
         holder<CoroutineScope>("scopeRef").set(CoroutineScope(Dispatchers.Unconfined))
 
+        // SoftwareKeyStore's default cipher opens AndroidKeyStore on construction.
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().get(any()) } returns null
         every { anyConstructed<SoftwareKeyStore>().get("sw-hmac") } returns SoftwareKey(
@@ -155,7 +159,7 @@ class HmacEcdhAuditTest {
     fun `hmac on a keystore key writes one HMAC_REQUEST naming the key`() = runTest {
         val response = call(MethodNames.LOCAL_HMAC, """{"keyId":"hw-hmac","data":"$data"}""")
 
-        assertFalse(response.has("error"))
+        assertFalse(response.toString(), response.has("error"))
         val entries = inserted.filter { it.operationType == AuditOperationType.HMAC_REQUEST }
         assertEquals(1, entries.size)
         assertEquals("hw-hmac", entries[0].keyId)
@@ -167,7 +171,7 @@ class HmacEcdhAuditTest {
     fun `hmac on a software key writes one HMAC_REQUEST naming the key`() = runTest {
         val response = call(MethodNames.LOCAL_HMAC, """{"keyId":"sw-hmac","data":"$data"}""")
 
-        assertFalse(response.has("error"))
+        assertFalse(response.toString(), response.has("error"))
         val entries = inserted.filter { it.operationType == AuditOperationType.HMAC_REQUEST }
         assertEquals(1, entries.size)
         assertEquals("sw-hmac", entries[0].keyId)
@@ -182,7 +186,7 @@ class HmacEcdhAuditTest {
             """{"keyId":"hw-ecdh","peerPublicKey":"$peerKey"}"""
         )
 
-        assertFalse(response.has("error"))
+        assertFalse(response.toString(), response.has("error"))
         val entries = inserted.filter {
             it.operationType == AuditOperationType.KEY_DERIVATION_REQUEST
         }
