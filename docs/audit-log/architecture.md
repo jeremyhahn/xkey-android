@@ -11,6 +11,16 @@ Comprehensive security event log with 35+ operation types covering key lifecycle
 cryptographic operations, FIDO2 events, connection events, certificate operations,
 file/media operations, contact management, and co-signing.
 
+Key-use requests write one entry per successful operation, naming the key,
+the requesting device and the duration; the output and the inputs (data,
+MAC, shared secret, peer key) are never logged:
+
+| Request | Operation type | Writer |
+|---------|----------------|--------|
+| `local.sign` | `SIGNING_REQUEST` | `AuditLogger.logSigningRequest` |
+| `local.hmac` (Keystore and software keys) | `HMAC_REQUEST` | `AuditLogger.logHmacRequest` |
+| `local.ecdh` | `KEY_DERIVATION_REQUEST` | `AuditLogger.logKeyDerivationRequest` |
+
 ## Index Strategy
 
 ### audit_logs
