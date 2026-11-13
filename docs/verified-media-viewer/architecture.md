@@ -62,3 +62,19 @@ file-operation screen's Verify uses the same function.
    key row without public key material never matches, even when its keyId
    equals the fingerprint: the fingerprint comes from the file being
    checked, so matching on it would let any file name a trusted signer.
+
+## Where the badge name comes from
+
+The name beside a badge comes from the key the signature was checked
+against, never from the file (`SignerVerification.Result.displayName`):
+
+| Case | Badge name | Claim line |
+|---|---|---|
+| Verified or failed, contact matched | contact name | embedded name, if it differs |
+| Verified or failed, local key matched | local key label | embedded name, if it differs |
+| Unknown, or failed with no match | embedded name, else the first 16 fingerprint characters | none |
+
+A file signed by contact "Bob" that embeds signerName "Alice" shows a green
+badge for "Bob" and, under it, "Claims: Alice"
+(`Result.claimedName`, string `verified_viewer_claims`). The
+file-operation screen's Verify shows `displayName` only.
