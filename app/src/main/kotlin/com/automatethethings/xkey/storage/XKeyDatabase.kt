@@ -598,7 +598,9 @@ abstract class XKeyDatabase : RoomDatabase() {
          * [denials] gives those records by key id, each "instance@POLICY"
          * ([PairedDeviceRepository.legacyKeyPolicyDenials]). A record for
          * another key row than the stored one is dropped; a PRIVATE denial
-         * also owes the key's grant clear.
+         * also owes the key's grant clear. If the records cannot be read,
+         * none is dropped silently: every key is denied to every peer until
+         * its next policy write, and the records stay where they were.
          */
         fun migration12To13(denials: () -> Map<String, String>): Migration = object : Migration(12, 13) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -612,7 +614,14 @@ abstract class XKeyDatabase : RoomDatabase() {
                     "INSERT INTO `key_policies` (`key_id`, `key_instance`, `sharing_policy`, `pending_policy`, `denial`, `clear_grants`) " +
                         "SELECT `key_id`, `id`, `sharing_policy`, NULL, NULL, 0 FROM `keys`"
                 )
-                for ((keyId, record) in denials()) {
+                val recorded = try {
+                    denials()
+                } catch (e: Exception) {
+                    Log.e("XKeyDatabase", "Reading recorded key policy denials failed; every key denied until its policy is set again", e)
+                    db.execSQL("UPDATE `key_policies` SET `denial` = 'PRIVATE'")
+                    return
+                }
+                for ((keyId, record) in recorded) {
                     val instance = record.substringBefore('@', "").toLongOrNull() ?: continue
                     val denial = record.substringAfter('@')
                     if (denial != "PRIVATE" && denial != "SELECTED_PEERS") continue
@@ -663,14 +672,7 @@ abstract class XKeyDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
                 .addMigrations(
                     migration12To13 {
-                        // Unreadable prefs must not leave the database unopenable:
-                        // the denials are then lost, and the stored policies hold.
-                        try {
-                            pairedDevices.value.legacyKeyPolicyDenials().also { moved.set(it.keys) }
-                        } catch (e: Exception) {
-                            Log.e("XKeyDatabase", "Reading recorded key policy denials failed; none moved", e)
-                            emptyMap()
-                        }
+                        pairedDevices.value.legacyKeyPolicyDenials().also { moved.set(it.keys) }
                     }
                 )
                 .addCallback(object : Callback() {
