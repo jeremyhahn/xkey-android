@@ -44,11 +44,14 @@ import javax.crypto.SecretKey
  * @param keystoreManager Manager for Android Keystore operations.
  * @param credentialDao DAO for the credential_metadata table.
  * @param keyDao DAO for the unified keys table.
+ * @param pendingDeletion Whether a key id's material delete is still owed
+ *   ([KeyPolicyStore.isDeletionPending]): such material is not discovered.
  */
 class KeyStoreSyncManager(
     private val keystoreManager: KeystoreManager,
     private val credentialDao: CredentialMetadataDao,
-    private val keyDao: KeyDao
+    private val keyDao: KeyDao,
+    private val pendingDeletion: suspend (String) -> Boolean = { false }
 ) {
     companion object {
         private const val TAG = "KeyStoreSyncManager"
@@ -160,6 +163,10 @@ class KeyStoreSyncManager(
             }
 
             if (!keyDao.exists(keyId)) {
+                // Its row was deleted and its material delete is still owed
+                // (a tombstone): the replay deletes it; never list it again
+                // with default metadata (#193 r9).
+                if (pendingDeletion(keyId)) continue
                 val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
                 if (entity != null) {
                     keyDao.insert(entity)

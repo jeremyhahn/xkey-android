@@ -28,8 +28,9 @@ import org.junit.Test
  * `room_master_table` with the one compiled into `XKeyDatabase_Impl`, and
  * throws "Room cannot verify the data integrity" when they differ
  * (room-runtime 2.8.5, RoomConnectionManager.kt:287). Since #193 the
- * database is version 13, which adds `key_policies`: its identity hash is
- * [V13_IDENTITY_HASH], the hash in the committed `app/schemas/.../13.json`
+ * database is version 13, which adds `key_policies`, and since round 9
+ * version 14, which adds `key_deletions`: its identity hash is
+ * [V14_IDENTITY_HASH], the hash in the committed `app/schemas/.../14.json`
  * this build exports; if the processor computed another from the same
  * entities (its identityHash inputs: room-compiler vo/Database.kt, Entity,
  * Property, Index, PrimaryKey), a v13 device would fail to open its
@@ -53,7 +54,7 @@ class XKeyDatabaseRoomUpgradeTest {
      * library-restricted.
      */
     @Test
-    fun `generated open delegate carries the identity hash v13 devices store`() {
+    fun `generated open delegate carries the identity hash v14 devices store`() {
         val impl = Class.forName("com.automatethethings.xkey.storage.XKeyDatabase_Impl")
             .getDeclaredConstructor()
             .newInstance()
@@ -63,10 +64,10 @@ class XKeyDatabaseRoomUpgradeTest {
 
         val delegateType = Class.forName("androidx.room.RoomOpenDelegate")
         assertTrue(delegateType.isInstance(delegate))
-        assertEquals(13, delegateType.getMethod("getVersion").invoke(delegate))
+        assertEquals(14, delegateType.getMethod("getVersion").invoke(delegate))
         assertEquals(
-            "the identity hash v13 databases hold in room_master_table",
-            V13_IDENTITY_HASH,
+            "the identity hash v14 databases hold in room_master_table",
+            V14_IDENTITY_HASH,
             delegateType.getMethod("getIdentityHash").invoke(delegate)
         )
     }
@@ -74,30 +75,30 @@ class XKeyDatabaseRoomUpgradeTest {
     /**
      * Turns red if Room 2.8.5's migration path search
      * (`RoomDatabase.MigrationContainer.findMigrationPath`) no longer finds
-     * the app's step-by-step chain from a stored version to 13. With no
+     * the app's step-by-step chain from a stored version to 14. With no
      * destructive fallback, a device on that version would then fail to open
      * its database instead of migrating.
      */
     @Test
-    fun `every stored version from 1 to 12 has a migration path to 13`() {
+    fun `every stored version from 1 to 13 has a migration path to 14`() {
         val container = RoomDatabase.MigrationContainer()
         container.addMigrations(APP_MIGRATIONS)
 
-        for (start in 1..12) {
-            val path = container.findMigrationPath(start, 13)
-            assertNotNull("no migration path from v$start to v13", path)
+        for (start in 1..13) {
+            val path = container.findMigrationPath(start, 14)
+            assertNotNull("no migration path from v$start to v14", path)
             assertEquals(
                 "path from v$start runs every step in order",
-                (start..12).toList(),
+                (start..13).toList(),
                 path!!.map { it.startVersion }
             )
-            assertEquals(13, path.last().endVersion)
+            assertEquals(14, path.last().endVersion)
         }
     }
 
     private companion object {
-        /** `identityHash` of the committed 13.json (#193). */
-        const val V13_IDENTITY_HASH = "5bc6a9db461776feb5f780a0098afbed"
+        /** `identityHash` of the committed 14.json (#193 r9: `key_deletions`). */
+        const val V14_IDENTITY_HASH = "0205ffe280f25a96b4ab622ad954f87e"
 
         /** The migrations `XKeyDatabase.buildDatabase` registers, in its order. */
         val APP_MIGRATIONS = listOf(
@@ -112,7 +113,8 @@ class XKeyDatabaseRoomUpgradeTest {
             XKeyDatabase.MIGRATION_9_10,
             XKeyDatabase.MIGRATION_10_11,
             XKeyDatabase.MIGRATION_11_12,
-            XKeyDatabase.MIGRATION_12_13
+            XKeyDatabase.MIGRATION_12_13,
+            XKeyDatabase.MIGRATION_13_14
         )
     }
 }

@@ -792,7 +792,8 @@ class KeySharingPeersTest {
                 attached = { attached },
                 // What requireContext() does once the sheet is detached.
                 redraw = { check(attached) { "redrew a detached sheet" }; redraws++ },
-                unsaved = { error("a refused grant was shown as an unsaved withdrawal") }
+                unsaved = { error("a refused grant was shown as an unsaved withdrawal") },
+                stale = { error("a refused grant was shown as stale") }
             )
         }
         assertFalse(tap.isCompleted)
@@ -835,7 +836,8 @@ class KeySharingPeersTest {
             repo.pairingGeneration(PEER_A),
             attached = { true },
             redraw = { redraws++ },
-            unsaved = { unsaved++ }
+            unsaved = { unsaved++ },
+            stale = {}
         )
         runCurrent()
 
@@ -847,8 +849,8 @@ class KeySharingPeersTest {
         // A withdrawal that stands, or a refused grant, is never shown unsaved.
         tables.failing.clear()
         advanceUntilIdle()
-        peers.setAllowedOrRedraw(PEER_B, true, null, attached = { true }, redraw = { redraws++ }, unsaved = { unsaved++ })
-        peers.setAllowedOrRedraw(PEER_A, false, null, attached = { true }, redraw = { redraws++ }, unsaved = { unsaved++ })
+        peers.setAllowedOrRedraw(PEER_B, true, null, attached = { true }, redraw = { redraws++ }, unsaved = { unsaved++ }, stale = {})
+        peers.setAllowedOrRedraw(PEER_A, false, null, attached = { true }, redraw = { redraws++ }, unsaved = { unsaved++ }, stale = {})
         assertEquals(1, unsaved)
     }
 
@@ -870,7 +872,7 @@ class KeySharingPeersTest {
         var unsaved = 0
         val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
         sheet.launch {
-            peers.setAllowedOrRedraw(PEER_A, false, repo.pairingGeneration(PEER_A), attached = { true }, redraw = {}, unsaved = { unsaved++ })
+            peers.setAllowedOrRedraw(PEER_A, false, repo.pairingGeneration(PEER_A), attached = { true }, redraw = {}, unsaved = { unsaved++ }, stale = {})
         }
         sheet.cancel()
 
@@ -883,13 +885,13 @@ class KeySharingPeersTest {
         val reopened = peersOf().peers().first().of(PEER_A)
         assertFalse(reopened.allowed)
         assertTrue("a sheet opened later does not show the withdrawal unsaved", reopened.unsaved)
-        assertEquals("the key list does not show the withdrawal unsaved", setOf(KEY), KeySharingPeers.unsavedWithdrawalKeys.first())
+        assertEquals("the key list does not show the withdrawal unsaved", setOf(KEY), KeySharingPeers.unsavedKeys.first())
         assertFalse(hasAccess(PEER_A))
 
         tables.failing.clear()
         advanceUntilIdle()
         assertFalse("a landed retry still shows unsaved", peersOf().peers().first().of(PEER_A).unsaved)
-        assertEquals(emptySet<String>(), KeySharingPeers.unsavedWithdrawalKeys.first())
+        assertEquals(emptySet<String>(), KeySharingPeers.unsavedKeys.first())
     }
 
     /**
@@ -1043,7 +1045,7 @@ class KeySharingPeersTest {
         val noUnsaved = sources.flatMap { file ->
             val text = file.readText()
             Regex("""(?<!fun KeySharingPeers)\.setAllowedOrRedraw\((.*?)\n\s*\)""", RegexOption.DOT_MATCHES_ALL).findAll(text)
-                .filter { "unsaved =" !in it.groupValues[1] }
+                .filter { "unsaved =" !in it.groupValues[1] || "stale =" !in it.groupValues[1] }
                 .map { "${file.name}:${text.substring(0, it.range.first).count { c -> c == '\n' } + 1}" }
                 .toList()
         }

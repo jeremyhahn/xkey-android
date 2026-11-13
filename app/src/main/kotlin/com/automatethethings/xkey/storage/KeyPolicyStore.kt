@@ -19,6 +19,7 @@ import androidx.room.withTransaction
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.automatethethings.xkey.storage.dao.KeyPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -61,8 +62,13 @@ class KeyPolicyStore(
     private val unrecorded: MutableMap<String, Held> = processObligations
 ) {
 
-    /** An obligation held in the process because its write failed: the key row [instance] it binds, and whether it owes the grant clear. */
-    data class Held(val instance: Long, val clearGrants: Boolean)
+    /**
+     * An obligation held in the process because its write failed: the key
+     * row [instance] it binds, whether it owes the grant clear, and the
+     * [narrowing] that left it (null for a withdrawal), which [recordHeld]
+     * writes again.
+     */
+    data class Held(val instance: Long, val clearGrants: Boolean, val narrowing: SharingPolicyType? = null)
 
     /** What an obligation leaves in a policy row: the [denial] enforced and whether the grant clear is owed. */
     data class Obligation(val denial: SharingPolicyType, val clearGrants: Boolean)
@@ -89,6 +95,9 @@ class KeyPolicyStore(
     fun observePolicy(keyId: String): Flow<KeyPolicyEntity?> = dao.observePolicyRow(keyId)
 
     fun observeGrants(keyId: String): Flow<List<KeySharingPolicy>> = dao.observeGrants(keyId)
+
+    /** [keyId]'s key row instance, observed: null while it has none. A sheet binds to one (#193 r9). */
+    fun observeInstance(keyId: String): Flow<Long?> = dao.observeKeyInstance(keyId)
 
     /**
      * Stores [policy] for [keyId]'s key row [instance], in one transaction:
@@ -123,8 +132,14 @@ class KeyPolicyStore(
 
     /** How a [withdraw] ended. Only [REMOVED] and [OWED] may be reported done: both are durable. */
     enum class Withdrawal {
-        /** The grant is deleted, or its key row is gone or replaced, its grants with it. */
+        /** The grant is deleted. */
         REMOVED,
+
+        /**
+         * Refused: the key row it was bound to is gone or replaced, so it
+         * touched nothing; a replacement's grants are its own (#193 r9).
+         */
+        STALE,
 
         /** The delete failed; the grant clear it owes is in the policy row, so the peer stays denied after a restart too. */
         OWED,
@@ -151,7 +166,7 @@ class KeyPolicyStore(
         } catch (e: CancellationException) {
             throw e
         } catch (e: KeyChangedException) {
-            Withdrawal.REMOVED
+            Withdrawal.STALE
         } catch (e: Exception) {
             if (owe(keyId, instance, null, e)) Withdrawal.OWED else Withdrawal.HELD
         }
@@ -168,6 +183,7 @@ class KeyPolicyStore(
      */
     private suspend fun owe(keyId: String, instance: Long, narrowing: SharingPolicyType?, failure: Exception?): Boolean {
         val heldClear = held(keyId, instance)?.clearGrants == true
+        val heldNarrowing = held(keyId, instance)?.narrowing
         var owed = obligation(narrowing, heldClear)
         try {
             val recorded = transactor.run {
@@ -178,7 +194,7 @@ class KeyPolicyStore(
                 )
                 true
             }
-            if (!recorded) unrecorded[keyId] = Held(instance, owed.clearGrants)
+            if (!recorded) unrecorded[keyId] = Held(instance, owed.clearGrants, narrowing ?: heldNarrowing)
             return recorded
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -187,7 +203,7 @@ class KeyPolicyStore(
             return true
         } catch (write: Exception) {
             // Fail closed: denied in this process, clear owed, until a later write lands.
-            unrecorded[keyId] = Held(instance, owed.clearGrants)
+            unrecorded[keyId] = Held(instance, owed.clearGrants, narrowing ?: heldNarrowing)
             failure?.addSuppressed(write)
             return false
         }
@@ -195,6 +211,23 @@ class KeyPolicyStore(
 
     /** The obligation held in the process for [keyId]'s key row [instance], if any. */
     private fun held(keyId: String, instance: Long): Held? = unrecorded[keyId]?.takeIf { it.instance == instance }
+
+    /** Whether an obligation for [keyId]'s key row [instance] is held in the process only: not durable, which a restart loses. */
+    fun isHeld(keyId: String, instance: Long): Boolean = held(keyId, instance) != null
+
+    /**
+     * Writes the obligation held in the process for [keyId]'s key row
+     * [instance] to its policy row again, through [owe] (#193 r9): a policy
+     * denial whose sheet is gone is retried like a withdrawal. Returns
+     * whether nothing is held any more: the obligation is durable, or its
+     * key row is gone or replaced. Never throws but for cancellation.
+     */
+    suspend fun recordHeld(keyId: String, instance: Long): Boolean {
+        val held = held(keyId, instance) ?: return true
+        if (!owe(keyId, instance, held.narrowing, null)) return false
+        unrecorded.remove(keyId, held)
+        return !isHeld(keyId, instance)
+    }
 
     /**
      * Writes [peerPublicKeyHex]'s grant for [keyId]. Refused while the key's
@@ -237,25 +270,85 @@ class KeyPolicyStore(
      */
     suspend fun deleteKey(keyId: String, instance: Long, material: suspend () -> Unit = {}): Boolean =
         withKeyMaterial(keyId) {
-            transactor.run {
+            val deleted = transactor.run {
                 if (dao.keyInstance(keyId) != instance) return@run false
+                // The tombstone, in the row delete's transaction: the material
+                // keeps a record until its delete succeeds (#193 r9).
+                dao.putDeletion(KeyDeletionEntity(keyId, instance, dao.keySource(keyId)))
                 dao.deleteGrants(keyId)
                 dao.deleteKey(keyId) > 0
-            }.also { if (it) material() }
+            }
+            if (deleted) deleteMaterialOf(keyId, instance, material)
+            deleted
         }
 
     /**
      * Deletes the material of [keyId] when it has no key row ([material]),
      * inside [withKeyMaterial]: only if no key row appeared meanwhile, so a
      * key generated under the id while this waited keeps its material.
-     * Returns whether [material] ran.
+     * A tombstone is written first, so a failed delete is replayed. Returns
+     * whether [material] was attempted.
      */
     suspend fun deleteMaterial(keyId: String, material: suspend () -> Unit): Boolean =
         withKeyMaterial(keyId) {
-            if (dao.keyInstance(keyId) != null) return@withKeyMaterial false
-            material()
-            true
+            val absent = transactor.run {
+                if (dao.keyInstance(keyId) != null) return@run false
+                dao.putDeletion(KeyDeletionEntity(keyId, NO_ROW, dao.deletion(keyId)?.source))
+                true
+            }
+            if (absent) deleteMaterialOf(keyId, NO_ROW, material)
+            absent
         }
+
+    /**
+     * Runs [material] for the tombstone of [keyId]'s key row [instance],
+     * dropping it once [material] returns. A [material] that throws keeps
+     * the tombstone: [replayDeletions] deletes the material later.
+     */
+    private suspend fun deleteMaterialOf(keyId: String, instance: Long, material: suspend () -> Unit) {
+        try {
+            material()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Kept for the replay: the tombstone is the material's record.
+            return
+        }
+        try {
+            dao.dropDeletion(keyId, instance)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The tombstone stays; replaying it deletes nothing that is there.
+        }
+    }
+
+    /** Whether [keyId]'s material is owed a delete: its rows are gone, its material may not be. */
+    suspend fun isDeletionPending(keyId: String): Boolean = dao.deletion(keyId) != null
+
+    /**
+     * Replays every deletion tombstone (#193 r9): at start-up and before a
+     * key sync, so material whose delete failed, or whose process died after
+     * the row commit, is deleted, never rediscovered with default metadata
+     * or orphaned. Each runs in [withKeyMaterial]; a key generated again
+     * under the id meanwhile keeps its material and the tombstone is
+     * dropped. [deleter] gets the tombstone's `source`. A tombstone whose
+     * [deleter] throws stays for the next replay. Returns how many are left.
+     */
+    suspend fun replayDeletions(deleter: suspend (KeyMaterialHeld, String?) -> Unit): Int {
+        var left = 0
+        for (tombstone in dao.deletions()) {
+            withKeyMaterial(tombstone.keyId) { held ->
+                if (dao.keyInstance(tombstone.keyId) == null) {
+                    deleteMaterialOf(tombstone.keyId, tombstone.keyInstance) { deleter(held, tombstone.source) }
+                } else {
+                    dao.dropDeletion(tombstone.keyId, tombstone.keyInstance)
+                }
+                if (dao.deletion(tombstone.keyId) != null) left++
+            }
+        }
+        return left
+    }
 
     /**
      * The one serialisation of [keyId]'s key material (#193 r8, ruling 554):
@@ -297,6 +390,9 @@ class KeyPolicyStore(
     }
 
     companion object {
+        /** A tombstone's instance when the material it deletes had no key row ([deleteMaterial]). */
+        const val NO_ROW = 0L
+
         /** Obligations whose write failed, by key id, for the life of the process. */
         private val processObligations: MutableMap<String, Held> = java.util.concurrent.ConcurrentHashMap()
 

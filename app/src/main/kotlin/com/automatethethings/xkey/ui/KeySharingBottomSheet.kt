@@ -48,6 +48,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -642,6 +643,31 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         lifecycleScope.launch {
             sharingPeers.peers().collect { peersFlow.emit(it) }
         }
+        // Bound to the key row it was opened for: replaced or deleted, the
+        // sheet closes instead of editing the replacement (#193 r9).
+        lifecycleScope.launch {
+            sharingPeers.stale.first { it }
+            showStaleAndDismiss()
+        }
+        // A policy denial held only in the process, from this sheet or one
+        // dismissed before it was stored, is shown until it is durable.
+        lifecycleScope.launch {
+            var shown: com.google.android.material.snackbar.Snackbar? = null
+            try {
+                sharingPeers.policyUnsaved.collect { unsaved ->
+                    shown?.dismiss()
+                    shown = if (!unsaved) null else view?.let {
+                        com.google.android.material.snackbar.Snackbar.make(
+                            it,
+                            getString(R.string.key_sharing_denial_not_saved),
+                            com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE
+                        ).also { bar -> bar.show() }
+                    }
+                }
+            } finally {
+                shown?.dismiss()
+            }
+        }
     }
 
     /**
@@ -704,8 +730,15 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 context?.let {
                     Toast.makeText(it, R.string.key_sharing_withdrawal_not_saved, Toast.LENGTH_LONG).show()
                 }
-            }
+            },
+            stale = { showStaleAndDismiss() }
         )
+    }
+
+    /** The key this sheet was opened for is gone or replaced (#193 r9): say so, and close. */
+    private fun showStaleAndDismiss() {
+        context?.let { Toast.makeText(it, R.string.key_sharing_key_replaced, Toast.LENGTH_LONG).show() }
+        if (isAdded) dismissAllowingStateLoss()
     }
 
     // -------------------------------------------------------------------------
@@ -759,9 +792,12 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
  * ruling 554): [KeySharingPeers.setAllowedOutcome], then, if the change was
  * refused, [redraw] of the list from the stored state; a withdrawal that is
  * not saved ([KeySharingPeers.Outcome.UNSAVED]) is redrawn too, the peer
- * still denied in the process, and [unsaved] tells the user so. Nothing is
- * drawn if the caller was cancelled or the sheet is no longer [attached] by
- * the time the queued edit completes. Returns whether the change stood.
+ * still denied in the process, and [unsaved] tells the user so. An edit
+ * refused because the sheet's key was deleted or replaced
+ * ([KeySharingPeers.Outcome.STALE]) is shown by [stale] alone, never as a
+ * change that stood (#193 r9). Nothing is drawn if the caller was cancelled
+ * or the sheet is no longer [attached] by the time the queued edit
+ * completes. Returns whether the change stood.
  */
 internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     peerPublicKeyHex: String,
@@ -769,7 +805,8 @@ internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     pairing: Long?,
     attached: () -> Boolean,
     redraw: () -> Unit,
-    unsaved: () -> Unit
+    unsaved: () -> Unit,
+    stale: () -> Unit
 ): Boolean {
     val outcome = setAllowedOutcome(peerPublicKeyHex, allowed, pairing)
     if (outcome == KeySharingPeers.Outcome.STOOD) return true
@@ -778,6 +815,10 @@ internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     // draw with (#193 r2).
     currentCoroutineContext().ensureActive()
     if (attached()) {
+        if (outcome == KeySharingPeers.Outcome.STALE) {
+            stale()
+            return false
+        }
         redraw()
         if (outcome == KeySharingPeers.Outcome.UNSAVED) unsaved()
     }

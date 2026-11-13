@@ -40,6 +40,7 @@ import com.automatethethings.xkey.piv.PivSlotEntity
 import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -100,9 +101,10 @@ import java.util.concurrent.atomic.AtomicReference
         OathCredentialEntity::class,
         PivSlotEntity::class,
         PasswordEntity::class,
-        KeyPolicyEntity::class
+        KeyPolicyEntity::class,
+        KeyDeletionEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = true
 )
 @TypeConverters(AuditOperationTypeConverter::class)
@@ -623,6 +625,21 @@ abstract class XKeyDatabase : RoomDatabase() {
         val MIGRATION_12_13: Migration = migration12To13 { emptyMap() }
 
         /**
+         * Migration from version 13 to 14: the deletion tombstones (#193). A
+         * key row deleted before its material is gone keeps one, so a failed
+         * or interrupted material delete is replayed instead of leaving
+         * material with no record.
+         */
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `key_deletions` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, " +
+                        "`source` TEXT, PRIMARY KEY(`key_id`))"
+                )
+            }
+        }
+
+        /**
          * Get the singleton database instance.
          *
          * Uses double-checked locking with AtomicReference for thread-safe
@@ -657,7 +674,8 @@ abstract class XKeyDatabase : RoomDatabase() {
                 .addMigrations(
                     migration12To13 {
                         pairedDevices.value.legacyKeyPolicyDenials().also { moved.set(it.keys) }
-                    }
+                    },
+                    MIGRATION_13_14
                 )
                 .addCallback(object : Callback() {
                     override fun onOpen(db: SupportSQLiteDatabase) {

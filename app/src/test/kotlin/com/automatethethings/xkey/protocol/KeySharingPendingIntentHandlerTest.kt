@@ -207,7 +207,7 @@ class KeySharingPendingIntentHandlerTest {
      */
     @Suppress("UNCHECKED_CAST")
     private fun restartProcess() {
-        val field = KeySharingPeers::class.java.getDeclaredField("pendingWithdrawals").apply { isAccessible = true }
+        val field = KeySharingPeers::class.java.getDeclaredField("pendingObligations").apply { isAccessible = true }
         (field.get(null) as MutableStateFlow<Map<Any, Any>>).value = emptyMap()
         repo = PairedDeviceRepository(prefs)
         handler = newHandler()

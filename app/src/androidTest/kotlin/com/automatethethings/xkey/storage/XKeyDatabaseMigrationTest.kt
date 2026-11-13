@@ -388,7 +388,8 @@ class XKeyDatabaseMigrationTest {
                 XKeyDatabase.MIGRATION_9_10,
                 XKeyDatabase.MIGRATION_10_11,
                 XKeyDatabase.MIGRATION_11_12,
-                migration12To13
+                migration12To13,
+                XKeyDatabase.MIGRATION_13_14
             )
             .build()
         try {

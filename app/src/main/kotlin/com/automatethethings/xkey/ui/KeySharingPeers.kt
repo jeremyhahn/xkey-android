@@ -92,25 +92,57 @@ class KeySharingPeers(
         val unsaved: Boolean = false
     )
 
-    /** The list, again on every change to this key's grant rows, its policy row, the paired devices or the pending revocations and withdrawals. */
+    /**
+     * The list, again on every change to this key's key row, grant rows,
+     * policy row, the paired devices or the pending revocations and
+     * obligations. Bound to the key row [instance] (#193 r9): once the key is
+     * deleted or replaced under its id, no peer is shown allowed or
+     * selectable, so a stale sheet never shows the replacement's grants.
+     */
     fun peers(): Flow<List<Peer>> =
-        combine(store.observeGrants(keyId), store.observePolicy(keyId), PairedDeviceRepository.storeChanges, pendingWithdrawals) { policies, row, _, withdrawn ->
+        combine(
+            store.observeInstance(keyId),
+            store.observeGrants(keyId),
+            store.observePolicy(keyId),
+            PairedDeviceRepository.storeChanges,
+            pendingObligations
+        ) { current, policies, row, _, owed ->
+            val live = current == instance
             val pending = repository.pendingRevocations()
-            val allowed = policies.filter { it.allowed }.map { it.peerPublicKeyHex }.toSet()
-            // Only this key row's withdrawals: one of a key replaced under the id denies nothing here (#193 r8).
-            val mine = withdrawn.filterKeys { it.keyId == keyId && it.instance == instance }.mapKeys { it.key.peer }
+            val allowed = if (live) policies.filter { it.allowed }.map { it.peerPublicKeyHex }.toSet() else emptySet()
+            val bound = row?.takeIf { it.keyInstance == instance }
+            // Only this key row's obligations: one of a key replaced under the id denies nothing here (#193 r8).
+            val mine = owed.filterKeys { it.keyId == keyId && it.instance == instance }
+            val withdrawals = mine.filterKeys { it.peer != null }.mapKeys { it.key.peer }
+            val policyHeld = mine.keys.any { it.peer == null }
             repository.getAllDevices().map { device ->
                 val revoking = device.publicKeyHex in pending
-                val withdrawal = mine[device.publicKeyHex]
+                val withdrawal = withdrawals[device.publicKeyHex]
                 Peer(
                     device,
-                    allowed = !revoking && device.publicKeyHex in allowed &&
-                        withdrawal == null && row?.enforced != StoredPolicy.PRIVATE,
-                    selectable = !revoking && !KeyPolicyStore.refusesGrants(row),
+                    allowed = !revoking && device.publicKeyHex in allowed && !policyHeld &&
+                        withdrawal == null && bound?.enforced != StoredPolicy.PRIVATE,
+                    selectable = live && !revoking && !policyHeld && !KeyPolicyStore.refusesGrants(bound),
                     unsaved = withdrawal?.saved == false
                 )
             }
         }
+
+    /**
+     * True once the key row this list was opened for is deleted or replaced
+     * under its id (#193 r9): the sheet dismisses itself, and every edit it
+     * makes meanwhile is refused as [Outcome.STALE].
+     */
+    val stale: Flow<Boolean> = store.observeInstance(keyId).map { it != instance }.distinctUntilChanged()
+
+    /**
+     * True while a policy denial for this key row is held only in the
+     * process, its writes failed, whichever sheet made it (#193 r9): shown
+     * until its retry stores it durably.
+     */
+    val policyUnsaved: Flow<Boolean> =
+        pendingObligations.map { owed -> owed.any { (k, v) -> k.keyId == keyId && k.instance == instance && k.peer == null && !v.saved } }
+            .distinctUntilChanged()
 
     /**
      * Grants or withdraws [peerPublicKeyHex]'s access to the key. Returns
@@ -143,28 +175,38 @@ class KeySharingPeers(
          * write: the peer is denied in this process and the delete is
          * retried, but a restart would lose that, so it is not saved (#193 r7).
          */
-        UNSAVED
+        UNSAVED,
+
+        /**
+         * Refused, nothing written: the key row this list was opened for is
+         * gone or was replaced under its id (#193 r9). The sheet is stale.
+         */
+        STALE
     }
 
     /** [setAllowed], telling a refused grant from a withdrawal that is not saved. */
     suspend fun setAllowedOutcome(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?): Outcome {
-        val entry = Withdrawn(keyId, instance, peerPublicKeyHex)
+        val entry = Owed(keyId, instance, peerPublicKeyHex)
         if (allowed) {
             if (pairing == null) return Outcome.REFUSED
             return accepted {
                 val granted = withContext(ioDispatcher) {
                     try {
-                        repository.writeGrant(peerPublicKeyHex, pairing) { store.grant(keyId, instance, peerPublicKeyHex) }
+                        if (repository.writeGrant(peerPublicKeyHex, pairing) { store.grant(keyId, instance, peerPublicKeyHex) }) {
+                            Outcome.STOOD
+                        } else {
+                            Outcome.REFUSED
+                        }
                     } catch (e: KeyPolicyStore.GrantRefusedException) {
-                        false
+                        Outcome.REFUSED
                     } catch (e: KeyPolicyStore.KeyChangedException) {
                         // The key this sheet was opened for is gone or replaced.
-                        false
+                        Outcome.STALE
                     }
                 }
                 // The later choice stands: an earlier failed withdrawal is not retried over it.
-                if (granted) settle { it == entry }
-                if (granted) Outcome.STOOD else Outcome.REFUSED
+                if (granted == Outcome.STOOD) settle { it == entry }
+                granted
             }
         }
         return accepted { withdraw(entry) }
@@ -196,40 +238,38 @@ class KeySharingPeers(
      * or its owed clear stored: one whose denial is held in the process
      * alone, which a restart loses, is [Outcome.UNSAVED] (#193 r6, r7, ruling 554).
      */
-    private suspend fun withdraw(entry: Withdrawn): Outcome {
-        val result = store.withdraw(keyId, instance, entry.peer)
-        if (result == KeyPolicyStore.Withdrawal.REMOVED) {
+    private suspend fun withdraw(entry: Owed): Outcome {
+        val peer = checkNotNull(entry.peer)
+        val result = store.withdraw(keyId, instance, peer)
+        if (result == KeyPolicyStore.Withdrawal.REMOVED || result == KeyPolicyStore.Withdrawal.STALE) {
             settle { it == entry }
-            return Outcome.STOOD
+            return if (result == KeyPolicyStore.Withdrawal.STALE) Outcome.STALE else Outcome.STOOD
         }
         Log.e(TAG, "Withdrawing key access failed ($result); every peer is denied until the key's next policy write")
         // Whether it is saved is app state, not the tapping sheet's: a sheet
         // opened later, or the key list, shows it unsaved (#193 r8).
-        var token = Pending(saved = result == KeyPolicyStore.Withdrawal.OWED)
-        pendingWithdrawals.update { it + (entry to token) }
-        editScope.launch {
-            retry({ pendingWithdrawals.value[entry] === token }) {
-                val again = store.withdraw(keyId, instance, entry.peer)
-                if (again != KeyPolicyStore.Withdrawal.REMOVED) {
-                    if (again == KeyPolicyStore.Withdrawal.OWED && !token.saved) {
-                        val saved = Pending(saved = true)
-                        val held = token
-                        pendingWithdrawals.update { if (it[entry] === held) it + (entry to saved) else it }
-                        token = saved
-                    }
-                    throw java.io.IOException("Withdrawing key access failed again")
-                }
-                pendingWithdrawals.update { if (it[entry] === token) it - entry else it }
+        owe(entry, saved = result == KeyPolicyStore.Withdrawal.OWED, editScope) {
+            when (store.withdraw(keyId, instance, peer)) {
+                KeyPolicyStore.Withdrawal.REMOVED, KeyPolicyStore.Withdrawal.STALE -> Attempt.DONE
+                KeyPolicyStore.Withdrawal.OWED -> Attempt.SAVED
+                KeyPolicyStore.Withdrawal.HELD -> Attempt.HELD
             }
         }
         return if (result == KeyPolicyStore.Withdrawal.OWED) Outcome.STOOD else Outcome.UNSAVED
     }
 
-    /** A pending withdrawal: [peer]'s grant of [keyId]'s key row [instance] (#193 r8). */
-    private data class Withdrawn(val keyId: String, val instance: Long, val peer: String)
+    /**
+     * A pending obligation (#193 r8, r9): [peer]'s withdrawn grant of
+     * [keyId]'s key row [instance], or, with a null [peer], a policy denial
+     * of that key row held only in the process.
+     */
+    private data class Owed(val keyId: String, val instance: Long, val peer: String?)
 
-    /** A pending withdrawal's retry token (by identity), and whether its denial is durable. */
+    /** A pending obligation's retry token (by identity), and whether its denial is durable. */
     private class Pending(val saved: Boolean)
+
+    /** One retry's result: its write landed, only its denial is durable, or it is still held in the process. */
+    private enum class Attempt { DONE, SAVED, HELD }
 
     companion object {
         private const val TAG = "KeySharingPeers"
@@ -249,12 +289,39 @@ class KeySharingPeers(
         private val acceptedEdits = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
         /**
-         * Withdrawals (key, key row instance, peer) whose write failed and
-         * is being retried, each with its retry's token, which says whether
-         * its denial is durable. Held for the life of the process, as the
-         * retries are.
+         * The one pending-obligation tracker (#193 r9, ruling 554):
+         * withdrawals (key, key row instance, peer) whose write failed, and
+         * policy denials (peer null) held only in the process, each retried
+         * with its retry's token, which says whether its denial is durable.
+         * Held for the life of the process, as the retries are.
          */
-        private val pendingWithdrawals = MutableStateFlow<Map<Withdrawn, Pending>>(emptyMap())
+        private val pendingObligations = MutableStateFlow<Map<Owed, Pending>>(emptyMap())
+
+        /**
+         * Records [entry] as pending ([saved]: its denial is durable) and
+         * retries [attempt] in [scope] until it is [Attempt.DONE] or a later
+         * edit settles it. The one place an obligation is tracked.
+         */
+        private fun owe(entry: Owed, saved: Boolean, scope: CoroutineScope, attempt: suspend () -> Attempt) {
+            var token = Pending(saved)
+            pendingObligations.update { it + (entry to token) }
+            scope.launch {
+                retry({ pendingObligations.value[entry] === token }) {
+                    val again = attempt()
+                    if (again == Attempt.DONE) {
+                        pendingObligations.update { if (it[entry] === token) it - entry else it }
+                        return@retry
+                    }
+                    if (again == Attempt.SAVED && !token.saved) {
+                        val durable = Pending(saved = true)
+                        val held = token
+                        pendingObligations.update { if (it[entry] === held) it + (entry to durable) else it }
+                        token = durable
+                    }
+                    throw java.io.IOException("A sharing obligation failed to store again")
+                }
+            }
+        }
 
         /**
          * True while a withdrawal of [peerPublicKeyHex]'s access to [keyId]'s
@@ -264,16 +331,16 @@ class KeySharingPeers(
          * replaced since, denies nothing (#193 r8).
          */
         fun isWithdrawalPending(keyId: String, instance: Long, peerPublicKeyHex: String?): Boolean =
-            peerPublicKeyHex != null && Withdrawn(keyId, instance, peerPublicKeyHex) in pendingWithdrawals.value
+            peerPublicKeyHex != null && Owed(keyId, instance, peerPublicKeyHex) in pendingObligations.value
 
         /**
-         * The key ids with a withdrawal held only in the process
-         * ([Outcome.UNSAVED]), which a restart would lose: the key list
-         * shows them, whether or not the sheet that made one is still open
-         * (#193 r8).
+         * The key ids with a withdrawal or a policy denial held only in the
+         * process ([Outcome.UNSAVED]), which a restart would lose: the key
+         * list shows them, whether or not the sheet that made one is still
+         * open (#193 r8, r9).
          */
-        val unsavedWithdrawalKeys: Flow<Set<String>> =
-            pendingWithdrawals.map { pending -> pending.filterValues { !it.saved }.keys.map { it.keyId }.toSet() }
+        val unsavedKeys: Flow<Set<String>> =
+            pendingObligations.map { pending -> pending.filterValues { !it.saved }.keys.map { it.keyId }.toSet() }
                 .distinctUntilChanged()
 
         /**
@@ -285,10 +352,14 @@ class KeySharingPeers(
          * key in the same transaction, under that order, so a grant the user
          * made earlier lands first and is cleared, never after the clear.
          *
-         * Nothing is retried: a failure is logged and returned as false, and
-         * the caller reports it. A failed narrowing leaves its denial in the
-         * key's policy row, enforced until a later change lands; an edit of
-         * a key row deleted or replaced since [instance] was read is refused.
+         * The policy is not retried: a failure is logged and returned as
+         * false, and the caller reports it. A failed narrowing leaves its
+         * denial in the key's policy row, enforced until a later change
+         * lands; if that write fails too, the denial is held in the process
+         * and tracked here ([pendingObligations], [unsavedKeys]), retried
+         * until durable whether or not the sheet is still open (#193 r9). An
+         * edit of a key row deleted or replaced since [instance] was read is
+         * refused.
          *
          * @return true once the change is stored, false if it was refused.
          */
@@ -303,11 +374,18 @@ class KeySharingPeers(
                 try {
                     // The grant rows are gone: no per-peer withdrawal of the key is outstanding.
                     if (store.setPolicy(keyId, instance, StoredPolicy.valueOf(policy.name))) settle { it.keyId == keyId }
+                    // The policy row dropped any denial: no held one is owed.
+                    settle { it.keyId == keyId && it.instance == instance && it.peer == null }
                     true
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Storing the key's sharing policy failed; it was refused", e)
+                    if (store.isHeld(keyId, instance)) {
+                        owe(Owed(keyId, instance, null), saved = false, editScope) {
+                            if (store.recordHeld(keyId, instance)) Attempt.DONE else Attempt.HELD
+                        }
+                    }
                     false
                 }
             }
@@ -372,8 +450,8 @@ class KeySharingPeers(
         }
 
         /** Drops the pending withdrawals [which] selects: a later edit landed over them. */
-        private fun settle(which: (Withdrawn) -> Boolean) {
-            pendingWithdrawals.update { pending -> pending.filterKeys { !which(it) } }
+        private fun settle(which: (Owed) -> Boolean) {
+            pendingObligations.update { pending -> pending.filterKeys { !which(it) } }
         }
     }
 }

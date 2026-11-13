@@ -123,7 +123,9 @@ class KeyManagementActivity : AppCompatActivity() {
     private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this)) }
     private val credentialDao by lazy { XKeyDatabase.getInstance(this).credentialMetadataDao() }
     private val keystoreManager by lazy { KeystoreManager(this) }
-    private val syncManager by lazy { KeyStoreSyncManager(keystoreManager, credentialDao, keyDao) }
+    private val syncManager by lazy {
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, pendingDeletion = { keyPolicyStore.isDeletionPending(it) })
+    }
 
     // -------------------------------------------------------------------------
     // UI Components
@@ -703,6 +705,8 @@ class KeyManagementActivity : AppCompatActivity() {
     private fun observeKeys() {
         lifecycleScope.launch {
             try {
+                // Owed material deletes first: a tombstoned key is never rediscovered (#193 r9).
+                com.automatethethings.xkey.storage.replayKeyDeletions(this@KeyManagementActivity, keyPolicyStore)
                 syncManager.syncAll()
             } catch (e: Exception) {
                 android.util.Log.w("KeyManagementActivity", "Key sync failed", e)
@@ -729,11 +733,11 @@ class KeyManagementActivity : AppCompatActivity() {
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 var shown: com.google.android.material.snackbar.Snackbar? = null
                 try {
-                    KeySharingPeers.unsavedWithdrawalKeys.collectLatest { keys ->
+                    KeySharingPeers.unsavedKeys.collectLatest { keys ->
                         shown?.dismiss()
                         shown = if (keys.isEmpty()) null else com.google.android.material.snackbar.Snackbar.make(
                             findViewById(android.R.id.content),
-                            getString(R.string.key_sharing_withdrawal_not_saved),
+                            getString(R.string.key_sharing_denial_not_saved),
                             com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE,
                         ).also { it.show() }
                     }

@@ -19,6 +19,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -77,4 +78,24 @@ interface KeyPolicyDao {
 
     @Query("DELETE FROM keys WHERE key_id = :keyId")
     suspend fun deleteKey(keyId: String): Int
+
+    /** [keyInstance], observed: null while [keyId] has no key row. */
+    @Query("SELECT id FROM keys WHERE key_id = :keyId")
+    fun observeKeyInstance(keyId: String): Flow<Long?>
+
+    @Query("SELECT source FROM keys WHERE key_id = :keyId")
+    suspend fun keySource(keyId: String): String?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putDeletion(row: KeyDeletionEntity)
+
+    @Query("SELECT * FROM key_deletions WHERE key_id = :keyId")
+    suspend fun deletion(keyId: String): KeyDeletionEntity?
+
+    @Query("SELECT * FROM key_deletions")
+    suspend fun deletions(): List<KeyDeletionEntity>
+
+    /** Drops [keyId]'s tombstone only if it is still the one for [instance]. */
+    @Query("DELETE FROM key_deletions WHERE key_id = :keyId AND key_instance = :instance")
+    suspend fun dropDeletion(keyId: String, instance: Long): Int
 }
