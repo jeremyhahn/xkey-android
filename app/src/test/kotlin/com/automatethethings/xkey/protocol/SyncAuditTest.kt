@@ -157,7 +157,7 @@ class SyncAuditTest {
     fun `syncOATH on a served connection names that connection's peer`() = runTest {
         mockkObject(AuditLogger)
 
-        withContext(RequestHandler.servedConnection(binding, OTHER_PEER)) {
+        withContext(RequestHandler.servedConnection(binding, OTHER_PEER, "served")) {
             call(MethodNames.LOCAL_SYNC_OATH, "credentials")
         }
 
@@ -330,12 +330,12 @@ class SyncAuditTest {
         }
 
         val a = async(Dispatchers.Default) {
-            withContext(RequestHandler.servedConnection(binding, DESK_PEER)) {
+            withContext(RequestHandler.servedConnection(binding, DESK_PEER, "served")) {
                 call(MethodNames.LOCAL_SYNC_OATH, "credentials")
             }
         }
         aInMerge.await()
-        withContext(RequestHandler.servedConnection(binding, null)) {
+        withContext(RequestHandler.servedConnection(binding, null, "served")) {
             assertOathResponseUnchanged(call(MethodNames.LOCAL_SYNC_OATH, "credentials"))
             assertNull(call(MethodNames.LOCAL_SYNC_PASSWORDS, "passwords").error)
         }
