@@ -1589,6 +1589,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val signParams = LocalSignParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         if (!keystoreManager.generalKeyExists(signParams.keyId)) {
             throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
@@ -1636,14 +1638,12 @@ class RequestHandler(
         keyDao.recordUsage(signParams.keyId)
 
         // Log signing request
-        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         // signWithAlgorithm ran signAlgorithm (it refuses any other name).
         logKeyUse(
             KeyUse.SIGN, signParams.keyId,
             executedAlgorithm = signAlgorithm,
             durationMs = durationMs,
-            deviceId = connectedDevicePublicKeyHex,
-            deviceName = deviceInfo?.deviceName
+            caller = caller
         )
 
         val result = LocalSignResult(
@@ -1672,6 +1672,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val decryptParams = LocalDecryptParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
         val startTime = System.currentTimeMillis()
         val plaintext = keystoreManager.rsaDecrypt(decryptParams.keyId, decryptParams.getCiphertextBytes())
         val durationMs = System.currentTimeMillis() - startTime
@@ -1679,13 +1681,11 @@ class RequestHandler(
         keyDao.recordUsage(decryptParams.keyId)
 
         // Log decryption request
-        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         logKeyUse(
             KeyUse.DECRYPT, decryptParams.keyId,
             executedAlgorithm = KeystoreManager.EXECUTED_RSA_OAEP,
             durationMs = durationMs,
-            deviceId = connectedDevicePublicKeyHex,
-            deviceName = deviceInfo?.deviceName
+            caller = caller
         )
 
         val result = LocalDecryptResult(
@@ -1710,6 +1710,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val symParams = LocalSymmetricParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
@@ -1732,13 +1734,11 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log encryption request
-        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         logKeyUse(
             KeyUse.ENCRYPT, symParams.keyId,
             executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
             durationMs = durationMs,
-            deviceId = connectedDevicePublicKeyHex,
-            deviceName = deviceInfo?.deviceName
+            caller = caller
         )
 
         val result = LocalSymmetricResult(
@@ -1764,6 +1764,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val symParams = LocalSymmetricParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
@@ -1786,13 +1788,11 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log decryption request
-        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         logKeyUse(
             KeyUse.DECRYPT, symParams.keyId,
             executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
             durationMs = durationMs,
-            deviceId = connectedDevicePublicKeyHex,
-            deviceName = deviceInfo?.deviceName
+            caller = caller
         )
 
         val result = LocalSymmetricResult(
@@ -1840,37 +1840,43 @@ class RequestHandler(
      * not validated and need not be what ran. AuditKeyTypeChokePointTest
      * fails on a key-use AuditLogger call outside this function, or a call of
      * it with any other algorithm source.
+     *
+     * [caller] is the requesting desktop its handler captured with
+     * [auditCaller] on entry, before any prompt or crypto call can suspend
+     * it: the entry's deviceId and deviceName come from it alone, never from
+     * the handler-wide connected device, which a second desktop's connection
+     * overwrites while this request runs. The scan test fails on a call that
+     * passes its own device or captures the caller late.
      */
     private suspend fun logKeyUse(
         use: KeyUse,
         keyId: String,
         executedAlgorithm: String,
         durationMs: Long,
-        deviceId: String?,
-        deviceName: String?,
+        caller: AuditCaller,
         softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
     ) {
         val keyType = auditKeyType(keyId, softwareKey)
         when (use) {
             KeyUse.SIGN -> AuditLogger.logSigningRequest(
                 keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
             )
             KeyUse.DECRYPT -> AuditLogger.logDecryptionRequest(
                 keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
             )
             KeyUse.ENCRYPT -> AuditLogger.logEncryptionRequest(
                 keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
             )
             KeyUse.HMAC -> AuditLogger.logHmacRequest(
                 keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
             )
             KeyUse.KEY_DERIVATION -> AuditLogger.logKeyDerivationRequest(
                 keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = deviceId, deviceName = deviceName, success = true, durationMs = durationMs
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
             )
         }
     }
@@ -1906,8 +1912,7 @@ class RequestHandler(
                 KeyUse.HMAC, hmacParams.keyId,
                 executedAlgorithm = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmacAlgorithm(sw.algorithm),
                 durationMs = swDurationMs,
-                deviceId = caller.peerPublicKeyHex,
-                deviceName = caller.deviceName,
+                caller = caller,
                 softwareKey = sw
             )
             return Response.success(
@@ -1925,8 +1930,7 @@ class RequestHandler(
             KeyUse.HMAC, hmacParams.keyId,
             executedAlgorithm = hmac.algorithm,
             durationMs = durationMs,
-            deviceId = caller.peerPublicKeyHex,
-            deviceName = caller.deviceName
+            caller = caller
         )
 
         val result = LocalHMACResult(
@@ -1965,8 +1969,7 @@ class RequestHandler(
             KeyUse.KEY_DERIVATION, ecdhParams.keyId,
             executedAlgorithm = KeystoreManager.EXECUTED_ECDH,
             durationMs = durationMs,
-            deviceId = caller.peerPublicKeyHex,
-            deviceName = caller.deviceName
+            caller = caller
         )
 
         val result = LocalECDHResult(

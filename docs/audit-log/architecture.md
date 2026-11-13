@@ -48,6 +48,15 @@ HMAC's own MAC (`computeHMACWithAlgorithm`), the software HMAC's mapping
 `RequestHandler.logKeyUse` writes every key-use entry;
 `AuditKeyTypeChokePointTest` fails on a writer outside it.
 
+The entry's `deviceId` and `deviceName` name the desktop that sent the
+request: each key-use handler captures it once with
+`RequestHandler.auditCaller` (the peer of the session the request arrived
+on) before any prompt or crypto call, and `logKeyUse` takes the device from
+that capture alone. The handler-wide connected device is never used: a
+second desktop confirming over another transport overwrites it while the
+first request is still running. The same scan test fails on a call that
+passes its own device or captures the caller late.
+
 ## Index Strategy
 
 ### audit_logs
