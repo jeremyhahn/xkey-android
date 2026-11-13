@@ -48,19 +48,16 @@ object SignerVerification {
             31 * (31 * keyId.hashCode() + label.hashCode()) + (publicKeyDer?.contentHashCode() ?: 0)
     }
 
-    data class Result(val status: Status, val displayName: String)
-
     /**
-     * Decides the status of one signer.
-     *
-     * @param entry the signature entry read from the file.
-     * @param storedContentHash the content hash recorded with the signatures;
-     *        this is what each signer signed.
-     * @param contentHashMatches whether [storedContentHash] matches the file;
-     *        when it does not, the signer fails before any lookup.
-     * @param contact the contact whose fingerprint equals the entry's, if any.
-     * @param localKeys the local key store.
+     * @property displayName the name beside the badge: the matched contact's
+     *           name or local key's label when a key matched, otherwise the
+     *           name the file embeds or a fingerprint prefix.
+     * @property claimedName the name the file embeds, set only when a key
+     *           matched and the embedded name differs from [displayName]. It
+     *           is a claim, never the badge name.
      */
+    data class Result(val status: Status, val displayName: String, val claimedName: String? = null)
+
     fun verify(
         entry: SignatureEntry,
         storedContentHash: String,
@@ -68,34 +65,45 @@ object SignerVerification {
         contact: Contact?,
         localKeys: List<LocalKey>
     ): Result {
+        // With no matching key the embedded name is all there is, and the
+        // status (unknown, or failed) already says it is not vouched for.
         val fallbackName = entry.signerName ?: (entry.keyFingerprint.take(16) + "...")
+        // Only a key we hold the public key of can match. A row without
+        // one says nothing about the signature: matching it by keyId
+        // would trust a fingerprint the file itself supplies.
+        val matchedKey = if (contact == null) {
+            localKeys.firstOrNull { key ->
+                val pubDer = key.publicKeyDer
+                pubDer != null && MediaHasher.hashBytes(pubDer) == entry.keyFingerprint
+            }
+        } else {
+            null
+        }
+        val matchedName = contact?.name ?: matchedKey?.label
+        val matchedPublicKey = contact?.publicKeyDer ?: matchedKey?.publicKeyDer
+
+        // A matched signer is named by the contact or key the signature is
+        // checked against; the name the file embeds is only a claim.
+        fun result(status: Status): Result {
+            if (matchedName == null) return Result(status, fallbackName)
+            val claimed = entry.signerName?.takeIf { it != matchedName }
+            return Result(status, matchedName, claimed)
+        }
+
         // The content hash comes first: on a mismatch the signatures cover
         // other content, so every signer fails, known or not. Returning
         // UNKNOWN here would let a copied block read as merely unrecognised.
         if (!contentHashMatches) {
             Log.w(TAG, "Content hash mismatch: stored=$storedContentHash")
-            return Result(Status.FAILED, entry.signerName ?: contact?.name ?: fallbackName)
+            return result(Status.FAILED)
         }
+        if (matchedPublicKey == null) return result(Status.UNKNOWN)
         return try {
-            if (contact != null) {
-                val ok = checkSignature(contact.publicKeyDer, entry, storedContentHash, contentHashMatches)
-                return Result(if (ok) Status.VERIFIED else Status.FAILED, entry.signerName ?: contact.name)
-            }
-
-            // Only a key we hold the public key of can match. A row without
-            // one says nothing about the signature: matching it by keyId
-            // would trust a fingerprint the file itself supplies.
-            val matchedKey = localKeys.firstOrNull { key ->
-                val pubDer = key.publicKeyDer
-                pubDer != null && MediaHasher.hashBytes(pubDer) == entry.keyFingerprint
-            } ?: return Result(Status.UNKNOWN, fallbackName)
-            val pubDer = matchedKey.publicKeyDer ?: return Result(Status.UNKNOWN, fallbackName)
-
-            val ok = checkSignature(pubDer, entry, storedContentHash, contentHashMatches)
-            Result(if (ok) Status.VERIFIED else Status.FAILED, entry.signerName ?: matchedKey.label)
+            val ok = checkSignature(matchedPublicKey, entry, storedContentHash, contentHashMatches)
+            result(if (ok) Status.VERIFIED else Status.FAILED)
         } catch (e: Exception) {
             Log.e(TAG, "Error verifying entry for ${entry.keyFingerprint}", e)
-            Result(Status.FAILED, fallbackName)
+            result(Status.FAILED)
         }
     }
 
