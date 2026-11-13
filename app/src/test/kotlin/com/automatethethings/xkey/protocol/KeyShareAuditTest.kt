@@ -687,7 +687,11 @@ class KeyShareAuditTest {
                 .containsMatchIn(attestation)
         )
 
-        val allowed = Regex("(?:auditPeerName\\(\\w+\\)|peerName|peer\\?\\.deviceName|Build\\.MODEL|deviceName)\\)*")
+        val allowed = Regex("(?:auditPeerName\\(\\w+\\)|peerName|peer\\?\\.deviceName|caller\\.deviceName|Build\\.MODEL|deviceName)\\)*")
+        assertTrue(
+            "a key-use caller is named through auditPeerName",
+            "AuditCaller(peer, auditPeerName(peer))" in source
+        )
         val auditing = members.filter { "AuditLogger.log" in it }
         assertTrue("audit paths found: ${auditing.size}", auditing.size >= 8)
         for (fn in auditing) {
@@ -779,7 +783,12 @@ class KeyShareAuditTest {
         val functions = members.filter { nameOf(it) != null }
         val auditing = functions.filter { "AuditLogger.log" in it || nameOf(it) == "requireConfirmedPeer" }
         assertTrue("audit paths found: ${auditing.size}", auditing.size >= 8)
-        val allowedPeers = setOf("callerPeer", "peerPublicKeyHex", "peer", "null")
+        val allowedPeers = setOf("callerPeer", "peerPublicKeyHex", "peer", "caller.peerPublicKeyHex", "null")
+        val auditCaller = functions.single { nameOf(it) == "auditCaller" }
+        assertTrue(
+            "auditCaller takes the session's own peer",
+            "val peer = attestingPeerPublicKeyHex()" in auditCaller
+        )
         for (fn in auditing) {
             val name = nameOf(fn)
             assertFalse("$name reads the handler-wide peer", "connectedDevicePublicKeyHex" in fn)
@@ -816,6 +825,7 @@ class KeyShareAuditTest {
             setOf(
                 "setSessionId",
                 "setConnectedDevicePublicKeyHex",
+                "clearConnectedDevicePublicKeyHex",
                 "getConnectedDevicePublicKeyHex",
                 "attestingPeerPublicKeyHex",
                 "currentPeerPublicKeyHex"
@@ -856,7 +866,7 @@ class KeyShareAuditTest {
 
     /** Handles [request] as one arriving on a served connection whose peer is [peer]. */
     private suspend fun served(request: ByteArray, peer: String? = PEER): ByteArray =
-        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer)) {
+        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer, "test:connection")) {
             handler.handleRawRequest(request)
         }
 

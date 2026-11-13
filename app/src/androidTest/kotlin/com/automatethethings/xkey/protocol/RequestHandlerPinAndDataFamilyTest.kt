@@ -689,7 +689,7 @@ class RequestHandlerPinAndDataFamilyTest {
      */
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
-        val caller = RequestHandler.servedConnection(SessionBindingProvider { null }, peerKeyHex)
+        val caller = RequestHandler.servedConnection(SessionBindingProvider { null }, peerKeyHex, "test:connection")
         return runBlocking(caller) { handler.handleRequest(request) }
     }
 

@@ -694,7 +694,7 @@ class RequestHandlerFido2AndCosignTest {
      */
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
-        val caller = RequestHandler.servedConnection(SessionBindingProvider { null }, servedPeer)
+        val caller = RequestHandler.servedConnection(SessionBindingProvider { null }, servedPeer, "test:connection")
         return runBlocking(caller) { handler.handleRequest(request) }
     }
 

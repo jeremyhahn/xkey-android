@@ -16,9 +16,11 @@
 package com.automatethethings.xkey.protocol
 
 import android.content.Context
+import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.auth.SessionAuthManager
+import com.automatethethings.xkey.crypto.KeystoreCapabilities
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
@@ -322,7 +324,7 @@ class RequestHandlerErrorPathTest {
         for (method in methods) {
             assertEquals(
                 "$method must reject a call with no params",
-                ErrorCodes.INVALID_PARAMS,
+                expectedCode(method, ErrorCodes.INVALID_PARAMS),
                 call(method).errorCode()
             )
         }
@@ -344,7 +346,7 @@ class RequestHandlerErrorPathTest {
         for (entry in cases) {
             assertEquals(
                 "${entry.key} must report the missing field as INVALID_PARAMS",
-                ErrorCodes.INVALID_PARAMS,
+                expectedCode(entry.key, ErrorCodes.INVALID_PARAMS),
                 call(entry.key, entry.value).errorCode()
             )
         }
@@ -516,7 +518,7 @@ class RequestHandlerErrorPathTest {
         for (entry in cases) {
             assertEquals(
                 "${entry.key} on an unknown key must be KEY_NOT_FOUND",
-                ErrorCodes.KEY_NOT_FOUND,
+                expectedCode(entry.key, ErrorCodes.KEY_NOT_FOUND),
                 call(entry.key, entry.value).errorCode()
             )
         }
@@ -735,7 +737,7 @@ class RequestHandlerErrorPathTest {
         for (entry in gatedMethods) {
             assertEquals(
                 "${entry.key} must be gated on device attestation",
-                ErrorCodes.DEVICE_ATTESTATION_REQUIRED,
+                expectedCode(entry.key, ErrorCodes.DEVICE_ATTESTATION_REQUIRED),
                 call(entry.key, entry.value).errorCode()
             )
         }
@@ -1339,7 +1341,7 @@ class RequestHandlerErrorPathTest {
      * handler-wide peer never stands in for it.
      */
     private fun servedCaller(): CoroutineContext =
-        RequestHandler.servedConnection(SessionBindingProvider { null }, servedPeer)
+        RequestHandler.servedConnection(SessionBindingProvider { null }, servedPeer, "test:connection")
 
     /**
      * Returns the result of a successful response.
@@ -1352,6 +1354,18 @@ class RequestHandlerErrorPathTest {
 
     private fun Response.errorCode(): Int =
         error?.code ?: throw AssertionError("expected an error response, got: " + toJsonString())
+
+    /**
+     * The code [method] answers on this device when API 31+ would answer
+     * [code]: below API 31 local.ecdh refuses with ECDH_FAILED before it
+     * reads its parameters, the key or the attestation gate.
+     */
+    private fun expectedCode(method: String, code: Int): Int =
+        if (method == "local.ecdh" && !KeystoreCapabilities.supportsEcdh(Build.VERSION.SDK_INT)) {
+            ErrorCodes.ECDH_FAILED
+        } else {
+            code
+        }
 
     private fun Response.errorMessage(): String =
         error?.message ?: throw AssertionError("expected an error response, got: " + toJsonString())

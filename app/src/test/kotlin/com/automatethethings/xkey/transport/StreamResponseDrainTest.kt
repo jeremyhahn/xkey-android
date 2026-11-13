@@ -264,6 +264,7 @@ class StreamResponseDrainTest {
                     input = input,
                     output = accepted.getOutputStream(),
                     noiseSession = NoiseSession().also { it.loadStaticKey(context) },
+                    connectionId = "test:${java.util.UUID.randomUUID()}",
                     isActive = { !accepted.isClosed },
                     onConnected = { connected.complete(Unit) },
                 )

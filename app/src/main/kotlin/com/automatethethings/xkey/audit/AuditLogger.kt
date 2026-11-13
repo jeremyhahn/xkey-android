@@ -17,11 +17,17 @@ package com.automatethethings.xkey.audit
 import android.content.Context
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicReference
 
@@ -356,6 +362,93 @@ object AuditLogger {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.SIGNING_REQUEST,
+                keyId = keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = details,
+                durationMs = durationMs
+            )
+        )
+    }
+
+    /**
+     * Log an HMAC request. The MAC and the authenticated data are never logged.
+     *
+     * @param keyId The unique key identifier.
+     * @param keyLabel Human-readable key label.
+     * @param keyType The key type.
+     * @param algorithm The HMAC algorithm used.
+     * @param deviceId Remote device ID if applicable.
+     * @param deviceName Remote device name if applicable.
+     * @param success Whether the operation succeeded.
+     * @param errorMessage Error message if failed.
+     * @param durationMs Operation duration in milliseconds.
+     */
+    fun logHmacRequest(
+        keyId: String,
+        keyLabel: String,
+        keyType: String,
+        algorithm: String? = null,
+        deviceId: String? = null,
+        deviceName: String? = null,
+        success: Boolean = true,
+        errorMessage: String? = null,
+        durationMs: Long? = null
+    ) {
+        val details = algorithm?.let {
+            JSONObject().apply { put("algorithm", it) }.toString()
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.HMAC_REQUEST,
+                keyId = keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = details,
+                durationMs = durationMs
+            )
+        )
+    }
+
+    /**
+     * Log a key derivation (ECDH key agreement) request. The shared secret and
+     * the peer public key are never logged.
+     *
+     * @param keyId The unique key identifier.
+     * @param keyLabel Human-readable key label.
+     * @param keyType The key type.
+     * @param algorithm The key agreement algorithm used.
+     * @param deviceId Remote device ID if applicable.
+     * @param deviceName Remote device name if applicable.
+     * @param success Whether the operation succeeded.
+     * @param errorMessage Error message if failed.
+     * @param durationMs Operation duration in milliseconds.
+     */
+    fun logKeyDerivationRequest(
+        keyId: String,
+        keyLabel: String,
+        keyType: String,
+        algorithm: String? = null,
+        deviceId: String? = null,
+        deviceName: String? = null,
+        success: Boolean = true,
+        errorMessage: String? = null,
+        durationMs: Long? = null
+    ) {
+        val details = algorithm?.let {
+            JSONObject().apply { put("algorithm", it) }.toString()
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.KEY_DERIVATION_REQUEST,
                 keyId = keyId,
                 keyLabel = keyLabel,
                 keyType = keyType,
@@ -789,7 +882,50 @@ object AuditLogger {
     // -------------------------------------------------------------------------
 
     /**
+     * The audited change a settings write made: the values recorded in its
+     * `SETTINGS_CHANGED` entry.
+     */
+    data class SettingChange(val oldValue: String?, val newValue: String)
+
+    /**
+     * The one path for an audited settings write: runs [dataStore]'s edit
+     * with [transform] and then records the [SettingChange] it returns, both
+     * under [NonCancellable]. DataStore can commit a write while a caller
+     * cancelled mid-edit (an activity closed or recreated) stops `edit` from
+     * returning; running the pair as one non-cancellable unit means a
+     * committed write is always audited. A `null` change records nothing
+     * (the stored value did not change).
+     *
+     * Every `logSettingsChanged` call in the app goes through here
+     * (`AuditedSettingsChokePointTest`).
+     *
+     * @param dataStore The settings DataStore to write.
+     * @param settingName The setting name recorded in the audit entry.
+     * @param transform Applies the write and returns the change to audit, or null.
+     */
+    suspend fun editAuditedSetting(
+        dataStore: DataStore<Preferences>,
+        settingName: String,
+        transform: (MutablePreferences) -> SettingChange?
+    ) {
+        withContext(NonCancellable) {
+            var change: SettingChange? = null
+            dataStore.edit { preferences -> change = transform(preferences) }
+            change?.let {
+                logSettingsChanged(
+                    settingName = settingName,
+                    oldValue = it.oldValue,
+                    newValue = it.newValue
+                )
+            }
+        }
+    }
+
+    /**
      * Log a settings change.
+     *
+     * Settings repositories do not call this directly: they write through
+     * [editAuditedSetting], which keeps the write and the entry together.
      *
      * @param settingName The name of the setting that was changed.
      * @param oldValue The previous value (as a string).

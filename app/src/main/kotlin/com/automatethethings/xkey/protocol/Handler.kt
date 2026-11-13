@@ -30,6 +30,7 @@ import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.DecryptionException
 import com.automatethethings.xkey.crypto.DeviceAttestationKey
 import com.automatethethings.xkey.crypto.ECDHException
+import com.automatethethings.xkey.crypto.KeystoreCapabilities
 import com.automatethethings.xkey.crypto.EncryptionException
 import com.automatethethings.xkey.crypto.HMACException
 import com.automatethethings.xkey.crypto.KeyGenerationException
@@ -69,6 +70,7 @@ import java.lang.ref.WeakReference
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import java.util.Base64
+import java.util.UUID
 import com.automatethethings.xkey.pin.PinManager
 import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinType
@@ -116,11 +118,10 @@ interface MessageSender {
  * // Update settings when they change
  * handler.updateSettings(newSettings)
  *
- * // Set session ID when BLE connection is established
- * handler.setSessionId(deviceAddress)
- *
- * // Handle requests
- * val response = handler.handleRequest(request)
+ * // Handle a request in the context of the connection it arrived on
+ * val response = withContext(RequestHandler.servedConnection(binding, peerKeyHex, connectionId)) {
+ *     handler.handleRequest(request)
+ * }
  * ```
  *
  * @param context Application context for device capability checks.
@@ -145,6 +146,9 @@ class RequestHandler(
 ) {
     companion object {
         private const val TAG = "RequestHandler"
+
+        /** keyType of a key-use audit entry whose key has no stored metadata. */
+        const val AUDIT_KEY_TYPE_UNKNOWN = "unknown"
 
         // Protocol version
         private const val PROTOCOL_VERSION = "1.0.0"
@@ -185,9 +189,15 @@ class RequestHandler(
          *
          * @param binding the binding of the connection the request arrived on
          * @param peerPublicKeyHex that connection's authenticated peer static key
+         * @param connectionId the id the transport assigned the connection when
+         *   it connected, unique to it and never reused; PER_SESSION approval
+         *   is checked and recorded against it
          */
-        fun servedConnection(binding: SessionBindingProvider, peerPublicKeyHex: String?): CoroutineContext =
-            CallerSession(binding, peerPublicKeyHex, served = true)
+        fun servedConnection(
+            binding: SessionBindingProvider,
+            peerPublicKeyHex: String?,
+            connectionId: String,
+        ): CoroutineContext = CallerSession(binding, peerPublicKeyHex, served = true, connectionId = connectionId)
     }
 
     // Unified key storage DAO
@@ -223,14 +233,6 @@ class RequestHandler(
     private var currentSettings: BiometricSettingsData = BiometricSettingsData()
 
     /**
-     * Current BLE session identifier (typically device address).
-     *
-     * Updated via [setSessionId] when BLE connection state changes.
-     */
-    @Volatile
-    private var currentSessionId: String? = null
-
-    /**
      * Public key hex of the currently connected device.
      *
      * Updated via [setConnectedDevicePublicKeyHex] after pairing confirmation.
@@ -238,6 +240,16 @@ class RequestHandler(
      */
     @Volatile
     private var connectedDevicePublicKeyHex: String? = null
+
+    /**
+     * The session that set [connectedDevicePublicKeyHex], or null when its
+     * setter named none. Only that session's teardown clears the identity, so
+     * a session ending late (a USB detach followed by a reattach, #134) does
+     * not clear the identity of the one that replaced it. Guarded by
+     * [connectedPeerLock].
+     */
+    private var connectedPeerOwner: Any? = null
+    private val connectedPeerLock = Any()
 
     /**
      * This device's persistent attested identity (go-xkms#129).
@@ -360,19 +372,22 @@ class RequestHandler(
     }
 
     /**
-     * Sets the current BLE session identifier.
+     * Ends the PER_SESSION approval and the connected peer's identity when
+     * called with null.
      *
-     * This should be called when a BLE connection is established (with the device
-     * address) or disconnected (with null). The session ID is used by
-     * [SessionAuthManager] for PER_SESSION authentication mode.
+     * A non-null id changes nothing: approval keys on the connection id each
+     * request carries ([servedConnection]), never on handler-wide state that
+     * another transport's connect would overwrite (#134).
      *
-     * @param sessionId The BLE device address, or null if disconnected.
+     * @param sessionId null when the session ended.
      */
     fun setSessionId(sessionId: String?) {
-        currentSessionId = sessionId
         if (sessionId == null) {
             sessionAuthManager?.clearSession()
-            connectedDevicePublicKeyHex = null
+            synchronized(connectedPeerLock) {
+                connectedDevicePublicKeyHex = null
+                connectedPeerOwner = null
+            }
         }
         Log.d(TAG, "Session ID updated: $sessionId")
     }
@@ -384,10 +399,31 @@ class RequestHandler(
      * PAIRED_DEVICES_SKIP attestation policy can check if the device is known.
      *
      * @param publicKeyHex The hex-encoded Noise static public key, or null on disconnect.
+     * @param owner The session setting it; pass the same object to
+     *   [clearConnectedDevicePublicKeyHex] when that session ends.
      */
-    fun setConnectedDevicePublicKeyHex(publicKeyHex: String?) {
-        connectedDevicePublicKeyHex = publicKeyHex
+    fun setConnectedDevicePublicKeyHex(publicKeyHex: String?, owner: Any? = null) {
+        synchronized(connectedPeerLock) {
+            connectedDevicePublicKeyHex = publicKeyHex
+            connectedPeerOwner = if (publicKeyHex == null) null else owner
+        }
         Log.d(TAG, "Connected device public key updated: ${publicKeyHex?.take(16) ?: "null"}")
+    }
+
+    /**
+     * Clears the connected device's public key if [owner] set it and no
+     * session has set one since.
+     *
+     * @return whether the key was cleared.
+     */
+    fun clearConnectedDevicePublicKeyHex(owner: Any): Boolean {
+        synchronized(connectedPeerLock) {
+            if (connectedPeerOwner !== owner) return false
+            connectedDevicePublicKeyHex = null
+            connectedPeerOwner = null
+        }
+        Log.d(TAG, "Connected device public key cleared by its session")
+        return true
     }
 
     /**
@@ -454,6 +490,7 @@ class RequestHandler(
         val binding: SessionBindingProvider,
         val peerPublicKeyHex: String?,
         val served: Boolean,
+        val connectionId: String? = null,
     ) : AbstractCoroutineContextElement(Key) {
         companion object Key : CoroutineContext.Key<CallerSession>
     }
@@ -492,17 +529,38 @@ class RequestHandler(
         return Response.error(id, code, message).toJson()
     }
 
+    suspend fun handleRequest(request: Request): Response {
+        val context = currentCoroutineContext()
+        val approval = context[ApprovalSession]
+            ?: ApprovalSession(context[CallerSession]?.connectionId ?: unsharedApprovalId())
+        return withContext(approval) {
+            dispatch(request).copy(generation = request.generation)
+        }
+    }
+
     /**
-     * Handles a parsed request.
+     * The connection id a request arrived with, captured once when it
+     * reaches [handleRequest] and carried in the coroutine context for the
+     * rest of the request (#134).
      *
-     * Every answer carries the request's `generation` (go-xkms#128), copied
-     * here rather than by each handler, so no method can drop it.
-     *
-     * @param request The parsed request
-     * @return Response to the request
+     * One handler serves BLE, TCP and USB, so the id comes from the request's
+     * own [CallerSession], which its transport set to the id it assigned the
+     * connection at connect; nothing handler-wide that another transport's
+     * connect could overwrite. Biometric approval is checked and recorded
+     * against this id alone, so an approval given on one connection never
+     * authenticates a request on another. A request with no connection id
+     * gets an id of its own, so it shares no approval.
      */
-    suspend fun handleRequest(request: Request): Response =
-        dispatch(request).copy(generation = request.generation)
+    private class ApprovalSession(val sessionId: String) : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<ApprovalSession>
+    }
+
+    /** An approval id no other request carries. */
+    private fun unsharedApprovalId(): String = "request:${UUID.randomUUID()}"
+
+    /** The [ApprovalSession] id of the request being handled. */
+    private suspend fun requestSessionId(): String =
+        currentCoroutineContext()[ApprovalSession]?.sessionId ?: unsharedApprovalId()
 
     private suspend fun dispatch(request: Request): Response {
         Log.d(TAG, "Handling request: id=${request.id}, method=${request.method}")
@@ -743,7 +801,7 @@ class RequestHandler(
 
         // Determine if biometric authentication is required
         val biometricRequired = if (signParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -833,7 +891,7 @@ class RequestHandler(
                     )
 
                     // Record successful authentication for session tracking
-                    sessionAuthManager?.recordAuthentication(currentSessionId)
+                    sessionAuthManager?.recordAuthentication(requestSessionId())
 
                     val signatureBase64 = Base64.getEncoder().encodeToString(signature)
                     val result = SignResult(
@@ -852,7 +910,13 @@ class RequestHandler(
                     // biometric auth. They require a GENERIC biometric prompt to authenticate the user,
                     // and then signWithoutBiometric() will work within the auth duration window.
                     // Only PER_OPERATION keys (authDuration = 0) support CryptoObject-bound signing.
-                    try {
+                    //
+                    // A PER_SESSION session that has not been approved yet always prompts: the
+                    // Keystore window may still be open from an earlier session (a USB detach and
+                    // reattach, #134), and that approval does not carry over.
+                    val sessionUnapproved = currentSettings.authMode == BiometricAuthMode.PER_SESSION &&
+                        sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) != false
+                    if (!sessionUnapproved) try {
                         Log.d(TAG, "Trying signWithoutBiometric (optimistic for TIME_WINDOW/PER_SESSION)")
                         val signature = keystoreManager.signWithoutBiometric(
                             credentialId = signParams.credentialId,
@@ -884,7 +948,7 @@ class RequestHandler(
                     )
 
                     // Record successful authentication for session tracking
-                    sessionAuthManager?.recordAuthentication(currentSessionId)
+                    sessionAuthManager?.recordAuthentication(requestSessionId())
 
                     // Now sign within the fresh auth window
                     Log.d(TAG, "Biometric succeeded, signing within auth window")
@@ -923,7 +987,7 @@ class RequestHandler(
             )
 
             // Record successful authentication for session tracking
-            sessionAuthManager?.recordAuthentication(currentSessionId)
+            sessionAuthManager?.recordAuthentication(requestSessionId())
 
             val signatureBase64 = Base64.getEncoder().encodeToString(signature)
             val result = SignResult(
@@ -1605,6 +1669,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val signParams = LocalSignParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         if (!keystoreManager.generalKeyExists(signParams.keyId)) {
             throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
@@ -1614,7 +1680,7 @@ class RequestHandler(
 
         // Check if biometric is needed
         val biometricRequired = if (signParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -1628,7 +1694,7 @@ class RequestHandler(
                     showOnLockScreen = keyguardManager.isKeyguardLocked,
                     onLaunch = notice.onLaunch
                 )
-                sessionAuthManager?.recordAuthentication(currentSessionId)
+                sessionAuthManager?.recordAuthentication(requestSessionId())
             } finally {
                 notice.close()
             }
@@ -1652,16 +1718,12 @@ class RequestHandler(
         keyDao.recordUsage(signParams.keyId)
 
         // Log signing request
-        val callerPeer = currentPeerPublicKeyHex()
-        AuditLogger.logSigningRequest(
-            keyId = signParams.keyId,
-            keyLabel = signParams.keyId,
-            keyType = "signing",
-            algorithm = signAlgorithm,
-            deviceId = callerPeer,
-            deviceName = auditPeerName(callerPeer),
-            success = true,
-            durationMs = durationMs
+        // signWithAlgorithm ran signAlgorithm (it refuses any other name).
+        logKeyUse(
+            KeyUse.SIGN, signParams.keyId,
+            executedAlgorithm = signAlgorithm,
+            durationMs = durationMs,
+            caller = caller
         )
 
         val result = LocalSignResult(
@@ -1690,27 +1752,26 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val decryptParams = LocalDecryptParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val plaintext = keystoreManager.rsaDecrypt(decryptParams.keyId, decryptParams.getCiphertextBytes())
+        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(
+            decryptParams.keyId, decryptParams.getCiphertextBytes()
+        )
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(decryptParams.keyId)
 
-        // Log decryption request
-        val callerPeer = currentPeerPublicKeyHex()
-        AuditLogger.logDecryptionRequest(
-            keyId = decryptParams.keyId,
-            keyLabel = decryptParams.keyId,
-            keyType = "rsa",
-            algorithm = "RSA-OAEP",
-            deviceId = callerPeer,
-            deviceName = auditPeerName(callerPeer),
-            success = true,
-            durationMs = durationMs
+        // The OAEP parameters the cipher ran (KeystoreManager.rsaOaepSpec).
+        logKeyUse(
+            KeyUse.DECRYPT, decryptParams.keyId,
+            executedAlgorithm = decrypted.algorithm,
+            durationMs = durationMs,
+            caller = caller
         )
 
         val result = LocalDecryptResult(
-            plaintext = Base64.getEncoder().encodeToString(plaintext)
+            plaintext = Base64.getEncoder().encodeToString(decrypted.plaintext)
         )
         return Response.success(request.id, result.toJson())
     }
@@ -1731,6 +1792,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val symParams = LocalSymmetricParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
@@ -1753,16 +1816,11 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log encryption request
-        val callerPeer = currentPeerPublicKeyHex()
-        AuditLogger.logEncryptionRequest(
-            keyId = symParams.keyId,
-            keyLabel = symParams.keyId,
-            keyType = "symmetric",
-            algorithm = "AES-GCM",
-            deviceId = callerPeer,
-            deviceName = auditPeerName(callerPeer),
-            success = true,
-            durationMs = durationMs
+        logKeyUse(
+            KeyUse.ENCRYPT, symParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+            durationMs = durationMs,
+            caller = caller
         )
 
         val result = LocalSymmetricResult(
@@ -1788,6 +1846,8 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val symParams = LocalSymmetricParams.fromJson(params)
+        // The requesting desktop, captured before anything can suspend.
+        val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
@@ -1810,16 +1870,11 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log decryption request
-        val callerPeer = currentPeerPublicKeyHex()
-        AuditLogger.logDecryptionRequest(
-            keyId = symParams.keyId,
-            keyLabel = symParams.keyId,
-            keyType = "symmetric",
-            algorithm = "AES-GCM",
-            deviceId = callerPeer,
-            deviceName = auditPeerName(callerPeer),
-            success = true,
-            durationMs = durationMs
+        logKeyUse(
+            KeyUse.DECRYPT, symParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+            durationMs = durationMs,
+            caller = caller
         )
 
         val result = LocalSymmetricResult(
@@ -1827,6 +1882,85 @@ class RequestHandler(
             payloadField = LocalSymmetricResult.FIELD_PLAINTEXT
         )
         return Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The keyType of a key-use audit entry: the type the key is stored with,
+     * never the operation (the entry's operation type already names that).
+     * The audit screen filters entries by this value, so an ECDH on a signing
+     * key must read "signing". It is the key-store row's type, else the
+     * software key's ([softwareKey], or looked up), else
+     * [AUDIT_KEY_TYPE_UNKNOWN] when the key has no stored metadata.
+     *
+     * Every key-use AuditLogger call in this file takes its keyType from
+     * here (AuditKeyTypeChokePointTest enforces it).
+     */
+    private suspend fun auditKeyType(
+        keyId: String,
+        softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
+    ): String =
+        keyDao.getByKeyId(keyId)?.keyType?.takeIf { it.isNotBlank() }
+            ?: (
+                softwareKey
+                    // The operation already succeeded; labelling it must not fail it.
+                    ?: runCatching { com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId) }.getOrNull()
+                )?.keyType?.takeIf { it.isNotBlank() }
+            ?: AUDIT_KEY_TYPE_UNKNOWN
+
+    /** The key-use operations [logKeyUse] records. */
+    private enum class KeyUse { SIGN, DECRYPT, ENCRYPT, HMAC, KEY_DERIVATION }
+
+    /**
+     * The one writer of key-use audit entries (sign, decrypt, encrypt, HMAC,
+     * ECDH): one success entry naming the key, its stored type
+     * ([auditKeyType]) and the algorithm that ran.
+     *
+     * [executedAlgorithm] is the algorithm the operation executed, taken from
+     * the crypto path (an HmacResult, SoftwareKeyOps.hmacAlgorithm,
+     * KeystoreManager.EXECUTED_*) or the validated request algorithm the
+     * operation ran with, never the key's stored metadata: a stored name is
+     * not validated and need not be what ran. AuditKeyTypeChokePointTest
+     * fails on a key-use AuditLogger call outside this function, or a call of
+     * it with any other algorithm source.
+     *
+     * [caller] is the requesting desktop its handler captured with
+     * [auditCaller] on entry, before any prompt or crypto call can suspend
+     * it: the entry's deviceId and deviceName come from it alone, never from
+     * the handler-wide connected device, which a second desktop's connection
+     * overwrites while this request runs. The scan test fails on a call that
+     * passes its own device or captures the caller late.
+     */
+    private suspend fun logKeyUse(
+        use: KeyUse,
+        keyId: String,
+        executedAlgorithm: String,
+        durationMs: Long,
+        caller: AuditCaller,
+        softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
+    ) {
+        val keyType = auditKeyType(keyId, softwareKey)
+        when (use) {
+            KeyUse.SIGN -> AuditLogger.logSigningRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.DECRYPT -> AuditLogger.logDecryptionRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.ENCRYPT -> AuditLogger.logEncryptionRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.HMAC -> AuditLogger.logHmacRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.KEY_DERIVATION -> AuditLogger.logKeyDerivationRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+        }
     }
 
     /**
@@ -1845,25 +1979,44 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val hmacParams = LocalHMACParams.fromJson(params)
+        val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
+            val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
                 sw.material, hmacParams.getDataBytes(), sw.algorithm
             )
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
+            // The MAC and the data stay out of the entry.
+            logKeyUse(
+                KeyUse.HMAC, hmacParams.keyId,
+                executedAlgorithm = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmacAlgorithm(sw.algorithm),
+                durationMs = swDurationMs,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalHMACResult(mac = Base64.getEncoder().encodeToString(swMac)).toJson()
             )
         }
 
-        val mac = keystoreManager.computeHMAC(hmacParams.keyId, hmacParams.getDataBytes())
+        val startTime = System.currentTimeMillis()
+        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
+        val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
+        logKeyUse(
+            KeyUse.HMAC, hmacParams.keyId,
+            executedAlgorithm = hmac.algorithm,
+            durationMs = durationMs,
+            caller = caller
+        )
 
         val result = LocalHMACResult(
-            mac = Base64.getEncoder().encodeToString(mac)
+            mac = Base64.getEncoder().encodeToString(hmac.mac)
         )
         return Response.success(request.id, result.toJson())
     }
@@ -1872,6 +2025,11 @@ class RequestHandler(
      * Handles local.ecdh - ECDH key agreement.
      */
     private suspend fun handleLocalECDH(request: Request): Response {
+        // Keystore key agreement is API 31+; refuse before touching the Keystore.
+        if (!KeystoreCapabilities.supportsEcdh(Build.VERSION.SDK_INT)) {
+            throw ECDHException(KeystoreCapabilities.ecdhUnsupportedReason(Build.VERSION.SDK_INT))
+        }
+
         // Check device attestation requirement
         if (!isDeviceAttestationCurrent(forKeyUse = true)) {
             throw ProtocolException(
@@ -1884,16 +2042,47 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val ecdhParams = LocalECDHParams.fromJson(params)
+        val caller = auditCaller()
+        val startTime = System.currentTimeMillis()
         val sharedSecret = keystoreManager.performECDH(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
         )
+        val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(ecdhParams.keyId)
+
+        // Log the key agreement; the shared secret and peer key stay out of it.
+        logKeyUse(
+            KeyUse.KEY_DERIVATION, ecdhParams.keyId,
+            executedAlgorithm = KeystoreManager.EXECUTED_ECDH,
+            durationMs = durationMs,
+            caller = caller
+        )
 
         val result = LocalECDHResult(
             sharedSecret = Base64.getEncoder().encodeToString(sharedSecret)
         )
         return Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The requesting peer an audit entry names, resolved once per request.
+     *
+     * @property peerPublicKeyHex the peer's static key hex, or null when unknown
+     * @property deviceName its paired-device name, when it is paired
+     */
+    private class AuditCaller(val peerPublicKeyHex: String?, val deviceName: String?)
+
+    /**
+     * Resolves the peer of the session this request arrived on, see
+     * [attestingPeerPublicKeyHex], and its paired-device name in one snapshot.
+     * Audit entries take the device from here, never from the handler-wide
+     * connected device: every confirmed BLE, USB or TCP connection overwrites
+     * that one, so it can name another desktop, or none after a disconnect.
+     */
+    private suspend fun auditCaller(): AuditCaller {
+        val peer = attestingPeerPublicKeyHex()
+        return AuditCaller(peer, auditPeerName(peer))
     }
 
     /**
@@ -2273,17 +2462,12 @@ class RequestHandler(
      */
     private suspend fun handleLocalGetCapabilities(request: Request): Response {
         val result = LocalGetCapabilitiesResult(
-            algorithms = listOf(
-                "ES256", "ES384", "ES512",
-                "RS256", "RS384", "RS512",
-                "AES128", "AES256",
-                "HMAC-SHA256", "HMAC-SHA512"
-            ),
+            algorithms = KeystoreCapabilities.supportedAlgorithms(Build.VERSION.SDK_INT),
             keyTypes = listOf("fido2", "tls", "signing", "encryption", "secret", "hmac", "ca", "attestation"),
             hasStrongBox = keystoreManager.isStrongBoxAvailable(),
             hasBiometrics = hasBiometrics(),
             supportsAttestation = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N,
-            supportsECDH = true,
+            supportsECDH = KeystoreCapabilities.supportsEcdh(Build.VERSION.SDK_INT),
             supportsSymmetric = true,
             supportsHMAC = true,
             maxKeys = 256, // Android Keystore practical limit
@@ -3120,7 +3304,7 @@ class RequestHandler(
 
         // Biometric authentication if required
         val biometricRequired = if (assertionParams.userVerificationRequired) {
-            sessionAuthManager?.isBiometricRequired(currentSettings, currentSessionId) ?: true
+            sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
@@ -3138,7 +3322,7 @@ class RequestHandler(
                     showOnLockScreen = keyguardManager.isKeyguardLocked,
                     onLaunch = notice.onLaunch
                 )
-                sessionAuthManager?.recordAuthentication(currentSessionId)
+                sessionAuthManager?.recordAuthentication(requestSessionId())
                 userVerified = true
             } finally {
                 notice.close()
