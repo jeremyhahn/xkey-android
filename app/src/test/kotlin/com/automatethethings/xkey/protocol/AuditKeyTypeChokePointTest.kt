@@ -103,6 +103,63 @@ class AuditKeyTypeChokePointTest {
         }
     }
 
+    @Test
+    fun `every key-use entry names the device captured at request entry`() {
+        val source = handlerSource()
+        val helper = Regex("""private (suspend )?fun logKeyUse\(""").find(source)
+            ?: return fail("RequestHandler.logKeyUse is gone; is the scan stale?")
+        val offenders = mutableListOf<String>()
+
+        // logKeyUse takes the device only from the request's AuditCaller.
+        val params = argumentList(source, helper.range.last)
+        if (!Regex("""\bcaller\s*:\s*AuditCaller\b""").containsMatchIn(params)) {
+            offenders += "logKeyUse takes no caller: AuditCaller parameter"
+        }
+        if (Regex("""\bdevice(Id|Name)\s*:""").containsMatchIn(params)) {
+            offenders += "logKeyUse takes a deviceId/deviceName parameter"
+        }
+        val helperBody = bodyRange(source, helper.range.last)
+        keyUseCall.findAll(source).filter { it.range.first in helperBody }.forEach { match ->
+            val args = argumentList(source, match.range.last)
+            val id = Regex("""deviceId\s*=\s*([^,\n)]+)""").find(args)?.groupValues?.get(1)?.trim()
+            val name = Regex("""deviceName\s*=\s*([^,\n)]+)""").find(args)?.groupValues?.get(1)?.trim()
+            if (id != "caller.peerPublicKeyHex" || name != "caller.deviceName") {
+                offenders += "line ${lineOf(source, match.range.first)}: deviceId = $id, deviceName = $name"
+            }
+        }
+
+        // Each call passes the caller its handler captured on entry, before
+        // any prompt or crypto call can suspend it.
+        val calls = Regex("""(?<!fun )\blogKeyUse\(""").findAll(source).toList()
+        assertTrue("expected the sign, decrypt, encrypt, HMAC and ECDH call sites", calls.size >= 7)
+        calls.forEach { match ->
+            val where = "line ${lineOf(source, match.range.first)}"
+            val args = argumentList(source, match.range.last)
+            if (!Regex("""\bcaller\s*=\s*caller\b""").containsMatchIn(args)) {
+                offenders += "$where passes no caller = caller"
+            }
+            if (Regex("""\bdevice(Id|Name)\s*=""").containsMatchIn(args)) {
+                offenders += "$where passes its own deviceId/deviceName"
+            }
+            val fn = Regex("""private suspend fun (\w+)\(""").findAll(source)
+                .lastOrNull { it.range.first < match.range.first }
+            if (fn == null) {
+                offenders += "$where has no enclosing handler"
+                return@forEach
+            }
+            val upToCall = source.substring(fn.range.first, match.range.first)
+            val capture = upToCall.indexOf("val caller = auditCaller()")
+            val firstSuspend = listOf("keystoreManager.", "biometricLauncher.", "SoftwareKeyOps.")
+                .map { upToCall.indexOf(it) }.filter { it >= 0 }.minOrNull() ?: Int.MAX_VALUE
+            if (capture < 0 || capture > firstSuspend) {
+                offenders += "$where: ${fn.groupValues[1]} does not capture auditCaller() before its first prompt or crypto call"
+            }
+        }
+        if (offenders.isNotEmpty()) {
+            fail("key-use audit entries bypass the request's device:\n" + offenders.joinToString("\n"))
+        }
+    }
+
     /** The text between the call's opening parenthesis at [open] and its match. */
     private fun argumentList(source: String, open: Int): String {
         var depth = 0

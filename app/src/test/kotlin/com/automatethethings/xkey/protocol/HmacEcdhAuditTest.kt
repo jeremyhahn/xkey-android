@@ -42,7 +42,9 @@ import io.mockk.unmockkAll
 import java.security.KeyStore
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -321,6 +323,61 @@ class HmacEcdhAuditTest {
         entries.forEach { entry ->
             assertEquals("${entry.operationType} ${entry.keyId}", PEER_A, entry.deviceId)
             assertEquals("${entry.operationType} ${entry.keyId}", "Desktop A", entry.deviceName)
+        }
+    }
+
+    @Test
+    fun `an interleaved second desktop leaves each key-use entry its own device`() = runTest {
+        // A's request pauses inside the crypto call; meanwhile desktop B
+        // confirms over another transport (taking the handler-wide connected
+        // device) and runs the same operation to completion.
+        var paused: CompletableDeferred<Unit>? = null
+        suspend fun pauseFirst() {
+            paused?.let { gate -> paused = null; gate.await() }
+        }
+        coEvery { keystore.generalKeyExists("hw-ecdh") } returns true
+        coEvery { keystore.signWithAlgorithm("hw-ecdh", any(), any()) } coAnswers {
+            pauseFirst(); ByteArray(64) { 8 }
+        }
+        coEvery { keystore.rsaDecrypt("hw-ecdh", any()) } coAnswers { pauseFirst(); ByteArray(16) { 6 } }
+        coEvery { keystore.symmetricEncrypt("hw-sym", any(), any()) } coAnswers { pauseFirst(); ByteArray(44) { 1 } }
+        coEvery { keystore.symmetricDecrypt("hw-sym", any(), any()) } coAnswers { pauseFirst(); ByteArray(16) { 2 } }
+        coEvery { keystore.computeHMACWithAlgorithm("hw-hmac", any()) } coAnswers {
+            pauseFirst(); HmacResult(keystoreMac, "HMAC-SHA256")
+        }
+        coEvery { keystore.performECDH("hw-ecdh", any()) } coAnswers { pauseFirst(); sharedSecret }
+
+        val ct = Base64.getEncoder().encodeToString(ByteArray(256) { 5 })
+        val requests = listOf(
+            MethodNames.LOCAL_SIGN to
+                """{"keyId":"hw-ecdh","data":"$data","algorithm":"ES256","userVerificationRequired":false}""",
+            MethodNames.LOCAL_DECRYPT to """{"keyId":"hw-ecdh","ciphertext":"$ct"}""",
+            MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"hw-sym","plaintext":"$data"}""",
+            MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"hw-sym","ciphertext":"$ct"}""",
+            MethodNames.LOCAL_HMAC to """{"keyId":"hw-hmac","data":"$data"}""",
+            MethodNames.LOCAL_ECDH to """{"keyId":"hw-ecdh","peerPublicKey":"$peerKey"}"""
+        )
+        requests.forEach { (method, params) ->
+            inserted.clear()
+            handler.setConnectedDevicePublicKeyHex(PEER_A)
+            val gate = CompletableDeferred<Unit>().also { paused = it }
+            val first = async { servedBy(PEER_A) { call(method, params) } }
+            testScheduler.runCurrent()
+            assertTrue("$method: A's request is paused in the crypto call", paused == null && !first.isCompleted)
+
+            handler.setConnectedDevicePublicKeyHex(PEER_B)
+            val second = servedBy(PEER_B) { call(method, params) }
+            gate.complete(Unit)
+            val firstResponse = first.await()
+
+            assertFalse("$method B: $second", second.has("error"))
+            assertFalse("$method A: $firstResponse", firstResponse.has("error"))
+            val devices = inserted.filter { it.success && it.keyId != null }.map { it.deviceId to it.deviceName }
+            assertEquals(
+                "$method: B's entry, then A's, each naming its own desktop",
+                listOf(PEER_B to "Desktop B", PEER_A to "Desktop A"),
+                devices
+            )
         }
     }
 
