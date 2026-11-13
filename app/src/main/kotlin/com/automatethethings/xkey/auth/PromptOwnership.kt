@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.auth
 
+import android.content.Intent
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CancellationException
@@ -230,5 +231,26 @@ internal class PromptOwnership(
             // A JVM test without Android's logger still runs the process owner.
             runCatching { Log.w("PromptOwnership", "Refused $refusal") }
         })
+
+        /** The queue key an activity started from outside the app (a Credential Manager pending intent) enqueues under. */
+        const val EXTRA_PROMPT_KEY = "com.automatethethings.xkey.auth.PROMPT_KEY"
+
+        /**
+         * Marks [intent], for an activity the system starts later, with a fresh
+         * [NotificationKeys.wakeOnly] key for [operation]. The activity takes
+         * its queue entry under that key ([promptKey]) and prompts only on
+         * its turn, never over an ACTIVE approval.
+         */
+        fun queued(intent: Intent, operation: String): Intent =
+            intent.putExtra(EXTRA_PROMPT_KEY, NotificationKeys.wakeOnly(operation))
+
+        /**
+         * The key [intent] was [queued] under, or a fresh one for [operation]
+         * when it carries none or its key already took an entry (a relaunch).
+         */
+        fun promptKey(intent: Intent?, operation: String): String =
+            intent?.getStringExtra(EXTRA_PROMPT_KEY)
+                ?.takeIf { process.state(it) == null && process.outcome(it) == null }
+                ?: NotificationKeys.wakeOnly(operation)
     }
 }

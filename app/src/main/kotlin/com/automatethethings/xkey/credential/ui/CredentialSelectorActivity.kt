@@ -33,7 +33,6 @@ import androidx.credentials.exceptions.GetCredentialInterruptedException
 import androidx.credentials.exceptions.GetCredentialUnknownException
 import androidx.credentials.provider.PendingIntentHandler
 import androidx.lifecycle.lifecycleScope
-import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.credential.handler.CreateCredentialHandler
 import com.automatethethings.xkey.credential.handler.GetCredentialHandler
@@ -253,7 +252,7 @@ class CredentialSelectorActivity : AppCompatActivity() {
         // still takes a turn in the one prompt queue: it shows only once no
         // other approval holds the screen, and hands the screen on when it
         // is answered or the activity goes away.
-        val key = NotificationKeys.wakeOnly("credentialSelector")
+        val key = PromptOwnership.promptKey(intent, "credentialSelector")
         promptKey = key
         val answered: (Boolean, Boolean) -> Unit = { cancelled, verified ->
             PromptOwnership.process.end(key)
