@@ -2078,9 +2078,7 @@ class KeyDetailActivity : AppCompatActivity() {
             // the material only once the rows of this key row are deleted,
             // in the store's serialisation of its material (#193 r8).
             KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore, material = {
-                if (key.source != "xkmsd") {
-                    keystoreManager.resolveKeystoreAlias(key.keyId)?.let { keystoreManager.deleteByAlias(it) }
-                }
+                com.automatethethings.xkey.storage.deleteKeyMaterial(this@KeyDetailActivity, it, key.source)
             })
             finish()
         }

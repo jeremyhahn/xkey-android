@@ -20,17 +20,45 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 
 /**
- * Deletes the material of a tombstoned key ([KeyPolicyStore.replayDeletions],
- * #193 r9), wherever it lives: the Android Keystore or the software key
- * store. A key from the KMS daemon (`xkmsd`) holds no local material.
- * Callable only under the key's [KeyPolicyStore.withKeyMaterial] lock.
+ * The app's one [MaterialDelete] (#193 r9, r10): deletes [held]'s key
+ * material wherever it lives, the Android Keystore (every alias its id
+ * resolves to) and the software key store, and returns true only once
+ * neither holds any of it. A key from the KMS daemon (`xkmsd`) holds no
+ * local material. Callable only under the key's
+ * [KeyPolicyStore.withKeyMaterial] lock.
  */
-fun deleteKeyMaterial(context: Context, held: KeyPolicyStore.KeyMaterialHeld, source: String?) {
-    if (source == "xkmsd") return
-    val keystore = KeystoreManager(context)
-    keystore.resolveKeystoreAlias(held.keyId)?.let { keystore.deleteByAlias(it) }
-    SoftwareKeyStore(context).delete(held.keyId)
+fun deleteKeyMaterial(
+    context: Context,
+    held: KeyPolicyStore.KeyMaterialHeld,
+    source: String?,
+    keystore: KeystoreManager = KeystoreManager(context)
+): Boolean {
+    if (source == "xkmsd") return true
+    // Each backend is tried whatever the other does: one that fails leaves
+    // its material, reported below, and never stops the other's delete.
+    // A key id resolves to one alias at a time; a refused or failed delete
+    // leaves it resolving.
+    val keystoreGone = try {
+        repeat(MAX_ALIASES) {
+            val alias = keystore.resolveKeystoreAlias(held.keyId) ?: return@repeat
+            keystore.deleteByAlias(alias)
+        }
+        keystore.resolveKeystoreAlias(held.keyId) == null
+    } catch (e: Exception) {
+        false
+    }
+    val softwareGone = try {
+        val software = SoftwareKeyStore(context)
+        software.delete(held.keyId)
+        !software.contains(held.keyId)
+    } catch (e: Exception) {
+        false
+    }
+    return keystoreGone && softwareGone
 }
+
+/** The aliases one key id can resolve to (credential, general, legacy). */
+private const val MAX_ALIASES = 4
 
 /**
  * Replays every deletion tombstone of [store] ([KeyPolicyStore.replayDeletions]):

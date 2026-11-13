@@ -136,6 +136,16 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
         return 1
     }
 
+    override suspend fun storedPolicy(keyId: String): SharingPolicyType? {
+        check("storedPolicy")
+        return keys.value[keyId]?.sharingPolicy
+    }
+
+    override suspend fun policyRevision(keyId: String): Long? {
+        check("policyRevision")
+        return keys.value[keyId]?.policyRevision
+    }
+
     override suspend fun policyRow(keyId: String): KeyPolicyEntity? {
         check("policyRow")
         return rows.value[keyId]
@@ -152,7 +162,12 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
     override suspend fun setKeyPolicy(keyId: String, policy: SharingPolicyType): Int {
         check("setKeyPolicy")
         val key = keys.value[keyId] ?: return 0
-        keys.value = keys.value + (keyId to key.copy(sharingPolicy = policy, shareable = policy != SharingPolicyType.PRIVATE))
+        keys.value = keys.value + (keyId to key.copy(
+            sharingPolicy = policy,
+            shareable = policy != SharingPolicyType.PRIVATE,
+            // The policy_revision trigger (#178) moves the revision on every policy write.
+            policyRevision = key.policyRevision + 1
+        ))
         return 1
     }
 

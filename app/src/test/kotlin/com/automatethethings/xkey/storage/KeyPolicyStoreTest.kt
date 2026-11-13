@@ -300,6 +300,7 @@ class KeyPolicyStoreTest {
                 window.complete(Unit)
                 release.await()
                 material -= "k"
+                true
             }
         }
         window.await()
@@ -336,7 +337,7 @@ class KeyPolicyStoreTest {
         assertEquals(null, tables.keyInstance("k"))
         assertTrue("the material lost its record", store.isDeletionPending("k"))
 
-        store.replayDeletions { held, _ -> material -= held.keyId }
+        store.replayDeletions { held, _ -> material -= held.keyId; true }
         assertTrue("the replay left the material behind", "k" !in material)
         assertTrue("the tombstone outlived the material", !store.isDeletionPending("k"))
     }
@@ -355,7 +356,7 @@ class KeyPolicyStoreTest {
 
         val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
         assertTrue("the material lost its record across the restart", restarted.isDeletionPending("k"))
-        restarted.replayDeletions { held, _ -> material -= held.keyId }
+        restarted.replayDeletions { held, _ -> material -= held.keyId; true }
         assertTrue("the replay left the material behind", "k" !in material)
         assertTrue(!restarted.isDeletionPending("k"))
     }
@@ -369,9 +370,49 @@ class KeyPolicyStoreTest {
         assertTrue(store.deleteKey("k", key) { throw IOException("keystore busy") })
         store.withKeyMaterial("k") { store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS)) }
 
-        store.replayDeletions { held, _ -> material -= held.keyId }
+        store.replayDeletions { held, _ -> material -= held.keyId; true }
         assertTrue("the new key's material was deleted by the replay", "k" in material)
         assertTrue(!store.isDeletionPending("k"))
+    }
+
+    /**
+     * Round 10 (4): a material delete that returns with material still in a
+     * backend (a refused Keystore delete, a software key left) keeps the
+     * tombstone, and the replay deletes the rest before dropping it.
+     */
+    @Test
+    fun aTombstoneStaysUntilEveryBackendConfirmsTheMaterialGone() = runBlocking {
+        val key = tables.addKey("k", SELECTED_PEERS)
+        val keystore = mutableSetOf("k")
+        val software = mutableSetOf("k")
+        val store = store()
+
+        // The Keystore delete is refused; the software key is deleted.
+        assertTrue(store.deleteKey("k", key) { held -> software -= held.keyId; held.keyId !in keystore })
+        assertTrue("a tombstone dropped while the Keystore still holds the key", store.isDeletionPending("k"))
+
+        assertEquals(0, store.replayDeletions { held, _ -> keystore -= held.keyId; held.keyId !in keystore })
+        assertTrue(!store.isDeletionPending("k"))
+    }
+
+    /**
+     * Round 10 (4) bypass guard: every key material delete handed to the
+     * store is the app's one confirming deleter, [deleteKeyMaterial].
+     */
+    @Test
+    fun everyMaterialDeleteIsTheConfirmingDeleter() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue(root.isDirectory)
+        val callers = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "KeyPolicyStore.kt" && it.name != "KeySharingPeers.kt" }
+            .filter { file -> file.readText().let { "forgetKey(" in it || ".deleteMaterial(" in it || ".replayDeletions" in it } }
+            .toList()
+        assertTrue("no material delete callers found", callers.size >= 3)
+        assertEquals(
+            "a material delete that does not confirm every backend",
+            emptyList<String>(),
+            callers.filter { "deleteKeyMaterial(" !in it.readText() }.map { it.name }
+        )
     }
 
     /** Round 9 (1): a withdrawal bound to a replaced key is stale, not REMOVED, and keeps the new grant. */
@@ -459,5 +500,68 @@ class KeyPolicyStoreTest {
         const val PEER = "peer-a"
         const val OTHER = "peer-b"
     }
-}
 
+    private fun decision(revision: Long, enforced: SharingPolicyType, approved: Boolean, audit: MutableList<SharingPolicyType> = mutableListOf()) =
+        KeyPolicyStore.RemoteDecision(revision, enforced, approved) { audit += it }
+
+    /** Round 10 (1): a remote change that lifts a failed narrowing's denial is refused without approval. */
+    @Test
+    fun `a remote lift of a denial without approval is refused in the transaction`() = runBlocking {
+        val instance = tables.addKey("k", ALL_PEERS)
+        tables.failing += "setKeyPolicy"
+        expectFailure { store().setPolicy("k", instance, PRIVATE) }
+        tables.failing.clear()
+        assertEquals(PRIVATE, tables.enforced("k"))
+        val revision = tables.key("k")!!.policyRevision
+
+        try {
+            store().setPolicy("k", instance, ALL_PEERS, decision(revision, ALL_PEERS, approved = false))
+            fail("an unapproved lift landed")
+        } catch (e: KeyPolicyStore.DecisionRefusedException) {
+            // refused
+        }
+        assertEquals(PRIVATE, tables.enforced("k"))
+
+        val audit = mutableListOf<SharingPolicyType>()
+        store().setPolicy("k", instance, ALL_PEERS, decision(revision, PRIVATE, approved = true, audit))
+        assertEquals(ALL_PEERS, tables.enforced("k"))
+        assertEquals(listOf(PRIVATE), audit)
+    }
+
+    /** Round 10 (2): an approval taken at a revision the key has since left is refused inside the write's transaction. */
+    @Test
+    fun `an approval at an earlier revision is refused in the transaction`() = runBlocking {
+        val instance = tables.addKey("k", PRIVATE)
+        val approvedAt = tables.key("k")!!.policyRevision
+        store().setPolicy("k", instance, ALL_PEERS)
+        store().setPolicy("k", instance, PRIVATE)
+
+        try {
+            store().setPolicy("k", instance, ALL_PEERS, decision(approvedAt, PRIVATE, approved = true))
+            fail("a stale approval landed")
+        } catch (e: KeyPolicyStore.DecisionRefusedException) {
+            // refused
+        }
+        assertEquals(PRIVATE, tables.keyPolicy("k"))
+
+        // A narrowing always lands, whatever moved.
+        store().setPolicy("k", instance, ALL_PEERS)
+        store().setPolicy("k", instance, PRIVATE, decision(approvedAt, ALL_PEERS, approved = false))
+        assertEquals(PRIVATE, tables.keyPolicy("k"))
+    }
+
+    /** Round 10 bypass guard: the remote decision is checked in setPolicy's transaction, before any write. */
+    @Test
+    fun `the remote decision is checked inside the policy transaction`() {
+        val source = listOf(
+            java.io.File("src/main/kotlin/com/automatethethings/xkey/storage/KeyPolicyStore.kt"),
+            java.io.File("app/src/main/kotlin/com/automatethethings/xkey/storage/KeyPolicyStore.kt")
+        ).first { it.isFile }.readText()
+        val start = source.indexOf("suspend fun setPolicy(")
+        val body = source.substring(start, source.indexOf("\n    suspend fun ", start + 1))
+        val transaction = body.indexOf("transactor.run {")
+        val check = body.indexOf("dao.policyRevision(keyId) != decision.revision")
+        assertTrue(transaction in 0 until check)
+        assertTrue(check < body.indexOf("dao.setKeyPolicy("))
+    }
+}

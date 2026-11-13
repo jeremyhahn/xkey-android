@@ -361,6 +361,11 @@ class KeySharingPeers(
          * edit of a key row deleted or replaced since [instance] was read is
          * refused.
          *
+         * A remote change (local.setKeyPolicy) passes its [decision], which
+         * the store checks inside the write's transaction and audits once
+         * committed ([KeyPolicyStore.setPolicy]); its refusal, or its key row
+         * being replaced, is thrown to the caller to answer.
+         *
          * @return true once the change is stored, false if it was refused.
          */
         suspend fun setKeyPolicy(
@@ -368,18 +373,22 @@ class KeySharingPeers(
             store: KeyPolicyStore,
             policy: SharingPolicyType,
             instance: Long,
-            editScope: CoroutineScope = acceptedEdits
+            editScope: CoroutineScope = acceptedEdits,
+            decision: KeyPolicyStore.RemoteDecision? = null
         ): Boolean =
             accepted(editScope) {
                 try {
                     // The grant rows are gone: no per-peer withdrawal of the key is outstanding.
-                    if (store.setPolicy(keyId, instance, StoredPolicy.valueOf(policy.name))) settle { it.keyId == keyId }
+                    if (store.setPolicy(keyId, instance, StoredPolicy.valueOf(policy.name), decision)) settle { it.keyId == keyId }
                     // The policy row dropped any denial: no held one is owed.
                     settle { it.keyId == keyId && it.instance == instance && it.peer == null }
                     true
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: KeyPolicyStore.DecisionRefusedException) {
+                    throw e
                 } catch (e: Exception) {
+                    if (decision != null && e is KeyPolicyStore.KeyChangedException) throw e
                     Log.e(TAG, "Storing the key's sharing policy failed; it was refused", e)
                     if (store.isHeld(keyId, instance)) {
                         owe(Owed(keyId, instance, null), saved = false, editScope) {
@@ -406,7 +415,7 @@ class KeySharingPeers(
             keyId: String,
             instance: Long,
             store: KeyPolicyStore,
-            material: suspend () -> Unit = {}
+            material: com.automatethethings.xkey.storage.MaterialDelete = { true }
         ): Boolean =
             accepted(acceptedEdits) {
                 store.deleteKey(keyId, instance, material).also { if (it) settle { it.keyId == keyId } }

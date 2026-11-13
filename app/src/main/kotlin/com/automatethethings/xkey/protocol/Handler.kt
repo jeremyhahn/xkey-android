@@ -2030,11 +2030,10 @@ class RequestHandler(
         // store (only one of the two holds it), is deleted in the same queued
         // edit once the rows are: a request cancelled while the delete waits
         // never leaves it behind (#193 r6, ruling 554).
-        val material: suspend () -> Unit = {
-            keystoreManager.deleteGeneralKey(keyId)
-            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
-        }
         val entity = keyDao.getByKeyId(keyId)
+        val material: com.automatethethings.xkey.storage.MaterialDelete = {
+            com.automatethethings.xkey.storage.deleteKeyMaterial(context, it, entity?.source, keystoreManager)
+        }
         if (entity == null) {
             // No key row: the material alone, in the store's serialisation,
             // and only if no key was generated under the id meanwhile (#193 r8).
@@ -2057,16 +2056,18 @@ class RequestHandler(
      * the sharing check, so it needs a confirmed peer and the owner's
      * approval on the phone. Without a launcher, or when the prompt is
      * cancelled or fails, the request answers BIOMETRIC_FAILED and the stored
-     * policy is unchanged. Narrowing needs neither. Every stored change is
-     * audited.
+     * policy is unchanged. Lifting a denial a failed narrowing left
+     * enforced is a widening too (#193 r10). Narrowing needs neither. Every
+     * stored change is audited.
      *
-     * The write is a compare-and-set against the policy revision the
-     * decision was taken on (every policy write moves it forward, so a
-     * policy changed away and back is a new revision), so a change that
-     * lands while the prompt is up, or between the read and the write, is
-     * never overwritten: a widening whose starting
-     * policy moved is refused (OPERATION_DENIED) rather than applied without
-     * an approval for it, and a narrowing re-reads and retries. A key already
+     * The decision is checked inside the write's transaction
+     * ([KeyPolicyStore.RemoteDecision]) against the policy revision it was
+     * taken on (every policy write moves it forward, so a policy changed
+     * away and back is a new revision), so a change that lands while the
+     * prompt is up, or between the read and the write, is never overwritten
+     * by a widening: one whose starting policy moved is refused
+     * (OPERATION_DENIED) rather than applied without an approval for it. A
+     * narrowing always lands. A key already
      * at the requested policy is not written. The audit records only a write
      * that changed the row, with the policy it replaced.
      */
@@ -2079,24 +2080,17 @@ class RequestHandler(
         val entity = keyDao.getByKeyId(policyParams.keyId)
             ?: throw ProtocolException("Key not found: ${policyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
-        // The read row as it is now. A different row under the same key id
-        // is another key: the request, and any approval for it, named the
-        // one read above.
-        suspend fun storedRow(): KeyEntity {
-            val current = keyDao.getByKeyId(entity.keyId)
-                ?: throw ProtocolException("Key not found: ${entity.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
-            if (current.id != entity.id) {
-                throw ProtocolException(
-                    "Key ${entity.keyId} was replaced while the request was in flight; retry",
-                    errorCode = ErrorCodes.OPERATION_DENIED
-                )
-            }
-            return current
-        }
-
         if (policyParams.shareable != null) {
             val policy = if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
-            if (policy == SharingPolicyType.ALL_PEERS && entity.sharingPolicy != SharingPolicyType.ALL_PEERS) {
+            // What the key enforces now: a denial left by a failed narrowing
+            // (#193) counts, so lifting it is a widening like any other.
+            val enforced = keyPolicyStore.enforcedPolicy(entity)
+            if (enforced == policy && entity.sharingPolicy == policy) {
+                Log.i(TAG, "Policy for key ${policyParams.keyId} is already $policy")
+                return Response.success(request.id, JSONObject().put("updated", true))
+            }
+            val widening = policy == SharingPolicyType.ALL_PEERS && enforced != SharingPolicyType.ALL_PEERS
+            if (widening) {
                 requireConfirmedPeer("Sharing a key with all peers")
                 val keyName = entity.label.ifBlank { entity.keyId }
                 val launcher = biometricLauncher ?: throw ProtocolException(
@@ -2128,27 +2122,51 @@ class RequestHandler(
                         notice.close()
                     }
                 }
-                // Approved at the revision read above (#178): a policy write that
-                // landed while the prompt was up, even one changed back, is not
-                // covered by it.
-                val now = storedRow()
-                if (now.policyRevision != entity.policyRevision && now.sharingPolicy != SharingPolicyType.ALL_PEERS) {
-                    throw ProtocolException(
-                        "Sharing policy of ${entity.keyId} changed while waiting for approval; retry",
-                        errorCode = ErrorCodes.OPERATION_DENIED
+            }
+            // The decision is checked inside the policy write's transaction
+            // (#193 r10): a widening of what the key enforces then, lifting a
+            // denial included, lands only with the owner's approval taken at
+            // the revision and policy it still has (#178), so a change that
+            // landed while the prompt was up, even one changed back, is not
+            // covered. Through the sheet's ordering (#174), bound to the key
+            // row read above (#193): a key deleted or generated again since is
+            // refused. The committed write is audited with the policy it
+            // replaced, in the store's edit, so a request cancelled after the
+            // commit still audits it.
+            val decision = KeyPolicyStore.RemoteDecision(
+                revision = entity.policyRevision,
+                enforced = enforced,
+                approved = widening
+            ) { replaced ->
+                if (replaced != policy) {
+                    AuditLogger.logKeySharingChanged(
+                        keyId = entity.keyId,
+                        keyLabel = entity.label,
+                        keyType = entity.keyType,
+                        oldPolicy = replaced.name,
+                        newPolicy = policy.name
                     )
                 }
             }
-            // Through the sheet's ordering (#174), bound to the key row read
-            // above (#193): a key deleted or generated again since is refused.
-            // The store keeps `shareable` and `sharing_policy` in step, which
-            // KeyEntity requires.
-            val landed = KeySharingPeers.setKeyPolicy(
-                policyParams.keyId,
-                keyPolicyStore,
-                SheetPolicy.valueOf(policy.name),
-                entity.id
-            )
+            val landed = try {
+                KeySharingPeers.setKeyPolicy(
+                    policyParams.keyId,
+                    keyPolicyStore,
+                    SheetPolicy.valueOf(policy.name),
+                    entity.id,
+                    decision = decision
+                )
+            } catch (e: KeyPolicyStore.KeyChangedException) {
+                throw ProtocolException(
+                    "Key ${entity.keyId} was replaced while the request was in flight; retry",
+                    errorCode = ErrorCodes.OPERATION_DENIED
+                )
+            } catch (e: KeyPolicyStore.DecisionRefusedException) {
+                throw ProtocolException(
+                    "Sharing policy of ${entity.keyId} changed while waiting for approval; retry",
+                    errorCode = ErrorCodes.OPERATION_DENIED
+                )
+            }
             // Never reported updated unless stored (#193); a failed
             // narrowing's denial stays enforced until a later change lands.
             if (!landed) {

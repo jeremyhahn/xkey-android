@@ -37,6 +37,14 @@ interface KeyPolicyDao {
     @Query("SELECT id FROM keys WHERE key_id = :keyId")
     suspend fun keyInstance(keyId: String): Long?
 
+    /** `keys.sharing_policy` of [keyId]'s key row, or null if there is none. */
+    @Query("SELECT sharing_policy FROM keys WHERE key_id = :keyId")
+    suspend fun storedPolicy(keyId: String): SharingPolicyType?
+
+    /** `keys.policy_revision` of [keyId]'s key row: every policy write moves it forward (#178). */
+    @Query("SELECT policy_revision FROM keys WHERE key_id = :keyId")
+    suspend fun policyRevision(keyId: String): Long?
+
     @Query("SELECT * FROM key_policies WHERE key_id = :keyId")
     suspend fun policyRow(keyId: String): KeyPolicyEntity?
 

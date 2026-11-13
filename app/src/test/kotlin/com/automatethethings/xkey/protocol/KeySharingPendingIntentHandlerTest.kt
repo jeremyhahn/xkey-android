@@ -188,7 +188,14 @@ class KeySharingPendingIntentHandlerTest {
             method = MethodNames.LOCAL_SET_KEY_POLICY,
             params = JSONObject().put("keyId", keyId).put("shareable", shareable)
         )
-        return suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+        // A refusal the handler throws is answered as an error, as
+        // handleRequest answers it.
+        return try {
+            suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val refusal = e.cause as? ProtocolException ?: throw e
+            Response.error(request.id, refusal.errorCode, refusal.message ?: "")
+        }
     }
 
     /** Runs local.deleteKey through the handler, as a desktop's RPC does. */
@@ -480,6 +487,11 @@ class KeySharingPendingIntentHandlerTest {
         mockkStatic(java.security.KeyStore::class)
         every { java.security.KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
         tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        // The key's Keystore alias, gone once deleted.
+        val alias = "xkey_key_$key"
+        var aliasHeld = true
+        every { keystore.resolveKeystoreAlias(key) } answers { alias.takeIf { aliasHeld } }
+        every { keystore.deleteByAlias(alias) } answers { aliasHeld = false; true }
         val gate = CompletableDeferred<Unit>()
         tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
         val other = KeySharingPeers(OTHER_KEY, otherInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
@@ -493,7 +505,7 @@ class KeySharingPendingIntentHandlerTest {
         assertTrue(held.await())
 
         // The queued delete lands in the edits' own scope, off the test's clock.
-        io.mockk.verify(timeout = 5_000) { keystore.deleteGeneralKey(key) }
+        io.mockk.verify(timeout = 5_000) { keystore.deleteByAlias(alias) }
         assertEquals("the queued row delete did not land", null, tables.key(key))
     }
 }

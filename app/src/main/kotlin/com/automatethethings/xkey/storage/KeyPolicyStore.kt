@@ -30,6 +30,14 @@ import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 
 /**
+ * Deletes a key's material under its [KeyPolicyStore.withKeyMaterial] lock
+ * and returns true only if every material backend confirms none of it is
+ * left (#193 r10): the store drops the key's deletion tombstone on true
+ * alone. The app's one is [deleteKeyMaterial].
+ */
+typealias MaterialDelete = suspend (KeyPolicyStore.KeyMaterialHeld) -> Boolean
+
+/**
  * A key's sharing policy state and its grant rows, written only here (#193).
  *
  * Every write runs in one Room transaction ([Transactor]) together with the
@@ -82,6 +90,28 @@ class KeyPolicyStore(
     class KeyChangedException(keyId: String) :
         IOException("Key $keyId was deleted or replaced; the edit was refused")
 
+    /**
+     * What a remote policy change (local.setKeyPolicy) was decided on
+     * (#193 r10), checked inside its write's transaction ([setPolicy]): the
+     * key's [revision] (`keys.policy_revision`) and [enforced] policy as the
+     * request read them, and whether the owner [approved] the change on the
+     * phone. [audit] is told the policy the committed write replaced.
+     */
+    class RemoteDecision(
+        val revision: Long,
+        val enforced: SharingPolicyType,
+        val approved: Boolean,
+        val audit: (replaced: SharingPolicyType) -> Unit
+    )
+
+    /**
+     * A remote change refused inside its transaction: it widens what the key
+     * enforces (lifting a denial included) without the owner's approval, or
+     * the policy moved since the approval was taken.
+     */
+    class DecisionRefusedException(keyId: String, reason: String) :
+        IOException("Sharing policy change of $keyId refused: $reason")
+
     /** A grant refused because the key's policy state forbids it. */
     class GrantRefusedException(keyId: String) :
         IOException("Key $keyId refuses grants until a policy write lands")
@@ -106,24 +136,55 @@ class KeyPolicyStore(
      * the policy row, which drops any denial. Returns whether grant rows were
      * cleared.
      *
+     * A remote change carries its [decision]: one that widens the policy
+     * the key enforces in this transaction (a held or recorded denial
+     * included) needs the owner's approval, taken at the revision and
+     * enforced policy it still has; anything else is refused with
+     * [DecisionRefusedException] and writes nothing. Once committed, the
+     * decision's audit is told the policy the write replaced, as enforced. The sheet's
+     * own changes carry none: the owner makes them on the phone.
+     *
      * @throws KeyChangedException if [keyId]'s key row is not [instance].
+     * @throws DecisionRefusedException if [decision] does not cover the change.
      * @throws Exception whatever the database threw; nothing was stored but
      *   the denial of a failed narrowing.
      */
-    suspend fun setPolicy(keyId: String, instance: Long, policy: SharingPolicyType): Boolean =
+    suspend fun setPolicy(
+        keyId: String,
+        instance: Long,
+        policy: SharingPolicyType,
+        decision: RemoteDecision? = null
+    ): Boolean =
         try {
+            var replaced: SharingPolicyType? = null
             transactor.run {
                 val row = bound(keyId, instance)
+                if (decision != null) {
+                    val stored = dao.storedPolicy(keyId) ?: throw KeyChangedException(keyId)
+                    val enforced = if (held(keyId, instance) != null) SharingPolicyType.PRIVATE else row?.enforced ?: stored
+                    replaced = enforced
+                    if (widens(enforced, policy)) {
+                        if (!decision.approved) throw DecisionRefusedException(keyId, "it needs the owner's approval")
+                        if (dao.policyRevision(keyId) != decision.revision || enforced != decision.enforced) {
+                            throw DecisionRefusedException(keyId, "the policy changed after the approval")
+                        }
+                    }
+                }
                 val clear = policy != SharingPolicyType.SELECTED_PEERS || row?.clearGrants == true ||
                     held(keyId, instance)?.clearGrants == true
                 if (clear) dao.deleteGrants(keyId)
                 if (dao.setKeyPolicy(keyId, policy) != 1) throw KeyChangedException(keyId)
                 dao.putPolicyRow(KeyPolicyEntity(keyId, instance, policy))
                 clear
-            }.also { unrecorded.computeIfPresent(keyId) { _, held -> held.takeUnless { it.instance == instance } } }
+            }.also {
+                unrecorded.computeIfPresent(keyId) { _, held -> held.takeUnless { it.instance == instance } }
+                replaced?.let { old -> decision?.audit?.invoke(old) }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: KeyChangedException) {
+            throw e
+        } catch (e: DecisionRefusedException) {
             throw e
         } catch (e: Exception) {
             if (policy != SharingPolicyType.ALL_PEERS) owe(keyId, instance, policy, e)
@@ -268,8 +329,8 @@ class KeyPolicyStore(
      * serialisation every generation takes: material is deleted only for
      * the key row [instance] whose rows were just deleted (#193 r8).
      */
-    suspend fun deleteKey(keyId: String, instance: Long, material: suspend () -> Unit = {}): Boolean =
-        withKeyMaterial(keyId) {
+    suspend fun deleteKey(keyId: String, instance: Long, material: MaterialDelete = { true }): Boolean =
+        withKeyMaterial(keyId) { held ->
             val deleted = transactor.run {
                 if (dao.keyInstance(keyId) != instance) return@run false
                 // The tombstone, in the row delete's transaction: the material
@@ -278,7 +339,7 @@ class KeyPolicyStore(
                 dao.deleteGrants(keyId)
                 dao.deleteKey(keyId) > 0
             }
-            if (deleted) deleteMaterialOf(keyId, instance, material)
+            if (deleted) deleteMaterialOf(held, instance, material)
             deleted
         }
 
@@ -289,31 +350,35 @@ class KeyPolicyStore(
      * A tombstone is written first, so a failed delete is replayed. Returns
      * whether [material] was attempted.
      */
-    suspend fun deleteMaterial(keyId: String, material: suspend () -> Unit): Boolean =
-        withKeyMaterial(keyId) {
+    suspend fun deleteMaterial(keyId: String, material: MaterialDelete): Boolean =
+        withKeyMaterial(keyId) { held ->
             val absent = transactor.run {
                 if (dao.keyInstance(keyId) != null) return@run false
                 dao.putDeletion(KeyDeletionEntity(keyId, NO_ROW, dao.deletion(keyId)?.source))
                 true
             }
-            if (absent) deleteMaterialOf(keyId, NO_ROW, material)
+            if (absent) deleteMaterialOf(held, NO_ROW, material)
             absent
         }
 
     /**
-     * Runs [material] for the tombstone of [keyId]'s key row [instance],
-     * dropping it once [material] returns. A [material] that throws keeps
+     * Runs [material] for the tombstone of [held]'s key row [instance], the
+     * one place a tombstone is dropped after a material delete: only once
+     * [material] confirms every backend holds none of the key's material
+     * (#193 r10). A [material] that throws or reports material left keeps
      * the tombstone: [replayDeletions] deletes the material later.
      */
-    private suspend fun deleteMaterialOf(keyId: String, instance: Long, material: suspend () -> Unit) {
-        try {
-            material()
+    private suspend fun deleteMaterialOf(held: KeyMaterialHeld, instance: Long, material: MaterialDelete) {
+        val keyId = held.keyId
+        val removed = try {
+            material(held)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // Kept for the replay: the tombstone is the material's record.
-            return
+            false
         }
+        // Kept for the replay: the tombstone is the material's record.
+        if (!removed) return
         try {
             dao.dropDeletion(keyId, instance)
         } catch (e: CancellationException) {
@@ -335,12 +400,12 @@ class KeyPolicyStore(
      * dropped. [deleter] gets the tombstone's `source`. A tombstone whose
      * [deleter] throws stays for the next replay. Returns how many are left.
      */
-    suspend fun replayDeletions(deleter: suspend (KeyMaterialHeld, String?) -> Unit): Int {
+    suspend fun replayDeletions(deleter: suspend (KeyMaterialHeld, String?) -> Boolean): Int {
         var left = 0
         for (tombstone in dao.deletions()) {
             withKeyMaterial(tombstone.keyId) { held ->
                 if (dao.keyInstance(tombstone.keyId) == null) {
-                    deleteMaterialOf(tombstone.keyId, tombstone.keyInstance) { deleter(held, tombstone.source) }
+                    deleteMaterialOf(held, tombstone.keyInstance) { deleter(it, tombstone.source) }
                 } else {
                     dao.dropDeletion(tombstone.keyId, tombstone.keyInstance)
                 }
@@ -382,6 +447,16 @@ class KeyPolicyStore(
     suspend fun enforcedPolicy(key: KeyEntity): SharingPolicyType =
         if (held(key.keyId, key.id) != null) SharingPolicyType.PRIVATE
         else dao.policyRow(key.keyId)?.takeIf { it.keyInstance == key.id }?.enforced ?: key.sharingPolicy
+
+    /** [policy] lets more peers use the key than [from] does. */
+    private fun widens(from: SharingPolicyType, policy: SharingPolicyType): Boolean = reach(policy) > reach(from)
+
+    /** How many peers [policy] lets use the key, in order: none, the selected ones, every one. */
+    private fun reach(policy: SharingPolicyType): Int = when (policy) {
+        SharingPolicyType.PRIVATE -> 0
+        SharingPolicyType.SELECTED_PEERS -> 1
+        SharingPolicyType.ALL_PEERS -> 2
+    }
 
     /** [keyId]'s policy row, after checking its key row is [instance]. */
     private suspend fun bound(keyId: String, instance: Long): KeyPolicyEntity? {

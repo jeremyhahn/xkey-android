@@ -120,14 +120,26 @@ class ApprovalPromptFlowTest {
 
         val keyDao = mockk<KeyDao>(relaxed = true)
         coEvery { keyDao.getByKeyId(keyId) } answers { key() }
-        coEvery { keyDao.compareAndSetSharingPolicy(1L, keyId, any(), any(), any()) } answers {
-            if (thirdArg<Long>() == storedRevision && arg<SharingPolicyType>(3) == stored) {
-                stored = arg(4)
-                storedRevision++
-                1
-            } else {
-                0
-            }
+        // The policy store (#193) over the same stored row.
+        val policyDao = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true)
+        coEvery { policyDao.keyInstance(keyId) } returns 1L
+        coEvery { policyDao.storedPolicy(keyId) } answers { stored }
+        coEvery { policyDao.policyRevision(keyId) } answers { storedRevision }
+        coEvery { policyDao.policyRow(keyId) } returns null
+        coEvery { policyDao.setKeyPolicy(keyId, any()) } answers {
+            stored = secondArg()
+            storedRevision++
+            1
+        }
+        mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any()) } answers {
+            com.automatethethings.xkey.storage.KeyPolicyStore(
+                policyDao,
+                object : com.automatethethings.xkey.storage.KeyPolicyStore.Transactor {
+                    override suspend fun <T> run(block: suspend () -> T): T = block()
+                },
+                java.util.concurrent.ConcurrentHashMap()
+            )
         }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
