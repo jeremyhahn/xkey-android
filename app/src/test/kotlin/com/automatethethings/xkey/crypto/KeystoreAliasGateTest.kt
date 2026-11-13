@@ -121,6 +121,19 @@ class KeystoreAliasGateTest {
     }
 
     @Test
+    fun `a block that throws leaves no entry and frees the gate`() {
+        val alias = "throws-${UUID.randomUUID()}"
+        val before = KeystoreManager.aliasGateCount()
+        val thrown = runCatching { KeystoreManager.withAliasGate(alias) { error("boom") } }
+        assertTrue(thrown.isFailure)
+        assertEquals(before, KeystoreManager.aliasGateCount())
+        val other = Thread { KeystoreManager.withAliasGate(alias) { } }
+        other.start()
+        other.join(10_000)
+        assertTrue(!other.isAlive)
+    }
+
+    @Test
     fun `the gate is reentrant for its holder`() {
         val alias = "reentrant-${UUID.randomUUID()}"
         val before = KeystoreManager.aliasGateCount()

@@ -60,7 +60,9 @@ checks, in this order:
    signs with the same alias. `signApproved` checks, reads and signs while
    holding `KeystoreManager.withAliasGate` for the alias, and every keystore
    delete and key generation under an alias takes the same gate, so a key
-   cannot be replaced between the check and the signature.
+   cannot be replaced between the check and the signature. The gate registry
+   is reference-counted: an alias keeps an entry only while a thread holds or
+   waits on its lock, so per-file and caller-named aliases do not accumulate.
 
 The success result is unchanged: `signature` (base64), `keyFingerprint`,
 `algorithm` and `signerName`.

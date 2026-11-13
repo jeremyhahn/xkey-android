@@ -2100,18 +2100,54 @@ class KeystoreManager(private val context: Context) {
         /** The JCA algorithm passkey assertions sign their hash with. */
         const val PASSKEY_SIGNATURE_ALGORITHM = "SHA256withECDSA"
 
-        /** One monitor per Keystore alias, shared by every instance in the process. */
-        private val aliasGates = java.util.concurrent.ConcurrentHashMap<String, Any>()
+        /**
+         * The lock for one Keystore alias and how many threads hold it or
+         * wait on it. [users] changes only inside the registry's per-key
+         * `compute`, so an entry is dropped exactly when its last user leaves.
+         */
+        private class AliasGate {
+            val lock = java.util.concurrent.locks.ReentrantLock()
+            var users = 0
+        }
+
+        /**
+         * One gate per Keystore alias, shared by every instance in the
+         * process. An alias has an entry only while some thread holds or
+         * waits on its gate, so churned aliases leave nothing behind.
+         */
+        private val aliasGates = java.util.concurrent.ConcurrentHashMap<String, AliasGate>()
 
         /**
          * Runs [block] holding the process-wide gate for Keystore [alias].
          * [signApproved] checks and signs inside it, and every delete or key
          * generation under an alias takes it, so a key cannot be replaced
          * between an approved-key check and its signature. [block] cannot
-         * suspend: the gate is a monitor.
+         * suspend: the gate is a thread lock.
+         *
+         * A caller joins the alias's entry before it waits on the lock and
+         * leaves it after it unlocks, both inside the registry's atomic
+         * per-key `compute`. Two concurrent users of one alias therefore
+         * always share one lock, and the entry goes once neither needs it.
          */
-        fun <T> withAliasGate(alias: String, block: () -> T): T =
-            synchronized(aliasGates.computeIfAbsent(alias) { Any() }) { block() }
+        fun <T> withAliasGate(alias: String, block: () -> T): T {
+            val gate = aliasGates.compute(alias) { _, existing ->
+                (existing ?: AliasGate()).also { it.users++ }
+            }!!
+            try {
+                gate.lock.lock()
+                try {
+                    return block()
+                } finally {
+                    gate.lock.unlock()
+                }
+            } finally {
+                aliasGates.compute(alias) { _, existing ->
+                    check(existing === gate) { "alias gate for $alias replaced while in use" }
+                    gate.users--
+                    if (gate.users == 0) null else gate
+                }
+            }
+        }
 
         /** How many aliases the gate registry holds an entry for. */
         @androidx.annotation.VisibleForTesting
