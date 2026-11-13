@@ -24,6 +24,7 @@ import android.os.Looper
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
+import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.PendingAuthentications
 import com.automatethethings.xkey.auth.PendingCryptoSignatures
 import com.automatethethings.xkey.auth.PromptOwnership
@@ -45,6 +46,7 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.runs
 import io.mockk.unmockkAll
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -63,6 +65,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -334,6 +337,42 @@ class ApprovalPromptFlowTest {
         assertEquals(SharingPolicyType.ALL_PEERS, stored)
         assertEquals(listOf(id to true), results())
         assertNull("the answered request's notification is gone", notificationFor(id))
+    }
+
+    @Test
+    fun `a wake-only prompt from a second connection waits for the approval on screen`() = runTest {
+        val approval = shareWithAllPeers()
+        runCurrent()
+        val prompt = directStart()
+        val id = prompt.requestId()!!
+
+        // local.verifyUser's prompt on another connection, as its handler raises it.
+        val wakeKey = NotificationKeys.wakeOnly("verifyUser")
+        val answered = CompletableDeferred<Unit>()
+        val verifyUser = async {
+            PromptOwnership.process.turn(wakeKey) {
+                BiometricNotificationHelper(app).showBiometricRequiredNotification("verifyUser", null, wakeKey)
+                answered.await()
+            }
+        }
+        runCurrent()
+
+        assertNull("no wake notification while the approval holds the screen", notificationFor(wakeKey))
+        val wakeStart = TransparentBiometricActivity.createIntent(app, wakeKey, showOnLockScreen = true)
+        assertNull("a wake-only start before its turn shows no prompt", open(wakeStart).get().promptCallback)
+        assertThrows(IllegalStateException::class.java) {
+            BiometricNotificationHelper(app).showBiometricRequiredNotification("verifyUser", null, wakeKey)
+        }
+
+        open(prompt).approve()
+        settle()
+        assertUpdated(approval.await())
+        assertEquals(listOf(id to true), results())
+
+        assertNotNull("the wake notification comes on its turn", notificationFor(wakeKey))
+        assertNotNull("its prompt shows on its turn", open(tapNotification(wakeKey)).get().promptCallback)
+        answered.complete(Unit)
+        verifyUser.await()
     }
 
     @Test

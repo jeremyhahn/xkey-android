@@ -239,4 +239,70 @@ class PromptOwnershipTest {
         owner.settle("a", Outcome.APPROVED, Event.ACTIVITY_RESULT)
         enqueue("a")
     }
+
+    // -----------------------------------------------------------------
+    // turn: prompts raised outside a launcher (wake-only notifications)
+    // -----------------------------------------------------------------
+
+    @Test
+    fun aTurnRunsItsPromptOnlyOnceTheActiveApprovalSettles() = runTest {
+        enqueue("approval-1")
+        val raised = mutableListOf<String>()
+
+        val wake = async { owner.turn("wake-verifyUser-1") { raised += "wake-verifyUser-1"; "signed" } }
+        runCurrent()
+
+        assertEquals(emptyList<String>(), raised)
+        assertEquals(State.QUEUED, owner.state("wake-verifyUser-1"))
+
+        owner.settle("approval-1", Outcome.APPROVED)
+        assertEquals("signed", wake.await())
+        assertEquals(listOf("wake-verifyUser-1"), raised)
+        assertEquals(State.SETTLED, owner.state("wake-verifyUser-1"))
+        assertEquals(0, owner.entries)
+    }
+
+    @Test
+    fun aTurnHoldsTheScreenWhileItsPromptIsUp() = runTest {
+        val turn = async {
+            owner.turn("wake-sign-1") {
+                assertEquals(State.ACTIVE, owner.state("wake-sign-1"))
+                enqueue("approval-2")
+                assertEquals(State.QUEUED, owner.state("approval-2"))
+            }
+        }
+        turn.await()
+
+        assertEquals(State.ACTIVE, owner.state("approval-2"))
+        assertEquals(listOf("approval-2"), activated)
+    }
+
+    @Test
+    fun aTurnWhoseDeadlinePassesRaisesNothingAndLeavesTheQueue() = runTest {
+        enqueue("approval-1")
+        var raised = false
+
+        val result = owner.turn("wake-sign-2", queueDeadlineMillis = 1_000L) { raised = true }
+
+        assertNull(result)
+        assertFalse(raised)
+        assertEquals(Outcome.EXPIRED, owner.outcome("wake-sign-2"))
+        assertEquals(1, owner.entries)
+    }
+
+    @Test
+    fun aFailingOrCancelledTurnHandsTheScreenOn() = runTest {
+        val failed = runCatching { owner.turn("wake-sign-3") { error("prompt failed") } }
+        assertTrue(failed.isFailure)
+        assertEquals(Outcome.FAILED, owner.outcome("wake-sign-3"))
+
+        enqueue("approval-1")
+        val queued = async { owner.turn("wake-sign-4") { } }
+        runCurrent()
+        queued.cancel()
+        runCurrent()
+
+        assertEquals(Outcome.WITHDRAWN, owner.outcome("wake-sign-4"))
+        assertEquals(1, owner.entries)
+    }
 }
