@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2025 Jeremy Hahn
+  Copyright (c) 2025 Automate The Things, LLC
+
+  This file is part of xKey.
+
+  xKey is dual-licensed:
+
+  1. GNU Affero General Public License v3.0 (AGPL-3.0)
+     See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+
+  2. Commercial License
+     Contact licensing@automatethethings.com for commercial licensing options.
+-->
+<!-- One row of the desktop keys list: a backend or a key. -->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minHeight="64dp"
+    android:gravity="center_vertical"
+    android:orientation="vertical"
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="12dp">
+
+    <TextView
+        android:id="@+id/textDesktopKeyTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:textColor="?attr/colorOnSurface"
+        tools:text="tpm2" />
+
+    <TextView
+        android:id="@+id/textDesktopKeySubtitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textAppearance="?attr/textAppearanceBodySmall"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        tools:text="tpm2 · hardware" />
+
+</LinearLayout>
