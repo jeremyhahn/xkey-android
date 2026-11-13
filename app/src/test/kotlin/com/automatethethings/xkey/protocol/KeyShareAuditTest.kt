@@ -370,8 +370,144 @@ class KeyShareAuditTest {
     }
 
     // -----------------------------------------------------------------
+    // Key use records name the caller too: sign, decrypt, encrypt
+    // -----------------------------------------------------------------
+
+    @Test
+    fun aSigningRecordNamesTheCallerNotTheLastPairedPeer() = runTest {
+        handler.setConnectedDevicePublicKeyHex(USB_PEER)
+        every { keystoreManager.generalKeyExists(KEY_ID) } returns true
+        coEvery { keystoreManager.signWithAlgorithm(KEY_ID, any(), any()) } returns ByteArray(64)
+
+        success(served(keyUse(MethodNames.LOCAL_SIGN, "data", "userVerificationRequired" to false, "algorithm" to "ES256"), peer = PEER))
+
+        assertNamesCaller(single(AuditOperationType.SIGNING_REQUEST))
+    }
+
+    @Test
+    fun anRsaDecryptionRecordNamesTheCallerNotTheLastPairedPeer() = runTest {
+        handler.setConnectedDevicePublicKeyHex(USB_PEER)
+
+        coEvery { keystoreManager.rsaDecrypt(KEY_ID, any()) } returns ByteArray(16)
+
+        success(served(keyUse(MethodNames.LOCAL_DECRYPT, "ciphertext"), peer = PEER))
+
+        assertNamesCaller(single(AuditOperationType.DECRYPTION_REQUEST))
+    }
+
+    @Test
+    fun anEncryptionRecordNamesTheCallerNotTheLastPairedPeer() = runTest {
+        handler.setConnectedDevicePublicKeyHex(USB_PEER)
+
+        coEvery { keystoreManager.symmetricEncrypt(KEY_ID, any(), any()) } returns ByteArray(16)
+
+        success(served(keyUse(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, "plaintext"), peer = PEER))
+
+        assertNamesCaller(single(AuditOperationType.ENCRYPTION_REQUEST))
+    }
+
+    @Test
+    fun aSymmetricDecryptionRecordNamesTheCallerNotTheLastPairedPeer() = runTest {
+        handler.setConnectedDevicePublicKeyHex(USB_PEER)
+
+        coEvery { keystoreManager.symmetricDecrypt(KEY_ID, any(), any()) } returns ByteArray(16)
+
+        success(served(keyUse(MethodNames.LOCAL_SYMMETRIC_DECRYPT, "ciphertext"), peer = PEER))
+
+        assertNamesCaller(single(AuditOperationType.DECRYPTION_REQUEST))
+    }
+
+    /**
+     * Every handler function that writes an audit record, and the share
+     * gate, takes the peer from the request's own connection: none reads the
+     * handler-wide peer, and every `deviceId` it records is the caller peer
+     * ([RequestHandler]'s `callerPeerPublicKeyHex`, directly or through
+     * `requireConfirmedPeer`). A new audit call that reads the global peer
+     * fails here before it can record the wrong desktop.
+     */
+    @Test
+    fun noAuditPathReadsTheHandlerWidePeer() {
+        // Comments dropped, then one chunk per class member, so a KDoc or a
+        // property never counts against its neighbour.
+        val source = handlerSource()
+            .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("//[^\n]*"), "")
+        val members = source.split(Regex(
+            "\n(?=    (?:@\\w+\\s+)?(?:(?:private|internal|public|override|const|lateinit) )*" +
+                "(?:suspend )?(?:fun|val|var|class|object) )"
+        ))
+        val memberFun = Regex("^\\s*(?:@\\w+\\s+)?(?:(?:private|internal|public|override) )*(?:suspend )?fun (\\w+)")
+        fun nameOf(chunk: String) = memberFun.find(chunk)?.groupValues?.get(1)
+        val functions = members.filter { nameOf(it) != null }
+        val auditing = functions.filter { "AuditLogger.log" in it || nameOf(it) == "requireConfirmedPeer" }
+        assertTrue("audit paths found: ${auditing.size}", auditing.size >= 8)
+        val allowedPeers = setOf("callerPeer", "peerPublicKeyHex", "null")
+        for (fn in auditing) {
+            val name = nameOf(fn)
+            assertFalse("$name reads the handler-wide peer", "connectedDevicePublicKeyHex" in fn)
+            Regex("deviceId = ([\\w.]+)").findAll(fn).forEach {
+                assertTrue("$name records deviceId = ${it.groupValues[1]}", it.groupValues[1] in allowedPeers)
+            }
+            if (Regex("deviceId = peerPublicKeyHex").containsMatchIn(fn)) {
+                assertTrue(
+                    "$name takes its peer from requireConfirmedPeer",
+                    Regex("val peerPublicKeyHex = requireConfirmedPeer\\(").containsMatchIn(fn)
+                )
+            }
+            if (Regex("deviceId = callerPeer\\b").containsMatchIn(fn)) {
+                assertTrue(
+                    "$name takes its peer from callerPeerPublicKeyHex",
+                    "val callerPeer = callerPeerPublicKeyHex()" in fn
+                )
+            }
+        }
+        // Beyond the audit paths: no sharing decision reads it either. Only
+        // its own setters and getter, and the attestation policy's
+        // no-session fallback, may touch the handler-wide peer.
+        val readers = functions
+            .filter { "connectedDevicePublicKeyHex" in it }
+            .mapNotNull { nameOf(it) }
+            .toSet()
+        assertEquals(
+            setOf(
+                "setSessionId",
+                "setConnectedDevicePublicKeyHex",
+                "getConnectedDevicePublicKeyHex",
+                "attestingPeerPublicKeyHex"
+            ),
+            readers
+        )
+        val gate = auditing.single { nameOf(it) == "requireConfirmedPeer" }
+        assertTrue("requireConfirmedPeer reads the caller session", "callerPeerPublicKeyHex()" in gate)
+        val choke = functions.single { nameOf(it) == "callerPeerPublicKeyHex" }
+        assertTrue("the choke point reads the CallerSession", "[CallerSession]" in choke)
+        assertFalse("the choke point reads the handler-wide peer", "connectedDevicePublicKeyHex" in choke)
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
+
+    private fun handlerSource(): String {
+        val rel = "src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt"
+        val file = listOf(java.io.File(rel), java.io.File("app/$rel")).first { it.isFile }
+        return file.readText()
+    }
+
+    private fun keyUse(method: String, payloadField: String, vararg extra: Pair<String, Any>): ByteArray =
+        Request(
+            id = 4,
+            method = method,
+            params = JSONObject()
+                .put("keyId", KEY_ID)
+                .put(payloadField, Base64.getEncoder().encodeToString("payload".toByteArray()))
+                .apply { extra.forEach { (k, v) -> put(k, v) } }
+        ).toJson()
+
+    private fun assertNamesCaller(entry: AuditLogEntity) {
+        assertEquals("entry names the caller: $entry", PEER, entry.deviceId)
+        assertEquals("entry names the caller: $entry", PEER_NAME, entry.deviceName)
+    }
 
     /** Handles [request] as one arriving on a served connection whose peer is [peer]. */
     private suspend fun served(request: ByteArray, peer: String? = PEER): ByteArray =
