@@ -1912,37 +1912,47 @@ class RequestHandler(
         val keyType = key?.keyType ?: "unknown"
 
         val startTime = System.currentTimeMillis()
-        val certChain = keystoreManager.getKeyAttestationWithChallenge(
-            attestParams.keyId, attestParams.getNonceBytes()
-        )
-        if (certChain == null) {
-            val message = "Attestation not available for key: ${attestParams.keyId}"
+        // Every attempt from here on records exactly one KEY_ATTESTED entry,
+        // whether the keystore returns no chain, throws (API 28+ reports
+        // failures as AttestationException), or the chain cannot be read.
+        var recorded = false
+        fun recordAttestation(success: Boolean, securityLevel: String? = null, errorMessage: String? = null) {
+            recorded = true
             AuditLogger.logKeyAttested(
                 keyId = attestParams.keyId,
                 keyLabel = keyLabel,
                 keyType = keyType,
-                success = false,
-                errorMessage = message,
+                securityLevel = securityLevel,
+                success = success,
+                errorMessage = errorMessage,
                 durationMs = System.currentTimeMillis() - startTime
             )
-            throw ProtocolException(message, errorCode = ErrorCodes.ATTESTATION_FAILED)
         }
 
-        val certsBase64 = certChain.map { cert ->
-            Base64.getEncoder().encodeToString(cert.encoded)
+        val certsBase64: List<String>
+        val securityLevel: String
+        try {
+            val certChain = keystoreManager.getKeyAttestationWithChallenge(
+                attestParams.keyId, attestParams.getNonceBytes()
+            )
+            if (certChain == null) {
+                val message = "Attestation not available for key: ${attestParams.keyId}"
+                recordAttestation(success = false, errorMessage = message)
+                throw ProtocolException(message, errorCode = ErrorCodes.ATTESTATION_FAILED)
+            }
+
+            certsBase64 = certChain.map { cert ->
+                Base64.getEncoder().encodeToString(cert.encoded)
+            }
+
+            val leafCert = certChain[0] as java.security.cert.X509Certificate
+            securityLevel = parseAttestationSecurityLevel(leafCert)
+        } catch (e: Exception) {
+            if (!recorded) recordAttestation(success = false, errorMessage = e.message ?: e.javaClass.simpleName)
+            throw e
         }
 
-        val leafCert = certChain[0] as java.security.cert.X509Certificate
-        val securityLevel = parseAttestationSecurityLevel(leafCert)
-
-        AuditLogger.logKeyAttested(
-            keyId = attestParams.keyId,
-            keyLabel = keyLabel,
-            keyType = keyType,
-            securityLevel = securityLevel,
-            success = true,
-            durationMs = System.currentTimeMillis() - startTime
-        )
+        recordAttestation(success = true, securityLevel = securityLevel)
 
         val result = LocalAttestKeyResult(
             certificateChain = certsBase64,
