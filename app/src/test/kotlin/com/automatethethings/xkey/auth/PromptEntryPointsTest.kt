@@ -139,6 +139,37 @@ class PromptEntryPointsTest {
         }
     }
 
+    /**
+     * The approval prompt activity starts only on a queue turn: every
+     * `TransparentBiometricActivity.createIntent` in the main sources is
+     * built inside a `pendingRequests.await` launch, and that await enqueues
+     * the request with [PromptOwnership] before it launches anything. A prompt
+     * started from anywhere else (#177's co-sign kept a queue of its own) is
+     * shown beside the ACTIVE one, and the two swallow each other.
+     */
+    @Test
+    fun everyApprovalPromptActivityStartsOnAQueueTurn() {
+        val launch = Regex("""TransparentBiometricActivity\.createIntent\(""")
+        val bypasses = sourceRoot.walkTopDown().filter { it.isFile && it.extension == "kt" }.flatMap { file ->
+            val code = file.readLines().filterNot { line ->
+                line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+            }.joinToString("\n")
+            val path = file.relativeTo(sourceRoot).invariantSeparatorsPath
+            launch.findAll(code).filterNot { match ->
+                // The function the launch is written in, up to the launch
+                "pendingRequests.await" in code.substring(0, match.range.first).substringAfterLast("fun ")
+            }.map { path }
+        }.toList()
+        assertTrue("TransparentBiometricActivity started outside a PromptOwnership turn: $bypasses", bypasses.isEmpty())
+
+        val await = sourceRoot.resolve("auth/BiometricActivityLauncher.kt").readText()
+            .substringAfter("class PendingAuthentications").substringAfter("suspend fun await(")
+            .substringBefore("fun complete(")
+        val enqueued = await.indexOf("prompts.enqueue(")
+        val launched = await.indexOf("launch(id.toString())")
+        assertTrue("PendingAuthentications.await launches without a queue entry", enqueued in 0 until launched)
+    }
+
     /** What lets a queue entry go from an activity's teardown (a media player's release is not one). */
     private val releases = Regex("""PromptOwnership\.process\.(end|settle|expire)\(|controller\??\.release\(""")
 

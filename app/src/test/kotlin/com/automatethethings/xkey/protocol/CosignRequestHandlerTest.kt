@@ -14,7 +14,6 @@
  */
 package com.automatethethings.xkey.protocol
 
-import android.app.Application
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
@@ -22,10 +21,13 @@ import android.content.Context
 import android.content.Intent
 import android.os.Looper
 import android.util.Log
+import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -33,11 +35,13 @@ import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import io.mockk.Runs
+
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.slot
@@ -45,6 +49,7 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -63,15 +68,16 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 import java.util.Base64
 
 /**
  * `cosign.request` signs a peer's content hash only after the owner approves
  * it on the phone (#177). The request goes through the real
- * [RequestHandler.handleRequest], so the dispatch error mapping is exercised;
- * the database, keystore and biometric launcher are mocked.
+ * [RequestHandler.handleRequest], so the dispatch error mapping is exercised,
+ * and its prompt through a real [BiometricActivityLauncher], so it takes its
+ * turn in the one [PromptOwnership] queue with every other prompt; the
+ * database, keystore and the prompt activity ([FakeScreen]) are stand-ins.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class CosignRequestHandlerTest {
@@ -80,41 +86,7 @@ class CosignRequestHandlerTest {
     private lateinit var keystoreManager: KeystoreManager
     private lateinit var launcher: BiometricActivityLauncher
     private lateinit var context: Context
-    private lateinit var surface: FakeSurface
-    private lateinit var prompts: CosignApprovalPrompts
-
-    /**
-     * A prompt surface that records each prompt. It answers at once with
-     * [autoAnswer], or leaves the prompt open when that is null.
-     */
-    private class FakeSurface : CosignPromptSurface {
-        class Shown(
-            val requestId: String,
-            val subtitle: String,
-            val onResult: (String, CosignPromptOutcome) -> Unit
-        ) {
-            fun answer(outcome: CosignPromptOutcome) = onResult(requestId, outcome)
-        }
-
-        val shown = mutableListOf<Shown>()
-        val dismissed = mutableListOf<String>()
-        var autoAnswer: CosignPromptOutcome? = CosignPromptOutcome.Approved
-
-        override fun show(
-            requestId: String,
-            title: String,
-            subtitle: String,
-            locked: Boolean,
-            onResult: (requestId: String, outcome: CosignPromptOutcome) -> Unit
-        ) {
-            shown += Shown(requestId, subtitle, onResult)
-            autoAnswer?.let { onResult(requestId, it) }
-        }
-
-        override suspend fun dismiss(requestId: String) {
-            dismissed += requestId
-        }
-    }
+    private lateinit var screen: FakeScreen
 
     private val peerHex = "ab".repeat(32)
     private val hashHex = "0123456789abcdef".repeat(4)
@@ -146,6 +118,8 @@ class CosignRequestHandlerTest {
 
         mockkObject(AuditLogger)
         every { AuditLogger.logCoSignReceived(any(), any()) } just Runs
+        every { AuditLogger.logBiometricSuccess(any()) } just Runs
+        every { AuditLogger.logBiometricFailure(any(), any()) } just Runs
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
@@ -155,13 +129,16 @@ class CosignRequestHandlerTest {
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
 
+        mockkObject(BiometricNotificationHelper.Companion)
+        every { BiometricNotificationHelper.intentData(any()) } returns mockk(relaxed = true)
+
         keystoreManager = mockk(relaxed = true)
         coEvery { keystoreManager.signWithAlgorithm(any(), any(), any()) } returns signature
         every { keystoreManager.getPublicKeyDER(any()) } returns publicKeyDer
 
-        launcher = mockk(relaxed = true)
-        surface = FakeSurface()
-        prompts = CosignApprovalPrompts(surface, timeoutMs = PROMPT_TIMEOUT_MS)
+        // The screen first: the launcher registers its result receivers with it.
+        screen = FakeScreen()
+        launcher = BiometricActivityLauncher(context).also { it.register() }
 
         coEvery { keyDao.getByKeyId(signingKey.keyId) } returns signingKey
         coEvery { keyDao.getByKeyId(fido2Key.keyId) } returns fido2Key
@@ -170,6 +147,7 @@ class CosignRequestHandlerTest {
 
     @After
     fun tearDown() {
+        PromptOwnership.process.forgetSettled()
         Dispatchers.resetMain()
         unmockkAll()
     }
@@ -188,8 +166,7 @@ class CosignRequestHandlerTest {
             context = context,
             keystoreManager = keystoreManager,
             biometricLauncher = if (withLauncher) launcher else null,
-            sessionAuthManager = null,
-            cosignApprovalPrompts = if (withLauncher) prompts else null
+            sessionAuthManager = null
         ).also { it.setConnectedDevicePublicKeyHex(peer) }
 
     private fun request(
@@ -210,11 +187,133 @@ class CosignRequestHandlerTest {
 
     private fun assertError(code: Int, response: Response) {
         assertNull("no result on a refusal", response.result)
-        assertEquals(code, response.error?.code)
+        assertEquals(response.error?.message, code, response.error?.code)
     }
 
     private fun assertNothingSigned() {
         coVerify(exactly = 0) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+    }
+
+    /** The broadcast the prompt activity sends when the owner answers [requestId]. */
+    private fun promptResult(requestId: String, approved: Boolean): Intent {
+        val intent = mockk<Intent>()
+        every { intent.action } returns TransparentBiometricActivity.ACTION_BIOMETRIC_RESULT
+        every {
+            intent.getStringExtra(TransparentBiometricActivity.EXTRA_REQUEST_ID)
+        } returns requestId
+        every {
+            intent.getBooleanExtra(TransparentBiometricActivity.EXTRA_SUCCESS, false)
+        } returns approved
+        every {
+            intent.getIntExtra(TransparentBiometricActivity.EXTRA_ERROR_CODE, any())
+        } returns BiometricPrompt.ERROR_USER_CANCELED
+        every {
+            intent.getStringExtra(TransparentBiometricActivity.EXTRA_ERROR_MESSAGE)
+        } returns "Authentication cancelled"
+        return intent
+    }
+
+    /**
+     * The single-top prompt activity as the phone shows it, by main's rules.
+     * An activity created for a request the process owner does not hold
+     * ACTIVE, or one ended unshown, finishes without prompting (its claim);
+     * a start that reaches the visible activity replaces it only for a newer
+     * ACTIVE launcher request (its onNewIntent), and is dropped otherwise;
+     * the owner answers whatever prompt is visible.
+     *
+     * With [autoAnswer] set the owner answers each prompt as it comes up.
+     * With [deferredCreate] startActivity only queues the launch, as on the
+     * phone: the activity comes up at [createNext].
+     */
+    private inner class FakeScreen {
+        var autoAnswer: Boolean? = true
+        var deferredCreate = false
+        var visible: String? = null
+
+        /** Every prompt that came up on the screen, in order. */
+        val shown = mutableListOf<String>()
+
+        /** Every prompt started, in order, and the subtitles they were built with. */
+        val launched = mutableListOf<String>()
+        val subtitles = mutableListOf<String>()
+        val intents = mutableListOf<Intent>()
+
+        private val receivers = mutableListOf<BroadcastReceiver>()
+        private val launchIds = mutableMapOf<Intent, String>()
+        private val launching = ArrayDeque<String>()
+        private val endedUnshown = mutableSetOf<String>()
+
+        /** The started prompts whose activities are not created yet. */
+        val launchingIds: List<String> get() = launching.toList()
+
+        init {
+            mockkStatic(ContextCompat::class)
+            every {
+                ContextCompat.registerReceiver(any(), capture(receivers), any(), any<Int>())
+            } returns null
+            every { context.unregisterReceiver(any()) } answers {
+                receivers.remove(firstArg<BroadcastReceiver>())
+                Unit
+            }
+            mockkObject(TransparentBiometricActivity.Companion)
+            every {
+                TransparentBiometricActivity.createIntent(any(), any(), any(), any(), any(), any())
+            } answers {
+                subtitles += arg<String>(3)
+                mockk<Intent>(relaxed = true).also { launchIds[it] = secondArg() }
+            }
+            every { TransparentBiometricActivity.expireUnshown(any()) } answers {
+                val requestId = firstArg<String>()
+                if (requestId == visible) {
+                    false
+                } else {
+                    endedUnshown += requestId
+                    true
+                }
+            }
+            every { context.startActivity(any()) } answers {
+                val intent = firstArg<Intent>()
+                val requestId = launchIds.getValue(intent)
+                launched += requestId
+                intents += intent
+                if (deferredCreate) launching.addLast(requestId) else create(requestId)
+            }
+        }
+
+        private fun owns(requestId: String): Boolean {
+            val key = if (requestId.toLongOrNull() != null) NotificationKeys.approval(requestId) else requestId
+            return PromptOwnership.process.state(key) == PromptOwnership.State.ACTIVE
+        }
+
+        private fun create(requestId: String) {
+            val current = visible
+            if (current != null) {
+                if (!TransparentBiometricActivity.isNewer(requestId, current) || !owns(requestId)) return
+                // Replaced: it answers cancelled and a fresh instance starts
+                visible = null
+                deliver(current, approved = false)
+            }
+            if (requestId in endedUnshown || !owns(requestId)) return
+            visible = requestId
+            shown += requestId
+            autoAnswer?.let { answer(it) }
+        }
+
+        /** The oldest started prompt's activity is created. */
+        fun createNext() = create(launching.removeFirst())
+
+        /** The owner answers the visible prompt. */
+        fun answer(approved: Boolean) {
+            val requestId = checkNotNull(visible) { "no prompt is visible" }
+            visible = null
+            deliver(requestId, approved)
+        }
+
+        /** A result broadcast for [requestId], whether or not its prompt is up. */
+        fun deliver(requestId: String, approved: Boolean) {
+            val result = promptResult(requestId, approved)
+            receivers.toList().forEach { it.onReceive(context, result) }
+        }
     }
 
     @Test
@@ -228,7 +327,7 @@ class CosignRequestHandlerTest {
         assertEquals("ES256", result.getString("algorithm"))
         assertEquals(signingKey.keyId, result.getString("signerName"))
         assertTrue(result.getString("keyFingerprint").isNotEmpty())
-        val subtitle = surface.shown.single().subtitle
+        val subtitle = screen.subtitles.single()
         assertTrue(
             "the prompt names the hash: $subtitle",
             subtitle.contains(hashHex.take(8))
@@ -240,7 +339,7 @@ class CosignRequestHandlerTest {
 
     @Test
     fun `a cancelled prompt answers BIOMETRIC_FAILED and signs nothing`() = runTest {
-        surface.autoAnswer = CosignPromptOutcome.Refused("Authentication cancelled")
+        screen.autoAnswer = false
 
         assertError(ErrorCodes.BIOMETRIC_FAILED, handler().handleRequest(request()))
         assertNothingSigned()
@@ -259,7 +358,7 @@ class CosignRequestHandlerTest {
     fun `no confirmed peer answers OPERATION_DENIED`() = runTest {
         assertError(ErrorCodes.OPERATION_DENIED, handler(peer = null).handleRequest(request()))
         assertNothingSigned()
-        assertTrue("no prompt for a refused peer", surface.shown.isEmpty())
+        assertTrue("no prompt for a refused peer", screen.launched.isEmpty())
     }
 
     @Test
@@ -328,8 +427,7 @@ class CosignRequestHandlerTest {
             keystoreManager = keystoreManager,
             biometricLauncher = launcher,
             sessionAuthManager = null,
-            pairedDeviceRepository = repo,
-            cosignApprovalPrompts = prompts
+            pairedDeviceRepository = repo
         )
     }
 
@@ -367,7 +465,7 @@ class CosignRequestHandlerTest {
             handler.onConnection(strangerHex, request())
         )
         assertNothingSigned()
-        assertTrue("no prompt for a refused peer", surface.shown.isEmpty())
+        assertTrue("no prompt for a refused peer", screen.launched.isEmpty())
     }
 
     @Test
@@ -379,301 +477,44 @@ class CosignRequestHandlerTest {
         assertNothingSigned()
     }
 
-    // r3: one prompt at a time, each settled only by its own answer.
+    // One prompt at a time, each settled only by its own answer.
 
     @Test
     fun `a second co-sign waits for the first prompt, then gets its own`() = runTest {
-        surface.autoAnswer = null
+        screen.autoAnswer = null
         val handler = handler()
         val first = async { handler.handleRequest(request(id = 1L)) }
         val second = async { handler.handleRequest(request(id = 2L)) }
         runCurrent()
-        assertEquals("the second waits while the first prompt is up", 1, surface.shown.size)
+        assertEquals("the second waits while the first prompt is up", 1, screen.launched.size)
+        val firstPrompt = checkNotNull(screen.visible)
 
-        surface.shown[0].answer(CosignPromptOutcome.Approved)
+        screen.answer(approved = true)
         runCurrent()
-        assertEquals("the second gets its own prompt", 2, surface.shown.size)
-        assertNotEquals(surface.shown[0].requestId, surface.shown[1].requestId)
+        assertEquals("the second gets its own prompt", 2, screen.shown.size)
+        assertNotEquals(firstPrompt, screen.visible)
 
         // A late answer to the first prompt settles nothing.
-        surface.shown[0].answer(CosignPromptOutcome.Approved)
+        screen.deliver(firstPrompt, approved = true)
         runCurrent()
         assertTrue("the second still waits for its own answer", second.isActive)
 
-        surface.shown[1].answer(CosignPromptOutcome.Refused("Authentication cancelled"))
+        screen.answer(approved = false)
         assertNull(first.await().error)
         assertEquals(1L, first.await().id)
         assertError(ErrorCodes.BIOMETRIC_FAILED, second.await())
-        assertEquals(2L, second.await().id)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
-        assertEquals(surface.shown.map { it.requestId }, surface.dismissed)
-    }
-
-    @Test
-    fun `a prompt that never settles fails at its timeout and releases the next`() = runTest {
-        surface.autoAnswer = null
-        val handler = handler()
-        val first = async { handler.handleRequest(request(id = 1L)) }
-        val second = async { handler.handleRequest(request(id = 2L)) }
-        runCurrent()
-
-        advanceTimeBy(PROMPT_TIMEOUT_MS + 1)
-        runCurrent()
-        assertError(ErrorCodes.BIOMETRIC_FAILED, first.await())
-        assertEquals(listOf(surface.shown[0].requestId), surface.dismissed)
-        assertEquals("the timeout releases the next prompt", 2, surface.shown.size)
-
-        surface.shown[1].answer(CosignPromptOutcome.Approved)
-        assertNull(second.await().error)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
-    }
-
-    @Test
-    fun `a cancelled caller takes its prompt down and releases the next`() = runTest {
-        surface.autoAnswer = null
-        val handler = handler()
-        val first = async { handler.handleRequest(request(id = 1L)) }
-        val second = async { handler.handleRequest(request(id = 2L)) }
-        runCurrent()
-
-        first.cancel()
-        runCurrent()
-        assertEquals(listOf(surface.shown[0].requestId), surface.dismissed)
-        assertEquals(2, surface.shown.size)
-
-        surface.shown[1].answer(CosignPromptOutcome.Approved)
-        assertNull(second.await().error)
-    }
-
-    private val promptIntent = mockk<Intent>(relaxed = true)
-    private val resultReceiver = slot<BroadcastReceiver>()
-    private val launchedId = slot<String>()
-    private val notifiedId = slot<String>()
-    private val notifiedIntents = mutableListOf<Intent?>()
-    private val notificationHelper = mockk<BiometricNotificationHelper>(relaxed = true)
-
-    /** A handler on a locked phone whose prompts go through the real activity surface. */
-    private fun lockedPhoneHandler(): RequestHandler {
-        val keyguard = mockk<KeyguardManager>()
-        every { keyguard.isKeyguardLocked } returns true
-        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns keyguard
-
-        mockkStatic(ContextCompat::class)
-        every {
-            ContextCompat.registerReceiver(any(), capture(resultReceiver), any(), any<Int>())
-        } returns null
-        mockkObject(TransparentBiometricActivity.Companion)
-        every {
-            TransparentBiometricActivity.createIntent(
-                any(), capture(launchedId), any(), any(), any(), any()
-            )
-        } returns promptIntent
-        every {
-            notificationHelper.showBiometricRequiredNotification(
-                any(), any(), capture(notifiedId), any(), any(), captureNullable(notifiedIntents)
-            )
-        } just Runs
-
-        return RequestHandler(
-            context = context,
-            keystoreManager = keystoreManager,
-            biometricLauncher = launcher,
-            sessionAuthManager = null,
-            cosignApprovalPrompts = CosignApprovalPrompts(
-                ActivityCosignPromptSurface(context, notificationHelper),
-                timeoutMs = PROMPT_TIMEOUT_MS
-            )
-        ).also { it.setConnectedDevicePublicKeyHex(peerHex) }
-    }
-
-    /** The broadcast the prompt activity sends when the owner answers [requestId]. */
-    private fun promptResult(requestId: String, approved: Boolean): Intent {
-        val intent = mockk<Intent>()
-        every { intent.action } returns TransparentBiometricActivity.ACTION_BIOMETRIC_RESULT
-        every {
-            intent.getStringExtra(TransparentBiometricActivity.EXTRA_REQUEST_ID)
-        } returns requestId
-        every {
-            intent.getBooleanExtra(TransparentBiometricActivity.EXTRA_SUCCESS, false)
-        } returns approved
-        every {
-            intent.getStringExtra(TransparentBiometricActivity.EXTRA_ERROR_MESSAGE)
-        } returns "Authentication cancelled"
-        return intent
-    }
-
-    @Test
-    fun `the lock-screen notification opens the co-sign's own prompt`() = runTest {
-        val response = async { lockedPhoneHandler().handleRequest(request()) }
-        runCurrent()
-
-        assertEquals("one request id for both launches", launchedId.captured, notifiedId.captured)
-        assertSame("the notification carries the prompt's intent", promptIntent, notifiedIntents.single())
-        verify { context.startActivity(promptIntent) }
-
-        // An answer to another prompt (the launcher's numeric ids) settles nothing.
-        resultReceiver.captured.onReceive(context, promptResult("1", approved = true))
-        runCurrent()
-        assertTrue(response.isActive)
-
-        // The owner approves the prompt the notification opened.
-        resultReceiver.captured.onReceive(context, promptResult(notifiedId.captured, approved = true))
-        assertNull(response.await().error)
-        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256") }
-        verify { context.unregisterReceiver(resultReceiver.captured) }
-        verify { notificationHelper.cancelNotification(notifiedId.captured) }
-    }
-
-    @Test
-    fun `cancelling the lock-screen prompt answers BIOMETRIC_FAILED`() = runTest {
-        val response = async { lockedPhoneHandler().handleRequest(request()) }
-        runCurrent()
-
-        resultReceiver.captured.onReceive(context, promptResult(notifiedId.captured, approved = false))
-        assertError(ErrorCodes.BIOMETRIC_FAILED, response.await())
-        assertNothingSigned()
-    }
-
-    // r4: a co-sign's prompt is gone before the next one launches.
-
-    /**
-     * The single-top prompt activity as the phone shows it. A launch over a
-     * visible prompt is dropped (the activity reads its request only when
-     * created), a cancel finishes it only for its own request id, and the
-     * owner answers whatever prompt is visible.
-     *
-     * With [delayedCreation], startActivity only queues the launch, as on the
-     * phone: the activity comes up at [createNext], after the application's
-     * lifecycle callbacks see it, and only then registers its cancel receiver.
-     * A cancel sent before that reaches nothing.
-     */
-    private inner class FakeScreen(private val delayedCreation: Boolean = false) {
-        var visible: String? = null
-        val receivers = mutableListOf<BroadcastReceiver>()
-        /** Every prompt that came up on the screen, in order. */
-        val shown = mutableListOf<String>()
-        private val launchIds = mutableMapOf<Intent, String>()
-        private val cancelIds = mutableMapOf<Intent, String>()
-        private val launching = ArrayDeque<Intent>()
-        private val lifecycleCallbacks = mutableListOf<Application.ActivityLifecycleCallbacks>()
-
-        /** The launched prompts whose activities are not created yet. */
-        val launchingIds: List<String> get() = launching.map { launchIds.getValue(it) }
-
-        init {
-            mockkStatic(ContextCompat::class)
-            every {
-                ContextCompat.registerReceiver(any(), capture(receivers), any(), any<Int>())
-            } returns null
-            every { context.unregisterReceiver(any()) } answers {
-                receivers.remove(firstArg<BroadcastReceiver>())
-            }
-            mockkObject(TransparentBiometricActivity.Companion)
-            every {
-                TransparentBiometricActivity.createIntent(any(), any(), any(), any(), any(), any())
-            } answers { mockk<Intent>(relaxed = true).also { launchIds[it] = secondArg() } }
-            every { TransparentBiometricActivity.createCancelIntent(any(), any()) } answers {
-                mockk<Intent>(relaxed = true).also { cancelIds[it] = secondArg() }
-            }
-            every { context.startActivity(any()) } answers {
-                if (delayedCreation) {
-                    launching.addLast(firstArg())
-                } else {
-                    val requestId = launchIds.getValue(firstArg())
-                    if (visible == null) {
-                        visible = requestId
-                        shown += requestId
-                    }
-                }
-            }
-            every { context.sendBroadcast(any()) } answers {
-                val cancelled = cancelIds[firstArg()]
-                if (cancelled != null && cancelled == visible) finish(approved = false)
-            }
-            val application = mockk<Application>(relaxed = true)
-            every { context.applicationContext } returns application
-            every {
-                application.registerActivityLifecycleCallbacks(capture(lifecycleCallbacks))
-            } just Runs
-        }
-
-        /**
-         * The oldest queued launch's activity is created: the lifecycle
-         * callbacks see it first, then it reads its request id (none: it
-         * finishes without prompting), registers its cancel receiver and
-         * prompts, unless a visible prompt swallows the launch.
-         */
-        fun createNext() {
-            val requestIdExtra = TransparentBiometricActivity.EXTRA_REQUEST_ID
-            var requestId: String? = launchIds.getValue(launching.removeFirst())
-            val activityIntent = mockk<Intent>(relaxed = true)
-            every { activityIntent.getStringExtra(requestIdExtra) } answers { requestId }
-            every { activityIntent.removeExtra(requestIdExtra) } answers { requestId = null }
-            val activity = mockk<TransparentBiometricActivity>(relaxed = true)
-            every { activity.intent } returns activityIntent
-            lifecycleCallbacks.toList().forEach { it.onActivityCreated(activity, null) }
-
-            val created = requestId ?: return
-            if (visible == null) {
-                visible = created
-                shown += created
-            }
-        }
-
-        /** The owner answers the visible prompt. */
-        fun answer(approved: Boolean) = finish(approved)
-
-        private fun finish(approved: Boolean) {
-            val requestId = checkNotNull(visible) { "no prompt is visible" }
-            visible = null
-            val result = promptResult(requestId, approved)
-            receivers.toList().forEach { it.onReceive(context, result) }
-        }
-    }
-
-    /** A handler on an unlocked phone whose prompts go through the real activity surface. */
-    private fun activityHandler(biometricLauncher: BiometricActivityLauncher = launcher) =
-        RequestHandler(
-            context = context,
-            keystoreManager = keystoreManager,
-            biometricLauncher = biometricLauncher,
-            sessionAuthManager = null,
-            cosignApprovalPrompts = CosignApprovalPrompts(
-                ActivityCosignPromptSurface(context, notificationHelper),
-                timeoutMs = PROMPT_TIMEOUT_MS
-            )
-        ).also { it.setConnectedDevicePublicKeyHex(peerHex) }
-
-    @Test
-    fun `a cancelled caller's prompt is gone before the next co-sign shows its own`() = runTest {
-        val screen = FakeScreen()
-        val handler = activityHandler()
-        val first = async { handler.handleRequest(request(id = 1L)) }
-        val second = async { handler.handleRequest(request(id = 2L)) }
-        runCurrent()
-        val firstPrompt = screen.visible
-        assertNotNull(firstPrompt)
-
-        first.cancel()
-        runCurrent()
-        assertNotNull("the next co-sign's prompt is up", screen.visible)
-        assertNotEquals("the cancelled prompt is gone", firstPrompt, screen.visible)
-
-        screen.answer(approved = true)
-        assertNull(second.await().error)
         assertEquals(2L, second.await().id)
         coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
     }
 
     @Test
     fun `a timed-out prompt is gone before the next co-sign shows its own`() = runTest {
-        val screen = FakeScreen()
-        val handler = activityHandler()
+        screen.autoAnswer = null
+        val handler = handler()
         val first = async { handler.handleRequest(request(id = 1L)) }
         val second = async { handler.handleRequest(request(id = 2L)) }
         runCurrent()
-        val firstPrompt = screen.visible
-        assertNotNull(firstPrompt)
+        val firstPrompt = checkNotNull(screen.visible)
 
         advanceTimeBy(PROMPT_TIMEOUT_MS + 1)
         runCurrent()
@@ -687,33 +528,109 @@ class CosignRequestHandlerTest {
         coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
     }
 
-    // r5: a withdrawal is remembered until the prompt's activity comes up.
+    @Test
+    fun `a cancelled caller's prompt is gone before the next co-sign shows its own`() = runTest {
+        screen.autoAnswer = null
+        val handler = handler()
+        val first = async { handler.handleRequest(request(id = 1L)) }
+        val second = async { handler.handleRequest(request(id = 2L)) }
+        runCurrent()
+        val firstPrompt = checkNotNull(screen.visible)
+
+        first.cancel()
+        runCurrent()
+        assertNotNull("the next co-sign's prompt is up", screen.visible)
+        assertNotEquals("the cancelled prompt is gone", firstPrompt, screen.visible)
+
+        screen.answer(approved = true)
+        assertNull(second.await().error)
+        assertEquals(2L, second.await().id)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+    }
+
+    // F1: co-sign and FIDO2 prompts share the one queue, in either order.
+
+    /** The prompt local.signFido2Assertion asks for when verification is required. */
+    private fun CoroutineScope.passkeyPrompt() = async {
+        runCatching {
+            launcher.requestAuthentication("xKey Authentication", "Verify your identity to use this passkey")
+        }
+    }
 
     @Test
-    fun `a prompt cancelled before its activity comes up never shows`() = runTest {
-        val screen = FakeScreen(delayedCreation = true)
-        val handler = activityHandler()
+    fun `a FIDO2 prompt after a co-sign waits for the co-sign's to settle`() = runTest {
+        screen.autoAnswer = null
+        val cosign = async { handler().handleRequest(request(id = 1L)) }
+        runCurrent()
+        val cosignPrompt = screen.visible
+        assertNotNull("the co-sign's prompt is up", cosignPrompt)
+
+        val assertion = passkeyPrompt()
+        runCurrent()
+        assertEquals("the passkey prompt is not started over the co-sign's", listOf(cosignPrompt), screen.launched)
+
+        screen.answer(approved = true)
+        runCurrent()
+        assertNull("the co-sign settles by its own prompt", cosign.await().error)
+        val passkey = screen.visible
+        assertNotNull("the passkey prompt follows the co-sign's", passkey)
+        assertNotEquals(cosignPrompt, passkey)
+
+        screen.answer(approved = true)
+        runCurrent()
+        assertTrue("the assertion settles by its own prompt", assertion.await().isSuccess)
+    }
+
+    @Test
+    fun `a co-sign after a FIDO2 prompt waits for the FIDO2 one to settle`() = runTest {
+        screen.autoAnswer = null
+        val assertion = passkeyPrompt()
+        runCurrent()
+        val passkey = checkNotNull(screen.visible)
+
+        val cosign = async { handler().handleRequest(request(id = 1L)) }
+        runCurrent()
+        assertEquals("the co-sign's prompt is not started over the passkey's", listOf(passkey), screen.launched)
+        assertTrue(cosign.isActive)
+
+        screen.answer(approved = true)
+        runCurrent()
+        assertTrue("the assertion settles by its own prompt", assertion.await().isSuccess)
+        val cosignPrompt = screen.visible
+        assertNotNull("the co-sign's prompt follows the passkey's", cosignPrompt)
+        assertNotEquals(passkey, cosignPrompt)
+
+        screen.answer(approved = true)
+        assertNull("the co-sign settles by its own prompt", cosign.await().error)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
+    }
+
+    // F2: a withdrawal is the queue's, so an activity coming up late prompts for nothing.
+
+    @Test
+    fun `a co-sign withdrawn before its activity comes up never shows, and the next is answered`() = runTest {
+        screen.autoAnswer = null
+        screen.deferredCreate = true
+        val handler = handler()
         val first = async { handler.handleRequest(request(id = 1L)) }
         val second = async { handler.handleRequest(request(id = 2L)) }
         runCurrent()
         val firstPrompt = screen.launchingIds.single()
 
-        // The caller goes away after startActivity, before the activity has a cancel receiver.
+        // The caller goes away after startActivity, before the activity's onCreate.
         first.cancel()
         runCurrent()
-        advanceTimeBy(ACTIVITY_START_MS) // past r4's 2 s wait for the withdrawn prompt
-        runCurrent()
         assertEquals(
-            "the next co-sign waits while the cancelled prompt can still come up",
-            listOf(firstPrompt),
-            screen.launchingIds
+            "the withdrawal hands the screen straight to the next co-sign",
+            2,
+            screen.launchingIds.size
         )
+        val secondPrompt = screen.launchingIds.last()
+        assertNotEquals(firstPrompt, secondPrompt)
 
         screen.createNext()
-        runCurrent()
-        assertFalse("the cancelled prompt never shows", firstPrompt in screen.shown)
-        val secondPrompt = screen.launchingIds.single()
-        assertNotEquals(firstPrompt, secondPrompt)
+        assertFalse("the withdrawn prompt never shows", firstPrompt in screen.shown)
+        assertNull(screen.visible)
 
         screen.createNext()
         assertEquals("the next co-sign's prompt is its own", secondPrompt, screen.visible)
@@ -723,35 +640,55 @@ class CosignRequestHandlerTest {
         coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(any(), any(), any()) }
     }
 
-    @Ignore("serialized with the launcher's prompt queue in issue #178")
+    // A locked phone's notification opens the co-sign's own queued prompt.
+
+    private val notifiedKey = slot<String>()
+    private val notifiedIntents = mutableListOf<Intent?>()
+
+    /** A handler on a locked phone; its lock-screen notifications are recorded. */
+    private fun lockedPhoneHandler(): RequestHandler {
+        val keyguard = mockk<KeyguardManager>()
+        every { keyguard.isKeyguardLocked } returns true
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns keyguard
+        mockkConstructor(BiometricNotificationHelper::class)
+        every {
+            anyConstructed<BiometricNotificationHelper>().showBiometricRequiredNotification(
+                any(), any(), capture(notifiedKey), any(), any(), captureNullable(notifiedIntents)
+            )
+        } just Runs
+        every { anyConstructed<BiometricNotificationHelper>().cancelNotification(any()) } just Runs
+        return handler()
+    }
+
     @Test
-    fun `a co-sign prompt and a launcher prompt each settle by their own prompt`() = runTest {
-        val screen = FakeScreen()
-        every { AuditLogger.logBiometricSuccess(any()) } just Runs
-        val sharedLauncher = BiometricActivityLauncher(context).also { it.register() }
-        val handler = activityHandler(sharedLauncher)
-        val cosign = async { handler.handleRequest(request(id = 1L)) }
+    fun `the lock-screen notification opens the co-sign's own prompt`() = runTest {
+        screen.autoAnswer = null
+        val response = async { lockedPhoneHandler().handleRequest(request()) }
         runCurrent()
-        // The prompt local.signFido2Assertion asks for when verification is required.
-        val assertion = async {
-            runCatching { sharedLauncher.requestAuthentication("xKey", "Sign in to example.com") }
-        }
+        val prompt = checkNotNull(screen.visible)
+
+        assertEquals("one key for both launches", NotificationKeys.approval(prompt), notifiedKey.captured)
+        assertSame("the notification carries the prompt's intent", screen.intents.single(), notifiedIntents.single())
+
+        // An answer to another prompt settles nothing.
+        screen.deliver("${prompt.toLong() + 1000}", approved = true)
         runCurrent()
+        assertTrue(response.isActive)
 
         screen.answer(approved = true)
-        runCurrent()
-        assertNull("the co-sign settles by its own prompt", cosign.await().error)
-        assertNotNull("the launcher's prompt follows the co-sign's", screen.visible)
+        assertNull(response.await().error)
+        coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256") }
+        verify { anyConstructed<BiometricNotificationHelper>().cancelNotification(notifiedKey.captured) }
+    }
 
-        screen.answer(approved = true)
-        runCurrent()
-        assertTrue("the assertion settles by its own prompt", assertion.await().isSuccess)
+    @Test
+    fun `cancelling the lock-screen prompt answers BIOMETRIC_FAILED`() = runTest {
+        screen.autoAnswer = false
+        assertError(ErrorCodes.BIOMETRIC_FAILED, lockedPhoneHandler().handleRequest(request()))
+        assertNothingSigned()
     }
 
     private companion object {
         const val PROMPT_TIMEOUT_MS = 60_000L
-
-        /** A slow activity start: startActivity returned, onCreate has not run yet. */
-        const val ACTIVITY_START_MS = 5_000L
     }
 }
