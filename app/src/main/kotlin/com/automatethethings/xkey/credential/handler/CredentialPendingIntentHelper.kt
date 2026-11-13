@@ -19,6 +19,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.annotation.RequiresApi
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.credential.ui.CredentialSelectorActivity
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -44,10 +45,13 @@ object CredentialPendingIntentHelper {
         context: Context,
         requestJson: String
     ): PendingIntent {
-        val intent = Intent(context, CredentialSelectorActivity::class.java).apply {
-            action = CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL
-            putExtra(CredentialSelectorActivity.EXTRA_REQUEST_JSON, requestJson)
-        }
+        val intent = PromptOwnership.queued(
+            Intent(context, CredentialSelectorActivity::class.java).apply {
+                action = CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL
+                putExtra(CredentialSelectorActivity.EXTRA_REQUEST_JSON, requestJson)
+            },
+            "credentialSelector",
+        )
 
         return PendingIntent.getActivity(
             context,
@@ -70,11 +74,14 @@ object CredentialPendingIntentHelper {
         credentialId: String,
         requestJson: String
     ): PendingIntent {
-        val intent = Intent(context, CredentialSelectorActivity::class.java).apply {
-            action = CredentialSelectorActivity.ACTION_GET_CREDENTIAL
-            putExtra(CredentialSelectorActivity.EXTRA_CREDENTIAL_ID, credentialId)
-            putExtra(CredentialSelectorActivity.EXTRA_REQUEST_JSON, requestJson)
-        }
+        val intent = PromptOwnership.queued(
+            Intent(context, CredentialSelectorActivity::class.java).apply {
+                action = CredentialSelectorActivity.ACTION_GET_CREDENTIAL
+                putExtra(CredentialSelectorActivity.EXTRA_CREDENTIAL_ID, credentialId)
+                putExtra(CredentialSelectorActivity.EXTRA_REQUEST_JSON, requestJson)
+            },
+            "credentialSelector",
+        )
 
         return PendingIntent.getActivity(
             context,

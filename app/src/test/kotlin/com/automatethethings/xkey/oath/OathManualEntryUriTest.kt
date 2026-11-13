@@ -6,7 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * The manual-entry round trip: [manualOtpauthUri] writes the label the way
+ * The manual-entry round trip: [otpauthUri] writes the label the way
  * [parseStructuredOathLabel] reads it back, so the persisted issuer and
  * account are the values typed in (#156); an external import keeps the
  * separator split of third-party labels.
@@ -52,7 +52,7 @@ class OathManualEntryUriTest {
 
     @Test
     fun `the label uses a literal colon separator`() {
-        val uri = manualOtpauthUri("Corp:EU", "alice", "JBSWY3DPEHPK3PXP", "TOTP", "SHA1", 6, 30)
+        val uri = otpauthUri("totp", "Corp:EU", "alice", "JBSWY3DPEHPK3PXP", "SHA1", 6, 30, null)
         assertEquals("/Corp%3AEU:alice", URI(uri).rawPath)
     }
 
@@ -90,7 +90,7 @@ class OathManualEntryUriTest {
 
     /** Build the manual-entry URI, then read it back on the structured path. */
     private fun roundTrip(issuer: String?, account: String): OathLabel =
-        read(manualOtpauthUri(issuer, account, "JBSWY3DPEHPK3PXP", "TOTP", "SHA1", 6, 30), structured = true)
+        read(otpauthUri("totp", issuer, account, "JBSWY3DPEHPK3PXP", "SHA1", 6, 30, null), structured = true)
 
     /**
      * Read [uriString] as `OathRepository.importFromUri` does: the

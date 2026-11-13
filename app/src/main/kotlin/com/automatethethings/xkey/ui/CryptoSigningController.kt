@@ -16,6 +16,8 @@
 package com.automatethethings.xkey.ui
 
 import androidx.biometric.BiometricPrompt
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import java.util.Base64
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,32 +31,75 @@ import java.util.concurrent.atomic.AtomicBoolean
  * lands before its activity has come up is remembered, so the activity, when
  * it does, finishes without prompting. Request ids are never reused within a
  * process, so the record only has to outlive the launch.
+ *
+ * Each request has one owner, the first activity that registers it. The same
+ * prompt intent can be delivered again -- the lock-screen notification's
+ * full-screen intent arriving after the launcher's direct start, or a tap on
+ * it while the request is pending -- and that activity is refused, so it
+ * finishes without prompting and its destruction answers nothing: the live
+ * request is never failed or dequeued by a repeat. A request whose owner has
+ * gone for good is refused too, so a late delivery never prompts for a
+ * request already answered.
  */
 object CryptoSigningCancellations {
     private const val MAX_REMEMBERED = 64
 
     private val live = HashMap<String, CryptoSigningController>()
-    private val cancelled = LinkedHashSet<String>()
 
-    /** False when [controller]'s request was already cancelled. */
+    /** Requests no new activity may take: cancelled, or ended with their owner. */
+    private val refused = LinkedHashSet<String>()
+
+    /**
+     * False when [controller] must not prompt: its request was cancelled or
+     * has ended, another activity already owns it, or the prompt owner does
+     * not hold it ACTIVE -- still queued, settled (a failed direct start
+     * whose notification was already dispatched), or unknown (a notification
+     * from an earlier process). Checked before anything is shown, since the
+     * key signs before any result could be refused.
+     */
     @Synchronized
     fun register(controller: CryptoSigningController): Boolean {
-        if (controller.requestId in cancelled) return false
+        if (controller.requestId in refused) return false
+        if (!controller.holdsScreen(controller.requestId)) return false
+        if (live[controller.requestId].let { it != null && it !== controller }) return false
         live[controller.requestId] = controller
         return true
     }
 
-    /** Removes [controller], and only it: a recreated activity has replaced it. */
+    /**
+     * Removes [controller], and only it: a repeat delivery never owned the
+     * request, and a recreated activity has replaced it. An owner gone for
+     * good, not [recreating], ends its request, so no later delivery of it
+     * prompts.
+     */
     @Synchronized
-    fun unregister(controller: CryptoSigningController) {
-        if (live[controller.requestId] === controller) live.remove(controller.requestId)
+    fun unregister(controller: CryptoSigningController, recreating: Boolean = false) {
+        if (live[controller.requestId] !== controller) return
+        live.remove(controller.requestId)
+        if (!recreating) remember(controller.requestId)
+    }
+
+    private fun remember(requestId: String) {
+        refused.add(requestId)
+        while (refused.size > MAX_REMEMBERED) refused.remove(refused.first())
+    }
+
+    /**
+     * Ends [requestId]'s prompt unshown, so an activity that comes up for it
+     * later finishes without prompting. False when an activity already has
+     * the request: its prompt is up and the owner is answering it.
+     */
+    @Synchronized
+    fun expireUnshown(requestId: String): Boolean {
+        if (requestId in live) return false
+        remember(requestId)
+        return true
     }
 
     /** Takes down [requestId]'s prompt, now or when its activity comes up. */
     fun cancel(requestId: String) {
         val controller = synchronized(this) {
-            cancelled.add(requestId)
-            while (cancelled.size > MAX_REMEMBERED) cancelled.remove(cancelled.first())
+            remember(requestId)
             live.remove(requestId)
         }
         controller?.cancel()
@@ -72,6 +117,10 @@ object CryptoSigningCancellations {
  *
  * Everything but [cancel] runs on the main thread; [cancel] may be called from
  * any thread and does its work on [mainExecutor].
+ *
+ * [holdsScreen] says whether the prompt owner holds the request ACTIVE; by
+ * default the process owner, whose `signature-<id>` entry the launcher's
+ * request holds.
  */
 class CryptoSigningController(
     val requestId: String,
@@ -79,6 +128,9 @@ class CryptoSigningController(
     private val deliverSuccess: (signatureBase64: String) -> Unit,
     private val deliverError: (code: Int, message: String) -> Unit,
     private val finish: () -> Unit,
+    internal val holdsScreen: (requestId: String) -> Boolean = { id ->
+        PromptOwnership.process.accept(NotificationKeys.signature(id), PromptOwnership.Event.NOTIFICATION_TAP)
+    },
 ) {
     /** The biometric prompt this request is showing. */
     fun interface Prompt {
@@ -94,8 +146,10 @@ class CryptoSigningController(
     /**
      * Registers the request so a cancel can reach it.
      *
-     * @return false when it was cancelled before the activity came up; the
-     *   activity has then been finished and must not prompt
+     * @return false when it was cancelled before the activity came up, has
+     *   already ended, or is owned by another activity (a repeat delivery of
+     *   the same prompt intent); the activity has then been finished, must
+     *   not prompt, and answers nothing when it goes
      */
     fun start(): Boolean {
         if (CryptoSigningCancellations.register(this)) return true
@@ -164,7 +218,7 @@ class CryptoSigningController(
      * new instance takes the request over and answers it.
      */
     fun release(recreating: Boolean) {
-        CryptoSigningCancellations.unregister(this)
+        CryptoSigningCancellations.unregister(this, recreating)
         val unsettled = !settled && !cancelled.get()
         settled = true
         prompt?.cancelAuthentication()

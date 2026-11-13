@@ -177,7 +177,13 @@ enum class AuditOperationType {
     /** A PIV signing request was processed. */
     PIV_SIGN_REQUEST,
     /** A PIV key was deleted from a slot. */
-    PIV_KEY_DELETED
+    PIV_KEY_DELETED,
+
+    // Desktop backups (local.createBackup / local.restoreBackup)
+    /** A paired desktop stored an encrypted backup on the phone. */
+    BACKUP_CREATED,
+    /** A paired desktop fetched a stored backup from the phone. */
+    BACKUP_RESTORED
 }
 
 /**

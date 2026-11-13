@@ -31,6 +31,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
@@ -53,6 +54,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -965,8 +967,17 @@ class PivActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * The most recent key generation launched from the dialog, or null if none
+     * was. Main thread only. Lets a test wait for the generation to finish
+     * instead of sleeping; nothing in the app reads it.
+     */
+    @VisibleForTesting
+    internal var generateJob: Job? = null
+        private set
+
     private fun generateKey(slot: PivSlot, algorithm: PivAlgorithm) {
-        lifecycleScope.launch {
+        generateJob = lifecycleScope.launch {
             try {
                 pivKeyManager.generateKey(slot, algorithm)
                 Snackbar.make(
