@@ -40,6 +40,7 @@
     <string name="oath_desktop_code_title">Desktop code</string>
     <string name="oath_desktop_code_expires">Expires in %1$d s</string>
     <string name="oath_desktop_code_no_expiry">Counter-based code (no expiry)</string>
+    <string name="oath_desktop_code_expired">Code expired. Ask the desktop for a new one.</string>
     <string name="oath_desktop_not_connected">No desktop connected</string>
     <string name="oath_desktop_not_linked">This credential is not on the desktop</string>
     <string name="oath_desktop_failed">Desktop: %1$s</string>

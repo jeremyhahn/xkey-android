@@ -742,16 +742,7 @@ class OathActivity : AppCompatActivity() {
 
     private fun showDesktopOutcome(outcome: OathDesktopActions.Outcome) {
         when (outcome) {
-            is OathDesktopActions.Outcome.Code -> {
-                val expiry = outcome.expiresIn
-                    ?.let { getString(R.string.oath_desktop_code_expires, it) }
-                    ?: getString(R.string.oath_desktop_code_no_expiry)
-                MaterialAlertDialogBuilder(this)
-                    .setTitle(R.string.oath_desktop_code_title)
-                    .setMessage("${outcome.code}\n\n$expiry")
-                    .setPositiveButton(android.R.string.ok, null)
-                    .show()
-            }
+            is OathDesktopActions.Outcome.Code -> showDesktopCodeDialog(outcome.deadline)
             is OathDesktopActions.Outcome.Copied ->
                 Snackbar.make(rootLayout, R.string.oath_desktop_copied, Snackbar.LENGTH_SHORT).show()
             OathDesktopActions.Outcome.NotConnected ->
@@ -765,6 +756,36 @@ class OathActivity : AppCompatActivity() {
                     Snackbar.LENGTH_LONG
                 ).show()
         }
+    }
+
+    /**
+     * Shows a desktop code until its deadline: the remaining seconds count
+     * down while the dialog is open, and at zero the code is replaced by
+     * the expired notice.
+     */
+    private fun showDesktopCodeDialog(deadline: DesktopCodeDeadline) {
+        fun render(): String = when (val view = deadline.view()) {
+            is DesktopCodeDeadline.View.Live ->
+                "${view.code}\n\n${getString(R.string.oath_desktop_code_expires, view.remainingSeconds)}"
+            is DesktopCodeDeadline.View.NoExpiry ->
+                "${view.code}\n\n${getString(R.string.oath_desktop_code_no_expiry)}"
+            DesktopCodeDeadline.View.Expired -> getString(R.string.oath_desktop_code_expired)
+        }
+
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.oath_desktop_code_title)
+            .setMessage(render())
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+        val ticker = lifecycleScope.launch {
+            while (true) {
+                val wait = deadline.millisUntilChange() ?: break
+                kotlinx.coroutines.delay(wait)
+                dialog.setMessage(render())
+            }
+            dialog.setMessage(render())
+        }
+        dialog.setOnDismissListener { ticker.cancel() }
     }
 
     private fun showCredentialDetails(item: OathCredentialWithCode) {
@@ -1028,13 +1049,17 @@ class PrefsDesktopOathLinks(private val prefs: SharedPreferences) : DesktopOathL
 class OathDesktopActions(
     private val desktop: () -> ConnectedDesktop?,
     private val links: DesktopOathLinks,
-    private val secretOf: suspend (OathCredentialEntity) -> ByteArray
+    private val secretOf: suspend (OathCredentialEntity) -> ByteArray,
+    private val clock: MonotonicClock = MonotonicClock.SYSTEM
 ) {
     enum class Entry { COPY, DESKTOP_CODE }
 
     sealed interface Outcome {
         data class Copied(val desktopId: String) : Outcome
-        data class Code(val code: String, val expiresIn: Int?) : Outcome
+        /** A desktop code, readable only through [deadline] (ruling 554). */
+        class Code(val deadline: DesktopCodeDeadline) : Outcome {
+            override fun toString(): String = "Code($deadline)"
+        }
         data object NotConnected : Outcome
         data object NotOnDesktop : Outcome
         data class Failed(val message: String) : Outcome
@@ -1118,7 +1143,7 @@ class OathDesktopActions(
         val desktopId = links.get(peer.peerKeyHex, credential.oathId) ?: return Outcome.NotOnDesktop
         return try {
             val result = RemoteOathClient(peer).oathGenerate(desktopId)
-            Outcome.Code(result.code, result.expiresIn)
+            Outcome.Code(DesktopCodeDeadline(result.code, result.expiresIn, clock))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
