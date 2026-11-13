@@ -3318,6 +3318,13 @@ class RequestHandler(
             val bytes = decodeBase64Strict("backup_data", dataB64)
             val label = params.optString("label", "")
             val id = com.automatethethings.xkey.backup.BackupStore(context).store("", bytes)
+            val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+            AuditLogger.logBackupCreated(
+                backupId = id,
+                sizeBytes = bytes.size,
+                deviceId = connectedDevicePublicKeyHex,
+                deviceName = deviceInfo?.deviceName
+            )
             Response.success(request.id, JSONObject().apply {
                 put("success", true)
                 put("backup_id", id)
@@ -3345,10 +3352,18 @@ class RequestHandler(
             }
             val bytes = store.load(id)
                 ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Backup not found: $id")
+            val createdAt = com.automatethethings.xkey.crypto.SyncCodec.toRfc3339(store.createdAtMillis(id))
+            val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+            AuditLogger.logBackupRestored(
+                backupId = id,
+                sizeBytes = bytes.size,
+                deviceId = connectedDevicePublicKeyHex,
+                deviceName = deviceInfo?.deviceName
+            )
             Response.success(request.id, JSONObject().apply {
                 put("backup_data", java.util.Base64.getEncoder().encodeToString(bytes))
                 put("backup_id", id)
-                put("created_at", com.automatethethings.xkey.crypto.SyncCodec.toRfc3339(store.createdAtMillis(id)))
+                put("created_at", createdAt)
             })
         } catch (e: Exception) {
             Log.e(TAG, "restoreBackup failed", e)

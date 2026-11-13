@@ -38,6 +38,19 @@ and encodes it with `java.util.Base64`.
 `handleCreateBackup` always calls `BackupStore.store("", bytes)`, so the phone
 generates the id; the `label` is only echoed in the message.
 
+## Audit
+
+Each successful call writes one audit log entry: `local.createBackup` a
+`BACKUP_CREATED` entry (`AuditLogger.logBackupCreated`), `local.restoreBackup`
+a `BACKUP_RESTORED` entry (`AuditLogger.logBackupRestored`). The entry names
+the requesting device as `local.sign` does: `deviceId` is the connected
+peer's Noise static key hex and `deviceName` its name in
+`PairedDeviceRepository`. `details` holds `backupId` and `sizeBytes` only;
+the backup bytes, their base64 and the desktop's `label` never enter the log.
+A failed call (missing or invalid `backup_data`, no backup stored, an unknown
+id) writes no entry. Backups `XKeyGattService` stores directly are not
+audited here.
+
 ## Backup ids
 
 A generated id is `backup-<creation unix millis>-<sequence>`. The sequence is
