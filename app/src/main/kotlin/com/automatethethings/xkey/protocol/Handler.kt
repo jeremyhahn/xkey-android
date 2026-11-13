@@ -18,6 +18,7 @@ import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.auth.SessionAuthManager
+import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.credential.UserVerificationCompliance
 import com.automatethethings.xkey.credential.UserVerificationRequiredException
 import com.automatethethings.xkey.credential.UvRequirement
@@ -189,6 +190,12 @@ class RequestHandler(
 
     // Unified key storage DAO
     private val keyDao: KeyDao = XKeyDatabase.getInstance(context).keyDao()
+
+    // The one signature counter a passkey has, shared with the credential provider
+    private val passkeySignCounter = PasskeySignCounter(
+        XKeyDatabase.getInstance(context).credentialMetadataDao(),
+        keyDao
+    )
 
     // Per-key sharing policy DAO
     private val keySharingPolicyDao: KeySharingPolicyDao = XKeyDatabase.getInstance(context).keySharingPolicyDao()
@@ -3162,8 +3169,10 @@ class RequestHandler(
                 )
             }
 
-            // Increment sign count
-            val newSignCount = current.signCount + 1
+            // The credential provider serves this passkey too, so the counter
+            // comes from the one both paths share. It advances before signing:
+            // a failed signature leaves a gap, never a reused value.
+            val newSignCount = passkeySignCounter.next(assertionParams.credentialId)
 
             // Build authenticator data
             // rpIdHash (32 bytes) || flags (1 byte) || signCount (4 bytes, big-endian)
@@ -3200,8 +3209,6 @@ class RequestHandler(
                 dataHash = dataHash
             )
 
-            // Update sign count in database
-            keyDao.updateSignCount(assertionParams.credentialId, newSignCount)
             Triple(newSignCount, authData, signature)
         }
 
