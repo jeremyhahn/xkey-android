@@ -153,6 +153,8 @@ fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null): Key
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String =
             readKeyMaterialGeneration(context, held, source, manager)
 
+        override fun isEmpty(generation: String): Boolean = decodeGeneration(generation).isEmpty()
+
         override suspend fun delete(held: KeyPolicyStore.KeyMaterialHeld, tombstone: KeyDeletionEntity): Boolean =
             try {
                 deleteKeyMaterial(context, held, tombstone, manager)

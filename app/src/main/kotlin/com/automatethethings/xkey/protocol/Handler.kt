@@ -1153,17 +1153,9 @@ class RequestHandler(
             )
         }
 
-        // Delete the key
-        val deleted = keystoreManager.deleteKey(deleteParams.credentialId)
-        if (!deleted) {
-            throw ProtocolException(
-                "Failed to delete credential",
-                errorCode = ErrorCodes.INTERNAL_ERROR
-            )
-        }
-
-        Log.i(TAG, "Deleted credential: ${deleteParams.credentialId}")
-        return Response.success(request.id, JSONObject().put("deleted", true))
+        // The same delete as local.deleteKey: through the store, with its
+        // tombstone, generation and audit event (#193 r12).
+        return deleteUserKey(request, deleteParams.credentialId)
     }
 
     /**
@@ -2034,7 +2026,14 @@ class RequestHandler(
         // `deleteKey` shape used `credentialId`. Accept both.
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
+        return deleteUserKey(request, keyId)
+    }
 
+    /**
+     * The one RPC key delete, of local.deleteKey and the legacy deleteKey.
+     * The store records its audit event once the delete commits (#193 r12).
+     */
+    private suspend fun deleteUserKey(request: Request, keyId: String): Response {
         // Delete from unified key store with its policy row and grant rows,
         // in one transaction, under the sharing edits' order (#193), only if
         // the key row is still the one this request found: a delete queued

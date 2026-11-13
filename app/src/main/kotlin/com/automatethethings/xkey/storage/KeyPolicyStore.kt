@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.storage
 
+import com.automatethethings.xkey.audit.AuditLogger
 import android.util.Log
 import androidx.room.withTransaction
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -55,6 +56,9 @@ interface KeyMaterial {
      */
     suspend fun delete(held: KeyPolicyStore.KeyMaterialHeld, tombstone: KeyDeletionEntity): Boolean
 
+    /** Whether [generation] names no material at all. */
+    fun isEmpty(generation: String): Boolean = generation.isEmpty()
+
     companion object {
         /** No material: for a key whose material lives elsewhere. */
         val NONE: KeyMaterial = object : KeyMaterial {
@@ -94,8 +98,32 @@ interface KeyMaterial {
 class KeyPolicyStore(
     private val dao: KeyPolicyDao,
     private val transactor: Transactor,
-    private val unrecorded: MutableMap<String, Held> = processObligations
+    private val unrecorded: MutableMap<String, Held> = processObligations,
+    private val audit: DeletionAudit = DeletionAudit.APP
 ) {
+
+    /**
+     * Records a key delete once it is committed (#193 r12): the one place a
+     * user-key delete is audited, by [deleteKey] and [deleteMaterial], never
+     * by a replay or settle of the same delete.
+     */
+    fun interface DeletionAudit {
+        fun deleted(tombstone: KeyDeletionEntity)
+
+        companion object {
+            /** The app's audit log. */
+            val APP = DeletionAudit { AuditLogger.logKeyDeleted(keyId = it.keyId, keyLabel = it.keyId, keyType = "general") }
+        }
+    }
+
+    /** Audits [tombstone]'s committed delete; a failed audit never fails the delete. */
+    private fun audited(tombstone: KeyDeletionEntity) {
+        try {
+            audit.deleted(tombstone)
+        } catch (e: Exception) {
+            // The delete is committed; its record is best effort, as every audit is.
+        }
+    }
 
     /**
      * An obligation held in the process because its write failed: the key
@@ -373,7 +401,10 @@ class KeyPolicyStore(
                 dao.deleteGrants(keyId)
                 dao.deleteKey(keyId) > 0
             }
-            if (deleted) deleteMaterialOf(held, tombstone, material)
+            if (deleted) {
+                audited(tombstone)
+                deleteMaterialOf(held, tombstone, material)
+            }
             deleted
         }
 
@@ -398,7 +429,11 @@ class KeyPolicyStore(
                 dao.putDeletion(tombstone)
                 true
             }
-            if (absent) deleteMaterialOf(held, tombstone, material)
+            if (absent) {
+                // A delete of an id that holds nothing deletes nothing to record.
+                if (!material.isEmpty(generation)) audited(tombstone)
+                deleteMaterialOf(held, tombstone, material)
+            }
             absent
         }
 

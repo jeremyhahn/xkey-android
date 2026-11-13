@@ -24,6 +24,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -416,6 +417,54 @@ class KeyPolicyStoreTest {
         reachable = true
         store.replayDeletions(generations)
         assertTrue("the replay left the tombstoned generation", "j" !in material)
+    }
+
+    /**
+     * Round 12 (4): a delete is audited once, when it commits: not again by
+     * its replay, not for a delete refused as stale, and not for an id that
+     * holds nothing.
+     */
+    @Test
+    fun aDeleteIsAuditedOnceWhenItCommits() = runBlocking {
+        val audited = mutableListOf<String>()
+        val store = KeyPolicyStore(tables, tables, tables.unrecordedDenials) { audited += it.keyId }
+        val key = tables.addKey("k", SELECTED_PEERS)
+
+        assertFalse(store.deleteKey("k", key + 1, materialDelete { true }))
+        assertEquals("a stale delete was audited", emptyList<String>(), audited)
+
+        assertTrue(store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
+        assertEquals(listOf("k"), audited)
+        store.replayDeletions(materialDelete { true })
+        assertEquals("the replay audited the delete again", listOf("k"), audited)
+
+        assertTrue(store.deleteMaterial("bare", materialDelete { true }))
+        assertTrue(store.deleteMaterial("nothing", KeyMaterial.NONE))
+        assertEquals(listOf("k", "bare"), audited)
+    }
+
+    /**
+     * Round 12 (4) bypass guard: a user-key delete is audited only by the
+     * store; the key managers' own audits are of their direct deletes, which
+     * the protocol uses only to discard a key its own generation just made.
+     */
+    @Test
+    fun everyKeyDeleteIsAuditedByTheStore() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue(root.isDirectory)
+        val auditors = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && "logKeyDeleted(" in it.readText() }
+            .map { it.name }
+            .toSet()
+        assertEquals(setOf("AuditLogger.kt", "KeystoreManager.kt", "PivKeyManager.kt", "KeyPolicyStore.kt"), auditors)
+        val store = java.io.File(root, "com/automatethethings/xkey/storage/KeyPolicyStore.kt").readText()
+        assertEquals("the store's deletes do not both audit", 2, Regex("""\baudited\(tombstone\)""").findAll(store).count())
+        val direct = Regex("""\.(deleteKey|deleteGeneralKey)\(""")
+        val protocolDeletes = java.io.File(root, "com/automatethethings/xkey/protocol").walkTopDown()
+            .filter { it.isFile && it.extension == "kt" }
+            .flatMap { file -> file.readLines().mapIndexedNotNull { i, l -> if (direct.containsMatchIn(l) && "discard = " !in l && "keyPolicyStore.deleteKey(" !in l) "${file.name}:${i + 1}" else null } }
+            .toList()
+        assertEquals("a protocol key delete outside the store", emptyList<String>(), protocolDeletes)
     }
 
     /**
