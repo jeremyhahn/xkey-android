@@ -137,6 +137,23 @@ class KeySharingPendingIntentHandlerTest {
         val keyDao = mockk<KeyDao>()
         coEvery { keyDao.getByKeyId(any()) } answers { keys[firstArg()] }
         coEvery { keyDao.updateSharingPolicy(any(), any()) } answers { store(firstArg(), secondArg()) }
+        // local.setKeyPolicy's compare-and-set: writes only at the expected policy and revision.
+        coEvery { keyDao.compareAndSetSharingPolicy(any(), any(), any(), any(), any()) } answers {
+            val keyId = secondArg<String>()
+            val current = keys[keyId]
+            if (current == null || current.policyRevision != thirdArg<Long>() ||
+                current.sharingPolicy != arg<SharingPolicyType>(3)
+            ) {
+                0
+            } else {
+                keys[keyId] = current.copy(
+                    sharingPolicy = arg<SharingPolicyType>(4),
+                    policyRevision = current.policyRevision + 1
+                )
+                1
+            }
+        }
+        every { AuditLogger.logKeySharingChanged(any(), any(), any(), any(), any()) } just runs
 
         repo = PairedDeviceRepository(InMemorySharedPreferences())
         repo.addDevice(PEER_A, "desktop-a")

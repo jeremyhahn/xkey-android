@@ -290,7 +290,13 @@ class PivActivityUiTest {
 
         onView(withText(android.R.string.cancel)).inRoot(isDialog()).perform(click())
 
-        Thread.sleep(SETTLE_MS)
+        // Espresso's click returns once the main loop is idle, so a generation
+        // the cancel had started would already be recorded; wait for it to end.
+        waitForIdle()
+        assertTrue(
+            "A generation launched from the dialog should have finished",
+            awaitActivity(scenario) { it.generateJob?.isCompleted != false }
+        )
         assertEquals(
             "Cancelling the dialog must not generate a key",
             before,
@@ -345,7 +351,9 @@ class PivActivityUiTest {
         onView(withText(target.displayName)).inRoot(isDialog()).perform(click())
         onView(withText(R.string.piv_generate_key)).inRoot(isDialog()).perform(click())
 
-        Thread.sleep(SETTLE_MS)
+        awaitCondition("slot ${slot.hexId} should hold the generated key") {
+            runBlocking { dao.getBySlotId(slot.hexId) }?.hasKey == true
+        }
         val stored = runBlocking { dao.getBySlotId(slot.hexId) }
         // The dialog lists displayName; the store records the enum name.
         assertEquals(
@@ -484,8 +492,5 @@ class PivActivityUiTest {
 
         /** Algorithm token stored on the seeded slots. */
         val SEEDED_ALGORITHM = PivAlgorithm.ES256
-
-        /** Time to let a cancelled dialog settle before re-reading the DAO. */
-        const val SETTLE_MS = 300L
     }
 }

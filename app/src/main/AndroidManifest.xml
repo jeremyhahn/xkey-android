@@ -134,6 +134,17 @@
                 android:value=".ui.PairedDevicesActivity" />
         </activity>
 
+        <!-- Desktop keys: the paired desktop's backends and keys over remote.* -->
+        <activity
+            android:name=".ui.DesktopKeysActivity"
+            android:exported="false"
+            android:label="@string/desktop_keys_title"
+            android:parentActivityName=".ui.DeviceDetailActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.DeviceDetailActivity" />
+        </activity>
+
         <!-- Trust Store activity for managing trusted CA certificates -->
         <activity
             android:name=".ui.TrustStoreActivity"

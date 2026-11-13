@@ -115,6 +115,14 @@ android {
         jacocoVersion = libs.versions.jacoco.get()
     }
 
+    // Robolectric tests start the real activities, which read the app's
+    // layouts and strings.
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+
     lint {
         abortOnError = true
         warningsAsErrors = false
@@ -240,6 +248,33 @@ configurations.named("kotlinAbiValidationCompatClasspath") {
             because("KGP pins the ABI-validation build tools to 2.4.0")
         }
     }
+}
+
+// Robolectric fetches its android-all framework jar from Maven Central when a
+// test first needs it, which the offline CI container cannot reach. Resolve it
+// here instead, so it sits in the Gradle cache the image's warm stage fills,
+// copy it under the name Robolectric looks for, and run the unit tests offline
+// against that directory: a test then never reaches the network.
+val robolectricAndroidAll = configurations.create("robolectricAndroidAll") {
+    isCanBeConsumed = false
+    isTransitive = false
+}
+
+dependencies {
+    robolectricAndroidAll(libs.robolectric.android.all)
+}
+
+val robolectricDependencyDir = layout.buildDirectory.dir("robolectric-deps")
+
+val syncRobolectricAndroidAll = tasks.register<Sync>("syncRobolectricAndroidAll") {
+    from(robolectricAndroidAll)
+    into(robolectricDependencyDir)
+}
+
+tasks.withType<Test>().configureEach {
+    dependsOn(syncRobolectricAndroidAll)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.dependency.dir", robolectricDependencyDir.get().asFile.absolutePath)
 }
 
 // -----------------------------------------------------------------------------
