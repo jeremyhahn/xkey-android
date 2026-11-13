@@ -18,6 +18,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -25,6 +26,8 @@ import androidx.core.app.NotificationCompat
 import com.automatethethings.xkey.XKeyApplication
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Helper class for showing high-priority biometric request notifications.
@@ -38,6 +41,14 @@ import com.automatethethings.xkey.ui.TransparentBiometricActivity
  * - High-priority notification channel for visibility
  * - Auto-dismiss after timeout with callback
  * - Cancellation support
+ *
+ * Each notification belongs to the request it was posted for: it is posted
+ * under that request's key ([NotificationKeys]) as its tag, and
+ * [cancelNotification] with the key takes down only that one; there is no
+ * way to take down every notification. Requests take turns on screen, and one
+ * that is withdrawn while it waits for its turn has posted nothing, so it
+ * must take nothing down: the notification up is the route to another
+ * request's prompt.
  *
  * Usage:
  * ```kotlin
@@ -56,10 +67,21 @@ class BiometricNotificationHelper(private val context: Context) {
         private const val TAG = "BiometricNotifyHelper"
         private const val NOTIFICATION_ID = 2001
         private const val DEFAULT_TIMEOUT_MS = 30_000L
+        private const val INTENT_SCHEME = "xkey-notification"
+
+        /**
+         * The data a notification's full-screen intent for [key] carries, so
+         * each key has a pending intent of its own; [BiometricActivityLauncher]
+         * sets it on its direct start as well. The prompt activities are
+         * started by component and read nothing from it.
+         */
+        internal fun intentData(key: String): Uri = Uri.Builder().scheme(INTENT_SCHEME).opaquePart(key).build()
     }
 
     private val handler = Handler(Looper.getMainLooper())
-    private var timeoutRunnable: Runnable? = null
+
+    /** The pending timeout of each notification this helper has up, by request id. */
+    private val timeouts = ConcurrentHashMap<String, Runnable>()
 
     /**
      * Shows a high-priority notification indicating biometric authentication is required.
@@ -72,11 +94,16 @@ class BiometricNotificationHelper(private val context: Context) {
      * @param operationType The type of operation requiring authentication
      *                      (e.g., "sign", "decrypt", "attestKey")
      * @param rpName The relying party name for context, or null if unavailable
-     * @param requestId A unique identifier for the biometric request
+     * @param requestId The request's key ([NotificationKeys]), unique across
+     *   the app; the notification is posted under it, and replaces only an
+     *   earlier one for the same request
      * @param timeoutMs Timeout in milliseconds before auto-dismissing (default 30s)
      * @param onTimeout Callback invoked when the notification times out without user action
-     * @param promptIntent The prompt the caller is waiting on, when it awaits
-     *   that prompt's own request id; null opens a generic prompt for [requestId]
+     * @param promptIntent The prompt a [BiometricActivityLauncher] request opened
+     *   for [requestId] (see its `onLaunch`). Opening that same intent lets an
+     *   approval or a cancel on the lock screen complete the waiting request;
+     *   without one, the notification opens a generic prompt that answers no
+     *   launcher request.
      */
     fun showBiometricRequiredNotification(
         operationType: String,
@@ -86,16 +113,37 @@ class BiometricNotificationHelper(private val context: Context) {
         onTimeout: () -> Unit = {},
         promptIntent: Intent? = null
     ) {
+        // Only on the request's own queue turn: a caller that skipped the
+        // queue would put a prompt over the one holding the screen.
+        check(PromptOwnership.process.state(requestId) == PromptOwnership.State.ACTIVE) {
+            "Notification $requestId posted outside its prompt queue turn"
+        }
         Log.d(TAG, "Showing biometric notification: operation=$operationType, rpName=$rpName")
 
-        // Create the full-screen intent for TransparentBiometricActivity
-        val fullScreenIntent = promptIntent ?: Intent(context, TransparentBiometricActivity::class.java).apply {
+        // The full-screen intent: the launcher's own prompt when there is one,
+        // else a generic TransparentBiometricActivity.
+        // The launcher has already started its prompt, so the copy carries no
+        // CLEAR_TOP: that would destroy the live prompt and recreate it,
+        // answering the request as closed. A repeat delivery of the copy is
+        // refused by the prompt that owns the request (for signing,
+        // CryptoSigningCancellations; TransparentBiometricActivity is
+        // singleTop and on top while it prompts).
+        val fullScreenIntent = promptIntent?.let { Intent(it) }?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } ?: Intent(context, TransparentBiometricActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(TransparentBiometricActivity.EXTRA_REQUEST_ID, requestId)
             putExtra(TransparentBiometricActivity.EXTRA_TITLE, context.getString(R.string.biometric_prompt_title))
             putExtra(TransparentBiometricActivity.EXTRA_SUBTITLE, rpName ?: operationType)
             putExtra(TransparentBiometricActivity.EXTRA_SHOW_ON_LOCK_SCREEN, true)
         }
+        // The key, whole, in the intent's data: extras do not tell two pending
+        // intents apart, and two keys' hashCode() can be equal, so without it
+        // posting one request would rewrite another's pending intent. A
+        // launcher prompt already carries it (BiometricActivityLauncher sets
+        // it before the direct start), so the copy stays the same intent as
+        // the live prompt and Android routes it there (onNewIntent).
+        fullScreenIntent.data = intentData(requestId)
 
         val fullScreenPendingIntent = PendingIntent.getActivity(
             context,
@@ -121,41 +169,74 @@ class BiometricNotificationHelper(private val context: Context) {
             .build()
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        notificationManager.notify(requestId, NOTIFICATION_ID, notification)
 
-        // Schedule timeout callback
-        cancelTimeoutRunnable()
-        timeoutRunnable = Runnable {
-            Log.d(TAG, "Biometric notification timed out")
-            cancelNotification()
-            onTimeout()
+        // Schedule this request's timeout callback
+        val timeout = object : Runnable {
+            override fun run() {
+                // Only while this is still the request's notification.
+                if (!timeouts.remove(requestId, this)) return
+                Log.d(TAG, "Biometric notification timed out")
+                notificationManager.cancel(requestId, NOTIFICATION_ID)
+                onTimeout()
+            }
         }
-        handler.postDelayed(timeoutRunnable!!, timeoutMs)
+        timeouts.put(requestId, timeout)?.let(handler::removeCallbacks)
+        handler.postDelayed(timeout, timeoutMs)
 
         Log.i(TAG, "Biometric notification shown, will timeout in ${timeoutMs}ms")
     }
 
     /**
-     * Cancels the biometric notification if it's currently showing.
-     *
-     * This also cancels any pending timeout callback.
+     * Cancels the notification posted under [requestId], the request's key,
+     * and its pending timeout callback, leaving every other request's
+     * notification up.
      */
-    fun cancelNotification() {
+    fun cancelNotification(requestId: String) {
         Log.d(TAG, "Cancelling biometric notification")
 
-        cancelTimeoutRunnable()
+        timeouts.remove(requestId)?.let(handler::removeCallbacks)
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)
-        notificationManager.cancel(NOTIFICATION_ID)
+        notificationManager.cancel(requestId, NOTIFICATION_ID)
     }
+}
+
+/**
+ * The keys lock-screen approval notifications are posted under: one per
+ * request, across the whole app.
+ *
+ * Notification tags are app-wide, whichever helper posts them, and generic
+ * approvals ([PendingAuthentications]) and crypto signatures
+ * ([PendingCryptoSignatures]) are numbered apart, each from 1, so a bare
+ * request id would let one family's request take down the other's
+ * notification. A launcher request's key names its family as well as its
+ * id; a notification that only wakes the phone, for a prompt no launcher
+ * request waits on, gets a number of its own.
+ */
+object NotificationKeys {
+    private const val APPROVAL = "approval-"
+    private const val SIGNATURE = "signature-"
+
+    private val nextWakeOnly = AtomicLong(0L)
+
+    /** The key of generic approval [requestId]. */
+    fun approval(requestId: String): String = APPROVAL + requestId
+
+    /** The key of crypto signature [requestId]. */
+    fun signature(requestId: String): String = SIGNATURE + requestId
 
     /**
-     * Cancels the timeout runnable if pending.
+     * A fresh queue key for a prompt no launcher request owns, and the
+     * notification that only wakes the phone for it ([PromptOwnership.turn]).
      */
-    private fun cancelTimeoutRunnable() {
-        timeoutRunnable?.let {
-            handler.removeCallbacks(it)
-        }
-        timeoutRunnable = null
-    }
+    fun wakeOnly(operationType: String): String = "wake-$operationType-${nextWakeOnly.incrementAndGet()}"
+
+    /** The generic approval request [key] names, or null for a key of any other kind. */
+    fun approvalRequestId(key: String): String? =
+        if (key.startsWith(APPROVAL)) key.removePrefix(APPROVAL) else null
+
+    /** The crypto signature request [key] names, or null for a key of any other kind. */
+    fun signatureRequestId(key: String): String? =
+        if (key.startsWith(SIGNATURE)) key.removePrefix(SIGNATURE) else null
 }

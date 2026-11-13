@@ -521,7 +521,7 @@ class CosignRequestHandlerTest {
         assertNull(response.await().error)
         coVerify(exactly = 1) { keystoreManager.signWithAlgorithm(signingKey.keyId, any(), "ES256") }
         verify { context.unregisterReceiver(resultReceiver.captured) }
-        verify { notificationHelper.cancelNotification() }
+        verify { notificationHelper.cancelNotification(notifiedId.captured) }
     }
 
     @Test

@@ -255,7 +255,7 @@ class ActivityCosignPromptSurface(
                 // Already unregistered
             }
         }
-        notificationHelper.cancelNotification()
+        notificationHelper.cancelNotification(requestId)
     }
 
     companion object {

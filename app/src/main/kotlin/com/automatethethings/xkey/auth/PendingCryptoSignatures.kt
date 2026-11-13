@@ -15,9 +15,14 @@
 
 package com.automatethethings.xkey.auth
 
+import androidx.biometric.BiometricPrompt
 import com.automatethethings.xkey.auth.BiometricActivityLauncher.CryptoSigningResult
 import com.automatethethings.xkey.ui.CryptoSigningCancellations
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -33,69 +38,152 @@ import kotlin.coroutines.resumeWithException
  * that one, which dismisses the prompt and signs nothing.
  * Leaving the prompt up would let a touch meant for nothing sign anyway.
  *
- * Requests take turns on screen through [prompts], one prompt at a time in
- * arrival order: a request that arrives while another is
+ * Requests take turns on screen through [prompts], which owns each request's
+ * one queue entry (`signature-<id>`) from enqueue to settle, one prompt at a
+ * time in arrival order: a request that arrives while another is
  * prompting waits for it to settle, and one cancelled while it waits is
  * never shown. Every request is settled exactly once: by its result, by the
- * failure to launch its prompt, or by its cancellation.
+ * failure to launch its prompt, by its active deadline passing or its
+ * notification expiring with its prompt never up ([expireUnshown]), or by its
+ * cancellation. The screen is shared with the generic approvals
+ * ([PendingAuthentications]), so a signature whose start Android blocked
+ * must let go of it as they do, or every approval behind it times out unseen.
  *
  * @param cancelPrompt dismisses the prompt for a request id
- * @param prompts the turns the requests take on screen; process-wide, since
- *   there is one screen whichever launcher a request came through
+ * @param prompts the owner of the turns the requests take on screen;
+ *   process-wide, since there is one screen whichever launcher a request came
+ *   through
+ * @param expirePrompt ends a request's prompt unshown, so a late start of it
+ *   prompts for nothing; false while its activity has the request
+ * @param activeDeadlineMillis how long a launched request waits for its
+ *   prompt to come up; the generic approvals' own deadline
  */
 internal class PendingCryptoSignatures(
     private val cancelPrompt: (requestId: String) -> Unit = CryptoSigningCancellations::cancel,
-    private val prompts: SigningPromptQueue = SigningPromptQueue.process,
+    private val prompts: PromptOwnership = PromptOwnership.process,
+    private val expirePrompt: (requestId: String) -> Boolean = CryptoSigningCancellations::expireUnshown,
+    private val activeDeadlineMillis: Long = PendingAuthentications.ACTIVE_DEADLINE_MILLIS,
+    private val queueDeadlineMillis: Long = PendingAuthentications.QUEUE_DEADLINE_MILLIS,
 ) {
-    private val pending = ConcurrentHashMap<Long, Request>()
-
-    /** One request: whoever removes it from [pending] settles it. */
-    private inner class Request(
-        val id: Long,
-        val continuation: CancellableContinuation<CryptoSigningResult>,
-        private val launch: (requestId: String) -> Unit,
-    ) : SigningPromptQueue.Turn {
-        override fun show() {
-            // Cancelled before its turn came: it never comes up.
-            if (pending[id] !== this) {
-                prompts.leave(this)
-                return
-            }
-            try {
-                launch(id.toString())
-            } catch (e: Exception) {
-                if (pending.remove(id, this)) {
-                    prompts.leave(this)
-                    continuation.resumeWithException(e)
-                }
-            }
-        }
-    }
+    private val pending = ConcurrentHashMap<Long, CancellableContinuation<CryptoSigningResult>>()
 
     /**
      * Allocates a request id, [launch]es the prompt for it when its turn
      * comes, and waits for its result. Cancelling the caller cancels the
      * prompt, or, while the request still waits for its turn, withdraws it.
+     * A request whose turn has not come within [queueDeadlineMillis] fails
+     * with [BiometricPrompt.ERROR_TIMEOUT] and is never shown.
+     * A launched request whose prompt is still not up [activeDeadlineMillis]
+     * after its launch fails with [BiometricPrompt.ERROR_TIMEOUT] and hands
+     * the screen on ([expireUnshown]); one the owner is answering keeps
+     * waiting, since its prompt answers when it goes away.
      */
-    suspend fun await(launch: (requestId: String) -> Unit): CryptoSigningResult =
-        suspendCancellableCoroutine { continuation ->
-            val request = Request(nextRequestId.incrementAndGet(), continuation, launch)
-            pending[request.id] = request
-            continuation.invokeOnCancellation {
-                pending.remove(request.id, request)
-                // The prompt goes down before the next one comes up.
-                prompts.leave(request) { wasShowing ->
-                    if (wasShowing) cancelPrompt(request.id.toString())
+    suspend fun await(launch: (requestId: String) -> Unit): CryptoSigningResult = coroutineScope {
+        val id = nextRequestId.incrementAndGet()
+        val key = NotificationKeys.signature(id.toString())
+        val launched = CompletableDeferred<Unit>()
+        // Its own clock, started with the launch: no notification has to
+        // exist for an unseen request to let go of the screen.
+        // (`this.launch` is the coroutine builder, not the parameter.)
+        val activeDeadline = this.launch {
+            launched.await()
+            delay(activeDeadlineMillis)
+            expireUnshown(id.toString(), PromptOwnership.Event.DEADLINE)
+        }
+        try {
+            suspendCancellableCoroutine { continuation ->
+                pending[id] = continuation
+                prompts.enqueue(
+                    key,
+                    PromptOwnership.Kind.CRYPTO_SIGNING,
+                    clock = this,
+                    queueDeadlineMillis = queueDeadlineMillis,
+                    onQueueExpired = {
+                        // Settled expired unshown: it never prompts.
+                        if (pending.remove(id, continuation)) {
+                            continuation.resume(
+                                CryptoSigningResult.Error(
+                                    BiometricPrompt.ERROR_TIMEOUT,
+                                    "Another approval prompt held the screen past this signature's deadline"
+                                )
+                            )
+                        }
+                    },
+                ) {
+                    // Withdrawn as its turn came: its entry is released already.
+                    if (pending[id] !== continuation) return@enqueue
+                    try {
+                        launch(id.toString())
+                        launched.complete(Unit)
+                    } catch (e: Exception) {
+                        // The launch may have posted the notification before
+                        // the start threw: its prompt is ended, so a late
+                        // delivery of that intent never signs.
+                        if (prompts.settle(key, PromptOwnership.Outcome.FAILED) { cancelPrompt(id.toString()) } &&
+                            pending.remove(id, continuation)
+                        ) {
+                            continuation.resumeWithException(e)
+                        }
+                    }
+                }
+                // Registered after the enqueue, so a caller already cancelled
+                // runs this at once and its entry is never left held.
+                continuation.invokeOnCancellation {
+                    pending.remove(id, continuation)
+                    // The prompt goes down before the next one comes up.
+                    prompts.end(key) { wasActive ->
+                        if (wasActive) cancelPrompt(id.toString())
+                    }
                 }
             }
-            prompts.join(request)
+        } finally {
+            activeDeadline.cancel()
         }
+    }
 
-    /** Resumes [requestId]'s caller with [result]; false when nothing waits on it. */
+    /**
+     * Fails launched request [requestId] with [BiometricPrompt.ERROR_TIMEOUT]
+     * unless its activity has it; false when it was left waiting, or nothing
+     * waits on that id. Called by [event]: its notification expiring or its
+     * active deadline passing, whichever comes first. Another launcher's
+     * request is left alone, its prompt included.
+     */
+    fun expireUnshown(
+        requestId: String,
+        event: PromptOwnership.Event = PromptOwnership.Event.NOTIFICATION_EXPIRY,
+    ): Boolean {
+        val key = NotificationKeys.signature(requestId)
+        val id = requestId.toLongOrNull()
+        val continuation = id?.let { pending[it] }
+        if (!prompts.accept(key, event) || id == null || continuation == null || !expirePrompt(requestId)) {
+            return false
+        }
+        if (!prompts.expire(key, event)) return false
+        if (!pending.remove(id, continuation)) return false
+        continuation.resume(
+            CryptoSigningResult.Error(
+                BiometricPrompt.ERROR_TIMEOUT,
+                "The signing prompt was never shown before its deadline"
+            )
+        )
+        return true
+    }
+
+    /**
+     * Resumes [requestId]'s caller with [result]; false when nothing waits on
+     * it. Only the ACTIVE request accepts a result: one for a request still
+     * queued or already settled is refused. Every launcher's receiver hears
+     * every result, so one for another launcher's ACTIVE request is left to
+     * that launcher, and the shared entry is not touched.
+     */
     fun complete(requestId: Long, result: CryptoSigningResult): Boolean {
-        val request = pending.remove(requestId) ?: return false
-        prompts.leave(request)
-        request.continuation.resume(result)
+        val key = NotificationKeys.signature(requestId.toString())
+        val continuation = pending[requestId]
+        if (!prompts.accept(key, PromptOwnership.Event.ACTIVITY_RESULT) || continuation == null) return false
+        val outcome = promptOutcome((result as? CryptoSigningResult.Error)?.code)
+        if (!prompts.settle(key, outcome, PromptOwnership.Event.ACTIVITY_RESULT)) return false
+        if (!pending.remove(requestId, continuation)) return false
+        continuation.resume(result)
         return true
     }
 
@@ -104,74 +192,12 @@ internal class PendingCryptoSignatures(
         // Newest first, so a request still waiting for its turn is withdrawn
         // before the one on screen leaves and could hand the turn to it.
         for (requestId in pending.keys.sortedDescending()) {
-            pending[requestId]?.continuation?.cancel()
+            pending[requestId]?.cancel()
         }
     }
 
     private companion object {
         /** Process-wide, so ids from two launchers never name the same prompt. */
-        val nextRequestId = AtomicLong(0L)
-    }
-}
-
-/**
- * One crypto signing prompt on screen at a time, the rest waiting in arrival
- * order.
- *
- * [com.automatethethings.xkey.ui.CryptoSigningActivity] reads its request
- * when it is created and the system shows one biometric authentication at a
- * time, so a request launched while another prompts would displace it or be
- * lost. Here the next request is shown only when the one on screen leaves,
- * and a request that leaves while it waits is dropped from the line unseen.
- */
-internal class SigningPromptQueue {
-
-    /** A request waiting for the screen or holding it. */
-    fun interface Turn {
-        /** Shows the request's prompt. Called once, outside the queue's lock. */
-        fun show()
-    }
-
-    private val waiting = ArrayDeque<Turn>()
-    private var showing: Turn? = null
-
-    /** Shows [turn] now if no prompt is up, otherwise after the turns ahead of it. */
-    fun join(turn: Turn) {
-        val showNow = synchronized(this) {
-            if (showing == null) {
-                showing = turn
-                true
-            } else {
-                waiting.addLast(turn)
-                false
-            }
-        }
-        if (showNow) turn.show()
-    }
-
-    /**
-     * Takes [turn] out of the line, or off the screen. [beforeNext] learns
-     * which, and runs before the next turn is shown. Leaving twice is a no-op.
-     */
-    fun leave(turn: Turn, beforeNext: (wasShowing: Boolean) -> Unit = {}) {
-        val wasShowing: Boolean
-        val next: Turn?
-        synchronized(this) {
-            wasShowing = showing === turn
-            if (wasShowing) {
-                next = waiting.removeFirstOrNull()
-                showing = next
-            } else {
-                waiting.remove(turn)
-                next = null
-            }
-        }
-        beforeNext(wasShowing)
-        next?.show()
-    }
-
-    companion object {
-        /** The one screen every launcher in the process prompts on. */
-        val process = SigningPromptQueue()
+        val nextRequestId = AtomicLong(PromptRequestIds.firstOfProcess())
     }
 }
