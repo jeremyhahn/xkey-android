@@ -173,18 +173,38 @@ class KeyDeletionMaterialTypesTest {
         assertFalse(SoftwareKeyStore(context).contains("k"))
     }
 
-    /** Material that stays (a backend refusing the delete) is reported. */
+    /**
+     * Material that stays (a backend refusing the delete) is reported. The
+     * fake behaves as SharedPreferences does: remove() takes the entry out
+     * of the in-memory cache at once, and commit() = false means the disk
+     * still holds it. The cached absence must not count as a delete
+     * (#255 review): the tombstone stays owed and a replay retries it.
+     */
     @Test
-    fun anEd25519KeyThatStaysIsReported() {
+    fun anEd25519KeyWhoseCommitFailsStaysOwed() {
         ed25519["xkey_key_k"] = "c2VjcmV0"
         val prefs = keystore.ed25519Prefs()!!
         every { prefs.edit() } answers {
-            mockk<SharedPreferences.Editor> {
-                every { remove(any()) } returns this
-                every { commit() } returns false
-            }
+            val editor = mockk<SharedPreferences.Editor>()
+            every { editor.remove(any()) } answers { ed25519.remove(firstArg<String>()); editor }
+            every { editor.commit() } returns false
+            editor
         }
-        assertFalse(delete("k", "android"))
+        assertFalse("a failed commit was reported as a delete", delete("k", "android"))
+    }
+
+    /**
+     * An Ed25519 store that cannot be opened is never read as an empty one
+     * (#255 review): capturing the generation throws, so the delete is
+     * refused before its tombstone or any row removal.
+     */
+    @Test
+    fun anUnreadableEd25519StoreRefusesTheDelete() {
+        ed25519["xkey_key_k"] = "c2VjcmV0"
+        every { keystore.ed25519Prefs() } throws java.security.GeneralSecurityException("master key unavailable")
+        val refused = runCatching { readKeyMaterialGeneration(context, held("k"), "android", keystore) }
+        assertTrue("an unreadable Ed25519 store was read as empty", refused.isFailure)
+        assertEquals(setOf("xkey_key_k"), ed25519.keys)
     }
 
     /** An internal key named like the user key's id stays. */

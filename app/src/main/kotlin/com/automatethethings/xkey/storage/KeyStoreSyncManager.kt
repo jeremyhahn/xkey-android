@@ -69,6 +69,24 @@ class KeyStoreSyncManager(
             "_androidx_",       // AndroidX Security Crypto (master key for EncryptedSharedPreferences)
             "AndroidKeyStore",  // Android platform internal keys
         )
+
+        /**
+         * Whether the Keystore entry [alias] is protected from a user delete:
+         * every alias but a user key's (KeystoreManager.userKeyAliases), so
+         * the app's own keys (xkey_seal_store_key,
+         * xkey_password_encryption_key, the CA keys) and framework keys are
+         * listed as system keys. A delete of one is refused
+         * ([InternalKeyException]) with nothing deleted (#255 review).
+         */
+        fun isProtectedAlias(alias: String): Boolean {
+            val userKey = when {
+                alias.startsWith(KEY_ALIAS_PREFIX) -> alias.removePrefix(KEY_ALIAS_PREFIX)
+                alias.startsWith(KEY_ALIAS_PREFIX_GENERAL) -> alias.removePrefix(KEY_ALIAS_PREFIX_GENERAL)
+                else -> return true
+            }
+            return alias !in com.automatethethings.xkey.crypto.KeystoreManager.userKeyAliases(userKey) ||
+                SYSTEM_KEY_PREFIXES.any { alias.startsWith(it) }
+        }
     }
 
     /**
@@ -184,6 +202,11 @@ class KeyStoreSyncManager(
                     discovered++
                     Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
                 }
+            } else if (isProtectedAlias(alias)) {
+                // A row an earlier sync listed as a deletable user key.
+                keyDao.getByKeyId(keyId)?.takeIf { !it.isSystemKey }?.let {
+                    keyDao.update(it.copy(isSystemKey = true))
+                }
             }
         }
 
@@ -284,10 +307,7 @@ class KeyStoreSyncManager(
                 else -> "signing"
             }
 
-            // Detect system/framework keys by alias pattern
-            val isSystemKey = isCA || SYSTEM_KEY_PREFIXES.any { prefix ->
-                alias.startsWith(prefix)
-            }
+            val isSystemKey = isCA || isProtectedAlias(alias)
 
             // Generate a user-friendly label
             val label = when {

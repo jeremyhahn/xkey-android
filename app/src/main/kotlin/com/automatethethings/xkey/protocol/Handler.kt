@@ -855,10 +855,10 @@ class RequestHandler(
         if (!biometricRequired) {
             // Try signing without biometric (session/time-window still valid, or UV disabled)
             try {
-                signature = keystoreManager.signWithoutBiometric(
+                signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
                     credentialId = signParams.credentialId,
                     dataHash = dataHash
-                )
+                ) }
                 userVerified = currentSettings.uvPolicy == UserVerificationPolicy.REQUIRED
                 Log.d(TAG, "Signed without biometric prompt (cached auth or UV disabled)")
             } catch (e: BiometricRequiredException) {
@@ -924,14 +924,14 @@ class RequestHandler(
                     // PER_OPERATION mode: Use crypto-bound signing directly
                     // This performs biometric auth and signing in a single activity
                     Log.d(TAG, "Using crypto-bound signing for PER_OPERATION mode")
-                    val signature = biometricLauncher.requestCryptoSignature(
+                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { biometricLauncher.requestCryptoSignature(
                         credentialId = signParams.credentialId,
                         dataHash = dataHash,
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
                         showOnLockScreen = keyguardManager.isKeyguardLocked,
                         onLaunch = notice.onLaunch
-                    )
+                    ) }
 
                     // Record successful authentication for session tracking
                     sessionAuthManager?.recordAuthentication(requestSessionId())
@@ -961,10 +961,10 @@ class RequestHandler(
                         sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) != false
                     if (!sessionUnapproved) try {
                         Log.d(TAG, "Trying signWithoutBiometric (optimistic for TIME_WINDOW/PER_SESSION)")
-                        val signature = keystoreManager.signWithoutBiometric(
+                        val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
                             credentialId = signParams.credentialId,
                             dataHash = dataHash
-                        )
+                        ) }
 
                         val signatureBase64 = Base64.getEncoder().encodeToString(signature)
                         val result = SignResult(
@@ -995,10 +995,10 @@ class RequestHandler(
 
                     // Now sign within the fresh auth window
                     Log.d(TAG, "Biometric succeeded, signing within auth window")
-                    val signature = keystoreManager.signWithoutBiometric(
+                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
                         credentialId = signParams.credentialId,
                         dataHash = dataHash
-                    )
+                    ) }
 
                     val signatureBase64 = Base64.getEncoder().encodeToString(signature)
                     val result = SignResult(
@@ -1020,14 +1020,14 @@ class RequestHandler(
 
             // The activity's own prompt answers no launcher request; it takes
             // its queue turn, and the notification only wakes the phone for it.
-            val signature = keystoreManager.sign(
+            val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.sign(
                 credentialId = signParams.credentialId,
                 dataHash = dataHash,
                 biometricHelper = helper,
                 title = "xKey Authentication",
                 subtitle = "Verify your identity to sign",
                 onTurn = notice::wake
-            )
+            ) }
 
             // Record successful authentication for session tracking
             sessionAuthManager?.recordAuthentication(requestSessionId())
@@ -1744,7 +1744,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val signature = keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm)
+        val signature = keyPolicyStore.withUsableKey(signParams.keyId) { keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm) }
         val durationMs = System.currentTimeMillis() - startTime
 
         // Record usage
@@ -1788,9 +1788,9 @@ class RequestHandler(
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(
+        val decrypted = keyPolicyStore.withUsableKey(decryptParams.keyId) { keystoreManager.rsaDecryptWithAlgorithm(
             decryptParams.keyId, decryptParams.getCiphertextBytes()
-        )
+        ) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(decryptParams.keyId)
@@ -1830,9 +1830,9 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
+            val ct = keyPolicyStore.withUsableKey(symParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+            ) }
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
@@ -1841,9 +1841,9 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val ciphertext = keystoreManager.symmetricEncrypt(
+        val ciphertext = keyPolicyStore.withUsableKey(symParams.keyId) { keystoreManager.symmetricEncrypt(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        ) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -1884,9 +1884,9 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
+            val pt = keyPolicyStore.withUsableKey(symParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+            ) }
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
@@ -1895,9 +1895,9 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val plaintext = keystoreManager.symmetricDecrypt(
+        val plaintext = keyPolicyStore.withUsableKey(symParams.keyId) { keystoreManager.symmetricDecrypt(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        ) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -2017,9 +2017,9 @@ class RequestHandler(
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
             val swStart = System.currentTimeMillis()
-            val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
+            val swMac = keyPolicyStore.withUsableKey(hmacParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
                 sw.material, hmacParams.getDataBytes(), sw.algorithm
-            )
+            ) }
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
             // The MAC and the data stay out of the entry.
@@ -2037,7 +2037,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
+        val hmac = keyPolicyStore.withUsableKey(hmacParams.keyId) { keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes()) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
@@ -2077,9 +2077,9 @@ class RequestHandler(
         val ecdhParams = LocalECDHParams.fromJson(params)
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val sharedSecret = keystoreManager.performECDH(
+        val sharedSecret = keyPolicyStore.withUsableKey(ecdhParams.keyId) { keystoreManager.performECDH(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
-        )
+        ) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(ecdhParams.keyId)
@@ -3450,10 +3450,10 @@ class RequestHandler(
             val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
 
             // Sign using the credential key
-            val signature = keystoreManager.signWithoutBiometric(
+            val signature = keyPolicyStore.withUsableKey(assertionParams.credentialId) { keystoreManager.signWithoutBiometric(
                 credentialId = assertionParams.credentialId,
                 dataHash = dataHash
-            )
+            ) }
 
             Triple(newSignCount, authData, signature)
         }
@@ -4230,9 +4230,9 @@ class RequestHandler(
         // Sign the content hash
         return try {
             val hashBytes = hexToBytes(contentHash)
-            val signatureBytes = keystoreManager.signWithAlgorithm(
+            val signatureBytes = keyPolicyStore.withUsableKey(signingKey.keyId) { keystoreManager.signWithAlgorithm(
                 signingKey.keyId, hashBytes, signingKey.algorithm
-            )
+            ) }
             val publicKeyDer = keystoreManager.getPublicKeyDER(signingKey.keyId)
                 ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
             val fingerprint = computeFingerprint(publicKeyDer)

@@ -1050,9 +1050,12 @@ class KeystoreManager(private val context: Context) {
         // Store private key in EncryptedSharedPreferences since Android Keystore
         // does not support Ed25519
         val prefs = checkNotNull(ed25519Prefs())
-        prefs.edit()
+        // commit(), not apply(): a key is generated only once its write is
+        // durable; cached presence never stands in for it (#255 review).
+        val stored = prefs.edit()
             .putString(alias, Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP))
-            .apply()
+            .commit()
+        if (!stored) throw KeyGenerationException("Could not store the Ed25519 key $alias")
 
         return keyPair
     }
@@ -1675,15 +1678,13 @@ class KeystoreManager(private val context: Context) {
      * and `ed25519:<alias>` for an Ed25519 software key, each mapped to a tag
      * that changes when the material under that alias is replaced (the
      * entry's creation date and certificate digest, or the digest of the
-     * stored key). Empty when no material is held.
+     * stored key). Empty when no material is held. A backend that cannot be
+     * read throws: an unreadable Ed25519 store is never taken for an empty
+     * one, so a delete refuses before it removes any row (#255 review).
      */
     fun userKeyGeneration(keyId: String): Map<String, String> {
         val generation = LinkedHashMap<String, String>()
-        val prefs = try {
-            ed25519Prefs()
-        } catch (e: Exception) {
-            null
-        }
+        val prefs = ed25519Prefs()
         for (alias in userKeyAliases(keyId)) {
             keystoreTag(alias)?.let { generation[KEYSTORE_ENTRY + alias] = it }
             prefs?.getString(alias, null)?.let { generation[ED25519_ENTRY + alias] = digestHex(it.toByteArray()) }
@@ -1696,11 +1697,14 @@ class KeystoreManager(private val context: Context) {
      * still in place: an entry whose alias now holds material with another
      * tag was replaced by a later write and is left alone. Returns the
      * entries of [generation] still held after the delete; empty means the
-     * generation is gone.
+     * generation is gone. An Ed25519 remove whose commit() fails is still
+     * held: the preferences' in-memory cache already shows it absent, but
+     * nothing durable says so, so only a commit that returned true counts.
      */
     fun deleteUserKeyGeneration(keyId: String, generation: Map<String, String>): Map<String, String> {
         val namespace = userKeyAliases(keyId)
         val prefs = if (generation.keys.any { it.startsWith(ED25519_ENTRY) }) ed25519Prefs() else null
+        val uncommitted = LinkedHashMap<String, String>()
         for ((entry, tag) in generation) {
             when {
                 entry.startsWith(KEYSTORE_ENTRY) -> {
@@ -1711,13 +1715,13 @@ class KeystoreManager(private val context: Context) {
                     val alias = entry.removePrefix(ED25519_ENTRY)
                     val stored = prefs?.getString(alias, null)
                     if (alias in namespace && stored != null && digestHex(stored.toByteArray()) == tag) {
-                        prefs.edit().remove(alias).commit()
+                        if (!prefs.edit().remove(alias).commit()) uncommitted[entry] = tag
                     }
                 }
             }
         }
         val left = userKeyGeneration(keyId)
-        return generation.filter { (entry, tag) -> left[entry] == tag }
+        return generation.filter { (entry, tag) -> left[entry] == tag } + uncommitted
     }
 
     /** The tag of the Keystore entry at [alias], or null if there is none. */

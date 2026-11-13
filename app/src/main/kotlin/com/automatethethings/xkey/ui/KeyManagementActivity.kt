@@ -1296,9 +1296,10 @@ class KeyManagementActivity : AppCompatActivity() {
             // With its policy row and grant rows, in one transaction (#193);
             // the material only once the rows of this key row are deleted,
             // in the store's serialisation of its material (#193 r8).
-            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore, material =
+            val outcome = deleteUserKey(key, keyPolicyStore,
                 com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyManagementActivity))
-            Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
+            val shown = if (outcome == UserKeyDelete.PROTECTED) R.string.key_system_explanation else R.string.key_deleted
+            Snackbar.make(rootLayout, getString(shown), Snackbar.LENGTH_SHORT).show()
         }
     }
 
@@ -1797,5 +1798,30 @@ class KeyManagementActivity : AppCompatActivity() {
         override fun areContentsTheSame(oldItem: KeyEntity, newItem: KeyEntity): Boolean {
             return oldItem == newItem
         }
+    }
+}
+
+/** What a key delete the user asked for did. */
+internal enum class UserKeyDelete { DELETED, GONE, PROTECTED }
+
+/**
+ * The UI's one key delete (#255 review): every delete screen goes through
+ * here. A system key, or a key whose material is the app's own
+ * ([com.automatethethings.xkey.storage.InternalKeyException]), is refused
+ * with nothing deleted and reported as [UserKeyDelete.PROTECTED], never a
+ * crash. [UserKeyDelete.GONE]: the key was deleted or generated again
+ * meanwhile, nothing deleted.
+ */
+internal suspend fun deleteUserKey(
+    key: KeyEntity,
+    store: KeyPolicyStore,
+    material: com.automatethethings.xkey.storage.KeyMaterial
+): UserKeyDelete {
+    if (key.isSystemKey) return UserKeyDelete.PROTECTED
+    return try {
+        if (KeySharingPeers.forgetKey(key.keyId, key.id, store, material)) UserKeyDelete.DELETED
+        else UserKeyDelete.GONE
+    } catch (e: com.automatethethings.xkey.storage.InternalKeyException) {
+        UserKeyDelete.PROTECTED
     }
 }

@@ -25,6 +25,7 @@ import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -561,10 +562,53 @@ class KeyPolicyStore(
             block(held)
         }
 
-    /** [keyId]'s material lock, for the store's deletes and [withKeyMaterial]. */
+    /**
+     * The one gate every crypto use of a user key passes (#255 review,
+     * ruling 554): [requireUsable] rechecks the key under [keyId]'s material
+     * lock, the lock every delete takes, and [block] runs as a shared use of
+     * the key that the lock's exclusive holders (deletes, [withKeyMaterial])
+     * wait out. A request that waited in an approval prompt while a delete
+     * reported success is refused here, before any crypto, never run with
+     * the deleted key; a delete that starts while a use runs waits until it
+     * ends. Uses of one key by two desktops run side by side. The dispatch
+     * gate's earlier [requireUsable] refuses early; this one refuses late.
+     * [block] must not take [keyId]'s exclusive lock.
+     */
+    suspend inline fun <T> withUsableKey(keyId: String, block: () -> T): T {
+        val lock = acquireMaterialLock(keyId)
+        try {
+            lock.mutex.withLock {
+                requireUsable(keyId)
+                lock.beginUse()
+            }
+            try {
+                return block()
+            } finally {
+                lock.endUse()
+            }
+        } finally {
+            releaseMaterialLock(keyId, lock)
+        }
+    }
+
+    /**
+     * [keyId]'s exclusive material lock, for the store's deletes and
+     * [withKeyMaterial]: [block] runs once no [withUsableKey] use of the key
+     * is running, and none starts until it ends.
+     */
     @PublishedApi
-    internal suspend inline fun <T> lockKeyMaterial(keyId: String, block: (KeyMaterialHeld) -> T): T =
-        materialLock(keyId).withLock { block(KeyMaterialHeld(keyId)) }
+    internal suspend inline fun <T> lockKeyMaterial(keyId: String, block: (KeyMaterialHeld) -> T): T {
+        val lock = acquireMaterialLock(keyId)
+        try {
+            return lock.mutex.withLock {
+                // Uses start only under the mutex, so none starts meanwhile.
+                lock.awaitNoUse()
+                block(KeyMaterialHeld(keyId))
+            }
+        } finally {
+            releaseMaterialLock(keyId, lock)
+        }
+    }
 
     /**
      * A key material write refused: an earlier delete under the id still
@@ -579,9 +623,52 @@ class KeyPolicyStore(
      */
     class KeyMaterialHeld @PublishedApi internal constructor(val keyId: String)
 
-    /** [keyId]'s lock for [withKeyMaterial]. */
+    /**
+     * One key id's material lock and how many callers hold or wait on it.
+     * Key ids can be chosen by a peer, so a lock lives only while it has a
+     * holder or a waiter, the way [com.automatethethings.xkey.protocol.KeyIdReservations]
+     * keeps its locks: the map never grows with ids no one is using.
+     */
     @PublishedApi
-    internal fun materialLock(keyId: String): Mutex = materialLocks.computeIfAbsent(keyId) { Mutex() }
+    internal class MaterialLock {
+        val mutex = Mutex()
+        var users = 0
+        private var uses = 0
+        private var idle: CompletableDeferred<Unit>? = null
+
+        /** One more running [withUsableKey] use; called under [mutex]. */
+        fun beginUse() = synchronized(this) { uses++ }
+
+        fun endUse() {
+            val done = synchronized(this) {
+                if (--uses == 0) idle.also { idle = null } else null
+            }
+            done?.complete(Unit)
+        }
+
+        /** Waits until no use runs; called under [mutex]. */
+        suspend fun awaitNoUse() {
+            while (true) {
+                val wait = synchronized(this) {
+                    if (uses == 0) null else idle ?: CompletableDeferred<Unit>().also { idle = it }
+                } ?: return
+                wait.await()
+            }
+        }
+    }
+
+    /** [keyId]'s lock for [withKeyMaterial], counted as one more user until [releaseMaterialLock]. */
+    @PublishedApi
+    internal fun acquireMaterialLock(keyId: String): MaterialLock =
+        synchronized(materialLocks) { materialLocks.getOrPut(keyId) { MaterialLock() }.also { it.users++ } }
+
+    /** Ends one use of [lock]; the last user removes it from the map. */
+    @PublishedApi
+    internal fun releaseMaterialLock(keyId: String, lock: MaterialLock) {
+        synchronized(materialLocks) {
+            if (--lock.users == 0) materialLocks.remove(keyId)
+        }
+    }
 
     /**
      * The policy to enforce for [key]: its policy row's, which carries a
@@ -616,7 +703,13 @@ class KeyPolicyStore(
         private val processObligations: MutableMap<String, Held> = java.util.concurrent.ConcurrentHashMap()
 
         /** Each key id's material lock ([withKeyMaterial]), shared by every store in the process. */
-        private val materialLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+        private val materialLocks = HashMap<String, MaterialLock>()
+
+        /** How many key ids have a live material lock (tests: the map never outgrows its users). */
+        internal fun liveMaterialLocks(): Int = synchronized(materialLocks) { materialLocks.size }
+
+        /** [keyId]'s live material lock users, 0 when it has none. */
+        internal fun materialLockUsers(keyId: String): Int = synchronized(materialLocks) { materialLocks[keyId]?.users ?: 0 }
 
         /**
          * The rule every obligation is recorded by: a failed withdrawal

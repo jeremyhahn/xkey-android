@@ -2077,8 +2077,12 @@ class KeyDetailActivity : AppCompatActivity() {
             // With its policy row and grant rows, in one transaction (#193);
             // the material only once the rows of this key row are deleted,
             // in the store's serialisation of its material (#193 r8).
-            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore, material =
+            val outcome = deleteUserKey(key, keyPolicyStore,
                 com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyDetailActivity))
+            if (outcome == UserKeyDelete.PROTECTED) {
+                Snackbar.make(coordinatorLayout, getString(R.string.key_system_explanation), Snackbar.LENGTH_LONG).show()
+                return@launch
+            }
             finish()
         }
     }
