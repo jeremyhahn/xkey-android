@@ -53,7 +53,8 @@ class OathDesktopActionsTest {
             // "Hello!\xde\xad\xbe\xef" = JBSWY3DPEHPK3PXP
             byteArrayOf(0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x21, 0xde.toByte(), 0xad.toByte(), 0xbe.toByte(), 0xef.toByte())
                 .also { secrets += it }
-        }
+        },
+        clock = { 0L }
     )
 
     private fun entity(type: String = "TOTP") = OathCredentialEntity(
@@ -115,7 +116,10 @@ class OathDesktopActionsTest {
 
         val outcome = actions().desktopCode(entity())
 
-        assertEquals(OathDesktopActions.Outcome.Code("492039", 21), outcome)
+        assertEquals(
+            DesktopCodeDeadline.View.Live("492039", 21),
+            (outcome as OathDesktopActions.Outcome.Code).deadline.view()
+        )
         assertEquals(MethodNames.REMOTE_OATH_GENERATE, sender.lastRequest.method)
         assertEquals("desk-7", sender.lastRequest.params!!.getString("credential_id"))
     }
@@ -202,7 +206,10 @@ class OathDesktopActionsTest {
         // Desktop B replaces A while the menu is open.
         peer = PEER_B
         sender.succeedWith("""{"code":"492039","expires_in":21}""")
-        assertEquals(OathDesktopActions.Outcome.Code("492039", 21), menu.desktopCode())
+        assertEquals(
+            DesktopCodeDeadline.View.Live("492039", 21),
+            (menu.desktopCode() as OathDesktopActions.Outcome.Code).deadline.view()
+        )
         assertEquals("desk-7", sender.lastRequest.params!!.getString("credential_id"))
 
         sender.succeedWith("""{"success":true,"credential_id":"desk-9"}""")
