@@ -49,6 +49,7 @@ import com.automatethethings.xkey.protocol.RemoteVerifyParams
 import com.automatethethings.xkey.protocol.RemoteVerifyResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.security.cert.CertificateFactory
@@ -66,7 +67,9 @@ import java.util.concurrent.atomic.AtomicLong
  * All methods are suspend functions and block until the laptop responds or
  * the request times out.
  *
- * Thread safety: Request IDs use [AtomicLong] for lock-free generation.
+ * Thread safety: Request IDs use [AtomicLong] for lock-free generation, one
+ * counter per [BidirectionalMessageRouter]: every client on a router draws
+ * from the same counter, so no two of them register the same pending id.
  * Pending requests are tracked by [BidirectionalMessageRouter].
  *
  * @param messageSender Transport for sending encrypted messages to the laptop.
@@ -398,6 +401,159 @@ class RemoteKeyClient(
     }
 
     // ================================================================
+    // PIV (go-xkms pkg/pairingproto/protocol_piv.go, RemotePIV*)
+    // ================================================================
+
+    /**
+     * Lists the desktop's PIV slots (`remote.pivListSlots`).
+     *
+     * @param backend Optional desktop key backend. When null no params are
+     *   sent and the desktop uses its default backend (`software`).
+     * @return The slots the desktop reports, in its order.
+     * @throws ProtocolException on a desktop error or a malformed reply.
+     */
+    suspend fun pivListSlots(backend: String? = null): List<RemotePivSlot> {
+        val params = backend?.let { JSONObject().put("backend", it) }
+        val response = sendRequest(MethodNames.REMOTE_PIV_LIST_SLOTS, params)
+        return parsePiv(MethodNames.REMOTE_PIV_LIST_SLOTS) {
+            val result = response.result ?: throw malformed("no result")
+            if (!result.has("slots")) throw malformed("missing slots")
+            val raw = result.get("slots")
+            if (raw == JSONObject.NULL) {
+                // A Go nil slice encodes as null: no slots.
+                emptyList()
+            } else {
+                val array = raw as? JSONArray ?: throw malformed("slots is not an array")
+                (0 until array.length()).map { i ->
+                    val entry = array.get(i) as? JSONObject
+                        ?: throw malformed("slots[$i] is not an object")
+                    val slot = entry.requiredString("slot")
+                    // Kept verbatim (go-xkms ids are case-sensitive), but a
+                    // blank id names no slot and could never be sent back.
+                    if (slot.isBlank()) throw malformed("slots[$i].slot is blank")
+                    RemotePivSlot(
+                        slot = slot,
+                        label = entry.optionalString("label"),
+                        algorithm = entry.optionalString("algorithm"),
+                        hasKey = entry.requiredBoolean("has_key"),
+                        hasCertificate = entry.requiredBoolean("has_certificate"),
+                        certSubject = entry.optionalString("cert_subject"),
+                        certExpiry = entry.optionalString("cert_expiry")
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Fetches the certificate in one of the desktop's PIV slots
+     * (`remote.pivGetCert`).
+     *
+     * @param slot PIV slot id, e.g. "9a".
+     * @param backend Optional desktop key backend (desktop default when null).
+     * @throws IllegalArgumentException if [slot] is blank (nothing is sent).
+     * @throws ProtocolException on a desktop error, a malformed reply, or a
+     *   `certificate_der` that is not an X.509 certificate.
+     */
+    suspend fun pivGetCert(slot: String, backend: String? = null): RemotePivCertificate {
+        require(slot.isNotBlank()) { "PIV slot must not be blank" }
+        val params = JSONObject().put("slot", slot)
+        backend?.let { params.put("backend", it) }
+        val response = sendRequest(MethodNames.REMOTE_PIV_GET_CERT, params)
+        return parsePiv(MethodNames.REMOTE_PIV_GET_CERT) {
+            val result = response.result ?: throw malformed("no result")
+            val der = result.requiredBytes("certificate_der")
+            try {
+                CertificateFactory.getInstance("X.509")
+                    .generateCertificate(ByteArrayInputStream(der))
+            } catch (e: Exception) {
+                throw malformed("certificate_der is not an X.509 certificate")
+            }
+            RemotePivCertificate(
+                certificateDer = der,
+                subject = result.optionalString("subject"),
+                issuer = result.optionalString("issuer"),
+                expiry = result.optionalString("expiry")
+            )
+        }
+    }
+
+    /**
+     * Signs [data] with the key in one of the desktop's PIV slots
+     * (`remote.pivSign`).
+     *
+     * @param slot PIV slot id, e.g. "9c".
+     * @param data The bytes to sign, sent as base64 (Go `[]byte`).
+     * @param algorithm Optional signing algorithm override.
+     * @param backend Optional desktop key backend (desktop default when null).
+     * @throws IllegalArgumentException if [slot] is blank or [data] is empty.
+     * @throws ProtocolException on a desktop error or a malformed reply.
+     */
+    suspend fun pivSign(
+        slot: String,
+        data: ByteArray,
+        algorithm: String? = null,
+        backend: String? = null
+    ): RemotePivSignature {
+        require(slot.isNotBlank()) { "PIV slot must not be blank" }
+        require(data.isNotEmpty()) { "PIV sign data must not be empty" }
+        val params = JSONObject()
+            .put("slot", slot)
+            .put("data", Base64.getEncoder().encodeToString(data))
+        algorithm?.let { params.put("algorithm", it) }
+        backend?.let { params.put("backend", it) }
+        val response = sendRequest(MethodNames.REMOTE_PIV_SIGN, params)
+        return parsePiv(MethodNames.REMOTE_PIV_SIGN) {
+            val result = response.result ?: throw malformed("no result")
+            RemotePivSignature(
+                signature = result.requiredBytes("signature"),
+                algorithm = result.requiredString("algorithm")
+            )
+        }
+    }
+
+    /** A malformed PIV reply; [parsePiv] turns it into a [ProtocolException]. */
+    private class MalformedReply(message: String) : Exception(message)
+
+    private fun malformed(message: String) = MalformedReply(message)
+
+    private inline fun <T> parsePiv(method: String, parse: () -> T): T =
+        try {
+            parse()
+        } catch (e: MalformedReply) {
+            throw ProtocolException(
+                "Malformed $method reply: ${e.message}",
+                errorCode = ErrorCodes.PARSE_ERROR
+            )
+        }
+
+    private fun JSONObject.requiredString(key: String): String {
+        if (!has(key)) throw malformed("missing $key")
+        return get(key) as? String ?: throw malformed("$key is not a string")
+    }
+
+    private fun JSONObject.optionalString(key: String): String? {
+        if (!has(key) || isNull(key)) return null
+        return get(key) as? String ?: throw malformed("$key is not a string")
+    }
+
+    private fun JSONObject.requiredBoolean(key: String): Boolean {
+        if (!has(key)) throw malformed("missing $key")
+        return get(key) as? Boolean ?: throw malformed("$key is not a boolean")
+    }
+
+    private fun JSONObject.requiredBytes(key: String): ByteArray {
+        val text = requiredString(key)
+        val bytes = try {
+            Base64.getDecoder().decode(text)
+        } catch (e: IllegalArgumentException) {
+            throw malformed("$key is not base64")
+        }
+        if (bytes.isEmpty()) throw malformed("$key is empty")
+        return bytes
+    }
+
+    // ================================================================
     // Attestation verification
     // ================================================================
 
@@ -506,3 +662,39 @@ class RemoteKeyClient(
         Log.d(TAG, "Device attestation verified: format=$format, securityLevel=$securityLevel")
     }
 }
+
+/**
+ * One of the desktop's PIV slots, as `PIVSlotInfo` in go-xkms
+ * `pkg/pairingproto/protocol_piv.go`.
+ *
+ * @property slot Slot id, e.g. "9a".
+ * @property label Human-readable slot name, if the desktop sent one.
+ * @property algorithm Key algorithm, e.g. "ECDSA-P256", if a key is present.
+ * @property hasKey Whether the slot holds a private key.
+ * @property hasCertificate Whether the slot holds a certificate.
+ * @property certSubject Certificate subject CN, if any.
+ * @property certExpiry Certificate expiry, ISO 8601, if any.
+ */
+data class RemotePivSlot(
+    val slot: String,
+    val label: String?,
+    val algorithm: String?,
+    val hasKey: Boolean,
+    val hasCertificate: Boolean,
+    val certSubject: String?,
+    val certExpiry: String?
+)
+
+/** `RemotePIVGetCertResult`: the DER certificate in a desktop PIV slot. */
+class RemotePivCertificate(
+    val certificateDer: ByteArray,
+    val subject: String?,
+    val issuer: String?,
+    val expiry: String?
+)
+
+/** `RemotePIVSignResult`: a signature made by a desktop PIV slot key. */
+class RemotePivSignature(
+    val signature: ByteArray,
+    val algorithm: String
+)

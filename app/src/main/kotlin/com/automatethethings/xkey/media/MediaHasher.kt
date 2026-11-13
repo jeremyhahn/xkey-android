@@ -76,9 +76,13 @@ object MediaHasher {
 
     /** The bytes [hashCanonical] covers. Exposed for tests and diagnostics. */
     fun canonicalContent(data: ByteArray, mimeType: String?): ByteArray {
+        return if (isCanonicalisedJpeg(mimeType)) jpegWithoutMetadata(data) else data
+    }
+
+    /** Whether [hashCanonical] strips metadata for [mimeType]; otherwise it hashes the file whole. */
+    fun isCanonicalisedJpeg(mimeType: String?): Boolean {
         val type = mimeType.orEmpty().lowercase()
-        val isJpeg = type.startsWith("image/jpeg") || type.startsWith("image/jpg")
-        return if (isJpeg) jpegWithoutMetadata(data) else data
+        return type.startsWith("image/jpeg") || type.startsWith("image/jpg")
     }
 
     /** Where a signature was read from, which decides the hashes it may cover. */

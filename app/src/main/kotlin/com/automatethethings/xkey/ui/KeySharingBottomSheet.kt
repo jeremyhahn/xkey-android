@@ -53,11 +53,9 @@ import com.automatethethings.xkey.remote.DesktopShareDecision
 import com.automatethethings.xkey.remote.DesktopShareGate
 import com.automatethethings.xkey.remote.loadZeroedOnCancel
 import com.automatethethings.xkey.remote.shareSessionChanges
-import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
-import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -119,6 +117,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     private val keyDao by lazy { XKeyDatabase.getInstance(requireContext()).keyDao() }
     private val keySharingPolicyDao by lazy { XKeyDatabase.getInstance(requireContext()).keySharingPolicyDao() }
     private val pairedDeviceRepository by lazy { PairedDeviceRepository(requireContext()) }
+    private val sharingPeers by lazy { KeySharingPeers(keyId, keySharingPolicyDao, pairedDeviceRepository) }
 
     private var keyId: String = ""
     private var keyEntity: KeyEntity? = null
@@ -155,7 +154,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     private var isApplyingStoredPolicy = false
 
     private val selectedPolicyFlow = MutableStateFlow(SharingPolicyType.PRIVATE)
-    private val allowedPeersFlow = MutableStateFlow<Set<String>>(emptySet())
+    private val peersFlow = MutableStateFlow<List<KeySharingPeers.Peer>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -501,7 +500,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     /**
      * Populates the peer list with paired devices.
      */
-    private fun populatePeerList(pairedDevices: List<PairedDeviceData>, allowedPeers: Set<String>) {
+    private fun populatePeerList(peers: List<KeySharingPeers.Peer>) {
         // Remove all views except the empty state text
         for (i in peerListLayout.childCount - 1 downTo 0) {
             val child = peerListLayout.getChildAt(i)
@@ -510,23 +509,24 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             }
         }
 
-        if (pairedDevices.isEmpty()) {
+        if (peers.isEmpty()) {
             emptyPeersText.visibility = View.VISIBLE
             return
         }
 
         emptyPeersText.visibility = View.GONE
 
-        for (device in pairedDevices) {
-            val deviceCard = createPeerCard(device, allowedPeers.contains(device.publicKeyHex))
-            peerListLayout.addView(deviceCard)
+        for (peer in peers) {
+            peerListLayout.addView(createPeerCard(peer))
         }
     }
 
     /**
-     * Creates a card view for a paired device with checkbox.
+     * Creates a card view for a paired device with checkbox. A peer that is
+     * not [KeySharingPeers.Peer.selectable] is dimmed and its checkbox disabled.
      */
-    private fun createPeerCard(device: PairedDeviceData, isAllowed: Boolean): MaterialCardView {
+    private fun createPeerCard(peer: KeySharingPeers.Peer): MaterialCardView {
+        val device = peer.device
         val card = PremiumCardFactory.createCompactCard(requireContext()).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -599,7 +599,8 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
 
         // Checkbox
         val checkbox = CheckBox(requireContext()).apply {
-            isChecked = isAllowed
+            isChecked = peer.allowed
+            isEnabled = peer.selectable
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -614,9 +615,13 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
 
         card.addView(contentLayout)
 
-        // Make entire card clickable to toggle checkbox
-        PremiumCardFactory.setCardClickListener(card) {
-            checkbox.isChecked = !checkbox.isChecked
+        if (peer.selectable) {
+            // Make entire card clickable to toggle checkbox
+            PremiumCardFactory.setCardClickListener(card) {
+                checkbox.isChecked = !checkbox.isChecked
+            }
+        } else {
+            card.alpha = DISABLED_ALPHA
         }
 
         return card
@@ -850,13 +855,12 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     }
 
     /**
-     * Loads the allowed peers for this key from the database.
+     * Follows this key's peer list, re-read on every change to its policy
+     * rows, so a deletion made elsewhere reaches the sheet.
      */
     private fun loadAllowedPeers() {
         lifecycleScope.launch {
-            val policies = keySharingPolicyDao.getPoliciesForKeySync(keyId)
-            val allowedSet = policies.filter { it.allowed }.map { it.peerPublicKeyHex }.toSet()
-            allowedPeersFlow.emit(allowedSet)
+            sharingPeers.peers().collect { peersFlow.emit(it) }
         }
     }
 
@@ -870,18 +874,15 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 peerSelectionContainer.visibility = if (showPeerSelection) View.VISIBLE else View.GONE
 
                 if (showPeerSelection) {
-                    val pairedDevices = pairedDeviceRepository.getAllDevices()
-                    val allowedPeers = allowedPeersFlow.value
-                    populatePeerList(pairedDevices, allowedPeers)
+                    populatePeerList(peersFlow.value)
                 }
             }
         }
 
         lifecycleScope.launch {
-            allowedPeersFlow.collectLatest { allowedPeers ->
+            peersFlow.collectLatest { peers ->
                 if (selectedPolicyFlow.value == SharingPolicyType.SELECTED_PEERS) {
-                    val pairedDevices = pairedDeviceRepository.getAllDevices()
-                    populatePeerList(pairedDevices, allowedPeers)
+                    populatePeerList(peers)
                 }
             }
         }
@@ -913,34 +914,17 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
 
         if (policy != SharingPolicyType.SELECTED_PEERS) {
             keySharingPolicyDao.clearPoliciesForKey(keyId)
-            allowedPeersFlow.emit(emptySet())
         }
         refreshDesktopSection()
     }
 
     /**
-     * Updates the sharing policy for a specific peer.
+     * Updates the sharing policy for a specific peer. The list follows the
+     * policy rows; a refused change redraws it from the stored state.
      */
     private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean) {
-        if (allowed) {
-            val policy = KeySharingPolicy(
-                keyId = keyId,
-                peerPublicKeyHex = peerPublicKeyHex,
-                allowed = true
-            )
-            keySharingPolicyDao.setPolicy(policy)
-
-            // Update local state
-            val currentAllowed = allowedPeersFlow.value.toMutableSet()
-            currentAllowed.add(peerPublicKeyHex)
-            allowedPeersFlow.emit(currentAllowed)
-        } else {
-            keySharingPolicyDao.removePolicy(keyId, peerPublicKeyHex)
-
-            // Update local state
-            val currentAllowed = allowedPeersFlow.value.toMutableSet()
-            currentAllowed.remove(peerPublicKeyHex)
-            allowedPeersFlow.emit(currentAllowed)
+        if (!sharingPeers.setAllowed(peerPublicKeyHex, allowed)) {
+            populatePeerList(peersFlow.value)
         }
         refreshDesktopSection()
     }
@@ -967,6 +951,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         private const val TAG = "KeySharingBottomSheet"
         private const val ARG_KEY_ID = "key_id"
         private const val TAG_SUBTITLE = "subtitle"
+        private const val DISABLED_ALPHA = 0.5f
 
         // Use fixed IDs to avoid issues with generateViewId() in companion object
         private const val RADIO_ID_PRIVATE = 0x7f0a0001

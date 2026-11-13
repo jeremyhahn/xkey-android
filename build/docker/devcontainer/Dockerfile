@@ -129,6 +129,40 @@ class WarmTest {
     }
 }
 EOF
+# gradle-quiesce: run after each gradle run below, before its Gradle home is
+# copied or deleted. `gradle --no-daemon` returns while JVMs it started still
+# run: the single-use build daemon (gradle.properties' jvmargs differ from the
+# client's) still closing and cleaning caches/modules-2, and any Kotlin compile
+# daemon. A cp -a then copies a cache mid-cleanup, and an rm -rf races new
+# entries ("Directory not empty", #183). The runs pass
+# kotlin.compiler.execution.strategy=in-process, so no Kotlin daemon starts;
+# this stops the Gradle daemons and waits for every java process in the step
+# to exit: TERM at 10 s, KILL at 20 s, and the image build fails at 30 s.
+COPY --chmod=0755 <<'EOF' /usr/local/bin/gradle-quiesce
+#!/bin/bash
+set -euo pipefail
+gradle --stop > /dev/null 2>&1 || true
+jvms() {
+  local c p
+  for c in /proc/[0-9]*/comm; do
+    read -r p 2>/dev/null < "$c" || continue
+    [ "$p" = java ] || continue
+    p=${c%/comm}
+    echo "${p#/proc/}"
+  done
+}
+for i in $(seq 1 30); do
+  pids=$(jvms)
+  [ -n "$pids" ] || exit 0
+  # shellcheck disable=SC2086 # one pid per word
+  [ "$i" -ne 10 ] || kill -TERM $pids 2>/dev/null || true
+  # shellcheck disable=SC2086
+  [ "$i" -ne 20 ] || kill -KILL $pids 2>/dev/null || true
+  sleep 1
+done
+echo "gradle-quiesce: JVMs outlived the build: $(jvms | tr '\n' ' ')" >&2
+exit 1
+EOF
 COPY --chown=1000:1000 settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY --chown=1000:1000 gradle/libs.versions.toml gradle/gradle-daemon-jvm.properties gradle/
 COPY --chown=1000:1000 gradle/wrapper/gradle-wrapper.properties gradle/wrapper/
@@ -136,8 +170,10 @@ COPY --chown=1000:1000 app/build.gradle.kts app/
 # The gates' tasks, online, download every dependency they use. Any failure
 # fails the image build: a dependency that cannot be resolved, or the stub
 # failing its own test or lint.
-RUN gradle --no-daemon --console=plain assembleDebug testDebugUnitTest coverageReport lintDebug > /tmp/warm.log 2>&1 \
+RUN gradle --no-daemon --console=plain -Pkotlin.compiler.execution.strategy=in-process \
+      assembleDebug testDebugUnitTest coverageReport lintDebug > /tmp/warm.log 2>&1 \
       || { tail -n 60 /tmp/warm.log; exit 1; }; \
+    gradle-quiesce; \
     cp -a "${GRADLE_USER_HOME}/caches/modules-2" /opt/gradle-ro-cache/; \
     find /opt/gradle-ro-cache -name '*.lock' -delete; \
     rm -f /opt/gradle-ro-cache/modules-2/gc.properties
@@ -170,8 +206,10 @@ RUN rm -rf build app/build .gradle .kotlin "${GRADLE_USER_HOME}"; \
     mkdir -p /tmp/proof-home/caches; \
     cp -a /opt/gradle-ro-cache/modules-2 /tmp/proof-home/caches/; \
     GRADLE_USER_HOME=/tmp/proof-home gradle --no-daemon --console=plain --offline --no-build-cache \
+      -Pkotlin.compiler.execution.strategy=in-process \
       assembleDebug testDebugUnitTest coverageReport lintDebug > /tmp/proof.log 2>&1 \
       || { tail -n 60 /tmp/proof.log; exit 1; }; \
+    GRADLE_USER_HOME=/tmp/proof-home gradle-quiesce; \
     rm -rf /tmp/proof-home build app/build .gradle .kotlin
 
 # ---- base: the toolchain, the dependency cache and a non-root user ----
