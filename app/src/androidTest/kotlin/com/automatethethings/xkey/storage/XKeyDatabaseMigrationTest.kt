@@ -297,14 +297,19 @@ class XKeyDatabaseMigrationTest {
     /**
      * Creates a database at [version] using that version's frozen DDL, seeds a
      * key and a FIDO2 credential, migrates it with the production migration
-     * set, and asserts both rows arrived intact.
+     * set, and asserts both rows arrived intact. The key is seeded with the
+     * legacy source token only where the path runs MIGRATION_10_11 (from 10
+     * or earlier), else with the current one.
      */
     private fun assertMigratesAndPreservesData(version: Int) {
         val keyId = "legacy-key-v$version"
         val credentialId = "legacy-credential-v$version"
+        // Only a path that crosses 10 -> 11 rewrites the legacy token; a
+        // database at 11 or later was written with the current one (#193 r7).
+        val seeded = if (version <= 10) LEGACY_SOURCE else CURRENT_SOURCE
 
         createLegacyDatabase(version) { db ->
-            insertKey(db, keyId = keyId, source = LEGACY_SOURCE)
+            insertKey(db, keyId = keyId, source = seeded)
             insertCredential(db, credentialId)
         }
 
@@ -314,7 +319,7 @@ class XKeyDatabaseMigrationTest {
             assertEquals("test-label", key!!.label)
             assertEquals("ES256", key.algorithm)
             assertEquals(
-                "MIGRATION_10_11 must run as part of every path",
+                "the key must come out with the current source token from v$version",
                 CURRENT_SOURCE,
                 key.source
             )

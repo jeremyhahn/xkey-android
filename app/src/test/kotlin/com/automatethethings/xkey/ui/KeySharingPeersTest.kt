@@ -813,6 +813,75 @@ class KeySharingPeersTest {
         assertTrue(peers.setAllowed(PEER_B, false, null))
     }
 
+    /**
+     * A withdrawal whose grant delete and denial write both fail is held in
+     * the process only (#193 r7, ruling 554): the tap returns false, the
+     * sheet is told explicitly that the withdrawal is not saved, not just
+     * redrawn unchecked, and the peer stays denied in the process meanwhile.
+     */
+    @Test
+    fun aWithdrawalHeldOnlyInTheProcessIsShownUnsaved() = runTest {
+        rows(KEY to PEER_A)
+        tables.failing += setOf("deleteGrant", "putPolicyRow")
+        val peers = peersOf()
+        var redraws = 0
+        var unsaved = 0
+
+        peers.setAllowedOrRedraw(
+            PEER_A,
+            false,
+            repo.pairingGeneration(PEER_A),
+            attached = { true },
+            redraw = { redraws++ },
+            unsaved = { unsaved++ }
+        )
+        runCurrent()
+
+        assertEquals("a withdrawal held only in the process was not shown unsaved", 1, unsaved)
+        assertEquals(1, redraws)
+        assertFalse("the held denial was dropped", peers.peers().first().single { it.device.publicKeyHex == PEER_A }.allowed)
+        assertFalse(hasAccess(PEER_A))
+
+        // A withdrawal that stands, or a refused grant, is never shown unsaved.
+        tables.failing.clear()
+        advanceUntilIdle()
+        peers.setAllowedOrRedraw(PEER_B, true, null, attached = { true }, redraw = { redraws++ }, unsaved = { unsaved++ })
+        peers.setAllowedOrRedraw(PEER_A, false, null, attached = { true }, redraw = { redraws++ }, unsaved = { unsaved++ })
+        assertEquals(1, unsaved)
+    }
+
+    /**
+     * The bypass guard for the sheet (#193 r7, ruling 554): a peer tap's
+     * result reaches the user only through [setAllowedOrRedraw], which shows
+     * an unsaved withdrawal. No main source but [KeySharingPeers] itself
+     * calls `setAllowed` or `setAllowedOutcome` outside that helper, and
+     * every call of the helper passes its `unsaved` display.
+     */
+    @Test
+    fun everyPeerTapResultIsShownThroughTheOneHelper() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue("main sources not found from ${java.io.File(".").absolutePath}", root.isDirectory)
+        val sources = root.walkTopDown().filter { it.isFile && it.extension == "kt" && it.name != "KeySharingPeers.kt" }.toList()
+        val taps = Regex("""\bsetAllowed(Outcome)?\(""")
+        val outside = sources.flatMap { file ->
+            val lines = file.readLines()
+            val helper = lines.indexOfFirst { "fun KeySharingPeers.setAllowedOrRedraw(" in it }
+            val helperEnd = if (helper < 0) -1 else (helper until lines.size).first { lines[it] == "}" }
+            lines.mapIndexedNotNull { i, line ->
+                if (taps.containsMatchIn(line) && i !in helper..helperEnd) "${file.name}:${i + 1}" else null
+            }
+        }
+        assertEquals("a peer tap's result shown outside setAllowedOrRedraw", emptyList<String>(), outside)
+        val noUnsaved = sources.flatMap { file ->
+            val text = file.readText()
+            Regex("""(?<!fun KeySharingPeers)\.setAllowedOrRedraw\((.*?)\n\s*\)""", RegexOption.DOT_MATCHES_ALL).findAll(text)
+                .filter { "unsaved =" !in it.groupValues[1] }
+                .map { "${file.name}:${text.substring(0, it.range.first).count { c -> c == '\n' } + 1}" }
+                .toList()
+        }
+        assertEquals("a peer tap that does not show an unsaved withdrawal", emptyList<String>(), noUnsaved)
+    }
+
     @Test
     fun aKeyWideClearQueuedBehindAGrantSurvivesTheSheetsDismissal() = runTest {
         val gate = holdGrants()

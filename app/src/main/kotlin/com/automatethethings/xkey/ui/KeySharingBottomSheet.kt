@@ -749,7 +749,8 @@ internal suspend fun KeySharingPeers.setAllowedOrRedraw(
     allowed: Boolean,
     pairing: Long?,
     attached: () -> Boolean,
-    redraw: () -> Unit
+    redraw: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") unsaved: () -> Unit = {}
 ) {
     if (setAllowed(peerPublicKeyHex, allowed, pairing)) return
     // The queued edit completes in the edit scope, whatever the caller's job;
