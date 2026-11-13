@@ -220,7 +220,7 @@ jobs:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight
-    timeout-minutes: 150      # two cold image builds and every stage on 4 cores
+    timeout-minutes: 120
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       # The cache volumes' trust class. Only a push to main writes the caches
