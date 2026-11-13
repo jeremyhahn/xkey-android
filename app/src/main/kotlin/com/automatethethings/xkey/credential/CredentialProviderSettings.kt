@@ -19,6 +19,10 @@ import android.content.Intent
 import android.os.Build
 import android.provider.Settings
 import androidx.annotation.RequiresApi
+import androidx.credentials.provider.BeginCreateCredentialRequest
+import androidx.credentials.provider.BeginCreateCredentialResponse
+import androidx.credentials.provider.BeginGetCredentialRequest
+import androidx.credentials.provider.BeginGetCredentialResponse
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -73,9 +77,9 @@ data class CredentialProviderSettingsData(
  * ```
  */
 class CredentialProviderSettingsRepository(
-    private val context: Context
-) {
+    private val context: Context,
     private val dataStore: DataStore<Preferences> = context.credentialProviderSettingsDataStore
+) {
 
     /**
      * Flow of credential provider settings that emits whenever settings change.
@@ -105,6 +109,14 @@ class CredentialProviderSettingsRepository(
     suspend fun getSettings(): CredentialProviderSettingsData {
         return settingsFlow.first()
     }
+
+    /**
+     * Whether the user has turned the credential provider on.
+     *
+     * Off when nothing is stored. [XKeyCredentialService] reads this before
+     * every begin request, through [CredentialProviderEnableGate].
+     */
+    suspend fun isEnabled(): Boolean = getSettings().isEnabled
 
     /**
      * Set whether the credential provider is enabled.
@@ -162,4 +174,28 @@ class CredentialProviderSettingsRepository(
     private companion object {
         val KEY_ENABLED = booleanPreferencesKey("credential_provider_enabled")
     }
+}
+
+/**
+ * Puts the user's enable switch in front of the passkey handlers.
+ *
+ * @param isEnabled Reads the switch; called once per begin request.
+ */
+@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+class CredentialProviderEnableGate(
+    private val isEnabled: suspend () -> Boolean
+) {
+    /** The create handler's answer while the switch is on; no create entries while it is off. */
+    suspend fun beginCreate(
+        request: BeginCreateCredentialRequest,
+        handle: suspend (BeginCreateCredentialRequest) -> BeginCreateCredentialResponse
+    ): BeginCreateCredentialResponse =
+        if (isEnabled()) handle(request) else BeginCreateCredentialResponse()
+
+    /** The get handler's answer while the switch is on; no credential entries while it is off. */
+    suspend fun beginGet(
+        request: BeginGetCredentialRequest,
+        handle: suspend (BeginGetCredentialRequest) -> BeginGetCredentialResponse
+    ): BeginGetCredentialResponse =
+        if (isEnabled()) handle(request) else BeginGetCredentialResponse()
 }
