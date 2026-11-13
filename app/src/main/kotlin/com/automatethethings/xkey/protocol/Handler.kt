@@ -1675,21 +1675,23 @@ class RequestHandler(
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val plaintext = keystoreManager.rsaDecrypt(decryptParams.keyId, decryptParams.getCiphertextBytes())
+        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(
+            decryptParams.keyId, decryptParams.getCiphertextBytes()
+        )
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(decryptParams.keyId)
 
-        // Log decryption request
+        // The OAEP parameters the cipher reported, not an assumed name.
         logKeyUse(
             KeyUse.DECRYPT, decryptParams.keyId,
-            executedAlgorithm = KeystoreManager.EXECUTED_RSA_OAEP,
+            executedAlgorithm = decrypted.algorithm,
             durationMs = durationMs,
             caller = caller
         )
 
         val result = LocalDecryptResult(
-            plaintext = Base64.getEncoder().encodeToString(plaintext)
+            plaintext = Base64.getEncoder().encodeToString(decrypted.plaintext)
         )
         return Response.success(request.id, result.toJson())
     }

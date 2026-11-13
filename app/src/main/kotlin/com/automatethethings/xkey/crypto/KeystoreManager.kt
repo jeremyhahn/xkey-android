@@ -41,6 +41,7 @@ import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.InvalidKeySpecException
+import java.security.spec.MGF1ParameterSpec
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
@@ -50,6 +51,7 @@ import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.OAEPParameterSpec
 
 /**
  * Where a key's material lives, read from the key's own [KeyInfo].
@@ -2075,19 +2077,56 @@ class KeystoreManager(private val context: Context) {
         /** AES GCM cipher transformation. */
         private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
 
-        /** Audit names of the algorithms [rsaDecrypt], [symmetricEncrypt]/[symmetricDecrypt] and [performECDH] run. */
-        const val EXECUTED_RSA_OAEP = "RSA-OAEP-256"
+        /**
+         * Audit names of the fixed algorithms [symmetricEncrypt]/[symmetricDecrypt]
+         * ([AES_GCM_TRANSFORMATION], 128-bit tag) and [performECDH] run. RSA
+         * decrypt has no constant: its MGF1 digest is the provider's, so
+         * [rsaDecryptWithAlgorithm] reports it.
+         */
         const val EXECUTED_AES_GCM = "AES-GCM"
         const val EXECUTED_ECDH = "ECDH"
 
         /**
          * Decrypts [ciphertext] with [privateKey] under [RSA_OAEP_TRANSFORMATION]:
          * the decrypt step of [rsaDecryptWithAlgorithm].
+         *
+         * The transformation fixes the OAEP digest but leaves the MGF1 digest
+         * to the provider (AndroidKeyStore and the JDK both pick SHA-1), so
+         * the audit name is read from the parameters the initialised cipher
+         * reports, see [rsaOaepAlgorithm], never assumed.
          */
         fun rsaOaepDecrypt(privateKey: PrivateKey, ciphertext: ByteArray): DecryptResult {
             val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, privateKey)
-            return DecryptResult(cipher.doFinal(ciphertext), EXECUTED_RSA_OAEP)
+            val spec = runCatching {
+                cipher.parameters?.getParameterSpec(OAEPParameterSpec::class.java)
+            }.getOrNull()
+            return DecryptResult(cipher.doFinal(ciphertext), rsaOaepAlgorithm(spec))
+        }
+
+        /**
+         * The audit name of an OAEP decrypt run with [spec]: "RSA-OAEP-256"
+         * when both digests are SHA-256 and "RSA-OAEP" when both are SHA-1 (the
+         * JOSE names), else "RSA-OAEP-<digest>-MGF1-<mgf1 digest>", e.g.
+         * "RSA-OAEP-SHA-256-MGF1-SHA-1". With no spec reported, only the
+         * transformation's own digest is known: "RSA-OAEP-SHA-256-MGF1-unknown".
+         */
+        fun rsaOaepAlgorithm(spec: OAEPParameterSpec?): String {
+            if (spec == null) return "RSA-OAEP-SHA-256-MGF1-unknown"
+            val digest = digestName(spec.digestAlgorithm)
+            val mgf1 = (spec.mgfParameters as? MGF1ParameterSpec)?.digestAlgorithm?.let(::digestName)
+                ?: "unknown"
+            return when {
+                digest == "SHA-256" && mgf1 == "SHA-256" -> "RSA-OAEP-256"
+                digest == "SHA-1" && mgf1 == "SHA-1" -> "RSA-OAEP"
+                else -> "RSA-OAEP-$digest-MGF1-$mgf1"
+            }
+        }
+
+        /** "SHA256", "sha-256" and "SHA-256" all name SHA-256. */
+        private fun digestName(name: String): String {
+            val upper = name.uppercase()
+            return if (upper.startsWith("SHA") && !upper.startsWith("SHA-")) "SHA-" + upper.removePrefix("SHA") else upper
         }
 
         /** PEM line length for Base64 encoding. */

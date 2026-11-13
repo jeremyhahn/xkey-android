@@ -44,7 +44,11 @@ never the key's stored metadata, which is not validated: the sign
 request's algorithm (`signWithAlgorithm` refuses any other), the Keystore
 HMAC's own MAC (`computeHMACWithAlgorithm`), the software HMAC's mapping
 (`SoftwareKeyOps.hmacAlgorithm`: `HMAC-SHA512` or `HMAC-SHA256`), and
-`RSA-OAEP-256`, `AES-GCM` and `ECDH` for the fixed transformations.
+the RSA decrypt's OAEP parameters as its initialised cipher reports them
+(`rsaDecryptWithAlgorithm`: the transformation fixes SHA-256 but leaves
+the MGF1 digest to the provider, which picks SHA-1, so a typical entry
+reads `RSA-OAEP-SHA-256-MGF1-SHA-1`; `RSA-OAEP-256` only when both are
+SHA-256), and `AES-GCM` and `ECDH` for the fixed transformations.
 `RequestHandler.logKeyUse` writes every key-use entry;
 `AuditKeyTypeChokePointTest` fails on a writer outside it.
 

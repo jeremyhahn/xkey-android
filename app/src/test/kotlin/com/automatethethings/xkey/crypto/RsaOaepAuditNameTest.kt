@@ -51,4 +51,18 @@ class RsaOaepAuditNameTest {
         assertArrayEquals(plaintext, result.plaintext)
         assertEquals("RSA-OAEP-SHA-256-MGF1-SHA-1", result.algorithm)
     }
+
+    @Test
+    fun `the name follows both digests the cipher reports`() {
+        fun spec(digest: String, mgf1: MGF1ParameterSpec) =
+            OAEPParameterSpec(digest, "MGF1", mgf1, PSource.PSpecified.DEFAULT)
+
+        assertEquals("RSA-OAEP-256", KeystoreManager.rsaOaepAlgorithm(spec("SHA-256", MGF1ParameterSpec.SHA256)))
+        assertEquals("RSA-OAEP", KeystoreManager.rsaOaepAlgorithm(spec("SHA-1", MGF1ParameterSpec.SHA1)))
+        assertEquals(
+            "RSA-OAEP-SHA-256-MGF1-SHA-1",
+            KeystoreManager.rsaOaepAlgorithm(spec("SHA256", MGF1ParameterSpec.SHA1))
+        )
+        assertEquals("RSA-OAEP-SHA-256-MGF1-unknown", KeystoreManager.rsaOaepAlgorithm(null))
+    }
 }
