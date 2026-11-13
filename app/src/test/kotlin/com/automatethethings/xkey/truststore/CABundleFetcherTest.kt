@@ -18,7 +18,9 @@ import android.util.Log
 import io.mockk.every
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.util.zip.GZIPOutputStream
 import kotlinx.coroutines.test.runTest
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -26,7 +28,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.asResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.GzipSource
+import okio.buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -268,8 +275,106 @@ class CABundleFetcherTest {
     }
 
     // -------------------------------------------------------------------------
+    // Response size and certificate count limits
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `fetchBundle refuses a body one byte over the size limit`() = runTest {
+        val fetcher = fetcherReturning(body = paddedBundle(MAX_BODY_BYTES + 1))
+
+        val error = assertFails(CABundleFetchException::class.java) {
+            fetcher.fetchBundle("https://ca.example.com")
+        }
+
+        assertTrue(
+            "unexpected message: ${error.message}",
+            error.message!!.contains("too large")
+        )
+    }
+
+    @Test
+    fun `fetchBundle parses a body of exactly the size limit`() = runTest {
+        val body = paddedBundle(MAX_BODY_BYTES)
+        val fetcher = fetcherReturning(body = body)
+
+        val result = fetcher.fetchBundle("https://ca.example.com")
+
+        assertEquals(MAX_BODY_BYTES, result.pemBundle.size)
+        assertEquals(1, result.certificates.size)
+    }
+
+    @Test
+    fun `fetchBundle refuses a gzip body that inflates past the size limit`() = runTest {
+        val compressed = ByteArrayOutputStream().also { out ->
+            GZIPOutputStream(out).use { it.write(paddedBundle(2 * MAX_BODY_BYTES).toByteArray()) }
+        }.toByteArray()
+        assertTrue(compressed.size < MAX_BODY_BYTES)
+        // OkHttp's bridge strips Content-Encoding and hands the caller the
+        // inflating source; the limit must hold on what that source yields.
+        val decoded = GzipSource(Buffer().write(compressed)).buffer()
+            .asResponseBody("application/pem-certificate-chain".toMediaTypeOrNull(), -1)
+        val fetcher = fetcherReturningBody(decoded)
+
+        val error = assertFails(CABundleFetchException::class.java) {
+            fetcher.fetchBundle("https://ca.example.com")
+        }
+
+        assertTrue(
+            "unexpected message: ${error.message}",
+            error.message!!.contains("too large")
+        )
+    }
+
+    @Test
+    fun `fetchBundle refuses a bundle over the certificate limit before parsing`() = runTest {
+        // Malformed blocks would be skipped by the parser and end in "No valid
+        // certificates found"; the count check must fire first.
+        val malformed = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+        val fetcher = fetcherReturning(body = malformed.repeat(MAX_CERTIFICATES + 1))
+
+        val error = assertFails(CABundleFetchException::class.java) {
+            fetcher.fetchBundle("https://ca.example.com")
+        }
+
+        assertTrue(
+            "unexpected message: ${error.message}",
+            error.message!!.contains("limit is $MAX_CERTIFICATES")
+        )
+    }
+
+    @Test
+    fun `fetchBundle parses a bundle at the certificate limit`() = runTest {
+        val fetcher = fetcherReturning(body = TestCertificates.ROOT_CA_A_PEM.repeat(MAX_CERTIFICATES))
+
+        val result = fetcher.fetchBundle("https://ca.example.com")
+
+        assertEquals(MAX_CERTIFICATES, result.certificates.size)
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /** One valid certificate followed by comment padding, [size] bytes in all. */
+    private fun paddedBundle(size: Int): String {
+        val pem = TestCertificates.ROOT_CA_A_PEM + "\n"
+        return pem + "#".repeat(size - pem.toByteArray().size)
+    }
+
+    private fun fetcherReturningBody(body: ResponseBody): CABundleFetcher {
+        val interceptor = Interceptor { chain ->
+            capturedRequests.add(chain.request())
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .header("Content-Type", "application/pem-certificate-chain")
+                .body(body)
+                .build()
+        }
+        return CABundleFetcher(OkHttpClient.Builder().addInterceptor(interceptor).build())
+    }
 
     private fun fetcherReturning(
         code: Int = 200,
@@ -304,5 +409,11 @@ class CABundleFetcherTest {
             throw AssertionError("expected ${type.name} but was ${e.javaClass.name}: ${e.message}", e)
         }
         throw AssertionError("expected ${type.name} but nothing was thrown")
+    }
+
+    private companion object {
+        // The limits CABundleFetcher applies, restated so the tests pin them.
+        const val MAX_BODY_BYTES = 1024 * 1024
+        const val MAX_CERTIFICATES = 64
     }
 }
