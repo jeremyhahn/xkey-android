@@ -33,6 +33,13 @@ pairing:
 - Re-pairing under the same key is not a removal, so with no revocation
   pending the rows stay.
 
+**Audit.** Every transfer is audited with the peer's device id and name and
+no key bytes (#222): `local.importSharedKey` records `KEY_EXPORTED` (format
+`raw`, `metadata` or `public`; a policy refusal as a failed entry),
+`local.shareSymmetric` records `KEY_CREATED` and `local.sharePublicKey`
+records `CONTACT_IMPORTED` with source `shared`. See
+[the audit log architecture](../audit-log/architecture.md).
+
 ## Index Strategy
 
 ### key_sharing_policies

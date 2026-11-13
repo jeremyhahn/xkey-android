@@ -11,6 +11,18 @@ Comprehensive security event log with 35+ operation types covering key lifecycle
 cryptographic operations, FIDO2 events, connection events, certificate operations,
 file/media operations, contact management, and co-signing.
 
+### Key-sharing transfers
+
+Each transfer between the phone and a paired desktop records one entry with
+`device_id` (the peer's static key, hex) and `device_name` (its pairing name).
+No entry carries key material.
+
+| Method | Operation type | Details |
+|--------|----------------|---------|
+| `local.importSharedKey` (a key leaves the phone) | `KEY_EXPORTED` | `format`: `raw` (software material), `metadata` (software key, no material), `public` (hardware key, public key only). A sharing-policy refusal records `success = false`. An unknown key records nothing. |
+| `local.shareSymmetric` (material arrives) | `KEY_CREATED` | `algorithm`, `strongBox = false`, `source = shared`. A refused duplicate id records nothing. |
+| `local.sharePublicKey` (a public key arrives) | `CONTACT_IMPORTED` | `name`, `fingerprint`, `source = shared`. A key already in contacts records nothing. |
+
 ## Index Strategy
 
 ### audit_logs
