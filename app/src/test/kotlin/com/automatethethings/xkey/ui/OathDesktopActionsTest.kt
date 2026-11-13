@@ -10,7 +10,7 @@ import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
-import com.automatethethings.xkey.remote.RemoteOathClient
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.ScriptedMessageSender
 import com.automatethethings.xkey.remote.stubAndroidLog
 import io.mockk.mockk
@@ -32,6 +32,7 @@ class OathDesktopActionsTest {
     private val links = MapLinks()
     private val secrets = mutableListOf<ByteArray>()
     private var connected = true
+    private var peer = PEER_A
 
     @Before
     fun setUp() {
@@ -46,7 +47,7 @@ class OathDesktopActionsTest {
     }
 
     private fun actions() = OathDesktopActions(
-        client = { if (connected) RemoteOathClient(sender, router) else null },
+        desktop = { if (connected) ConnectedDesktop(peer, sender, router) else null },
         links = links,
         secretOf = { _ ->
             // "Hello!\xde\xad\xbe\xef" = JBSWY3DPEHPK3PXP
@@ -81,7 +82,7 @@ class OathDesktopActionsTest {
         assertEquals("GitHub:alice", cred.getString("name"))
         assertEquals("totp", cred.getString("type"))
         assertEquals("JBSWY3DPEHPK3PXP", cred.getString("secret"))
-        assertEquals("desk-7", links.get("GitHub:alice"))
+        assertEquals("desk-7", links.get(PEER_A, "GitHub:alice"))
         assertTrue(secrets.single().all { it == 0.toByte() })
     }
 
@@ -103,13 +104,13 @@ class OathDesktopActionsTest {
         val outcome = actions().copyToDesktop(entity())
 
         assertTrue(outcome is OathDesktopActions.Outcome.Failed)
-        assertNull(links.get("GitHub:alice"))
+        assertNull(links.get(PEER_A, "GitHub:alice"))
         assertTrue(secrets.single().all { it == 0.toByte() })
     }
 
     @Test
     fun `desktop code sends remote oathGenerate and returns code and expiry`() = runTest {
-        links.put("GitHub:alice", "desk-7")
+        links.put(PEER_A, "GitHub:alice", "desk-7")
         sender.succeedWith("""{"code":"492039","expires_in":21}""")
 
         val outcome = actions().desktopCode(entity())
@@ -129,7 +130,7 @@ class OathDesktopActionsTest {
 
     @Test
     fun `malformed desktop code reply is a failure`() = runTest {
-        links.put("GitHub:alice", "desk-7")
+        links.put(PEER_A, "GitHub:alice", "desk-7")
         sender.succeedWith("""{"code":"abc"}""")
 
         assertTrue(actions().desktopCode(entity()) is OathDesktopActions.Outcome.Failed)
@@ -138,7 +139,7 @@ class OathDesktopActionsTest {
     @Test
     fun `no desktop connected sends nothing and offers nothing`() = runTest {
         connected = false
-        links.put("GitHub:alice", "desk-7")
+        links.put(PEER_A, "GitHub:alice", "desk-7")
         val a = actions()
 
         assertFalse(a.isConnected())
@@ -154,18 +155,50 @@ class OathDesktopActionsTest {
         val a = actions()
         assertEquals(listOf(OathDesktopActions.Entry.COPY), a.menuEntries(entity()))
 
-        links.put("GitHub:alice", "desk-7")
+        links.put(PEER_A, "GitHub:alice", "desk-7")
         assertEquals(
             listOf(OathDesktopActions.Entry.COPY, OathDesktopActions.Entry.DESKTOP_CODE),
             a.menuEntries(entity())
         )
     }
 
+    @Test
+    fun `a link belongs to the desktop it was copied to`() = runTest {
+        sender.succeedWith("""{"success":true,"credential_id":"desk-7"}""")
+        val a = actions()
+        assertEquals(OathDesktopActions.Outcome.Copied("desk-7"), a.copyToDesktop(entity()))
+
+        peer = PEER_B
+        sender.sent.clear()
+        assertEquals(listOf(OathDesktopActions.Entry.COPY), a.menuEntries(entity()))
+        assertEquals(OathDesktopActions.Outcome.NotOnDesktop, a.desktopCode(entity()))
+        assertTrue(sender.sent.isEmpty())
+
+        sender.succeedWith("""{"success":true,"credential_id":"desk-9"}""")
+        assertEquals(OathDesktopActions.Outcome.Copied("desk-9"), a.copyToDesktop(entity()))
+        assertEquals("desk-7", links.get(PEER_A, "GitHub:alice"))
+        assertEquals("desk-9", links.get(PEER_B, "GitHub:alice"))
+
+        peer = PEER_A
+        assertEquals(
+            listOf(OathDesktopActions.Entry.COPY, OathDesktopActions.Entry.DESKTOP_CODE),
+            a.menuEntries(entity())
+        )
+        sender.succeedWith("""{"code":"492039","expires_in":21}""")
+        a.desktopCode(entity())
+        assertEquals("desk-7", sender.lastRequest.params!!.getString("credential_id"))
+    }
+
     private class MapLinks : DesktopOathLinks {
-        private val map = mutableMapOf<String, String>()
-        override fun get(oathId: String): String? = map[oathId]
-        override fun put(oathId: String, desktopId: String) {
-            map[oathId] = desktopId
+        private val map = mutableMapOf<Pair<String, String>, String>()
+        override fun get(peerKeyHex: String, oathId: String): String? = map[peerKeyHex to oathId]
+        override fun put(peerKeyHex: String, oathId: String, desktopId: String) {
+            map[peerKeyHex to oathId] = desktopId
         }
+    }
+
+    private companion object {
+        const val PEER_A = "aa01"
+        const val PEER_B = "bb02"
     }
 }
