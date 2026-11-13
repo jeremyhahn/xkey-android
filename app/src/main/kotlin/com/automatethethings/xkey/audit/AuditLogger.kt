@@ -590,6 +590,30 @@ object AuditLogger {
     }
 
     /**
+     * Log the per-key sharing grants dropped because a device stopped being
+     * paired: unpaired, cleared, or replaced by a re-pairing under a new key
+     * (#174). Separate from [logDeviceUnpaired], which fires before the grants
+     * are deleted and not at all for an eviction or a clear.
+     *
+     * @param deviceId The removed device's public key hex.
+     * @param droppedGrants The number of `key_sharing_policies` rows deleted.
+     */
+    fun logPeerGrantsDropped(deviceId: String, droppedGrants: Int) {
+        val details = JSONObject().apply {
+            put("reason", "peer_unpaired")
+            put("droppedGrants", droppedGrants)
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.KEY_SHARING_CHANGED,
+                deviceId = deviceId,
+                success = true,
+                details = details.toString()
+            )
+        )
+    }
+
+    /**
      * Log a connection establishment.
      *
      * @param deviceId The device identifier.
