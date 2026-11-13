@@ -3189,12 +3189,24 @@ class RequestHandler(
      * replication over the Noise channel) so the desktop can merge them back.
      */
     private suspend fun handleSyncOATH(request: Request): Response {
+        val (peerId, peerName) = syncPeer()
         return try {
             val params = request.params ?: JSONObject()
             val engine = com.automatethethings.xkey.sync.SyncEngine(context)
             val counts = engine.mergeOath(params.optJSONArray("credentials") ?: org.json.JSONArray())
             val remote = engine.gatherOath()
             engine.markSynced()
+            AuditLogger.logOathSyncPerformed(
+                deviceId = peerId,
+                deviceName = peerName,
+                count = remote.length(),
+                direction = AuditLogger.SYNC_INBOUND,
+                added = counts.added,
+                updated = counts.updated,
+                skipped = counts.skipped,
+                success = true,
+                errorMessage = null
+            )
             Response.success(request.id, JSONObject().apply {
                 put("added", counts.added)
                 put("updated", counts.updated)
@@ -3203,6 +3215,17 @@ class RequestHandler(
             })
         } catch (e: Exception) {
             Log.e(TAG, "syncOATH failed", e)
+            AuditLogger.logOathSyncPerformed(
+                deviceId = peerId,
+                deviceName = peerName,
+                count = 0,
+                direction = AuditLogger.SYNC_INBOUND,
+                added = 0,
+                updated = 0,
+                skipped = 0,
+                success = false,
+                errorMessage = "syncOATH failed: ${e.message}"
+            )
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncOATH failed: ${e.message}")
         }
     }
@@ -3213,12 +3236,24 @@ class RequestHandler(
      * can merge them back.
      */
     private suspend fun handleSyncPasswords(request: Request): Response {
+        val (peerId, peerName) = syncPeer()
         return try {
             val params = request.params ?: JSONObject()
             val engine = com.automatethethings.xkey.sync.SyncEngine(context)
             val counts = engine.mergePasswords(params.optJSONArray("passwords") ?: org.json.JSONArray())
             val remote = engine.gatherPasswords()
             engine.markSynced()
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = peerId,
+                deviceName = peerName,
+                count = remote.length(),
+                direction = AuditLogger.SYNC_INBOUND,
+                added = counts.added,
+                updated = counts.updated,
+                skipped = counts.skipped,
+                success = true,
+                errorMessage = null
+            )
             Response.success(request.id, JSONObject().apply {
                 put("added", counts.added)
                 put("updated", counts.updated)
@@ -3228,11 +3263,39 @@ class RequestHandler(
         } catch (e: PasswordStoreLockedException) {
             // Merge runs first and is refused before it writes, so a locked
             // vault leaves the store untouched and exports nothing.
-            Response.error(request.id, ErrorCodes.PASSWORD_STORE_LOCKED, e.message ?: "password store is locked")
+            val message = e.message ?: "password store is locked"
+            logFailedPasswordSync(peerId, peerName, message)
+            Response.error(request.id, ErrorCodes.PASSWORD_STORE_LOCKED, message)
         } catch (e: Exception) {
             Log.e(TAG, "syncPasswords failed", e)
+            // The exception class only: a merge error's message may quote an entry.
+            logFailedPasswordSync(peerId, peerName, "syncPasswords failed: ${e.javaClass.simpleName}")
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncPasswords failed: ${e.message}")
         }
+    }
+
+    private fun logFailedPasswordSync(peerId: String?, peerName: String?, errorMessage: String) {
+        AuditLogger.logPasswordSyncPerformed(
+            deviceId = peerId,
+            deviceName = peerName,
+            count = 0,
+            direction = AuditLogger.SYNC_INBOUND,
+            added = 0,
+            updated = 0,
+            skipped = 0,
+            success = false,
+            errorMessage = errorMessage
+        )
+    }
+
+    /**
+     * The desktop a sync request came from, for its audit entry: the peer of
+     * the connection it arrived on, else the served peer, with its paired name.
+     */
+    private suspend fun syncPeer(): Pair<String?, String?> {
+        val peer = currentCoroutineContext()[CallerSession]?.peerPublicKeyHex?.takeIf { it.isNotEmpty() }
+            ?: connectedDevicePublicKeyHex
+        return peer to peer?.let { pairedDeviceRepository?.getDevice(it)?.deviceName }
     }
 
     /**

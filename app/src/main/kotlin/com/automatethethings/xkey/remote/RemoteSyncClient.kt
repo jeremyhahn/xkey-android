@@ -8,6 +8,7 @@ package com.automatethethings.xkey.remote
 
 import android.content.Context
 import android.util.Log
+import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
@@ -42,12 +43,16 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Requires an active paired connection: [messageSender] and [messageRouter]
  * come from the live transport (BLE / USB-AOA / TCP) for the connected desktop.
+ * [peerDeviceId] and [peerDeviceName] name that desktop in the audit entry
+ * each OATH and password sync records.
  */
 class RemoteSyncClient(
     context: Context,
     private val messageSender: MessageSender,
     private val messageRouter: BidirectionalMessageRouter,
-    private val requestTimeoutMs: Long = 30_000L
+    private val requestTimeoutMs: Long = 30_000L,
+    private val peerDeviceId: String? = null,
+    private val peerDeviceName: String? = null
 ) {
     private val engine = SyncEngine(context.applicationContext)
 
@@ -106,20 +111,52 @@ class RemoteSyncClient(
         return acceptedByPeer(resp) to merged.added
     }
 
-    /** Pushes the phone's OATH credentials and merges the laptop's. Returns (pushed, pulled). */
-    suspend fun syncOath(): Pair<Int, Int> {
+    /**
+     * Pushes the phone's OATH credentials and merges the laptop's. Returns
+     * (pushed, pulled). Records one outbound audit entry, failed or not.
+     */
+    suspend fun syncOath(): Pair<Int, Int> = audited(AuditLogger::logOathSyncPerformed) {
         val mine = engine.gatherOath()
         val resp = sendRequest(MethodNames.REMOTE_SYNC_OATH, JSONObject().put("credentials", mine))
-        val merged = engine.mergeOath(resp.result?.optJSONArray("local") ?: JSONArray())
-        return acceptedByPeer(resp) to (merged.added + merged.updated)
+        acceptedByPeer(resp) to engine.mergeOath(resp.result?.optJSONArray("local") ?: JSONArray())
     }
 
-    /** Pushes the phone's passwords and merges the laptop's. Returns (pushed, pulled). */
-    suspend fun syncPasswords(): Pair<Int, Int> {
+    /**
+     * Pushes the phone's passwords and merges the laptop's. Returns (pushed,
+     * pulled). Records one outbound audit entry, failed or not; the entry
+     * holds counts only.
+     */
+    suspend fun syncPasswords(): Pair<Int, Int> = audited(AuditLogger::logPasswordSyncPerformed) {
         val mine = engine.gatherPasswords()
         val resp = sendRequest(MethodNames.REMOTE_SYNC_PASSWORDS, JSONObject().put("passwords", mine))
-        val merged = engine.mergePasswords(resp.result?.optJSONArray("local") ?: JSONArray())
-        return acceptedByPeer(resp) to (merged.added + merged.updated)
+        acceptedByPeer(resp) to engine.mergePasswords(resp.result?.optJSONArray("local") ?: JSONArray())
+    }
+
+    /**
+     * Runs one store's sync, [block] returning (pushed, merge counts), and
+     * records it through [record]: the counts on success, a failed entry and
+     * the rethrown error otherwise. A password error records its class only,
+     * since its message could quote an entry; a locked vault says so.
+     */
+    private suspend fun audited(
+        record: (String?, String?, Int, String, Int, Int, Int, Boolean, String?) -> Unit,
+        block: suspend () -> Pair<Int, SyncEngine.ItemCounts>
+    ): Pair<Int, Int> {
+        val (pushed, merged) = try {
+            block()
+        } catch (e: Exception) {
+            val why = when (e) {
+                is PasswordStoreLockedException, is ProtocolException -> e.message
+                else -> e.javaClass.simpleName
+            }
+            record(peerDeviceId, peerDeviceName, 0, AuditLogger.SYNC_OUTBOUND, 0, 0, 0, false, why)
+            throw e
+        }
+        record(
+            peerDeviceId, peerDeviceName, pushed, AuditLogger.SYNC_OUTBOUND,
+            merged.added, merged.updated, merged.skipped, true, null
+        )
+        return pushed to (merged.added + merged.updated)
     }
 
     /**
