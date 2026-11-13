@@ -23,6 +23,7 @@ import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditLogEntity
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.audit.AuditOperationType
+import com.automatethethings.xkey.crypto.HmacResult
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
@@ -108,7 +109,8 @@ class HmacEcdhAuditTest {
         coEvery { keyDao.getByKeyId("hw-ecdh") } returns
             KeyEntity(keyId = "hw-ecdh", keyType = "signing", algorithm = "ES256", label = "ecdh", keySizeBits = 256, source = "local")
         coEvery { keyDao.getByKeyId("hw-hmac") } returns
-            KeyEntity(keyId = "hw-hmac", keyType = "secret", algorithm = "HMAC-SHA256", label = "hmac", keySizeBits = 256, source = "local")
+            // The row says SHA-512; the Keystore key runs SHA-256 (below).
+            KeyEntity(keyId = "hw-hmac", keyType = "secret", algorithm = "HMAC-SHA512", label = "hmac", keySizeBits = 256, source = "local")
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
@@ -139,6 +141,16 @@ class HmacEcdhAuditTest {
             shareable = true,
             material = swMaterial
         )
+        // Unvalidated stored name: SoftwareKeyOps runs SHA-256 for it.
+        every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } returns SoftwareKey(
+            keyId = "sw-odd",
+            algorithm = "HMAC-SHA384",
+            keyType = "symmetric",
+            keySize = 256,
+            exportable = true,
+            shareable = true,
+            material = swMaterial
+        )
 
         val context = mockk<Context>(relaxed = true)
         every { context.filesDir } returns tmp.root
@@ -156,6 +168,8 @@ class HmacEcdhAuditTest {
 
         keystore = mockk(relaxed = true)
         coEvery { keystore.computeHMAC("hw-hmac", any()) } returns keystoreMac
+        coEvery { keystore.computeHMACWithAlgorithm("hw-hmac", any()) } returns
+            HmacResult(keystoreMac, "HMAC-SHA256")
         coEvery { keystore.performECDH("hw-ecdh", any()) } returns sharedSecret
 
         handler = RequestHandler(
@@ -185,6 +199,7 @@ class HmacEcdhAuditTest {
         assertEquals(1, entries.size)
         assertEquals("hw-hmac", entries[0].keyId)
         assertEquals("the key's stored type", "secret", entries[0].keyType)
+        assertEquals("the algorithm the Keystore ran, not the row's", "HMAC-SHA256", algorithmOf(entries[0]))
         assertTrue(entries[0].success)
         assertNoSecrets(response.getJSONObject("result").getString("mac"))
     }
@@ -216,8 +231,38 @@ class HmacEcdhAuditTest {
         assertEquals(1, entries.size)
         assertEquals("hw-ecdh", entries[0].keyId)
         assertEquals("ECDH on a signing key is filed under signing", "signing", entries[0].keyType)
+        assertEquals("ECDH", algorithmOf(entries[0]))
         assertTrue(entries[0].success)
         assertNoSecrets(response.getJSONObject("result").getString("sharedSecret"))
+    }
+
+    @Test
+    fun `software hmac records the algorithm that ran, not the stored name`() = runTest {
+        val response = call(MethodNames.LOCAL_HMAC, """{"keyId":"sw-odd","data":"$data"}""")
+
+        assertFalse(response.toString(), response.has("error"))
+        val expected = javax.crypto.Mac.getInstance("HmacSHA256").run {
+            init(javax.crypto.spec.SecretKeySpec(swMaterial, "HmacSHA256"))
+            doFinal(Base64.getDecoder().decode(data))
+        }
+        assertEquals(
+            "the MAC is HMAC-SHA256",
+            Base64.getEncoder().encodeToString(expected),
+            response.getJSONObject("result").getString("mac")
+        )
+        val entry = inserted.single { it.operationType == AuditOperationType.HMAC_REQUEST }
+        assertEquals("HMAC-SHA256", algorithmOf(entry))
+    }
+
+    @Test
+    fun `rsa decrypt records the OAEP SHA-256 it runs`() = runTest {
+        val ct = Base64.getEncoder().encodeToString(ByteArray(256) { 5 })
+        coEvery { keystore.rsaDecrypt("hw-ecdh", any()) } returns ByteArray(16) { 6 }
+        val response = call(MethodNames.LOCAL_DECRYPT, """{"keyId":"hw-ecdh","ciphertext":"$ct"}""")
+
+        assertFalse(response.toString(), response.has("error"))
+        val entry = inserted.single { it.operationType == AuditOperationType.DECRYPTION_REQUEST }
+        assertEquals("RSA-OAEP-256", algorithmOf(entry))
     }
 
     @Test
@@ -278,6 +323,9 @@ class HmacEcdhAuditTest {
             assertEquals("${entry.operationType} ${entry.keyId}", "Desktop A", entry.deviceName)
         }
     }
+
+    private fun algorithmOf(entry: AuditLogEntity): String? =
+        entry.details?.let { JSONObject(it).optString("algorithm", "").ifEmpty { null } }
 
     private suspend fun <T> servedBy(peer: String, block: suspend () -> T): T =
         withContext(RequestHandler.servedConnection(binding, peer)) { block() }

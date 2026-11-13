@@ -69,6 +69,9 @@ enum class KeySecurityLevel(val wire: String) {
 class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
     KeyStoreException("Cannot read the KeyInfo of $alias", cause)
 
+/** A MAC and the algorithm that computed it ("HMAC-SHA256" or "HMAC-SHA512"). */
+class HmacResult(val mac: ByteArray, val algorithm: String)
+
 /**
  * Manages cryptographic keys in Android Keystore for FIDO2 operations.
  *
@@ -1377,7 +1380,15 @@ class KeystoreManager(private val context: Context) {
      * @throws KeyNotFoundException if no key exists for the identifier.
      * @throws HMACException if HMAC computation fails.
      */
-    suspend fun computeHMAC(keyId: String, data: ByteArray): ByteArray {
+    suspend fun computeHMAC(keyId: String, data: ByteArray): ByteArray =
+        computeHMACWithAlgorithm(keyId, data).mac
+
+    /**
+     * [computeHMAC], also naming the MAC algorithm that ran ("HMAC-SHA256" or
+     * "HMAC-SHA512"), as the Keystore key determines it: an audit entry
+     * records this, never the key's stored metadata.
+     */
+    suspend fun computeHMACWithAlgorithm(keyId: String, data: ByteArray): HmacResult {
         val alias = buildGeneralAlias(keyId)
 
         val secretKey = keyStore.getKey(alias, null) as? SecretKey
@@ -1393,7 +1404,8 @@ class KeystoreManager(private val context: Context) {
 
             val mac = Mac.getInstance(macAlgorithm)
             mac.init(secretKey)
-            return mac.doFinal(data)
+            val name = if (macAlgorithm == "HmacSHA512") "HMAC-SHA512" else "HMAC-SHA256"
+            return HmacResult(mac.doFinal(data), name)
         } catch (e: Exception) {
             throw HMACException("Failed to compute HMAC", e)
         }
@@ -2051,6 +2063,11 @@ class KeystoreManager(private val context: Context) {
 
         /** AES GCM cipher transformation. */
         private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
+
+        /** Audit names of the algorithms [rsaDecrypt], [symmetricEncrypt]/[symmetricDecrypt] and [performECDH] run. */
+        const val EXECUTED_RSA_OAEP = "RSA-OAEP-256"
+        const val EXECUTED_AES_GCM = "AES-GCM"
+        const val EXECUTED_ECDH = "ECDH"
 
         /** PEM line length for Base64 encoding. */
         private const val PEM_LINE_LENGTH = 64
