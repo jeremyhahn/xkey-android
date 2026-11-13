@@ -34,6 +34,7 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.runBlocking
+import kotlin.coroutines.CoroutineContext
 import org.json.JSONObject
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
@@ -173,10 +174,14 @@ class RequestHandlerErrorPathTest {
     // Baseline: every test starts from a confirmed, unrestricted peer
     // ------------------------------------------------------------------
 
+    /** The peer each request is served for; null is an anonymous connection. */
+    private var servedPeer: String? = null
+
     @Before
     fun resetHandlerState() {
         handler.setConnectedDevicePublicKeyHex(peerKeyHex)
         bareHandler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        servedPeer = peerKeyHex
         requireAttestation(
             forKeyUse = false,
             forKeyAttestation = false,
@@ -786,7 +791,7 @@ class RequestHandlerErrorPathTest {
     @Test
     fun anAnonymousSessionIsNotGated() {
         requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
-        handler.setConnectedDevicePublicKeyHex(null)
+        servedPeer = null
 
         assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
     }
@@ -795,7 +800,7 @@ class RequestHandlerErrorPathTest {
     @Test
     fun aPeerWithNoStoredRecordIsNotGated() {
         requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
-        handler.setConnectedDevicePublicKeyHex(UNKNOWN_PEER_HEX)
+        servedPeer = UNKNOWN_PEER_HEX
 
         assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
     }
@@ -807,7 +812,7 @@ class RequestHandlerErrorPathTest {
     /** Sharing decisions need a peer to decide about. */
     @Test
     fun sharingWithoutAConfirmedPeerIsDenied() {
-        handler.setConnectedDevicePublicKeyHex(null)
+        servedPeer = null
 
         assertEquals(
             ErrorCodes.OPERATION_DENIED,
@@ -926,6 +931,37 @@ class RequestHandlerErrorPathTest {
         assertEquals(
             ErrorCodes.OPERATION_DENIED,
             call("local.importSharedKey", JSONObject().put("key_id", keyId)).errorCode()
+        )
+    }
+
+    /**
+     * The SELECTED_PEERS grant is checked against the request's own caller:
+     * the handler-wide peer's grant never lends itself to another caller, and
+     * an ungranted handler-wide peer never refuses the granted caller.
+     */
+    @Test
+    fun selectedPeersPolicyFollowsTheRequestCallerNotTheHandlerWidePeer() {
+        val keyId = seedSoftwareKey(
+            keyId = "share-caller-peer-$runId",
+            exportable = true,
+            shareable = true,
+            policy = SharingPolicyType.SELECTED_PEERS,
+            material = randomMaterial()
+        )
+        setSharingPolicy(keyId, peerKeyHex)
+
+        servedPeer = UNKNOWN_PEER_HEX
+        assertEquals(
+            "the handler-wide peer's grant must not reach another caller",
+            ErrorCodes.OPERATION_DENIED,
+            call("local.importSharedKey", JSONObject().put("key_id", keyId)).errorCode()
+        )
+
+        handler.setConnectedDevicePublicKeyHex(UNKNOWN_PEER_HEX)
+        servedPeer = peerKeyHex
+        assertTrue(
+            "the granted caller exports whatever the handler-wide peer",
+            call("local.importSharedKey", JSONObject().put("key_id", keyId)).isSuccess()
         )
     }
 
@@ -1058,7 +1094,7 @@ class RequestHandlerErrorPathTest {
         )
 
         for (entry in unmanaged) {
-            val response = runBlocking {
+            val response = runBlocking(servedCaller()) {
                 bareHandler.handleRequest(
                     Request(nextRequestId.getAndIncrement(), entry.first, entry.second)
                 )
@@ -1288,14 +1324,22 @@ class RequestHandlerErrorPathTest {
      */
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
-        return runBlocking { handler.handleRequest(request) }
+        return runBlocking(servedCaller()) { handler.handleRequest(request) }
     }
 
     private fun rawCall(json: String): Response {
         val bytes = json.toByteArray()
-        val response = runBlocking { handler.handleRawRequest(bytes) }
+        val response = runBlocking(servedCaller()) { handler.handleRawRequest(bytes) }
         return Response.fromJson(response)
     }
+
+    /**
+     * Every request carries its own caller, [servedPeer] (null is an explicit
+     * anonymous connection), as a served transport installs it; the
+     * handler-wide peer never stands in for it.
+     */
+    private fun servedCaller(): CoroutineContext =
+        RequestHandler.servedConnection(SessionBindingProvider { null }, servedPeer)
 
     /**
      * Returns the result of a successful response.
