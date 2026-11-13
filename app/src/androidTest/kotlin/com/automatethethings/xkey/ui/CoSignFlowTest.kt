@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.Manifest
 import android.app.Activity
 import android.app.Instrumentation
 import android.content.Context
@@ -21,21 +22,35 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.BitmapDrawable
-import android.widget.EditText
 import android.widget.ImageView
 import android.widget.Spinner
 import androidx.core.content.FileProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.intent.Intents
+import androidx.test.espresso.intent.Intents.intended
 import androidx.test.espresso.intent.Intents.intending
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasAction
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasComponent
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasExtra
+import androidx.test.espresso.matcher.RootMatchers.isDialog
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.rule.GrantPermissionRule
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditOperationType
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
+import com.automatethethings.xkey.media.CoSignRequest
+import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.XmpMetadataHelper
@@ -43,10 +58,13 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import kotlinx.coroutines.runBlocking
+import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.containsString
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -82,6 +100,10 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class CoSignFlowTest {
+
+    /** The recreation tests open the real scanner; every other test stubs it. */
+    @get:Rule
+    val cameraPermission: GrantPermissionRule = GrantPermissionRule.grant(Manifest.permission.CAMERA)
 
     private val runId = System.nanoTime()
 
@@ -257,17 +279,19 @@ class CoSignFlowTest {
     // -----------------------------------------------------------------
 
     /**
-     * A witness signs a hash handed over out of band and gets a response QR
-     * plus an audit record naming the same content hash.
+     * A witness scans the owner's request QR, approves the prompt and gets a
+     * response QR plus an audit record naming the same content hash.
      */
     @Test
-    fun witnessSigning_withAContentHash_producesAResponseQrAndLogsIt() {
+    fun witnessScan_ofARequest_approved_producesAResponseQrAndLogsIt() {
         val scenario = launch()
         selectSeededKey(scenario)
         openWitnessSection(scenario)
+        stubScanner(request(contentHash))
 
-        enterWitnessHash(scenario, contentHash)
-        clickClickableWithExactText(scenario, context.getString(R.string.cosign_approve))
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_scan_request))
+        assertCoSignScannerLaunched()
+        approveInDialog()
 
         assertShownTextInTree(scenario, context.getString(R.string.cosign_success))
         assertWitnessQrRendered(scenario)
@@ -275,23 +299,24 @@ class CoSignFlowTest {
     }
 
     /**
-     * A hash that is not hexadecimal cannot be decoded, and the failure is
-     * reported rather than swallowed.
+     * A request whose hash is not hexadecimal is refused before any prompt,
+     * and nothing is signed or logged.
      */
     @Test
-    fun witnessSigning_withAMalformedHash_reportsTheFailure() {
+    fun witnessScan_ofAMalformedRequest_isRefused() {
         val scenario = launch()
         selectSeededKey(scenario)
         openWitnessSection(scenario)
+        stubScanner(request(MALFORMED_HASH))
 
-        enterWitnessHash(scenario, MALFORMED_HASH)
-        clickClickableWithExactText(scenario, context.getString(R.string.cosign_approve))
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_scan_request))
 
-        assertShownTextInTree(scenario, context.getString(R.string.cosign_error, "").trim())
-        // The failure snackbar is raised after the signing attempt has already
-        // unwound, so by now an audit row would exist if one were ever written.
+        assertShownTextInTree(
+            scenario,
+            context.getString(R.string.cosign_request_refused, context.getString(R.string.cosign_error_hash))
+        )
         assertTrue(
-            "A refused co-signature must not be recorded in the audit log",
+            "A refused co-sign request must not be recorded in the audit log",
             runBlocking {
                 auditLogDao.getByOperationType(AuditOperationType.COSIGN_RECEIVED)
                     .none { it.details?.contains(MALFORMED_HASH) == true }
@@ -300,7 +325,211 @@ class CoSignFlowTest {
     }
 
     // -----------------------------------------------------------------
-    // Helpers: launching and picking
+    // Owner: the witness's response
+    // -----------------------------------------------------------------
+
+    /** A scanned response is appended to the picked media as an ATTESTOR entry. */
+    @Test
+    fun ownerScan_ofAResponse_appendsTheAttestorToTheSavedMedia() {
+        val scenario = launch()
+        pickMedia(scenario, signedJpeg)
+        assertShownTextInTree(scenario, "Hash: ${contentHash.take(HASH_PREVIEW_LENGTH)}...")
+        stubScanner(response(witnessFingerprint))
+
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_scan_response))
+        assertCoSignScannerLaunched()
+
+        assertShownTextInTree(scenario, context.getString(R.string.cosign_appended, witnessName))
+        assertAttestorSaved()
+        assertShownTextInTree(scenario, "${SignerRole.ATTESTOR.name}: $witnessName... ($KEY_ALGORITHM)")
+    }
+
+    /** A response from a key that already signed is refused; the file is untouched. */
+    @Test
+    fun ownerScan_ofADuplicateSigner_isRefusedAndTheMediaIsUnchanged() {
+        val scenario = launch()
+        pickMedia(scenario, signedJpeg)
+        assertShownTextInTree(scenario, "Hash: ${contentHash.take(HASH_PREVIEW_LENGTH)}...")
+        val before = signedJpeg.readBytes()
+        stubScanner(response(creatorFingerprint))
+
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_scan_response))
+
+        assertShownTextInTree(
+            scenario,
+            context.getString(R.string.cosign_duplicate_signer, creatorFingerprint.take(16))
+        )
+        assertTrue("A refused duplicate must leave the media unchanged", before.contentEquals(signedJpeg.readBytes()))
+        assertEquals(1, XmpMetadataHelper.readSignature(signedJpeg.path)?.signatures?.size)
+    }
+
+    // -----------------------------------------------------------------
+    // Camera permission denied in the scanner
+    // -----------------------------------------------------------------
+
+    /** Both scan buttons report a camera denial rather than doing nothing. */
+    @Test
+    fun aCameraDenial_onEitherScan_isReported() {
+        val scenario = launch()
+        val denied = context.getString(R.string.qr_camera_denied)
+        intending(hasComponent(QrScannerActivity::class.java.name)).respondWith(
+            Instrumentation.ActivityResult(QrScannerActivity.RESULT_CAMERA_DENIED, null)
+        )
+
+        openWitnessSection(scenario)
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_scan_request))
+        assertShownTextInTree(scenario, denied)
+
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_initiator_title))
+        pickMedia(scenario, signedJpeg)
+        assertShownTextInTree(scenario, "Hash: ${contentHash.take(HASH_PREVIEW_LENGTH)}...")
+        awaitTextAbsent(scenario, denied)
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_scan_response))
+        assertShownTextInTree(scenario, denied)
+    }
+
+    // -----------------------------------------------------------------
+    // Recreation while the scanner is open
+    // -----------------------------------------------------------------
+
+    /**
+     * The activity is recreated while the real scanner is in front; the
+     * response then reaches the new instance, which still knows the media.
+     */
+    @Test
+    fun aResponseScan_survivesRecreationWhileTheScannerIsOpen() {
+        val scenario = launch()
+        pickMedia(scenario, signedJpeg)
+        assertShownTextInTree(scenario, "Hash: ${contentHash.take(HASH_PREVIEW_LENGTH)}...")
+
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_scan_response))
+        val scanner = awaitResumedScanner()
+        recreateBehindTheScanner(scenario)
+        finishScanner(scanner, response(witnessFingerprint))
+
+        assertAttestorSaved()
+        assertShownTextInTree(scenario, context.getString(R.string.cosign_appended, witnessName))
+    }
+
+    /**
+     * The witness side: after recreation behind the scanner, the request still
+     * opens the prompt in witness mode with the selected key, and signs.
+     */
+    @Test
+    fun aRequestScan_survivesRecreationWithWitnessModeAndKey() {
+        val scenario = launch()
+        selectSeededKey(scenario)
+        openWitnessSection(scenario)
+
+        clickClickableWithExactText(scenario, context.getString(R.string.cosign_scan_request))
+        val scanner = awaitResumedScanner()
+        recreateBehindTheScanner(scenario)
+        finishScanner(scanner, request(contentHash))
+
+        onView(withText(containsString(spinnerLabel()))).inRoot(isDialog()).check(matches(isDisplayed()))
+        approveInDialog()
+        assertShownTextInTree(scenario, WITNESS_DESCRIPTION)
+        assertShownTextInTree(scenario, context.getString(R.string.cosign_success))
+        assertWitnessQrRendered(scenario)
+    }
+
+    // -----------------------------------------------------------------
+    // Helpers: scanner
+    // -----------------------------------------------------------------
+
+    private val creatorFingerprint get() = "fingerprint-$runId"
+    private val witnessFingerprint get() = "witness-fingerprint-$runId"
+    private val witnessName get() = "UITestWitness$runId"
+
+    private fun request(hash: String): String =
+        CoSignRequest(hash, "SHA-256", "owner-fingerprint-$runId").toJsonString()
+
+    private fun response(fingerprint: String): String =
+        CoSignResponse(
+            signature = "c2lnbmF0dXJl",
+            fingerprint = fingerprint,
+            signerName = witnessName,
+            algorithm = KEY_ALGORITHM
+        ).toJsonString()
+
+    /** Stubs [QrScannerActivity] to return [value] as a scan. */
+    private fun stubScanner(value: String) {
+        intending(hasComponent(QrScannerActivity::class.java.name)).respondWith(
+            Instrumentation.ActivityResult(
+                Activity.RESULT_OK,
+                Intent().putExtra(QrScannerActivity.EXTRA_SCANNED_URI, value)
+            )
+        )
+    }
+
+    private fun assertCoSignScannerLaunched() {
+        intended(
+            allOf(
+                hasComponent(QrScannerActivity::class.java.name),
+                hasExtra(QrScannerActivity.EXTRA_PAYLOAD_KIND, QrPayloadKind.COSIGN.name)
+            )
+        )
+    }
+
+    private fun approveInDialog() {
+        onView(withText(R.string.cosign_approve)).inRoot(isDialog()).perform(click())
+        waitForIdle()
+    }
+
+    /** Polls until the media file itself carries the witness's ATTESTOR entry. */
+    private fun assertAttestorSaved() {
+        awaitCondition("Expected the saved media to carry the witness's ATTESTOR entry") {
+            val saved = XmpMetadataHelper.readSignature(signedJpeg.path)?.signatures.orEmpty()
+            saved.size == 2 && saved.any {
+                it.role == SignerRole.ATTESTOR && it.keyFingerprint == witnessFingerprint &&
+                    it.signerName == witnessName
+            }
+        }
+    }
+
+    /** The real scanner, once it is in front (CAMERA is granted by the rule). */
+    private fun awaitResumedScanner(): QrScannerActivity {
+        var scanner: QrScannerActivity? = null
+        awaitCondition("Expected the QR scanner to come to the front") {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                scanner = ActivityLifecycleMonitorRegistry.getInstance()
+                    .getActivitiesInStage(Stage.RESUMED)
+                    .filterIsInstance<QrScannerActivity>()
+                    .firstOrNull()
+            }
+            scanner != null
+        }
+        return scanner!!
+    }
+
+    /**
+     * Recreates the stopped [CoSignActivity] behind the scanner, as a
+     * configuration change or process-state restore would, and waits for the
+     * new instance.
+     */
+    private fun recreateBehindTheScanner(scenario: ActivityScenario<CoSignActivity>) {
+        val old = withActivity(scenario) { it }
+        InstrumentationRegistry.getInstrumentation().runOnMainSync { old.recreate() }
+        awaitCondition("Expected a new CoSignActivity instance after recreation") {
+            var recreated = false
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                val monitor = ActivityLifecycleMonitorRegistry.getInstance()
+                recreated = listOf(Stage.CREATED, Stage.STARTED, Stage.STOPPED).any { stage ->
+                    monitor.getActivitiesInStage(stage).any { it is CoSignActivity && it !== old }
+                }
+            }
+            recreated
+        }
+    }
+
+    private fun finishScanner(scanner: QrScannerActivity, value: String) {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            scanner.setResult(Activity.RESULT_OK, Intent().putExtra(QrScannerActivity.EXTRA_SCANNED_URI, value))
+            scanner.finish()
+        }
+        waitForIdle()
+    }
+$1
     // -----------------------------------------------------------------
 
     private fun launch(): ActivityScenario<CoSignActivity> =
@@ -316,7 +545,7 @@ class CoSignFlowTest {
      */
     private fun pickMedia(scenario: ActivityScenario<CoSignActivity>, file: File) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        intending(hasAction(Intent.ACTION_GET_CONTENT)).respondWith(
+        intending(hasAction(Intent.ACTION_OPEN_DOCUMENT)).respondWith(
             Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(uri))
         )
 
@@ -329,20 +558,6 @@ class CoSignFlowTest {
         assertShownTextInTree(scenario, WITNESS_DESCRIPTION)
     }
 
-    /** Types [hash] into the witness section's hash field. */
-    private fun enterWitnessHash(scenario: ActivityScenario<CoSignActivity>, hash: String) {
-        scenario.onActivity { activity ->
-            val input = collectViews(activity.window.decorView) {
-                it is EditText && it.hint?.toString() == HASH_INPUT_HINT
-            }.firstOrNull() as? EditText
-            if (input == null) {
-                fail("No witness hash field with hint '$HASH_INPUT_HINT'")
-                return@onActivity
-            }
-            input.setText(hash)
-        }
-        waitForIdle()
-    }
 
     // -----------------------------------------------------------------
     // Helpers: key selection
@@ -444,7 +659,6 @@ class CoSignFlowTest {
         const val SIGNATURE_PLACEHOLDER = "Select a signed media file to view signatures"
         const val WITNESS_DESCRIPTION =
             "As a witness, you sign someone else's content hash to attest your presence."
-        const val HASH_INPUT_HINT = "Paste content hash from initiator"
         const val WITNESS_QR_TAG = "witnessQr"
 
         /** 64 characters, none of them hexadecimal digits. */
