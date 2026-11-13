@@ -22,7 +22,9 @@ so a new type needs no migration.
 | `PASSWORD_SYNC_PERFORMED` | `AuditLogger.logPasswordSyncPerformed` | each `local.syncPasswords` (`RequestHandler.handleSyncPasswords`) and `remote.syncPasswords` (`RemoteSyncClient.syncPasswords`) | `direction`, `passwordCount` (sent to the peer), `added`, `updated`, `skipped`; never a password, site or user name |
 
 A failed sync, a locked password vault included, records one entry with
-`success = false` and `error_message` set. `device_id` and `device_name` name
+`success = false` and `error_message` set, and zero merge counts. Its count is
+0 when nothing reached the peer; an outbound sync whose local merge fails after
+the desktop answered keeps the count the desktop acknowledged. `device_id` and `device_name` name
 the desktop. See [store-sync](../store-sync/architecture.md#audit).
 
 ## Index Strategy
