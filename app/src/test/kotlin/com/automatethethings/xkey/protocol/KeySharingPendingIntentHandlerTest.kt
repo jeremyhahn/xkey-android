@@ -575,6 +575,50 @@ class KeySharingPendingIntentHandlerTest {
         io.mockk.verify(exactly = 0) { keystore.deleteByAlias(any()) }
     }
 
+    /**
+     * Round 12 (4): every key delete records one key-deletion audit event:
+     * local.deleteKey of a key row, of material with no row, and the legacy
+     * deleteKey.
+     */
+    @Test
+    fun everyRpcKeyDeleteIsAuditedOnce() = runTest {
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        val held = mutableSetOf("k-row", "k-bare", "k-legacy")
+        for (id in held.toList()) {
+            every { keystore.resolveKeystoreAlias(id) } answers { "xkey_credential_$id".takeIf { id in held } }
+            every { keystore.keyExists(id) } answers { id in held }
+            every { keystore.userKeyGeneration(id) } answers { if (id in held) mapOf("keystore:xkey_credential_$id" to "1") else emptyMap() }
+            every { keystore.deleteUserKeyGeneration(id, any()) } answers { held -= id; emptyMap() }
+        }
+        tables.addKey("k-row", SharingPolicyType.PRIVATE)
+
+        assertEquals(null, rpcDeleteKey("k-row").error)
+        assertEquals(null, rpcDeleteKey("k-bare").error)
+        assertEquals(null, rpcLegacyDeleteKey("k-legacy").error)
+
+        for (id in listOf("k-row", "k-bare", "k-legacy")) {
+            io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted(id, any(), any()) }
+        }
+        assertTrue("a delete left its material", held.isEmpty())
+        // The legacy delete takes the store's path: its material is deleted
+        // by its generation, never by a raw alias outside the store.
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(any()) }
+    }
+
+    /** Runs the legacy deleteKey through the handler. */
+    private suspend fun rpcLegacyDeleteKey(credentialId: String): Response {
+        val method = RequestHandler::class.java.getDeclaredMethod("handleDeleteKey", Request::class.java, Continuation::class.java)
+        method.isAccessible = true
+        val request = Request(id = 4, method = "deleteKey", params = JSONObject().put("credentialId", credentialId))
+        return try {
+            suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val refusal = e.cause as? ProtocolException ?: throw e
+            Response.error(request.id, refusal.errorCode, refusal.message ?: "")
+        }
+    }
+
     /** The app's deleter, recording the generation, whose delete does not confirm: the tombstone is owed. */
     private fun owedDelete(): com.automatethethings.xkey.storage.KeyMaterial =
         object : com.automatethethings.xkey.storage.KeyMaterial by com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystore) {
