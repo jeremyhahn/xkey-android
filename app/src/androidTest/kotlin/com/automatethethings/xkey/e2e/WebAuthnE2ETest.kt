@@ -22,6 +22,7 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import android.util.Log
+import com.automatethethings.xkey.credential.CredentialProviderSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -94,6 +95,7 @@ class WebAuthnE2ETest {
 
     private lateinit var device: UiDevice
     private lateinit var email: String
+    private var providerSwitchBefore: Boolean? = null
 
     @Before
     fun setUp() {
@@ -103,6 +105,16 @@ class WebAuthnE2ETest {
             backendIsHealthy()
         )
         device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+
+        // The service offers no entries while the in-app switch is off (its
+        // default), so turn it on for the ceremony and restore it after.
+        val settings = CredentialProviderSettingsRepository(
+            ApplicationProvider.getApplicationContext<android.content.Context>()
+        )
+        runBlocking {
+            providerSwitchBefore = settings.isEnabled()
+            settings.setEnabled(true)
+        }
 
         // Reinstalling the app drops it from the credential-provider list, which
         // would leave the sheet offering only Google Password Manager. Register
@@ -138,6 +150,10 @@ class WebAuthnE2ETest {
                     }
             }
         }.onFailure { Log.w(TAG, "passkey cleanup failed: ${it.message}") }
+        providerSwitchBefore?.let { before ->
+            val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+            runBlocking { CredentialProviderSettingsRepository(context).setEnabled(before) }
+        }
     }
 
     /**

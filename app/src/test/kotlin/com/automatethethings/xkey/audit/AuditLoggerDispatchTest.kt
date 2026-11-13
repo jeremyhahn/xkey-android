@@ -825,4 +825,34 @@ class AuditLoggerDispatchTest {
         assertEquals("piv", entry.keyType)
         assertEquals("9d", details(entry).getString("slotId"))
     }
+
+    // -----------------------------------------------------------------------
+    // Desktop backups
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `logBackupCreated records the backup id, size and requesting device`() {
+        AuditLogger.logBackupCreated("backup-1-1", 42, "aabbcc", "Laptop")
+        val entry = only()
+        assertEquals(AuditOperationType.BACKUP_CREATED, entry.operationType)
+        assertEquals("aabbcc", entry.deviceId)
+        assertEquals("Laptop", entry.deviceName)
+        assertTrue(entry.success)
+        val details = details(entry)
+        assertEquals("backup-1-1", details.getString("backupId"))
+        assertEquals(42, details.getInt("sizeBytes"))
+    }
+
+    @Test
+    fun `logBackupRestored records the backup id and size without a device`() {
+        AuditLogger.logBackupRestored("backup-2-1", 7, null, null)
+        val entry = only()
+        assertEquals(AuditOperationType.BACKUP_RESTORED, entry.operationType)
+        assertNull(entry.deviceId)
+        assertNull(entry.deviceName)
+        assertTrue(entry.success)
+        val details = details(entry)
+        assertEquals("backup-2-1", details.getString("backupId"))
+        assertEquals(7, details.getInt("sizeBytes"))
+    }
 }

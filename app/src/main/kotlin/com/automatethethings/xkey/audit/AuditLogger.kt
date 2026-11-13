@@ -16,6 +16,7 @@ package com.automatethethings.xkey.audit
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
@@ -61,11 +62,21 @@ object AuditLogger {
 
     private const val TAG = "AuditLogger"
 
-    /** Default retention period: 90 days in milliseconds. */
-    private const val DEFAULT_RETENTION_MS = 90L * 24 * 60 * 60 * 1000
+    /**
+     * Default retention period: 90 days in milliseconds.
+     *
+     * `internal` only so the retention tests can apply the same cutoff.
+     */
+    @VisibleForTesting
+    internal const val DEFAULT_RETENTION_MS = 90L * 24 * 60 * 60 * 1000
 
-    /** Maximum number of audit entries to retain. */
-    private const val MAX_ENTRIES = 10000
+    /**
+     * Maximum number of audit entries to retain.
+     *
+     * `internal` only so the retention tests can apply the same limit.
+     */
+    @VisibleForTesting
+    internal const val MAX_ENTRIES = 10000
 
     private val daoRef = AtomicReference<AuditLogDao?>(null)
     private val scopeRef = AtomicReference<CoroutineScope?>(null)
@@ -1382,6 +1393,34 @@ object AuditLogger {
     fun logPivKeyDeleted(slotId: String) {
         val details = JSONObject().apply { put("slotId", slotId) }
         log(AuditLogEntity(operationType = AuditOperationType.PIV_KEY_DELETED, keyId = "piv_$slotId", keyType = "piv", success = true, details = details.toString()))
+    }
+
+    // -------------------------------------------------------------------------
+    // Desktop Backups
+    // -------------------------------------------------------------------------
+
+    /**
+     * Log a backup a paired desktop stored on the phone. Records the id and
+     * size only; the backup bytes never enter the log.
+     */
+    fun logBackupCreated(backupId: String, sizeBytes: Int, deviceId: String?, deviceName: String?) {
+        val details = JSONObject().apply {
+            put("backupId", backupId)
+            put("sizeBytes", sizeBytes)
+        }
+        log(AuditLogEntity(operationType = AuditOperationType.BACKUP_CREATED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
+    }
+
+    /**
+     * Log a stored backup a paired desktop fetched from the phone. Records the
+     * id and size only; the backup bytes never enter the log.
+     */
+    fun logBackupRestored(backupId: String, sizeBytes: Int, deviceId: String?, deviceName: String?) {
+        val details = JSONObject().apply {
+            put("backupId", backupId)
+            put("sizeBytes", sizeBytes)
+        }
+        log(AuditLogEntity(operationType = AuditOperationType.BACKUP_RESTORED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
     }
 
     // -------------------------------------------------------------------------

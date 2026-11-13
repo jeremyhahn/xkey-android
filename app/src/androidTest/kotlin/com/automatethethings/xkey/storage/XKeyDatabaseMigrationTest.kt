@@ -205,6 +205,57 @@ class XKeyDatabaseMigrationTest {
     }
 
     /**
+     * MIGRATION_12_13 adds the keys table's policy revision. Every key
+     * written at 12 starts at revision 0 with its policy kept, and from then
+     * on every policy write moves the revision forward: the DAO's own
+     * writers, and a whole-row update carrying a stale revision, which the
+     * migration's trigger bumps instead of letting the revision go back.
+     */
+    @Test
+    fun migration12To13StartsEveryKeyAtRevisionZeroAndBumpsItOnEveryPolicyWrite() {
+        createLegacyDatabase(12) { db ->
+            insertKey(db, keyId = "shared-key", source = "local", shareable = true)
+            insertKey(db, keyId = "private-key", source = "local", shareable = false)
+        }
+
+        withMigratedDatabase { db ->
+            val keys = db.keyDao()
+            val shared = requireNotNull(keys.getByKeyId("shared-key"))
+            assertEquals(SharingPolicyType.ALL_PEERS, shared.sharingPolicy)
+            assertEquals("a key written at 12 starts at revision 0", 0L, shared.policyRevision)
+            assertEquals(0L, keys.getByKeyId("private-key")?.policyRevision)
+
+            // The sharing sheet revokes and re-shares: the policy reads the
+            // same as before, at a later revision.
+            keys.updateSharingPolicy("shared-key", SharingPolicyType.PRIVATE)
+            keys.updateSharingPolicy("shared-key", SharingPolicyType.ALL_PEERS)
+            assertEquals(2L, keys.getByKeyId("shared-key")?.policyRevision)
+
+            // An approval taken at revision 0 no longer writes.
+            assertEquals(
+                0,
+                keys.compareAndSetSharingPolicy(
+                    shared.id, "shared-key", 0L, SharingPolicyType.ALL_PEERS, SharingPolicyType.PRIVATE
+                )
+            )
+            assertEquals(
+                1,
+                keys.compareAndSetSharingPolicy(
+                    shared.id, "shared-key", 2L, SharingPolicyType.ALL_PEERS, SharingPolicyType.PRIVATE
+                )
+            )
+            assertEquals(3L, keys.getByKeyId("shared-key")?.policyRevision)
+
+            // A whole-row update from a copy read at revision 0 writes its
+            // stale policy, but never its stale revision.
+            keys.update(shared)
+            val afterStaleUpdate = requireNotNull(keys.getByKeyId("shared-key"))
+            assertEquals(SharingPolicyType.ALL_PEERS, afterStaleUpdate.sharingPolicy)
+            assertEquals(4L, afterStaleUpdate.policyRevision)
+        }
+    }
+
+    /**
      * MIGRATION_3_4 introduced the per-key sharing policy and had to decide
      * what the pre-existing boolean `shareable` flag meant. A key that was
      * shareable keeps working (ALL_PEERS); one that was not stays PRIVATE.
@@ -319,7 +370,8 @@ class XKeyDatabaseMigrationTest {
                 XKeyDatabase.MIGRATION_8_9,
                 XKeyDatabase.MIGRATION_9_10,
                 XKeyDatabase.MIGRATION_10_11,
-                XKeyDatabase.MIGRATION_11_12
+                XKeyDatabase.MIGRATION_11_12,
+                XKeyDatabase.MIGRATION_12_13
             )
             .build()
         try {

@@ -43,6 +43,9 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Handles credential assertion (authentication) requests from CredentialManager.
@@ -288,18 +291,23 @@ class GetCredentialHandler(
             )
         }
 
-        val authData = buildAuthenticatorData(
-            rpId = rpId,
-            signCount = credential.signCount + 1,
-            userVerified = willVerify
-        )
-        Log.d(TAG, "authData size: ${authData.size}, userVerified=$willVerify")
+        // The counter is read, bumped and persisted only once this assertion
+        // is the one signing (its queue turn has come, for a verified one),
+        // so two assertions for one credential never sign the same count.
+        val signedHash: ByteArray = clientDataHash
+        suspend fun signOnNextCount(sign: suspend (ByteArray) -> ByteArray): Pair<ByteArray, ByteArray> {
+            val authData = buildAuthenticatorData(
+                rpId = rpId,
+                signCount = nextSignCount(credentialId),
+                userVerified = willVerify
+            )
+            Log.d(TAG, "authData size: ${authData.size}, userVerified=$willVerify")
+            // Sign: authData || clientDataHash
+            // SHA256withECDSA hashes internally, so pass raw concatenation
+            return authData to sign(authData + signedHash)
+        }
 
-        // Sign: authData || clientDataHash
-        // SHA256withECDSA hashes internally, so pass raw concatenation
-        val dataToSign = authData + clientDataHash
-
-        val signature = if (willVerify) {
+        val (authData, signature) = if (willVerify) {
             // We are asserting UV=1, so verification must actually occur:
             // sign through the biometric-bound path, never the silent one.
             val helper = biometricHelper
@@ -308,20 +316,26 @@ class GetCredentialHandler(
                 )
             try {
                 Log.d(TAG, "Signing with verification, credentialId=$credentialId")
-                if (!keyRequiresAuth) {
-                    // Keystore only demands a prompt for an auth-bound key, so for
-                    // any other key sign() would take its silent path and we would
-                    // assert UV=1 without anyone being verified. Verify explicitly.
-                    helper.authenticateWithoutCrypto(
-                        title = "Sign In",
-                        subtitle = "Authenticate to $rpId"
-                    )
+                // One queue turn covers the prompt, the counter and the
+                // signature's own prompt, if its key is auth-bound.
+                BiometricHelper.inOneTurn("passkeyAssertion") {
+                    if (!keyRequiresAuth) {
+                        // Keystore only demands a prompt for an auth-bound key, so for
+                        // any other key sign() would take its silent path and we would
+                        // assert UV=1 without anyone being verified. Verify explicitly.
+                        helper.authenticateWithoutCrypto(
+                            title = "Sign In",
+                            subtitle = "Authenticate to $rpId"
+                        )
+                    }
+                    signOnNextCount { data ->
+                        keystoreManager.sign(
+                            credentialId, data, helper,
+                            title = "Sign In",
+                            subtitle = "Authenticate to $rpId"
+                        )
+                    }
                 }
-                keystoreManager.sign(
-                    credentialId, dataToSign, helper,
-                    title = "Sign In",
-                    subtitle = "Authenticate to $rpId"
-                )
             } catch (bioEx: Exception) {
                 Log.e(TAG, "Verified signing failed", bioEx)
                 throw CredentialAssertionException("Biometric signing failed", bioEx)
@@ -329,7 +343,7 @@ class GetCredentialHandler(
         } else {
             try {
                 Log.d(TAG, "Signing without verification, credentialId=$credentialId")
-                keystoreManager.signWithoutBiometric(credentialId, dataToSign)
+                signOnNextCount { data -> keystoreManager.signWithoutBiometric(credentialId, data) }
             } catch (e: BiometricRequiredException) {
                 // The key turned out to be auth-bound after all. Rather than
                 // sign with UV=0 baked into authData while actually verifying,
@@ -345,12 +359,8 @@ class GetCredentialHandler(
         }
         Log.d(TAG, "Signature generated, size=${signature.size}")
 
-        // Update sign count
-        credentialDao.updateSignCount(credentialId, credential.signCount + 1)
-
-        // Sync sign count and record usage in unified key store
+        // Record usage in the unified key store (nextSignCount synced its count)
         try {
-            keyDao.updateSignCount(credentialId, credential.signCount + 1)
             keyDao.recordUsage(credentialId)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to sync to unified key store: ${e.message}")
@@ -374,6 +384,25 @@ class GetCredentialHandler(
         Log.d(TAG, "Assertion response built: ${response.take(200)}...")
         return response
     }
+
+    /**
+     * Reads [credentialId]'s counter, bumps it and persists the new value
+     * (in both stores) as one step per credential, and returns it. A count
+     * whose signature then fails is spent: a counter may skip, never repeat.
+     */
+    private suspend fun nextSignCount(credentialId: String): Long =
+        signCountLocks.computeIfAbsent(credentialId) { Mutex() }.withLock {
+            val current = credentialDao.getByCredentialId(credentialId)
+                ?: throw NoCredentialsFoundException(credentialId)
+            val next = current.signCount + 1
+            credentialDao.updateSignCount(credentialId, next)
+            try {
+                keyDao.updateSignCount(credentialId, next)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to sync sign count to unified key store: ${e.message}")
+            }
+            next
+        }
 
     /**
      * Build authenticator data for assertion.
@@ -431,6 +460,9 @@ class GetCredentialHandler(
 
     companion object {
         private const val TAG = "GetCredentialHandler"
+
+        /** One lock per credential, process-wide: its counter moves one assertion at a time. */
+        private val signCountLocks = ConcurrentHashMap<String, Mutex>()
 
         // Authenticator data flags
         private const val FLAGS_UP: Byte = 0x01 // User Present
