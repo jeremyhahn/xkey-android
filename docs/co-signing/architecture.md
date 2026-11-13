@@ -57,7 +57,10 @@ checks, in this order:
    (`OPERATION_DENIED`) when the key there is no longer the approved one. No
    resolving lookup (such as a FIDO2 alias of the same id) can name one key
    while another signs. The witness QR path in `CoSignActivity` names and
-   signs with the same alias.
+   signs with the same alias. `signApproved` checks, reads and signs while
+   holding `KeystoreManager.withAliasGate` for the alias, and every keystore
+   delete and key generation under an alias takes the same gate, so a key
+   cannot be replaced between the check and the signature.
 
 The success result is unchanged: `signature` (base64), `keyFingerprint`,
 `algorithm` and `signerName`.

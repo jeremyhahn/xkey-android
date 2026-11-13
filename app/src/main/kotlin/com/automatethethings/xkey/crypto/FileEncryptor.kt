@@ -206,7 +206,7 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
 
         if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
+            KeystoreManager.withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
 
         val specBuilder = KeyGenParameterSpec.Builder(
@@ -221,7 +221,7 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
             KEYSTORE_PROVIDER
         )
         keyPairGenerator.initialize(specBuilder.build())
-        keyPairGenerator.generateKeyPair()
+        KeystoreManager.withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
     }
 
     /**
