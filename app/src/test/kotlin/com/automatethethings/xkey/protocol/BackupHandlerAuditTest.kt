@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -69,6 +70,7 @@ class BackupHandlerAuditTest {
     val tmp = TemporaryFolder()
 
     private lateinit var handler: RequestHandler
+    private lateinit var repository: PairedDeviceRepository
     private val inserted = mutableListOf<AuditLogEntity>()
 
     private val deviceKeyHex = "a1b2c3d4"
@@ -123,7 +125,7 @@ class BackupHandlerAuditTest {
 
         val device = mockk<PairedDeviceData>(relaxed = true)
         every { device.deviceName } returns deviceName
-        val repository = mockk<PairedDeviceRepository>(relaxed = true)
+        repository = mockk(relaxed = true)
         every { repository.getDevice(deviceKeyHex) } returns device
 
         handler = RequestHandler(
@@ -222,6 +224,52 @@ class BackupHandlerAuditTest {
         val response = call(MethodNames.LOCAL_RESTORE_BACKUP, "{}")
         assertTrue(response.has("error"))
         assertTrue(entriesOf(AuditOperationType.BACKUP_RESTORED).isEmpty())
+    }
+
+    // -----------------------------------------------------------------
+    // Requesting peer
+    // -----------------------------------------------------------------
+
+    /**
+     * Desktop A is served over BLE while desktop B connects last over USB, so
+     * the handler-wide connected key names B. A's backup calls -- served over
+     * its BLE connection and over a session the phone opened to A -- must be
+     * logged under A, the peer of the connection each request arrived on.
+     */
+    @Test
+    fun `backup entries name the desktop whose connection the request arrived on`() = runTest {
+        val keyA = "aa11aa11"
+        val keyB = "bb22bb22"
+        val deviceA = mockk<PairedDeviceData>(relaxed = true)
+        every { deviceA.deviceName } returns "Desktop A"
+        val deviceB = mockk<PairedDeviceData>(relaxed = true)
+        every { deviceB.deviceName } returns "Desktop B"
+        every { repository.getDevice(keyA) } returns deviceA
+        every { repository.getDevice(keyB) } returns deviceB
+
+        val bleA = mockk<SessionBindingProvider>(relaxed = true)
+        // B (USB) is the connection made last.
+        handler.setConnectedDevicePublicKeyHex(keyB)
+
+        val id = withContext(RequestHandler.servedConnection(bleA, keyA)) {
+            val created = call(MethodNames.LOCAL_CREATE_BACKUP, """{"backup_data":"$payloadB64"}""")
+            val backupId = created.getJSONObject("result").getString("backup_id")
+            call(MethodNames.LOCAL_RESTORE_BACKUP, """{"backup_id":"$backupId"}""")
+            backupId
+        }
+
+        // A phone-initiated session to A.
+        val request = """{"id":2,"method":"${MethodNames.LOCAL_RESTORE_BACKUP}","params":{"backup_id":"$id"}}"""
+        val raw = handler.handleRawRequest(request.toByteArray(Charsets.UTF_8), bleA, keyA)
+        assertFalse(JSONObject(String(raw, Charsets.UTF_8)).has("error"))
+
+        val entries = entriesOf(AuditOperationType.BACKUP_CREATED) +
+            entriesOf(AuditOperationType.BACKUP_RESTORED)
+        assertEquals(3, entries.size)
+        for (entry in entries) {
+            assertEquals(keyA, entry.deviceId)
+            assertEquals("Desktop A", entry.deviceName)
+        }
     }
 
     // -----------------------------------------------------------------
