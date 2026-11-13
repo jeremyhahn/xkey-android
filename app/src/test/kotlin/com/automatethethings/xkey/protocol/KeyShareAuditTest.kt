@@ -53,6 +53,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -142,6 +143,7 @@ class KeyShareAuditTest {
 
         val pairedDevices = mockk<PairedDeviceRepository>(relaxed = true)
         every { pairedDevices.getDevice(PEER) } returns PairedDeviceData(PEER, PEER_NAME, 0L)
+        every { pairedDevices.getDevice(USB_PEER) } returns PairedDeviceData(USB_PEER, USB_PEER_NAME, 0L)
 
         keystoreManager = mockk(relaxed = true)
         every { keystoreManager.getPublicKeyPEM(any()) } returns null
@@ -169,7 +171,7 @@ class KeyShareAuditTest {
     fun exportingSoftwareKeyMaterialRecordsOneRawExport() = runTest {
         givenSoftwareKey(exportable = true, shareable = true)
 
-        val result = success(handler.handleRawRequest(importSharedKey()))
+        val result = success(served(importSharedKey()))
 
         assertEquals(Base64.getEncoder().encodeToString(MATERIAL), result.getString("wrapped_key"))
         assertTrue(result.getBoolean("exportable"))
@@ -187,7 +189,7 @@ class KeyShareAuditTest {
         every { keystoreManager.getPublicKeyPEM(KEY_ID) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
         coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS)
 
-        val result = success(handler.handleRawRequest(importSharedKey()))
+        val result = success(served(importSharedKey()))
 
         assertEquals("public", result.getString("key_type"))
         val entry = single(AuditOperationType.KEY_EXPORTED)
@@ -200,7 +202,7 @@ class KeyShareAuditTest {
     fun aPolicyRefusalRecordsOneFailedExport() = runTest {
         givenSoftwareKey(exportable = true, shareable = true, policy = SharingPolicyType.PRIVATE)
 
-        val response = Response.fromJson(handler.handleRawRequest(importSharedKey()))
+        val response = Response.fromJson(served(importSharedKey()))
 
         assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
         val entry = single(AuditOperationType.KEY_EXPORTED)
@@ -212,7 +214,7 @@ class KeyShareAuditTest {
 
     @Test
     fun anUnknownKeyRecordsNothing() = runTest {
-        val response = Response.fromJson(handler.handleRawRequest(importSharedKey()))
+        val response = Response.fromJson(served(importSharedKey()))
 
         assertEquals(ErrorCodes.KEY_NOT_FOUND, response.error?.code)
         assertTrue("no entry for an unknown key: $entries", entries.isEmpty())
@@ -224,7 +226,7 @@ class KeyShareAuditTest {
 
     @Test
     fun receivingSymmetricKeyMaterialRecordsOneKeyCreated() = runTest {
-        val result = success(handler.handleRawRequest(shareSymmetric()))
+        val result = success(served(shareSymmetric()))
 
         assertTrue(result.getBoolean("accepted"))
         assertEquals(KEY_ID, result.getString("import_id"))
@@ -240,7 +242,7 @@ class KeyShareAuditTest {
     fun aDuplicateSymmetricKeyRecordsNothing() = runTest {
         every { anyConstructed<SoftwareKeyStore>().contains(KEY_ID) } returns true
 
-        val response = Response.fromJson(handler.handleRawRequest(shareSymmetric()))
+        val response = Response.fromJson(served(shareSymmetric()))
 
         assertEquals(ErrorCodes.KEY_EXISTS, response.error?.code)
         assertTrue("no entry for a refused duplicate: $entries", entries.isEmpty())
@@ -252,7 +254,7 @@ class KeyShareAuditTest {
 
     @Test
     fun receivingAPublicKeyRecordsOneContactImport() = runTest {
-        val result = success(handler.handleRawRequest(sharePublicKey()))
+        val result = success(served(sharePublicKey()))
 
         assertTrue(result.getBoolean("accepted"))
         val entry = single(AuditOperationType.CONTACT_IMPORTED)
@@ -265,7 +267,7 @@ class KeyShareAuditTest {
     fun aRepeatedPublicKeyRecordsNothing() = runTest {
         coEvery { contactDao.getByFingerprint(any()) } returns mockk<ContactEntity>(relaxed = true)
 
-        val result = success(handler.handleRawRequest(sharePublicKey()))
+        val result = success(served(sharePublicKey()))
 
         assertTrue(result.getBoolean("accepted"))
         assertTrue("no entry for a known key: $entries", entries.isEmpty())
@@ -280,21 +282,102 @@ class KeyShareAuditTest {
         unmockkObject(AuditLogger)
         givenSoftwareKey(exportable = true, shareable = true)
 
-        val exported = success(handler.handleRawRequest(importSharedKey()))
+        val exported = success(served(importSharedKey()))
         assertEquals(Base64.getEncoder().encodeToString(MATERIAL), exported.getString("wrapped_key"))
 
         every { anyConstructed<SoftwareKeyStore>().get(any()) } returns null
         coEvery { keyDao.getByKeyId(any()) } returns null
-        val symmetric = success(handler.handleRawRequest(shareSymmetric(keyId = "other-sym")))
+        val symmetric = success(served(shareSymmetric(keyId = "other-sym")))
         assertEquals("other-sym", symmetric.getString("import_id"))
 
-        val contact = success(handler.handleRawRequest(sharePublicKey()))
+        val contact = success(served(sharePublicKey()))
         assertTrue(contact.getBoolean("accepted"))
+    }
+
+    // -----------------------------------------------------------------
+    // The peer is the request's own connection, never the last one paired
+    // -----------------------------------------------------------------
+
+    /**
+     * Desktop A stays connected over BLE while desktop B pairs over USB last,
+     * which overwrites the handler-wide peer. A's transfers must still be
+     * authorized for, and recorded against, A.
+     */
+    @Test
+    fun aSecondTransportPairedLastIsNeverTheRecordedPeer() = runTest {
+        handler.setConnectedDevicePublicKeyHex(USB_PEER)
+        givenSoftwareKey(exportable = true, shareable = true)
+
+        success(served(sharePublicKey(), peer = PEER))
+        success(served(shareSymmetric(keyId = "other-sym"), peer = PEER))
+        success(served(importSharedKey(), peer = PEER))
+
+        assertEquals(
+            listOf(
+                AuditOperationType.CONTACT_IMPORTED,
+                AuditOperationType.KEY_CREATED,
+                AuditOperationType.KEY_EXPORTED
+            ),
+            entries.map { it.operationType }
+        )
+        entries.forEach {
+            assertEquals("entry names the caller: $it", PEER, it.deviceId)
+            assertEquals("entry names the caller: $it", PEER_NAME, it.deviceName)
+        }
+    }
+
+    /** B's transfer, served on B's own connection, names B and not A. */
+    @Test
+    fun eachConnectionRecordsItsOwnPeer() = runTest {
+        handler.setConnectedDevicePublicKeyHex(PEER)
+
+        success(served(sharePublicKey(), peer = USB_PEER))
+
+        val entry = single(AuditOperationType.CONTACT_IMPORTED)
+        assertEquals(USB_PEER, entry.deviceId)
+        assertEquals(USB_PEER_NAME, entry.deviceName)
+    }
+
+    /**
+     * A request that names no connection has no peer: the handler-wide peer
+     * is never borrowed, so the share is refused and nothing is recorded.
+     */
+    @Test
+    fun aRequestWithNoConnectionNeverBorrowsTheGlobalPeer() = runTest {
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        givenSoftwareKey(exportable = true, shareable = true)
+
+        for (request in listOf(importSharedKey(), shareSymmetric(), sharePublicKey())) {
+            val response = Response.fromJson(handler.handleRawRequest(request))
+            assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        }
+        assertTrue("no entry without a caller peer: $entries", entries.isEmpty())
+    }
+
+    /**
+     * A served connection that authenticated no peer is refused as an
+     * anonymous peer, not answered as a protocol failure, even while another
+     * desktop is the handler-wide peer.
+     */
+    @Test
+    fun aConnectionWithNoPeerKeyIsRefusedAsAnonymous() = runTest {
+        handler.setConnectedDevicePublicKeyHex(USB_PEER)
+
+        val response = Response.fromJson(served(sharePublicKey(), peer = null))
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertTrue("no entry without a caller peer: $entries", entries.isEmpty())
     }
 
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
+
+    /** Handles [request] as one arriving on a served connection whose peer is [peer]. */
+    private suspend fun served(request: ByteArray, peer: String? = PEER): ByteArray =
+        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer)) {
+            handler.handleRawRequest(request)
+        }
 
     private fun givenSoftwareKey(
         exportable: Boolean,
@@ -379,6 +462,8 @@ class KeyShareAuditTest {
     private companion object {
         const val PEER = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11"
         const val PEER_NAME = "Desk"
+        const val USB_PEER = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22"
+        const val USB_PEER_NAME = "Laptop"
         const val KEY_ID = "shared-aes"
         val MATERIAL = ByteArray(32) { (0x40 + it).toByte() }
 
