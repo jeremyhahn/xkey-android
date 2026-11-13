@@ -107,8 +107,15 @@ interface CertificateDao {
     // Revocation
     // -------------------------------------------------------------------------
 
-    @Query("UPDATE certificates SET revoked = 1, revoked_at = :revokedAt, revoked_reason = :reason WHERE serial_number = :serialNumber")
-    suspend fun revoke(serialNumber: String, revokedAt: Long = System.currentTimeMillis(), reason: Int = 0)
+    /**
+     * Revoke a certificate that is not revoked yet. A revocation is final: a
+     * second call keeps the first date and reason.
+     *
+     * @return The number of rows changed: 1 if revoked now, 0 if the serial
+     * is unknown or already revoked.
+     */
+    @Query("UPDATE certificates SET revoked = 1, revoked_at = :revokedAt, revoked_reason = :reason WHERE serial_number = :serialNumber AND revoked = 0")
+    suspend fun revoke(serialNumber: String, revokedAt: Long = System.currentTimeMillis(), reason: Int = 0): Int
 
     @Query("SELECT revoked FROM certificates WHERE serial_number = :serialNumber")
     suspend fun isRevoked(serialNumber: String): Boolean?

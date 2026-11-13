@@ -354,22 +354,57 @@ class RequestHandlerLocalKeyFamilyTest {
     // ------------------------------------------------------------------
 
     /**
-     * Sharing is granted after the fact from the desktop. The flag has to reach
-     * the row, otherwise `local.importSharedKey` keeps refusing.
+     * Widening a key to every peer needs a confirmed peer and the owner's
+     * approval on the phone (#178). This handler is headless: with no
+     * confirmed peer the request is refused outright, and with one there is
+     * still no prompt to approve on, so the key stays private either way.
      */
     @Test
-    fun setKeyPolicyTogglesShareableOnTheStoredKey() {
+    fun setKeyPolicyRefusesToWidenAKeyWithoutTheOwnersApproval() {
         val keyId = generateKey("policy-$runId", KeyTypes.SECRET, "AES256")
-        assertFalse(storedKey(keyId).shareable)
+        val widen = JSONObject().put("keyId", keyId).put("shareable", true)
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, call("local.setKeyPolicy", widen).errorCode())
+        assertStaysPrivate(keyId)
+
+        handler.setConnectedDevicePublicKeyHex("cd".repeat(32))
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, call("local.setKeyPolicy", widen).errorCode())
+        assertStaysPrivate(keyId)
+    }
+
+    /**
+     * Narrowing needs no approval: from a key generated shareable, the flag
+     * and the policy both reach the row, so `local.importSharedKey` refuses it
+     * again.
+     */
+    @Test
+    fun setKeyPolicyNarrowsASharedKeyWithoutAPrompt() {
+        val keyId = "policy-shared-$runId"
+        createdKeyIds.add(keyId)
+        val generated = call(
+            "local.generateKey",
+            JSONObject()
+                .put("keyId", keyId)
+                .put("keyType", KeyTypes.SECRET)
+                .put("algorithm", "AES256")
+                .put("shareable", true)
+                .put("requireUserVerification", false)
+                .put("preferStrongBox", false)
+        )
+        assertTrue("key generation must succeed: " + generated.toJsonString(), generated.isSuccess())
+        assertEquals(SharingPolicyType.ALL_PEERS, storedKey(keyId).sharingPolicy)
 
         assertTrue(
-            call("local.setKeyPolicy", JSONObject().put("keyId", keyId).put("shareable", true))
+            call("local.setKeyPolicy", JSONObject().put("keyId", keyId).put("shareable", false))
                 .ok().getBoolean("updated")
         )
-        assertTrue(storedKey(keyId).shareable)
+        assertStaysPrivate(keyId)
+    }
 
-        call("local.setKeyPolicy", JSONObject().put("keyId", keyId).put("shareable", false))
-        assertFalse(storedKey(keyId).shareable)
+    private fun assertStaysPrivate(keyId: String) {
+        val stored = storedKey(keyId)
+        assertFalse(stored.shareable)
+        assertEquals(SharingPolicyType.PRIVATE, stored.sharingPolicy)
     }
 
     /** A request that names no flag is accepted but changes nothing. */

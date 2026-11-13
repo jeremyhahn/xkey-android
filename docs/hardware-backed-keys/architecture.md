@@ -317,7 +317,7 @@ graph TB
     end
 
     subgraph Storage["Storage Layer"]
-        DB[(XKeyDatabase v7)]
+        DB[(XKeyDatabase v12)]
         DS[DataStore Repositories]
         ESP[EncryptedSharedPreferences]
     end
@@ -367,9 +367,9 @@ There are no traditional XML layout files for the main screens.
 
 ## Storage Layer
 
-### Room Database (XKeyDatabase v7)
+### Room Database (XKeyDatabase v12)
 
-SQLite database `xkey_credentials.db` with six entities:
+SQLite database `xkey_credentials.db` with nine entities:
 
 - `keys` -- unified key metadata for all key types
 - `credential_metadata` -- legacy FIDO2 credential table
@@ -377,6 +377,9 @@ SQLite database `xkey_credentials.db` with six entities:
 - `audit_logs` -- comprehensive security event log
 - `certificates` -- X.509 certificates issued by the local CA
 - `contacts` -- recipient public keys for encryption and verification
+- `oath_credentials` -- TOTP/HOTP credentials with encrypted secrets
+- `piv_slots` -- PIV smart card key slots
+- `passwords` -- password manager entries with encrypted values
 
 ### DataStore Repositories
 
@@ -427,7 +430,7 @@ com.automatethethings.xkey
 |----------|-------|
 | `minSdk` | 28 (Android 9 Pie) |
 | `targetSdk` | 34 (Android 14) |
-| Database | Room v7 (`xkey_credentials.db`) |
+| Database | Room v12 (`xkey_credentials.db`) |
 | License | AGPL-3.0 / Commercial dual license |
 | Package | `com.automatethethings.xkey` |
 
@@ -581,8 +584,8 @@ The database singleton is obtained via `XKeyDatabase.getInstance(context)`.
 | DataStore repositories | Per-component instantiation | Thread-safe (DataStore) |
 | `KeystoreManager` | Per-component instantiation | Thread-safe (Keystore is thread-safe) |
 
-> **Status: REFERENCE** · Last verified: 2026-08-10
-> As-built description of the xKey Room schema. STALE: the migration table stops at v7; `XKeyDatabase.kt` is at version 11. Read the code for v8-v11.
+> **Status: REFERENCE** · Last verified: 2026-11-12
+> As-built description of the xKey Room schema (`XKeyDatabase.kt`, version 12).
 
 This document describes the Room database schema, migration history, DataStore
 repositories, and indexing strategy used by the xKey Android application.
@@ -689,6 +692,54 @@ erDiagram
         string notes
     }
 
+    OathCredentialEntity {
+        long id PK
+        string oath_id UK
+        string oath_type
+        string algorithm
+        int digits
+        int period_seconds
+        long counter
+        string issuer
+        string account_name
+        blob secret_encrypted
+        string source
+        string remote_device_id
+        long created_at
+        long last_used_at
+        int use_count
+    }
+
+    PivSlotEntity {
+        long id PK
+        string slot_id UK
+        string algorithm
+        blob public_key_der
+        blob certificate_der
+        boolean has_key
+        long created_at
+        long last_used_at
+        int use_count
+    }
+
+    PasswordEntity {
+        long id PK
+        string password_id UK
+        string name
+        string title
+        string username
+        blob password_encrypted
+        string url
+        string notes
+        string folder_path
+        string source
+        long created_at
+        long updated_at
+        string expires_at
+        boolean shared
+        string tenant_id
+    }
+
     KeyEntity ||--o{ KeySharingPolicy : "has sharing policies"
     KeyEntity ||--o{ AuditLogEntity : "referenced in audit"
     KeyEntity ||--o{ CertificateEntity : "associated certificate"
@@ -719,6 +770,11 @@ graph LR
     V4 --> V5["v5<br/>+ audit_logs"]
     V5 --> V6["v6<br/>+ certificates"]
     V6 --> V7["v7<br/>+ contacts"]
+    V7 --> V8["v8<br/>+ oath_credentials"]
+    V8 --> V9["v9<br/>+ piv_slots"]
+    V9 --> V10["v10<br/>+ passwords"]
+    V10 --> V11["v11<br/>keys.source<br/>keychaind to xkmsd"]
+    V11 --> V12["v12<br/>+ passwords policy columns"]
 ```
 
 | Migration | Changes |
@@ -729,6 +785,11 @@ graph LR
 | v4 -> v5 | Created `audit_logs` table with indices on `timestamp`, `operation_type`, `key_id`, `key_type`, `device_id`, `success`. |
 | v5 -> v6 | Created `certificates` table with indices on `serial_number` (unique), `profile`, `key_id`, `revoked`, `not_after`, `is_ca`, `fingerprint`. |
 | v6 -> v7 | Created `contacts` table with unique index on `public_key_fingerprint` and indices on `name` and `algorithm`. |
+| v7 -> v8 | Created `oath_credentials` table (defaults: `digits` 6, `period_seconds` 30, `counter` 0, `source` `local`, `use_count` 0) with unique index on `oath_id` and indices on `issuer` and `source`. |
+| v8 -> v9 | Created `piv_slots` table (`has_key` and `use_count` default `0`) with unique index on `slot_id` and index on `has_key`. |
+| v9 -> v10 | Created `passwords` table (`source` default `local`) with unique index on `password_id` and indices on `name` and `source`. |
+| v10 -> v11 | Data only: renamed the `keys.source` value `keychaind` to `xkmsd`, matching the renamed go-xkms daemon. |
+| v11 -> v12 | Added `passwords` columns `expires_at` (nullable text), `shared` (default `0`) and `tenant_id` (default `''`, the default tenant). Existing entries become personal entries of the default tenant. |
 
 ## Index Strategy
 
@@ -772,3 +833,51 @@ val auditLogDao = database.auditLogDao()
 | Converter | Type | Storage |
 |-----------|------|---------|
 | `AuditOperationTypeConverter` | `AuditOperationType` enum | String (enum name) |
+
+## local.setKeyPolicy
+
+`local.setKeyPolicy` sets whether a key can be shared with peers.
+
+| Param | Type | Meaning |
+|-------|------|---------|
+| `keyId` | string, required | The key to change |
+| `shareable` | boolean, optional | `true` opens the key to every peer (`ALL_PEERS`), `false` makes it `PRIVATE`; absent changes nothing |
+
+The result is `{"updated": true}`.
+
+Widening needs the owner's approval. A request with `shareable: true` on a key
+whose policy is not already `ALL_PEERS` would let any paired peer pass the
+sharing check in `local.shareSymmetric`, so the phone first requires a
+confirmed peer for the session, then shows a biometric prompt that names the
+key (its label, else its id). The policy is stored only when the owner
+approves. Narrowing (`shareable: false`), an absent `shareable` and a key
+already `ALL_PEERS` need no prompt.
+
+Every stored policy change is written to the audit log as
+`KEY_SHARING_CHANGED`, with the old and new policy.
+
+The write is a compare-and-set (`KeyDao.compareAndSetSharingPolicy`) against
+the policy the decision was taken on, so a change that lands between the read
+and the write is never overwritten. A key already at the requested policy is
+not written or audited. If the policy moves while the approval prompt is up,
+the widening is refused with `OPERATION_DENIED`, since the approval covered
+the old state; a narrowing re-reads and narrows the new state. The audit
+entry names the policy the write actually replaced. The write is also bound to
+the row the request read (its immutable id): a key deleted and re-created under
+the same `keyId` meanwhile is another key, so it is not written and the
+request answers `OPERATION_DENIED`.
+
+On a locked phone the lock-screen notification opens the same prompt the
+biometric launcher is waiting on, under the launcher's own request id, so
+approving or cancelling from the lock screen completes the request.
+
+The confirmed peer is the one of the connection the request arrived on (its
+caller session); the handler-wide peer of the last served connection answers
+only for a request that names no connection.
+
+| Error | When |
+|-------|------|
+| `INVALID_PARAMS` | Params or `keyId` missing |
+| `KEY_NOT_FOUND` | No key with that `keyId` |
+| `OPERATION_DENIED` | Widening on a session with no confirmed peer, the policy changed while the prompt was up, or the key was replaced under the same `keyId` |
+| `BIOMETRIC_FAILED` | Widening with no biometric prompt available, or the owner cancels or fails it; the stored policy is unchanged |

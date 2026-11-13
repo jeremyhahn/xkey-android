@@ -272,7 +272,7 @@ class RequestHandlerPinAndDataFamilyTest {
                 .put("currentPin", SO_PIN).put("newPin", "24681357")
         )
 
-        assertEquals(ErrorCodes.PIN_INCORRECT, response.errorCode())
+        assertEquals(ErrorCodes.PIN_REQUIRED, response.errorCode())
     }
 
     /** Clearing a lockout is a Security Officer operation, so it needs the SO PIN. */

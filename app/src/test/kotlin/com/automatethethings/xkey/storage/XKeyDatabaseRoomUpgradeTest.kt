@@ -37,7 +37,9 @@ import org.junit.Test
  * (XKeyDatabase.buildDatabase), so a device on an older version needs a
  * migration path to 12, or the open throws "A migration from x to 12 was
  * required but not found". Both are checked here against the jars CI builds
- * with. The type converter is covered by [AuditOperationTypeConverterTest];
+ * with, at the current version: v13 (#178) adds the keys table's policy
+ * revision, so the compiled hash is now the committed 13.json's, and every
+ * stored version from 1 to 12 needs a path to 13. The type converter is covered by [AuditOperationTypeConverterTest];
  * the migrations' SQL is covered on a device by the instrumented
  * `XKeyDatabaseMigrationTest`.
  */
@@ -53,7 +55,7 @@ class XKeyDatabaseRoomUpgradeTest {
      * library-restricted.
      */
     @Test
-    fun `generated open delegate carries the identity hash v12 devices store`() {
+    fun `generated open delegate carries the identity hash of the committed current schema`() {
         val impl = Class.forName("com.automatethethings.xkey.storage.XKeyDatabase_Impl")
             .getDeclaredConstructor()
             .newInstance()
@@ -63,10 +65,10 @@ class XKeyDatabaseRoomUpgradeTest {
 
         val delegateType = Class.forName("androidx.room.RoomOpenDelegate")
         assertTrue(delegateType.isInstance(delegate))
-        assertEquals(12, delegateType.getMethod("getVersion").invoke(delegate))
+        assertEquals(CURRENT_VERSION, delegateType.getMethod("getVersion").invoke(delegate))
         assertEquals(
-            "the identity hash v12 databases hold in room_master_table",
-            V12_IDENTITY_HASH,
+            "the identity hash current databases hold in room_master_table",
+            CURRENT_IDENTITY_HASH,
             delegateType.getMethod("getIdentityHash").invoke(delegate)
         )
     }
@@ -79,25 +81,32 @@ class XKeyDatabaseRoomUpgradeTest {
      * its database instead of migrating.
      */
     @Test
-    fun `every stored version from 1 to 11 has a migration path to 12`() {
+    fun `every stored version has a migration path to the current one`() {
         val container = RoomDatabase.MigrationContainer()
         container.addMigrations(APP_MIGRATIONS)
 
-        for (start in 1..11) {
-            val path = container.findMigrationPath(start, 12)
-            assertNotNull("no migration path from v$start to v12", path)
+        for (start in 1 until CURRENT_VERSION) {
+            val path = container.findMigrationPath(start, CURRENT_VERSION)
+            assertNotNull("no migration path from v$start to v$CURRENT_VERSION", path)
             assertEquals(
                 "path from v$start runs every step in order",
-                (start..11).toList(),
+                (start until CURRENT_VERSION).toList(),
                 path!!.map { it.startVersion }
             )
-            assertEquals(12, path.last().endVersion)
+            assertEquals(CURRENT_VERSION, path.last().endVersion)
         }
     }
 
     private companion object {
-        /** `identityHash` of the committed 12.json, as written by Room 2.7.0 (#42). */
-        const val V12_IDENTITY_HASH = "346118e31d0992f85496533bbc1b5d5b"
+        /** The version `@Database` declares. */
+        const val CURRENT_VERSION = 13
+
+        /**
+         * `identityHash` of the committed 13.json. (12.json, written by Room
+         * 2.7.0 in #42, holds 346118e31d0992f85496533bbc1b5d5b, which 2.8.5
+         * reproduced for the v12 entities.)
+         */
+        const val CURRENT_IDENTITY_HASH = "e02480570d8c7a895d2410493d8e9e08"
 
         /** The migrations `XKeyDatabase.buildDatabase` registers, in its order. */
         val APP_MIGRATIONS = listOf(
@@ -111,7 +120,8 @@ class XKeyDatabaseRoomUpgradeTest {
             XKeyDatabase.MIGRATION_8_9,
             XKeyDatabase.MIGRATION_9_10,
             XKeyDatabase.MIGRATION_10_11,
-            XKeyDatabase.MIGRATION_11_12
+            XKeyDatabase.MIGRATION_11_12,
+            XKeyDatabase.MIGRATION_12_13
         )
     }
 }

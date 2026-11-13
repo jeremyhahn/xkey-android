@@ -21,6 +21,7 @@ import com.automatethethings.xkey.protocol.Response
 import kotlinx.coroutines.CompletableDeferred
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Routes incoming decrypted messages to the appropriate handler.
@@ -47,6 +48,17 @@ class BidirectionalMessageRouter(
 
     /** Pending outbound requests waiting for responses, keyed by request ID. */
     private val pendingResponses = ConcurrentHashMap<Long, CompletableDeferred<Response>>()
+
+    /** Outbound request id counters, one per starting id, kept for this router's life. */
+    private val requestIdCounters = ConcurrentHashMap<Long, AtomicLong>()
+
+    /**
+     * The counter for outbound request ids numbered from [base]. It lives as
+     * long as this router, so a client replaced on the same router continues
+     * the numbering and never reuses the id of a request whose late reply may
+     * still arrive.
+     */
+    fun requestIds(base: Long): AtomicLong = requestIdCounters.computeIfAbsent(base) { AtomicLong(it) }
 
     /**
      * Processes an incoming decrypted message.

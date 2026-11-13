@@ -461,6 +461,8 @@ class KeystoreManager(private val context: Context) {
      * @param biometricHelper Helper for showing biometric prompts.
      * @param title Title for the biometric prompt.
      * @param subtitle Subtitle for the biometric prompt (e.g., relying party).
+     * @param onTurn Called with the prompt's queue key on its turn, before it
+     *   shows ([BiometricHelper.authenticate]); not called without a prompt.
      * @return DER-encoded ECDSA signature.
      * @throws KeyNotFoundException if no key exists for the credential.
      * @throws SigningException if signing fails.
@@ -472,7 +474,8 @@ class KeystoreManager(private val context: Context) {
         dataHash: ByteArray,
         biometricHelper: BiometricHelper,
         title: String = "xKey Authentication",
-        subtitle: String = "Verify your identity to sign"
+        subtitle: String = "Verify your identity to sign",
+        onTurn: (key: String) -> Unit = {}
     ): ByteArray {
         // Resolve across both alias namespaces, as signWithoutBiometric does.
         // With the FIDO2-only alias, a passkey the desktop created through
@@ -507,11 +510,14 @@ class KeystoreManager(private val context: Context) {
             // Create CryptoObject for biometric binding
             val cryptoObject = BiometricPrompt.CryptoObject(signature)
 
-            // Authenticate with biometric - this unlocks the signature object
+            // Authenticate with biometric - this unlocks the signature object.
+            // The prompt waits for its queue turn, and onTurn posts its wake
+            // notification on that turn.
             biometricHelper.authenticate(
                 cryptoObject = cryptoObject,
                 title = title,
-                subtitle = subtitle
+                subtitle = subtitle,
+                onTurn = onTurn
             )
 
             // After successful biometric, the signature object is unlocked
