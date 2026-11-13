@@ -29,6 +29,8 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import java.security.KeyStore
@@ -130,5 +132,34 @@ class KeyStoreSyncManagerTest {
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, pendingDeletion = { it == "general-1" }).syncAll()
 
         coVerify(exactly = 0) { keyDao.insert(match { it.keyId == "general-1" }) }
+    }
+
+    /**
+     * Round 10 (5): a FIDO2 credential whose key row was deleted while its
+     * material delete is still owed is not copied back from
+     * credential_metadata either.
+     */
+    @Test
+    fun `a credential with a pending deletion is not synced back`() = runTest {
+        val credential = mockk<com.automatethethings.xkey.storage.entity.CredentialMetadataEntity>(relaxed = true)
+        every { credential.credentialId } returns "cred-1"
+        every { credential.rpId } returns "example.com"
+        coEvery { credentialDao.getAll() } returns listOf(credential)
+        coEvery { keyDao.getAll() } returns emptyList()
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, pendingDeletion = { it == "cred-1" }).syncAll()
+
+        coVerify(exactly = 0) { keyDao.insert(match { it.keyId == "cred-1" }) }
+    }
+
+    /** Round 10 (5) bypass guard: the sync inserts a key row in one place, its tombstone check. */
+    @Test
+    fun `the sync inserts key rows only through its tombstone check`() {
+        val source = listOf(
+            java.io.File("src/main/kotlin/com/automatethethings/xkey/storage/KeyStoreSyncManager.kt"),
+            java.io.File("app/src/main/kotlin/com/automatethethings/xkey/storage/KeyStoreSyncManager.kt")
+        ).first { it.isFile }.readText()
+        assertEquals(1, Regex("""keyDao\.(insert|insertAll|upsert)\(""").findAll(source).count())
+        assertTrue("pendingDeletion(entity.keyId)" in source)
     }
 }

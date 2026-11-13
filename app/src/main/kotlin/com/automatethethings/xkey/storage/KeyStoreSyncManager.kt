@@ -120,7 +120,10 @@ class KeyStoreSyncManager(
                 continue
             }
 
-            keyDao.insert(mapCredentialToKeyEntity(cred))
+            if (!track(mapCredentialToKeyEntity(cred))) {
+                skipped++
+                continue
+            }
             synced++
             Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
         }
@@ -128,6 +131,19 @@ class KeyStoreSyncManager(
         Log.d(TAG, "Synced $synced credentials from credential_metadata, " +
                 "$skipped skipped with no Keystore key")
         return synced
+    }
+
+    /**
+     * The sync's one key row insert (#193 r9, r10): a key id whose row was
+     * deleted while its material delete is still owed (a tombstone,
+     * [pendingDeletion]) is never listed again, from a credential or from the
+     * Keystore, with default metadata; the replay deletes its material.
+     * Returns whether [entity] was inserted.
+     */
+    private suspend fun track(entity: KeyEntity): Boolean {
+        if (pendingDeletion(entity.keyId)) return false
+        keyDao.insert(entity)
+        return true
     }
 
     /**
@@ -163,13 +179,8 @@ class KeyStoreSyncManager(
             }
 
             if (!keyDao.exists(keyId)) {
-                // Its row was deleted and its material delete is still owed
-                // (a tombstone): the replay deletes it; never list it again
-                // with default metadata (#193 r9).
-                if (pendingDeletion(keyId)) continue
                 val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
-                if (entity != null) {
-                    keyDao.insert(entity)
+                if (entity != null && track(entity)) {
                     discovered++
                     Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
                 }
