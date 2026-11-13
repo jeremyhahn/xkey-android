@@ -20,12 +20,15 @@ import android.content.Context
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import java.io.File
+import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
@@ -219,6 +222,27 @@ class BackupHandlerWireTest {
     fun `restoreBackup with no backups stored is INVALID_PARAMS`() = runTest {
         val response = call(MethodNames.LOCAL_RESTORE_BACKUP, "{}")
         assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+    }
+
+    @Test
+    fun `restoreBackup without an id on a cut-short newest record is INTERNAL_ERROR, not the older backup`() = runTest {
+        createBackup(byteArrayOf(1))
+        val id = "newest"
+        val idBytes = id.toByteArray(Charsets.UTF_8)
+        // A whole XKB2 header whose id length runs past the end of the file.
+        val record = ByteBuffer.allocate(4 + 8 + 8 + 4 + idBytes.size)
+            .put("XKB2".toByteArray(Charsets.US_ASCII))
+            .putLong(99L)
+            .putLong(System.currentTimeMillis())
+            .putInt(idBytes.size + 1000)
+            .put(idBytes)
+            .array()
+        File(File(tmp.root, "backups"), "${SyncCodec.sha256Hex(idBytes)}.backup").writeBytes(record)
+
+        val response = call(MethodNames.LOCAL_RESTORE_BACKUP, "{}")
+
+        assertFalse(response.has("result"))
+        assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(response))
     }
 
     // -----------------------------------------------------------------
