@@ -103,9 +103,7 @@ class XKeyGattServiceProbe(context: Context) {
      * tests have no accessory to connect to.
      */
     fun installUsbServer(server: UsbAccessoryServer, router: BidirectionalMessageRouter) {
-        val slot = usbServerSlot
-        slotFieldOf("server").set(slot, server)
-        slotFieldOf("router").set(slot, router)
+        usbServerSlot.install(server, router)
     }
 
     var pairedDeviceRepository: PairedDeviceRepository?
@@ -197,11 +195,6 @@ class XKeyGattServiceProbe(context: Context) {
         throw AssertionError("XKeyGattService.$name is a seam these tests drive", e)
     }
 
-    private fun slotFieldOf(name: String) = try {
-        UsbAccessoryServerSlot::class.java.getDeclaredField(name).apply { isAccessible = true }
-    } catch (e: NoSuchFieldException) {
-        throw AssertionError("UsbAccessoryServerSlot.$name is a seam these tests drive", e)
-    }
 
     companion object {
         private val attachBaseContext: Method =

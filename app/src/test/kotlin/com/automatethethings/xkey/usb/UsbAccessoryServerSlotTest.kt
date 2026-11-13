@@ -44,6 +44,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -395,5 +396,24 @@ class UsbAccessoryServerSlotTest {
         } finally {
             scope.cancel()
         }
+    }
+
+    @Test
+    fun `an attach that starts after a clear still opens`() {
+        slot.clear()
+        val server = attach()
+        assertNotNull("the clear refused a later attach", server)
+        assertSame(server, slot.current()?.first)
+    }
+
+    @Test
+    fun `a server installed without an accessory reaches states and current`() {
+        val server = UsbAccessoryServer(handler, mockk(relaxed = true))
+        val router = mockk<BidirectionalMessageRouter>(relaxed = true)
+        slot.install(server, router)
+        assertSame(server, slot.current()?.first)
+        assertEquals(UsbAccessoryState.Disconnected, runBlocking { withTimeout(5_000) { slot.states.first() } })
+        slot.clear()
+        assertNull(runBlocking { withTimeout(5_000) { slot.states.first() } })
     }
 }

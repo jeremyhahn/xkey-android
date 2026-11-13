@@ -697,6 +697,13 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             Log.e(TAG, "RequestHandler not initialized, cannot handle USB accessory")
             return
         }
+        // The desktop is ready only once the USB session is Connected, and is
+        // lost as soon as it ends, detached or not. One observer, installed on
+        // the first attach and kept for the service's lifetime, follows
+        // whichever server the slot holds, so no attach replaces it (#134).
+        if (usbStateJob == null) {
+            usbStateJob = desktopSessionTracker.follow(serviceScope, usbServerSlot.states)
+        }
 
         // Check if native USB is enabled before accepting the accessory
         serviceScope.launch {
@@ -732,12 +739,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 pairingCallback = this@XKeyGattService,
                 pairedDeviceRepository = pairedDeviceRepository,
                 storeMethods = storeMethods,
-            )?.also { server ->
-                // The desktop is ready only once the USB session is Connected,
-                // and is lost as soon as that session ends, detached or not.
-                usbStateJob?.cancel()
-                usbStateJob = desktopSessionTracker.follow(serviceScope, server.state)
-            } ?: run {
+            ) ?: run {
                 Log.w(TAG, "USB accessory server already active, ignoring attach")
                 return@launch
             }
@@ -755,8 +757,6 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * Called when the USB accessory is detached.
      */
     fun onUsbAccessoryDetached() {
-        usbStateJob?.cancel()
-        usbStateJob = null
         usbServerSlot.clear()
         refreshDesktopSession()
         Log.i(TAG, "USB accessory server stopped")
@@ -830,7 +830,10 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     /** Collects the TCP server's state into [desktopSession] while it runs. */
     private var tcpStateJob: Job? = null
 
-    /** Collects the USB session's state into [desktopSession] while attached. */
+    /**
+     * Collects [UsbAccessoryServerSlot.states] into [desktopSession] from the
+     * first attach until [serviceScope] ends.
+     */
     private var usbStateJob: Job? = null
 
     /**

@@ -17,12 +17,18 @@ package com.automatethethings.xkey.usb
 import android.content.Context
 import android.hardware.usb.UsbAccessory
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -48,14 +54,33 @@ class UsbAccessoryServerSlot(
     private val afterPublish: (UsbAccessoryServer) -> Unit = {},
 ) {
     private val lock = Any()
-    private var server: UsbAccessoryServer? = null
+
+    /** The published server; written only under [lock]. */
+    private val published = MutableStateFlow<UsbAccessoryServer?>(null)
+    private var server: UsbAccessoryServer?
+        get() = published.value
+        set(value) {
+            published.value = value
+        }
     private var router: BidirectionalMessageRouter? = null
+
+    /**
+     * Advanced by every [clear], so an [open] that began before the clear
+     * (waiting for the previous teardown) publishes nothing after it.
+     */
+    private var generation = 0L
 
     /** The session of the last server to leave the slot, until it ends. */
     private var retiring: Job? = null
 
-    /** Not yet wired: the states of the slot's current server. */
-    val states: kotlinx.coroutines.flow.Flow<UsbAccessoryState?> = kotlinx.coroutines.flow.emptyFlow()
+    /**
+     * The state of whichever server the slot holds: each published server's
+     * transitions, then null when it leaves the slot. One collector follows
+     * every attach in turn, so no attach installs or cancels an observer of
+     * its own.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val states: Flow<UsbAccessoryState?> = published.flatMapLatest { it?.state ?: flowOf(null) }
 
     /** True while a server holds the slot. */
     val isActive: Boolean
@@ -84,9 +109,9 @@ class UsbAccessoryServerSlot(
         pairedDeviceRepository: PairedDeviceRepository? = null,
         storeMethods: List<TransportMethods> = emptyList(),
     ): UsbAccessoryServer? {
-        val previous = synchronized(lock) {
+        val (previous, openedIn) = synchronized(lock) {
             if (this.server != null) return null
-            retiring
+            retiring to generation
         }
         if (previous != null && withTimeoutOrNull(TEARDOWN_WAIT_MS) { previous.join() } == null) {
             Log.w(TAG, "The previous USB session is still ending; opening anyway")
@@ -104,6 +129,8 @@ class UsbAccessoryServerSlot(
         published = server
         synchronized(lock) {
             if (this.server != null) return null
+            // A clear() during the wait (service shutdown) refuses this open.
+            if (generation != openedIn) return null
             retiring = null
             this.server = server
             this.router = router
@@ -132,10 +159,12 @@ class UsbAccessoryServerSlot(
     /**
      * Drops the active server, if any, and retires it: a connect that open()
      * has not yet run on it opens nothing, so no session or receiver outlives
-     * the clear.
+     * the clear. An open still waiting for the previous teardown publishes
+     * nothing.
      */
     fun clear() {
         val active = synchronized(lock) {
+            generation++
             server.also {
                 if (it != null) retiring = it.sessionJob
                 server = null
@@ -143,6 +172,19 @@ class UsbAccessoryServerSlot(
             }
         }
         active?.retire()
+    }
+
+    /**
+     * Publishes [server] with [router] without connecting it, as an attach
+     * would, for tests that have no accessory to open. It goes through the
+     * slot's publication, so [states] and [current] see it.
+     */
+    @VisibleForTesting
+    internal fun install(server: UsbAccessoryServer, router: BidirectionalMessageRouter) {
+        synchronized(lock) {
+            this.server = server
+            this.router = router
+        }
     }
 
     /** Drops [closedServer] unless an attach has since replaced it. */
