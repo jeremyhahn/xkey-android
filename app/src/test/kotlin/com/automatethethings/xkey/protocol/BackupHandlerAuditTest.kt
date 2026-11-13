@@ -251,7 +251,7 @@ class BackupHandlerAuditTest {
         // B (USB) is the connection made last.
         handler.setConnectedDevicePublicKeyHex(keyB)
 
-        val id = withContext(RequestHandler.servedConnection(bleA, keyA)) {
+        val id = withContext(RequestHandler.servedConnection(bleA, keyA, "ble-a")) {
             val created = call(MethodNames.LOCAL_CREATE_BACKUP, """{"backup_data":"$payloadB64"}""")
             val backupId = created.getJSONObject("result").getString("backup_id")
             call(MethodNames.LOCAL_RESTORE_BACKUP, """{"backup_id":"$backupId"}""")
