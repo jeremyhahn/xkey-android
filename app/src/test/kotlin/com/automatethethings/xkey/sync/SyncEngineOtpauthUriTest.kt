@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.sync
 
+import com.automatethethings.xkey.oath.otpauthUri
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.net.URI
@@ -24,7 +25,7 @@ import java.net.URLDecoder
  * [otpauthUri] percent-encodes the issuer and account it puts in the label
  * and the `issuer` query parameter (#133), so a synced credential whose
  * issuer or account holds a space, `&`, `?`, `#` or `/` keeps its label and
- * query intact when `OathRepository.importFromUri` parses it.
+ * query intact when `OathRepository.importStructured` parses it.
  */
 class SyncEngineOtpauthUriTest {
 

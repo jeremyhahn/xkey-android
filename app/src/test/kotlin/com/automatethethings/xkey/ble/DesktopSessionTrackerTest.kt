@@ -76,7 +76,7 @@ class DesktopSessionTrackerTest {
     @Test
     fun `the USB session publishes the client on Connected and drops it when it ends`() = runTest {
         val usbState = MutableStateFlow<UsbAccessoryState>(UsbAccessoryState.Handshaking)
-        val tracker = DesktopSessionTracker { usbDesktopTransport(usbState.value, sender, router) }
+        val tracker = DesktopSessionTracker.ofTransport { usbDesktopTransport(usbState.value, sender, router) }
         val seen = mutableListOf<RemoteKeyClient?>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { tracker.session.toList(seen) }
         tracker.follow(backgroundScope, usbState)

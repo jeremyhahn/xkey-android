@@ -214,9 +214,14 @@ class SettingsPersistenceAndDisclosureFlowTest {
             awaitActivity(scenario) { biometricSwitchOf(it)?.isChecked == false }
         )
 
-        // A write-back would restore REQUIRED. Give it every chance to happen.
+        // A write-back would restore REQUIRED. The switch's listener launches it
+        // synchronously while the switch is populated, so once the main loop is
+        // idle any write-back is recorded; wait for it to land before reading.
         waitForIdle()
-        Thread.sleep(SETTLE_MS)
+        assertTrue(
+            "A policy write launched by the switch should have finished",
+            awaitActivity(scenario) { it.uvPolicyWriteJob?.isCompleted != false }
+        )
         assertEquals(
             "The screen must not write the value it has just read",
             UserVerificationPolicy.DISABLED,
@@ -351,8 +356,5 @@ class SettingsPersistenceAndDisclosureFlowTest {
 
         /** Inline literal in `buildAuthPasskeysSection`, not a string resource. */
         const val AUTH_MODE_LABEL = "Authentication Mode"
-
-        /** Long enough for a stray write-back coroutine to have landed. */
-        const val SETTLE_MS = 500L
     }
 }

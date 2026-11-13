@@ -1347,6 +1347,34 @@ object AuditLogger {
     }
 
     // -------------------------------------------------------------------------
+    // Desktop Backups
+    // -------------------------------------------------------------------------
+
+    /**
+     * Log a backup a paired desktop stored on the phone. Records the id and
+     * size only; the backup bytes never enter the log.
+     */
+    fun logBackupCreated(backupId: String, sizeBytes: Int, deviceId: String?, deviceName: String?) {
+        val details = JSONObject().apply {
+            put("backupId", backupId)
+            put("sizeBytes", sizeBytes)
+        }
+        log(AuditLogEntity(operationType = AuditOperationType.BACKUP_CREATED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
+    }
+
+    /**
+     * Log a stored backup a paired desktop fetched from the phone. Records the
+     * id and size only; the backup bytes never enter the log.
+     */
+    fun logBackupRestored(backupId: String, sizeBytes: Int, deviceId: String?, deviceName: String?) {
+        val details = JSONObject().apply {
+            put("backupId", backupId)
+            put("sizeBytes", sizeBytes)
+        }
+        log(AuditLogEntity(operationType = AuditOperationType.BACKUP_RESTORED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
+    }
+
+    // -------------------------------------------------------------------------
     // Internal Methods
     // -------------------------------------------------------------------------
 
