@@ -34,7 +34,10 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -72,7 +75,12 @@ class BleClientHarness(
     val address: String = "AA:BB:CC:DD:EE:F0",
     val deviceName: String = "xKey Desktop",
     /** What the client answers the desktop's own requests with. */
-    inboundRequests: PhoneInitiatedRequestHandler? = null
+    inboundRequests: PhoneInitiatedRequestHandler? = null,
+    /**
+     * Who confirms the session's SAS. Confirms by default, so the tests that
+     * are not about the SAS see a session the user accepted.
+     */
+    pairingConfirmation: PairingConfirmationCallback? = CONFIRMS
 ) {
 
     // -----------------------------------------------------------------
@@ -217,6 +225,19 @@ class BleClientHarness(
     /** How many characteristic writes the client tried on [gatt], refused ones included. */
     fun writesOn(gatt: BluetoothGatt): Int = writes[gatt]?.get() ?: 0
 
+    /**
+     * How many events the client's inbound consumer has taken: fragments
+     * and disconnects, counted as it takes each, before it handles it. The
+     * consumer is single, so once it has taken event n, every event ahead
+     * of n has been handled.
+     */
+    val inboundEventsTaken: Int
+        get() = inboundTaken.get()
+
+    /** Runs on the inbound consumer after each event is counted; a test can hold the consumer here. */
+    @Volatile
+    var onInboundEvent: (() -> Unit)? = null
+
     // -----------------------------------------------------------------
     // The mocked stack
     // -----------------------------------------------------------------
@@ -239,7 +260,7 @@ class BleClientHarness(
     val statusCharacteristic: BluetoothGattCharacteristic = mockk(relaxed = true)
     val cccd: BluetoothGattDescriptor = mockk(relaxed = true)
 
-    val client = BleClient(context, inboundRequests)
+    val client = BleClient(context, inboundRequests, pairingConfirmation)
     val probe = BleClientProbe(client)
 
     /** The desktop's Noise responder, so tests can assert on its identity. */
@@ -268,6 +289,16 @@ class BleClientHarness(
 
     /** What [holdWrites] holds: the GATT object written on, and the desktop's reply. */
     private val held = CopyOnWriteArrayList<Pair<BluetoothGatt, ByteArray?>>()
+
+    /** See [inboundEventsTaken]. */
+    private val inboundTaken = AtomicInteger(0)
+
+    /**
+     * Notified whenever the fake stack takes a write or a close, or the
+     * inbound consumer takes an event: everything [awaitUntil] waits on
+     * changes in one of those steps.
+     */
+    private val monitor = Object()
 
     init {
         runBlocking { responder.loadStaticKey(context) }
@@ -310,7 +341,69 @@ class BleClientHarness(
             true
         }
 
+        client.inboundFragmentHook = {
+            inboundTaken.incrementAndGet()
+            signal()
+            onInboundEvent?.invoke()
+        }
+
         stubGatt(gatt)
+    }
+
+    /** Wakes every [awaitUntil], which re-checks its condition. */
+    private fun signal() = synchronized(monitor) { monitor.notifyAll() }
+
+    /**
+     * True once [condition] holds, false once [timeoutMs] has passed.
+     * [condition] is re-checked each time the fake stack or the inbound
+     * consumer signals, so it must read state that changes in one of their
+     * steps: what the harness records, or what the client set before it
+     * called the stack.
+     */
+    fun awaitOrTimeout(timeoutMs: Long, condition: () -> Boolean): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        synchronized(monitor) {
+            while (!condition()) {
+                val left = deadline - System.nanoTime()
+                if (left <= 0) return false
+                TimeUnit.NANOSECONDS.timedWait(monitor, left)
+            }
+        }
+        return true
+    }
+
+    /** Waits for [condition], as [awaitOrTimeout] does, and fails the test at [timeoutMs]. */
+    fun awaitUntil(what: String, timeoutMs: Long = AWAIT_MS, condition: () -> Boolean) {
+        if (!awaitOrTimeout(timeoutMs, condition)) throw AssertionError("timed out waiting for $what")
+    }
+
+    /** Waits for the inbound consumer to have taken [count] events in all. */
+    fun awaitInboundEventsTaken(count: Int) {
+        awaitUntil("the inbound consumer to take event $count") { inboundTaken.get() >= count }
+    }
+
+    /**
+     * Waits until the inbound consumer has handled its first [count] events
+     * in all: read [inboundEventsTaken] before queuing them, and add how many
+     * were queued. The consumer is single, so they are handled once it takes
+     * one more. This notifies that one: a fragment too short to carry a
+     * header, which the consumer drops before it touches any state. Needs a
+     * current connection to notify on.
+     */
+    fun awaitInboundHandled(count: Int) {
+        check(FragmentReassembler.HEADER_SIZE > 1) { "the drain marker must be shorter than a header" }
+        if (probe.connection == null) throw AssertionError("the inbound queue drains through a current connection")
+        probe.gattCallback.onCharacteristicChanged(dialledGatt, responseCharacteristic, ByteArray(1))
+        awaitInboundEventsTaken(count + 1)
+    }
+
+    /** Waits for the client's connection state to reach [state]. */
+    suspend fun awaitConnectionState(state: ClientConnectionState, timeoutMs: Long = AWAIT_MS) {
+        try {
+            withTimeout(timeoutMs) { client.connectionState.first { it == state } }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            throw AssertionError("the connection state never reached $state: ${client.connectionState.value}", e)
+        }
     }
 
     /**
@@ -321,6 +414,7 @@ class BleClientHarness(
      */
     private fun stubGatt(gatt: BluetoothGatt) {
         every { gatt.device } returns device
+        every { gatt.close() } answers { signal() }
         every { gatt.discoverServices() } answers {
             if (!discoveryStarts) return@answers false
             probe.gattCallback.onServicesDiscovered(gatt, discoveryStatus)
@@ -344,13 +438,24 @@ class BleClientHarness(
         }
 
         every { gatt.writeCharacteristic(any<BluetoothGattCharacteristic>()) } answers {
+            try {
+                takeWrite(gatt)
+            } finally {
+                signal()
+            }
+        }
+    }
+
+    /** The stack's side of a characteristic write on [gatt]; see [stubGatt]. */
+    private fun takeWrite(gatt: BluetoothGatt): Boolean {
+        run {
             writes.getOrPut(gatt) { AtomicInteger(0) }.incrementAndGet()
-            if (gatt !== dialledGatt) return@answers false
-            if (!writeStarts) return@answers false
+            if (gatt !== dialledGatt) return false
+            if (!writeStarts) return false
             if (writeInFlight) {
                 // One outstanding write per connection: a busy stack says no.
                 overlappingWrites.incrementAndGet()
-                return@answers false
+                return false
             }
             writeCount++
             val fragment = lastControlPointWrite
@@ -373,7 +478,7 @@ class BleClientHarness(
                 probe.gattCallback.onCharacteristicWrite(gatt, controlPoint, writeStatus)
                 reply?.let { deliver(it) }
             }
-            true
+            return true
         }
     }
 
@@ -452,21 +557,20 @@ class BleClientHarness(
 
     /** Waits for the client's [count]th answer to a [desktopSends]. */
     fun awaitResponses(count: Int): List<ByteArray> {
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
-            if (receivedResponses.size >= count) return receivedResponses.toList()
-            Thread.sleep(5)
+        if (!awaitOrTimeout(AWAIT_MS) { receivedResponses.size >= count }) {
+            throw AssertionError("the client sent ${receivedResponses.size} of $count answers")
         }
-        throw AssertionError("the client sent ${receivedResponses.size} of $count answers")
+        return receivedResponses.toList()
     }
 
     /**
      * Notifies the client, one fragment at a time.
      *
-     * The client dispatches every inbound fragment onto its own scope, so this
-     * waits for each one to be buffered before sending the next: a reassembler
-     * that sees fragment 0 *after* fragment 1 resets and drops everything, and
-     * a test that raced would fail for a reason unrelated to what it asserts.
+     * The client hands every inbound fragment to its own consumer, so this
+     * waits for the consumer to take each one before sending the next, as a
+     * stack paced by the link would: a reassembler that sees fragment 0
+     * *after* fragment 1 resets and drops everything, and a test that raced
+     * would fail for a reason unrelated to what it asserts.
      */
     private fun deliver(message: ByteArray) {
         val payloadSize = maxOf(
@@ -474,9 +578,14 @@ class BleClientHarness(
             Fragmenter.MIN_PAYLOAD_SIZE
         )
         val fragments = Fragmenter(payloadSize).fragment(message)
+        val before = inboundTaken.get()
         for ((index, fragment) in fragments.withIndex()) {
             probe.gattCallback.onCharacteristicChanged(dialledGatt, responseCharacteristic, fragment)
-            if (index < fragments.size - 1) awaitBufferedFragments(index + 1)
+            if (index < fragments.size - 1) {
+                awaitUntil("the client to take inbound fragment ${index + 1}") {
+                    inboundTaken.get() >= before + index + 1
+                }
+            }
         }
     }
 
@@ -485,10 +594,7 @@ class BleClientHarness(
      * tried to write over it, whichever comes first.
      */
     private fun holdWriteOpen() {
-        val deadline = System.currentTimeMillis() + writeAckHoldMs
-        while (System.currentTimeMillis() < deadline && overlappingWrites.get() == 0) {
-            Thread.sleep(2)
-        }
+        awaitOrTimeout(writeAckHoldMs) { overlappingWrites.get() > 0 }
     }
 
     /**
@@ -507,6 +613,7 @@ class BleClientHarness(
         }
         probe.writeCompletion.set(wrapped)
         writesAcked.set(thisWrite)
+        signal()
         ackThread.execute {
             probe.gattCallback.onCharacteristicWrite(gatt, controlPoint, writeStatus)
             reply?.let { deliver(it) }
@@ -528,23 +635,8 @@ class BleClientHarness(
     }
 
     /** True once [expected] writes have been handed over, false after [nextWriteWaitMs]. */
-    private fun awaitWritesAcked(expected: Int): Boolean {
-        val deadline = System.currentTimeMillis() + nextWriteWaitMs
-        while (System.currentTimeMillis() < deadline) {
-            if (writesAcked.get() >= expected) return true
-            Thread.sleep(2)
-        }
-        return false
-    }
-
-    private fun awaitBufferedFragments(expected: Int) {
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
-            if (probe.fragmentReassembler.getFragmentCount() >= expected) return
-            Thread.sleep(2)
-        }
-        throw AssertionError("the client never buffered inbound fragment $expected")
-    }
+    private fun awaitWritesAcked(expected: Int): Boolean =
+        awaitOrTimeout(nextWriteWaitMs) { writesAcked.get() >= expected }
 
     // -----------------------------------------------------------------
     // Convenience
@@ -584,6 +676,17 @@ class BleClientHarness(
     }
 
     companion object {
+        /** How long an [awaitUntil] waits before it fails the test. */
+        const val AWAIT_MS = 5_000L
+
+        /** A user who confirms every SAS the client shows. */
+        val CONFIRMS: PairingConfirmationCallback = object : PairingConfirmationCallback {
+            override suspend fun onPairingConfirmationRequired(
+                deviceName: String,
+                publicKeyFingerprint: String
+            ): Boolean = true
+        }
+
         /** The prologue formula the phone, the desktop and `go-xkms` all share. */
         fun prologueOf(publicKey: ByteArray, fingerprint: ByteArray): ByteArray =
             MessageDigest.getInstance("SHA-256").run {

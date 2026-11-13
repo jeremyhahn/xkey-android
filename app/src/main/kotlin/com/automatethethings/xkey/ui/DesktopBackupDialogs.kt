@@ -39,7 +39,9 @@ import kotlinx.coroutines.launch
  * Manage tab like Sync with Desktop.
  *
  * Create asks for the backup password twice and which stores to include;
- * restore picks the latest stored backup and asks for its password once. The
+ * restore picks the latest stored backup, lists the desktop's backups
+ * (`remote.listBackups`) and says whether the desktop holds it, then asks for
+ * its password once. The
  * password is read from its field into a [CharArray] only when it is sent,
  * the fields are wiped, and [XKeyGattService] zeroes the array once the
  * request is done. The fields keep no saved state, offer nothing to autofill
@@ -112,8 +114,10 @@ class DesktopBackupDialogs(
     }
 
     /**
-     * Looks up the latest stored backup and asks for its password. A storage
-     * failure during the lookup shows an error instead of crashing the app.
+     * Looks up the latest stored backup, lists the desktop's backups, and
+     * asks for its password. A storage failure during the lookup shows an
+     * error instead of crashing the app; a listing failure is said in the
+     * restore dialog and does not block the restore.
      */
     private fun pickLatestAndRestore() {
         val gatt = service()
@@ -123,7 +127,13 @@ class DesktopBackupDialogs(
         }
         activity.lifecycleScope.launch {
             when (val latest = DesktopBackupForm.findLatest(gatt::latestStoredBackupId)) {
-                is DesktopBackupForm.LatestBackup.Found -> showRestore(latest.backupId)
+                is DesktopBackupForm.LatestBackup.Found -> {
+                    val listing = DesktopBackupForm.listDesktop(gatt::listDesktopBackups)
+                    if (listing is DesktopBackupForm.DesktopListing.Failed) {
+                        Log.w(TAG, "Could not list the desktop's backups", listing.error)
+                    }
+                    showRestore(latest.backupId, DesktopBackupForm.listingNote(listing, latest.backupId))
+                }
                 DesktopBackupForm.LatestBackup.None ->
                     Snackbar.make(root, R.string.desktop_backup_none_stored, Snackbar.LENGTH_LONG).show()
                 is DesktopBackupForm.LatestBackup.Failed -> {
@@ -134,11 +144,13 @@ class DesktopBackupDialogs(
         }
     }
 
-    private fun showRestore(backupId: String) {
+    private fun showRestore(backupId: String, note: DesktopBackupForm.ListingNote) {
         val password = passwordField(R.string.desktop_backup_password)
+        val message = activity.getString(R.string.desktop_backup_restore_message, backupId) +
+            "\n\n" + activity.getString(note.message, note.count)
         val dialog = MaterialAlertDialogBuilder(activity)
             .setTitle(R.string.desktop_backup_restore_title)
-            .setMessage(activity.getString(R.string.desktop_backup_restore_message, backupId))
+            .setMessage(message)
             .setView(column(password))
             .setPositiveButton(R.string.desktop_backup_restore_button, null)
             .setNegativeButton(R.string.button_cancel, null)
@@ -153,7 +165,7 @@ class DesktopBackupDialogs(
                 }
                 val secret = take(password)
                 dialog.dismiss()
-                runWithNotice(R.string.desktop_backup_restore_in_progress, onRetry = { showRestore(backupId) }) { gatt ->
+                runWithNotice(R.string.desktop_backup_restore_in_progress, onRetry = { showRestore(backupId, note) }) { gatt ->
                     showRestoreResult(gatt.restoreDesktopBackup(backupId, secret))
                 }
             }
