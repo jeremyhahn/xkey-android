@@ -113,6 +113,11 @@ class BiometricNotificationHelper(private val context: Context) {
         onTimeout: () -> Unit = {},
         promptIntent: Intent? = null
     ) {
+        // Only on the request's own queue turn: a caller that skipped the
+        // queue would put a prompt over the one holding the screen.
+        check(PromptOwnership.process.state(requestId) == PromptOwnership.State.ACTIVE) {
+            "Notification $requestId posted outside its prompt queue turn"
+        }
         Log.d(TAG, "Showing biometric notification: operation=$operationType, rpName=$rpName")
 
         // The full-screen intent: the launcher's own prompt when there is one,
@@ -221,7 +226,10 @@ object NotificationKeys {
     /** The key of crypto signature [requestId]. */
     fun signature(requestId: String): String = SIGNATURE + requestId
 
-    /** A fresh key for a notification that only wakes the phone for [operationType]. */
+    /**
+     * A fresh queue key for a prompt no launcher request owns, and the
+     * notification that only wakes the phone for it ([PromptOwnership.turn]).
+     */
     fun wakeOnly(operationType: String): String = "wake-$operationType-${nextWakeOnly.incrementAndGet()}"
 
     /** The generic approval request [key] names, or null for a key of any other kind. */

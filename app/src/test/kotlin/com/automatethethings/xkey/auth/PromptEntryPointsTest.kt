@@ -41,7 +41,7 @@ class PromptEntryPointsTest {
             Regex("""(TransparentBiometricActivity|CryptoSigningActivity|CredentialSelectorActivity)::class\.java""")
         ),
         PROMPT_ACTIVITY_INTENT(Regex("""(TransparentBiometricActivity|CryptoSigningActivity)\.createIntent\(""")),
-        USER_VERIFICATION_PROMPT(Regex("""userVerificationPrompt\??\.sign\(""")),
+        USER_VERIFICATION_PROMPT(Regex("""userVerificationPrompt\??\.(sign\(|let\b)""")),
     }
 
     /**
@@ -77,7 +77,7 @@ class PromptEntryPointsTest {
             listOf("PromptOwnership.process.enqueue("),
             "started by the system Credential Manager, it still takes a queue entry and prompts on its turn",
         ),
-        "credential/CredentialPendingIntentHelper.kt" to EntryPoint(
+        "credential/handler/CredentialPendingIntentHelper.kt" to EntryPoint(
             mapOf(Raiser.PROMPT_ACTIVITY to 2),
             emptyList(),
             "pending intents handed to the system Credential Manager; the activity they open waits its turn",

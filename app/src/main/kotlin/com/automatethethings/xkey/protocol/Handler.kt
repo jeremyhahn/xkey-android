@@ -16,6 +16,7 @@ import org.bouncycastle.asn1.x500.X500Name
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.credential.UserVerificationCompliance
 import com.automatethethings.xkey.credential.UserVerificationRequiredException
@@ -900,15 +901,15 @@ class RequestHandler(
                     errorCode = ErrorCodes.INTERNAL_ERROR
                 )
 
-            // The activity's own prompt answers no launcher request; the
-            // notification only wakes the phone for it.
-            notice.wakeOnly()
+            // The activity's own prompt answers no launcher request; it takes
+            // its queue turn, and the notification only wakes the phone for it.
             val signature = keystoreManager.sign(
                 credentialId = signParams.credentialId,
                 dataHash = dataHash,
                 biometricHelper = helper,
                 title = "xKey Authentication",
-                subtitle = "Verify your identity to sign"
+                subtitle = "Verify your identity to sign",
+                onTurn = notice::wake
             )
 
             // Record successful authentication for session tracking
@@ -1001,8 +1002,11 @@ class RequestHandler(
             post(key, prompt) { biometricLauncher?.expireUnshown(key) }
         }
 
-        /** Wakes a locked phone for a prompt no launcher request waits on. */
-        fun wakeOnly() = post(NotificationKeys.wakeOnly(operationType), prompt = null) {}
+        /**
+         * Wakes a locked phone for a prompt no launcher request waits on,
+         * under its queue [key] ([PromptOwnership.turn]): only on its turn.
+         */
+        fun wake(key: String) = post(key, prompt = null) {}
 
         private fun post(key: String, prompt: android.content.Intent?, onTimeout: () -> Unit) {
             posted.add(key)
@@ -2290,15 +2294,15 @@ class RequestHandler(
                     onLaunch = notice.onLaunch
                 )
             } else {
-                // The activity's own prompt answers no launcher request; the
-                // notification only wakes the phone for it.
-                notice.wakeOnly()
+                // The activity's own prompt answers no launcher request; it
+                // takes its queue turn, and the notification only wakes the
+                // phone for it.
                 val helper = biometricHelper
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
                         errorCode = ErrorCodes.INTERNAL_ERROR
                     )
-                helper.authenticateWithoutCrypto(title = title, subtitle = subtitle)
+                helper.authenticateWithoutCrypto(title = title, subtitle = subtitle, onTurn = notice::wake)
             }
         } finally {
             notice.close()
@@ -2620,12 +2624,21 @@ class RequestHandler(
             rpName = null,
             notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
         )
-        notice.wakeOnly()
         return try {
             val title = context.getString(R.string.verify_user_prompt_title)
             val subtitle = context.getString(R.string.verify_user_prompt_subtitle)
-            val signature = userVerificationPrompt?.sign(transcript, title, subtitle, isLocked)
-                ?: promptWithUserVerificationKey(transcript, title, subtitle, isLocked)
+            val signature = userVerificationPrompt?.let { prompt ->
+                // Its own queue turn: nothing shows, and no notification
+                // wakes the phone, while another approval holds the screen.
+                val key = NotificationKeys.wakeOnly("verifyUser")
+                PromptOwnership.process.turn(key) {
+                    notice.wake(key)
+                    prompt.sign(transcript, title, subtitle, isLocked)
+                } ?: throw BiometricException(
+                    BiometricPrompt.ERROR_TIMEOUT,
+                    "Another approval prompt held the screen past this request's deadline"
+                )
+            } ?: promptWithUserVerificationKey(transcript, title, subtitle, isLocked, notice)
             certChain to signature
         } finally {
             notice.close()
@@ -2643,17 +2656,21 @@ class RequestHandler(
         message: ByteArray,
         title: String,
         subtitle: String,
-        showOnLockScreen: Boolean
+        showOnLockScreen: Boolean,
+        notice: OwnNotifications
     ): ByteArray {
         val signature = uvk.initSignature()
         if (biometricLauncher != null) {
+            // The launcher's request takes its queue turn; its notification
+            // opens that request's own prompt.
             return biometricLauncher.requestCryptoSignature(
                 credentialId = "user-verification",
                 dataHash = message,
                 title = title,
                 subtitle = subtitle,
                 showOnLockScreen = showOnLockScreen,
-                keyAlias = KeystoreUserVerificationKey.ALIAS
+                keyAlias = KeystoreUserVerificationKey.ALIAS,
+                onLaunch = notice.onLaunch
             )
         }
         val helper = biometricHelper
@@ -2665,7 +2682,8 @@ class RequestHandler(
             cryptoObject = BiometricPrompt.CryptoObject(signature),
             title = title,
             subtitle = subtitle,
-            description = null
+            description = null,
+            onTurn = notice::wake
         )
         return try {
             signature.update(message)

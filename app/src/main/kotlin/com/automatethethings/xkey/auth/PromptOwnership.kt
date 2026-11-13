@@ -17,6 +17,9 @@ package com.automatethethings.xkey.auth
 
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The owner of the one prompt queue: every approval, of either prompt family,
@@ -93,6 +96,42 @@ internal class PromptOwnership(
             }
         }
         if (activeNow) entry.onActive()
+    }
+
+    /**
+     * Holds an entry for [key] across [prompt], for a prompt no launcher
+     * request owns: an activity-bound `BiometricPrompt`, `local.verifyUser`'s
+     * prompt, and the wake-only notification each posts. [prompt] runs only
+     * once [key] is ACTIVE, so it raises nothing while another approval holds
+     * the screen; its key is a [NotificationKeys.wakeOnly] key, which
+     * `TransparentBiometricActivity` shows a prompt for only while ACTIVE.
+     *
+     * However [prompt] ends (returns, throws, is cancelled) the entry settles
+     * and the screen goes to the next. A turn that has not come within
+     * [queueDeadlineMillis] settles expired, runs nothing and returns null.
+     */
+    suspend fun <T> turn(
+        key: String,
+        kind: Kind = Kind.GENERIC,
+        queueDeadlineMillis: Long = PendingAuthentications.QUEUE_DEADLINE_MILLIS,
+        prompt: suspend () -> T,
+    ): T? {
+        val turnCame = CompletableDeferred<Unit>()
+        enqueue(key, kind) { turnCame.complete(Unit) }
+        var outcome = Outcome.WITHDRAWN
+        try {
+            withTimeoutOrNull(queueDeadlineMillis) { turnCame.await() } ?: run {
+                outcome = Outcome.EXPIRED
+                return null
+            }
+            outcome = Outcome.FAILED
+            return prompt().also { outcome = Outcome.APPROVED }
+        } catch (e: CancellationException) {
+            outcome = Outcome.WITHDRAWN
+            throw e
+        } finally {
+            settle(key, outcome)
+        }
     }
 
     @Synchronized

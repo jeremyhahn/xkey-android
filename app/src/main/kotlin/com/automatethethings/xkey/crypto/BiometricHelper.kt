@@ -18,6 +18,8 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
@@ -111,14 +113,68 @@ class BiometricHelper(
      * @param description Optional additional description.
      * @throws UserCancelledException if the user cancels authentication.
      * @throws BiometricLockoutException if too many failed attempts occurred.
-     * @throws BiometricException for other authentication errors.
+     * The prompt waits for its turn in the one prompt queue
+     * ([PromptOwnership.turn]) and raises nothing while another approval
+     * holds the screen; [onTurn] runs first on that turn, with its queue key,
+     * to post the notification that wakes a locked phone for it.
+     *
+     * @param onTurn Called with the turn's key just before the prompt shows.
+     * @throws BiometricException for other authentication errors, and
+     *   [BiometricPrompt.ERROR_TIMEOUT] when the turn never came.
      */
     suspend fun authenticate(
         cryptoObject: BiometricPrompt.CryptoObject,
         title: String = DEFAULT_TITLE,
         subtitle: String = DEFAULT_SUBTITLE,
-        description: String? = null
-    ) = suspendCancellableCoroutine { continuation ->
+        description: String? = null,
+        onTurn: (key: String) -> Unit = {}
+    ) = inTurn(onTurn) { prompt(title, subtitle, description, cryptoObject) }
+
+    /**
+     * Authenticate with biometric without a crypto object.
+     *
+     * This performs standalone biometric verification, useful when you need
+     * to verify user presence but don't have a specific cryptographic operation
+     * to perform. For FIDO2 operations, prefer [authenticate] with a CryptoObject.
+     * It takes its queue turn as [authenticate] does.
+     *
+     * @param title Title shown in the biometric prompt.
+     * @param subtitle Subtitle providing context.
+     * @param description Optional additional description.
+     * @param onTurn As for [authenticate].
+     * @throws UserCancelledException if the user cancels authentication.
+     * @throws BiometricLockoutException if too many failed attempts occurred.
+     * @throws BiometricException for other authentication errors.
+     */
+    suspend fun authenticateWithoutCrypto(
+        title: String = DEFAULT_TITLE,
+        subtitle: String = DEFAULT_SUBTITLE,
+        description: String? = null,
+        onTurn: (key: String) -> Unit = {}
+    ) = inTurn(onTurn) { prompt(title, subtitle, description, cryptoObject = null) }
+
+    /** Runs [prompt] on a queue turn of its own, after [onTurn]. */
+    private suspend fun inTurn(onTurn: (key: String) -> Unit, prompt: suspend () -> Unit) {
+        val key = NotificationKeys.wakeOnly("biometric")
+        PromptOwnership.process.turn(key) {
+            onTurn(key)
+            prompt()
+        } ?: throw BiometricException(
+            BiometricPrompt.ERROR_TIMEOUT,
+            "Another approval prompt held the screen past this request's deadline"
+        )
+    }
+
+    /**
+     * Shows one Class 3 prompt, bound to [cryptoObject] when there is one, and
+     * waits for its answer. Only a queue turn ([inTurn]) calls this.
+     */
+    private suspend fun prompt(
+        title: String,
+        subtitle: String,
+        description: String?,
+        cryptoObject: BiometricPrompt.CryptoObject?
+    ): Unit = suspendCancellableCoroutine { continuation ->
         val callback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                 if (continuation.isActive) {
@@ -158,66 +214,11 @@ class BiometricHelper(
             biometricPrompt.cancelAuthentication()
         }
 
-        biometricPrompt.authenticate(promptInfo, cryptoObject)
-    }
-
-    /**
-     * Authenticate with biometric without a crypto object.
-     *
-     * This performs standalone biometric verification, useful when you need
-     * to verify user presence but don't have a specific cryptographic operation
-     * to perform. For FIDO2 operations, prefer [authenticate] with a CryptoObject.
-     *
-     * @param title Title shown in the biometric prompt.
-     * @param subtitle Subtitle providing context.
-     * @param description Optional additional description.
-     * @throws UserCancelledException if the user cancels authentication.
-     * @throws BiometricLockoutException if too many failed attempts occurred.
-     * @throws BiometricException for other authentication errors.
-     */
-    suspend fun authenticateWithoutCrypto(
-        title: String = DEFAULT_TITLE,
-        subtitle: String = DEFAULT_SUBTITLE,
-        description: String? = null
-    ) = suspendCancellableCoroutine { continuation ->
-        val callback = object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                if (continuation.isActive) {
-                    continuation.resume(Unit)
-                }
-            }
-
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                if (continuation.isActive) {
-                    val exception = mapErrorToException(errorCode, errString.toString())
-                    continuation.resumeWithException(exception)
-                }
-            }
-
-            override fun onAuthenticationFailed() {
-                // User can retry - don't fail yet
-            }
+        if (cryptoObject != null) {
+            biometricPrompt.authenticate(promptInfo, cryptoObject)
+        } else {
+            biometricPrompt.authenticate(promptInfo)
         }
-
-        val promptInfoBuilder = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(title)
-            .setSubtitle(subtitle)
-            .setNegativeButtonText(NEGATIVE_BUTTON_TEXT)
-            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-            .setConfirmationRequired(true)
-
-        if (description != null) {
-            promptInfoBuilder.setDescription(description)
-        }
-
-        val promptInfo = promptInfoBuilder.build()
-        val biometricPrompt = BiometricPrompt(activity, executor, callback)
-
-        continuation.invokeOnCancellation {
-            biometricPrompt.cancelAuthentication()
-        }
-
-        biometricPrompt.authenticate(promptInfo)
     }
 
     /**

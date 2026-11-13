@@ -33,6 +33,8 @@ import androidx.credentials.exceptions.GetCredentialInterruptedException
 import androidx.credentials.exceptions.GetCredentialUnknownException
 import androidx.credentials.provider.PendingIntentHandler
 import androidx.lifecycle.lifecycleScope
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.credential.handler.CreateCredentialHandler
 import com.automatethethings.xkey.credential.handler.GetCredentialHandler
 import com.automatethethings.xkey.crypto.BiometricHelper
@@ -66,6 +68,9 @@ class CredentialSelectorActivity : AppCompatActivity() {
     private val getHandler by lazy { GetCredentialHandler(this, BiometricHelper(this)) }
 
     private var currentAction: String? = null
+
+    /** The queue key of this activity's user-verification prompt, once it asked for a turn. */
+    private var promptKey: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -244,16 +249,27 @@ class CredentialSelectorActivity : AppCompatActivity() {
 
         val executor = ContextCompat.getMainExecutor(this)
 
+        // The system Credential Manager starts this activity, but its prompt
+        // still takes a turn in the one prompt queue: it shows only once no
+        // other approval holds the screen, and hands the screen on when it
+        // is answered or the activity goes away.
+        val key = NotificationKeys.wakeOnly("credentialSelector")
+        promptKey = key
+        val answered: (Boolean, Boolean) -> Unit = { cancelled, verified ->
+            PromptOwnership.process.end(key)
+            onResult(cancelled, verified)
+        }
+
         val biometricCallback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                 super.onAuthenticationSucceeded(result)
-                onResult(false, true)
+                answered(false, true)
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                 super.onAuthenticationError(errorCode, errString)
                 Log.e(TAG, "Biometric error: $errorCode - $errString")
-                onResult(true, false)
+                answered(true, false)
             }
 
             override fun onAuthenticationFailed() {
@@ -268,7 +284,22 @@ class CredentialSelectorActivity : AppCompatActivity() {
             .setAllowedAuthenticators(authenticators)
             .build()
 
-        BiometricPrompt(this, executor, biometricCallback).authenticate(promptInfo)
+        PromptOwnership.process.enqueue(key) {
+            executor.execute {
+                if (isFinishing || isDestroyed) {
+                    PromptOwnership.process.end(key)
+                } else {
+                    BiometricPrompt(this, executor, biometricCallback).authenticate(promptInfo)
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        // Gone unanswered (or still waiting its turn): its entry hands the
+        // screen on rather than holding it.
+        promptKey?.let { PromptOwnership.process.end(it) }
+        super.onDestroy()
     }
 
     /**

@@ -364,16 +364,17 @@ class TransparentBiometricActivity : FragmentActivity() {
         }
 
         /**
-         * Whether [requestId] may take the screen: a launcher request (a
-         * number) only while the process owner holds it ACTIVE, refused and
-         * reported otherwise; any other id answers no launcher request.
+         * Whether [requestId] may take the screen: only while the process
+         * owner holds its key ACTIVE, refused and reported otherwise. A
+         * launcher request (a number) is keyed [NotificationKeys.approval]; a
+         * wake-only notification's id is its queue key itself
+         * ([PromptOwnership.turn]), and any other id is unknown and refused.
          */
         private fun ownsScreen(requestId: String): Boolean =
-            requestId.toLongOrNull() == null ||
-                PromptOwnership.process.accept(
-                    NotificationKeys.approval(requestId),
-                    PromptOwnership.Event.NOTIFICATION_TAP,
-                )
+            PromptOwnership.process.accept(
+                if (requestId.toLongOrNull() != null) NotificationKeys.approval(requestId) else requestId,
+                PromptOwnership.Event.NOTIFICATION_TAP,
+            )
 
         internal fun isNewer(candidate: String, current: String): Boolean {
             val next = candidate.toLongOrNull() ?: return false
