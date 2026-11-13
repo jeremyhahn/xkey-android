@@ -94,6 +94,9 @@ class KeySharingPendingIntentHandlerTest {
     private lateinit var handler: RequestHandler
     private var otherInstance = 0L
 
+    /** The Android Keystore side of a key: its material. */
+    private val keystore = mockk<com.automatethethings.xkey.crypto.KeystoreManager>(relaxed = true)
+
     @Before
     fun setUp() {
         mockkStatic(Log::class)
@@ -138,7 +141,7 @@ class KeySharingPendingIntentHandlerTest {
     /** A handler as the service builds it, over [repo]. */
     private fun newHandler() = RequestHandler(
         context = context,
-        keystoreManager = mockk(relaxed = true),
+        keystoreManager = keystore,
         biometricLauncher = null,
         sessionAuthManager = null,
         pairedDeviceRepository = repo
@@ -463,5 +466,34 @@ class KeySharingPendingIntentHandlerTest {
 
         assertEquals("the delayed delete removed the new key's metadata", second, tables.key(key)?.id)
         assertTrue(tables.isGranted(key, PEER_A))
+    }
+
+    /**
+     * A local.deleteKey cancelled while it waits behind another edit still
+     * deletes the key's material once its queued row delete lands: the row
+     * delete outlives the caller, so the material delete is part of it, never
+     * left behind on a cancel (#193 r6, ruling 554).
+     */
+    @Test
+    fun aCancelledQueuedDeleteStillDeletesTheKeyMaterial() = runTest {
+        val key = "k-delete-cancel"
+        mockkStatic(java.security.KeyStore::class)
+        every { java.security.KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
+        tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        val gate = CompletableDeferred<Unit>()
+        tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
+        val other = KeySharingPeers(OTHER_KEY, otherInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val held = async(UnconfinedTestDispatcher(testScheduler)) { other.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
+        val delete = async(UnconfinedTestDispatcher(testScheduler)) { rpcDeleteKey(key) }
+        assertFalse(delete.isCompleted)
+
+        // The desktop's request is cancelled while the delete is queued.
+        delete.cancel()
+        gate.complete(Unit)
+        assertTrue(held.await())
+
+        // The queued delete lands in the edits' own scope, off the test's clock.
+        io.mockk.verify(timeout = 5_000) { keystore.deleteGeneralKey(key) }
+        assertEquals("the queued row delete did not land", null, tables.key(key))
     }
 }

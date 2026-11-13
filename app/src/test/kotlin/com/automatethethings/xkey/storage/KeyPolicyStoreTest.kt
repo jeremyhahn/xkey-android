@@ -249,6 +249,35 @@ class KeyPolicyStoreTest {
         assertEquals("denial or grant-clear written outside the store's choke point", emptyList<String>(), bypasses)
     }
 
+    /**
+     * The bypass guard for withdrawals and RPC deletes (#193 r6, ruling 554):
+     * a grant is deleted only by the store's [KeyPolicyStore.withdraw], which
+     * reports a withdrawal done only once it, or its denial, is durable; and
+     * every queued delete of a key from the protocol passes its key-material
+     * delete into the queued edit ([KeySharingPeers.forgetKey]'s `material`),
+     * so a cancelled caller never leaves the material behind.
+     */
+    @Test
+    fun everyWithdrawalAndRpcDeleteGoesThroughTheStore() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue("main sources not found from ${java.io.File(".").absolutePath}", root.isDirectory)
+        val sources = root.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
+        fun hits(files: List<java.io.File>, match: (String) -> Boolean) = files.flatMap { file ->
+            file.readLines().mapIndexedNotNull { i, line -> if (match(line)) "${file.name}:${i + 1}" else null }
+        }
+        val grantDeletes = Regex("""\.deleteGrant\(|\bremoveGrant\(""")
+        assertEquals(
+            "a grant deleted outside the store's withdrawal",
+            emptyList<String>(),
+            hits(sources.filter { it.name != "KeyPolicyStore.kt" }) { grantDeletes.containsMatchIn(it) }
+        )
+        assertEquals(
+            "a protocol key delete leaves its key material outside the queued edit",
+            emptyList<String>(),
+            hits(sources.filter { it.path.contains("/protocol/") }) { "forgetKey(" in it && "material =" !in it }
+        )
+    }
+
     private suspend fun expectFailure(edit: suspend () -> Unit) {
         try {
             edit()

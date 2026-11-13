@@ -553,6 +553,31 @@ class KeySharingPeersTest {
     }
 
     /**
+     * A withdrawal whose grant delete fails and whose denial cannot be
+     * written either is not reported done: the denial is only held in the
+     * process, which a restart loses, so the caller is told the withdrawal
+     * did not stand (#193 r6, ruling 554).
+     */
+    @Test
+    fun aWithdrawalWhoseDenialIsNotDurableIsNotReportedDone() = runTest {
+        rows(KEY to PEER_A)
+        tables.failing += setOf("deleteGrant", "putPolicyRow")
+        val peers = peersOf()
+
+        assertFalse(
+            "a withdrawal was reported done with no durable denial",
+            peers.setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A))
+        )
+        runCurrent()
+        assertEquals("the held denial was dropped", StoredPolicy.PRIVATE, store.enforcedPolicy(tables.key(KEY)!!))
+
+        tables.failing.clear()
+        advanceUntilIdle()
+        assertTrue(peers.setKeyPolicy(SharingPolicyType.SELECTED_PEERS, instance))
+        assertTrue(table.none { it.first == KEY })
+    }
+
+    /**
      * The Private write fails while the stored policy stays Selected Peers,
      * so the reopened sheet shows Selected Peers. A grant then is refused
      * while the failed change's clear is owed, so no approved grant is ever
