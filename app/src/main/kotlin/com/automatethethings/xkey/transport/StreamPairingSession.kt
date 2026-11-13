@@ -248,7 +248,12 @@ class StreamPairingSession(
         fun admit(plaintext: ByteArray, phoneInitiated: Boolean): ByteArray = synchronized(state) {
             ensureLive()
             if (!established) throw IOException("No active Noise session")
-            if (phoneInitiated) pairedDeviceRepository?.requirePaired(peerKeyHex)
+            if (phoneInitiated) {
+                // A phone-initiated frame goes only to the connection that
+                // holds the server, checked with the encryption it admits.
+                if (activeConnection !== this) throw IOException("Another desktop's connection replaced this one")
+                pairedDeviceRepository?.requirePaired(peerKeyHex)
+            }
             noise.encrypt(plaintext)
         }
 
@@ -870,7 +875,7 @@ class StreamPairingSession(
         val peerKeyHex = connection.peerKeyHex ?: return null
         return peerKeyHex to object : SessionSender {
             override suspend fun sendEncryptedMessage(data: ByteArray) {
-                this@StreamPairingSession.sendEncryptedMessage(data)
+                send(connection, data, phoneInitiated = true)
             }
         }
     }

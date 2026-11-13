@@ -1,6 +1,6 @@
 # Remote key access architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
+> **Status: REFERENCE** · Last verified: 2026-11-13
 > As-built description of how xKey forwards `remote.*` requests to the desktop.
 
 ## Message Types
@@ -21,9 +21,8 @@ Messages prefixed with `remote.*` are forwarded through the
 
 ### OATH methods
 
-`RemoteOathClient` sends both methods over the active transport
-(`XKeyGattService.remoteOathClient()`, null with no desktop connected).
-Shapes follow go-xkms `pkg/pairing/protocol_oath.go` at `xkey/v0.64.2-alpha`:
+`RemoteOathClient` sends both methods to the desktop it was built from (see
+[Session binding](#session-binding)). Shapes follow go-xkms `pkg/pairing/protocol_oath.go` at `xkey/v0.64.2-alpha`:
 
 | Method | Params | Result |
 |--------|--------|--------|
@@ -34,7 +33,8 @@ Shapes follow go-xkms `pkg/pairing/protocol_oath.go` at `xkey/v0.64.2-alpha`:
   instances, starting above 5,000,000 (key 1M, sync 2M, enrollment 3M,
   backup 4M).
 - The oathAdd body is built by hand so the secret never becomes a String;
-  the caller's secret chars and the sent body are zeroed after the send.
+  the caller's secret chars are zeroed once encoded and the body as soon as
+  it is sent, before the reply is awaited.
 - Replies are type checked: `success` must be a boolean, `credential_id` a
   non-empty string, `code` a digit string and `expires_in` a non-negative
   integer. `success: false` or anything off-shape throws `ProtocolException`.
@@ -42,6 +42,28 @@ Shapes follow go-xkms `pkg/pairing/protocol_oath.go` at `xkey/v0.64.2-alpha`:
   desktop copy, "Show desktop code". The phone keeps only the oathId to
   `credential_id` link (SharedPreferences `oath_desktop_links`). With no
   desktop connected neither entry shows and nothing is sent.
+
+### Session binding
+
+Every outbound `remote.*` client (`RemoteKeyClient`, `RemoteSyncClient`,
+`RemoteBackupClient`, `RemoteOathClient`) is built from a `ConnectedDesktop`,
+never from a transport. `XKeyGattService.connectedDesktop()` is the only
+source; it asks BLE, then TCP, then USB.
+
+| Transport | Hands out a desktop when | The desktop's sender |
+|-----------|--------------------------|----------------------|
+| BLE (`GattServer`) | the Noise session is established and current | encrypts on that session for that device; fails with `IOException` once the session or device is replaced or ended |
+| TCP (`TcpHsmServer`) | `TcpHsmState.Connected` | writes on that `StreamPairingSession` connection; fails once it ends or another connection is installed |
+| USB (`UsbAccessoryServer`) | `UsbAccessoryState.Connected` | as TCP |
+
+- `peerKeyHex` is the static key the handshake authenticated; OATH desktop
+  links are keyed by it.
+- A sender never re-resolves the transport's current session at send time,
+  so a request built for desktop A never reaches desktop B, even when B
+  replaces A between the lookup and the send.
+- Clients take only a `ConnectedDesktop`, whose sender is a `SessionSender`
+  that only the transports make; `ConnectedDesktopBindingTest` fails if a
+  client or the service takes or hands out any other sender.
 
 ## BLE Protocol Communication Stack
 

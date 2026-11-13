@@ -2804,7 +2804,9 @@ class GattServer(
         }
         return peerKeyHex to object : SessionSender {
             override suspend fun sendEncryptedMessage(data: ByteArray) {
-                this@GattServer.sendEncryptedMessage(data)
+                // sendOnSession refuses a session that is no longer current,
+                // under the lock that installs a replacing one.
+                sendOnSession(session, device, data, revalidatePeer = true)
             }
         }
     }

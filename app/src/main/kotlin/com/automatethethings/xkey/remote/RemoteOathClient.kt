@@ -72,8 +72,10 @@ class RemoteOathClient(
             validate(credential)
             val id = nextId.incrementAndGet()
             val body = encodeAdd(id, credential)
+            // Neither the secret nor the encrypted-and-sent body waits on the reply.
+            credential.secret.fill('\u0000')
             val result = try {
-                send(id, MethodNames.REMOTE_OATH_ADD, body)
+                send(id, MethodNames.REMOTE_OATH_ADD, body, afterSend = { body.fill(0) })
             } finally {
                 body.fill(0)
             }
@@ -94,11 +96,20 @@ class RemoteOathClient(
         return parseGenerate(send(id, MethodNames.REMOTE_OATH_GENERATE, json.toString().toByteArray(Charsets.UTF_8)))
     }
 
-    private suspend fun send(id: Long, method: String, body: ByteArray): JSONObject {
+    private suspend fun send(
+        id: Long,
+        method: String,
+        body: ByteArray,
+        afterSend: () -> Unit = {}
+    ): JSONObject {
         val deferred = CompletableDeferred<Response>()
         messageRouter.registerPendingResponse(id, deferred)
         try {
-            messageSender.sendEncryptedMessage(body)
+            try {
+                messageSender.sendEncryptedMessage(body)
+            } finally {
+                afterSend()
+            }
             val response = try {
                 withTimeout(requestTimeoutMs) { deferred.await() }
             } catch (e: TimeoutCancellationException) {
