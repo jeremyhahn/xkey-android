@@ -81,17 +81,16 @@ sequenceDiagram
 | Condition | Error code |
 |-----------|------------|
 | Handler built without a `PinManager` | `FEATURE_UNAVAILABLE` ("PIN support is not available on this transport") |
-| Missing params, missing `newPin` / `currentPin`, unknown `pinType` | `INVALID_PARAMS` |
+| Missing params, missing `newPin` / `currentPin` on change, unknown `pinType` (an absent `pinType` on verify is the User PIN) | `INVALID_PARAMS` |
+| New PIN outside 6 to 63 characters (`PinHasher.validatePinLength`, checked before the `PinManager` is called) | `INVALID_PARAMS` |
 | Empty `pin` on verify; missing `soPin` on User PIN set or reset | `PIN_REQUIRED` |
-| Wrong PIN, PIN not set, SO PIN already set without `currentPin` (`PinException`) | `PIN_INCORRECT` |
-| Locked PIN on verify | `PIN_LOCKED` with `lockoutUntil` and `failedAttempts` in the error data |
-| Locked PIN on change | `PIN_LOCKED` |
-| Locked SO PIN on set or reset lockout | `INTERNAL_ERROR`: `handlePinSet` and `handlePinResetLockout` catch `PinException` but not `PinLockedException`, which falls to the generic branch |
-| New PIN outside 6 to 63 characters (`IllegalArgumentException` from `PinHasher.validatePinLength`) | `INTERNAL_ERROR` |
+| PIN not set (or its hash not stored); SO PIN already set and set without `currentPin` (`PinRequiredException`) | `PIN_REQUIRED` |
+| Wrong PIN (`PinIncorrectException`; the failed attempt is counted) | `PIN_INCORRECT` |
+| Locked PIN on verify, set, change or reset lockout | `PIN_LOCKED` with `lockoutUntil` and `failedAttempts` in the error data |
 
 ## Tests
 
-- Unit (`app/src/test`): `PinManagerTest`, `PinHasherTest`, `PinSettingsDataTest`, `ProtocolConstantsTest`.
+- Unit (`app/src/test`): `PinManagerTest`, `PinHasherTest`, `PinSettingsDataTest`, `ProtocolConstantsTest`, `PinOathHandlerErrorsTest` (the handler error codes above).
 - Instrumented (`app/src/androidTest`): `PinHasherInstrumentedTest`, `RequestHandlerPinAndDataFamilyTest`, `RequestHandlerErrorPathTest`, `ProtocolIntegrationTest`, `PinManagementActivityUiTest`, `PinManagementFlowTest`.
 
 ## Related features

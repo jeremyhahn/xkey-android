@@ -19,13 +19,17 @@ import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Looper
+import android.util.Base64
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.pin.LockoutStatus
+import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinLockedException
 import com.automatethethings.xkey.pin.PinManager
+import com.automatethethings.xkey.settings.PinSettingsData
+import com.automatethethings.xkey.settings.PinSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -33,6 +37,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
+import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +50,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -61,6 +67,8 @@ class PinOathHandlerErrorsTest {
     private lateinit var pinManager: PinManager
     private lateinit var oathDao: OathCredentialDao
     private lateinit var handler: RequestHandler
+    private lateinit var context: Context
+    private var pinSettings = PinSettingsData()
 
     private val locked = PinLockedException(
         LockoutStatus(failedAttempts = 5, maxAttempts = 5, isLocked = true, lockoutUntil = 1L, recoverySeconds = 60)
@@ -97,15 +105,41 @@ class PinOathHandlerErrorsTest {
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
 
+        this.context = context
         pinManager = mockk(relaxed = true)
-        handler = RequestHandler(
-            context = context,
-            keystoreManager = mockk<KeystoreManager>(relaxed = true),
-            biometricLauncher = null,
-            sessionAuthManager = null,
-            pairedDeviceRepository = null,
-            pinManager = pinManager
-        )
+        handler = handlerWith(pinManager)
+    }
+
+    private fun handlerWith(pins: PinManager) = RequestHandler(
+        context = context,
+        keystoreManager = mockk<KeystoreManager>(relaxed = true),
+        biometricLauncher = null,
+        sessionAuthManager = null,
+        pairedDeviceRepository = null,
+        pinManager = pins
+    )
+
+    /**
+     * Serves the handler from a real [PinManager] over [settings], so a test
+     * sees what the manager throws and what it writes back to [pinSettings].
+     * "correct-pin" is the only PIN that verifies.
+     */
+    private fun useRealPinManager(settings: PinSettingsData) {
+        pinSettings = settings
+        mockkStatic(Base64::class)
+        every { Base64.decode(any<String>(), any()) } answers {
+            java.util.Base64.getDecoder().decode(firstArg<String>())
+        }
+        every { Base64.encodeToString(any(), any()) } answers {
+            java.util.Base64.getEncoder().encodeToString(firstArg())
+        }
+        mockkObject(PinHasher)
+        every { PinHasher.verifyPin(any(), any(), any()) } answers { firstArg<String>() == "correct-pin" }
+        val repository = mockk<PinSettingsRepository>(relaxed = true)
+        coEvery { repository.getSettings() } answers { pinSettings }
+        val written = slot<PinSettingsData>()
+        coEvery { repository.updateSettings(capture(written)) } answers { pinSettings = written.captured }
+        handler = handlerWith(PinManager(repository))
     }
 
     @After
@@ -177,6 +211,38 @@ class PinOathHandlerErrorsTest {
     }
 
     @Test
+    fun `pinChange of the User PIN without currentPin returns PIN_REQUIRED`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"USER_PIN","newPin":"654321"}""")
+
+        assertEquals(ErrorCodes.PIN_REQUIRED, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
+    fun `pinChange of the SO PIN without currentPin returns PIN_REQUIRED`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"SO_PIN","newPin":"654321"}""")
+
+        assertEquals(ErrorCodes.PIN_REQUIRED, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
+    fun `pinChange of the User PIN without newPin returns INVALID_PARAMS`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"USER_PIN","currentPin":"654321"}""")
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
+    fun `pinChange of the SO PIN without newPin returns INVALID_PARAMS`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"SO_PIN","currentPin":"654321"}""")
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
     fun `pinSet with a 6 and a 63 character new PIN succeeds`() = runTest {
         for (pin in listOf("123456", "8".repeat(63))) {
             val response = call(MethodNames.LOCAL_PIN_SET, """{"pinType":"SO_PIN","newPin":"$pin"}""")
@@ -184,6 +250,109 @@ class PinOathHandlerErrorsTest {
             assertFalse(response.has("error"))
             coVerify { pinManager.setSOPIN(null, pin) }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // A PIN that is not set or not supplied is PIN_REQUIRED (#190)
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `pinVerify of the User PIN before it is set returns PIN_REQUIRED`() = runTest {
+        useRealPinManager(PinSettingsData(soPinSet = true, soPinHashBase64 = HASH, soPinSaltBase64 = SALT))
+
+        val response = call(MethodNames.LOCAL_PIN_VERIFY, """{"pin":"123456","pinType":"USER_PIN"}""")
+
+        assertEquals(ErrorCodes.PIN_REQUIRED, errorCode(response))
+    }
+
+    @Test
+    fun `pinSet of the SO PIN without currentPin while it is set returns PIN_REQUIRED`() = runTest {
+        useRealPinManager(PinSettingsData(soPinSet = true, soPinHashBase64 = HASH, soPinSaltBase64 = SALT))
+
+        val response = call(MethodNames.LOCAL_PIN_SET, """{"pinType":"SO_PIN","newPin":"654321"}""")
+
+        assertEquals(ErrorCodes.PIN_REQUIRED, errorCode(response))
+        assertEquals(0, pinSettings.failedSoPinAttempts)
+    }
+
+    @Test
+    fun `pinChange of a PIN that is not set returns PIN_REQUIRED`() = runTest {
+        useRealPinManager(PinSettingsData())
+
+        for (pinType in listOf("SO_PIN", "USER_PIN")) {
+            val response = call(
+                MethodNames.LOCAL_PIN_CHANGE,
+                """{"pinType":"$pinType","currentPin":"123456","newPin":"654321"}"""
+            )
+
+            assertEquals(pinType, ErrorCodes.PIN_REQUIRED, errorCode(response))
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // pinType on verify: absent is the User PIN, unknown is INVALID_PARAMS
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `pinVerify with an unknown pinType returns INVALID_PARAMS`() = runTest {
+        val response = call(MethodNames.LOCAL_PIN_VERIFY, """{"pin":"123456","pinType":"ADMIN_PIN"}""")
+
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(response))
+        assertPinManagerNotCalled()
+    }
+
+    @Test
+    fun `pinVerify with no pinType verifies the User PIN`() = runTest {
+        coEvery { pinManager.verifyUserPIN("123456") } returns true
+
+        val response = call(MethodNames.LOCAL_PIN_VERIFY, """{"pin":"123456"}""")
+
+        assertTrue(response.getJSONObject("result").getBoolean("verified"))
+        coVerify(exactly = 0) { pinManager.verifySOPIN(any()) }
+    }
+
+    // -----------------------------------------------------------------
+    // Every PIN_LOCKED carries lockoutUntil and failedAttempts
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `pinSet pinChange and pinResetLockout PIN_LOCKED carry lockoutUntil and failedAttempts`() = runTest {
+        coEvery { pinManager.setSOPIN(any(), any()) } throws locked
+        coEvery { pinManager.changeUserPIN(any(), any()) } throws locked
+        coEvery { pinManager.resetLockout(any()) } throws locked
+
+        val responses = listOf(
+            call(MethodNames.LOCAL_PIN_SET, """{"pinType":"SO_PIN","currentPin":"123456","newPin":"654321"}"""),
+            call(MethodNames.LOCAL_PIN_CHANGE, """{"pinType":"USER_PIN","currentPin":"123456","newPin":"654321"}"""),
+            call(MethodNames.LOCAL_PIN_RESET_LOCKOUT, """{"soPin":"123456"}""")
+        )
+
+        for (response in responses) {
+            val error = response.getJSONObject("error")
+            assertEquals(ErrorCodes.PIN_LOCKED, error.getInt("code"))
+            val data = error.getJSONObject("data")
+            assertEquals(locked.lockoutStatus.lockoutUntil, data.getLong("lockoutUntil"))
+            assertEquals(locked.lockoutStatus.failedAttempts, data.getInt("failedAttempts"))
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // A wrong PIN stays PIN_INCORRECT
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `a wrong PIN still returns PIN_INCORRECT and counts a failed attempt`() = runTest {
+        useRealPinManager(
+            PinSettingsData(
+                soPinSet = true, soPinHashBase64 = HASH, soPinSaltBase64 = SALT,
+                userPinSet = true, userPinHashBase64 = HASH, userPinSaltBase64 = SALT
+            )
+        )
+
+        val response = call(MethodNames.LOCAL_PIN_VERIFY, """{"pin":"wrong-pin","pinType":"USER_PIN"}""")
+
+        assertEquals(ErrorCodes.PIN_INCORRECT, errorCode(response))
+        assertEquals(1, pinSettings.failedUserPinAttempts)
     }
 
     // -----------------------------------------------------------------
@@ -231,4 +400,10 @@ class PinOathHandlerErrorsTest {
     }
 
     private fun errorCode(response: JSONObject): Int = response.getJSONObject("error").getInt("code")
+
+    private companion object {
+        /** Any stored hash and salt: [PinHasher.verifyPin] is mocked. */
+        const val HASH = "AAAA"
+        const val SALT = "AAAA"
+    }
 }
