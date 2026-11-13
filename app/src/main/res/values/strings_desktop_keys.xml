@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2025 Jeremy Hahn
+  Copyright (c) 2025 Automate The Things, LLC
+
+  This file is part of xKey.
+
+  xKey is dual-licensed:
+
+  1. GNU Affero General Public License v3.0 (AGPL-3.0)
+     See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+
+  2. Commercial License
+     Contact licensing@automatethethings.com for commercial licensing options.
+-->
+<resources>
+    <!-- Desktop keys screen: keys held by the paired desktop's backends -->
+    <string name="desktop_keys_title">Desktop keys</string>
+    <string name="desktop_keys_open">Desktop keys</string>
+    <string name="desktop_keys_no_session">No desktop session. Connect to the desktop, then open this screen again.</string>
+    <string name="desktop_keys_loading">Asking the desktop…</string>
+    <string name="desktop_keys_no_backends">The desktop offers no key backends.</string>
+    <string name="desktop_keys_no_keys">This backend holds no keys.</string>
+    <string name="desktop_keys_backends_header">Backends</string>
+    <string name="desktop_keys_keys_header">Keys in %1$s</string>
+    <string name="desktop_keys_backend_subtitle">%1$s · %2$s</string>
+    <string name="desktop_keys_hardware">hardware</string>
+    <string name="desktop_keys_software">software</string>
+    <string name="desktop_keys_key_subtitle">%1$s · %2$d bits</string>
+    <string name="desktop_keys_no_label">(no label)</string>
+
+    <!-- Key detail -->
+    <string name="desktop_keys_detail_info">Key</string>
+    <string name="desktop_keys_detail_value">%1$s: %2$s</string>
+    <string name="desktop_keys_field_id">ID</string>
+    <string name="desktop_keys_field_label">Label</string>
+    <string name="desktop_keys_field_backend">Backend</string>
+    <string name="desktop_keys_field_algorithm">Algorithm</string>
+    <string name="desktop_keys_field_size">Size</string>
+    <string name="desktop_keys_field_created">Created</string>
+    <string name="desktop_keys_field_hardware">Hardware-backed</string>
+    <string name="desktop_keys_field_exportable">Exportable</string>
+    <string name="desktop_keys_yes">yes</string>
+    <string name="desktop_keys_no">no</string>
+    <string name="desktop_keys_detail_public_key">Public key (%1$s)</string>
+    <string name="desktop_keys_sign_test">Sign and verify a test message</string>
+    <string name="desktop_keys_sign_test_valid">Signed with %1$s; the desktop verified the signature.</string>
+    <string name="desktop_keys_sign_test_invalid">Signed with %1$s, but the desktop did not verify the signature.</string>
+    <string name="desktop_keys_attest">Attest this key</string>
+    <string name="desktop_keys_attest_result">Format: %1$s\nCertificates: %2$d\nAttestation data: %3$d bytes\nNonce: %4$s</string>
+    <string name="desktop_keys_retry">Retry</string>
+
+    <!-- Typed desktop errors -->
+    <string name="desktop_keys_error_not_connected">No desktop session.</string>
+    <string name="desktop_keys_error_key_not_found">The desktop no longer has this key.</string>
+    <string name="desktop_keys_error_denied">The desktop refused the operation.</string>
+    <string name="desktop_keys_error_unsupported">The desktop does not offer this operation.</string>
+    <string name="desktop_keys_error_attestation">The key\'s attestation did not check out: %1$s</string>
+    <string name="desktop_keys_error_remote">The desktop answered with an error: %1$s</string>
+    <string name="desktop_keys_error_transport">The link to the desktop failed: %1$s</string>
+</resources>

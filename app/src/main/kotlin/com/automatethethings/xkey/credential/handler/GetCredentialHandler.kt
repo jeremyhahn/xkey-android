@@ -293,66 +293,51 @@ class GetCredentialHandler(
             )
         }
 
-        // We are asserting UV=1, so verification must actually occur: sign
-        // through the biometric-bound path, never the silent one. Refusals and
-        // the explicit verification come before the counter advances, so a
-        // refused ceremony never consumes a value.
-        val verifyingHelper = if (willVerify) {
+        // The counter is read, bumped and persisted only once this assertion
+        // is the one signing (its queue turn has come, for a verified one),
+        // so two assertions for one credential never sign the same count.
+        val signedHash: ByteArray = clientDataHash
+        suspend fun signOnNextCount(sign: suspend (ByteArray) -> ByteArray): Pair<ByteArray, ByteArray> {
+            val authData = buildAuthenticatorData(
+                rpId = rpId,
+                signCount = nextSignCount(credentialId),
+                userVerified = willVerify
+            )
+            Log.d(TAG, "authData size: ${authData.size}, userVerified=$willVerify")
+            // Sign: authData || clientDataHash
+            // SHA256withECDSA hashes internally, so pass raw concatenation
+            return authData to sign(authData + signedHash)
+        }
+
+        val (authData, signature) = if (willVerify) {
+            // We are asserting UV=1, so verification must actually occur:
+            // sign through the biometric-bound path, never the silent one.
             val helper = biometricHelper
                 ?: throw CredentialAssertionException(
                     "User verification is required but no biometric prompt is available"
                 )
-            if (!keyRequiresAuth) {
-                // Keystore only demands a prompt for an auth-bound key, so for
-                // any other key sign() would take its silent path and we would
-                // assert UV=1 without anyone being verified. Verify explicitly.
-                try {
-                    helper.authenticateWithoutCrypto(
-                        title = "Sign In",
-                        subtitle = "Authenticate to $rpId"
-                    )
-                } catch (bioEx: Exception) {
-                    Log.e(TAG, "Verification failed", bioEx)
-                    throw CredentialAssertionException("Biometric signing failed", bioEx)
-                }
-            }
-            helper
-        } else {
-            null
-        }
-
-        // The phone backend serves this passkey too, so the counter comes from
-        // the one both paths share. It advances before signing: a failed
-        // signature leaves a gap, never a reused value. A counter that cannot
-        // be persisted refuses the assertion before anything is signed.
-        val signCount = try {
-            signCounter.next(credentialId)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Could not persist the signature counter", e)
-            throw CredentialAssertionException("Could not persist the signature counter", e)
-        }
-
-        val authData = buildAuthenticatorData(
-            rpId = rpId,
-            signCount = signCount,
-            userVerified = willVerify
-        )
-        Log.d(TAG, "authData size: ${authData.size}, userVerified=$willVerify")
-
-        // Sign: authData || clientDataHash
-        // SHA256withECDSA hashes internally, so pass raw concatenation
-        val dataToSign = authData + clientDataHash
-
-        val signature = if (verifyingHelper != null) {
             try {
                 Log.d(TAG, "Signing with verification, credentialId=$credentialId")
-                keystoreManager.sign(
-                    credentialId, dataToSign, verifyingHelper,
-                    title = "Sign In",
-                    subtitle = "Authenticate to $rpId"
-                )
+                // One queue turn covers the prompt, the counter and the
+                // signature's own prompt, if its key is auth-bound.
+                BiometricHelper.inOneTurn("passkeyAssertion") {
+                    if (!keyRequiresAuth) {
+                        // Keystore only demands a prompt for an auth-bound key, so for
+                        // any other key sign() would take its silent path and we would
+                        // assert UV=1 without anyone being verified. Verify explicitly.
+                        helper.authenticateWithoutCrypto(
+                            title = "Sign In",
+                            subtitle = "Authenticate to $rpId"
+                        )
+                    }
+                    signOnNextCount { data ->
+                        keystoreManager.sign(
+                            credentialId, data, helper,
+                            title = "Sign In",
+                            subtitle = "Authenticate to $rpId"
+                        )
+                    }
+                }
             } catch (bioEx: Exception) {
                 Log.e(TAG, "Verified signing failed", bioEx)
                 throw CredentialAssertionException("Biometric signing failed", bioEx)
@@ -360,7 +345,7 @@ class GetCredentialHandler(
         } else {
             try {
                 Log.d(TAG, "Signing without verification, credentialId=$credentialId")
-                keystoreManager.signWithoutBiometric(credentialId, dataToSign)
+                signOnNextCount { data -> keystoreManager.signWithoutBiometric(credentialId, data) }
             } catch (e: BiometricRequiredException) {
                 // The key turned out to be auth-bound after all. Rather than
                 // sign with UV=0 baked into authData while actually verifying,
@@ -376,7 +361,7 @@ class GetCredentialHandler(
         }
         Log.d(TAG, "Signature generated, size=${signature.size}")
 
-        // Record usage in unified key store
+        // Record usage in the unified key store (the shared counter synced its count)
         try {
             keyDao.recordUsage(credentialId)
         } catch (e: Exception) {
@@ -400,6 +385,21 @@ class GetCredentialHandler(
         )
         Log.d(TAG, "Assertion response built: ${response.take(200)}...")
         return response
+    }
+
+    /**
+     * The value to sign for [credentialId], from the one counter the phone
+     * backend shares ([PasskeySignCounter]). It advances before signing: a
+     * failed signature leaves a gap, never a reused value. A counter that
+     * cannot be persisted refuses the assertion before anything is signed.
+     */
+    private suspend fun nextSignCount(credentialId: String): Long = try {
+        signCounter.next(credentialId)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.e(TAG, "Could not persist the signature counter", e)
+        throw CredentialAssertionException("Could not persist the signature counter", e)
     }
 
     /**

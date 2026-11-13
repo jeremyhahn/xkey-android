@@ -26,6 +26,8 @@ import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.unmockkObject
+import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -85,6 +87,7 @@ class PivKeyManagerTest {
         mockkObject(AuditLogger)
         every { AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
         every { AuditLogger.logKeyCreated(any(), any(), any(), any()) } returns Unit
+        every { AuditLogger.logPivCertImported(any(), any()) } returns Unit
     }
 
     @After
@@ -103,6 +106,47 @@ class PivKeyManagerTest {
 
     @Test
     fun `importCertificate stores a certificate for the slot key`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+        val cert = PivTestCertificates.selfSigned(slotKey)
+
+        PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, cert)
+
+        coVerify { pivSlotDao.upsert(match { it.slotId == "9A" && it.certificateDer.contentEquals(cert) }) }
+    }
+
+    @Test
+    fun `importCertificate writes one audit entry naming the slot and subject`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+
+        PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, PivTestCertificates.selfSigned(slotKey))
+
+        verify(exactly = 1) { AuditLogger.logPivCertImported(any(), any()) }
+        verify(exactly = 1) { AuditLogger.logPivCertImported("9A", "CN=xkey PIV test") }
+    }
+
+    @Test
+    fun `importCertificate refused for its key writes no audit entry`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+
+        val error = importError(PivTestCertificates.selfSigned(PivTestCertificates.ecKeyPair()))
+
+        assertTrue("got $error", error is PivCertificateKeyMismatchException)
+        verify(exactly = 0) { AuditLogger.logPivCertImported(any(), any()) }
+    }
+
+    @Test
+    fun `importCertificate of unparseable bytes writes no audit entry`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+
+        val error = importError(byteArrayOf(0x30, 0x03, 0x02, 0x01, 0x01))
+
+        assertTrue("got $error", error is PivCertificateNotParseableException)
+        verify(exactly = 0) { AuditLogger.logPivCertImported(any(), any()) }
+    }
+
+    @Test
+    fun `importCertificate succeeds with AuditLogger not initialized`() = runTest {
+        unmockkObject(AuditLogger)
         coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
         val cert = PivTestCertificates.selfSigned(slotKey)
 

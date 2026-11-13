@@ -15,6 +15,11 @@
 package com.automatethethings.xkey.ui
 
 import android.app.Dialog
+import android.content.ComponentName
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
+import androidx.annotation.StringRes
 import android.graphics.Typeface
 import android.os.Bundle
 import android.util.TypedValue
@@ -27,20 +32,35 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.core.widget.NestedScrollView
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.ble.XKeyGattService
+import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.SoftwareKey
+import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.remote.DesktopKeyShare
+import com.automatethethings.xkey.remote.DesktopSectionRefresh
+import com.automatethethings.xkey.remote.DesktopShareDecision
+import com.automatethethings.xkey.remote.DesktopShareGate
+import com.automatethethings.xkey.protocol.SharePermission
+import com.automatethethings.xkey.remote.loadZeroedOnCancel
+import com.automatethethings.xkey.remote.shareSessionChanges
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -109,6 +129,28 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     private lateinit var peerListLayout: LinearLayout
     private lateinit var emptyPeersText: TextView
 
+    // Paired-desktop section: shown only while a desktop is connected.
+    private lateinit var desktopContainer: LinearLayout
+    private lateinit var desktopStatusText: TextView
+    private lateinit var desktopSendButton: MaterialButton
+    private var gattService: XKeyGattService? = null
+    private var serviceBound = false
+
+    /** Follows desktop connect, confirm and disconnect while the sheet is started. */
+    private var desktopWatch: Job? = null
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            gattService = (binder as? XKeyGattService.LocalBinder)?.getService()
+            refreshDesktopSection()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            gattService = null
+            refreshDesktopSection()
+        }
+    }
+
     /** Set while the stored policy is being reflected into the radio group. */
     private var isApplyingStoredPolicy = false
 
@@ -153,14 +195,51 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         buildHeaderSection()
         buildPolicyRadioGroup()
         buildPeerSelectionSection()
+        buildDesktopSection()
 
-        return rootLayout
+        // The whole sheet scrolls: on a short screen (landscape, enlarged
+        // text) the desktop section below the policies and the peer list
+        // would otherwise be cut off with no way to reach its send button.
+        return NestedScrollView(requireContext()).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setBackgroundColor(resolveThemeColor(com.google.android.material.R.attr.colorSurface))
+            addView(rootLayout)
+        }
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         loadKeyData()
         observePolicyChanges()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Flags 0: bind only to a running service; with no service there is
+        // no desktop, and the sheet stays as it was.
+        serviceBound = requireContext().bindService(
+            Intent(requireContext(), XKeyGattService::class.java), serviceConnection, 0
+        )
+        // The section tracks the session while the sheet is open.
+        desktopWatch?.cancel()
+        desktopWatch = lifecycleScope.launch {
+            shareSessionChanges { gattService?.shareSession() }.collect { refreshDesktopSection() }
+        }
+    }
+
+    override fun onStop() {
+        desktopWatch?.cancel()
+        desktopWatch = null
+        desktopRefresh.cancel()
+        if (serviceBound) {
+            requireContext().unbindService(serviceConnection)
+            serviceBound = false
+        }
+        gattService = null
+        super.onStop()
     }
 
     // -------------------------------------------------------------------------
@@ -380,8 +459,8 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         }
         peerSelectionContainer.addView(headerText)
 
-        // Scrollable peer list
-        val scrollView = ScrollView(requireContext()).apply {
+        // Scrollable peer list, nested in the sheet's own scrolling
+        val scrollView = NestedScrollView(requireContext()).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dpToPxInt(200)  // Max height for scrollable area
@@ -560,6 +639,166 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     }
 
     // -------------------------------------------------------------------------
+    // Paired Desktop (remote.sharePublicKey)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Builds the paired-desktop section: a status line and a send button.
+     * Hidden until [refreshDesktopSection] finds a connected desktop.
+     */
+    private fun buildDesktopSection() {
+        desktopContainer = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setPadding(dpToPxInt(20), dpToPxInt(8), dpToPxInt(20), dpToPxInt(16))
+            visibility = View.GONE
+        }
+
+        val headerText = TextView(requireContext()).apply {
+            text = getString(R.string.sharing_desktop_title)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
+            setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorPrimary))
+        }
+        desktopContainer.addView(headerText)
+
+        desktopStatusText = TextView(requireContext()).apply {
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dpToPxInt(4)
+            }
+        }
+        desktopContainer.addView(desktopStatusText)
+
+        desktopSendButton = MaterialButton(requireContext()).apply {
+            text = getString(R.string.sharing_desktop_send_public)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dpToPxInt(8)
+            }
+            visibility = View.GONE
+            setOnClickListener { sendToDesktop() }
+        }
+        desktopContainer.addView(desktopSendButton)
+
+        rootLayout.addView(desktopContainer)
+    }
+
+    /** What may leave the phone for this key, as of now. */
+    private class ShareInputs(val entity: KeyEntity?, val software: SoftwareKey?, val publicKeyPem: String?)
+
+    /**
+     * Reads the key fresh (the policy may just have changed). The caller
+     * zeroes [ShareInputs.software]; a cancellation that drops the result at
+     * the hand back from the IO dispatcher zeroes it here.
+     */
+    private suspend fun loadShareInputs(): ShareInputs = loadZeroedOnCancel(
+        Dispatchers.IO, zero = { it.software?.material?.fill(0) }
+    ) {
+        val context = requireContext().applicationContext
+        val entity = keyDao.getByKeyId(keyId)
+        val software = SoftwareKeyStore(context).get(keyId)
+        val pem = if (software == null) runCatching { KeystoreManager(context).getPublicKeyPEM(keyId) }.getOrNull() else null
+        ShareInputs(entity, software, pem)
+    }
+
+    /** The one share decision, the inbound handlers' rule (a pending revocation refuses SELECTED_PEERS). */
+    private val sharePermission by lazy { SharePermission(keySharingPolicyDao, pairedDeviceRepository) }
+
+    /**
+     * Shows the desktop section when a desktop is connected, with the send
+     * button only for a key [DesktopShareGate] lets go; otherwise the reason.
+     * The decision is taken against the peer confirmed on the session the
+     * key would go out on, and only the latest refresh may apply one: a
+     * disconnect or a new session that overtakes a refresh still deciding
+     * always wins.
+     */
+    private fun refreshDesktopSection() {
+        if (!::desktopContainer.isInitialized || !isAdded) return
+        desktopRefresh.refresh()
+    }
+
+    private val desktopRefresh by lazy {
+        DesktopSectionRefresh(
+            scope = lifecycleScope,
+            currentSession = { if (keyEntity == null) null else gattService?.shareSession() },
+            decide = { session ->
+                val inputs = loadShareInputs()
+                try {
+                    DesktopShareGate.decide(
+                        inputs.entity, inputs.software, inputs.publicKeyPem,
+                        session.peerPublicKeyHex, sharePermission
+                    )
+                } finally {
+                    inputs.software?.material?.fill(0)
+                }
+            },
+            show = show@{ decision ->
+                if (!isAdded || !::desktopContainer.isInitialized) return@show
+                if (decision == null) {
+                    desktopContainer.visibility = View.GONE
+                    return@show
+                }
+                desktopContainer.visibility = View.VISIBLE
+                desktopSendButton.visibility =
+                    if (decision == DesktopShareDecision.PUBLIC_KEY) View.VISIBLE else View.GONE
+                desktopStatusText.text = getString(desktopStatusFor(decision))
+            },
+            // The key could not be read (e.g. deleted between the store's
+            // existence check and its read): nothing can be sent, but the
+            // sheet and its policy controls stay usable.
+            failed = failed@{ e ->
+                if (!isAdded || !::desktopContainer.isInitialized) return@failed
+                desktopContainer.visibility = View.VISIBLE
+                desktopSendButton.visibility = View.GONE
+                desktopStatusText.text =
+                    getString(R.string.sharing_desktop_load_failed, e.message ?: e.javaClass.simpleName)
+            }
+        )
+    }
+
+    /**
+     * Sends the key's public half to the connected desktop
+     * (`remote.sharePublicKey`). The transport, router and confirmed peer all
+     * come from one [ShareSession] snapshot, and nothing is sent once that
+     * session has been replaced.
+     */
+    private fun sendToDesktop() {
+        val session = gattService?.shareSession() ?: return refreshDesktopSection()
+        desktopSendButton.isEnabled = false
+        desktopStatusText.text = getString(R.string.sharing_desktop_sending)
+        lifecycleScope.launch {
+            val message: String? = try {
+                val inputs = loadShareInputs()
+                when (val out = DesktopKeyShare(session).send(
+                    inputs.entity, inputs.software, inputs.publicKeyPem, null, sharePermission
+                )) {
+                    is DesktopKeyShare.Outcome.Sent ->
+                        getString(R.string.sharing_desktop_sent, out.result.importId)
+                    // Declined, refused, or (null) a changed session: nothing was
+                    // imported. A changed session re-reads what the new one allows.
+                    else -> desktopOutcomeFor(out)?.let { getString(it) }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                getString(R.string.sharing_desktop_failed, e.message ?: e.javaClass.simpleName)
+            }
+            if (!isAdded) return@launch
+            desktopSendButton.isEnabled = true
+            if (message != null) desktopStatusText.text = message else refreshDesktopSection()
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Data Loading & Persistence
     // -------------------------------------------------------------------------
 
@@ -598,6 +837,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
 
             // Load allowed peers
             loadAllowedPeers()
+            refreshDesktopSection()
         }
     }
 
@@ -676,6 +916,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         if (policy != SharingPolicyType.SELECTED_PEERS) {
             keySharingPolicyDao.clearPoliciesForKey(keyId)
         }
+        refreshDesktopSection()
     }
 
     /**
@@ -686,6 +927,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         if (!sharingPeers.setAllowed(peerPublicKeyHex, allowed)) {
             populatePeerList(peersFlow.value)
         }
+        refreshDesktopSection()
     }
 
     // -------------------------------------------------------------------------
@@ -716,6 +958,34 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         private const val RADIO_ID_PRIVATE = 0x7f0a0001
         private const val RADIO_ID_ALL_PEERS = 0x7f0a0002
         private const val RADIO_ID_SELECTED_PEERS = 0x7f0a0003
+
+        /**
+         * The status line for a [DesktopShareGate] decision: what will be
+         * sent, or why nothing will.
+         */
+        @StringRes
+        internal fun desktopStatusFor(decision: DesktopShareDecision): Int = when (decision) {
+            DesktopShareDecision.PUBLIC_KEY -> R.string.sharing_desktop_ready
+            DesktopShareDecision.NO_PEER -> R.string.sharing_desktop_no_peer
+            DesktopShareDecision.POLICY_DENIED -> R.string.sharing_desktop_policy_denied
+            DesktopShareDecision.NOT_FOUND -> R.string.sharing_desktop_no_public_key
+            DesktopShareDecision.NOT_EXPORTABLE -> R.string.sharing_desktop_not_exportable
+            DesktopShareDecision.SYMMETRIC_NO_WRAP_PATH -> R.string.sharing_desktop_no_wrap_path
+        }
+
+        /**
+         * The status line after a send: the import id line only when the
+         * desktop accepted the key, the refusal when it declined, the gate's
+         * reason when nothing was sent, and none when the session changed
+         * (the section is re-read for the new session instead).
+         */
+        @StringRes
+        internal fun desktopOutcomeFor(outcome: DesktopKeyShare.Outcome): Int? = when (outcome) {
+            is DesktopKeyShare.Outcome.Sent -> R.string.sharing_desktop_sent
+            is DesktopKeyShare.Outcome.Declined -> R.string.sharing_desktop_declined
+            is DesktopKeyShare.Outcome.Refused -> desktopStatusFor(outcome.decision)
+            DesktopKeyShare.Outcome.SessionChanged -> null
+        }
 
         /**
          * Shows the key sharing bottom sheet for a specific key.

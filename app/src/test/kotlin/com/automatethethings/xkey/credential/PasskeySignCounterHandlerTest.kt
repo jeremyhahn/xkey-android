@@ -174,6 +174,38 @@ class PasskeySignCounterHandlerTest {
     }
 
     // -----------------------------------------------------------------
+    // Neither path keeps a counter of its own
+    // -----------------------------------------------------------------
+
+    /**
+     * Only the shared counter continues from the larger store; a provider
+     * counter of its own would read credential_metadata alone and sign 3.
+     */
+    @Test
+    fun providerSignsFromTheSharedCounterNotItsOwnStore() = runTest {
+        metadataCount = 2
+        keyCount = 9
+
+        assertEquals(10L, providerAssertion())
+        assertEquals(10L, metadataCount)
+        assertEquals(10L, keyCount)
+    }
+
+    /**
+     * Only the shared counter continues from the larger store; a phone
+     * backend counter of its own would read keys alone and sign 3.
+     */
+    @Test
+    fun phoneBackendSignsFromTheSharedCounterNotItsOwnStore() = runTest {
+        metadataCount = 9
+        keyCount = 2
+
+        assertEquals(10L, phoneBackendAssertion())
+        assertEquals(10L, metadataCount)
+        assertEquals(10L, keyCount)
+    }
+
+    // -----------------------------------------------------------------
     // A refusal consumes no value
     // -----------------------------------------------------------------
 
@@ -200,7 +232,7 @@ class PasskeySignCounterHandlerTest {
     fun aRefusedPhoneBackendAssertionLeavesTheCounterAlone() = runTest {
         metadataCount = 5
         keyCount = 5
-        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any()) } throws
+        coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any(), any()) } throws
             UserCancelledException()
 
         val response = phoneBackend(userVerificationRequired = true)

@@ -54,7 +54,6 @@ import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.security.cert.CertificateFactory
 import java.util.Base64
-import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -93,22 +92,10 @@ class RemoteKeyClient(
 
         /** Known attestation formats for sanity-check validation. */
         private val knownAttestationFormats = setOf("tpm2", "pkcs11", "software")
-
-        /** The request-id counter of each live router (weak keys). */
-        private val routerCounters = WeakHashMap<BidirectionalMessageRouter, AtomicLong>()
-
-        /** The shared request-id counter for [router], made on first use. */
-        private fun counterFor(router: BidirectionalMessageRouter): AtomicLong =
-            synchronized(routerCounters) {
-                routerCounters.getOrPut(router) { AtomicLong(BASE_REQUEST_ID) }
-            }
     }
 
-    /**
-     * This router's request-id counter, shared with every other
-     * [RemoteKeyClient] on it.
-     */
-    private val nextRequestId = counterFor(messageRouter)
+    /** Held by the router, not this client, so a replacement client never reuses an id. */
+    private val nextRequestId = messageRouter.requestIds(BASE_REQUEST_ID)
 
     /**
      * Sends a JSON-RPC request and waits for the response.

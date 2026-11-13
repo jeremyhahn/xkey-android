@@ -1,7 +1,6 @@
 package com.automatethethings.xkey.oath
 
 import java.io.ByteArrayOutputStream
-import java.net.URLEncoder
 
 /**
  * The two parts of an otpauth label: `issuer:account` or just `account`.
@@ -99,34 +98,3 @@ private fun decodeLabelPart(part: String): String {
     }
     return bytes.toString(Charsets.UTF_8.name())
 }
-
-/**
- * Assemble the `otpauth://` URI the importer parses from hand-entered values.
- *
- * Every value is percent-encoded, so an issuer or account containing `&`,
- * `?`, `#`, `=` or `:` is not read back as URI structure. The issuer and the
- * account are joined by a literal `:`, the separator [parseOathLabel] reads
- * (#156).
- */
-internal fun manualOtpauthUri(
-    issuer: String?,
-    accountName: String,
-    secret: String,
-    type: String,
-    algorithm: String,
-    digits: Int,
-    period: Int
-): String = buildString {
-    append("otpauth://${type.lowercase()}/")
-    if (issuer != null) append("${encodeUriComponent(issuer)}:")
-    append(encodeUriComponent(accountName))
-    append("?secret=${encodeUriComponent(secret)}")
-    if (issuer != null) append("&issuer=${encodeUriComponent(issuer)}")
-    append("&algorithm=${encodeUriComponent(algorithm)}")
-    append("&digits=$digits")
-    append("&period=$period")
-}
-
-/** Percent-encode (UTF-8) a URI component; a space is `%20`, never `+`. */
-private fun encodeUriComponent(value: String): String =
-    URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
