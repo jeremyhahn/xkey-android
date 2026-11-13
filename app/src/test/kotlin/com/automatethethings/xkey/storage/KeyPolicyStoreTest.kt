@@ -421,9 +421,10 @@ class KeyPolicyStoreTest {
 
     /**
      * Round 11 (1) bypass guard: a key delete reaches Keystore aliases only
-     * through [deleteKeyMaterial], which deletes the key's user-key aliases
-     * and nothing else; the one other raw-alias delete is the rollback of
-     * a key its own issuance just generated.
+     * through [deleteKeyMaterial], which deletes through
+     * [KeystoreManager.deleteUserKeyGeneration], bounded to the key's
+     * user-key aliases; the one raw-alias delete is the rollback of a key
+     * its own issuance just generated.
      */
     @Test
     fun aKeyDeleteTouchesOnlyUserKeyAliases() {
@@ -434,11 +435,12 @@ class KeyPolicyStoreTest {
             .filter { ".deleteByAlias(" in it.readText() }
             .map { it.name }
             .toSet()
-        assertEquals(setOf("KeyDeletionReplay.kt", "CertificateManagementActivity.kt"), callers)
+        assertEquals(setOf("CertificateManagementActivity.kt"), callers)
         val replay = java.io.File(root, "com/automatethethings/xkey/storage/KeyDeletionReplay.kt").readText()
-        val deletes = Regex("""\.deleteByAlias\(([^)]*)\)""").findAll(replay).map { it.groupValues[1] }.toList()
-        assertEquals("deleteKeyMaterial deletes an alias outside userKeyAliases", listOf("it"), deletes)
-        assertTrue("userKeyAliases(" in replay && "resolveKeystoreAlias(held.keyId) ?:" !in replay)
+        assertTrue(".deleteUserKeyGeneration(" in replay && "resolveKeystoreAlias(held.keyId) ?:" !in replay)
+        val manager = java.io.File(root, "com/automatethethings/xkey/crypto/KeystoreManager.kt").readText()
+        val body = manager.substringAfter("fun deleteUserKeyGeneration(").substringBefore("\n    /**")
+        assertTrue("the generation delete is not bounded to userKeyAliases", "alias in namespace" in body && "userKeyAliases(keyId)" in body)
         assertTrue("the internal-key refusal left the deleter", "throw InternalKeyException(" in replay)
     }
 

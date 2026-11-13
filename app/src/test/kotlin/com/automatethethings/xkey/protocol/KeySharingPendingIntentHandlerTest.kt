@@ -493,7 +493,8 @@ class KeySharingPendingIntentHandlerTest {
         val alias = "xkey_key_$key"
         var aliasHeld = true
         every { keystore.resolveKeystoreAlias(key) } answers { alias.takeIf { aliasHeld } }
-        every { keystore.deleteByAlias(alias) } answers { aliasHeld = false; true }
+        every { keystore.userKeyGeneration(key) } answers { if (aliasHeld) mapOf("keystore:$alias" to "1") else emptyMap() }
+        every { keystore.deleteUserKeyGeneration(key, any()) } answers { aliasHeld = false; emptyMap() }
         val gate = CompletableDeferred<Unit>()
         tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
         val other = KeySharingPeers(OTHER_KEY, otherInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
@@ -507,7 +508,7 @@ class KeySharingPendingIntentHandlerTest {
         assertTrue(held.await())
 
         // The queued delete lands in the edits' own scope, off the test's clock.
-        io.mockk.verify(timeout = 5_000) { keystore.deleteByAlias(alias) }
+        io.mockk.verify(timeout = 5_000) { keystore.deleteUserKeyGeneration(key, mapOf("keystore:$alias" to "1")) }
         assertEquals("the queued row delete did not land", null, tables.key(key))
     }
 
@@ -527,6 +528,7 @@ class KeySharingPendingIntentHandlerTest {
 
         assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
         io.mockk.verify(exactly = 0) { keystore.deleteByAlias(internal) }
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
         assertNotNull("the internal key's row was deleted", tables.key(internal))
         assertFalse("a tombstone for an internal key", store.isDeletionPending(internal))
     }
@@ -547,6 +549,7 @@ class KeySharingPendingIntentHandlerTest {
         com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
 
         io.mockk.verify(exactly = 0) { keystore.deleteByAlias(internal) }
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
         assertFalse("the refused replay kept its tombstone", store.isDeletionPending(internal))
     }
 
@@ -560,14 +563,15 @@ class KeySharingPendingIntentHandlerTest {
         val userAlias = "xkey_key_$id"
         var userHeld = true
         every { keystore.resolveKeystoreAlias(id) } answers { if (userHeld) userAlias else id }
-        every { keystore.deleteByAlias(userAlias) } answers { userHeld = false; true }
-        every { keystore.deleteByAlias(id) } returns true
+        every { keystore.userKeyGeneration(id) } answers { if (userHeld) mapOf("keystore:$userAlias" to "1") else emptyMap() }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { userHeld = false; emptyMap() }
+        every { keystore.deleteByAlias(any()) } returns true
         tables.addKey(id, SharingPolicyType.PRIVATE)
 
         assertEquals(null, rpcDeleteKey(id).error)
 
-        io.mockk.verify { keystore.deleteByAlias(userAlias) }
-        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(id) }
+        io.mockk.verify { keystore.deleteUserKeyGeneration(id, mapOf("keystore:$userAlias" to "1")) }
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(any()) }
     }
 
     /**
@@ -585,6 +589,13 @@ class KeySharingPendingIntentHandlerTest {
             software += firstArg<com.automatethethings.xkey.crypto.SoftwareKey>().keyId
         }
         every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().delete(any()) } answers { software -= firstArg<String>() }
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().generation(any()) } answers {
+            firstArg<String>().takeIf { it in software }?.let { "g-$it" }
+        }
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().deleteGeneration(any(), any()) } answers {
+            if (secondArg<String>() == "g-${firstArg<String>()}") software -= firstArg<String>()
+            true
+        }
         return software
     }
 

@@ -23,9 +23,10 @@ import kotlinx.coroutines.withContext
 
 /**
  * The app's one [MaterialDelete] (#193 r9, r10): deletes [held]'s key
- * material wherever it lives, the Android Keystore (the key's user-key
- * aliases, [KeystoreManager.userKeyAliases]) and the software key store,
- * and returns true only once neither holds any of it. A key from the KMS
+ * material wherever it lives, of every type the app stores: the Android
+ * Keystore entries (EC, RSA, AES, HMAC) and the Ed25519 software keys of
+ * the key's user-key namespace ([KeystoreManager.userKeyAliases]), and the
+ * software key store; it returns true only once none holds any of it. A key from the KMS
  * daemon (`xkmsd`) holds no local material. Callable only under the key's
  * [KeyPolicyStore.withKeyMaterial] lock.
  *
@@ -43,24 +44,78 @@ fun deleteKeyMaterial(
 ): Boolean {
     if (source == "xkmsd") return true
     if (isInternalKey(held.keyId, keystore)) throw InternalKeyException(held.keyId)
-    // Each backend is tried whatever the other does: one that fails leaves
-    // its material, reported below, and never stops the other's delete.
+    return deleteKeyMaterialGeneration(context, held.keyId, keyMaterialGeneration(context, held.keyId, keystore), keystore)
+}
+
+/**
+ * The generation of [keyId]'s key material in every backend that holds a
+ * user key's material: the Android Keystore entries and Ed25519 software
+ * keys of its user-key namespace ([KeystoreManager.userKeyGeneration]) and
+ * its software key store record ([SoftwareKeyStore.generation], entry
+ * [SOFTWARE_ENTRY]). Each entry's tag changes when its material is
+ * replaced, so a delete of this generation never reaches material written
+ * under the id since. Empty when nothing is held.
+ */
+fun keyMaterialGeneration(context: Context, keyId: String, keystore: KeystoreManager): Map<String, String> {
+    val generation = LinkedHashMap<String, String>()
+    // A backend that cannot be read is owed as a whole ([UNREAD]): its
+    // delete is reported failed, and never stops the other's.
+    try {
+        generation.putAll(keystore.userKeyGeneration(keyId))
+    } catch (e: Exception) {
+        generation[KEYSTORE_UNREAD] = UNREAD
+    }
+    try {
+        SoftwareKeyStore(context).generation(keyId)?.let { generation[SOFTWARE_ENTRY] = it }
+    } catch (e: Exception) {
+        generation[SOFTWARE_ENTRY] = UNREAD
+    }
+    return generation
+}
+
+/**
+ * Deletes what is still in place of [generation] ([keyMaterialGeneration])
+ * and returns true only once no backend holds any of it. Material replaced
+ * since under the id carries another tag and is left. Each backend is tried
+ * whatever the other does: one that fails leaves its material, reported in
+ * the result, and never stops the other's delete.
+ */
+fun deleteKeyMaterialGeneration(
+    context: Context,
+    keyId: String,
+    generation: Map<String, String>,
+    keystore: KeystoreManager
+): Boolean {
     val keystoreGone = try {
-        val aliases = KeystoreManager.userKeyAliases(held.keyId)
-        aliases.forEach { keystore.deleteByAlias(it) }
-        keystore.resolveKeystoreAlias(held.keyId) !in aliases
+        val held = generation - SOFTWARE_ENTRY
+        when {
+            KEYSTORE_UNREAD in held -> false
+            held.isEmpty() -> true
+            else -> keystore.deleteUserKeyGeneration(keyId, held).isEmpty()
+        }
     } catch (e: Exception) {
         false
     }
     val softwareGone = try {
-        val software = SoftwareKeyStore(context)
-        software.delete(held.keyId)
-        !software.contains(held.keyId)
+        when (val tag = generation[SOFTWARE_ENTRY]) {
+            null -> true
+            UNREAD -> false
+            else -> SoftwareKeyStore(context).deleteGeneration(keyId, tag)
+        }
     } catch (e: Exception) {
         false
     }
     return keystoreGone && softwareGone
 }
+
+/** [keyMaterialGeneration] entry of a software key store record. */
+const val SOFTWARE_ENTRY = "software"
+
+/** [keyMaterialGeneration] entry of a Keystore backend that could not be read. */
+private const val KEYSTORE_UNREAD = "keystore-unread"
+
+/** The tag of a backend whose generation could not be read. */
+private const val UNREAD = "unread"
 
 /**
  * True if [keyId] resolves to a Keystore alias outside its user-key
