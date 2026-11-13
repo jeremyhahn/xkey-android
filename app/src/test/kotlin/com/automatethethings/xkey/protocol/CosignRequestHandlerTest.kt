@@ -519,7 +519,7 @@ class CosignRequestHandlerTest {
 
     /** Handles [request] as if it arrived on the served connection of [peer]. */
     private suspend fun RequestHandler.onConnection(peer: String?, request: Request): Response =
-        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer)) {
+        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer, "connection-${peer ?: "none"}")) {
             handleRequest(request)
         }
 

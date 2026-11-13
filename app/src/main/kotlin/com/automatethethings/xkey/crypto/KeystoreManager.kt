@@ -41,6 +41,7 @@ import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.InvalidKeySpecException
+import java.security.spec.MGF1ParameterSpec
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
@@ -50,6 +51,8 @@ import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.OAEPParameterSpec
+import javax.crypto.spec.PSource
 
 /**
  * Where a key's material lives, read from the key's own [KeyInfo].
@@ -68,6 +71,15 @@ enum class KeySecurityLevel(val wire: String) {
  */
 class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
     KeyStoreException("Cannot read the KeyInfo of $alias", cause)
+
+/** A MAC and the algorithm that computed it ("HMAC-SHA256" or "HMAC-SHA512"). */
+class HmacResult(val mac: ByteArray, val algorithm: String)
+
+/**
+ * An RSA decryption's plaintext and the audit name of the OAEP
+ * parameterisation the cipher ran with.
+ */
+class DecryptResult(val plaintext: ByteArray, val algorithm: String)
 
 /**
  * Manages cryptographic keys in Android Keystore for FIDO2 operations.
@@ -1291,16 +1303,21 @@ class KeystoreManager(private val context: Context) {
      * @throws BiometricRequiredException if key requires biometric authentication.
      * @throws DecryptionException if decryption fails.
      */
-    suspend fun rsaDecrypt(keyId: String, ciphertext: ByteArray): ByteArray {
+    suspend fun rsaDecrypt(keyId: String, ciphertext: ByteArray): ByteArray =
+        rsaDecryptWithAlgorithm(keyId, ciphertext).plaintext
+
+    /**
+     * [rsaDecrypt], also naming the OAEP parameterisation that ran, for the
+     * audit entry.
+     */
+    suspend fun rsaDecryptWithAlgorithm(keyId: String, ciphertext: ByteArray): DecryptResult {
         val alias = buildGeneralAlias(keyId)
 
         val privateKey = keyStore.getKey(alias, null) as? PrivateKey
             ?: throw KeyNotFoundException(keyId)
 
         try {
-            val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, privateKey)
-            return cipher.doFinal(ciphertext)
+            return rsaOaepDecrypt(privateKey, ciphertext)
         } catch (e: android.security.keystore.UserNotAuthenticatedException) {
             throw BiometricRequiredException()
         } catch (e: Exception) {
@@ -1424,7 +1441,15 @@ class KeystoreManager(private val context: Context) {
      * @throws KeyNotFoundException if no key exists for the identifier.
      * @throws HMACException if HMAC computation fails.
      */
-    suspend fun computeHMAC(keyId: String, data: ByteArray): ByteArray {
+    suspend fun computeHMAC(keyId: String, data: ByteArray): ByteArray =
+        computeHMACWithAlgorithm(keyId, data).mac
+
+    /**
+     * [computeHMAC], also naming the MAC algorithm that ran ("HMAC-SHA256" or
+     * "HMAC-SHA512"), as the Keystore key determines it: an audit entry
+     * records this, never the key's stored metadata.
+     */
+    suspend fun computeHMACWithAlgorithm(keyId: String, data: ByteArray): HmacResult {
         val alias = buildGeneralAlias(keyId)
 
         val secretKey = keyStore.getKey(alias, null) as? SecretKey
@@ -1440,7 +1465,8 @@ class KeystoreManager(private val context: Context) {
 
             val mac = Mac.getInstance(macAlgorithm)
             mac.init(secretKey)
-            return mac.doFinal(data)
+            val name = if (macAlgorithm == "HmacSHA512") "HMAC-SHA512" else "HMAC-SHA256"
+            return HmacResult(mac.doFinal(data), name)
         } catch (e: Exception) {
             throw HMACException("Failed to compute HMAC", e)
         }
@@ -1475,11 +1501,26 @@ class KeystoreManager(private val context: Context) {
             val peerPublicKey = keyFactory.generatePublic(X509EncodedKeySpec(peerPublicKeyDer))
 
             val keyAgreement = KeyAgreement.getInstance("ECDH")
-            keyAgreement.init(privateKey)
+            try {
+                keyAgreement.init(privateKey)
+            } catch (e: java.security.InvalidKeyException) {
+                // An EC key generated before the device reached API 31 (or
+                // before PURPOSE_AGREE_KEY was requested) cannot agree.
+                if (e is android.security.keystore.UserNotAuthenticatedException ||
+                    e is android.security.keystore.KeyPermanentlyInvalidatedException
+                ) throw e
+                throw ECDHException(
+                    "key $keyId was not generated with PURPOSE_AGREE_KEY " +
+                        "(EC keys made below Android 12 / API 31 cannot do ECDH)",
+                    e
+                )
+            }
             keyAgreement.doPhase(peerPublicKey, true)
             return keyAgreement.generateSecret()
         } catch (e: android.security.keystore.UserNotAuthenticatedException) {
             throw BiometricRequiredException()
+        } catch (e: ECDHException) {
+            throw e
         } catch (e: Exception) {
             throw ECDHException("ECDH key agreement failed", e)
         }
@@ -2125,6 +2166,65 @@ class KeystoreManager(private val context: Context) {
 
         /** AES GCM cipher transformation. */
         private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
+
+        /**
+         * Audit names of the fixed algorithms [symmetricEncrypt]/[symmetricDecrypt]
+         * ([AES_GCM_TRANSFORMATION], 128-bit tag) and [performECDH] run. RSA
+         * decrypt has no constant: [rsaDecryptWithAlgorithm] names the
+         * [rsaOaepSpec] its cipher runs.
+         */
+        const val EXECUTED_AES_GCM = "AES-GCM"
+        const val EXECUTED_ECDH = "ECDH"
+
+        /**
+         * The one OAEP parameterisation [rsaOaepDecrypt] runs: SHA-256 OAEP
+         * digest, MGF1 over SHA-1, empty label. It is passed explicitly, so the
+         * MGF1 digest never depends on which provider is first: AndroidKeyStore
+         * and SunJCE default to SHA-1, but Conscrypt and Bouncy Castle default
+         * to the OAEP digest (SHA-256). SHA-1 MGF1 is what AndroidKeyStore has
+         * always run for this transformation, and every Keystore RSA key
+         * accepts it. Peers encrypt with this spec; the audit name is
+         * [rsaOaepAlgorithm] of it.
+         */
+        fun rsaOaepSpec(): OAEPParameterSpec =
+            OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT)
+
+        /**
+         * Decrypts [ciphertext] with [privateKey] under [RSA_OAEP_TRANSFORMATION]
+         * and [rsaOaepSpec]: the decrypt step of [rsaDecryptWithAlgorithm].
+         * The audit name follows the spec the cipher was initialised with.
+         */
+        fun rsaOaepDecrypt(privateKey: PrivateKey, ciphertext: ByteArray): DecryptResult {
+            val spec = rsaOaepSpec()
+            val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, privateKey, spec)
+            return DecryptResult(cipher.doFinal(ciphertext), rsaOaepAlgorithm(spec))
+        }
+
+        /**
+         * The audit name of an OAEP decrypt run with [spec]: "RSA-OAEP-256"
+         * when both digests are SHA-256 and "RSA-OAEP" when both are SHA-1 (the
+         * JOSE names), else "RSA-OAEP-<digest>-MGF1-<mgf1 digest>", e.g.
+         * "RSA-OAEP-SHA-256-MGF1-SHA-1". With no spec reported, only the
+         * transformation's own digest is known: "RSA-OAEP-SHA-256-MGF1-unknown".
+         */
+        fun rsaOaepAlgorithm(spec: OAEPParameterSpec?): String {
+            if (spec == null) return "RSA-OAEP-SHA-256-MGF1-unknown"
+            val digest = digestName(spec.digestAlgorithm)
+            val mgf1 = (spec.mgfParameters as? MGF1ParameterSpec)?.digestAlgorithm?.let(::digestName)
+                ?: "unknown"
+            return when {
+                digest == "SHA-256" && mgf1 == "SHA-256" -> "RSA-OAEP-256"
+                digest == "SHA-1" && mgf1 == "SHA-1" -> "RSA-OAEP"
+                else -> "RSA-OAEP-$digest-MGF1-$mgf1"
+            }
+        }
+
+        /** "SHA256", "sha-256" and "SHA-256" all name SHA-256. */
+        private fun digestName(name: String): String {
+            val upper = name.uppercase()
+            return if (upper.startsWith("SHA") && !upper.startsWith("SHA-")) "SHA-" + upper.removePrefix("SHA") else upper
+        }
 
         /** PEM line length for Base64 encoding. */
         private const val PEM_LINE_LENGTH = 64

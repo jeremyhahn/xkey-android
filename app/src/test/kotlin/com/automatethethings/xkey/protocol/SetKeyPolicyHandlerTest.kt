@@ -272,7 +272,7 @@ class SetKeyPolicyHandlerTest {
 
     /** Handles [request] as one arriving on a served connection whose peer is [callerPeer]. */
     private suspend fun RequestHandler.handleFromCaller(request: Request, callerPeer: String?): Response =
-        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, callerPeer)) {
+        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, callerPeer, "caller")) {
             handleRequest(request)
         }
 

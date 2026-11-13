@@ -16,6 +16,7 @@ package com.automatethethings.xkey.crypto
 
 import android.content.Context
 import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -35,10 +36,12 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.security.KeyFactory
+import java.security.KeyPairGenerator
 import java.security.SecureRandom
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
+import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 
 /**
@@ -583,6 +586,32 @@ class KeystoreManagerGeneralKeysTest {
         assertThrows(ECDHException::class.java) {
             runBlocking { keystoreManager.performECDH(keyId, byteArrayOf(1, 2, 3, 4)) }
         }
+    }
+
+    /**
+     * An EC key generated before an upgrade to API 31 has no agree purpose:
+     * performECDH must say so rather than report a generic failure.
+     */
+    @Test
+    fun ecdhWithALegacyKeyWithoutTheAgreePurposeNamesThePurpose() {
+        assumeTrue("Keystore ECDH is API 31+", Build.VERSION.SDK_INT >= 31)
+        val (_, peerDer) = generate("ES256", label = "ecdh-legacy-peer")
+        val keyId = newKeyId("ecdh-legacy")
+        // The alias performECDH reads (KeystoreManager's general key prefix).
+        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore").apply {
+            initialize(
+                KeyGenParameterSpec.Builder("xkey_key_$keyId", KeyProperties.PURPOSE_SIGN)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .build()
+            )
+            generateKeyPair()
+        }
+
+        val error = assertThrows(ECDHException::class.java) {
+            runBlocking { keystoreManager.performECDH(keyId, peerDer) }
+        }
+        assertTrue(error.message.orEmpty(), error.message.orEmpty().contains("not generated with PURPOSE_AGREE_KEY"))
     }
 
     // ------------------------------------------------------------ RSA decrypt
