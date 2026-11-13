@@ -18,6 +18,9 @@ Messages prefixed with `remote.*` are forwarded through the
 | `remote.attestDevice` | Request device attestation from desktop |
 | `remote.oathAdd` | Store a phone OATH credential on the desktop (`RemoteOathClient.oathAdd`) |
 | `remote.oathGenerate` | Get the current code and expiry of a desktop-stored OATH credential (`RemoteOathClient.oathGenerate`) |
+| `remote.pivListSlots` | List the desktop's PIV slots (`backend` optional) |
+| `remote.pivGetCert` | Get the DER certificate in one desktop PIV slot |
+| `remote.pivSign` | Sign base64 `data` with one desktop PIV slot key |
 
 ### OATH methods
 
@@ -64,6 +67,23 @@ source; it asks BLE, then TCP, then USB.
 - Clients take only a `ConnectedDesktop`, whose sender is a `SessionSender`
   that only the transports make; `ConnectedDesktopBindingTest` fails if a
   client or the service takes or hands out any other sender.
+- `XKeyGattService.remoteKeyClient()` and `desktopSession` share one
+  `RemoteKeyClient` per desktop session (`DesktopSessionTracker`), built from
+  `connectedDesktop()`; another desktop, or none, drops it.
+
+### Desktop PIV slots
+
+`RemoteKeyClient.pivListSlots`, `pivGetCert` and `pivSign` send the three
+`remote.piv*` methods with the params and results of go-xkms
+`pkg/pairingproto/protocol_piv.go`. Byte fields (`data`, `signature`,
+`certificate_der`) are standard base64. A reply with a missing or mistyped
+field raises `ProtocolException` with `PARSE_ERROR`.
+
+The PIV screen lists the paired desktop's slots read-only below the phone's
+own. With no desktop connected, or when the desktop errors, the section stays
+hidden and the phone's slots show as before. A desktop slot's detail view
+fetches its certificate with `remote.pivGetCert` (`PIV_SLOT_NOT_FOUND` means
+no certificate), and its "sign test" action sends `remote.pivSign`.
 
 ## BLE Protocol Communication Stack
 
