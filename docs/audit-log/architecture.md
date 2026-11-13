@@ -36,8 +36,9 @@ A failed sync, a locked password vault included, records one entry with
 0 when nothing reached the peer; an outbound sync whose local merge fails after
 the desktop answered keeps the count the desktop acknowledged. `device_id` and `device_name` name
 the desktop. Both inbound handlers audit through one path
-(`RequestHandler.auditedInboundSync`): the id comes from the connection alone,
-and `device_name` is null when the paired-device store cannot be read, so the
+(`RequestHandler.auditedInboundSync`): the id is the peer of the request's own
+connection, never the phone's last served desktop, so two desktops syncing at
+once each get their own entry; and `device_name` is null when the paired-device store cannot be read, so the
 sync still runs and is audited. See [store-sync](../store-sync/architecture.md#audit).
 
 ## Index Strategy

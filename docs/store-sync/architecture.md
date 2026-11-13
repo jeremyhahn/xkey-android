@@ -154,7 +154,7 @@ success or failure (see [audit-log](../audit-log/architecture.md#sync-events)):
 
 | Leg | Recorded by | Operation type | Device |
 |-----|-------------|----------------|--------|
-| `local.syncOATH` | `handleSyncOATH` | `OATH_SYNC_PERFORMED`, `direction` `inbound` | the request's connection peer (else the served peer) and its paired name |
+| `local.syncOATH` | `handleSyncOATH` | `OATH_SYNC_PERFORMED`, `direction` `inbound` | the peer of the connection the request arrived on (none when it authenticated no peer; the served peer only for a request that names no connection) and its paired name |
 | `local.syncPasswords` | `handleSyncPasswords` | `PASSWORD_SYNC_PERFORMED`, `direction` `inbound` | as above |
 | `remote.syncOATH` | `RemoteSyncClient.syncOath` | `OATH_SYNC_PERFORMED`, `direction` `outbound` | the client's `peerDeviceId` / `peerDeviceName` (null when the caller passes none; `XKeyGattService.syncNow` passes none yet) |
 | `remote.syncPasswords` | `RemoteSyncClient.syncPasswords` | `PASSWORD_SYNC_PERFORMED`, `direction` `outbound` | as above |

@@ -3547,7 +3547,10 @@ class RequestHandler(
      * The one path every inbound store sync runs and is audited through:
      * [sync] merges the desktop's `[key]` items and gathers the phone's, and
      * [record] writes exactly one entry, success or failure, for the
-     * desktop that asked. The peer id comes from the connection alone; its
+     * desktop that asked. The peer id is the request's own connection peer
+     * ([currentPeerPublicKeyHex]), never the handler-wide peer when the
+     * request names a connection, so concurrent desktops each audit their
+     * own; null when that connection authenticated no peer. Its
      * paired name is looked up inside this path and is null when the lookup
      * fails, so an unreadable paired-device store neither blocks the sync nor
      * drops its entry. A failed entry holds a local description or the
@@ -3563,7 +3566,7 @@ class RequestHandler(
         sync: suspend (com.automatethethings.xkey.sync.SyncEngine, org.json.JSONArray) ->
             Pair<com.automatethethings.xkey.sync.SyncEngine.ItemCounts, org.json.JSONArray>
     ): Response {
-        val peerId = syncPeerId()
+        val peerId = currentPeerPublicKeyHex()
         val peerName = syncPeerName(peerId)
         fun failed(why: String) =
             record(peerId, peerName, 0, AuditLogger.SYNC_INBOUND, 0, 0, 0, false, why)
@@ -3591,14 +3594,6 @@ class RequestHandler(
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "$label failed: ${e.message}")
         }
     }
-
-    /**
-     * The desktop a sync request came from, for its audit entry: the peer of
-     * the connection it arrived on, else the served peer. Reads no store.
-     */
-    private suspend fun syncPeerId(): String? =
-        currentCoroutineContext()[CallerSession]?.peerPublicKeyHex?.takeIf { it.isNotEmpty() }
-            ?: connectedDevicePublicKeyHex
 
     /** [peerId]'s paired name, or null when it has none or the store cannot be read. */
     private fun syncPeerName(peerId: String?): String? = peerId?.let {
