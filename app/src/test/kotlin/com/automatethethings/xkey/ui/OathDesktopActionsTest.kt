@@ -189,6 +189,41 @@ class OathDesktopActionsTest {
         assertEquals("desk-7", sender.lastRequest.params!!.getString("credential_id"))
     }
 
+    @Test
+    fun `a menu action goes to the desktop present when the menu opened`() = runTest {
+        links.put(PEER_A, "GitHub:alice", "desk-7")
+        val a = actions()
+        val menu = a.openMenu(entity())
+        assertEquals(
+            listOf(OathDesktopActions.Entry.COPY, OathDesktopActions.Entry.DESKTOP_CODE),
+            menu.entries
+        )
+
+        // Desktop B replaces A while the menu is open.
+        peer = PEER_B
+        sender.succeedWith("""{"code":"492039","expires_in":21}""")
+        assertEquals(OathDesktopActions.Outcome.Code("492039", 21), menu.desktopCode())
+        assertEquals("desk-7", sender.lastRequest.params!!.getString("credential_id"))
+
+        sender.succeedWith("""{"success":true,"credential_id":"desk-9"}""")
+        assertEquals(OathDesktopActions.Outcome.Copied("desk-9"), menu.copyToDesktop())
+        assertEquals("the link is A's, the desktop the menu opened on", "desk-9", links.get(PEER_A, "GitHub:alice"))
+        assertNull("B inherits nothing from A's menu", links.get(PEER_B, "GitHub:alice"))
+    }
+
+    @Test
+    fun `a menu opened with no desktop sends nothing once one connects`() = runTest {
+        connected = false
+        val menu = actions().openMenu(entity())
+        assertTrue(menu.entries.isEmpty())
+
+        connected = true
+        assertEquals(OathDesktopActions.Outcome.NotConnected, menu.copyToDesktop())
+        assertEquals(OathDesktopActions.Outcome.NotConnected, menu.desktopCode())
+        assertTrue(sender.sent.isEmpty())
+        assertTrue(secrets.isEmpty())
+    }
+
     private class MapLinks : DesktopOathLinks {
         private val map = mutableMapOf<Pair<String, String>, String>()
         override fun get(peerKeyHex: String, oathId: String): String? = map[peerKeyHex to oathId]

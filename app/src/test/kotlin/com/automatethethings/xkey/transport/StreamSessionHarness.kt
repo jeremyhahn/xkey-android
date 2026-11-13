@@ -49,10 +49,18 @@ internal class StreamSessionHarness : Closeable {
     private val listener = ServerSocket(0, 4, InetAddress.getLoopbackAddress())
     private val connections = ServedConnections()
 
-    /** Pairs a new desktop, connects it and waits until its handshake is installed. */
+    private var paired = 0
+
+    /**
+     * Pairs a new desktop, connects it and waits until its handshake is
+     * installed. Each desktop is paired under its own name: the repository
+     * evicts an entry with the same name, and a replacement test must keep
+     * the earlier desktop paired, so that only the session binding (not a
+     * revocation) keeps the newer desktop from inheriting the old session.
+     */
     suspend fun connectPaired(): DesktopPeer {
         val desktop = DesktopPeer(Socket(listener.inetAddress, listener.localPort))
-        repo.addDevice(desktop.publicKeyHex, "desktop")
+        repo.addDevice(desktop.publicKeyHex, "desktop-${++paired}")
         val accepted = connections.track(listener.accept())
         val connected = CompletableDeferred<Unit>()
         connections.scope.launch {

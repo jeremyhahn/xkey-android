@@ -155,6 +155,11 @@ class UsbConnectedDesktopTest {
 
             val b = harness.connectPaired()
             assertEquals(b.publicKeyHex, harness.pairing.boundSender()!!.first)
+            // A is still paired: only the connection binding refuses its send.
+            assertTrue(
+                "A stays paired",
+                harness.repo.getAllDevices().any { it.publicKeyHex == a.publicKeyHex },
+            )
 
             try {
                 captured.sender.sendEncryptedMessage(REQUEST)
