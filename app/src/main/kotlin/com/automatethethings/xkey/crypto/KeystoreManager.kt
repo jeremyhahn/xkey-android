@@ -52,6 +52,7 @@ import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.OAEPParameterSpec
+import javax.crypto.spec.PSource
 
 /**
  * Where a key's material lives, read from the key's own [KeyInfo].
@@ -2080,27 +2081,34 @@ class KeystoreManager(private val context: Context) {
         /**
          * Audit names of the fixed algorithms [symmetricEncrypt]/[symmetricDecrypt]
          * ([AES_GCM_TRANSFORMATION], 128-bit tag) and [performECDH] run. RSA
-         * decrypt has no constant: its MGF1 digest is the provider's, so
-         * [rsaDecryptWithAlgorithm] reports it.
+         * decrypt has no constant: [rsaDecryptWithAlgorithm] names the
+         * [rsaOaepSpec] its cipher runs.
          */
         const val EXECUTED_AES_GCM = "AES-GCM"
         const val EXECUTED_ECDH = "ECDH"
 
         /**
-         * Decrypts [ciphertext] with [privateKey] under [RSA_OAEP_TRANSFORMATION]:
-         * the decrypt step of [rsaDecryptWithAlgorithm].
-         *
-         * The transformation fixes the OAEP digest but leaves the MGF1 digest
-         * to the provider (AndroidKeyStore and the JDK both pick SHA-1), so
-         * the audit name is read from the parameters the initialised cipher
-         * reports, see [rsaOaepAlgorithm], never assumed.
+         * The one OAEP parameterisation [rsaOaepDecrypt] runs: SHA-256 OAEP
+         * digest, MGF1 over SHA-1, empty label. It is passed explicitly, so the
+         * MGF1 digest never depends on which provider is first: AndroidKeyStore
+         * and SunJCE default to SHA-1, but Conscrypt and Bouncy Castle default
+         * to the OAEP digest (SHA-256). SHA-1 MGF1 is what AndroidKeyStore has
+         * always run for this transformation, and every Keystore RSA key
+         * accepts it. Peers encrypt with this spec; the audit name is
+         * [rsaOaepAlgorithm] of it.
+         */
+        fun rsaOaepSpec(): OAEPParameterSpec =
+            OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT)
+
+        /**
+         * Decrypts [ciphertext] with [privateKey] under [RSA_OAEP_TRANSFORMATION]
+         * and [rsaOaepSpec]: the decrypt step of [rsaDecryptWithAlgorithm].
+         * The audit name follows the spec the cipher was initialised with.
          */
         fun rsaOaepDecrypt(privateKey: PrivateKey, ciphertext: ByteArray): DecryptResult {
+            val spec = rsaOaepSpec()
             val cipher = Cipher.getInstance(RSA_OAEP_TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, privateKey)
-            val spec = runCatching {
-                cipher.parameters?.getParameterSpec(OAEPParameterSpec::class.java)
-            }.getOrNull()
+            cipher.init(Cipher.DECRYPT_MODE, privateKey, spec)
             return DecryptResult(cipher.doFinal(ciphertext), rsaOaepAlgorithm(spec))
         }
 

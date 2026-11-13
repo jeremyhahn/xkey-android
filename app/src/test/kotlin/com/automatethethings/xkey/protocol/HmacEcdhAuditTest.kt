@@ -259,8 +259,9 @@ class HmacEcdhAuditTest {
 
     @Test
     fun `rsa decrypt records the OAEP parameters the cipher ran with`() = runTest {
-        // A peer encrypts with SHA-256 OAEP and the default SHA-1 MGF1; the
-        // decrypt runs the real cipher step, not a canned answer.
+        // A peer encrypts with SHA-256 OAEP and SHA-1 MGF1 (the phone's
+        // KeystoreManager.rsaOaepSpec); the decrypt runs the real cipher
+        // step, not a canned answer.
         val pair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.genKeyPair()
         val plaintext = "rsa oaep payload".toByteArray()
         val ct = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding").run {

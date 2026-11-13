@@ -1689,7 +1689,7 @@ class RequestHandler(
 
         keyDao.recordUsage(decryptParams.keyId)
 
-        // The OAEP parameters the cipher reported, not an assumed name.
+        // The OAEP parameters the cipher ran (KeystoreManager.rsaOaepSpec).
         logKeyUse(
             KeyUse.DECRYPT, decryptParams.keyId,
             executedAlgorithm = decrypted.algorithm,
