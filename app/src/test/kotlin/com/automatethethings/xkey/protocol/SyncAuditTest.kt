@@ -37,6 +37,7 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -302,6 +303,68 @@ class SyncAuditTest {
                 deviceId = DESK_PEER, deviceName = null, count = 2, direction = AuditLogger.SYNC_INBOUND,
                 added = 1, updated = 2, skipped = 0, success = true, errorMessage = null
             )
+        }
+    }
+
+    /**
+     * Two desktops sync at once on their own connections while the
+     * handler-wide peer names a third (the desktop this phone last served).
+     * Desktop A's sync is held inside its merge while a connection that
+     * authenticated no peer runs a whole sync of each store. Each entry names
+     * its own request's peer: A's id, and none for the unauthenticated one,
+     * never the handler-wide peer. A path that read the shared peer fails.
+     */
+    @Test
+    fun `interleaved syncs from two desktops each audit their own connection's peer`() = runTest {
+        mockkObject(AuditLogger)
+        handler.setConnectedDevicePublicKeyHex(OTHER_PEER)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val aInMerge = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val releaseA = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { anyConstructed<SyncEngine>().mergeOath(any()) } coAnswers {
+            if (calls.getAndIncrement() == 0) {
+                aInMerge.complete(Unit)
+                releaseA.await()
+            }
+            SyncEngine.ItemCounts(added = 2, updated = 1, skipped = 3)
+        }
+
+        val a = async(Dispatchers.Default) {
+            withContext(RequestHandler.servedConnection(binding, DESK_PEER)) {
+                call(MethodNames.LOCAL_SYNC_OATH, "credentials")
+            }
+        }
+        aInMerge.await()
+        withContext(RequestHandler.servedConnection(binding, null)) {
+            assertOathResponseUnchanged(call(MethodNames.LOCAL_SYNC_OATH, "credentials"))
+            assertNull(call(MethodNames.LOCAL_SYNC_PASSWORDS, "passwords").error)
+        }
+        releaseA.complete(Unit)
+        assertOathResponseUnchanged(a.await())
+
+        verify(exactly = 1) {
+            AuditLogger.logOathSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 1, direction = AuditLogger.SYNC_INBOUND,
+                added = 2, updated = 1, skipped = 3, success = true, errorMessage = null
+            )
+        }
+        verify(exactly = 1) {
+            AuditLogger.logOathSyncPerformed(
+                deviceId = null, deviceName = null, count = 1, direction = AuditLogger.SYNC_INBOUND,
+                added = 2, updated = 1, skipped = 3, success = true, errorMessage = null
+            )
+        }
+        verify(exactly = 1) {
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = null, deviceName = null, count = 2, direction = AuditLogger.SYNC_INBOUND,
+                added = 1, updated = 2, skipped = 0, success = true, errorMessage = null
+            )
+        }
+        verify(exactly = 0) {
+            AuditLogger.logOathSyncPerformed(OTHER_PEER, any(), any(), any(), any(), any(), any(), any(), any())
+        }
+        verify(exactly = 0) {
+            AuditLogger.logPasswordSyncPerformed(OTHER_PEER, any(), any(), any(), any(), any(), any(), any(), any())
         }
     }
 
