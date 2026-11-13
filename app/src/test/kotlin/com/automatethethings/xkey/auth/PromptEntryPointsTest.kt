@@ -195,9 +195,39 @@ class PromptEntryPointsTest {
             val between = body.substring(lastApproval.range.last, use.range.first)
             // The key material approved is read before the prompt goes up.
             val before = body.substring(0, approval.find(body)!!.range.first)
-            if ("revalidateApprovedKey(" in between && "approvalSnapshot(" in before) null else fn.groupValues[1]
+            val choked = Regex("""useApprovedKey(OrAlias)?\(""").containsMatchIn(between)
+            if (choked && "approvalSnapshot(" in before) null else fn.groupValues[1]
         }
-        assertTrue("approval-gated key use without revalidateApprovedKey: $unchecked", unchecked.isEmpty())
+        assertTrue("approval-gated key use outside useApprovedKey: $unchecked", unchecked.isEmpty())
+
+        // The recheck and the use share the key's lock, which key creation and
+        // deletion take too: nothing replaces the key between check and use.
+        assertEquals(
+            "revalidateApprovedKey is called other than from useApprovedKey",
+            1,
+            Regex("""revalidateApprovedKey\(""").findAll(code).count() - 1
+        )
+        val choke = code.substringAfter("fun <T> useApprovedKey(", "").substringBefore("\n\n")
+        assertTrue(
+            "useApprovedKey does not recheck under the key's lock",
+            choke.indexOf("withKeyLock(keyLockId(") in 0 until choke.indexOf("revalidateApprovedKey(")
+        )
+        val delete = code.substringAfter("fun handleLocalDeleteKey(", "").substringBefore("\n    }")
+        assertTrue(
+            "local.deleteKey deletes outside the key's lock",
+            delete.indexOf("withKeyLock(keyLockId(") in 0 until delete.indexOf("deleteGeneralKey(")
+        )
+        assertTrue(
+            "local.generateKey does not reserve the key's lock",
+            "val reservation = keyLockId(genParams.keyId)" in code
+        )
+
+        // A per-operation key co-signs only in a crypto-bound prompt, and only
+        // the approved key's signature over the requested hash is answered.
+        val cosign = code.substringAfter("fun handleCosignRequest(", "").substringBefore("\n    }\n")
+        listOf("authDurationSeconds == 0", "approvals.sign(", "signedBy(publicKeyDer").forEach {
+            assertTrue("handleCosignRequest does not use $it", it in cosign)
+        }
 
         val check = code.substringAfter("fun revalidateApprovedKey(", "").substringBefore("\n    }")
         // The row and the key material signed with: the keystore key under

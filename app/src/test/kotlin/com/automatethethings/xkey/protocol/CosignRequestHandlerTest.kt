@@ -34,6 +34,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import com.automatethethings.xkey.ui.CryptoSigningActivity
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import io.mockk.Runs
 
@@ -51,7 +52,9 @@ import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
@@ -70,6 +73,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.security.KeyPairGenerator
 import java.util.Base64
 
 /**
@@ -226,6 +230,14 @@ class CosignRequestHandlerTest {
      * With [deferredCreate] startActivity only queues the launch, as on the
      * phone: the activity comes up at [createNext].
      */
+    /** A crypto-bound signing prompt as it was started. */
+    private class CryptoPrompt(
+        val requestId: String,
+        val dataHash: ByteArray,
+        val keyAlias: String?,
+        val signatureAlgorithm: String?
+    )
+
     private inner class FakeScreen {
         var autoAnswer: Boolean? = true
         var deferredCreate = false
@@ -282,8 +294,25 @@ class CosignRequestHandlerTest {
                 if (requestId == visible) visible = null
                 // The prompt was withdrawn, not answered: no result follows.
             }
+            mockkObject(CryptoSigningActivity.Companion)
+            every {
+                CryptoSigningActivity.createIntent(any(), any(), any(), any(), any(), any(), any(), any(), any())
+            } answers {
+                mockk<Intent>(relaxed = true).also {
+                    cryptoIntents[it] = CryptoPrompt(
+                        requestId = secondArg(),
+                        dataHash = Base64.getDecoder().decode(arg<String>(3)),
+                        keyAlias = arg(7),
+                        signatureAlgorithm = arg(8)
+                    )
+                }
+            }
             every { context.startActivity(any()) } answers {
                 val intent = firstArg<Intent>()
+                cryptoIntents[intent]?.let {
+                    showCrypto(it)
+                    return@answers Unit
+                }
                 val requestId = launchIds.getValue(intent)
                 events += "launched:$requestId"
                 launched += requestId
@@ -319,6 +348,39 @@ class CosignRequestHandlerTest {
             val requestId = checkNotNull(visible) { "no prompt is visible" }
             visible = null
             deliver(requestId, approved)
+        }
+
+        /**
+         * Signs a crypto-bound prompt's data hash as its authenticated
+         * CryptoObject would, once the owner answers it; null: the owner cancels.
+         */
+        var cryptoSigner: ((ByteArray) -> ByteArray)? = null
+
+        /** Every crypto-bound prompt that came up, in order. */
+        val cryptoPrompts = mutableListOf<CryptoPrompt>()
+        private val cryptoIntents = mutableMapOf<Intent, CryptoPrompt>()
+
+        /** A crypto-bound prompt comes up for its ACTIVE request and is answered. */
+        private fun showCrypto(prompt: CryptoPrompt) {
+            events += "launched:${prompt.requestId}"
+            val key = NotificationKeys.signature(prompt.requestId)
+            if (PromptOwnership.process.state(key) != PromptOwnership.State.ACTIVE) return
+            cryptoPrompts += prompt
+            val signed = cryptoSigner?.invoke(prompt.dataHash)
+            val result = mockk<Intent>()
+            every { result.action } returns CryptoSigningActivity.ACTION_CRYPTO_SIGNING_RESULT
+            every { result.getStringExtra(CryptoSigningActivity.EXTRA_REQUEST_ID) } returns prompt.requestId
+            every { result.getBooleanExtra(CryptoSigningActivity.EXTRA_SUCCESS, false) } returns (signed != null)
+            every {
+                result.getStringExtra(CryptoSigningActivity.EXTRA_SIGNATURE)
+            } returns signed?.let { Base64.getEncoder().encodeToString(it) }
+            every {
+                result.getIntExtra(CryptoSigningActivity.EXTRA_ERROR_CODE, any())
+            } returns BiometricPrompt.ERROR_USER_CANCELED
+            every {
+                result.getStringExtra(CryptoSigningActivity.EXTRA_ERROR_MESSAGE)
+            } returns "Authentication cancelled"
+            receivers.toList().forEach { it.onReceive(context, result) }
         }
 
         /** A result broadcast for [requestId], whether or not its prompt is up. */
@@ -644,6 +706,104 @@ class CosignRequestHandlerTest {
         assertError(ErrorCodes.OPERATION_DENIED, response.getCompleted())
         assertNothingSigned()
     }
+
+    @Test
+    fun `a replacement holding the key's lock as the approval lands is refused, never raced`() = runTest {
+        // A key mutation (creation, deletion) holds the key's lock when the
+        // owner approves: the co-sign waits for it, then sees what it left.
+        val held = CompletableDeferred<Unit>()
+        val done = CompletableDeferred<Unit>()
+        val mutation = launch {
+            KeyIdReservations.process.withKeyLock("key:${signingKey.keyId}") {
+                held.complete(Unit)
+                done.await()
+                every { keystoreManager.getPublicKeyDER(signingKey.keyId) } returns ByteArray(91) { 9 }
+            }
+        }
+        held.await()
+        val response = async { handler().handleRequest(request()) }
+        runCurrent()
+        assertTrue("the owner approved", screen.shown.isNotEmpty())
+        assertFalse("the co-sign waits for the key's lock", response.isCompleted)
+        assertNothingSigned()
+
+        done.complete(Unit)
+        mutation.join()
+        runCurrent()
+        assertError(ErrorCodes.OPERATION_DENIED, response.getCompleted())
+        assertNothingSigned()
+    }
+
+    private val approvedPair = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+    private val perOperationKey = key("cosign-per-op", "signing").copy(authDurationSeconds = 0)
+
+    private fun ecSign(pair: java.security.KeyPair, payload: ByteArray): ByteArray =
+        java.security.Signature.getInstance("SHA256withECDSA").run {
+            initSign(pair.private)
+            update(payload)
+            sign()
+        }
+
+    /** A per-operation key whose keystore public key is [approvedPair]'s. */
+    private fun perOperationRequest(): Request {
+        coEvery { keyDao.getByKeyId(perOperationKey.keyId) } returns perOperationKey
+        every { keystoreManager.getPublicKeyDER(perOperationKey.keyId) } returns approvedPair.public.encoded
+        return request(keyId = perOperationKey.keyId)
+    }
+
+    @Test
+    fun `a per-operation key co-signs in a crypto-bound prompt over exactly the requested hash`() = runTest {
+        screen.cryptoSigner = { ecSign(approvedPair, it) }
+
+        val response = handler().handleRequest(perOperationRequest())
+
+        assertNull(response.error)
+        val prompt = screen.cryptoPrompts.single()
+        assertTrue("the prompt signs the requested hash", prompt.dataHash.contentEquals(hexBytes(hashHex)))
+        assertEquals(KeystoreManager.generalKeyAlias(perOperationKey.keyId), prompt.keyAlias)
+        assertEquals("SHA256withECDSA", prompt.signatureAlgorithm)
+        val signed = Base64.getDecoder().decode((response.result as JSONObject).getString("signature"))
+        val verifier = java.security.Signature.getInstance("SHA256withECDSA").apply {
+            initVerify(approvedPair.public)
+            update(hexBytes(hashHex))
+        }
+        assertTrue("the answer is the prompt's signature over the hash", verifier.verify(signed))
+        assertTrue("no bare approval prompt", screen.subtitles.isEmpty())
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `an approval signature over another payload co-signs nothing`() = runTest {
+        // The prompt's signature covers some other digest: not this co-sign's.
+        val other = ByteArray(32) { 0x55 }
+        screen.cryptoSigner = { ecSign(approvedPair, other) }
+
+        val response = handler().handleRequest(perOperationRequest())
+
+        assertError(ErrorCodes.OPERATION_DENIED, response)
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `a per-operation key replaced under its alias before its prompt signs co-signs nothing`() = runTest {
+        val replacement = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        screen.cryptoSigner = { ecSign(replacement, it) }
+
+        val response = handler().handleRequest(perOperationRequest())
+
+        assertError(ErrorCodes.OPERATION_DENIED, response)
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `a cancelled crypto-bound prompt answers BIOMETRIC_FAILED`() = runTest {
+        screen.cryptoSigner = null
+
+        assertError(ErrorCodes.BIOMETRIC_FAILED, handler().handleRequest(perOperationRequest()))
+        assertNothingSigned()
+    }
+
+    private fun hexBytes(hex: String) = ByteArray(hex.length / 2) { hex.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
 
     @Test
     fun `a signing key re-policied while its approval waits signs nothing`() = runTest {
