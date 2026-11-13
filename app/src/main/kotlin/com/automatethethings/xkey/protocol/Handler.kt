@@ -3145,9 +3145,12 @@ class RequestHandler(
 
             val type = credential.optString("type", "totp").lowercase()
             val issuer = credential.optString("issuer", null)
-            // The same percent-encoded otpauth:// URI SyncEngine.mergeOath
-            // imports (#152); importFromUri handles the Base32 decoding.
-            val uri = com.automatethethings.xkey.sync.otpauthUri(
+            // The issuer and account arrive as separate fields: the structured
+            // import keeps a ':' inside either where it is (#152), as
+            // SyncEngine.mergeOath does. The id it returns is the one the
+            // credential is stored under: the `name` local.oathList reports
+            // and the credential_id oathGenerate/oathRemove accept.
+            val credentialId = oathRepository.importStructured(
                 type = type,
                 issuer = issuer,
                 accountName = accountName,
@@ -3155,11 +3158,8 @@ class RequestHandler(
                 algorithm = credential.optString("algorithm", "SHA1"),
                 digits = credential.optInt("digits", 6),
                 period = credential.optInt("period", 30),
-                counter = if (type == "hotp") credential.optLong("counter", 0) else null
+                counter = credential.optLong("counter", 0)
             )
-            // The id the credential is stored under: the `name` local.oathList
-            // reports and the credential_id oathGenerate/oathRemove accept.
-            val credentialId = oathRepository.importFromUri(uri)
 
             AuditLogger.logOathCredentialCreated(name, issuer, accountName, type.uppercase())
 
