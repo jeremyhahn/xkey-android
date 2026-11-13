@@ -392,12 +392,19 @@ class CosignRequestHandlerTest {
 
     @Test
     fun `an approved prompt signs the hash with the named key`() = runTest {
+        val alias = KeystoreManager.generalKeyAlias(signingKey.keyId)
+        servedByRealKeystore(mutableMapOf(alias to approvedPair))
+
         val response = handler().handleRequest(request())
 
         assertNull(response.error)
         assertNotNull(response.result)
         val result = response.result as JSONObject
-        assertEquals(Base64.getEncoder().encodeToString(signature), result.getString("signature"))
+        val returned = Base64.getDecoder().decode(result.getString("signature"))
+        assertTrue(
+            "the signature verifies under the approved public key",
+            verifies(approvedPair.public, hashBytes(), returned)
+        )
         assertEquals("ES256", result.getString("algorithm"))
         assertEquals(signingKey.keyId, result.getString("signerName"))
         assertTrue(result.getString("keyFingerprint").isNotEmpty())
@@ -407,7 +414,12 @@ class CosignRequestHandlerTest {
             subtitle.contains(hashHex.take(8))
         )
         coVerify(exactly = 1) {
-            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), "SHA256withECDSA")
+            keystoreManager.signApproved(
+                alias,
+                match { it.contentEquals(approvedPair.public.encoded) },
+                match { it.contentEquals(hashBytes()) },
+                "SHA256withECDSA"
+            )
         }
     }
 
@@ -750,6 +762,72 @@ class CosignRequestHandlerTest {
         mockkStatic(java.security.KeyStore::class)
         every { java.security.KeyStore.getInstance("AndroidKeyStore") } returns store
         return KeystoreManager(mockk(relaxed = true))
+    }
+
+    /** [keystoreManager] reads and signs through a real one over [entries]. */
+    private fun servedByRealKeystore(entries: MutableMap<String, java.security.KeyPair>): KeystoreManager {
+        val real = realKeystoreOver(entries)
+        every { keystoreManager.publicKeyDERAt(any()) } answers { real.publicKeyDERAt(firstArg()) }
+        every { keystoreManager.getPublicKeyDER(any()) } answers { real.getPublicKeyDER(firstArg()) }
+        coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } coAnswers {
+            real.signApproved(arg(0), arg(1), arg(2), arg(3))
+        }
+        return real
+    }
+
+    private fun hashBytes(): ByteArray = hashHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
+    private fun verifies(key: java.security.PublicKey, data: ByteArray, signed: ByteArray): Boolean =
+        runCatching {
+            java.security.Signature.getInstance("SHA256withECDSA").run {
+                initVerify(key)
+                update(data)
+                verify(signed)
+            }
+        }.getOrDefault(false)
+
+    @Test
+    fun `a key replaced while the signer signs never signs with the replacement`() = runTest {
+        val replacement = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val alias = KeystoreManager.generalKeyAlias(signingKey.keyId)
+        val entries: MutableMap<String, java.security.KeyPair> =
+            java.util.concurrent.ConcurrentHashMap(mapOf(alias to approvedPair))
+        val real = servedByRealKeystore(entries)
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just Runs
+        val store = java.security.KeyStore.getInstance("AndroidKeyStore")
+        // The stand-in collapses a regeneration's delete and its new key into
+        // the one keystore write the replacing thread makes under the alias.
+        every { store.deleteEntry(alias) } answers { entries[alias] = replacement }
+        var replacer: Thread? = null
+        every { store.getKey(alias, any()) } answers {
+            // The signer has just compared the approved key: another thread
+            // replaces the key under its alias before the private key is read.
+            if (replacer == null) {
+                replacer = kotlin.concurrent.thread { real.deleteGeneralKey(signingKey.keyId) }
+                replacer!!.join(1_000)
+            }
+            entries[alias]?.private
+        }
+
+        val response = handler().handleRequest(request())
+        replacer?.join(5_000)
+
+        assertNotNull("the replacement ran during the signature", replacer)
+        assertEquals("the replacement landed", replacement, entries[alias])
+        val result = response.result as? JSONObject
+        if (response.error == null) {
+            val returned = Base64.getDecoder().decode(checkNotNull(result).getString("signature"))
+            assertFalse(
+                "the replacement key signed an approval it never had",
+                verifies(replacement.public, hashBytes(), returned)
+            )
+            assertTrue(
+                "the signature is the approved key's",
+                verifies(approvedPair.public, hashBytes(), returned)
+            )
+        } else {
+            assertError(ErrorCodes.OPERATION_DENIED, response)
+        }
     }
 
     @Test

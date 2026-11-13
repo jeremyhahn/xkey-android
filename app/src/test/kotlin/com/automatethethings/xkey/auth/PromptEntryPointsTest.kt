@@ -286,6 +286,39 @@ class PromptEntryPointsTest {
     }
 
     /**
+     * No key can be replaced between `signApproved`'s check and its signature:
+     * it compares, reads and signs inside `withAliasGate(alias)`, and every
+     * keystore write that can land under a signing alias (a delete or a key
+     * generation, in `KeystoreManager` and `FileEncryptor`, which files its
+     * ephemeral keys under `xkey_key_`) takes the same gate for its alias.
+     * A write outside the gate is a bypass.
+     */
+    @Test
+    fun everySigningAliasWriteTakesTheSignersGate() {
+        val strip = { text: String ->
+            text.lines().filterNot { line ->
+                line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+            }.joinToString("\n")
+        }
+        val write = Regex("""keyStore\.deleteEntry\(|\.generateKeyPair\(\)|\.generateKey\(\)""")
+        val ungated = listOf("crypto/KeystoreManager.kt", "crypto/FileEncryptor.kt").flatMap { file ->
+            strip(sourceRoot.resolve(file).readText()).lines()
+                .filter { write.containsMatchIn(it) && "withAliasGate(" !in it }
+                .map { "$file: ${it.trim()}" }
+        }
+        assertTrue("a keystore write outside the signer's alias gate: $ungated", ungated.isEmpty())
+
+        val signer = strip(sourceRoot.resolve("crypto/KeystoreManager.kt").readText())
+            .substringAfter("suspend fun signApproved(", "").substringBefore("\n    }")
+        val gate = signer.indexOf("withAliasGate(alias)")
+        assertTrue(
+            "signApproved checks or signs outside its alias gate",
+            gate in 0 until signer.indexOf("publicKeyDERAt(alias)") &&
+                gate < signer.indexOf("signature.sign()")
+        )
+    }
+
+    /**
      * A request withdrawn with its prompt on screen (a co-sign's timeout, a
      * cancelled caller) has that prompt taken down before the queue starts
      * the next one: every owner's withdrawal (`prompts.end`) in the launcher
