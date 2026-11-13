@@ -112,17 +112,31 @@ that ends by itself, with or without the broadcast, and a refused open
 `USB_ACCESSORY_ATTACHED` builds and serves a new `UsbAccessoryServer` without
 a service restart.
 
-Each opened connection sets its own `usb:<uuid>` session id on the shared
-`RequestHandler`. `SessionAuthManager` treats a new session id as a new
-session, so a `PER_SESSION` biometric approval given before a detach is not
-reused after the reattach: the next protected request prompts again.
+Each opened accessory gets an immutable `usb:<uuid>` connection id, which
+`UsbAccessoryServer` passes to `StreamPairingSession.serve`. Every request on
+that connection runs in `RequestHandler.servedConnection(..., connectionId)`,
+and `SessionAuthManager` records and checks a `PER_SESSION` biometric approval
+against the connection id the request carries, never against handler-wide
+state. A reattach opens a new connection with a new id, so an approval given
+before a detach is not reused after it: the next protected request prompts
+again. BLE (`ble:`) and TCP (`tcp:`) connections carry their own ids, so an
+approval on one transport never authenticates another.
 
-The detached session's `StreamPairingSession` teardown clears the peer
-identity on the shared `RequestHandler`
-(`setConnectedDevicePublicKeyHex(null)`). The slot waits for that session to
-end before it opens the replacement, so the clear cannot remove the identity
-the new session sets. If the old session has not ended after 5 s the slot logs
-a warning and opens anyway.
+The shared `RequestHandler` holds one connected peer identity, set by the
+session that set it (`setConnectedDevicePublicKeyHex(key, owner)`). The
+detached session's `StreamPairingSession` teardown clears it only through
+`clearConnectedDevicePublicKeyHex(owner)`, which does nothing once another
+session has set its own identity. The slot also waits (up to 5 s, then logs a
+warning and opens anyway) for the old session to end before it opens the
+replacement; a teardown that ends later still leaves the new identity in
+place.
+
+`UsbAccessoryServerSlot` is the one place a USB server is published and
+observed. `clear()` (service shutdown) advances the slot's generation, so an
+attach still waiting for the old teardown publishes nothing once it resumes.
+The service follows `UsbAccessoryServerSlot.states`, the state of whichever
+server the slot currently holds, with one observer for its lifetime, so a
+late attach cannot replace the observer of the server that holds the slot.
 
 ```mermaid
 sequenceDiagram
