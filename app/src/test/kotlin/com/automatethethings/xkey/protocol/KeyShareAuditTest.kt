@@ -18,6 +18,7 @@ package com.automatethethings.xkey.protocol
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogEntity
@@ -88,6 +89,7 @@ class KeyShareAuditTest {
     private lateinit var contactDao: ContactDao
     private lateinit var keystoreManager: KeystoreManager
     private lateinit var pairedDevices: PairedDeviceRepository
+    private lateinit var context: Context
     private lateinit var grants: KeySharingPolicyDao
     private lateinit var handler: RequestHandler
     private val entries = mutableListOf<AuditLogEntity>()
@@ -144,7 +146,7 @@ class KeyShareAuditTest {
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
-        val context = mockk<Context>(relaxed = true)
+        context = mockk(relaxed = true)
         every { context.filesDir } returns tmp.root
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns
             mockk<KeyguardManager>(relaxed = true)
@@ -271,6 +273,32 @@ class KeyShareAuditTest {
         val entry = single(AuditOperationType.ENCRYPTION_REQUEST)
         assertEquals(PEER, entry.deviceId)
         assertNull(entry.deviceName)
+    }
+
+    /**
+     * A paired-device store that cannot be read (encrypted prefs throw) is
+     * not a peer with no record: the phone cannot tell whether the peer's
+     * settings require a current attestation, so key use and key
+     * attestation are refused rather than let through.
+     */
+    @Test
+    fun anUnreadableStoreRefusesKeyUseAndKeyAttestation() = runTest {
+        val unreadable = mockk<SharedPreferences>(relaxed = true)
+        every { unreadable.getString(any(), any()) } throws SecurityException("keystore unavailable")
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystoreManager,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = PairedDeviceRepository(unreadable)
+        )
+        coEvery { keystoreManager.symmetricEncrypt(KEY_ID, any(), any()) } returns ByteArray(16)
+
+        val keyUse = Response.fromJson(served(keyUse(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, "plaintext")))
+        assertEquals(ErrorCodes.DEVICE_ATTESTATION_REQUIRED, keyUse.error?.code)
+
+        val attest = Request(id = 5, method = "local.attestKey", params = JSONObject().put("keyId", KEY_ID)).toJson()
+        assertEquals(ErrorCodes.DEVICE_ATTESTATION_REQUIRED, Response.fromJson(served(attest)).error?.code)
     }
 
     @Test
