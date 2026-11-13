@@ -450,14 +450,48 @@ class ProtocolIntegrationTest {
         verifier.update(data)
         assertTrue("PIV signature must verify", verifier.verify(unb64(signed.getString("signature"))))
 
-        // Import a real X.509 certificate (Keystore self-signed) and read it back.
-        val certDer = generateSelfSignedCertDer("itest-piv-cert-$runId")
+        // Import the slot key's own certificate (#173: a certificate must be
+        // for the slot's key) and read it back.
+        val certDer = slotCertificateDer(slotId)
         client.call(
             "local.pivImportCert",
             JSONObject().put("slotId", slotId).put("certificate", b64(certDer))
         )
         val fetched = client.call("local.pivGetCert", JSONObject().put("slotId", slotId))
         assertArrayEquals(certDer, unb64(fetched.getString("certificate")))
+    }
+
+    /**
+     * A certificate for another key is refused with INVALID_PARAMS and the
+     * slot keeps the certificate it had (#173).
+     */
+    @Test
+    fun pivImportRefusesACertificateForAnotherKey() {
+        val slotId = "9a"
+        client.call(
+            "local.pivGenerateKey",
+            JSONObject().put("slotId", slotId).put("algorithm", "ES256")
+        )
+        val before = unb64(
+            client.call("local.pivGetCert", JSONObject().put("slotId", slotId)).getString("certificate")
+        )
+
+        val err = client.callExpectingError(
+            "local.pivImportCert",
+            JSONObject().put("slotId", slotId)
+                .put("certificate", b64(generateSelfSignedCertDer("itest-piv-other-$runId")))
+        )
+
+        assertNotNull("a certificate for another key must be refused", err)
+        assertEquals(ErrorCodes.INVALID_PARAMS, err!!.code)
+        val after = client.call("local.pivGetCert", JSONObject().put("slotId", slotId))
+        assertArrayEquals(before, unb64(after.getString("certificate")))
+    }
+
+    /** The self-signed certificate the Keystore holds for PIV slot [slotId]'s key. */
+    private fun slotCertificateDer(slotId: String): ByteArray {
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        return ks.getCertificate("xkey_piv_${slotId.uppercase()}").encoded
     }
 
     /** Generates an AndroidKeyStore keypair and returns its self-signed cert DER. */
@@ -500,7 +534,7 @@ class ProtocolIntegrationTest {
         assertTrue("listSlots must emit has_certificate", entry.has("has_certificate"))
         assertTrue("listSlots must emit public_key_der", entry.has("public_key_der"))
 
-        val certDer = generateSelfSignedCertDer("itest-piv-go-$runId")
+        val certDer = slotCertificateDer(slotId)
         client.call(
             "local.pivImportCert",
             JSONObject().put("slot", slotId).put("certificate_der", b64(certDer))

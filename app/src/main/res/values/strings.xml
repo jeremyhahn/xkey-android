@@ -1078,6 +1078,7 @@
     <string name="verified_viewer_no_signatures">No signatures found in this file</string>
     <string name="verified_viewer_verification_title">Signature Verification</string>
     <string name="verified_viewer_signers">Signers (%1$d)</string>
+    <string name="verified_viewer_claims">Claims: %1$s</string>
     <string name="verified_viewer_signed_at">Signed: %1$s</string>
 
     <!-- Audit Log - New Operation Types -->
