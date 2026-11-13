@@ -25,6 +25,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.audit.AuditOperationType
 import com.automatethethings.xkey.crypto.DecryptResult
 import com.automatethethings.xkey.crypto.HmacResult
+import com.automatethethings.xkey.crypto.KeystoreCapabilities
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
@@ -118,6 +119,11 @@ class HmacEcdhAuditTest {
         every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
+
+        // local.ecdh runs only from API 31 (#206); Build.VERSION.SDK_INT
+        // reads as 0 on the JVM, so stand in a device that has it.
+        mockkObject(KeystoreCapabilities)
+        every { KeystoreCapabilities.supportsEcdh(any()) } returns true
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
@@ -415,7 +421,7 @@ class HmacEcdhAuditTest {
         entry.details?.let { JSONObject(it).optString("algorithm", "").ifEmpty { null } }
 
     private suspend fun <T> servedBy(peer: String, block: suspend () -> T): T =
-        withContext(RequestHandler.servedConnection(binding, peer)) { block() }
+        withContext(RequestHandler.servedConnection(binding, peer, "test:connection")) { block() }
 
     private fun device(name: String): PairedDeviceData = mockk(relaxed = true) {
         every { deviceName } returns name
