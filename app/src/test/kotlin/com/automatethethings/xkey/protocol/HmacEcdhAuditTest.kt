@@ -26,6 +26,8 @@ import com.automatethethings.xkey.audit.AuditOperationType
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.settings.PairedDeviceData
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coEvery
 import io.mockk.every
@@ -44,6 +46,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -133,6 +136,12 @@ class HmacEcdhAuditTest {
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
 
+        // Two paired desktops; neither requires attestation for key use.
+        val pairedDevices = mockk<PairedDeviceRepository>()
+        every { pairedDevices.getDevice(any()) } returns null
+        every { pairedDevices.getDevice(PEER_A) } returns device("Desktop A")
+        every { pairedDevices.getDevice(PEER_B) } returns device("Desktop B")
+
         keystore = mockk(relaxed = true)
         coEvery { keystore.computeHMAC("hw-hmac", any()) } returns keystoreMac
         coEvery { keystore.performECDH("hw-ecdh", any()) } returns sharedSecret
@@ -142,7 +151,7 @@ class HmacEcdhAuditTest {
             keystoreManager = keystore,
             biometricLauncher = null,
             sessionAuthManager = null,
-            pairedDeviceRepository = null,
+            pairedDeviceRepository = pairedDevices,
             pinManager = mockk(relaxed = true)
         )
     }
@@ -214,6 +223,42 @@ class HmacEcdhAuditTest {
         )
     }
 
+    @Test
+    fun `entries name the caller of the session, not the transport connected last`() = runTest {
+        // Desktop A is served over BLE; desktop B then confirms over USB, which
+        // installs B as the handler-wide connected device.
+        handler.setConnectedDevicePublicKeyHex(PEER_B)
+
+        servedBy(PEER_A) {
+            call(MethodNames.LOCAL_HMAC, """{"keyId":"hw-hmac","data":"$data"}""")
+            call(MethodNames.LOCAL_ECDH, """{"keyId":"hw-ecdh","peerPublicKey":"$peerKey"}""")
+        }
+
+        // Another transport disconnects, clearing the handler-wide device.
+        handler.setSessionId(null)
+        servedBy(PEER_A) {
+            call(MethodNames.LOCAL_HMAC, """{"keyId":"sw-hmac","data":"$data"}""")
+        }
+
+        val entries = inserted.filter {
+            it.operationType == AuditOperationType.HMAC_REQUEST ||
+                it.operationType == AuditOperationType.KEY_DERIVATION_REQUEST
+        }
+        assertEquals(3, entries.size)
+        entries.forEach { entry ->
+            assertEquals("${entry.operationType} ${entry.keyId}", PEER_A, entry.deviceId)
+            assertEquals("${entry.operationType} ${entry.keyId}", "Desktop A", entry.deviceName)
+        }
+    }
+
+    private suspend fun <T> servedBy(peer: String, block: suspend () -> T): T =
+        withContext(RequestHandler.servedConnection(binding, peer)) { block() }
+
+    private fun device(name: String): PairedDeviceData = mockk(relaxed = true) {
+        every { deviceName } returns name
+        every { requireAttestationForKeyUse } returns false
+    }
+
     /** No audit field may carry the output, the input data or the peer key. */
     private fun assertNoSecrets(output: String) {
         val forbidden = listOf(
@@ -239,5 +284,13 @@ class HmacEcdhAuditTest {
     private suspend fun call(method: String, params: String): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
         return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
+    }
+
+    private companion object {
+        const val PEER_A = "aa01"
+        const val PEER_B = "bb02"
+        val binding = SessionBindingProvider {
+            SessionBinding(ByteArray(32) { 3 }, ByteArray(32) { 4 }, ByteArray(0))
+        }
     }
 }
