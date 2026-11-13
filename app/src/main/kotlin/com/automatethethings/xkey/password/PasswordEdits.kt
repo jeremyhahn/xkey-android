@@ -15,6 +15,8 @@
 package com.automatethethings.xkey.password
 
 import com.automatethethings.xkey.audit.AuditLogger
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /**
  * Password adds and deletes made on the phone, each written to the audit log
@@ -22,6 +24,10 @@ import com.automatethethings.xkey.audit.AuditLogger
  *
  * The audit lives here and not in [PasswordRepository] because the desktop
  * sync path writes through the repository too and is audited on its own.
+ *
+ * Every write goes through [writeThenAudit], so once a write has committed
+ * its audit entry is appended even if the caller's scope is cancelled (the
+ * activity finishing, for example).
  */
 class PasswordEdits(private val repository: PasswordRepository) {
 
@@ -30,17 +36,35 @@ class PasswordEdits(private val repository: PasswordRepository) {
      * [PasswordEntryTooLargeException]) throws to the caller and is not
      * audited. Returns the stable password ID.
      */
-    suspend fun add(record: PasswordRecord): String {
-        val passwordId = repository.upsert(record)
-        AuditLogger.logPasswordCreated(passwordId, displayName(record))
-        return passwordId
-    }
+    suspend fun add(record: PasswordRecord): String =
+        writeThenAudit(
+            write = { repository.upsert(record) },
+            audit = { passwordId -> AuditLogger.logPasswordCreated(passwordId, displayName(record)) }
+        )
 
     /** Deletes [record]; audits the delete only if an entry was removed. */
-    suspend fun delete(record: PasswordRecord): Boolean {
-        val deleted = repository.delete(record.passwordId)
-        if (deleted) AuditLogger.logPasswordDeleted(record.passwordId, displayName(record))
-        return deleted
+    suspend fun delete(record: PasswordRecord): Boolean =
+        writeThenAudit(
+            write = { repository.delete(record.passwordId) },
+            audit = { deleted ->
+                if (deleted) AuditLogger.logPasswordDeleted(record.passwordId, displayName(record))
+            }
+        )
+
+    /**
+     * The one path for a vault write and its audit entry. Both run under
+     * [NonCancellable]: a cancellation cannot land between a committed write
+     * and its audit. A write that throws is not audited and the exception
+     * reaches the caller; a pending cancellation is seen at the caller's next
+     * suspension point.
+     */
+    private suspend fun <T> writeThenAudit(
+        write: suspend () -> T,
+        audit: (T) -> Unit
+    ): T = withContext(NonCancellable) {
+        val result = write()
+        audit(result)
+        result
     }
 
     private fun displayName(record: PasswordRecord): String =
