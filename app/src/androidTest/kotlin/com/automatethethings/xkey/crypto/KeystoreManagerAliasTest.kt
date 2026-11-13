@@ -17,6 +17,7 @@ package com.automatethethings.xkey.crypto
 import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -38,8 +39,10 @@ import org.junit.runner.RunWith
 import java.io.ByteArrayInputStream
 import java.io.DataInputStream
 import java.security.KeyFactory
+import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.Signature
+import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 import javax.crypto.KeyGenerator
@@ -427,15 +430,62 @@ class KeystoreManagerAliasTest {
         )
     }
 
+    /**
+     * A credential reports the backing its own KeyInfo gives. The StrongBox
+     * feature flag is no proof of this key's backing: generation falls back
+     * to the TEE when StrongBox refuses the key (docs/SPEC.md).
+     */
     @Test
-    fun reportsStrongBoxBackingConsistentlyWithHardwareAvailability() {
+    fun aCredentialReportsTheBackingItsOwnKeyInfoGives() {
         val credentialId = credentialKey("strongbox")
 
-        assertEquals(
-            keystoreManager.isStrongBoxAvailable(),
-            keystoreManager.isKeyStrongBoxBacked(credentialId)
-        )
+        val level = keystoreManager.credentialSecurityLevel(credentialId)
+        assertNotNull(level)
+        assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(credentialId))
+        if (!keystoreManager.isStrongBoxAvailable()) {
+            assertFalse(keystoreManager.isKeyStrongBoxBacked(credentialId))
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val inStrongBox = keyInfoOf("xkey_credential_$credentialId").securityLevel ==
+                KeyProperties.SECURITY_LEVEL_STRONGBOX
+            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(credentialId))
+        }
         assertFalse(keystoreManager.isKeyStrongBoxBacked("missing-${System.nanoTime()}"))
+    }
+
+    /**
+     * The key a StrongBox fallback leaves behind: a TEE key at the credential
+     * alias, generated as the fallback path does, without the StrongBox spec.
+     * It is never StrongBox, even on a device that has StrongBox.
+     */
+    @Test
+    fun aCredentialThatFellBackToTheTeeIsNotReportedAsStrongBox() {
+        val credentialId = newCredentialId("strongbox-fallback")
+        val alias = "xkey_credential_$credentialId"
+        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore").apply {
+            initialize(
+                KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setUserAuthenticationRequired(false)
+                    .build()
+            )
+            generateKeyPair()
+        }
+
+        val level = keystoreManager.credentialSecurityLevel(credentialId)
+        assertNotNull(level)
+        assertFalse(level == KeySecurityLevel.STRONGBOX)
+        assertFalse(keystoreManager.isKeyStrongBoxBacked(credentialId))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            keyInfoOf(alias).securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
+        ) {
+            assertEquals(KeySecurityLevel.TEE, level)
+        }
+    }
+
+    private fun keyInfoOf(alias: String): KeyInfo {
+        val key = keyStore.getKey(alias, null)
+        return KeyFactory.getInstance(key.algorithm, "AndroidKeyStore").getKeySpec(key, KeyInfo::class.java)
     }
 
     // -------------------------------------------------- credential lifecycle
