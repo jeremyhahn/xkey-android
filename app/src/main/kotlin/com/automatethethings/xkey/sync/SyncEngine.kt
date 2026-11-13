@@ -150,7 +150,7 @@ class SyncEngine(
                 period = obj.optInt("period", 30),
                 counter = if (type == "hotp") obj.optLong("counter", 0) else null
             )
-            oathRepo.importFromUri(uri)
+            oathRepo.importFromUri(uri, structuredLabel = true)
             if (existed) updated++ else added++
         }
         return ItemCounts(added, updated, skipped)
