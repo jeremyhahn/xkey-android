@@ -38,6 +38,7 @@ import com.automatethethings.xkey.credential.NoCredentialsFoundException
 import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import kotlinx.coroutines.CancellationException
@@ -69,6 +70,7 @@ class GetCredentialHandler(
     private val credentialDao = database.credentialMetadataDao()
     private val keyDao = database.keyDao()
     private val signCounter = PasskeySignCounter(credentialDao, keyDao)
+    private val keyPolicyStore = KeyPolicyStore.of(database)
 
     /**
      * Handle the begin phase of credential assertion.
@@ -170,6 +172,13 @@ class GetCredentialHandler(
 
         val credential = credentialDao.getByCredentialId(credentialId)
             ?: throw NoCredentialsFoundException(credentialId)
+        // The store's deleted-key gate (#193 r12): a passkey whose delete
+        // reported success signs nothing, though its material is still owed.
+        try {
+            keyPolicyStore.requireUsable(credentialId)
+        } catch (e: KeyPolicyStore.KeyDeletedException) {
+            throw NoCredentialsFoundException(credentialId)
+        }
         Log.d(TAG, "Found credential: rpId=${credential.rpId}, signCount=${credential.signCount}")
 
         // Log available credential options for debugging

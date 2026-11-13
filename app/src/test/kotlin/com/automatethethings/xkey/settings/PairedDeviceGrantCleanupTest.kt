@@ -23,6 +23,7 @@ import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.storage.FakeKeyPolicyTables
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -448,13 +449,15 @@ class PairedDeviceGrantCleanupTest {
         every { Log.e(any(), any<String>()) } returns 0
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
-        coEvery { dao.isKeySharedWithPeer(any(), any()) } answers {
+        coEvery { dao.isPeerGranted(any(), any()) } answers {
             val keyId = firstArg<String>()
             val peer = secondArg<String>()
             table.any { it.keyId == keyId && it.peerPublicKeyHex == peer }
         }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keySharingPolicyDao() } returns dao
+        // No policy row: the stored policy decides (#193).
+        every { database.keyPolicyDao() } returns FakeKeyPolicyTables()
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         val context = mockk<Context>(relaxed = true)
@@ -769,7 +772,7 @@ class PairedDeviceGrantCleanupTest {
         disk.failCommits = 1
         var wrote = false
 
-        assertFalse(paired.writeGrant(PEER_C) { wrote = true; table += KeySharingPolicy("k-9", PEER_C) })
+        assertFalse(paired.writeGrant(PEER_C, paired.pairingGeneration(PEER_C)!!) { wrote = true; table += KeySharingPolicy("k-9", PEER_C) })
 
         assertFalse(wrote)
         assertTrue(grantsOf(PEER_C).isEmpty())
@@ -778,5 +781,52 @@ class PairedDeviceGrantCleanupTest {
         after.recoverInterruptedGrantWrites()
         assertFalse(after.isRevocationPending(PEER_C))
         assertTrue(after.pendingRevocations().isEmpty())
+    }
+
+    /**
+     * #193: a grant is bound to the pairing the user saw when they tapped. A
+     * that was unpaired and paired again since then is refused, though the new
+     * pairing is current and has no revocation pending.
+     */
+    @Test
+    fun writeGrantRefusesAnotherPairing() = runTest {
+        val tapped = repo.pairingGeneration(PEER_A)!!
+        repo.removeDevice(PEER_A)
+        repo.addDevice(PEER_A, "desktop-a")
+        assertNotEquals(tapped, repo.pairingGeneration(PEER_A))
+        assertFalse(repo.isRevocationPending(PEER_A))
+        var wrote = false
+
+        assertFalse(repo.writeGrant(PEER_A, tapped) { wrote = true; table += KeySharingPolicy("k-9", PEER_A) })
+
+        assertFalse(wrote)
+        assertTrue(grantsOf(PEER_A).isEmpty())
+        assertFalse(repo.isRevocationPending(PEER_A))
+        assertTrue(prefs.getStringSet("grant_writes", null).isNullOrEmpty())
+    }
+
+    /** The compatibility overload binds the grant to the current pairing and answers as the three-argument one. */
+    @Test
+    fun theCompatibilityWriteGrantWritesForAPairedKey() = runTest {
+        var wrote = false
+
+        val result = repo.writeGrant(PEER_A) { wrote = true; table += KeySharingPolicy("k-9", PEER_A) }
+
+        assertTrue(result)
+        assertTrue(wrote)
+        assertEquals(listOf("k-1", "k-2", "k-9"), grantsOf(PEER_A).map { it.keyId }.sorted())
+        assertEquals(result, repo.writeGrant(PEER_A, repo.pairingGeneration(PEER_A)!!) {})
+    }
+
+    /** An unknown key has no pairing: the compatibility overload refuses without running the write. */
+    @Test
+    fun theCompatibilityWriteGrantRefusesAnUnknownKey() = runTest {
+        var wrote = false
+
+        assertFalse(repo.writeGrant(PEER_C) { wrote = true; table += KeySharingPolicy("k-9", PEER_C) })
+
+        assertFalse(wrote)
+        assertTrue(grantsOf(PEER_C).isEmpty())
+        assertTrue(prefs.getStringSet("grant_writes", null).isNullOrEmpty())
     }
 }

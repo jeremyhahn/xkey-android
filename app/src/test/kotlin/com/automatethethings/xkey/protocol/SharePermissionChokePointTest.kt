@@ -43,6 +43,22 @@ class SharePermissionChokePointTest {
         sources.filterValues { call in it }.keys.map { it.substringAfterLast('/') }.toSet()
 
     @Test
+    fun onlySharePermissionDecidesOnAGrantRowOrAPendingWithdrawal() {
+        // #193: the enforced policy, the pending withdrawal and the grant row
+        // alone are read for a share only in SharePermission.
+        assertEquals(setOf("SharePermission.kt"), filesCalling(".isPeerGranted("))
+        assertEquals(
+            setOf("SharePermission.kt"),
+            filesCalling("isWithdrawalPending(") - "KeySharingPeers.kt"
+        )
+        assertTrue(
+            "the inbound handlers pass the policy store",
+            "SharePermission(keySharingPolicyDao, pairedDeviceRepository, keyPolicyStore)" in
+                sources.entries.first { it.key.endsWith("/Handler.kt") }.value
+        )
+    }
+
+    @Test
     fun onlySharePermissionReadsAPeerGrant() {
         assertEquals(
             "a share decision outside SharePermission reads key_sharing_policies",
@@ -79,7 +95,7 @@ class SharePermissionChokePointTest {
         val sheet = sources.getValue("com/automatethethings/xkey/ui/KeySharingBottomSheet.kt")
         assertTrue(
             "the key-sharing sheet builds SharePermission over the paired-device repository",
-            "SharePermission(keySharingPolicyDao, pairedDeviceRepository)" in sheet
+            "pairedDeviceRepository,\n            keyPolicyStore\n        )" in sheet
         )
     }
 }

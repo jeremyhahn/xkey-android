@@ -121,6 +121,10 @@ class QueuedApprovalRaceTest {
         }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No earlier delete under any id is owed.
+        val policies = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true)
+        coEvery { policies.deletion(any()) } returns null
+        every { database.keyPolicyDao() } returns policies
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 

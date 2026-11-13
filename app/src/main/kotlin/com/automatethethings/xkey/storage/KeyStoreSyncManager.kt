@@ -44,11 +44,15 @@ import javax.crypto.SecretKey
  * @param keystoreManager Manager for Android Keystore operations.
  * @param credentialDao DAO for the credential_metadata table.
  * @param keyDao DAO for the unified keys table.
+ * @param keyPolicyStore The store whose deletion tombstones the sync
+ *   honours ([KeyPolicyStore.insertDiscovered]): material whose delete is
+ *   still owed is not discovered.
  */
 class KeyStoreSyncManager(
     private val keystoreManager: KeystoreManager,
     private val credentialDao: CredentialMetadataDao,
-    private val keyDao: KeyDao
+    private val keyDao: KeyDao,
+    private val keyPolicyStore: KeyPolicyStore
 ) {
     companion object {
         private const val TAG = "KeyStoreSyncManager"
@@ -117,7 +121,10 @@ class KeyStoreSyncManager(
                 continue
             }
 
-            keyDao.insert(mapCredentialToKeyEntity(cred))
+            if (!track(mapCredentialToKeyEntity(cred))) {
+                skipped++
+                continue
+            }
             synced++
             Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
         }
@@ -126,6 +133,18 @@ class KeyStoreSyncManager(
                 "$skipped skipped with no Keystore key")
         return synced
     }
+
+    /**
+     * The sync's one key row insert (#193 r9, r10, r11): a key id whose row
+     * was deleted while its material delete is still owed (a tombstone) is
+     * never listed again, from a credential or from the Keystore, with
+     * default metadata; the replay deletes its material. The tombstone
+     * check and the insert are one step under the key's material lock
+     * ([KeyPolicyStore.insertDiscovered]), so a delete running meanwhile
+     * is never undone. Returns whether [entity] was inserted.
+     */
+    private suspend fun track(entity: KeyEntity): Boolean =
+        keyPolicyStore.insertDiscovered(entity.keyId) { keyDao.insert(entity) }
 
     /**
      * Discovers keys in Android Keystore that are not tracked in the keys table.
@@ -161,8 +180,7 @@ class KeyStoreSyncManager(
 
             if (!keyDao.exists(keyId)) {
                 val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
-                if (entity != null) {
-                    keyDao.insert(entity)
+                if (entity != null && track(entity)) {
                     discovered++
                     Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
                 }

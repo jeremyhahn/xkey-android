@@ -29,6 +29,7 @@ import com.automatethethings.xkey.ca.CertificateEntity
 import com.automatethethings.xkey.storage.dao.ContactDao
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.KeyPolicyDao
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
@@ -39,7 +40,10 @@ import com.automatethethings.xkey.piv.PivSlotEntity
 import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
+import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -68,6 +72,11 @@ import java.util.concurrent.atomic.AtomicReference
  * - v12: Added expires_at, shared and tenant_id columns to passwords table.
  * - v13: Added policy_revision to keys, and the trigger that only lets it
  *        move forward.
+ * - v14: Added `key_policies` table: one row per key holding its sharing
+ *        policy state, written only by [KeyPolicyStore] (#193).
+ * - v15: Added `key_deletions`: a tombstone per key row deleted before its
+ *        material is gone, with the material generation it owes, replayed
+ *        at start-up (#193).
  *
  * Usage:
  * ```kotlin
@@ -96,9 +105,11 @@ import java.util.concurrent.atomic.AtomicReference
         ContactEntity::class,
         OathCredentialEntity::class,
         PivSlotEntity::class,
-        PasswordEntity::class
+        PasswordEntity::class,
+        KeyPolicyEntity::class,
+        KeyDeletionEntity::class
     ],
-    version = 13,
+    version = 15,
     exportSchema = true
 )
 @TypeConverters(AuditOperationTypeConverter::class)
@@ -128,6 +139,12 @@ abstract class XKeyDatabase : RoomDatabase() {
      * SELECTED_PEERS.
      */
     abstract fun keySharingPolicyDao(): KeySharingPolicyDao
+
+    /**
+     * Get the DAO for a key's policy row and the writes [KeyPolicyStore]
+     * composes into its transactions. Use the store, not this DAO.
+     */
+    abstract fun keyPolicyDao(): KeyPolicyDao
 
     /**
      * Get the DAO for audit log operations.
@@ -623,6 +640,53 @@ abstract class XKeyDatabase : RoomDatabase() {
         }
 
         /**
+         * Migration from v13 to v14: every key gets its policy row (#193),
+         * bound to its key row and holding its stored policy, and a denial a
+         * failed narrowing recorded outside the database is moved into it.
+         * [denials] gives those records by key id, each "instance@POLICY"
+         * ([PairedDeviceRepository.legacyKeyPolicyDenials]). A record for
+         * another key row than the stored one is dropped; a PRIVATE denial
+         * also owes the key's grant clear. If the records cannot be read,
+         * none is dropped silently: every key is denied to every peer and
+         * owes its grant clear until its next policy write, and the records
+         * stay where they were. Recorded through the store's choke point,
+         * [KeyPolicyStore.owedAtMigration].
+         */
+        fun migration13To14(denials: () -> Map<String, String>): Migration = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `key_policies` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, " +
+                        "`sharing_policy` TEXT NOT NULL, `pending_policy` TEXT, `denial` TEXT, `clear_grants` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`key_id`), FOREIGN KEY(`key_instance`) REFERENCES `keys`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_key_policies_key_instance` ON `key_policies` (`key_instance`)")
+                db.execSQL(
+                    "INSERT INTO `key_policies` (`key_id`, `key_instance`, `sharing_policy`, `pending_policy`, `denial`, `clear_grants`) " +
+                        "SELECT `key_id`, `id`, `sharing_policy`, NULL, NULL, 0 FROM `keys`"
+                )
+                KeyPolicyStore.owedAtMigration(db, denials)
+            }
+        }
+
+        /** [migration13To14] with no recorded denials. */
+        val MIGRATION_13_14: Migration = migration13To14 { emptyMap() }
+
+        /**
+         * Migration from version 14 to 15: the deletion tombstones (#193). A
+         * key row deleted before its material is gone keeps one, so a failed
+         * or interrupted material delete is replayed instead of leaving
+         * material with no record.
+         */
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `key_deletions` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, " +
+                        "`source` TEXT, `generation` TEXT, PRIMARY KEY(`key_id`))"
+                )
+            }
+        }
+
+        /**
          * Get the singleton database instance.
          *
          * Uses double-checked locking with AtomicReference for thread-safe
@@ -643,12 +707,29 @@ abstract class XKeyDatabase : RoomDatabase() {
          * Build the database instance.
          */
         private fun buildDatabase(context: Context): XKeyDatabase {
+            // The 12 -> 13 migration moves the key policy denials recorded in
+            // the paired-device store; they are dropped there only once the
+            // migration has committed (onOpen runs after it).
+            val pairedDevices = lazy { PairedDeviceRepository(context.applicationContext) }
+            val moved = AtomicReference<Collection<String>>(emptyList())
             return Room.databaseBuilder(
                 context.applicationContext,
                 XKeyDatabase::class.java,
                 DATABASE_NAME
             )
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
+                .addMigrations(
+                    migration13To14 {
+                        pairedDevices.value.legacyKeyPolicyDenials().also { moved.set(it.keys) }
+                    },
+                    MIGRATION_14_15
+                )
+                .addCallback(object : Callback() {
+                    override fun onOpen(db: SupportSQLiteDatabase) {
+                        val keyIds = moved.getAndSet(emptyList())
+                        if (keyIds.isNotEmpty()) pairedDevices.value.dropLegacyKeyPolicyDenials(keyIds)
+                    }
+                })
                 .addCallback(CREATE_TRIGGERS)
                 .build()
         }

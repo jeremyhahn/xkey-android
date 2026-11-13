@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
@@ -717,7 +718,7 @@ class KeystoreManager(private val context: Context) {
     fun generalKeySecurityLevel(keyId: String): KeySecurityLevel? {
         val alias = buildGeneralAlias(keyId)
         if (keyStore.containsAlias(alias)) return aliasSecurityLevel(alias)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)) {
+        if (hasSoftwareEd25519Key(alias)) {
             return KeySecurityLevel.SOFTWARE
         }
         return null
@@ -1036,13 +1037,7 @@ class KeystoreManager(private val context: Context) {
 
         // Store private key in EncryptedSharedPreferences since Android Keystore
         // does not support Ed25519
-        val prefs = EncryptedSharedPreferences.create(
-            context,
-            ED25519_PREFS_NAME,
-            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
+        val prefs = checkNotNull(ed25519Prefs())
         prefs.edit()
             .putString(alias, Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP))
             .apply()
@@ -1055,36 +1050,11 @@ class KeystoreManager(private val context: Context) {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     fun getEd25519PrivateKey(alias: String): PrivateKey? {
-        val prefs = EncryptedSharedPreferences.create(
-            context,
-            ED25519_PREFS_NAME,
-            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
+        val prefs = ed25519Prefs() ?: return null
         val encoded = prefs.getString(alias, null) ?: return null
         val keyBytes = Base64.decode(encoded, Base64.NO_WRAP)
         val keyFactory = KeyFactory.getInstance("Ed25519")
         return keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
-    }
-
-    /**
-     * Check if an Ed25519 key exists in EncryptedSharedPreferences.
-     */
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-    private fun hasEd25519Key(alias: String): Boolean {
-        return try {
-            val prefs = EncryptedSharedPreferences.create(
-                context,
-                ED25519_PREFS_NAME,
-                MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-            prefs.contains(alias)
-        } catch (e: Exception) {
-            false
-        }
     }
 
     /**
@@ -1635,7 +1605,90 @@ class KeystoreManager(private val context: Context) {
 
     /** True if an Ed25519 software key is stored under [alias] (API 33+ only). */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)
+        try {
+            ed25519Prefs()?.contains(alias) == true
+        } catch (e: Exception) {
+            false
+        }
+
+    /**
+     * The EncryptedSharedPreferences holding Ed25519 software keys, or null
+     * below API 33, where none are generated. Every Ed25519 read, write and
+     * delete goes through it.
+     */
+    internal fun ed25519Prefs(): SharedPreferences? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
+        return EncryptedSharedPreferences.create(
+            context,
+            ED25519_PREFS_NAME,
+            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    /**
+     * The generation of the user key [keyId] held in this manager's backends:
+     * one entry per piece of material in its user-key namespace
+     * ([userKeyAliases]), `keystore:<alias>` for an Android Keystore entry
+     * and `ed25519:<alias>` for an Ed25519 software key, each mapped to a tag
+     * that changes when the material under that alias is replaced (the
+     * entry's creation date and certificate digest, or the digest of the
+     * stored key). Empty when no material is held.
+     */
+    fun userKeyGeneration(keyId: String): Map<String, String> {
+        val generation = LinkedHashMap<String, String>()
+        val prefs = try {
+            ed25519Prefs()
+        } catch (e: Exception) {
+            null
+        }
+        for (alias in userKeyAliases(keyId)) {
+            keystoreTag(alias)?.let { generation[KEYSTORE_ENTRY + alias] = it }
+            prefs?.getString(alias, null)?.let { generation[ED25519_ENTRY + alias] = digestHex(it.toByteArray()) }
+        }
+        return generation
+    }
+
+    /**
+     * Delete the material of [generation] (from [userKeyGeneration]) that is
+     * still in place: an entry whose alias now holds material with another
+     * tag was replaced by a later write and is left alone. Returns the
+     * entries of [generation] still held after the delete; empty means the
+     * generation is gone.
+     */
+    fun deleteUserKeyGeneration(keyId: String, generation: Map<String, String>): Map<String, String> {
+        val namespace = userKeyAliases(keyId)
+        val prefs = if (generation.keys.any { it.startsWith(ED25519_ENTRY) }) ed25519Prefs() else null
+        for ((entry, tag) in generation) {
+            when {
+                entry.startsWith(KEYSTORE_ENTRY) -> {
+                    val alias = entry.removePrefix(KEYSTORE_ENTRY)
+                    if (alias in namespace && keystoreTag(alias) == tag) keyStore.deleteEntry(alias)
+                }
+                entry.startsWith(ED25519_ENTRY) -> {
+                    val alias = entry.removePrefix(ED25519_ENTRY)
+                    val stored = prefs?.getString(alias, null)
+                    if (alias in namespace && stored != null && digestHex(stored.toByteArray()) == tag) {
+                        prefs.edit().remove(alias).commit()
+                    }
+                }
+            }
+        }
+        val left = userKeyGeneration(keyId)
+        return generation.filter { (entry, tag) -> left[entry] == tag }
+    }
+
+    /** The tag of the Keystore entry at [alias], or null if there is none. */
+    private fun keystoreTag(alias: String): String? {
+        if (!keyStore.containsAlias(alias)) return null
+        val created = keyStore.getCreationDate(alias)?.time ?: 0L
+        val certificate = keyStore.getCertificate(alias)?.encoded ?: ByteArray(0)
+        return "$created:${digestHex(certificate)}"
+    }
+
+    private fun digestHex(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     /**
      * List all key aliases managed by xKey.
@@ -2007,8 +2060,24 @@ class KeystoreManager(private val context: Context) {
         /** Prefix for general-purpose key aliases. */
         private const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
 
+        /**
+         * The user-key namespace of [keyId]: the only Keystore aliases a
+         * delete of a user's key may touch, its credential and general
+         * aliases. An id that resolves to any other alias
+         * ([resolveKeystoreAlias]) names an internal key (a CA, the
+         * attestation, sealing or encryption keys) or a foreign one.
+         */
+        fun userKeyAliases(keyId: String): List<String> =
+            listOf(KEY_ALIAS_PREFIX + keyId, KEY_ALIAS_PREFIX_GENERAL + keyId)
+
         /** EncryptedSharedPreferences file for Ed25519 software-backed keys. */
         private const val ED25519_PREFS_NAME = "xkey_ed25519_keys"
+
+        /** [userKeyGeneration] entry prefix of an Android Keystore entry. */
+        const val KEYSTORE_ENTRY = "keystore:"
+
+        /** [userKeyGeneration] entry prefix of an Ed25519 software key. */
+        const val ED25519_ENTRY = "ed25519:"
 
         /** EC curve for FIDO2 (NIST P-256). */
         private const val EC_CURVE = "secp256r1"
