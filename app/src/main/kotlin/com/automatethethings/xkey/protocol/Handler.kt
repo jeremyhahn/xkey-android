@@ -1514,13 +1514,14 @@ class RequestHandler(
         keyDao.recordUsage(signParams.keyId)
 
         // Log signing request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val callerPeer = callerPeerPublicKeyHex()
+        val deviceInfo = callerPeer?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logSigningRequest(
             keyId = signParams.keyId,
             keyLabel = signParams.keyId,
             keyType = "signing",
             algorithm = signAlgorithm,
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = callerPeer,
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1559,13 +1560,14 @@ class RequestHandler(
         keyDao.recordUsage(decryptParams.keyId)
 
         // Log decryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val callerPeer = callerPeerPublicKeyHex()
+        val deviceInfo = callerPeer?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logDecryptionRequest(
             keyId = decryptParams.keyId,
             keyLabel = decryptParams.keyId,
             keyType = "rsa",
             algorithm = "RSA-OAEP",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = callerPeer,
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1615,13 +1617,14 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log encryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val callerPeer = callerPeerPublicKeyHex()
+        val deviceInfo = callerPeer?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logEncryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
             keyType = "symmetric",
             algorithm = "AES-GCM",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = callerPeer,
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1672,13 +1675,14 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log decryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val callerPeer = callerPeerPublicKeyHex()
+        val deviceInfo = callerPeer?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logDecryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
             keyType = "symmetric",
             algorithm = "AES-GCM",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = callerPeer,
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -2494,6 +2498,23 @@ class RequestHandler(
         repo.updateDeviceFingerprint(peerKeyHex, hex)
         Log.i(TAG, "Bound attested-key fingerprint for peer ${peerKeyHex.take(16)}: ${hex.take(16)}...")
     }
+
+    /**
+     * The authenticated peer of the connection this request arrived on, as
+     * its transport recorded it in the request's [CallerSession]: the one
+     * peer a share is authorized for and an audit record names.
+     *
+     * Never the handler-wide [connectedDevicePublicKeyHex]. One handler serves
+     * BLE, USB and TCP at once and each transport's pairing confirmation
+     * overwrites that field, so it names whichever desktop paired last, not
+     * the caller.
+     *
+     * @return the peer's static key hex, or null when the request names no
+     *   connection or its connection authenticated no peer; never throws, so
+     *   an audit record of an anonymous caller names no device
+     */
+    private suspend fun callerPeerPublicKeyHex(): String? =
+        currentCoroutineContext()[CallerSession]?.peerPublicKeyHex?.takeIf { it.isNotEmpty() }
 
     /**
      * The authenticated peer whose per-device policy governs this request --
@@ -3380,14 +3401,16 @@ class RequestHandler(
     // -------------------------------------------------------------------------
 
     /**
-     * Returns the confirmed peer identity for the current session.
+     * Returns the confirmed peer identity of the connection this request
+     * arrived on, from [callerPeerPublicKeyHex]: the peer every sharing
+     * decision and every audit record of a transfer names.
      *
      * @throws ProtocolException with [ErrorCodes.OPERATION_DENIED] when the
-     * session has no confirmed peer, since no sharing decision can be made
-     * about an anonymous peer.
+     * request's connection has no confirmed peer, since no sharing decision
+     * can be made about an anonymous peer.
      */
-    private fun requireConfirmedPeer(operation: String): String {
-        return connectedDevicePublicKeyHex ?: throw ProtocolException(
+    private suspend fun requireConfirmedPeer(operation: String): String {
+        return callerPeerPublicKeyHex() ?: throw ProtocolException(
             "$operation requires a confirmed peer identity",
             errorCode = ErrorCodes.OPERATION_DENIED
         )
