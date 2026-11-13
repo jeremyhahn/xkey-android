@@ -22,6 +22,7 @@ import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.crypto.AttestationException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricSettingsData
@@ -180,6 +181,58 @@ class LocalAttestKeyAuditTest {
                 securityLevel = null,
                 success = false,
                 errorMessage = any(),
+                durationMs = any()
+            )
+        }
+        verify(exactly = 1) {
+            AuditLogger.logKeyAttested(any(), any(), any(), any(), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun aThrownAttestationFailureRecordsOneFailedEntry() = runTest {
+        // API 28+ reports a failed attestation by throwing, not by returning null.
+        every {
+            keystoreManager.getKeyAttestationWithChallenge(KEY_ID, any())
+        } throws AttestationException("No certificate chain available for attestation key")
+
+        val response = Response.fromJson(attest(attestKeyRequest()))
+
+        assertEquals(ErrorCodes.INTERNAL_ERROR, response.error?.code)
+        verify(exactly = 1) {
+            AuditLogger.logKeyAttested(
+                keyId = KEY_ID,
+                keyLabel = KEY_LABEL,
+                keyType = KEY_TYPE,
+                securityLevel = null,
+                success = false,
+                errorMessage = "Key attestation failed: No certificate chain available for attestation key",
+                durationMs = any()
+            )
+        }
+        verify(exactly = 1) {
+            AuditLogger.logKeyAttested(any(), any(), any(), any(), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun aFailureAfterTheChainRecordsOneFailedEntry() = runTest {
+        // A chain whose leaf cannot be encoded fails after the keystore answered.
+        val badCert = mockk<X509Certificate>()
+        every { badCert.encoded } throws java.security.cert.CertificateEncodingException("bad leaf")
+        every { keystoreManager.getKeyAttestationWithChallenge(KEY_ID, any()) } returns listOf(badCert)
+
+        val response = Response.fromJson(attest(attestKeyRequest()))
+
+        assertEquals(ErrorCodes.INTERNAL_ERROR, response.error?.code)
+        verify(exactly = 1) {
+            AuditLogger.logKeyAttested(
+                keyId = KEY_ID,
+                keyLabel = KEY_LABEL,
+                keyType = KEY_TYPE,
+                securityLevel = null,
+                success = false,
+                errorMessage = "bad leaf",
                 durationMs = any()
             )
         }
