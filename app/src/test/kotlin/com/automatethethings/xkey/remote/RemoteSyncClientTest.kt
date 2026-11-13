@@ -347,6 +347,48 @@ class RemoteSyncClientTest {
     }
 
     @Test
+    fun `an OATH merge failing after the desktop acknowledged records the pushed count`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().mergeOath(any()) } throws IllegalArgumentException("bad Base32")
+        sender.succeedWith("""{"added":2,"updated":1,"local":[{"id":"x","secret":"!!"}]}""")
+
+        try {
+            auditedClient().syncOath()
+            fail("expected the merge failure")
+        } catch (_: IllegalArgumentException) {
+        }
+
+        verify(exactly = 1) {
+            AuditLogger.logOathSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 3, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = false, errorMessage = "IllegalArgumentException"
+            )
+        }
+    }
+
+    @Test
+    fun `a password merge failing after the desktop acknowledged records the pushed count`() = runTest {
+        mockkObject(AuditLogger)
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().mergePasswords(any()) } throws IllegalStateException("bad row")
+        sender.succeedWith("""{"added":1,"updated":3,"local":[{"id":"p"}]}""")
+
+        try {
+            auditedClient().syncPasswords()
+            fail("expected the merge failure")
+        } catch (_: IllegalStateException) {
+        }
+
+        verify(exactly = 1) {
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = DESK_PEER, deviceName = DESK_NAME, count = 4, direction = AuditLogger.SYNC_OUTBOUND,
+                added = 0, updated = 0, skipped = 0, success = false, errorMessage = "IllegalStateException"
+            )
+        }
+    }
+
+    @Test
     fun `syncAll with a locked vault records the failed password leg and syncs the other stores`() = runTest {
         mockkObject(AuditLogger)
         stubIdleEngine()
