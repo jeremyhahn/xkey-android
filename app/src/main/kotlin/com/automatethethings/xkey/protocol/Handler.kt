@@ -128,8 +128,6 @@ interface MessageSender {
  *   the Keystore one. Tests supply a software key.
  * @param userVerificationPrompt The biometric prompt that unlocks that key for
  *   one signature; null for the activity or [BiometricHelper] prompt.
- * @param cosignApprovalPrompts The owner's co-sign approval prompts; null for
- *   the activity prompts when [biometricLauncher] is set, none otherwise.
  */
 class RequestHandler(
     private val context: Context,
@@ -140,8 +138,7 @@ class RequestHandler(
     private val pinManager: PinManager? = null,
     private val pivKeyManager: PivKeyManager? = null,
     userVerificationKey: UserVerificationKey? = null,
-    private val userVerificationPrompt: UserVerificationPrompt? = null,
-    cosignApprovalPrompts: CosignApprovalPrompts? = null
+    private val userVerificationPrompt: UserVerificationPrompt? = null
 ) {
     companion object {
         private const val TAG = "RequestHandler"
@@ -206,13 +203,11 @@ class RequestHandler(
     private val biometricNotificationHelper = BiometricNotificationHelper(context)
 
     /**
-     * Co-sign approval prompts, one at a time across every transport. A
-     * handler with no biometric launcher runs in no service that can show one.
+     * Co-sign approval prompts, each an entry in the one prompt queue every
+     * transport's prompts share. A handler with no biometric launcher runs in
+     * no service that can show one.
      */
-    private val cosignApprovals: CosignApprovalPrompts? = cosignApprovalPrompts
-        ?: biometricLauncher?.let {
-            CosignApprovalPrompts(ActivityCosignPromptSurface(context, biometricNotificationHelper))
-        }
+    private val cosignApprovals: CosignApprovalPrompts? = biometricLauncher?.let(::CosignApprovalPrompts)
 
     // KeyguardManager to check if screen is locked
     private val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
@@ -3709,7 +3704,11 @@ class RequestHandler(
      * about an anonymous peer.
      */
     private suspend fun requireConfirmedPeer(operation: String): String {
-        return currentPeerPublicKeyHex() ?: throw ProtocolException(
+        val peer = currentPeerPublicKeyHex()?.takeIf {
+            currentCoroutineContext()[CallerSession] == null ||
+                pairedDeviceRepository?.isDeviceKnown(it) == true
+        }
+        return peer ?: throw ProtocolException(
             "$operation requires a confirmed peer identity",
             errorCode = ErrorCodes.OPERATION_DENIED
         )
@@ -3969,24 +3968,22 @@ class RequestHandler(
                 ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
         }
 
-        // The owner approves every co-signature on the phone.
-        // One prompt at a time, settled only by its own answer; a locked
-        // phone's notification opens that same prompt.
+        // The owner approves every co-signature on the phone. The prompt
+        // takes its turn in the one prompt queue and is settled only by its
+        // own answer; a locked phone's notification opens that same prompt.
         val approvals = cosignApprovals
             ?: return Response.error(
                 request.id,
                 ErrorCodes.BIOMETRIC_FAILED,
                 "Co-signing needs the owner's approval and no prompt is available"
             )
+        val notice = OwnNotifications(operationType = "sign", rpName = null)
         try {
-            val locked = keyguardManager.isKeyguardLocked
-            if (locked) {
-                sendBiometricPendingNotification("sign", null)
-            }
             approvals.approve(
                 title = "Co-sign request",
                 subtitle = "Approve co-signing hash ${contentHash.take(8)}",
-                locked = locked
+                locked = keyguardManager.isKeyguardLocked,
+                onLaunch = notice.onLaunch
             )
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             throw e
@@ -3997,6 +3994,8 @@ class RequestHandler(
                 ErrorCodes.BIOMETRIC_FAILED,
                 "Co-sign not approved: ${e.message}"
             )
+        } finally {
+            notice.close()
         }
 
         // Sign the content hash

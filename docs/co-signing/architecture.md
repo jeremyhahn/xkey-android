@@ -30,7 +30,12 @@ checks, in this order:
 4. **Owner approval.** The phone shows a biometric prompt (with a
    notification when the screen is locked) whose subtitle names the first 8
    hex characters of the hash. It signs only when the owner approves; every
-   co-signature prompts, with no session cache.
+   co-signature prompts, with no session cache. The prompt is an entry in
+   the one process-wide prompt queue (`PromptOwnership`) that FIDO2,
+   attestation and signing prompts share: it waits its turn, shows only
+   while its key is ACTIVE, and hands the screen on when it settles, by
+   the owner's answer, by its 60 s timeout, or because the caller went away.
+   A request withdrawn before its prompt appears never shows.
 
 The success result is unchanged: `signature` (base64), `keyFingerprint`,
 `algorithm` and `signerName`.
