@@ -15,6 +15,8 @@ import com.automatethethings.xkey.ca.DeviceIdentityException
 import org.bouncycastle.asn1.x500.X500Name
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.credential.UserVerificationCompliance
 import com.automatethethings.xkey.credential.UserVerificationRequiredException
@@ -54,6 +56,7 @@ import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.settings.UserVerificationPolicy
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -68,6 +71,7 @@ import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinType
 import com.automatethethings.xkey.pin.PinException
 import com.automatethethings.xkey.pin.PinLockedException
+import com.automatethethings.xkey.pin.PinRequiredException
 import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
@@ -601,27 +605,50 @@ class RequestHandler(
             )
         }
 
-        // Check if key already exists
-        if (keystoreManager.keyExists(generateParams.credentialId)) {
-            throw ProtocolException(
-                "Credential already exists",
-                errorCode = ErrorCodes.INVALID_PARAMS
-            )
+        // As in local.generateKey: the reservation holds the id from this check
+        // until the creation ends, and the creation rechecks after the approval.
+        val reservation = "credential:${generateParams.credentialId}"
+        if (keystoreManager.keyExists(generateParams.credentialId) || !keyIds.tryReserve(reservation)) {
+            throw credentialExists()
         }
+        try {
+            // Determine authentication duration based on settings
+            val authDurationSeconds = calculateAuthDuration(currentSettings)
+            approveRegistration(generateParams)
+            keyIds.withKeyLock(reservation) {
+                if (keystoreManager.keyExists(generateParams.credentialId)) {
+                    throw credentialExists()
+                }
+                createCredential(request, generateParams, authDurationSeconds)
+            }
+        } finally {
+            keyIds.release(reservation)
+        }
+    }
 
-        // Determine authentication duration based on settings
-        val authDurationSeconds = calculateAuthDuration(currentSettings)
+    private fun credentialExists() =
+        ProtocolException("Credential already exists", errorCode = ErrorCodes.INVALID_PARAMS)
 
+    /** Asks the owner to approve a `generateKey` registration when verification applies. */
+    private suspend fun approveRegistration(generateParams: GenerateKeyParams) {
         // If user verification required (not DISABLED), prompt for biometric BEFORE generating the key
         // This ensures user explicitly approves credential creation
         if (generateParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
             // Try BiometricActivityLauncher first (for service context)
             if (biometricLauncher != null) {
-                biometricLauncher.requestAuthentication(
-                    title = "xKey Registration",
-                    subtitle = "Verify your identity to create a new passkey",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
-                )
+                // On a locked phone the notification opens this same prompt;
+                // the request takes down only its own notification.
+                val notice = OwnNotifications(operationType = "register", rpName = null)
+                try {
+                    biometricLauncher.requestAuthentication(
+                        title = "xKey Registration",
+                        subtitle = "Verify your identity to create a new passkey",
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = notice.onLaunch
+                    )
+                } finally {
+                    notice.close()
+                }
             } else {
                 // Fall back to BiometricHelper (for activity context)
                 val helper = biometricHelper
@@ -636,7 +663,14 @@ class RequestHandler(
                 )
             }
         }
+    }
 
+    /** Creates an approved `generateKey` credential; the caller holds its id's lock. */
+    private suspend fun createCredential(
+        request: Request,
+        generateParams: GenerateKeyParams,
+        authDurationSeconds: Int
+    ): Response {
         // Generate the key with appropriate authentication duration
         val cosePublicKey = keystoreManager.generateKeyWithAuthDuration(
             credentialId = generateParams.credentialId,
@@ -671,7 +705,7 @@ class RequestHandler(
 
         Log.i(TAG, "Generated key for credential: ${generateParams.credentialId}, " +
                 "securityLevel=${level.wire}, authDuration=$authDurationSeconds")
-        Response.success(request.id, result.toJson())
+        return Response.success(request.id, result.toJson())
     }
 
     /**
@@ -768,13 +802,9 @@ class RequestHandler(
         signParams: SignParams,
         dataHash: ByteArray
     ): Response {
-        // Show notification if screen is locked to wake the user
-        val requestId = "sign-${request.id}"
-        showBiometricNotificationIfLocked(
-            operationType = "sign",
-            rpName = null, // Could be enhanced to extract RP name from credential metadata
-            requestId = requestId
-        )
+        // On a locked phone the notification opens the launcher's own prompt
+        // (OwnNotifications), so its result completes this request.
+        val notice = OwnNotifications(operationType = "sign", rpName = null)
 
         try {
             // Check if we're in PER_OPERATION mode (requires crypto-bound biometric every time)
@@ -792,7 +822,8 @@ class RequestHandler(
                         dataHash = dataHash,
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
-                        showOnLockScreen = keyguardManager.isKeyguardLocked
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = notice.onLaunch
                     )
 
                     // Record successful authentication for session tracking
@@ -842,7 +873,8 @@ class RequestHandler(
                     biometricLauncher.requestAuthentication(
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
-                        showOnLockScreen = keyguardManager.isKeyguardLocked
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = notice.onLaunch
                     )
 
                     // Record successful authentication for session tracking
@@ -873,12 +905,15 @@ class RequestHandler(
                     errorCode = ErrorCodes.INTERNAL_ERROR
                 )
 
+            // The activity's own prompt answers no launcher request; it takes
+            // its queue turn, and the notification only wakes the phone for it.
             val signature = keystoreManager.sign(
                 credentialId = signParams.credentialId,
                 dataHash = dataHash,
                 biometricHelper = helper,
                 title = "xKey Authentication",
-                subtitle = "Verify your identity to sign"
+                subtitle = "Verify your identity to sign",
+                onTurn = notice::wake
             )
 
             // Record successful authentication for session tracking
@@ -893,8 +928,8 @@ class RequestHandler(
             Log.i(TAG, "Signed data for credential: ${signParams.credentialId} (via crypto-bound helper)")
             return Response.success(request.id, result.toJson())
         } finally {
-            // Always cancel the notification after biometric completes
-            cancelBiometricNotification()
+            // This request's notifications, and no other request's.
+            notice.close()
         }
     }
 
@@ -908,30 +943,90 @@ class RequestHandler(
      *
      * @param operationType The type of operation requiring biometric (e.g., "sign", "decrypt")
      * @param rpName The relying party name for context, or null if unavailable
-     * @param requestId A unique identifier for this biometric request
+     * @param key The notification's key ([NotificationKeys]), naming its
+     *   request across the whole app
      * @param onTimeout Callback invoked if the notification times out without user action
      * @param notifyLaptop Whether the installed [messageSender]'s laptop is the
      *   one waiting on this prompt, and so should hear that it is pending
+     * @param promptIntent The launcher prompt the notification opens, so that
+     *   its result completes the launcher's request [key] names; null for a
+     *   prompt no launcher request waits on
      */
     private fun showBiometricNotificationIfLocked(
         operationType: String,
         rpName: String?,
-        requestId: String,
+        key: String,
         onTimeout: () -> Unit = {},
-        notifyLaptop: Boolean = true
+        notifyLaptop: Boolean = true,
+        promptIntent: android.content.Intent? = null
     ) {
         if (keyguardManager.isKeyguardLocked) {
             Log.d(TAG, "Screen is locked, showing biometric notification")
             biometricNotificationHelper.showBiometricRequiredNotification(
                 operationType = operationType,
                 rpName = rpName,
-                requestId = requestId,
-                onTimeout = onTimeout
+                requestId = key,
+                onTimeout = onTimeout,
+                promptIntent = promptIntent
             )
             // Also notify the laptop that biometric is pending
             if (notifyLaptop) {
                 sendBiometricPendingNotification(operationType, rpName)
             }
+        }
+    }
+
+    /**
+     * The lock-screen notifications one operation posts, and only those.
+     *
+     * Notification tags are app-wide, and requests from every connection take
+     * turns on one screen, so the notification up may be any request's. Each
+     * is posted under its own request's key ([NotificationKeys]), and [close]
+     * takes down the ones this operation posted, by the keys it posted them
+     * under: an operation withdrawn or timed out while it waited for its turn
+     * posted nothing, and takes nothing down.
+     */
+    private inner class OwnNotifications(
+        private val operationType: String,
+        private val rpName: String?,
+        private val notifyLaptop: Boolean = true
+    ) {
+        private val posted = java.util.concurrent.ConcurrentLinkedQueue<String>()
+
+        /**
+         * The `onLaunch` of a [BiometricActivityLauncher] prompt. On a locked
+         * phone the notification opens the launched request's own prompt, so
+         * approving or cancelling from the lock screen completes that request;
+         * should it expire unanswered with the prompt never up (Android
+         * blocked its start), the request settles and hands the screen on.
+         * Every launcher prompt goes through this: a notification of its own
+         * would open a prompt whose result nobody waits on.
+         */
+        val onLaunch: (String, android.content.Intent) -> Unit = { key, prompt ->
+            post(key, prompt) { biometricLauncher?.expireUnshown(key) }
+        }
+
+        /**
+         * Wakes a locked phone for a prompt no launcher request waits on,
+         * under its queue [key] ([PromptOwnership.turn]): only on its turn.
+         */
+        fun wake(key: String) = post(key, prompt = null) {}
+
+        private fun post(key: String, prompt: android.content.Intent?, onTimeout: () -> Unit) {
+            posted.add(key)
+            showBiometricNotificationIfLocked(
+                operationType = operationType,
+                rpName = rpName,
+                key = key,
+                onTimeout = onTimeout,
+                notifyLaptop = notifyLaptop,
+                promptIntent = prompt
+            )
+        }
+
+        /** Takes down every notification this operation posted, and no other. */
+        fun close() {
+            while (true) biometricNotificationHelper.cancelNotification(posted.poll() ?: return)
         }
     }
 
@@ -975,16 +1070,6 @@ class RequestHandler(
                 // Don't throw - this is fire-and-forget
             }
         }
-    }
-
-    /**
-     * Cancels any pending biometric notification.
-     *
-     * Should be called after biometric authentication completes (success or failure)
-     * to dismiss the notification.
-     */
-    private fun cancelBiometricNotification() {
-        biometricNotificationHelper.cancelNotification()
     }
 
     /**
@@ -1141,6 +1226,9 @@ class RequestHandler(
     // Extended local.* method handlers
     // ============================================================
 
+    /** Key ids claimed by a creation or locked by a request, across every connection. */
+    private val keyIds = KeyIdReservations.process
+
     /**
      * Handles local.generateKey - generate a key with specified algorithm.
      *
@@ -1158,21 +1246,50 @@ class RequestHandler(
         val genParams = LocalGenerateKeyParams.fromJson(params)
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
-        // Check if key already exists
-        if (keystoreManager.generalKeyExists(genParams.keyId)) {
+        // Approval prompts take turns, so another creation of this id can pass
+        // this check while this one waits; the reservation refuses it until
+        // this creation ends.
+        val reservation = "key:${genParams.keyId}"
+        if (keystoreManager.generalKeyExists(genParams.keyId) || !keyIds.tryReserve(reservation)) {
             throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
         }
+        try {
+            val authDurationSeconds = calculateAuthDuration(currentSettings)
+            approveLocalKeyGeneration(genParams)
+            // The approval waited: recheck under the id's lock, since every
+            // generator replaces an existing alias, destroying that key.
+            keyIds.withKeyLock(reservation) {
+                if (keystoreManager.generalKeyExists(genParams.keyId)) {
+                    throw ProtocolException(
+                        "Key already exists: ${genParams.keyId}",
+                        errorCode = ErrorCodes.KEY_EXISTS
+                    )
+                }
+                createLocalKey(request, genParams, algorithmName, authDurationSeconds)
+            }
+        } finally {
+            keyIds.release(reservation)
+        }
+    }
 
-        val authDurationSeconds = calculateAuthDuration(currentSettings)
-
+    /** Asks the owner to approve a `local.generateKey` when verification applies. */
+    private suspend fun approveLocalKeyGeneration(genParams: LocalGenerateKeyParams) {
         // Biometric verification before key generation
         if (genParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
             if (biometricLauncher != null) {
-                biometricLauncher.requestAuthentication(
-                    title = "Key Generation",
-                    subtitle = "Verify your identity to create a new key",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
-                )
+                // On a locked phone the notification opens this same prompt;
+                // the request takes down only its own notification.
+                val notice = OwnNotifications(operationType = "generateKey", rpName = null)
+                try {
+                    biometricLauncher.requestAuthentication(
+                        title = "Key Generation",
+                        subtitle = "Verify your identity to create a new key",
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = notice.onLaunch
+                    )
+                } finally {
+                    notice.close()
+                }
             } else {
                 val helper = biometricHelper
                     ?: throw ProtocolException(
@@ -1185,12 +1302,20 @@ class RequestHandler(
                 )
             }
         }
+    }
 
+    /** Creates an approved `local.generateKey` key; the caller holds its id's lock. */
+    private suspend fun createLocalKey(
+        request: Request,
+        genParams: LocalGenerateKeyParams,
+        algorithmName: String,
+        authDurationSeconds: Int
+    ): Response {
         // Software-backed (exportable) keys take a separate path: the raw
         // material lives in SoftwareKeyStore (app-encrypted) so it can be
         // exported/shared, instead of the non-exportable hardware Keystore.
         if (genParams.exportable) {
-            return@withContext generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
+            return generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
         }
 
         // Generate key based on algorithm type
@@ -1249,7 +1374,7 @@ class RequestHandler(
                 keySizeBits = keySizeBits,
                 level = level
             )
-            return@withContext Response.success(request.id, result.toJson())
+            return Response.success(request.id, result.toJson())
         }
 
         // Asymmetric key generation
@@ -1330,7 +1455,7 @@ class RequestHandler(
             )
         }
 
-        Response.success(request.id, result.toJson())
+        return Response.success(request.id, result.toJson())
     }
 
     /**
@@ -1479,23 +1604,17 @@ class RequestHandler(
         }
 
         if (biometricRequired && biometricLauncher != null) {
-            // Show notification if screen is locked
-            val requestId = "local-sign-${request.id}"
-            showBiometricNotificationIfLocked(
-                operationType = "sign",
-                rpName = null,
-                requestId = requestId
-            )
-
+            val notice = OwnNotifications(operationType = "sign", rpName = null)
             try {
                 biometricLauncher.requestAuthentication(
                     title = "Signing Request",
                     subtitle = "Verify your identity to sign data",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
+                    showOnLockScreen = keyguardManager.isKeyguardLocked,
+                    onLaunch = notice.onLaunch
                 )
                 sessionAuthManager?.recordAuthentication(currentSessionId)
             } finally {
-                cancelBiometricNotification()
+                notice.close()
             }
         }
 
@@ -1517,13 +1636,13 @@ class RequestHandler(
         keyDao.recordUsage(signParams.keyId)
 
         // Log signing request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logSigningRequest(
             keyId = signParams.keyId,
             keyLabel = signParams.keyId,
             keyType = auditKeyType(signParams.keyId),
             algorithm = signAlgorithm,
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = currentPeerPublicKeyHex(),
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1562,13 +1681,13 @@ class RequestHandler(
         keyDao.recordUsage(decryptParams.keyId)
 
         // Log decryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logDecryptionRequest(
             keyId = decryptParams.keyId,
             keyLabel = decryptParams.keyId,
             keyType = auditKeyType(decryptParams.keyId),
             algorithm = "RSA-OAEP",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = currentPeerPublicKeyHex(),
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1618,13 +1737,13 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log encryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logEncryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
             keyType = auditKeyType(symParams.keyId),
             algorithm = "AES-GCM",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = currentPeerPublicKeyHex(),
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1675,13 +1794,13 @@ class RequestHandler(
         keyDao.recordUsage(symParams.keyId)
 
         // Log decryption request
-        val deviceInfo = connectedDevicePublicKeyHex?.let { pairedDeviceRepository?.getDevice(it) }
+        val deviceInfo = currentPeerPublicKeyHex()?.let { pairedDeviceRepository?.getDevice(it) }
         AuditLogger.logDecryptionRequest(
             keyId = symParams.keyId,
             keyLabel = symParams.keyId,
             keyType = auditKeyType(symParams.keyId),
             algorithm = "AES-GCM",
-            deviceId = connectedDevicePublicKeyHex,
+            deviceId = currentPeerPublicKeyHex(),
             deviceName = deviceInfo?.deviceName,
             success = true,
             durationMs = durationMs
@@ -1988,6 +2107,24 @@ class RequestHandler(
 
     /**
      * Handles local.setKeyPolicy - update key sharing policy.
+     *
+     * Widening a key to every peer (`shareable: true` on a key whose policy
+     * is not already [SharingPolicyType.ALL_PEERS]) lets any paired peer pass
+     * the sharing check, so it needs a confirmed peer and the owner's
+     * approval on the phone. Without a launcher, or when the prompt is
+     * cancelled or fails, the request answers BIOMETRIC_FAILED and the stored
+     * policy is unchanged. Narrowing needs neither. Every stored change is
+     * audited.
+     *
+     * The write is a compare-and-set against the policy revision the
+     * decision was taken on (every policy write moves it forward, so a
+     * policy changed away and back is a new revision), so a change that
+     * lands while the prompt is up, or between the read and the write, is
+     * never overwritten: a widening whose starting
+     * policy moved is refused (OPERATION_DENIED) rather than applied without
+     * an approval for it, and a narrowing re-reads and retries. A key already
+     * at the requested policy is not written. The audit records only a write
+     * that changed the row, with the policy it replaced.
      */
     private suspend fun handleLocalSetKeyPolicy(request: Request): Response {
         val params = request.params
@@ -1995,17 +2132,117 @@ class RequestHandler(
 
         val policyParams = LocalSetKeyPolicyParams.fromJson(params)
 
-        keyDao.getByKeyId(policyParams.keyId)
+        val entity = keyDao.getByKeyId(policyParams.keyId)
             ?: throw ProtocolException("Key not found: ${policyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
-        if (policyParams.shareable != null) {
-            // updateSharingPolicy, not updateShareable: it keeps `shareable` and
-            // `sharing_policy` in step, which KeyEntity requires. Writing the
-            // legacy flag alone could leave shareable=1 with policy=PRIVATE.
-            keyDao.updateSharingPolicy(
-                policyParams.keyId,
-                if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
+        val newPolicy = when (policyParams.shareable) {
+            null -> null
+            true -> SharingPolicyType.ALL_PEERS
+            false -> SharingPolicyType.PRIVATE
+        }
+
+        // The compare-and-set, like updateSharingPolicy, keeps `shareable` and
+        // `sharing_policy` in step, which KeyEntity requires. It is bound to
+        // the row read above (its immutable id), so a key deleted and
+        // re-created under the same key id is never written, and to the
+        // policy revision [from] was read at, so a policy that changed and
+        // changed back since is not written either. It returns true only
+        // when it changed the row, and audits exactly that change. The write
+        // and the audit are one non-cancellable step: a request cancelled
+        // after the commit and before its result arrives still audits it.
+        suspend fun setPolicyFrom(from: KeyEntity, policy: SharingPolicyType): Boolean {
+            val expected = from.sharingPolicy
+            return withContext(NonCancellable) {
+                if (keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy) == 0) {
+                    return@withContext false
+                }
+                AuditLogger.logKeySharingChanged(
+                    keyId = entity.keyId,
+                    keyLabel = entity.label,
+                    keyType = entity.keyType,
+                    oldPolicy = expected.name,
+                    newPolicy = policy.name
+                )
+                true
+            }
+        }
+
+        // The read row as it is now. A different row under the same key id
+        // is another key: the request, and any approval for it, named the
+        // one read above.
+        suspend fun storedRow(): KeyEntity {
+            val current = keyDao.getByKeyId(entity.keyId)
+                ?: throw ProtocolException("Key not found: ${entity.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
+            if (current.id != entity.id) {
+                throw ProtocolException(
+                    "Key ${entity.keyId} was replaced while the request was in flight; retry",
+                    errorCode = ErrorCodes.OPERATION_DENIED
+                )
+            }
+            return current
+        }
+
+        if (newPolicy == SharingPolicyType.ALL_PEERS && entity.sharingPolicy != SharingPolicyType.ALL_PEERS) {
+            requireConfirmedPeer("Sharing a key with all peers")
+            val keyName = entity.label.ifBlank { entity.keyId }
+            val launcher = biometricLauncher ?: throw ProtocolException(
+                "Sharing a key with all peers needs the owner's approval, and no biometric prompt is available",
+                errorCode = ErrorCodes.BIOMETRIC_FAILED
             )
+            withContext(Dispatchers.Main) {
+                // A request withdrawn or timed out while it waited for its
+                // turn posted no notification, and takes none down: the
+                // notification up belongs to the request on screen.
+                val notice = OwnNotifications(operationType = "share", rpName = keyName)
+                try {
+                    // One launcher-owned request: on a locked phone the
+                    // notification opens this same prompt.
+                    launcher.requestAuthentication(
+                        title = "Share key with all devices",
+                        subtitle = "Allow every paired device to use \"$keyName\"",
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        onLaunch = notice.onLaunch
+                    )
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    throw ProtocolException(
+                        "Owner did not approve sharing the key with all peers: ${e.message}",
+                        errorCode = ErrorCodes.BIOMETRIC_FAILED
+                    )
+                } finally {
+                    notice.close()
+                }
+            }
+            // The owner approved widening from the policy revision read
+            // above. If any policy write landed while the prompt was up, even
+            // one that changed the policy back, the approval does not cover
+            // the new state: write nothing unless the key is already open.
+            if (!setPolicyFrom(entity, SharingPolicyType.ALL_PEERS) &&
+                storedRow().sharingPolicy != SharingPolicyType.ALL_PEERS
+            ) {
+                throw ProtocolException(
+                    "Sharing policy of ${entity.keyId} changed while waiting for approval; retry",
+                    errorCode = ErrorCodes.OPERATION_DENIED
+                )
+            }
+        } else if (newPolicy == SharingPolicyType.PRIVATE) {
+            // Narrowing needs no approval from any starting policy, so a
+            // change that lands first is re-read and narrowed in turn.
+            var current = entity
+            var attempts = 0
+            val maxAttempts = 3
+            while (current.sharingPolicy != SharingPolicyType.PRIVATE &&
+                !setPolicyFrom(current, SharingPolicyType.PRIVATE)
+            ) {
+                if (++attempts >= maxAttempts) {
+                    throw ProtocolException(
+                        "Sharing policy of ${entity.keyId} kept changing; retry",
+                        errorCode = ErrorCodes.OPERATION_DENIED
+                    )
+                }
+                current = storedRow()
+            }
         }
 
         Log.i(TAG, "Updated policy for key: ${policyParams.keyId}, shareable=${policyParams.shareable}")
@@ -2039,19 +2276,52 @@ class RequestHandler(
             subtitle = "Verify your identity to prove key ownership"
         )
 
-        val certChain = keystoreManager.getKeyAttestationWithChallenge(
-            attestParams.keyId, attestParams.getNonceBytes()
-        ) ?: throw ProtocolException(
-            "Attestation not available for key: ${attestParams.keyId}",
-            errorCode = ErrorCodes.ATTESTATION_FAILED
-        )
+        val key = keyDao.getByKeyId(attestParams.keyId)
+        val keyLabel = key?.label ?: attestParams.keyId
+        val keyType = key?.keyType ?: "unknown"
 
-        val certsBase64 = certChain.map { cert ->
-            Base64.getEncoder().encodeToString(cert.encoded)
+        val startTime = System.currentTimeMillis()
+        // Every attempt from here on records exactly one KEY_ATTESTED entry,
+        // whether the keystore returns no chain, throws (API 28+ reports
+        // failures as AttestationException), or the chain cannot be read.
+        var recorded = false
+        fun recordAttestation(success: Boolean, securityLevel: String? = null, errorMessage: String? = null) {
+            recorded = true
+            AuditLogger.logKeyAttested(
+                keyId = attestParams.keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                securityLevel = securityLevel,
+                success = success,
+                errorMessage = errorMessage,
+                durationMs = System.currentTimeMillis() - startTime
+            )
         }
 
-        val leafCert = certChain[0] as java.security.cert.X509Certificate
-        val securityLevel = parseAttestationSecurityLevel(leafCert)
+        val certsBase64: List<String>
+        val securityLevel: String
+        try {
+            val certChain = keystoreManager.getKeyAttestationWithChallenge(
+                attestParams.keyId, attestParams.getNonceBytes()
+            )
+            if (certChain == null) {
+                val message = "Attestation not available for key: ${attestParams.keyId}"
+                recordAttestation(success = false, errorMessage = message)
+                throw ProtocolException(message, errorCode = ErrorCodes.ATTESTATION_FAILED)
+            }
+
+            certsBase64 = certChain.map { cert ->
+                Base64.getEncoder().encodeToString(cert.encoded)
+            }
+
+            val leafCert = certChain[0] as java.security.cert.X509Certificate
+            securityLevel = parseAttestationSecurityLevel(leafCert)
+        } catch (e: Exception) {
+            if (!recorded) recordAttestation(success = false, errorMessage = e.message ?: e.javaClass.simpleName)
+            throw e
+        }
+
+        recordAttestation(success = true, securityLevel = securityLevel)
 
         val result = LocalAttestKeyResult(
             certificateChain = certsBase64,
@@ -2130,32 +2400,32 @@ class RequestHandler(
         }
 
         val isLocked = keyguardManager.isKeyguardLocked
-        showBiometricNotificationIfLocked(
-            operationType = operationType,
-            rpName = null,
-            requestId = "$operationType-${request.id}",
-            // The installed sender reaches the desktop this phone is serving,
-            // which is not the one waiting on a phone-initiated request.
-            notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
-        )
+        // The installed sender reaches the desktop this phone is serving,
+        // which is not the one waiting on a phone-initiated request.
+        val notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
 
+        val notice = OwnNotifications(operationType, rpName = null, notifyLaptop = notifyLaptop)
         try {
             if (biometricLauncher != null) {
                 biometricLauncher.requestAuthentication(
                     title = title,
                     subtitle = subtitle,
-                    showOnLockScreen = isLocked
+                    showOnLockScreen = isLocked,
+                    onLaunch = notice.onLaunch
                 )
             } else {
+                // The activity's own prompt answers no launcher request; it
+                // takes its queue turn, and the notification only wakes the
+                // phone for it.
                 val helper = biometricHelper
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
                         errorCode = ErrorCodes.INTERNAL_ERROR
                     )
-                helper.authenticateWithoutCrypto(title = title, subtitle = subtitle)
+                helper.authenticateWithoutCrypto(title = title, subtitle = subtitle, onTurn = notice::wake)
             }
         } finally {
-            cancelBiometricNotification()
+            notice.close()
         }
     }
 
@@ -2469,20 +2739,29 @@ class RequestHandler(
         )
 
         val isLocked = keyguardManager.isKeyguardLocked
-        showBiometricNotificationIfLocked(
+        val notice = OwnNotifications(
             operationType = "verifyUser",
             rpName = null,
-            requestId = "verifyUser-${request.id}",
             notifyLaptop = currentCoroutineContext()[CallerSession]?.served != false
         )
         return try {
             val title = context.getString(R.string.verify_user_prompt_title)
             val subtitle = context.getString(R.string.verify_user_prompt_subtitle)
-            val signature = userVerificationPrompt?.sign(transcript, title, subtitle, isLocked)
-                ?: promptWithUserVerificationKey(transcript, title, subtitle, isLocked)
+            val signature = userVerificationPrompt?.let { prompt ->
+                // Its own queue turn: nothing shows, and no notification
+                // wakes the phone, while another approval holds the screen.
+                val key = NotificationKeys.wakeOnly("verifyUser")
+                PromptOwnership.process.turn(key) {
+                    notice.wake(key)
+                    prompt.sign(transcript, title, subtitle, isLocked)
+                } ?: throw BiometricException(
+                    BiometricPrompt.ERROR_TIMEOUT,
+                    "Another approval prompt held the screen past this request's deadline"
+                )
+            } ?: promptWithUserVerificationKey(transcript, title, subtitle, isLocked, notice)
             certChain to signature
         } finally {
-            cancelBiometricNotification()
+            notice.close()
         }
     }
 
@@ -2497,17 +2776,21 @@ class RequestHandler(
         message: ByteArray,
         title: String,
         subtitle: String,
-        showOnLockScreen: Boolean
+        showOnLockScreen: Boolean,
+        notice: OwnNotifications
     ): ByteArray {
         val signature = uvk.initSignature()
         if (biometricLauncher != null) {
+            // The launcher's request takes its queue turn; its notification
+            // opens that request's own prompt.
             return biometricLauncher.requestCryptoSignature(
                 credentialId = "user-verification",
                 dataHash = message,
                 title = title,
                 subtitle = subtitle,
                 showOnLockScreen = showOnLockScreen,
-                keyAlias = KeystoreUserVerificationKey.ALIAS
+                keyAlias = KeystoreUserVerificationKey.ALIAS,
+                onLaunch = notice.onLaunch
             )
         }
         val helper = biometricHelper
@@ -2519,7 +2802,8 @@ class RequestHandler(
             cryptoObject = BiometricPrompt.CryptoObject(signature),
             title = title,
             subtitle = subtitle,
-            description = null
+            description = null,
+            onTurn = notice::wake
         )
         return try {
             signature.update(message)
@@ -2813,7 +3097,7 @@ class RequestHandler(
         val listParams = LocalListFido2CredentialsParams.fromJson(params)
 
         // Get connected device's public key for per-key policy checks
-        val peerPublicKeyHex = connectedDevicePublicKeyHex
+        val peerPublicKeyHex = currentPeerPublicKeyHex()
 
         // Query all FIDO2 credentials for this rpId
         val allEntities = keyDao.getFido2ByRpId(listParams.rpId)
@@ -2905,7 +3189,7 @@ class RequestHandler(
         }
 
         // Check per-key sharing policy
-        val peerPublicKeyHex = connectedDevicePublicKeyHex
+        val peerPublicKeyHex = currentPeerPublicKeyHex()
         if (!canShareKeyWithPeer(entity, peerPublicKeyHex)) {
             throw ProtocolException("Credential is not shareable with this peer", errorCode = ErrorCodes.OPERATION_DENIED)
         }
@@ -2922,24 +3206,18 @@ class RequestHandler(
         var userVerified = false
 
         if (biometricRequired && biometricLauncher != null) {
-            // Show notification if screen is locked
-            val requestId = "fido2-assertion-${request.id}"
-            showBiometricNotificationIfLocked(
-                operationType = "sign",
-                rpName = entity.rpName,
-                requestId = requestId
-            )
-
+            val notice = OwnNotifications(operationType = "sign", rpName = entity.rpName)
             try {
                 biometricLauncher.requestAuthentication(
                     title = "xKey Authentication",
                     subtitle = "Verify your identity to use this passkey",
-                    showOnLockScreen = keyguardManager.isKeyguardLocked
+                    showOnLockScreen = keyguardManager.isKeyguardLocked,
+                    onLaunch = notice.onLaunch
                 )
                 sessionAuthManager?.recordAuthentication(currentSessionId)
                 userVerified = true
             } finally {
-                cancelBiometricNotification()
+                notice.close()
             }
         }
 
@@ -2958,46 +3236,70 @@ class RequestHandler(
             ceremony = "Passkey assertion for ${assertionParams.rpId}"
         )
 
-        // Increment sign count
-        val newSignCount = entity.signCount + 1
+        // Other assertions with this passkey may have signed while this one
+        // waited for its approval. Reload the credential under its lock and
+        // hold the lock across the counter increment, the signature and the
+        // counter write, so each assertion signs a distinct, increasing count.
+        val (newSignCount, authData, signature) = keyIds.withKeyLock("key:${assertionParams.credentialId}") {
+            val current = keyDao.getByKeyId(assertionParams.credentialId)
+                ?: throw ProtocolException(
+                    "Credential not found: ${assertionParams.credentialId}",
+                    errorCode = ErrorCodes.KEY_NOT_FOUND
+                )
+            if (current.keyType != KeyTypes.FIDO2 ||
+                (current.rpId != null && current.rpId != assertionParams.rpId)
+            ) {
+                throw ProtocolException("Credential changed during approval", errorCode = ErrorCodes.INVALID_PARAMS)
+            }
+            if (!canShareKeyWithPeer(current, peerPublicKeyHex)) {
+                throw ProtocolException(
+                    "Credential is not shareable with this peer",
+                    errorCode = ErrorCodes.OPERATION_DENIED
+                )
+            }
 
-        // Build authenticator data
-        // rpIdHash (32 bytes) || flags (1 byte) || signCount (4 bytes, big-endian)
-        val rpIdHash = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(assertionParams.rpId.toByteArray(Charsets.UTF_8))
+            // Increment sign count
+            val newSignCount = current.signCount + 1
 
-        val flags: Byte = UserVerificationCompliance.flags(
-            userPresent = true,
-            userVerified = userVerified,
-            attestedCredentialData = false
-        )
+            // Build authenticator data
+            // rpIdHash (32 bytes) || flags (1 byte) || signCount (4 bytes, big-endian)
+            val rpIdHash = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(assertionParams.rpId.toByteArray(Charsets.UTF_8))
 
-        val authData = ByteArray(37)
-        System.arraycopy(rpIdHash, 0, authData, 0, 32)
-        authData[32] = flags
-        // signCount as 4-byte big-endian
-        authData[33] = ((newSignCount shr 24) and 0xFF).toByte()
-        authData[34] = ((newSignCount shr 16) and 0xFF).toByte()
-        authData[35] = ((newSignCount shr 8) and 0xFF).toByte()
-        authData[36] = (newSignCount and 0xFF).toByte()
+            val flags: Byte = UserVerificationCompliance.flags(
+                userPresent = true,
+                userVerified = userVerified,
+                attestedCredentialData = false
+            )
 
-        // Sign: authenticatorData || clientDataHash
-        val clientDataHash = assertionParams.getClientDataHashBytes()
-        val signedData = ByteArray(authData.size + clientDataHash.size)
-        System.arraycopy(authData, 0, signedData, 0, authData.size)
-        System.arraycopy(clientDataHash, 0, signedData, authData.size, clientDataHash.size)
+            val authData = ByteArray(37)
+            System.arraycopy(rpIdHash, 0, authData, 0, 32)
+            authData[32] = flags
+            // signCount as 4-byte big-endian
+            authData[33] = ((newSignCount shr 24) and 0xFF).toByte()
+            authData[34] = ((newSignCount shr 16) and 0xFF).toByte()
+            authData[35] = ((newSignCount shr 8) and 0xFF).toByte()
+            authData[36] = (newSignCount and 0xFF).toByte()
 
-        // Hash the signed data for ECDSA (sign expects a hash)
-        val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
+            // Sign: authenticatorData || clientDataHash
+            val clientDataHash = assertionParams.getClientDataHashBytes()
+            val signedData = ByteArray(authData.size + clientDataHash.size)
+            System.arraycopy(authData, 0, signedData, 0, authData.size)
+            System.arraycopy(clientDataHash, 0, signedData, authData.size, clientDataHash.size)
 
-        // Sign using the credential key
-        val signature = keystoreManager.signWithoutBiometric(
-            credentialId = assertionParams.credentialId,
-            dataHash = dataHash
-        )
+            // Hash the signed data for ECDSA (sign expects a hash)
+            val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
 
-        // Update sign count in database
-        keyDao.updateSignCount(assertionParams.credentialId, newSignCount)
+            // Sign using the credential key
+            val signature = keystoreManager.signWithoutBiometric(
+                credentialId = assertionParams.credentialId,
+                dataHash = dataHash
+            )
+
+            // Update sign count in database
+            keyDao.updateSignCount(assertionParams.credentialId, newSignCount)
+            Triple(newSignCount, authData, signature)
+        }
 
         val result = LocalSignFido2AssertionResult(
             authenticatorData = Base64.getEncoder().encodeToString(authData),
@@ -3472,11 +3774,28 @@ class RequestHandler(
      * session has no confirmed peer, since no sharing decision can be made
      * about an anonymous peer.
      */
-    private fun requireConfirmedPeer(operation: String): String {
-        return connectedDevicePublicKeyHex ?: throw ProtocolException(
+    private suspend fun requireConfirmedPeer(operation: String): String {
+        return currentPeerPublicKeyHex() ?: throw ProtocolException(
             "$operation requires a confirmed peer identity",
             errorCode = ErrorCodes.OPERATION_DENIED
         )
+    }
+
+    /**
+     * The confirmed peer of the connection this request arrived on.
+     *
+     * One handler serves BLE, TCP and USB at once, and a transport's teardown
+     * clears the handler-wide peer, so a request decides on its own
+     * [CallerSession]'s peer. The handler-wide peer answers only for a
+     * request that names no connection at all. A caller session is never
+     * backfilled from it, as in [attestingPeerPublicKeyHex].
+     *
+     * @return the peer's static key hex, or null when the request's connection
+     *   authenticated no peer, or names no connection and none is confirmed
+     */
+    private suspend fun currentPeerPublicKeyHex(): String? {
+        val caller = currentCoroutineContext()[CallerSession] ?: return connectedDevicePublicKeyHex
+        return caller.peerPublicKeyHex?.takeIf { it.isNotEmpty() }
     }
 
     /**
@@ -3756,6 +4075,9 @@ class RequestHandler(
         val params = request.params ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
         val pin = params.optString("pin", "")
         val pinType = params.optString("pinType", "USER_PIN")
+        if (pinType != "SO_PIN" && pinType != "USER_PIN") {
+            return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid pinType: $pinType")
+        }
         if (pin.isEmpty()) return Response.error(request.id, ErrorCodes.PIN_REQUIRED, "PIN is required")
         return try {
             val verified = if (pinType == "SO_PIN") pm.verifySOPIN(pin) else pm.verifyUserPIN(pin)
@@ -3765,15 +4087,11 @@ class RequestHandler(
                 Response.error(request.id, ErrorCodes.PIN_INCORRECT, "PIN verification failed")
             }
         } catch (e: PinLockedException) {
-            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked", JSONObject().apply {
-                put("lockoutUntil", e.lockoutStatus.lockoutUntil)
-                put("failedAttempts", e.lockoutStatus.failedAttempts)
-            })
+            pinLockedError(request, e)
         } catch (e: PinException) {
             // PinManager.verifyUserPIN/verifySOPIN report a wrong PIN by throwing
-            // rather than by returning false, so without this branch every
-            // incorrect PIN travelled to the desktop as INTERNAL_ERROR.
-            Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN verification failed")
+            // rather than by returning false.
+            pinError(request, e, "PIN verification failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "PIN verification error")
         }
@@ -3799,9 +4117,9 @@ class RequestHandler(
             }
             Response.success(request.id, JSONObject().apply { put("success", true) })
         } catch (e: PinLockedException) {
-            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
+            pinLockedError(request, e)
         } catch (e: PinException) {
-            Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN set failed")
+            pinError(request, e, "PIN set failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "PIN set error")
         }
@@ -3813,7 +4131,8 @@ class RequestHandler(
         val pinType = params.optString("pinType", "")
         val currentPin = params.optString("currentPin", "")
         val newPin = params.optString("newPin", "")
-        if (currentPin.isEmpty() || newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Current and new PINs required")
+        if (newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "New PIN required")
+        if (currentPin.isEmpty()) return Response.error(request.id, ErrorCodes.PIN_REQUIRED, "Current PIN required")
         newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
@@ -3823,9 +4142,9 @@ class RequestHandler(
             }
             Response.success(request.id, JSONObject().apply { put("success", true) })
         } catch (e: PinLockedException) {
-            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
+            pinLockedError(request, e)
         } catch (e: PinException) {
-            Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN change failed")
+            pinError(request, e, "PIN change failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "PIN change error")
         }
@@ -3840,12 +4159,32 @@ class RequestHandler(
             pm.resetLockout(soPin)
             Response.success(request.id, JSONObject().apply { put("success", true) })
         } catch (e: PinLockedException) {
-            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
+            pinLockedError(request, e)
         } catch (e: PinException) {
-            Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "Reset failed")
+            pinError(request, e, "Reset failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "Reset error")
         }
+    }
+
+    /**
+     * PIN_LOCKED for [e], with the `lockoutUntil` and `failedAttempts` the
+     * desktop shows; every local.pin* handler answers a lockout this way.
+     */
+    private fun pinLockedError(request: Request, e: PinLockedException): Response =
+        Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked", JSONObject().apply {
+            put("lockoutUntil", e.lockoutStatus.lockoutUntil)
+            put("failedAttempts", e.lockoutStatus.failedAttempts)
+        })
+
+    /**
+     * The error code for a [PinException] from the [PinManager]: PIN_REQUIRED
+     * when the PIN is not set or a needed current PIN was not supplied, and
+     * PIN_INCORRECT for a wrong PIN (and any other PIN refusal).
+     */
+    private fun pinError(request: Request, e: PinException, fallback: String): Response {
+        val code = if (e is PinRequiredException) ErrorCodes.PIN_REQUIRED else ErrorCodes.PIN_INCORRECT
+        return Response.error(request.id, code, e.message ?: fallback)
     }
 
     /**

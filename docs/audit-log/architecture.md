@@ -1,15 +1,25 @@
 # Audit log architecture
 
-> **Status: REFERENCE** · Last verified: 2026-08-10
-> As-built description of the xKey Room schema. STALE: the migration table stops at v7; `XKeyDatabase.kt` is at version 11. Read the code for v8-v11.
+> **Status: REFERENCE** · Last verified: 2026-11-12
+> As-built description of the `audit_logs` table in the xKey Room database
+> (`XKeyDatabase`, schema version 12).
 
 ## Entity Details
 
 ### AuditLogEntity (`audit_logs`)
 
-Comprehensive security event log with 35+ operation types covering key lifecycle,
-cryptographic operations, FIDO2 events, connection events, certificate operations,
-file/media operations, contact management, and co-signing.
+Security event log with 58 operation types (`AuditOperationType`) covering key
+lifecycle, cryptographic operations, FIDO2 events, pairing and connection
+events, configuration, certificate operations, file/media operations, contact
+management, OATH, co-signing, PIN and PIV.
+
+Key attestation is among the recorded events: every `local.attestKey` the
+phone answers writes one `KEY_ATTESTED` entry with the key id, label, type,
+the attestation security level and the duration, and a keystore that returns
+no certificate chain writes one failed `KEY_ATTESTED` entry before the
+`ATTESTATION_FAILED` reply. A request refused before the keystore is asked
+(missing parameters, a stale device attestation, a refused user-presence
+check) records none.
 
 Key-use requests write one entry per successful operation, naming the key,
 the requesting device and the duration; the output and the inputs (data,
@@ -41,3 +51,43 @@ for sign, decrypt, encrypt, HMAC and ECDH entries.
 | `index_audit_logs_key_type` | `key_type` | No | Aggregate by key type |
 | `index_audit_logs_device_id` | `device_id` | No | Device-specific audit trail |
 | `index_audit_logs_success` | `success` | No | Filter failures for alerting |
+
+## Retention
+
+### Retention policy
+
+`AuditLogger` applies two limits:
+
+| Limit | Constant | Value | DAO call |
+|-------|----------|-------|----------|
+| Age | `AuditLogger.DEFAULT_RETENTION_MS` | 90 days | `deleteOlderThan(now - 90 days)` |
+| Count | `AuditLogger.MAX_ENTRIES` | 10,000 entries | `deleteExceedingCount(10_000)` |
+
+The policy runs once per process, when `AuditLogger.initialize` first sets up
+the logger at application start. It runs in the background on
+`Dispatchers.IO`; a failure is logged and does not stop logging. The age limit
+runs first, then the count limit, so the count applies to what is left.
+
+- `deleteOlderThan(cutoff)` deletes entries with `timestamp < cutoff`
+  (an entry exactly at the cutoff stays) and returns the number deleted.
+- `deleteExceedingCount(n)` keeps the `n` newest entries by `timestamp` and
+  deletes the rest, returning the number deleted. When entries tie on the
+  timestamp at the limit, exactly `n` stay; which of the tied entries stay is
+  not specified.
+
+Neither limit is configurable.
+
+### The audit screen's purge
+
+The audit log screen (`AuditLogActivity`) has its own "delete older" action.
+After a confirmation dialog it calls `deleteOlderThan(now - 30 days)` and
+shows the number deleted. This is a manual purge, separate from the 90-day
+policy, and it does not change the policy's limits. The screen's "clear all"
+action calls `deleteAll()`.
+
+### Tests
+
+- `AuditRetentionConstantsTest` (JVM) pins the two constants above.
+- `AuditRetentionTest` and `AuditLogDaoTest` (instrumented, in-memory
+  `XKeyDatabase`) cover both DAO calls, tied timestamps, and the policy's two
+  calls with the constants.
