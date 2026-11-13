@@ -24,7 +24,7 @@ covered by the sync feature, not here.
 | Component | File | Role |
 |-----------|------|------|
 | `RequestHandler` (`handleOathList`, `handleOathGenerate`, `handleOathAdd`, `handleOathRemove`) | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | Wire handlers; each builds its own `OathRepository(db.oathCredentialDao(), OathSecretManager())` or uses the DAO directly |
-| `OathRepository`, `OathCredentialWithCode` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathRepository.kt` | `addCredential` (new random UUID `oathId`), `importFromUri`, `generateCode`, `observeAll`, `deleteCredential`, `getCredentialsForSync`; RFC 4648 Base32 decoding |
+| `OathRepository`, `OathCredentialWithCode` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathRepository.kt` | `addCredential` (new random UUID `oathId`), `importStructured` (app-held fields), `importFromUri` (external URIs), `otpauthUri`, `generateCode`, `observeAll`, `deleteCredential`, `getCredentialsForSync`; RFC 4648 Base32 decoding |
 | `OathEngine` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathEngine.kt` | `generateHotpCode`, `generateTotpCode`; stateless |
 | `OathSecretManager` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathSecretManager.kt` | `encryptSecret` / `decryptSecret`: Keystore AES-256-GCM, output `IV(12) || ciphertext || tag` |
 | `OathCredentialEntity`, `OathCredentialDao` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathCredentialEntity.kt`, `OathCredentialDao.kt` | Row: `oathId`, `oathType`, `algorithm`, `digits`, `periodSeconds`, `counter`, `issuer`, `accountName`, `secretEncrypted`, `source`; DAO `getAll`, `getByOathId`, `updateCounter`, `recordUsage`, `deleteByOathId` |
@@ -40,13 +40,24 @@ covered by the sync feature, not here.
 | `local.oathAdd` | `LOCAL_OATH_ADD` | `credential` {`name`, `account_name`, `secret` (Base32), `issuer`, `type` (default `totp`), `algorithm` (`SHA1`), `digits` (6), `period` (30), `counter` (HOTP, 0)} | `success: true`, `credential_id` |
 | `local.oathRemove` | `LOCAL_OATH_REMOVE` | `credential_id` | `deleted: true` |
 
-`local.oathAdd` builds an `otpauth://<type>/<issuer>:<account>?secret=...`
-URI from the fields with `otpauthUri` (sync/SyncEngine.kt), the builder
-`SyncEngine.mergeOath` uses: the issuer and account name are percent-encoded
-(RFC 3986, a space as `%20`) in the label and the `issuer` parameter, and
-`counter` is written for HOTP only. It passes the URI to
-`OathRepository.importFromUri`, which stores the credential under a new random
-UUID, and returns that UUID as `credential_id`. It is the `name` field
+`OathRepository` has two import paths:
+
+- `importStructured(type, issuer, accountName, secret, ...)` is the one path
+  for a credential the app holds as separate fields: `local.oathAdd`,
+  `SyncEngine.mergeOath` and manual entry (`OathActivity`). It builds an
+  `otpauth://<type>/<issuer>:<account>?secret=...` URI with `otpauthUri`
+  (oath/OathRepository.kt), every value percent-encoded (RFC 3986, a space as
+  `%20`) and `counter` written for HOTP only, and reads the label back with
+  `parseStructuredOathLabel`: only the literal `:` it wrote separates the
+  issuer from the account, so an issuerless account `host:user` is stored
+  whole.
+- `importFromUri(uri)` is for a URI from outside the app (a scanned QR
+  code). Its label also splits on an encoded `%3A` (`parseOathLabel`), as
+  third-party generators write the separator. No app-built URI goes here.
+
+`local.oathAdd` imports through `importStructured`, which stores the
+credential under a new random UUID, and returns that UUID as
+`credential_id`. It is the `name` field
 `local.oathList` returns and the `credential_id` `local.oathGenerate` and
 `local.oathRemove` accept.
 
@@ -62,8 +73,8 @@ sequenceDiagram
     participant DB as OathCredentialDao
 
     D->>H: local.oathAdd {credential}
-    H->>R: importFromUri(otpauth://...)
-    R->>R: parse label and params, base32Decode(secret)
+    H->>R: importStructured(type, issuer, account, secret, ...)
+    R->>R: otpauthUri, parse structured label and params, base32Decode(secret)
     R->>SM: encryptSecret(secret)
     R->>DB: insert(OathCredentialEntity oathId = UUID)
     R-->>H: oathId
