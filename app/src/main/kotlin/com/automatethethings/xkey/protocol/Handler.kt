@@ -68,6 +68,7 @@ import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinType
 import com.automatethethings.xkey.pin.PinException
 import com.automatethethings.xkey.pin.PinLockedException
+import com.automatethethings.xkey.pin.PinRequiredException
 import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
@@ -3672,6 +3673,9 @@ class RequestHandler(
         val params = request.params ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
         val pin = params.optString("pin", "")
         val pinType = params.optString("pinType", "USER_PIN")
+        if (pinType != "SO_PIN" && pinType != "USER_PIN") {
+            return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid pinType: $pinType")
+        }
         if (pin.isEmpty()) return Response.error(request.id, ErrorCodes.PIN_REQUIRED, "PIN is required")
         return try {
             val verified = if (pinType == "SO_PIN") pm.verifySOPIN(pin) else pm.verifyUserPIN(pin)
@@ -3681,15 +3685,11 @@ class RequestHandler(
                 Response.error(request.id, ErrorCodes.PIN_INCORRECT, "PIN verification failed")
             }
         } catch (e: PinLockedException) {
-            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked", JSONObject().apply {
-                put("lockoutUntil", e.lockoutStatus.lockoutUntil)
-                put("failedAttempts", e.lockoutStatus.failedAttempts)
-            })
+            pinLockedError(request, e)
         } catch (e: PinException) {
             // PinManager.verifyUserPIN/verifySOPIN report a wrong PIN by throwing
-            // rather than by returning false, so without this branch every
-            // incorrect PIN travelled to the desktop as INTERNAL_ERROR.
-            Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN verification failed")
+            // rather than by returning false.
+            pinError(request, e, "PIN verification failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "PIN verification error")
         }
@@ -3715,9 +3715,9 @@ class RequestHandler(
             }
             Response.success(request.id, JSONObject().apply { put("success", true) })
         } catch (e: PinLockedException) {
-            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
+            pinLockedError(request, e)
         } catch (e: PinException) {
-            Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN set failed")
+            pinError(request, e, "PIN set failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "PIN set error")
         }
@@ -3729,7 +3729,8 @@ class RequestHandler(
         val pinType = params.optString("pinType", "")
         val currentPin = params.optString("currentPin", "")
         val newPin = params.optString("newPin", "")
-        if (currentPin.isEmpty() || newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Current and new PINs required")
+        if (newPin.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "New PIN required")
+        if (currentPin.isEmpty()) return Response.error(request.id, ErrorCodes.PIN_REQUIRED, "Current PIN required")
         newPinLengthError(request, newPin)?.let { return it }
         return try {
             when (pinType) {
@@ -3739,9 +3740,9 @@ class RequestHandler(
             }
             Response.success(request.id, JSONObject().apply { put("success", true) })
         } catch (e: PinLockedException) {
-            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
+            pinLockedError(request, e)
         } catch (e: PinException) {
-            Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "PIN change failed")
+            pinError(request, e, "PIN change failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "PIN change error")
         }
@@ -3756,12 +3757,32 @@ class RequestHandler(
             pm.resetLockout(soPin)
             Response.success(request.id, JSONObject().apply { put("success", true) })
         } catch (e: PinLockedException) {
-            Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked")
+            pinLockedError(request, e)
         } catch (e: PinException) {
-            Response.error(request.id, ErrorCodes.PIN_INCORRECT, e.message ?: "Reset failed")
+            pinError(request, e, "Reset failed")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, e.message ?: "Reset error")
         }
+    }
+
+    /**
+     * PIN_LOCKED for [e], with the `lockoutUntil` and `failedAttempts` the
+     * desktop shows; every local.pin* handler answers a lockout this way.
+     */
+    private fun pinLockedError(request: Request, e: PinLockedException): Response =
+        Response.error(request.id, ErrorCodes.PIN_LOCKED, "PIN is locked", JSONObject().apply {
+            put("lockoutUntil", e.lockoutStatus.lockoutUntil)
+            put("failedAttempts", e.lockoutStatus.failedAttempts)
+        })
+
+    /**
+     * The error code for a [PinException] from the [PinManager]: PIN_REQUIRED
+     * when the PIN is not set or a needed current PIN was not supplied, and
+     * PIN_INCORRECT for a wrong PIN (and any other PIN refusal).
+     */
+    private fun pinError(request: Request, e: PinException, fallback: String): Response {
+        val code = if (e is PinRequiredException) ErrorCodes.PIN_REQUIRED else ErrorCodes.PIN_INCORRECT
+        return Response.error(request.id, code, e.message ?: fallback)
     }
 
     /**
