@@ -1,7 +1,7 @@
 # Certificate authority architecture
 
-> **Status: REFERENCE** · Last verified: 2026-08-10
-> As-built description of the xKey Room schema. STALE: the migration table stops at v7; `XKeyDatabase.kt` is at version 11. Read the code for v8-v11.
+> **Status: REFERENCE** · Last verified: 2026-11-12
+> As-built description of the certificate table in the xKey Room schema (`XKeyDatabase.kt`, version 12; the table was added in v6). The full schema and migration history are in [hardware-backed-keys](../hardware-backed-keys/architecture.md#migration-history).
 
 ## Entity Details
 
@@ -9,6 +9,26 @@
 
 X.509 certificates issued by the local Android CA. Tracks certificate lifecycle
 including issuance, revocation, and expiration.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER | Primary key, auto-generated |
+| `serial_number` | TEXT | Unique |
+| `subject_dn` | TEXT | |
+| `issuer_dn` | TEXT | |
+| `not_before` | INTEGER | Epoch milliseconds |
+| `not_after` | INTEGER | Epoch milliseconds |
+| `profile` | TEXT | Certificate profile |
+| `fingerprint` | TEXT | |
+| `certificate_pem` | TEXT | |
+| `chain_pem` | TEXT | Nullable |
+| `key_id` | TEXT | Nullable; the `keys.key_id` of the certified key |
+| `device_id` | TEXT | Nullable |
+| `revoked` | INTEGER (boolean) | Default false |
+| `revoked_at` | INTEGER | Nullable |
+| `revoked_reason` | INTEGER | Nullable |
+| `is_ca` | INTEGER (boolean) | Default false |
+| `created_at` | INTEGER | Epoch milliseconds |
 
 ## Index Strategy
 

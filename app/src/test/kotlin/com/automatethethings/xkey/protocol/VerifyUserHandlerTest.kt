@@ -21,6 +21,9 @@ import android.content.Context
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.BiometricNotificationHelper
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.BiometricUnavailableException
 import com.automatethethings.xkey.crypto.KeyGenerationException
@@ -31,8 +34,11 @@ import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coVerify
+import io.mockk.Runs
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
@@ -47,10 +53,12 @@ import java.util.Date
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
@@ -318,7 +326,69 @@ class VerifyUserHandlerTest {
     fun verifyUserNeverUsesTheAttestationPresencePrompt() = runTest {
         onConnection { handler.handleRequest(verifyUserRequest()) }
 
-        coVerify(exactly = 0) { biometricLauncher.requestAuthentication(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { biometricLauncher.requestAuthentication(any(), any(), any(), any(), any()) }
+    }
+
+    /**
+     * A setKeyPolicy approval holds the screen on a locked phone; verifyUser
+     * from a second connection waits its turn in the one prompt queue: no
+     * wake notification and no prompt until the approval settles.
+     */
+    @Test
+    fun verifyUserWaitsForTheActiveApprovalBeforeItsWakeNotificationAndPrompt() = runTest {
+        val keyguard = mockk<KeyguardManager>()
+        every { keyguard.isKeyguardLocked } returns true
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns keyguard
+        mockkConstructor(BiometricNotificationHelper::class)
+        val posted = mutableListOf<String>()
+        every {
+            anyConstructed<BiometricNotificationHelper>()
+                .showBiometricRequiredNotification(any(), any(), any(), any(), any(), any())
+        } answers {
+            val key = arg<String>(2)
+            assertEquals(
+                "a notification is posted only on its own queue turn",
+                PromptOwnership.State.ACTIVE,
+                PromptOwnership.process.state(key)
+            )
+            posted += key
+        }
+        every { anyConstructed<BiometricNotificationHelper>().cancelNotification(any()) } just Runs
+        val locked = RequestHandler(
+            context = context,
+            keystoreManager = mockk<KeystoreManager>(relaxed = true),
+            biometricLauncher = biometricLauncher,
+            sessionAuthManager = null,
+            userVerificationKey = uvk,
+            userVerificationPrompt = prompt
+        )
+        val approval = NotificationKeys.approval("setKeyPolicy-held")
+        PromptOwnership.process.enqueue(
+            approval, PromptOwnership.Kind.SHARING_APPROVAL, "first",
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
+        try {
+            val response = async(UnconfinedTestDispatcher(testScheduler)) {
+                onConnection { Response.fromJson(locked.handleRawRequest(verifyUserRequest().toJson())) }
+            }
+            runCurrent()
+
+            assertEquals("no wake notification while the approval holds the screen", emptyList<String>(), posted)
+            assertEquals("no prompt while the approval holds the screen", 0, prompt.prompts)
+            assertFalse(response.isCompleted)
+
+            PromptOwnership.process.settle(approval, PromptOwnership.Outcome.APPROVED)
+            val answered = response.await()
+
+            assertNull("no error expected: ${answered.error?.message}", answered.error)
+            assertEquals(1, prompt.prompts)
+            assertEquals(1, posted.size)
+            assertTrue(posted.single().startsWith("wake-verifyUser-"))
+            assertEquals(PromptOwnership.State.SETTLED, PromptOwnership.process.state(posted.single()))
+        } finally {
+            PromptOwnership.process.end(approval)
+        }
     }
 
     // -----------------------------------------------------------------
