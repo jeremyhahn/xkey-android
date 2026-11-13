@@ -46,8 +46,10 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricAuthMode
@@ -675,12 +677,17 @@ class RequestHandler(
         generateParams: GenerateKeyParams,
         authDurationSeconds: Int
     ): Response {
-        // Generate the key with appropriate authentication duration
-        val cosePublicKey = keystoreManager.generateKeyWithAuthDuration(
-            credentialId = generateParams.credentialId,
-            authDurationSeconds = authDurationSeconds,
-            requireStrongBox = false // Don't require, just prefer
-        )
+        // Generated inside a revoke of the ID: a share of the ID waiting at
+        // admission is refused from the revoke's start (this path writes no
+        // key row, so the ledger is the only record of the change).
+        val cosePublicKey = SharePermissionLedger.revoking(generateParams.credentialId) {
+            // Generate the key with appropriate authentication duration
+            keystoreManager.generateKeyWithAuthDuration(
+                credentialId = generateParams.credentialId,
+                authDurationSeconds = authDurationSeconds,
+                requireStrongBox = false // Don't require, just prefer
+            )
+        }
 
         val publicKeyBase64 = Base64.getEncoder().encodeToString(cosePublicKey)
         // The credential just generated, read by its exact alias; a KeyInfo
@@ -1140,8 +1147,21 @@ class RequestHandler(
             )
         }
 
-        // Delete the key
-        val deleted = keystoreManager.deleteKey(deleteParams.credentialId)
+        // The key the ID names: an alias form (xkey_key_<id>) removes <id>'s
+        // Keystore entry, so it is <id> that is revoked and whose row goes.
+        val keyId = canonicalKeyId(deleteParams.credentialId)
+
+        // Delete the key and its metadata row as one revoke, opened before the
+        // Keystore is touched, like every other key delete: a share of the key
+        // pending at a transport is refused at admission. The ID as given is
+        // revoked too when it differs.
+        val deleted = SharePermissionLedger.revoking(keyId) {
+            SharePermissionLedger.revoking(deleteParams.credentialId) {
+                keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
+                    if (removed) keyDao.deleteByKeyId(keyId)
+                }
+            }
+        }
         if (!deleted) {
             throw ProtocolException(
                 "Failed to delete credential",
@@ -1250,12 +1270,18 @@ class RequestHandler(
         val genParams = LocalGenerateKeyParams.fromJson(params)
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
+        // An ID in an existing key's raw alias form names that key.
+        val keyId = canonicalKeyId(genParams.keyId)
+        if (keyId != genParams.keyId) {
+            throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
+        }
         // Approval prompts take turns, so another creation of this id can pass
         // this check while this one waits; the reservation refuses it until
         // this creation ends.
-        val reservation = "key:${genParams.keyId}"
-        if (keystoreManager.generalKeyExists(genParams.keyId) || !keyIds.tryReserve(reservation)) {
-            throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
+        val reservation = "key:$keyId"
+        refuseExistingKey(keyId)
+        if (!keyIds.tryReserve(reservation)) {
+            throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
         }
         try {
             val authDurationSeconds = calculateAuthDuration(currentSettings)
@@ -1263,13 +1289,15 @@ class RequestHandler(
             // The approval waited: recheck under the id's lock, since every
             // generator replaces an existing alias, destroying that key.
             keyIds.withKeyLock(reservation) {
-                if (keystoreManager.generalKeyExists(genParams.keyId)) {
-                    throw ProtocolException(
-                        "Key already exists: ${genParams.keyId}",
-                        errorCode = ErrorCodes.KEY_EXISTS
-                    )
+                // Generated inside a revoke of the ID, opened before any key
+                // material is touched, after existence is checked again: a
+                // key that appeared during the prompt is refused, and a share
+                // of the ID waiting at admission is refused from the revoke's
+                // start.
+                SharePermissionLedger.revoking(keyId) {
+                    refuseExistingKey(keyId)
+                    createLocalKey(request, genParams, algorithmName, authDurationSeconds)
                 }
-                createLocalKey(request, genParams, algorithmName, authDurationSeconds)
             }
         } finally {
             keyIds.release(reservation)
@@ -1306,6 +1334,34 @@ class RequestHandler(
                 )
             }
         }
+    }
+
+    /**
+     * Refuses an ID that exists in any key store: the general and credential
+     * Keystore namespaces, the software store, and the metadata table.
+     */
+    private suspend fun refuseExistingKey(keyId: String) {
+        if (keystoreManager.generalKeyExists(keyId) ||
+            keystoreManager.keyExists(keyId) ||
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).contains(keyId) ||
+            keyDao.exists(keyId)
+        ) {
+            throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
+        }
+    }
+
+    /**
+     * The canonical ID of the key [id] names. An ID in raw alias form
+     * (`xkey_key_<id>` or `xkey_credential_<id>`, which [KeystoreManager]
+     * resolves to that Keystore entry itself) names the key `<id>`; any other
+     * ID is already canonical. Every operation that removes or replaces key
+     * material resolves its ID here and opens its revoke on the result before
+     * it touches the Keystore.
+     */
+    private fun canonicalKeyId(id: String): String {
+        if (keystoreManager.resolveKeystoreAlias(id) != id) return id
+        val prefix = KEYSTORE_ALIAS_PREFIXES.firstOrNull { id.startsWith(it) && id.length > it.length }
+        return if (prefix == null) id else id.removePrefix(prefix)
     }
 
     /** Creates an approved `local.generateKey` key; the caller holds its id's lock. */
@@ -2014,17 +2070,56 @@ class RequestHandler(
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
 
-        // Delete from Android Keystore and the software key store (only one
-        // of the two will actually hold the key).
-        keystoreManager.deleteGeneralKey(keyId)
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
+        // One revoke of the canonical ID from the first removal: the Android
+        // Keystore and the software key store (only one of the two holds the
+        // key), then the unified key store's row. An ID with a row or a
+        // software key of its own is that key; only an ID with neither is read
+        // as a raw Keystore alias. Software key `xkey_key_a` and hardware key
+        // `a` (alias `xkey_key_a`) can both exist, and deleting the first must
+        // never delete the second.
+        //
+        // Only the one key the ID names loses its material. A raw alias
+        // (`xkey_credential_k`, `xkey_key_k`) is that Keystore entry itself;
+        // a canonical ID is its software key if the store holds one, else its
+        // general key `xkey_key_<id>`, else the other Keystore entry discovery
+        // maps to it, by the rules `KeyDao.deleteKeyRow` uses. A credential `xkey_credential_k` and a
+        // general key `xkey_key_k` can both exist, and deleting one must leave
+        // the other.
+        val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
+        val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
+        var materialRemoved = false
+        val rowsDeleted = keyDao.deleteKeyAndMaterial(canonicalId) {
+            materialRemoved = when {
+                canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
+                softwareKeys.contains(canonicalId) -> {
+                    softwareKeys.delete(canonicalId)
+                    true
+                }
+                // A canonical ID names its general key `xkey_key_k` first, as
+                // this method always did; another alias only when it has none.
+                else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
+                    .sortedByDescending { it == "xkey_key_$canonicalId" }
+                    .any { deleteKeystoreAlias(canonicalId, it) }
+            }
+        }
 
-        // Delete from unified key store
-        keyDao.deleteByKeyId(keyId)
-
-        Log.i(TAG, "Deleted key: $keyId")
-        return Response.success(request.id, JSONObject().put("deleted", true))
+        // Deleted only when the key's material or its row was removed.
+        val deleted = materialRemoved || rowsDeleted > 0
+        Log.i(TAG, "Deleted key: $keyId ($deleted)")
+        return Response.success(request.id, JSONObject().put("deleted", deleted))
     }
+
+    /**
+     * Deletes Keystore entry [alias] of key [keyId] for [handleLocalDeleteKey];
+     * the general alias goes through [KeystoreManager.deleteGeneralKey], which
+     * audits the deletion. False when no such entry exists.
+     */
+    private fun deleteKeystoreAlias(keyId: String, alias: String): Boolean =
+        if (alias == "xkey_key_$keyId") {
+            keystoreManager.deleteGeneralKey(keyId)
+        } else {
+            keystoreManager.deleteByAlias(alias)
+        }
 
     /**
      * Handles local.setKeyPolicy - update key sharing policy.
@@ -2074,7 +2169,12 @@ class RequestHandler(
         suspend fun setPolicyFrom(from: KeyEntity, policy: SharingPolicyType): Boolean {
             val expected = from.sharingPolicy
             return withContext(NonCancellable) {
-                if (keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy) == 0) {
+                // A revoke: a share of the key pending at a transport is
+                // refused at admission.
+                val changed = SharePermissionLedger.revoking(entity.keyId) {
+                    keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy)
+                }
+                if (changed == 0) {
                     return@withContext false
                 }
                 AuditLogger.logKeySharingChanged(
@@ -4390,3 +4490,6 @@ class RequestHandler(
         return digest.digest(publicKeyDer).joinToString("") { "%02x".format(it) }
     }
 }
+
+/** The Keystore alias prefixes of [KeystoreManager]'s credential and general key namespaces. */
+private val KEYSTORE_ALIAS_PREFIXES = listOf("xkey_credential_", "xkey_key_")

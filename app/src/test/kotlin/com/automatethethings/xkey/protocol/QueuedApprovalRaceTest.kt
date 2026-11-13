@@ -128,6 +128,10 @@ class QueuedApprovalRaceTest {
         every { AuditLogger.logFido2Registration(any(), any(), any(), any()) } just runs
         every { AuditLogger.logFido2Authentication(any(), any(), any()) } just runs
 
+        // local.generateKey also refuses an ID the software store holds.
+        mockkConstructor(com.automatethethings.xkey.crypto.SoftwareKeyStore::class)
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().contains(any()) } returns false
+
         keystore = mockk(relaxed = true)
         coEvery { keystore.generalKeyExists(any()) } answers { firstArg<String>() in aliases }
         coEvery { keystore.keyExists(any()) } answers { firstArg<String>() in aliases }

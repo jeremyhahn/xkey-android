@@ -16,8 +16,16 @@ package com.automatethethings.xkey.remote
 
 import android.util.Log
 import com.automatethethings.xkey.protocol.Request
+import com.automatethethings.xkey.protocol.SharePermission
+import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import io.mockk.coEvery
 import io.mockk.every
+import io.mockk.mockk
 import io.mockk.mockkStatic
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Test double for the paired-desktop transport shared by the `remote.*` client
@@ -78,10 +86,74 @@ class ScriptedMessageSender(
         script(request)?.let { router.processMessage(it.toByteArray(Charsets.UTF_8)) }
     }
 
-    /** Sends on [connection] only while it is still this transport's confirmed one. */
-    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+    /**
+     * Sends on [connection] only while it is still this transport's confirmed
+     * one, and only once [admit] passes, as a real transport's admission does.
+     */
+    override suspend fun sendEncryptedMessageOn(
+        connection: ConfirmedConnection,
+        data: ByteArray,
+        admit: () -> Unit
+    ) {
         if (!connection.sameAs(confirmedConnection())) throw ConnectionChangedException()
+        admit()
         sendEncryptedMessage(data)
+    }
+}
+
+/** A [SharePermission] whose grant store answers with [isShared] and no revocation is pending. */
+fun permissionOf(isShared: suspend (String, String) -> Boolean): SharePermission =
+    SharePermission(
+        mockk<KeySharingPolicyDao> {
+            coEvery { isKeySharedWithPeer(any(), any()) } coAnswers { isShared(firstArg(), secondArg()) }
+        },
+        null
+    )
+
+/**
+ * One key shared with [peerPublicKeyHex] alone (selected peers), as the
+ * phone's store holds it, for the tests that revoke it while a share is
+ * pending. [makePrivate] and [removeGrant] are its revoke writers: each
+ * commits its change the way the app's writers do.
+ */
+class SharedKeyStore(
+    private val peerPublicKeyHex: String,
+    /** A fresh key id per store by default, so no two tests share one key's history. */
+    val keyId: String = "pending-" + next.incrementAndGet(),
+) {
+
+    @Volatile var entity: KeyEntity? = KeyEntity(
+        keyId = keyId,
+        keyType = "signing",
+        algorithm = "EC",
+        label = "pending share",
+        keySizeBits = 256,
+        exportable = false,
+        shareable = true,
+        sharingPolicy = SharingPolicyType.SELECTED_PEERS,
+        source = "local"
+    )
+        private set
+
+    private val grants: MutableSet<Pair<String, String>> =
+        ConcurrentHashMap.newKeySet<Pair<String, String>>().apply { add(keyId to peerPublicKeyHex) }
+
+    val isShared: suspend (String, String) -> Boolean = { key, peer -> (key to peer) in grants }
+    val permission: SharePermission = permissionOf(isShared)
+    val current: suspend (String) -> KeyEntity? = { id -> entity?.takeIf { it.keyId == id } }
+
+    /** The key is set to private. */
+    suspend fun makePrivate() = revoke { entity = entity?.copy(shareable = false, sharingPolicy = SharingPolicyType.PRIVATE) }
+
+    /** The peer's grant for the key is removed. */
+    suspend fun removeGrant() = revoke { grants.remove(keyId to peerPublicKeyHex) }
+
+    private suspend fun revoke(change: () -> Unit) {
+        SharePermissionLedger.revoking(keyId) { change() }
+    }
+
+    private companion object {
+        val next = AtomicInteger()
     }
 }
 

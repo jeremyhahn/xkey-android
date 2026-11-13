@@ -257,12 +257,15 @@ class StreamPairingSession(
          * Admits one frame: the connection is live, and a phone-initiated
          * frame's peer is still paired. Only then is a nonce consumed.
          * A frame scoped to [expected] is admitted only while this is still
-         * the current connection, confirmed for that same peer.
+         * the current connection, confirmed for that same peer. [check], the
+         * caller's own authorization, runs last, under [state] and just
+         * before the nonce is consumed; whatever it throws refuses the frame.
          */
         fun admit(
             plaintext: ByteArray,
             phoneInitiated: Boolean,
-            expected: ConfirmedConnection? = null
+            expected: ConfirmedConnection? = null,
+            check: () -> Unit = {}
         ): ByteArray = synchronized(state) {
             ensureLive()
             if (!established) throw IOException("No active Noise session")
@@ -273,6 +276,7 @@ class StreamPairingSession(
                 if (activeConnection !== this) throw IOException("Another desktop's connection replaced this one")
                 pairedDeviceRepository?.requirePaired(peerKeyHex)
             }
+            check()
             noise.encrypt(plaintext)
         }
 
@@ -903,9 +907,13 @@ class StreamPairingSession(
             override fun confirmedConnection(): ConfirmedConnection? =
                 synchronized(connection.state) { connection.confirmedHere() }
 
-            override suspend fun sendEncryptedMessageOn(confirmed: ConfirmedConnection, data: ByteArray) {
+            override suspend fun sendEncryptedMessageOn(
+                confirmed: ConfirmedConnection,
+                data: ByteArray,
+                admit: () -> Unit
+            ) {
                 if (confirmed.connection !== connection) throw ConnectionChangedException()
-                this@StreamPairingSession.sendEncryptedMessageOn(confirmed, data)
+                this@StreamPairingSession.sendEncryptedMessageOn(confirmed, data, admit)
             }
         }
     }
@@ -916,14 +924,22 @@ class StreamPairingSession(
      * refuses it unless that is still the current connection, confirmed for
      * the same peer. A reconnect, even of another paired desktop, gets nothing.
      *
+     * [admit] runs inside admission, after the send lock and the IO
+     * dispatcher, under the connection's [Connection.state] lock and just
+     * before the nonce is consumed.
+     *
      * @throws ConnectionChangedException if [connection] is not current;
      *   nothing is written and no nonce is consumed.
      */
-    private suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+    private suspend fun sendEncryptedMessageOn(
+        connection: ConfirmedConnection,
+        data: ByteArray,
+        admit: () -> Unit
+    ) {
         val target = connection.connection as? Connection ?: throw ConnectionChangedException()
         // Only this transport's own current connection; never another one's.
         if (target !== activeConnection) throw ConnectionChangedException()
-        send(target, data, phoneInitiated = true, expected = connection)
+        send(target, data, phoneInitiated = true, expected = connection, check = admit)
     }
 
     /**
@@ -937,14 +953,15 @@ class StreamPairingSession(
         connection: Connection,
         plaintext: ByteArray,
         phoneInitiated: Boolean,
-        expected: ConfirmedConnection? = null
+        expected: ConfirmedConnection? = null,
+        check: () -> Unit = {}
     ) {
         beforeSendLockForTest?.invoke()
         connection.sendLock.withLock {
             currentCoroutineContext().ensureActive()
             withContext(NonCancellable + Dispatchers.IO) {
                 beforeAdmissionForTest?.invoke()
-                val frame = connection.admit(plaintext, phoneInitiated, expected)
+                val frame = connection.admit(plaintext, phoneInitiated, expected, check)
                 try {
                     afterAdmissionForTest?.invoke()
                     StreamMessageFraming.writeMessage(connection.output, frame)

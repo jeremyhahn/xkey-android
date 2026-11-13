@@ -15,27 +15,45 @@
 
 package com.automatethethings.xkey.transport
 
+import android.app.KeyguardManager
+import android.app.NotificationManager
 import android.content.Context
+import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
+import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.piv.PivAlgorithm
+import com.automatethethings.xkey.piv.PivKeyManager
+import com.automatethethings.xkey.piv.PivSlot
+import com.automatethethings.xkey.piv.PivSlotDao
+import com.automatethethings.xkey.piv.PivSlotInfo
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectionChangedException
+import com.automatethethings.xkey.remote.DesktopKeyShare
+import com.automatethethings.xkey.remote.DesktopShareDecision
 import com.automatethethings.xkey.remote.RemoteShareClient
+import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.remote.SharePermissionRevokedException
 import com.automatethethings.xkey.remote.ShareSession
+import com.automatethethings.xkey.remote.SharedKeyStore
 import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
+import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.KeyDao
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.runs
@@ -46,6 +64,12 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.nio.file.Files
+import java.security.KeyPair
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.PublicKey
+import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -63,6 +87,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -82,6 +107,8 @@ class StreamPairingSessionRevocationTest {
 
     private companion object {
         const val TIMEOUT_MS = 10_000L
+        const val SHARE_TIMEOUT_MS = 1_000L
+        const val PEM = "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"
         val TRANSPORT_SECRETS = setOf("sendKey", "recvKey")
         val REQUEST = """{"jsonrpc":"2.0","id":9,"method":"remote.sync","params":{}}""".toByteArray()
 
@@ -601,6 +628,543 @@ class StreamPairingSessionRevocationTest {
         )
         late.desktop.assertNoFrame()
         first.desktop.assertNoFrame()
+    }
+
+    // ---------------------------------------------------------------------
+    // A revoke while a share waits for the transport
+    // ---------------------------------------------------------------------
+
+    /**
+     * A desktop share has passed every check before the transport and waits
+     * for admission (the send lock and the IO dispatcher); the key is set to
+     * private meanwhile. Admission refuses it: nothing is written, no nonce
+     * is consumed and the share is refused by policy. TCP and USB share this
+     * session.
+     */
+    @Test
+    fun aShareWhoseKeyTurnsPrivateWhileItWaitsForAdmissionWritesNothing() = runBlocking<Unit> {
+        assertRevokedAtAdmission { it.makePrivate() }
+    }
+
+    /** As above, with the peer's grant for the key removed instead. */
+    @Test
+    fun aShareWhosePeerGrantIsRemovedWhileItWaitsForAdmissionWritesNothing() = runBlocking<Unit> {
+        assertRevokedAtAdmission { it.removeGrant() }
+    }
+
+    /**
+     * Every send of a share client meets the same admission check: a public
+     * key, a symmetric key and an import request alike are refused at the
+     * transport's admission when the key was revoked after the client
+     * authorized the send, with nothing written and no nonce consumed.
+     */
+    @Test
+    fun everyShareClientSendIsRefusedAtAdmissionAfterARevoke() = runBlocking<Unit> {
+        val gate = GatedOutputStream()
+        val phone = connectPaired(gate)
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!
+        val store = SharedKeyStore(phone.desktop.publicKeyHex)
+        val client = session.client(SHARE_TIMEOUT_MS) {
+            val revision = SharePermissionLedger.revision(store.keyId)
+            return@client { SharePermissionLedger.requireUnchanged(store.keyId, revision) }
+        }
+        // The revoke lands while each send waits inside the transport.
+        pairing.beforeAdmissionForTest = { store.makePrivate() }
+        val writes = gate.writes.get()
+        val nonce = phone.noise.sendNonceForTest()
+
+        val sends = listOf(
+            runCatching {
+                client.sharePublicKey(RemoteShareClient.PublicKeyShare(store.keyId, PEM, null, "EC", null, null))
+            },
+            runCatching { client.shareSymmetric(store.keyId, ByteArray(32) { 7 }, "AES", 256, null, null) },
+            runCatching { client.importSharedKey("software", store.keyId, null) }
+        )
+        pairing.beforeAdmissionForTest = null
+
+        sends.forEach {
+            assertTrue("refused at admission, got $it", it.exceptionOrNull() is SharePermissionRevokedException)
+        }
+        assertEquals("nothing may reach the stream", writes, gate.writes.get())
+        assertEquals("a refused send must not consume a nonce", nonce, phone.noise.sendNonceForTest())
+    }
+
+    /**
+     * The legacy `deleteKey` RPC is a revoke like every other key delete: a
+     * share of the key paused before admission when the real handler deletes
+     * the key is refused there, with nothing written and no nonce consumed,
+     * and the key's metadata row goes with its Keystore entry.
+     */
+    @Test
+    fun aShareWhoseKeyIsDeletedByTheLegacyDeleteKeyRpcWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val deleter = realHandler(keyDao)
+        var deletedKeyId: String? = null
+        assertRevokedAtAdmission { store ->
+            deletedKeyId = store.keyId
+            val request = JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "deleteKey")
+                .put("params", JSONObject().put("credentialId", store.keyId))
+            val response = JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
+            assertTrue(
+                "the delete must succeed, got $response",
+                response.optJSONObject("result")?.optBoolean("deleted") == true
+            )
+        }
+        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+    }
+
+    /**
+     * A key row replaced under a pending share is a revoke: the real
+     * `local.generateKey` writes a new PRIVATE row under the shared key's ID
+     * while the share waits at admission (a row the handler's existence check
+     * did not see, as when it appears during the generation's prompt), and
+     * the share is refused, with nothing written and no nonce consumed.
+     */
+    @Test
+    fun aShareWhoseKeyRowGenerateKeyReplacesWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        // The DAO's own insert runs; only the Room write under it is mocked.
+        coEvery { keyDao.insert(any()) } coAnswers { callOriginal() }
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) } returns ByteArray(91) { 4 }
+        val generator = realHandler(keyDao, keystore)
+        var response: JSONObject? = null
+        assertRevokedAtAdmission { store ->
+            response = generate(generator, store.keyId)
+        }
+        assertTrue(
+            "the generation must succeed, got $response",
+            response?.optJSONObject("result")?.optString("keyId")?.isNotEmpty() == true
+        )
+    }
+
+    /**
+     * `local.generateKey` refuses an ID that exists in any key store (the
+     * general or credential Keystore namespace, the software store, or the
+     * metadata table) and writes no row.
+     */
+    @Test
+    fun generateKeyRefusesAnIdThatExistsInAnyKeyStore() = runBlocking<Unit> {
+        mockkConstructor(SoftwareKeyStore::class)
+        val stores = listOf<(KeystoreManager, KeyDao, String) -> Unit>(
+            { keystore, _, id -> every { keystore.generalKeyExists(id) } returns true },
+            { keystore, _, id -> every { keystore.keyExists(id) } returns true },
+            { _, _, id -> every { anyConstructed<SoftwareKeyStore>().contains(id) } returns true },
+            { _, dao, id -> coEvery { dao.exists(id) } returns true },
+        )
+        stores.forEachIndexed { i, holds ->
+            val keyDao = mockk<KeyDao>(relaxed = true)
+            val keystore = mockk<KeystoreManager>(relaxed = true)
+            every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+            val id = "existing-$i"
+            holds(keystore, keyDao, id)
+            val response = generate(realHandler(keyDao, keystore), id)
+            assertEquals(
+                "store $i: an existing ID must be refused, got $response",
+                ErrorCodes.KEY_EXISTS,
+                response.optJSONObject("error")?.optInt("code")
+            )
+            coVerify(exactly = 0) { keyDao.insert(any()) }
+        }
+    }
+
+    /**
+     * `local.deleteKey` is one revoke from its first removal: the real handler
+     * pauses right after the key's Keystore entry is gone, before its metadata
+     * row goes, and a share of the key waiting at admission resumes in that
+     * window. The share is refused, with nothing written and no nonce
+     * consumed, and the delete then completes.
+     */
+    @Test
+    fun aShareResumedAfterLocalDeleteKeyRemovedTheKeystoreEntryWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val removed = CompletableDeferred<Unit>()
+        val finish = CountDownLatch(1)
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        // The Keystore entry goes, then the delete pauses there.
+        every { keystore.deleteGeneralKey(any()) } answers {
+            removed.complete(Unit)
+            finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            true
+        }
+        val deleter = realHandler(keyDao, keystore)
+        var response: JSONObject? = null
+        var deletedKeyId: String? = null
+        assertRevokedAtAdmissionDuring { store, resumeShare ->
+            deletedKeyId = store.keyId
+            val request = JSONObject().put("jsonrpc", "2.0").put("id", 3).put("method", "local.deleteKey")
+                .put("params", JSONObject().put("keyId", store.keyId))
+            val deleting = scope.async(Dispatchers.IO) {
+                JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
+            }
+            try {
+                withTimeout(TIMEOUT_MS) { removed.await() }
+                resumeShare()
+            } finally {
+                finish.countDown()
+            }
+            response = withTimeout(TIMEOUT_MS) { deleting.await() }
+        }
+        assertTrue(
+            "the delete must succeed, got $response",
+            response?.optJSONObject("result")?.optBoolean("deleted") == true
+        )
+        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+    }
+
+    /**
+     * A delete through the alias form of a key's ID is a revoke of the key
+     * itself: the legacy `deleteKey` RPC with `credentialId = xkey_key_<id>`
+     * removes the same Keystore entry as `<id>`, so a share of `<id>` waiting
+     * at admission is refused, and `<id>`'s metadata row goes too.
+     */
+    @Test
+    fun aShareOfAKeyDeletedThroughItsAliasFormWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.keyExists(any()) } returns true
+        every { keystore.deleteKey(any()) } returns true
+        // The raw alias resolves to itself, as KeystoreManager does for it.
+        every { keystore.resolveKeystoreAlias(any()) } answers {
+            firstArg<String>().takeIf { it.startsWith("xkey_key_") }
+        }
+        val deleter = realHandler(keyDao, keystore)
+        var deletedKeyId: String? = null
+        assertRevokedAtAdmission { store ->
+            deletedKeyId = store.keyId
+            val request = JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", "deleteKey")
+                .put("params", JSONObject().put("credentialId", "xkey_key_" + store.keyId))
+            val response = JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
+            assertTrue(
+                "the delete must succeed, got $response",
+                response.optJSONObject("result")?.optBoolean("deleted") == true
+            )
+        }
+        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+    }
+
+    /**
+     * A share is bound to the revision it captured before loading its
+     * inputs: a key deleted and recreated under the same ID after the share
+     * loaded its record and public half, and before admission, is refused
+     * there, though the recreated key is shared with the same peer.
+     */
+    @Test
+    fun aKeyDeletedAndRecreatedAfterTheShareLoadedItsInputsIsRefusedAtAdmission() = runBlocking<Unit> {
+        val gate = GatedOutputStream()
+        val phone = connectPaired(gate)
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!
+        val store = SharedKeyStore(phone.desktop.publicKeyHex)
+        // The DAO's own writes run; only the Room writes under them are mocked.
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.deleteByKeyId(any()) } coAnswers { callOriginal() }
+        coEvery { keyDao.insert(any()) } coAnswers { callOriginal() }
+
+        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val loadedEntity = store.entity!!
+        val loadedPem = PEM
+        // Deleted and recreated, still shared with the peer, after the load.
+        keyDao.deleteByKeyId(store.keyId)
+        keyDao.insert(loadedEntity.copy(label = "recreated"))
+        val writes = gate.writes.get()
+        val nonce = phone.noise.sendNonceForTest()
+
+        val outcome = runCatching {
+            DesktopKeyShare(session, SHARE_TIMEOUT_MS)
+                .send(baseline, loadedEntity, null, loadedPem, null, store.permission, store.current)
+        }
+        assertEquals(
+            "the share must be refused by policy, got $outcome",
+            DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
+            outcome.getOrNull()
+        )
+        assertEquals("nothing may reach the stream", writes, gate.writes.get())
+        assertEquals("a refused send must not consume a nonce", nonce, phone.noise.sendNonceForTest())
+    }
+
+    /**
+     * `local.generateKey` opens its revoke before it touches key material: a
+     * generation that replaces an ID its existence checks did not see pauses
+     * right after the old Keystore entry is removed, a share of that ID
+     * waiting at admission resumes in that window, and it is refused.
+     */
+    @Test
+    fun aShareResumedAfterGenerateKeyRemovedTheOldKeystoreEntryWritesNothing() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        val removed = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        // The old entry goes, then the generation pauses there.
+        coEvery { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) } coAnswers {
+            removed.complete(Unit)
+            withTimeout(TIMEOUT_MS) { finish.await() }
+            ByteArray(91) { 4 }
+        }
+        val generator = realHandler(keyDao, keystore)
+        var response: JSONObject? = null
+        assertRevokedAtAdmissionDuring { store, resumeShare ->
+            val generating = scope.async(Dispatchers.IO) { generate(generator, store.keyId) }
+            try {
+                withTimeout(TIMEOUT_MS) { removed.await() }
+                resumeShare()
+            } finally {
+                finish.complete(Unit)
+            }
+            response = withTimeout(TIMEOUT_MS) { generating.await() }
+        }
+        assertTrue(
+            "the generation must succeed, got $response",
+            response?.optJSONObject("result")?.optString("keyId")?.isNotEmpty() == true
+        )
+    }
+
+    /**
+     * `local.generateKey` reserves its ID until it ends: a second generation
+     * of the same ID while the first is pending (here, paused inside the
+     * generation) is refused with `KEY_EXISTS` and generates nothing.
+     */
+    @Test
+    fun aSecondGenerateKeyOfAnIdIsRefusedWhileTheFirstIsPending() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) } coAnswers {
+            if (calls.incrementAndGet() == 1) {
+                started.complete(Unit)
+                withTimeout(TIMEOUT_MS) { finish.await() }
+            }
+            ByteArray(91) { 4 }
+        }
+        val generator = realHandler(keyDao, keystore)
+        val first = scope.async(Dispatchers.IO) { generate(generator, "pending-generation") }
+        val second = try {
+            withTimeout(TIMEOUT_MS) { started.await() }
+            generate(generator, "pending-generation")
+        } finally {
+            finish.complete(Unit)
+        }
+        assertEquals(
+            "a second generation of a pending ID must be refused, got $second",
+            ErrorCodes.KEY_EXISTS,
+            second.optJSONObject("error")?.optInt("code")
+        )
+        assertEquals("the second generation must generate nothing", 1, calls.get())
+        val firstResponse = withTimeout(TIMEOUT_MS) { first.await() }
+        assertTrue(
+            "the first generation must succeed, got $firstResponse",
+            firstResponse.optJSONObject("result")?.optString("keyId")?.isNotEmpty() == true
+        )
+    }
+
+    /**
+     * A PIV slot's key is an ordinary shareable key under the ID
+     * `KeyStoreSyncManager` discovers it by, its Keystore alias: the real
+     * [PivKeyManager.deleteKey], paused right after it removed the slot's
+     * Keystore entry, refuses a share of that ID waiting at admission.
+     */
+    @Test
+    fun aShareOfAPivKeyDeletedWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val slot = PivSlot.KEY_MANAGEMENT
+        val keyStore = pivEdges()
+        val removed = CompletableDeferred<Unit>()
+        val finish = CountDownLatch(1)
+        every { keyStore.containsAlias(slot.keystoreAlias) } returns true
+        // The entry goes, then the delete pauses there.
+        every { keyStore.deleteEntry(slot.keystoreAlias) } answers {
+            removed.complete(Unit)
+            finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            Unit
+        }
+        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true))
+        assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
+            val deleting = scope.async(Dispatchers.IO) { manager.deleteKey(slot) }
+            try {
+                withTimeout(TIMEOUT_MS) { removed.await() }
+                resumeShare()
+            } finally {
+                finish.countDown()
+            }
+            withTimeout(TIMEOUT_MS) { deleting.await() }
+        }
+        verify { keyStore.deleteEntry(slot.keystoreAlias) }
+    }
+
+    /**
+     * The real [PivKeyManager.generateKey] replacing a slot's key, paused
+     * inside the generation that overwrites the slot's alias, refuses a share
+     * of that slot's ID waiting at admission: the old public key it loaded is
+     * never sent.
+     */
+    @Test
+    fun aShareOfAPivKeyReplacedByGenerateKeyWhileItWaitsWritesNothing() = runBlocking<Unit> {
+        val slot = PivSlot.DIGITAL_SIGNATURE
+        pivEdges()
+        val replacing = CompletableDeferred<Unit>()
+        val finish = CountDownLatch(1)
+        val newKey = keyPair(ByteArray(91) { 5 })
+        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ ->
+            replacing.complete(Unit)
+            finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            newKey
+        }
+        var generated: PivSlotInfo? = null
+        assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
+            val generating = scope.async(Dispatchers.IO) { manager.generateKey(slot, PivAlgorithm.ES256) }
+            try {
+                withTimeout(TIMEOUT_MS) { replacing.await() }
+                resumeShare()
+            } finally {
+                finish.countDown()
+            }
+            generated = withTimeout(TIMEOUT_MS) { generating.await() }
+        }
+        assertArrayEquals("the generation must succeed", newKey.public.encoded, generated?.publicKeyDer)
+    }
+
+    /**
+     * The PIV writers' revoke ends with them: a share of a slot's key started
+     * after [PivKeyManager.generateKey] completed sends the new public key.
+     */
+    @Test
+    fun aShareOfAPivKeyStartedAfterGenerateKeyCompletesSendsTheNewKey() = runBlocking<Unit> {
+        val slot = PivSlot.CARD_AUTHENTICATION
+        pivEdges()
+        val newKey = keyPair(ByteArray(91) { 7 })
+        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ -> newKey }
+        val phone = connectPaired()
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!
+        val store = SharedKeyStore(phone.desktop.publicKeyHex, slot.keystoreAlias)
+
+        val generated = manager.generateKey(slot, PivAlgorithm.ES256)
+        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val newPem = "-----BEGIN PUBLIC KEY-----\n" +
+            Base64.getEncoder().encodeToString(generated.publicKeyDer) + "\n-----END PUBLIC KEY-----\n"
+        // No reply comes back to this router; only the request is checked.
+        val sending = scope.async {
+            runCatching {
+                DesktopKeyShare(session, TIMEOUT_MS)
+                    .send(baseline, store.entity!!, null, newPem, null, store.permission, store.current)
+            }
+        }
+
+        val request = phone.desktop.readEncrypted()
+        assertEquals("remote.sharePublicKey", request.getString("method"))
+        val sentPem = String(Base64.getDecoder().decode(request.getJSONObject("params").getString("public_key_pem")))
+        assertEquals("the new public key must be sent", newPem, sentPem)
+        sending.cancel()
+    }
+
+    /** The Android edges [PivKeyManager] reaches; returns the Keystore it opens. */
+    private fun pivEdges(): KeyStore {
+        val keyStore = mockk<KeyStore>(relaxed = true)
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
+        every { AuditLogger.logKeyCreated(any(), any(), any(), any(), any()) } just runs
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        return keyStore
+    }
+
+    private fun keyPair(publicDer: ByteArray): KeyPair =
+        KeyPair(mockk<PublicKey> { every { encoded } returns publicDer }, mockk<PrivateKey>())
+
+    private suspend fun generate(handler: RequestHandler, keyId: String): JSONObject {
+        val request = JSONObject().put("jsonrpc", "2.0").put("id", 2).put("method", "local.generateKey")
+            .put(
+                "params",
+                JSONObject().put("keyId", keyId).put("algorithm", "ES256").put("label", keyId)
+                    .put("requireUserVerification", false).put("shareable", false)
+            )
+        return JSONObject(String(handler.handleRawRequest(request.toString().toByteArray())))
+    }
+
+    /** The real [RequestHandler] with only its Android and storage edges mocked. */
+    private fun realHandler(
+        keyDao: KeyDao,
+        keystore: KeystoreManager = mockk<KeystoreManager>(relaxed = true).also {
+            every { it.keyExists(any()) } returns true
+            every { it.deleteKey(any()) } returns true
+        },
+    ): RequestHandler {
+        mockkStatic(Looper::class)
+        every { Looper.getMainLooper() } returns mockk(relaxed = true)
+        val database = mockk<XKeyDatabase>(relaxed = true)
+        every { database.keyDao() } returns keyDao
+        mockkObject(XKeyDatabase.Companion)
+        every { XKeyDatabase.getInstance(any()) } returns database
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)
+        // The software key store opens the Keystore and its directory when built.
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
+        every { context.filesDir } returns Files.createTempDirectory("xkey-files").toFile().apply { deleteOnExit() }
+        every { context.getSystemService(NotificationManager::class.java) } returns
+            mockk<NotificationManager>(relaxed = true)
+        return RequestHandler(context, keystore, biometricLauncher = null, sessionAuthManager = null)
+    }
+
+    private suspend fun assertRevokedAtAdmission(revoke: suspend (SharedKeyStore) -> Unit) =
+        assertRevokedAtAdmissionDuring { store, resumeShare ->
+            revoke(store)
+            resumeShare()
+        }
+
+    /**
+     * As [assertRevokedAtAdmission], with [revoke] choosing when the share
+     * waiting at admission resumes: `resumeShare` lets it go and returns once
+     * the share has finished.
+     */
+    private suspend fun assertRevokedAtAdmissionDuring(
+        keyId: String? = null,
+        revoke: suspend (store: SharedKeyStore, resumeShare: suspend () -> Unit) -> Unit
+    ) {
+        val gate = GatedOutputStream()
+        val phone = connectPaired(gate)
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!
+        val store = keyId?.let { SharedKeyStore(phone.desktop.publicKeyHex, it) }
+            ?: SharedKeyStore(phone.desktop.publicKeyHex)
+        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val paused = CompletableDeferred<Unit>()
+        val resume = CompletableDeferred<Unit>()
+        pairing.beforeAdmissionForTest = {
+            paused.complete(Unit)
+            resume.await()
+        }
+        val sending = scope.async {
+            runCatching {
+                DesktopKeyShare(session, SHARE_TIMEOUT_MS)
+                    .send(baseline, store.entity, null, PEM, null, store.permission, store.current)
+            }
+        }
+        withTimeout(TIMEOUT_MS) { paused.await() }
+        val writes = gate.writes.get()
+        val nonce = phone.noise.sendNonceForTest()
+
+        revoke(store) {
+            resume.complete(Unit)
+            withTimeout(TIMEOUT_MS) { sending.join() }
+        }
+        resume.complete(Unit)
+
+        val outcome = withTimeout(TIMEOUT_MS) { sending.await() }
+        pairing.beforeAdmissionForTest = null
+        assertEquals(
+            "the share must be refused by policy, got $outcome",
+            DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
+            outcome.getOrNull()
+        )
+        assertEquals("nothing may reach the stream", writes, gate.writes.get())
+        assertEquals("a refused send must not consume a nonce", nonce, phone.noise.sendNonceForTest())
     }
 
     // ---------------------------------------------------------------------

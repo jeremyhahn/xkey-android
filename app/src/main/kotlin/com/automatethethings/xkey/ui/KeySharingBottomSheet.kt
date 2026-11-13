@@ -50,6 +50,7 @@ import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopSectionRefresh
 import com.automatethethings.xkey.remote.DesktopShareDecision
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.remote.DesktopShareGate
 import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.remote.loadZeroedOnCancel
@@ -777,9 +778,15 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         desktopStatusText.text = getString(R.string.sharing_desktop_sending)
         lifecycleScope.launch {
             val message: String? = try {
+                // The baseline before any input is read: a delete, replacement
+                // or revoke of the key after it refuses the send at admission.
+                val baseline = SharePermissionLedger.baseline(keyId)
                 val inputs = loadShareInputs()
+                // The permission is read again from the store just before the
+                // send, so a revoke made while the share was pending wins.
                 when (val out = DesktopKeyShare(session).send(
-                    inputs.entity, inputs.software, inputs.publicKeyPem, null, sharePermission
+                    baseline, inputs.entity, inputs.software, inputs.publicKeyPem, null, sharePermission,
+                    { id -> keyDao.getByKeyId(id) }
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->
                         getString(R.string.sharing_desktop_sent, out.result.importId)
@@ -911,10 +918,11 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             SharingPolicyType.ALL_PEERS -> EntitySharingPolicyType.ALL_PEERS
             SharingPolicyType.SELECTED_PEERS -> EntitySharingPolicyType.SELECTED_PEERS
         }
-        keyDao.updateSharingPolicy(keyId, entityPolicy)
-
-        if (policy != SharingPolicyType.SELECTED_PEERS) {
-            keySharingPolicyDao.clearPoliciesForKey(keyId)
+        // A revoke for any pending desktop share of the key: it is refused at
+        // the transport's admission unless admitted before this started.
+        SharePermissionLedger.revoking(keyId) {
+            keyDao.updateSharingPolicy(keyId, entityPolicy)
+            if (policy != SharingPolicyType.SELECTED_PEERS) keySharingPolicyDao.clearPoliciesForKey(keyId)
         }
         refreshDesktopSection()
     }
@@ -924,7 +932,15 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
      * policy rows; a refused change redraws it from the stored state.
      */
     private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean) {
-        if (!sharingPeers.setAllowed(peerPublicKeyHex, allowed)) {
+        // A withdrawal is a revoke for any pending desktop share of the key:
+        // it is refused at the transport's admission unless admitted before
+        // this started. A grant goes through the pairing check unwrapped.
+        val stands = if (allowed) {
+            sharingPeers.setAllowed(peerPublicKeyHex, true)
+        } else {
+            SharePermissionLedger.revoking(keyId) { sharingPeers.setAllowed(peerPublicKeyHex, false) }
+        }
+        if (!stands) {
             populatePeerList(peersFlow.value)
         }
         refreshDesktopSection()

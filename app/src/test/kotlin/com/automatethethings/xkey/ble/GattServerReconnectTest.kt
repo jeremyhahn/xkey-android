@@ -26,6 +26,11 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectionChangedException
+import com.automatethethings.xkey.remote.DesktopKeyShare
+import com.automatethethings.xkey.remote.DesktopShareDecision
+import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.remote.ShareSession
+import com.automatethethings.xkey.remote.SharedKeyStore
 import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -46,6 +51,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -80,6 +87,8 @@ class GattServerReconnectTest {
     private companion object {
         const val ADDRESS = "AA:BB:CC:DD:EE:FF"
         const val TIMEOUT_MS = 5_000L
+        const val SHARE_TIMEOUT_MS = 1_000L
+        const val PEM = "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"
         const val BACKUP_ID = 42L
         val BACKUP_REQUEST = """{"jsonrpc":"2.0","id":$BACKUP_ID,"method":"remote.backup.create","params":{}}"""
             .toByteArray()
@@ -428,6 +437,63 @@ class GattServerReconnectTest {
         val late = replacement ?: error("the second desktop never reconnected")
         assertTrue("got $outcome", outcome.exceptionOrNull() is ConnectionChangedException)
         assertEquals("nothing is encrypted to the new desktop", nonce, late.sendNonceForTest())
+        assertNoNotification()
+    }
+
+    /**
+     * A desktop share has passed every check before the transport and waits
+     * for admission (the notification channel and the send mutex); the key
+     * is set to private meanwhile. Admission refuses it: nothing is
+     * encrypted or notified and the share is refused by policy.
+     */
+    @Test
+    fun aShareWhoseKeyTurnsPrivateWhileItWaitsForAdmissionSendsNothing() = runBlocking<Unit> {
+        assertRevokedAtAdmission { it.makePrivate() }
+    }
+
+    /** As above, with the peer's grant for the key removed instead. */
+    @Test
+    fun aShareWhosePeerGrantIsRemovedWhileItWaitsForAdmissionSendsNothing() = runBlocking<Unit> {
+        assertRevokedAtAdmission { it.removeGrant() }
+    }
+
+    private suspend fun assertRevokedAtAdmission(revoke: suspend (SharedKeyStore) -> Unit) = coroutineScope {
+        val desktop = NoiseInitiatorSession(randomKey())
+        val keyHex = desktop.getLocalStaticPublicKey().hex()
+        repo.addDevice(keyHex, "desktop")
+        val session = reconnect(desktop, claimedPeerKeyHex = keyHex)
+        val share = ShareSession.of(listOf(ShareSession.Transport(server.boundSender()!!.second, router))) { true }!!
+        assertEquals(keyHex, share.peerPublicKeyHex)
+        val store = SharedKeyStore(keyHex)
+        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val fragments = captureFragments()
+        val paused = CompletableDeferred<Unit>()
+        val resume = CompletableDeferred<Unit>()
+        server.beforeAdmissionForTest = {
+            paused.complete(Unit)
+            resume.await()
+        }
+        val sending = async {
+            runCatching {
+                DesktopKeyShare(share, SHARE_TIMEOUT_MS)
+                    .send(baseline, store.entity, null, PEM, null, store.permission, store.current)
+            }
+        }
+        withTimeout(TIMEOUT_MS) { paused.await() }
+        val nonce = session.sendNonceForTest()
+
+        revoke(store)
+        resume.complete(Unit)
+
+        val outcome = withTimeout(TIMEOUT_MS) { sending.await() }
+        server.beforeAdmissionForTest = null
+        assertEquals(
+            "the share must be refused by policy, got $outcome",
+            DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
+            outcome.getOrNull()
+        )
+        assertEquals("a refused send must consume no nonce", nonce, session.sendNonceForTest())
+        assertTrue("nothing may be written", fragments.isEmpty())
         assertNoNotification()
     }
 
