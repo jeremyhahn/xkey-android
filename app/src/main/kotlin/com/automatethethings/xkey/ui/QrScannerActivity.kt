@@ -21,6 +21,8 @@ import androidx.camera.view.PreviewView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.qr.QrCodeScannerHelper
 import com.google.android.material.snackbar.Snackbar
+import org.json.JSONException
+import org.json.JSONObject
 
 class QrScannerActivity : AppCompatActivity() {
 
@@ -49,8 +51,12 @@ class QrScannerActivity : AppCompatActivity() {
         }
     }
 
+    private val payloadKind: QrPayloadKind by lazy {
+        QrPayloadKind.fromExtra(intent?.getStringExtra(EXTRA_PAYLOAD_KIND))
+    }
+
     private fun onQrScanned(value: String) {
-        if (value.startsWith("otpauth://")) {
+        if (QrPayloadFilter.accepts(value, payloadKind)) {
             val resultIntent = Intent().apply {
                 putExtra(EXTRA_SCANNED_URI, value)
             }
@@ -60,7 +66,10 @@ class QrScannerActivity : AppCompatActivity() {
             runOnUiThread {
                 Snackbar.make(
                     findViewById(R.id.snackbarAnchor),
-                    R.string.oath_qr_invalid,
+                    when (payloadKind) {
+                        QrPayloadKind.OTPAUTH -> R.string.oath_qr_invalid
+                        QrPayloadKind.COSIGN -> R.string.cosign_qr_invalid
+                    },
                     Snackbar.LENGTH_SHORT
                 ).show()
                 // Restart scanning for the next QR code
@@ -71,5 +80,41 @@ class QrScannerActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_SCANNED_URI = "scanned_uri"
+
+        /** A [QrPayloadKind] name; absent or unknown means [QrPayloadKind.OTPAUTH]. */
+        const val EXTRA_PAYLOAD_KIND = "payload_kind"
+    }
+}
+
+/** The payload kind a [QrScannerActivity] caller asks for. */
+enum class QrPayloadKind {
+    /** An `otpauth://` URI (the default, for OATH enrolment). */
+    OTPAUTH,
+
+    /** A co-sign request or response JSON object. */
+    COSIGN;
+
+    companion object {
+        /** The kind named by the intent extra; otpauth when it is absent or unknown. */
+        fun fromExtra(value: String?): QrPayloadKind =
+            entries.firstOrNull { it.name == value } ?: OTPAUTH
+    }
+}
+
+/** Decides whether a scanned QR value is the kind the caller asked for. Pure: JVM-testable. */
+object QrPayloadFilter {
+    fun accepts(value: String, kind: QrPayloadKind): Boolean = when (kind) {
+        QrPayloadKind.OTPAUTH -> value.startsWith("otpauth://")
+        QrPayloadKind.COSIGN -> isCoSignPayload(value)
+    }
+
+    private fun isCoSignPayload(value: String): Boolean {
+        val trimmed = value.trim()
+        if (!trimmed.startsWith("{")) return false
+        return try {
+            JSONObject(trimmed).has("v")
+        } catch (_: JSONException) {
+            false
+        }
     }
 }
