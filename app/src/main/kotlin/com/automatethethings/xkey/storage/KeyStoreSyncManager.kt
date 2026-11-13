@@ -44,14 +44,15 @@ import javax.crypto.SecretKey
  * @param keystoreManager Manager for Android Keystore operations.
  * @param credentialDao DAO for the credential_metadata table.
  * @param keyDao DAO for the unified keys table.
- * @param pendingDeletion Whether a key id's material delete is still owed
- *   ([KeyPolicyStore.isDeletionPending]): such material is not discovered.
+ * @param keyPolicyStore The store whose deletion tombstones the sync
+ *   honours ([KeyPolicyStore.insertDiscovered]): material whose delete is
+ *   still owed is not discovered.
  */
 class KeyStoreSyncManager(
     private val keystoreManager: KeystoreManager,
     private val credentialDao: CredentialMetadataDao,
     private val keyDao: KeyDao,
-    private val pendingDeletion: suspend (String) -> Boolean = { false }
+    private val keyPolicyStore: KeyPolicyStore
 ) {
     companion object {
         private const val TAG = "KeyStoreSyncManager"
@@ -134,17 +135,16 @@ class KeyStoreSyncManager(
     }
 
     /**
-     * The sync's one key row insert (#193 r9, r10): a key id whose row was
-     * deleted while its material delete is still owed (a tombstone,
-     * [pendingDeletion]) is never listed again, from a credential or from the
-     * Keystore, with default metadata; the replay deletes its material.
-     * Returns whether [entity] was inserted.
+     * The sync's one key row insert (#193 r9, r10, r11): a key id whose row
+     * was deleted while its material delete is still owed (a tombstone) is
+     * never listed again, from a credential or from the Keystore, with
+     * default metadata; the replay deletes its material. The tombstone
+     * check and the insert are one step under the key's material lock
+     * ([KeyPolicyStore.insertDiscovered]), so a delete running meanwhile
+     * is never undone. Returns whether [entity] was inserted.
      */
-    private suspend fun track(entity: KeyEntity): Boolean {
-        if (pendingDeletion(entity.keyId)) return false
-        keyDao.insert(entity)
-        return true
-    }
+    private suspend fun track(entity: KeyEntity): Boolean =
+        keyPolicyStore.insertDiscovered(entity.keyId) { keyDao.insert(entity) }
 
     /**
      * Discovers keys in Android Keystore that are not tracked in the keys table.

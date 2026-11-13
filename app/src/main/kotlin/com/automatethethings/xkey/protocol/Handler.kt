@@ -1279,7 +1279,7 @@ class RequestHandler(
                 // serialisation of this key id's material, which every delete
                 // takes (#193 r8): a delete of an earlier key under this id
                 // never deletes the material generated here.
-                keyPolicyStore.withKeyMaterial(genParams.keyId) { held ->
+                keyPolicyStore.withKeyMaterial(genParams.keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) { held ->
                     createLocalKey(request, genParams, algorithmName, authDurationSeconds, held)
                 }
             }
@@ -2037,6 +2037,12 @@ class RequestHandler(
         // store (only one of the two holds it), is deleted in the same queued
         // edit once the rows are: a request cancelled while the delete waits
         // never leaves it behind (#193 r6, ruling 554).
+        // An internal key (a CA, attestation, sealing or encryption key) is
+        // never a peer's to delete: refused before any row or tombstone is
+        // touched. deleteKeyMaterial refuses it again under the lock (#193 r11).
+        if (com.automatethethings.xkey.storage.isInternalKey(keyId, keystoreManager)) {
+            return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "Key $keyId is not a user key; not deleted")
+        }
         val entity = keyDao.getByKeyId(keyId)
         val material: com.automatethethings.xkey.storage.MaterialDelete = {
             com.automatethethings.xkey.storage.deleteKeyMaterial(context, it, entity?.source, keystoreManager)
@@ -3878,7 +3884,7 @@ class RequestHandler(
             val softwareStore = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
             // The check and the write in the store's one serialisation of
             // this id's key material (#193 r8).
-            keyPolicyStore.withKeyMaterial(keyId) {
+            keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) {
                 if (softwareStore.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
                     return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
                 }

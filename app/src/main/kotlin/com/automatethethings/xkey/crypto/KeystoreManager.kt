@@ -2007,6 +2007,16 @@ class KeystoreManager(private val context: Context) {
         /** Prefix for general-purpose key aliases. */
         private const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
 
+        /**
+         * The user-key namespace of [keyId]: the only Keystore aliases a
+         * delete of a user's key may touch, its credential and general
+         * aliases. An id that resolves to any other alias
+         * ([resolveKeystoreAlias]) names an internal key (a CA, the
+         * attestation, sealing or encryption keys) or a foreign one.
+         */
+        fun userKeyAliases(keyId: String): List<String> =
+            listOf(KEY_ALIAS_PREFIX + keyId, KEY_ALIAS_PREFIX_GENERAL + keyId)
+
         /** EncryptedSharedPreferences file for Ed25519 software-backed keys. */
         private const val ED25519_PREFS_NAME = "xkey_ed25519_keys"
 

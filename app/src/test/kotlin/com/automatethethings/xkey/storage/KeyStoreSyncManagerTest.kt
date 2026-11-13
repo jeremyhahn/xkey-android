@@ -27,8 +27,11 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Before
@@ -49,6 +52,9 @@ class KeyStoreSyncManagerTest {
     private lateinit var keystoreManager: KeystoreManager
     private lateinit var credentialDao: CredentialMetadataDao
     private lateinit var keyDao: KeyDao
+
+    /** The key, policy and tombstone tables the store reads. */
+    private val tables = FakeKeyPolicyTables()
 
     private val pivAlias = PivSlot.AUTHENTICATION.keystoreAlias
     private val generalAlias = "xkey_key_general-1"
@@ -85,7 +91,7 @@ class KeyStoreSyncManagerTest {
     fun `a PIV slot alias is not discovered as a general key`() = runTest {
         coEvery { keyDao.getAll() } returns emptyList()
 
-        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao).syncAll()
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).syncAll()
 
         coVerify(exactly = 0) { keyDao.insert(match { it.keyId.startsWith("xkey_piv_") }) }
         coVerify { keyDao.insert(match { it.keyId == "general-1" }) }
@@ -100,7 +106,7 @@ class KeyStoreSyncManagerTest {
         // KeystoreManager never resolves a raw PIV slot alias.
         every { keystoreManager.resolveKeystoreAlias(pivAlias) } returns null
 
-        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao).syncAll()
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).syncAll()
 
         coVerify { keyDao.deleteByKeyId(pivAlias) }
     }
@@ -115,7 +121,7 @@ class KeyStoreSyncManagerTest {
         // local.generateKey stores it at the general alias xkey_key_<keyId>.
         every { keystoreManager.resolveKeystoreAlias(generalId) } returns "xkey_key_$generalId"
 
-        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao).syncAll()
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).syncAll()
 
         coVerify(exactly = 0) { keyDao.deleteByKeyId(generalId) }
     }
@@ -129,7 +135,10 @@ class KeyStoreSyncManagerTest {
     fun `a key with a pending deletion is not rediscovered`() = runTest {
         coEvery { keyDao.getAll() } returns emptyList()
 
-        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, pendingDeletion = { it == "general-1" }).syncAll()
+        val store = tables.store()
+        assertTrue(store.deleteMaterial("general-1") { false })
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, store).syncAll()
 
         coVerify(exactly = 0) { keyDao.insert(match { it.keyId == "general-1" }) }
     }
@@ -147,9 +156,38 @@ class KeyStoreSyncManagerTest {
         coEvery { credentialDao.getAll() } returns listOf(credential)
         coEvery { keyDao.getAll() } returns emptyList()
 
-        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, pendingDeletion = { it == "cred-1" }).syncAll()
+        val store = tables.store()
+        assertTrue(store.deleteMaterial("cred-1") { false })
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, store).syncAll()
 
         coVerify(exactly = 0) { keyDao.insert(match { it.keyId == "cred-1" }) }
+    }
+
+    /**
+     * Round 11 (3): a deletion that runs while the sync is between its
+     * tombstone check and its insert never ends with the key row listed
+     * again under a tombstone still owed: the check and the insert are one
+     * step under the key's material lock, so the delete runs after the
+     * insert and finds the row.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a deletion racing the sync never leaves a row under a tombstone`() = runTest {
+        coEvery { keyDao.getAll() } returns emptyList()
+        val store = tables.store()
+        var deletion: kotlinx.coroutines.Deferred<Boolean>? = null
+        coEvery { keyDao.insert(match { it.keyId == "general-1" }) } coAnswers {
+            // A delete of the id starts while the sync's insert is landing.
+            deletion = async(UnconfinedTestDispatcher(testScheduler)) { store.deleteMaterial("general-1") { false } }
+            tables.addKey("general-1", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
+        }
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, store).syncAll()
+        deletion!!.await()
+
+        val listed = tables.keyInstance("general-1") != null
+        assertFalse("the sync listed a key under a tombstone still owed", listed && store.isDeletionPending("general-1"))
     }
 
     /** Round 10 (5) bypass guard: the sync inserts a key row in one place, its tombstone check. */
@@ -160,6 +198,6 @@ class KeyStoreSyncManagerTest {
             java.io.File("app/src/main/kotlin/com/automatethethings/xkey/storage/KeyStoreSyncManager.kt")
         ).first { it.isFile }.readText()
         assertEquals(1, Regex("""keyDao\.(insert|insertAll|upsert)\(""").findAll(source).count())
-        assertTrue("pendingDeletion(entity.keyId)" in source)
+        assertTrue("keyPolicyStore.insertDiscovered(entity.keyId) { keyDao.insert(entity) }" in source)
     }
 }

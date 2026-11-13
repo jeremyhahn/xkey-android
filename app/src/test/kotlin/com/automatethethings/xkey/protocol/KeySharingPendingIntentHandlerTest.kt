@@ -135,6 +135,8 @@ class KeySharingPendingIntentHandlerTest {
             mockk<KeyguardManager>(relaxed = true)
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
+        // No Keystore alias unless a test gives its key one.
+        every { keystore.resolveKeystoreAlias(any()) } returns null
         handler = newHandler()
     }
 
@@ -507,5 +509,156 @@ class KeySharingPendingIntentHandlerTest {
         // The queued delete lands in the edits' own scope, off the test's clock.
         io.mockk.verify(timeout = 5_000) { keystore.deleteByAlias(alias) }
         assertEquals("the queued row delete did not land", null, tables.key(key))
+    }
+
+    /**
+     * Round 11 (1): local.deleteKey of an internal key (the seal store's,
+     * listed by the key sync under its raw alias) is refused and deletes
+     * neither its rows nor its material.
+     */
+    @Test
+    fun aDeleteOfAnInternalKeyIsRefusedOnTheRpcPath() = runTest {
+        val internal = "xkey_seal_store_key"
+        every { keystore.resolveKeystoreAlias(internal) } returns internal
+        every { keystore.deleteByAlias(any()) } returns true
+        tables.addKey(internal, SharingPolicyType.PRIVATE)
+
+        val response = rpcDeleteKey(internal)
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(internal) }
+        assertNotNull("the internal key's row was deleted", tables.key(internal))
+        assertFalse("a tombstone for an internal key", store.isDeletionPending(internal))
+    }
+
+    /**
+     * Round 11 (1): a tombstone for an internal key (left by an older
+     * build) is replayed without deleting the key, and is dropped.
+     */
+    @Test
+    fun aDeleteOfAnInternalKeyIsRefusedOnTheReplayPath() = runTest {
+        val internal = "xkey_seal_store_key"
+        every { keystore.resolveKeystoreAlias(internal) } returns internal
+        every { keystore.deleteByAlias(any()) } returns true
+        val store = store
+        assertTrue(store.deleteMaterial(internal) { false })
+        assertTrue(store.isDeletionPending(internal))
+
+        com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
+
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(internal) }
+        assertFalse("the refused replay kept its tombstone", store.isDeletionPending(internal))
+    }
+
+    /**
+     * Round 11 (1): a user key whose id is also an internal alias loses
+     * only its user-key aliases; the internal key stays.
+     */
+    @Test
+    fun aUserKeyDeleteNeverReachesAnInternalAliasOfTheSameName() = runTest {
+        val id = "xkey_seal_store_key"
+        val userAlias = "xkey_key_$id"
+        var userHeld = true
+        every { keystore.resolveKeystoreAlias(id) } answers { if (userHeld) userAlias else id }
+        every { keystore.deleteByAlias(userAlias) } answers { userHeld = false; true }
+        every { keystore.deleteByAlias(id) } returns true
+        tables.addKey(id, SharingPolicyType.PRIVATE)
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        io.mockk.verify { keystore.deleteByAlias(userAlias) }
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(id) }
+    }
+
+    /**
+     * The software key store as a set of key ids, its files under [files]:
+     * the platform keystore its cipher opens is a stub.
+     */
+    private fun fakeSoftwareKeyStore(files: java.io.File): MutableSet<String> {
+        mockkStatic(java.security.KeyStore::class)
+        every { java.security.KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
+        every { context.filesDir } returns files
+        val software = mutableSetOf<String>()
+        io.mockk.mockkConstructor(com.automatethethings.xkey.crypto.SoftwareKeyStore::class)
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().contains(any()) } answers { firstArg<String>() in software }
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().put(any()) } answers {
+            software += firstArg<com.automatethethings.xkey.crypto.SoftwareKey>().keyId
+        }
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().delete(any()) } answers { software -= firstArg<String>() }
+        return software
+    }
+
+    /**
+     * Round 11 (3): a replay whose caller is cancelled (the key screen
+     * closed) while it waits for a key's material lock still deletes the
+     * material and drops the tombstone: the replay runs out of the
+     * caller's cancellation.
+     */
+    @Test
+    fun aCancelledReplayStillSettlesItsTombstones() = runTest {
+        val key = "k-replay-cancel"
+        val files = java.nio.file.Files.createTempDirectory("software-keys").toFile()
+        val software = fakeSoftwareKeyStore(files)
+        try {
+            val store = store
+            assertTrue(store.deleteMaterial(key) { false })
+            software += key
+            // A write of another key under the same id holds its lock.
+            val gate = CompletableDeferred<Unit>()
+            val holder = async(UnconfinedTestDispatcher(testScheduler)) { store.lockKeyMaterial(key) { gate.await() } }
+            val replay = async(UnconfinedTestDispatcher(testScheduler)) {
+                com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
+            }
+            assertFalse(replay.isCompleted)
+
+            replay.cancel()
+            gate.complete(Unit)
+            holder.await()
+            advanceUntilIdle()
+
+            assertFalse("the cancelled replay left the material", key in software)
+            assertFalse("the cancelled replay left its tombstone", store.isDeletionPending(key))
+        } finally {
+            files.deleteRecursively()
+        }
+    }
+
+    /**
+     * Round 11 (2): a symmetric import accepted under the id of an earlier
+     * delete whose tombstone is still owed survives that tombstone's
+     * replay: the import settles the owed delete first, so the replay never
+     * deletes a later generation under the id.
+     */
+    @Test
+    fun anImportAfterATombstoneSurvivesTheReplay() = runTest {
+        val key = "k-import"
+        val files = java.nio.file.Files.createTempDirectory("software-keys").toFile()
+        val software = fakeSoftwareKeyStore(files)
+        try {
+            // An earlier delete of the id whose material delete did not
+            // confirm: its tombstone is owed.
+            val store = store
+            assertTrue(store.deleteMaterial(key) { false })
+            assertTrue(store.isDeletionPending(key))
+
+            handler.setConnectedDevicePublicKeyHex(PEER_A)
+            val method = RequestHandler::class.java.getDeclaredMethod("handleShareSymmetric", Request::class.java, Continuation::class.java)
+            method.isAccessible = true
+            val request = Request(
+                id = 3,
+                method = MethodNames.LOCAL_SHARE_SYMMETRIC,
+                params = JSONObject().put("wrapped_key", "AAAAAAAAAAAAAAAAAAAAAA==").put("label", key)
+            )
+            val response = suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+            assertEquals(null, response.error)
+            assertTrue("the import was not written", key in software)
+
+            com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
+
+            assertTrue("the replay deleted the import accepted after the tombstone", key in software)
+            assertFalse(store.isDeletionPending(key))
+        } finally {
+            files.deleteRecursively()
+        }
     }
 }

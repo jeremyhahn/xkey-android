@@ -124,7 +124,7 @@ class KeyManagementActivity : AppCompatActivity() {
     private val credentialDao by lazy { XKeyDatabase.getInstance(this).credentialMetadataDao() }
     private val keystoreManager by lazy { KeystoreManager(this) }
     private val syncManager by lazy {
-        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, pendingDeletion = { keyPolicyStore.isDeletionPending(it) })
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, keyPolicyStore)
     }
 
     // -------------------------------------------------------------------------
@@ -1159,7 +1159,7 @@ class KeyManagementActivity : AppCompatActivity() {
 
                 // The material write and its row insert in the store's one
                 // serialisation of this id's key material (#193 r8).
-                keyPolicyStore.withKeyMaterial(keyId) {
+                keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyManagementActivity, keystoreManager)) {
                     when (keyType) {
                         "signing", "tls", "ssh" -> {
                             publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)

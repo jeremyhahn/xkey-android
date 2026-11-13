@@ -307,7 +307,7 @@ class KeyPolicyStoreTest {
 
         // The rows are gone; the key is generated again under its id.
         val regenerate = async {
-            store.withKeyMaterial("k") {
+            store.withKeyMaterial("k", { _, _ -> true }) {
                 material += "k"
                 store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS))
             }
@@ -368,7 +368,11 @@ class KeyPolicyStoreTest {
         val material = mutableSetOf("k")
         val store = store()
         assertTrue(store.deleteKey("k", key) { throw IOException("keystore busy") })
-        store.withKeyMaterial("k") { store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS)) }
+        // The write settles the owed delete first, then writes its own material.
+        store.withKeyMaterial("k", { held, _ -> material -= held.keyId; true }) {
+            material += "k"
+            store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS))
+        }
 
         store.replayDeletions { held, _ -> material -= held.keyId; true }
         assertTrue("the new key's material was deleted by the replay", "k" in material)
@@ -413,6 +417,83 @@ class KeyPolicyStoreTest {
             emptyList<String>(),
             callers.filter { "deleteKeyMaterial(" !in it.readText() }.map { it.name }
         )
+    }
+
+    /**
+     * Round 11 (1) bypass guard: a key delete reaches Keystore aliases only
+     * through [deleteKeyMaterial], which deletes the key's user-key aliases
+     * and nothing else; the one other raw-alias delete is the rollback of
+     * a key its own issuance just generated.
+     */
+    @Test
+    fun aKeyDeleteTouchesOnlyUserKeyAliases() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue(root.isDirectory)
+        val callers = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "KeystoreManager.kt" }
+            .filter { ".deleteByAlias(" in it.readText() }
+            .map { it.name }
+            .toSet()
+        assertEquals(setOf("KeyDeletionReplay.kt", "CertificateManagementActivity.kt"), callers)
+        val replay = java.io.File(root, "com/automatethethings/xkey/storage/KeyDeletionReplay.kt").readText()
+        val deletes = Regex("""\.deleteByAlias\(([^)]*)\)""").findAll(replay).map { it.groupValues[1] }.toList()
+        assertEquals("deleteKeyMaterial deletes an alias outside userKeyAliases", listOf("it"), deletes)
+        assertTrue("userKeyAliases(" in replay && "resolveKeystoreAlias(held.keyId) ?:" !in replay)
+        assertTrue("the internal-key refusal left the deleter", "throw InternalKeyException(" in replay)
+    }
+
+    /** Round 11 (1): no internal Keystore alias lies in a user-key namespace. */
+    @Test
+    fun noInternalAliasIsAUserKeyAlias() {
+        val internal = listOf(
+            "xkey_root_ca", "xkey_intermediate_ca", "xkey_device_attestation_key", "xkey_software_key_store",
+            "xkey_user_verification_key", "xkey_oath_secret_encryption_key", "xkey_password_encryption_key",
+            "xkey_seal_store_key", "xkey_device_identity_0", "xkey_piv_9a"
+        )
+        val prefixes = com.automatethethings.xkey.crypto.KeystoreManager.userKeyAliases("")
+        assertEquals(emptyList<String>(), internal.filter { alias -> prefixes.any { alias.startsWith(it) } })
+    }
+
+    /**
+     * Round 11 (2): a write under an id whose earlier delete is owed settles
+     * it first; one whose owed material cannot be deleted is refused, so no
+     * write ever lands under a tombstone that a replay would act on.
+     */
+    @Test
+    fun aWriteUnderATombstoneSettlesItFirstOrIsRefused() = runBlocking {
+        val store = store()
+        assertTrue(store.deleteMaterial("k") { false })
+        val written = mutableSetOf<String>()
+
+        try {
+            store.withKeyMaterial("k", { _, _ -> false }) { written += "k" }
+            fail("a write landed under an owed delete")
+        } catch (expected: KeyPolicyStore.DeletionPendingException) {
+        }
+        assertTrue("the refused write ran", written.isEmpty())
+        assertTrue(store.isDeletionPending("k"))
+
+        // A rowless import, as local.shareSymmetric writes one.
+        store.withKeyMaterial("k", { _, _ -> true }) { written += "k" }
+        assertTrue(!store.isDeletionPending("k"))
+        assertEquals(0, store.replayDeletions { held, _ -> written -= held.keyId; true })
+        assertTrue("the replay deleted a write made after its tombstone", "k" in written)
+    }
+
+    /**
+     * Round 11 (2) bypass guard: every key material write in the main
+     * sources settles owed deletes with the app's one deleter.
+     */
+    @Test
+    fun everyMaterialWriteSettlesWithTheAppsDeleter() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue(root.isDirectory)
+        val calls = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "KeyPolicyStore.kt" }
+            .flatMap { file -> file.readLines().mapIndexedNotNull { i, l -> if ("withKeyMaterial(" in l) "${file.name}:${i + 1}" to l else null } }
+            .toList()
+        assertTrue("no material writes found", calls.size >= 4)
+        assertEquals(emptyList<String>(), calls.filter { "keyMaterialDeleter(" !in it.second }.map { it.first })
     }
 
     /** Round 9 (1): a withdrawal bound to a replaced key is stale, not REMOVED, and keeps the new grant. */

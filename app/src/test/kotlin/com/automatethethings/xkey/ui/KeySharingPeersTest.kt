@@ -907,7 +907,7 @@ class KeySharingPeersTest {
         assertFalse(sheet.stale.first())
 
         assertTrue(store.deleteKey(KEY, instance))
-        val replaced = store.withKeyMaterial(KEY) { store.insertKey(FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS)) }
+        val replaced = store.withKeyMaterial(KEY, { _, _ -> true }) { store.insertKey(FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS)) }
         tables.grant(KEY, PEER_A)
 
         assertTrue("the sheet was not told its key was replaced", sheet.stale.first())

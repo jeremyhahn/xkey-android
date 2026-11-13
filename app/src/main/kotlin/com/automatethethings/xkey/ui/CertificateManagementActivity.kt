@@ -1209,7 +1209,7 @@ class CertificateManagementActivity : AppCompatActivity() {
                 val keyId = UUID.randomUUID().toString()
                 val keystoreAlias = "xkey_key_$keyId"
                 // In the store's one serialisation of this id's key material (#193 r8).
-                val publicKeyDer = keyPolicyStore.withKeyMaterial(keyId) {
+                val publicKeyDer = keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(this@CertificateManagementActivity, keystoreManager)) {
                     withContext(Dispatchers.IO) {
                         keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1)
                     }
@@ -1299,7 +1299,7 @@ class CertificateManagementActivity : AppCompatActivity() {
      */
     private suspend fun discardIssuanceKey(keyId: String, keystoreAlias: String) {
         try {
-            keyPolicyStore.withKeyMaterial(keyId) {
+            keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(this@CertificateManagementActivity, keystoreManager)) {
                 withContext(Dispatchers.IO) {
                     keyDao.deleteByKeyId(keyId)
                     keystoreManager.deleteByAlias(keystoreAlias)

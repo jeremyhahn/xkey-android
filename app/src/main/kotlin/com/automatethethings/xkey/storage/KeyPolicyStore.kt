@@ -38,6 +38,12 @@ import java.io.IOException
 typealias MaterialDelete = suspend (KeyPolicyStore.KeyMaterialHeld) -> Boolean
 
 /**
+ * [MaterialDelete] for a deletion tombstone: also given the tombstone's
+ * `source`. The app's one is [keyMaterialDeleter].
+ */
+typealias TombstoneDelete = suspend (KeyPolicyStore.KeyMaterialHeld, String?) -> Boolean
+
+/**
  * A key's sharing policy state and its grant rows, written only here (#193).
  *
  * Every write runs in one Room transaction ([Transactor]) together with the
@@ -330,7 +336,7 @@ class KeyPolicyStore(
      * the key row [instance] whose rows were just deleted (#193 r8).
      */
     suspend fun deleteKey(keyId: String, instance: Long, material: MaterialDelete = { true }): Boolean =
-        withKeyMaterial(keyId) { held ->
+        lockKeyMaterial(keyId) { held ->
             val deleted = transactor.run {
                 if (dao.keyInstance(keyId) != instance) return@run false
                 // The tombstone, in the row delete's transaction: the material
@@ -351,7 +357,7 @@ class KeyPolicyStore(
      * whether [material] was attempted.
      */
     suspend fun deleteMaterial(keyId: String, material: MaterialDelete): Boolean =
-        withKeyMaterial(keyId) { held ->
+        lockKeyMaterial(keyId) { held ->
             val absent = transactor.run {
                 if (dao.keyInstance(keyId) != null) return@run false
                 dao.putDeletion(KeyDeletionEntity(keyId, NO_ROW, dao.deletion(keyId)?.source))
@@ -388,6 +394,22 @@ class KeyPolicyStore(
         }
     }
 
+    /**
+     * The key sync's one key row insert (#193 r10, r11): runs [insert] only
+     * if [keyId] has no key row and no deletion tombstone, the check and the
+     * insert in one step under [keyId]'s material lock, the lock every
+     * delete and its replay hold from the row delete to the tombstone drop.
+     * A sync racing a delete never lists the key again with default
+     * metadata, and never makes the replay drop a tombstone it still owes.
+     * Returns whether [insert] ran.
+     */
+    suspend fun insertDiscovered(keyId: String, insert: suspend () -> Unit): Boolean =
+        lockKeyMaterial(keyId) {
+            if (dao.deletion(keyId) != null || dao.keyInstance(keyId) != null) return@lockKeyMaterial false
+            insert()
+            true
+        }
+
     /** Whether [keyId]'s material is owed a delete: its rows are gone, its material may not be. */
     suspend fun isDeletionPending(keyId: String): Boolean = dao.deletion(keyId) != null
 
@@ -400,15 +422,11 @@ class KeyPolicyStore(
      * dropped. [deleter] gets the tombstone's `source`. A tombstone whose
      * [deleter] throws stays for the next replay. Returns how many are left.
      */
-    suspend fun replayDeletions(deleter: suspend (KeyMaterialHeld, String?) -> Boolean): Int {
+    suspend fun replayDeletions(deleter: TombstoneDelete): Int {
         var left = 0
         for (tombstone in dao.deletions()) {
-            withKeyMaterial(tombstone.keyId) { held ->
-                if (dao.keyInstance(tombstone.keyId) == null) {
-                    deleteMaterialOf(held, tombstone.keyInstance) { deleter(it, tombstone.source) }
-                } else {
-                    dao.dropDeletion(tombstone.keyId, tombstone.keyInstance)
-                }
+            lockKeyMaterial(tombstone.keyId) { held ->
+                settleDeletion(held, deleter)
                 if (dao.deletion(tombstone.keyId) != null) left++
             }
         }
@@ -416,18 +434,57 @@ class KeyPolicyStore(
     }
 
     /**
-     * The one serialisation of [keyId]'s key material (#193 r8, ruling 554):
-     * every write of it (a generation with its row insert, an import) and
-     * every delete of it ([deleteKey], [deleteMaterial]) runs in [block]
-     * under [keyId]'s lock, one at a time, so a delete never removes the
-     * material of a key generated again under its id between its row delete
-     * and its material delete. Not reentrant: [block] must not call
-     * [deleteKey], [deleteMaterial] or this for the same id. A helper that
-     * writes material for its caller takes the [KeyMaterialHeld] handed to
-     * [block], so it is callable only from inside one.
+     * Settles [held]'s deletion tombstone, if it has one: deletes the
+     * material of the key row it recorded ([deleteMaterialOf]) while no key
+     * row is there, else drops it (a key generated again keeps its
+     * material). The one place a tombstone is replayed: by
+     * [replayDeletions], and by [withKeyMaterial] before any write, so no
+     * tombstone outlives a later write under its id and a replay only ever
+     * deletes the generation it recorded (#193 r11).
      */
-    suspend inline fun <T> withKeyMaterial(keyId: String, block: (KeyMaterialHeld) -> T): T =
+    @PublishedApi
+    internal suspend fun settleDeletion(held: KeyMaterialHeld, deleter: TombstoneDelete) {
+        val tombstone = dao.deletion(held.keyId) ?: return
+        if (dao.keyInstance(held.keyId) == null) {
+            deleteMaterialOf(held, tombstone.keyInstance) { deleter(it, tombstone.source) }
+        } else {
+            dao.dropDeletion(held.keyId, tombstone.keyInstance)
+        }
+    }
+
+    /**
+     * The one serialisation of a write of [keyId]'s key material (#193 r8,
+     * r11, ruling 554): every write of it (a generation with its row insert,
+     * an import) runs in [block] under [keyId]'s lock, the lock every
+     * delete takes, so a delete never removes the material of a key
+     * generated again under its id between its row delete and its material
+     * delete. Before [block], an earlier delete still owed under the id is
+     * settled with [settle] (the app's [keyMaterialDeleter]); if its
+     * material cannot be deleted, [block] does not run and
+     * [DeletionPendingException] is thrown: a write never lands under a
+     * tombstone, so no replay deletes it. Not reentrant: [block] must not
+     * call [deleteKey], [deleteMaterial] or this for the same id. A helper
+     * that writes material for its caller takes the [KeyMaterialHeld]
+     * handed to [block], so it is callable only from inside one.
+     */
+    suspend inline fun <T> withKeyMaterial(keyId: String, noinline settle: TombstoneDelete, block: (KeyMaterialHeld) -> T): T =
+        lockKeyMaterial(keyId) { held ->
+            settleDeletion(held, settle)
+            if (isDeletionPending(keyId)) throw DeletionPendingException(keyId)
+            block(held)
+        }
+
+    /** [keyId]'s material lock, for the store's deletes and [withKeyMaterial]. */
+    @PublishedApi
+    internal suspend inline fun <T> lockKeyMaterial(keyId: String, block: (KeyMaterialHeld) -> T): T =
         materialLock(keyId).withLock { block(KeyMaterialHeld(keyId)) }
+
+    /**
+     * A key material write refused: an earlier delete under the id still
+     * owes material it could not delete yet (#193 r11).
+     */
+    class DeletionPendingException(keyId: String) :
+        IOException("An earlier delete of key $keyId is not finished; try again")
 
     /**
      * Proof that [keyId]'s [withKeyMaterial] lock is held: only that block
