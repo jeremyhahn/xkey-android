@@ -26,6 +26,7 @@ import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import java.security.SecureRandom
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -260,41 +261,80 @@ class BleClientPhoneInitiatedSasTest {
     }
 
     /**
-     * The link drops after the user said yes, between the ownership check and
-     * the trust publication: the retired connection is not trusted, its
-     * desktop request is never served, and connect() reports no session.
+     * The link drops, on the GATT callback's own thread, while the trust step
+     * runs: after the user said yes and the ownership check passed, before
+     * the trust is published. The publication is held at a gate the test
+     * controls until the drop has either finished or is waiting for the trust
+     * step. The check and the publication are one step, so the drop waits and
+     * ends a connection that is already trusted; a connection never becomes
+     * trusted after the drop ended it.
      */
     @Test
     fun aDisconnectAtTheTrustPublicationTrustsNothing(): Unit = runBlocking {
-        val handler = RecordingHandler()
-        lateinit var h: BleClientHarness
-        val confirmation = RecordingConfirmation {
-            h.desktopSends(attestRequest(id = 13))
-            delay(200)
-            true
+        val h = harness(RecordingHandler(), RecordingConfirmation { true })
+        val published = AtomicReference<Any?>()
+        val trustedBeforePublication = AtomicReference<Boolean?>()
+        val answeredBeforePublication = AtomicReference<Boolean?>()
+        val trustedWhenEnded = AtomicReference<Boolean?>()
+        val drop = AtomicReference<Thread?>()
+        h.client.stateChangeHook = { state ->
+            val ending = published.get()
+            if (state == BluetoothProfile.STATE_DISCONNECTED && ending != null) {
+                trustedWhenEnded.compareAndSet(null, fieldOf(ending, "trusted") as Boolean)
+            }
         }
-        h = harness(handler, confirmation)
-        var dropped: Any? = null
-        h.client.sasTrustHook = {
-            h.client.sasTrustHook = null
-            dropped = connectionOf(h.client)
-            h.probe.gattCallback.onConnectionStateChange(
-                h.gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
-            )
+        h.client.sasPublishHook = { current ->
+            h.client.sasPublishHook = null
+            published.set(current)
+            trustedBeforePublication.set(fieldOf(current, "trusted") as Boolean)
+            answeredBeforePublication.set((fieldOf(current, "sasConfirmed") as CompletableDeferred<*>).isCompleted)
+            val dropping = Thread {
+                h.probe.gattCallback.onConnectionStateChange(
+                    h.gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
+                )
+            }
+            drop.set(dropping)
+            dropping.start()
+            holdUntilFinishedOrWaitingForTheTrustStep(dropping)
         }
 
         val connected = withTimeout(5_000) { h.client.connect(h.address, randomKey()) }
 
-        assertFalse("connect() must not report a dropped link as up", connected)
-        val retired = dropped ?: throw AssertionError("the seam was never reached")
-        assertFalse("a retired connection must not be trusted", fieldOf(retired, "trusted") as Boolean)
-        val answer = fieldOf(retired, "sasConfirmed") as CompletableDeferred<*>
-        assertTrue(answer.isCompleted)
-        assertEquals(false, answer.await())
+        val dropping = drop.get() ?: throw AssertionError("the seam was never reached")
+        withContext(Dispatchers.IO) { dropping.join(5_000) }
+        assertFalse("the drop must finish", dropping.isAlive)
+        val retired = published.get()!!
+        assertEquals("nothing may be trusted before the publication", false, trustedBeforePublication.get())
+        assertEquals("the SAS answer must not be published before the trust", false, answeredBeforePublication.get())
+        assertEquals(
+            "the drop must wait for the trust step and end the connection it trusted",
+            true, trustedWhenEnded.get()
+        )
+        assertEquals(
+            "a connection must not become trusted after the drop ended it",
+            trustedWhenEnded.get(), fieldOf(retired, "trusted") as Boolean
+        )
+        assertTrue("the connection was the client's when it was trusted", connected)
         delay(300)
         assertFalse(h.client.isConnected())
-        assertTrue("nothing may be served on a retired session", handler.requests.isEmpty())
-        assertTrue("nothing may be answered on a retired session", h.receivedResponses.isEmpty())
+    }
+
+    /**
+     * Returns once [thread] has finished, or is blocked entering the
+     * connectionLock step in BleClient.takeIfOwned, the one the trust step
+     * holds. A block on any other monitor does not release the gate.
+     */
+    private fun holdUntilFinishedOrWaitingForTheTrustStep(thread: Thread) {
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (thread.isAlive) {
+            if (thread.state == Thread.State.BLOCKED &&
+                thread.stackTrace.firstOrNull()?.methodName?.startsWith("takeIfOwned") == true
+            ) {
+                return
+            }
+            if (System.nanoTime() > deadline) throw AssertionError("the drop neither finished nor waited")
+            Thread.sleep(1)
+        }
     }
 
     /**
@@ -331,9 +371,6 @@ class BleClientPhoneInitiatedSasTest {
 
     private fun appRequest(id: Long): ByteArray =
         """{"jsonrpc":"2.0","id":$id,"method":"${MethodNames.REMOTE_ATTEST_DEVICE}","params":{}}""".toByteArray()
-
-    private fun connectionOf(client: BleClient): Any? =
-        BleClient::class.java.getDeclaredField("connection").apply { isAccessible = true }.get(client)
 
     private fun fieldOf(target: Any, name: String): Any? =
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
