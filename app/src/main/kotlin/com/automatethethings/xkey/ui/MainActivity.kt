@@ -50,6 +50,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.time.Clock
 import java.time.ZoneId
@@ -776,10 +777,12 @@ class MainActivity : AppCompatActivity() {
      * times are recomputed once a minute while the activity is resumed.
      */
     private fun observeRecentActivity() {
-        val dao = XKeyDatabase.getInstance(this).auditLogDao()
+        val database = XKeyDatabase.getInstance(this)
+        val dao = database.auditLogDao()
+        val keyLabels = database.keyDao().observeAll().map { keys -> keys.associate { it.keyId to it.label } }
         lifecycleScope.launch {
             lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                RecentActivityRows.observe(dao, recentActivityClock).collectLatest { rows ->
+                RecentActivityRows.observe(dao, recentActivityClock, keyLabels = keyLabels).collectLatest { rows ->
                     renderRecentActivity(rows)
                 }
             }

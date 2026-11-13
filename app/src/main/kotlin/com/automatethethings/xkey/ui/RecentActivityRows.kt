@@ -75,7 +75,7 @@ object RecentActivityRows {
                 val (timeRes, timeCount) = age(nowMillis - entry.timestamp)
                 RecentActivityRow.Entry(
                     labelRes = AuditOperationLabels.labelRes(entry.operationType),
-                    keyLabel = entry.keyLabel,
+                    keyLabel = keyText(entry, keyLabels),
                     success = entry.success,
                     outcomeRes = if (entry.success) {
                         R.string.recent_activity_succeeded
@@ -90,7 +90,8 @@ object RecentActivityRows {
 
     /**
      * The rows the home screen binds: built from [AuditLogDao.observeRecent]
-     * and rebuilt on every [ticks] emission so the relative times keep aging.
+     * and rebuilt on every [ticks] emission so the relative times keep aging,
+     * and whenever [keyLabels] (stored key id to label) changes.
      */
     fun observe(
         dao: AuditLogDao,
@@ -99,8 +100,8 @@ object RecentActivityRows {
         limit: Int = DEFAULT_LIMIT,
         keyLabels: Flow<Map<String, String>> = flowOf(emptyMap())
     ): Flow<List<RecentActivityRow>> =
-        combine(dao.observeRecent(limit), ticks.onStart { emit(Unit) }) { entries, _ ->
-            build(entries, clock, limit)
+        combine(dao.observeRecent(limit), keyLabels, ticks.onStart { emit(Unit) }) { entries, labels, _ ->
+            build(entries, clock, limit, labels)
         }.distinctUntilChanged()
 
     /** Emits every [periodMillis], forever. */
@@ -109,6 +110,16 @@ object RecentActivityRows {
             delay(periodMillis)
             emit(Unit)
         }
+    }
+
+    /**
+     * The key text of [entry]: the stored key's label for its key id, else the
+     * logged label unless it is a key id (some call sites log the id as the
+     * label), else none.
+     */
+    private fun keyText(entry: AuditLogEntity, keyLabels: Map<String, String>): String? {
+        entry.keyId?.let { keyLabels[it] }?.let { return it }
+        return entry.keyLabel?.takeUnless { it == entry.keyId || it in keyLabels }
     }
 
     /** How long ago [elapsedMillis] is; a time ahead of the clock reads "just now". */
