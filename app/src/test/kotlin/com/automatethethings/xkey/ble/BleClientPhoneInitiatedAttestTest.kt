@@ -286,7 +286,7 @@ class BleClientPhoneInitiatedAttestTest {
         val newGatt = h.nextConnection()
         h.holdWrites = true
         val reconnect = async(Dispatchers.Default) { h.client.connect(h.address, randomKey()) }
-        awaitUntil("the reconnection's identity write") { h.heldWrites == 1 }
+        h.awaitUntil("the reconnection's identity write") { h.heldWrites == 1 }
         val handshakeWrite = h.probe.writeCompletion.get()
         val dropped = answerDropped()
 
@@ -317,9 +317,7 @@ class BleClientPhoneInitiatedAttestTest {
         paused.awaitPaused()
 
         val disconnecting = thread(name = "disconnect") { h.probe.disconnectInternal() }
-        awaitUntil("the disconnect to block or finish") {
-            disconnecting.state == Thread.State.BLOCKED || !disconnecting.isAlive
-        }
+        awaitBlockedOrDone(disconnecting)
         assertTrue("the connection was replaced under an admitted write", disconnecting.isAlive)
 
         paused.resume()
@@ -355,7 +353,7 @@ class BleClientPhoneInitiatedAttestTest {
         val newGatt = h.nextConnection()
         h.holdWrites = true
         val reconnect = async(Dispatchers.Default) { h.client.connect(h.address, randomKey()) }
-        awaitUntil("the reconnection's identity write") { h.heldWrites == 1 }
+        h.awaitUntil("the reconnection's identity write") { h.heldWrites == 1 }
         val handshakeWrite = h.probe.writeCompletion.get()
 
         paused.resume()
@@ -385,7 +383,7 @@ class BleClientPhoneInitiatedAttestTest {
         h.holdWrites = true
         val request = """{"jsonrpc":"2.0","id":1,"method":"local.listKeys"}""".toByteArray()
         val call = async(Dispatchers.Default) { h.client.sendRequest(request) }
-        awaitUntil("the request's write") { h.heldWrites == 1 }
+        h.awaitUntil("the request's write") { h.heldWrites == 1 }
         val requestWrite = h.probe.writeCompletion.get()
 
         h.probe.gattCallback.onConnectionStateChange(
@@ -424,9 +422,7 @@ class BleClientPhoneInitiatedAttestTest {
         withTimeout(REPLY_TIMEOUT_MS) { handler.cancelled.await() }
         val failure = withTimeout(REPLY_TIMEOUT_MS) { call.await() }.exceptionOrNull()
         assertTrue("the request must be failed, not left waiting: $failure", failure is BleClientException)
-        awaitUntil("the link to be torn down") {
-            h.client.connectionState.value == ClientConnectionState.Disconnected
-        }
+        h.awaitConnectionState(ClientConnectionState.Disconnected)
         handler.approve()
         assertEquals("a write was attempted for the cancelled worker", writes, h.writesOn(h.gatt))
         assertTrue("nothing may reach the desktop", h.receivedResponses.isEmpty())
@@ -626,11 +622,17 @@ class BleClientPhoneInitiatedAttestTest {
         return dropped
     }
 
-    private fun awaitUntil(what: String, condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + REPLY_TIMEOUT_MS
-        while (!condition()) {
-            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting for $what")
-            Thread.sleep(2)
+    /**
+     * Waits for [thread] to block on a monitor or to end. A thread blocking
+     * on a lock signals nothing, so this yields until its state says so, and
+     * fails the test at [REPLY_TIMEOUT_MS]. It never sleeps: the thread
+     * blocks within moments of starting, or ends.
+     */
+    private fun awaitBlockedOrDone(thread: Thread) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(REPLY_TIMEOUT_MS)
+        while (thread.state != Thread.State.BLOCKED && thread.isAlive) {
+            if (System.nanoTime() > deadline) throw AssertionError("timed out waiting for ${thread.name} to block or finish")
+            Thread.yield()
         }
     }
 

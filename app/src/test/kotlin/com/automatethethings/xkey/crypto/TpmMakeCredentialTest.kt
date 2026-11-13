@@ -16,8 +16,8 @@ package com.automatethethings.xkey.crypto
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -43,6 +43,9 @@ import javax.crypto.spec.PSource
  * composition its `CreateCredential` uses, so the two implementations are
  * checked against each other and not merely against themselves.
  */
+/** Wrong-key activations the sweep runs, each over a fresh pair of EKs. */
+private const val WRONG_KEY_PAIRS = 50
+
 class TpmMakeCredentialTest {
 
     // ---------------------------------------------------------------
@@ -211,24 +214,30 @@ class TpmMakeCredentialTest {
 
     @Test
     fun `a different endorsement key cannot recover the seed`() {
-        val ek = TpmTestStructures.generateRsaKeyPair()
-        val other = TpmTestStructures.generateRsaKeyPair()
+        assertWrongKeyRefused(TpmTestStructures.generateRsaKeyPair(), TpmTestStructures.generateRsaKeyPair())
+    }
+
+    @Test
+    fun `a different endorsement key is refused for every generated key pair`() {
+        repeat(WRONG_KEY_PAIRS) {
+            assertWrongKeyRefused(TpmTestStructures.generateRsaKeyPair(), TpmTestStructures.generateRsaKeyPair())
+        }
+    }
+
+    private fun assertWrongKeyRefused(ek: java.security.KeyPair, other: java.security.KeyPair) {
         val name = MessageDigest.getInstance("SHA-256").digest("iak".toByteArray())
         val credential = TpmMakeCredential.make(ek.public as RSAPublicKey, name)
 
-        var recovered: ByteArray? = null
-        try {
-            recovered = softwareActivateCredential(
+        // Either the OAEP unwrap fails or the integrity HMAC does; the helper
+        // reports both as IllegalStateException.
+        assertThrows(IllegalStateException::class.java) {
+            softwareActivateCredential(
                 other.private as RSAPrivateKey,
                 name,
                 credential.credentialBlob,
                 credential.encryptedSecret
             )
-        } catch (e: Exception) {
-            // Either the OAEP unwrap fails outright or the integrity HMAC does.
-            assertTrue(e is IllegalStateException || e is javax.crypto.BadPaddingException)
         }
-        assertFalse("the wrong EK must not recover the secret", credential.secret.contentEquals(recovered))
     }
 
     @Test
@@ -279,9 +288,27 @@ class TpmMakeCredentialTest {
     /**
      * What the desktop's TPM does with the challenge: unwrap the seed, re-derive
      * the integrity and storage keys from it and the object's own Name, check the
-     * outer HMAC, then decrypt the credential.
+     * outer HMAC, then decrypt the credential. Every failure (OAEP unwrap,
+     * integrity check, credential decode) surfaces as IllegalStateException.
      */
     private fun softwareActivateCredential(
+        ek: RSAPrivateKey,
+        name: ByteArray,
+        credentialBlob: ByteArray,
+        encryptedSecret: ByteArray
+    ): ByteArray = try {
+        activateOrThrow(ek, name, credentialBlob, encryptedSecret)
+    } catch (e: IllegalStateException) {
+        throw e
+    } catch (e: java.security.GeneralSecurityException) {
+        // The OAEP unwrap under a wrong key fails with a provider-specific type.
+        throw IllegalStateException("credential activation failed", e)
+    } catch (e: RuntimeException) {
+        // A garbled seed or blob can fail with an argument or index error.
+        throw IllegalStateException("credential activation failed", e)
+    }
+
+    private fun activateOrThrow(
         ek: RSAPrivateKey,
         name: ByteArray,
         credentialBlob: ByteArray,

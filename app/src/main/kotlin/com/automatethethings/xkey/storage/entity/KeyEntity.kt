@@ -178,6 +178,19 @@ data class KeyEntity(
     @ColumnInfo(name = "sharing_policy")
     val sharingPolicy: SharingPolicyType = SharingPolicyType.PRIVATE,
 
+    /**
+     * The revision of [sharingPolicy]: it only moves forward, by one on every
+     * policy write, so a policy changed away and back is a later revision
+     * even though it reads the same. A writer that decided on the policy it
+     * read earlier (an approval prompt) writes only while the row is still at
+     * the revision it read ([KeyDao.compareAndSetSharingPolicy]). The DAO's
+     * policy writers bump it in the same statement; a whole-row [KeyDao.update]
+     * carrying a stale revision is bumped past the stored one by the
+     * `keys_policy_revision_forward` trigger ([XKeyDatabase.MIGRATION_12_13]).
+     */
+    @ColumnInfo(name = "policy_revision", defaultValue = "0")
+    val policyRevision: Long = 0,
+
     /** Origin: "local", "remote_ble", "remote_usb", "xkmsd". */
     @ColumnInfo(name = "source")
     val source: String,

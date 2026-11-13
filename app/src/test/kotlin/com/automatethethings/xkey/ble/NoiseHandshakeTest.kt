@@ -377,10 +377,9 @@ class NoiseHandshakeTest {
     /**
      * Documents the transport's ordering requirement. The counter is derived
      * from a local monotonic nonce with no replay window, so a frame that
-     * arrives out of order cannot be decrypted — and, because the counter is
-     * advanced before the AEAD runs, the receive direction stays desynchronised
-     * afterwards. Anything that can drop or reorder a frame must tear the
-     * session down rather than retry.
+     * arrives out of order cannot be decrypted. A failed frame leaves the
+     * receive counter where it was (#236), so the frames then decrypt in
+     * their sending order.
      */
     @Test
     fun transportFramesMustArriveInOrder() = runTest {
@@ -397,12 +396,8 @@ class NoiseHandshakeTest {
         } catch (expected: Exception) {
             // expected
         }
-        try {
-            responder.decrypt(first)
-            fail("the receive counter is not rewound, so recovery is impossible")
-        } catch (expected: Exception) {
-            // expected
-        }
+        assertArrayEquals("first".toByteArray(), responder.decrypt(first))
+        assertArrayEquals("second".toByteArray(), responder.decrypt(second))
     }
 
     @Test
