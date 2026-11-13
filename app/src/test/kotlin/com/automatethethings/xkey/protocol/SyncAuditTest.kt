@@ -177,7 +177,8 @@ class SyncAuditTest {
         verify(exactly = 1) {
             AuditLogger.logOathSyncPerformed(
                 deviceId = DESK_PEER, deviceName = DESK_NAME, count = 0, direction = AuditLogger.SYNC_INBOUND,
-                added = 0, updated = 0, skipped = 0, success = false, errorMessage = any()
+                added = 0, updated = 0, skipped = 0, success = false,
+                errorMessage = "syncOATH failed: IllegalStateException"
             )
         }
     }

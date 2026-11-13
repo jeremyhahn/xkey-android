@@ -135,8 +135,10 @@ class RemoteSyncClient(
     /**
      * Runs one store's sync, [block] returning (pushed, merge counts), and
      * records it through [record]: the counts on success, a failed entry and
-     * the rethrown error otherwise. A password error records its class only,
-     * since its message could quote an entry; a locked vault says so.
+     * the rethrown error otherwise. The entry never copies an exception
+     * message: a peer's error text could quote a password, OATH secret, site
+     * or user name, so it holds a local description, the protocol error code
+     * or the exception class.
      */
     private suspend fun audited(
         record: (String?, String?, Int, String, Int, Int, Int, Boolean, String?) -> Unit,
@@ -146,7 +148,8 @@ class RemoteSyncClient(
             block()
         } catch (e: Exception) {
             val why = when (e) {
-                is PasswordStoreLockedException, is ProtocolException -> e.message
+                is PasswordStoreLockedException -> "password store is locked"
+                is ProtocolException -> "remote sync error, code ${e.errorCode}"
                 else -> e.javaClass.simpleName
             }
             record(peerDeviceId, peerDeviceName, 0, AuditLogger.SYNC_OUTBOUND, 0, 0, 0, false, why)

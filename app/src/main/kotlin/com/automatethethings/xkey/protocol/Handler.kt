@@ -3224,7 +3224,8 @@ class RequestHandler(
                 updated = 0,
                 skipped = 0,
                 success = false,
-                errorMessage = "syncOATH failed: ${e.message}"
+                // The exception class only: a merge error's message may quote a credential.
+                errorMessage = "syncOATH failed: ${e.javaClass.simpleName}"
             )
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncOATH failed: ${e.message}")
         }
@@ -3263,9 +3264,8 @@ class RequestHandler(
         } catch (e: PasswordStoreLockedException) {
             // Merge runs first and is refused before it writes, so a locked
             // vault leaves the store untouched and exports nothing.
-            val message = e.message ?: "password store is locked"
-            logFailedPasswordSync(peerId, peerName, message)
-            Response.error(request.id, ErrorCodes.PASSWORD_STORE_LOCKED, message)
+            logFailedPasswordSync(peerId, peerName, "password store is locked")
+            Response.error(request.id, ErrorCodes.PASSWORD_STORE_LOCKED, e.message ?: "password store is locked")
         } catch (e: Exception) {
             Log.e(TAG, "syncPasswords failed", e)
             // The exception class only: a merge error's message may quote an entry.
