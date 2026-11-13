@@ -152,8 +152,10 @@ class KeySharingPeers(
     /**
      * Runs [write], a withdrawal, under the edits lock already held. Its
      * caller may be gone (the sheet was dismissed), so a failure is handled
-     * here, not left in an abandoned Deferred: [entry] is recorded as a
-     * pending withdrawal, which denies the peer ([isWithdrawalPending]) from
+     * here, not left in an abandoned Deferred: the grant clear it owes is
+     * recorded first ([KeyPolicyStore.oweWithdrawal]), which denies every
+     * peer of the key until its next policy write, a restart included; then
+     * [entry] is recorded as a pending withdrawal, which denies the peer ([isWithdrawalPending]) from
      * that moment, and [write] is retried in [editScope] until it lands, or
      * until the key row it was made for is gone or replaced (#193).
      */
@@ -164,7 +166,10 @@ class KeySharingPeers(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Withdrawing key access failed; the peer is denied until a retry lands", e)
+            Log.e(TAG, "Withdrawing key access failed; every peer is denied until the key's next policy write", e)
+            // Acknowledged only once the clear it owes is recorded (#193):
+            // durably in the policy row, else held in the process.
+            store.oweWithdrawal(keyId, instance)
             val token = Any()
             // Unbound if the key row cannot be read: a retried removal only
             // ever deletes a grant, so it fails closed on a recreated key.

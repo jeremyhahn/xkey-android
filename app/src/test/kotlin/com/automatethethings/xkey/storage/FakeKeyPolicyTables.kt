@@ -44,8 +44,8 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
     /** Runs at the start of every single-grant delete, before [failing] is checked. */
     var onDeleteGrant: suspend (keyId: String, peer: String) -> Unit = { _, _ -> }
 
-    /** The denials a store holds in the process when their write fails; a "restart" keeps them, as one store per process does. */
-    val unrecordedDenials: MutableMap<String, Long> = java.util.concurrent.ConcurrentHashMap()
+    /** The obligations a store holds in the process when their write fails; a "restart" keeps them, as one store per process does. */
+    val unrecordedDenials: MutableMap<String, KeyPolicyStore.Held> = java.util.concurrent.ConcurrentHashMap()
 
     fun store() = KeyPolicyStore(this, this, unrecordedDenials)
 

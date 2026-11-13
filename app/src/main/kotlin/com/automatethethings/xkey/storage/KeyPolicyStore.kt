@@ -14,7 +14,9 @@
  */
 package com.automatethethings.xkey.storage
 
+import android.util.Log
 import androidx.room.withTransaction
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.automatethethings.xkey.storage.dao.KeyPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
@@ -40,15 +42,27 @@ import java.io.IOException
  * until a later policy write lands. A Private change, or any change away from
  * Selected Peers, also leaves the grant clear it owes: the next policy write
  * deletes the key's grant rows first, and no grant is written meanwhile.
- * If that denial cannot be written either, it is held in the process
- * ([unrecordedDenials], by key id and instance): every peer is denied and
- * every grant refused until a later policy write for the key lands.
+ * A withdrawal whose grant delete fails owes the same grant clear.
+ *
+ * Every such obligation, from a failed narrowing, a failed withdrawal or the
+ * 12 -> 13 migration's fallback, is recorded through one choke point,
+ * [owe] (or [owedAtMigration] inside the migration, by the same rule
+ * [obligation]), before the failure is acknowledged. If the row cannot be
+ * written, the obligation is held in the process with its clear
+ * ([unrecorded], by key id): every peer is denied, every grant refused, and
+ * the next policy write for the key row deletes its grants first.
  */
 class KeyPolicyStore(
     private val dao: KeyPolicyDao,
     private val transactor: Transactor,
-    private val unrecordedDenials: MutableMap<String, Long> = processDenials
+    private val unrecorded: MutableMap<String, Held> = processObligations
 ) {
+
+    /** An obligation held in the process because its write failed: the key row [instance] it binds, and whether it owes the grant clear. */
+    data class Held(val instance: Long, val clearGrants: Boolean)
+
+    /** What an obligation leaves in a policy row: the [denial] enforced and whether the grant clear is owed. */
+    data class Obligation(val denial: SharingPolicyType, val clearGrants: Boolean)
 
     /** Runs a block in one database transaction, rolled back if it throws. */
     interface Transactor {
@@ -88,49 +102,69 @@ class KeyPolicyStore(
         try {
             transactor.run {
                 val row = bound(keyId, instance)
-                val clear = policy != SharingPolicyType.SELECTED_PEERS || row?.clearGrants == true
+                val clear = policy != SharingPolicyType.SELECTED_PEERS || row?.clearGrants == true ||
+                    held(keyId, instance)?.clearGrants == true
                 if (clear) dao.deleteGrants(keyId)
                 if (dao.setKeyPolicy(keyId, policy) != 1) throw KeyChangedException(keyId)
                 dao.putPolicyRow(KeyPolicyEntity(keyId, instance, policy))
                 clear
-            }.also { unrecordedDenials.remove(keyId, instance) }
+            }.also { unrecorded.computeIfPresent(keyId) { _, held -> held.takeUnless { it.instance == instance } } }
         } catch (e: CancellationException) {
             throw e
         } catch (e: KeyChangedException) {
             throw e
         } catch (e: Exception) {
-            if (policy != SharingPolicyType.ALL_PEERS) {
-                try {
-                    recordDenial(keyId, instance, policy)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (denial: Exception) {
-                    // Fail closed: denied in this process until a later write lands.
-                    unrecordedDenials[keyId] = instance
-                    e.addSuppressed(denial)
-                }
-            }
+            if (policy != SharingPolicyType.ALL_PEERS) owe(keyId, instance, policy, e)
             throw e
         }
 
     /**
-     * Leaves the denial of [policy], a narrowing whose write failed, in
-     * [keyId]'s policy row, if that row is still [instance]'s. A clear an
-     * older failure owed is kept.
+     * A withdrawal of a grant of [keyId]'s key row [instance] failed to
+     * write: records the grant clear it owes ([owe]), so every peer is
+     * denied, a restart included, until the next policy write deletes the
+     * key's grants. Returns once it is recorded or held in the process;
+     * nothing is owed if the key row is gone or replaced (its grants went
+     * with it).
      */
-    private suspend fun recordDenial(keyId: String, instance: Long, policy: SharingPolicyType) {
-        transactor.run {
-            val row = bound(keyId, instance) ?: return@run
-            val clear = row.clearGrants || policy != SharingPolicyType.SELECTED_PEERS
-            dao.putPolicyRow(
-                row.copy(
-                    pendingPolicy = policy,
-                    denial = if (clear) SharingPolicyType.PRIVATE else policy,
-                    clearGrants = clear
+    suspend fun oweWithdrawal(keyId: String, instance: Long) {
+        owe(keyId, instance, null, null)
+    }
+
+    /**
+     * The choke point (#193, ruling 554): records the obligation of a failed
+     * [narrowing] (Private or Selected Peers), or of a failed withdrawal
+     * (null), in [keyId]'s policy row, if its key row is still [instance],
+     * by [obligation]; an owed clear, recorded or held, is kept. If the row
+     * cannot be written, or there is none, the obligation is held in the
+     * process instead; the write's failure is added to [failure]. Never
+     * throws but for cancellation.
+     */
+    private suspend fun owe(keyId: String, instance: Long, narrowing: SharingPolicyType?, failure: Exception?) {
+        val heldClear = held(keyId, instance)?.clearGrants == true
+        var owed = obligation(narrowing, heldClear)
+        try {
+            val recorded = transactor.run {
+                val row = bound(keyId, instance) ?: return@run false
+                owed = obligation(narrowing, heldClear || row.clearGrants)
+                dao.putPolicyRow(
+                    row.copy(pendingPolicy = narrowing ?: row.pendingPolicy, denial = owed.denial, clearGrants = owed.clearGrants)
                 )
-            )
+                true
+            }
+            if (!recorded) unrecorded[keyId] = Held(instance, owed.clearGrants)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (gone: KeyChangedException) {
+            // The key row is gone or replaced: its grants went with it.
+        } catch (write: Exception) {
+            // Fail closed: denied in this process, clear owed, until a later write lands.
+            unrecorded[keyId] = Held(instance, owed.clearGrants)
+            failure?.addSuppressed(write)
         }
     }
+
+    /** The obligation held in the process for [keyId]'s key row [instance], if any. */
+    private fun held(keyId: String, instance: Long): Held? = unrecorded[keyId]?.takeIf { it.instance == instance }
 
     /**
      * Writes [peerPublicKeyHex]'s grant for [keyId]. Refused while the key's
@@ -144,7 +178,7 @@ class KeyPolicyStore(
     suspend fun grant(keyId: String, instance: Long, peerPublicKeyHex: String) {
         transactor.run {
             if (dao.keyInstance(keyId) != instance) throw KeyChangedException(keyId)
-            if (unrecordedDenials[keyId] == instance || refusesGrants(dao.policyRow(keyId))) throw GrantRefusedException(keyId)
+            if (held(keyId, instance) != null || refusesGrants(dao.policyRow(keyId))) throw GrantRefusedException(keyId)
             dao.putGrant(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
         }
     }
@@ -183,7 +217,7 @@ class KeyPolicyStore(
      * missing or belongs to another key row.
      */
     suspend fun enforcedPolicy(key: KeyEntity): SharingPolicyType =
-        if (unrecordedDenials[key.keyId] == key.id) SharingPolicyType.PRIVATE
+        if (held(key.keyId, key.id) != null) SharingPolicyType.PRIVATE
         else dao.policyRow(key.keyId)?.takeIf { it.keyInstance == key.id }?.enforced ?: key.sharingPolicy
 
     /** [keyId]'s policy row, after checking its key row is [instance]. */
@@ -193,8 +227,56 @@ class KeyPolicyStore(
     }
 
     companion object {
-        /** Denials whose write failed, by key id and instance, for the life of the process. */
-        private val processDenials: MutableMap<String, Long> = java.util.concurrent.ConcurrentHashMap()
+        /** Obligations whose write failed, by key id, for the life of the process. */
+        private val processObligations: MutableMap<String, Held> = java.util.concurrent.ConcurrentHashMap()
+
+        /**
+         * The rule every obligation is recorded by: a failed withdrawal
+         * (null [narrowing]) or Private, or any narrowing once a clear is
+         * already owed ([owedClear]), denies every peer and owes the grant
+         * clear; a failed Selected Peers alone denies by Selected Peers.
+         */
+        fun obligation(narrowing: SharingPolicyType?, owedClear: Boolean): Obligation {
+            val clear = owedClear || narrowing != SharingPolicyType.SELECTED_PEERS
+            return Obligation(if (clear) SharingPolicyType.PRIVATE else SharingPolicyType.SELECTED_PEERS, clear)
+        }
+
+        /**
+         * The choke point inside the 12 -> 13 migration, over the policy
+         * rows it has just seeded from `keys` (none owes a clear yet):
+         * records each "instance@POLICY" of [denials] on its key row by
+         * [obligation], dropping a record for another key row. If the
+         * records cannot be read, every key may owe a Private's clear, so
+         * every row gets the obligation of a failed withdrawal, deny-all and
+         * the clear, and the records stay where they were.
+         */
+        fun owedAtMigration(db: SupportSQLiteDatabase, denials: () -> Map<String, String>) {
+            val recorded = try {
+                denials()
+            } catch (e: Exception) {
+                Log.e("KeyPolicyStore", "Reading recorded key policy denials failed; every key denied and its grants owed a clear", e)
+                val owed = obligation(null, false)
+                db.execSQL(
+                    "UPDATE `key_policies` SET `denial` = ?, `clear_grants` = ?",
+                    arrayOf<Any>(owed.denial.name, if (owed.clearGrants) 1 else 0)
+                )
+                return
+            }
+            for ((keyId, record) in recorded) {
+                val instance = record.substringBefore('@', "").toLongOrNull() ?: continue
+                val narrowing = when (record.substringAfter('@')) {
+                    "PRIVATE" -> SharingPolicyType.PRIVATE
+                    "SELECTED_PEERS" -> SharingPolicyType.SELECTED_PEERS
+                    else -> continue
+                }
+                val owed = obligation(narrowing, false)
+                db.execSQL(
+                    "UPDATE `key_policies` SET `pending_policy` = ?, `denial` = ?, `clear_grants` = ? " +
+                        "WHERE `key_id` = ? AND `key_instance` = ?",
+                    arrayOf<Any>(narrowing.name, owed.denial.name, if (owed.clearGrants) 1 else 0, keyId, instance)
+                )
+            }
+        }
 
         /** A grant written under [row] would be deleted by its owed clear, or deny-all would hide it. */
         fun refusesGrants(row: KeyPolicyEntity?): Boolean =

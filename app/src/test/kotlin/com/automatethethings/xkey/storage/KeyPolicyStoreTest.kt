@@ -199,6 +199,37 @@ class KeyPolicyStoreTest {
         assertEquals("a grant from before the Private survived its owed clear", emptySet<String>(), tables.grantsOf("k"))
     }
 
+    /** A withdrawal whose grant delete failed leaves the grant clear it owes in the policy row, after a restart too. */
+    @Test
+    fun aFailedWithdrawalOwesTheGrantClearDurably() = runBlocking {
+        val instance = tables.addKey("k", SELECTED_PEERS)
+        tables.grant("k", PEER)
+        tables.failing += "deleteGrant"
+        store().oweWithdrawal("k", instance)
+        tables.failing.clear()
+
+        val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
+        assertTrue(restarted.policy("k")!!.clearGrants)
+        assertEquals(PRIVATE, restarted.enforcedPolicy(tables.key("k")!!))
+        assertTrue(restarted.setPolicy("k", instance, SELECTED_PEERS))
+        assertEquals(emptySet<String>(), tables.grantsOf("k"))
+    }
+
+    /** A withdrawal whose obligation write fails too is held in the process with its clear. */
+    @Test
+    fun aWithdrawalWhoseObligationWriteFailsIsHeldWithItsClear() = runBlocking {
+        val instance = tables.addKey("k", SELECTED_PEERS)
+        tables.grant("k", PEER)
+        tables.failing += setOf("deleteGrant", "putPolicyRow")
+        store().oweWithdrawal("k", instance)
+        tables.failing.clear()
+
+        assertEquals(PRIVATE, store().enforcedPolicy(tables.key("k")!!))
+        assertTrue(store().setPolicy("k", instance, SELECTED_PEERS))
+        assertEquals(emptySet<String>(), tables.grantsOf("k"))
+        assertEquals(SELECTED_PEERS, store().enforcedPolicy(tables.key("k")!!))
+    }
+
     /**
      * The bypass guard (#193, ruling 554): the denial and grant-clear
      * columns are written only by [KeyPolicyStore]'s obligation choke point.

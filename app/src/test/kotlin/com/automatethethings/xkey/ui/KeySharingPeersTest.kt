@@ -458,7 +458,7 @@ class KeySharingPeersTest {
 
         assertTrue("the withdrawal was not retried", table.none { it.second == PEER_A })
         assertFalse(hasAccess(PEER_A))
-        assertTrue(hasAccess(PEER_B))
+        assertFalse("the clear the failed withdrawal owes was not enforced", hasAccess(PEER_B))
         assertTrue("the withdrawal was not retried", removals >= 2)
     }
 
@@ -513,7 +513,12 @@ class KeySharingPeersTest {
         runCurrent()
         assertFalse(hasAccess(PEER_A))
 
-        // The user grants A again before any retry: that later choice stands.
+        // The failed withdrawal owes the key's grant clear: a grant waits for it.
+        assertFalse("a grant landed under an owed clear", peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)))
+
+        // The user's policy write lands the clear; then A is granted again before
+        // any retry: that later choice stands.
+        assertTrue(peers.setKeyPolicy(SharingPolicyType.SELECTED_PEERS, instance))
         assertTrue(peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)))
         tables.failing.clear()
         advanceUntilIdle()

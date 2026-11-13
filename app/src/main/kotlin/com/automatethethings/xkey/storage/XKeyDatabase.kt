@@ -599,8 +599,10 @@ abstract class XKeyDatabase : RoomDatabase() {
          * ([PairedDeviceRepository.legacyKeyPolicyDenials]). A record for
          * another key row than the stored one is dropped; a PRIVATE denial
          * also owes the key's grant clear. If the records cannot be read,
-         * none is dropped silently: every key is denied to every peer until
-         * its next policy write, and the records stay where they were.
+         * none is dropped silently: every key is denied to every peer and
+         * owes its grant clear until its next policy write, and the records
+         * stay where they were. Recorded through the store's choke point,
+         * [KeyPolicyStore.owedAtMigration].
          */
         fun migration12To13(denials: () -> Map<String, String>): Migration = object : Migration(12, 13) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -614,24 +616,7 @@ abstract class XKeyDatabase : RoomDatabase() {
                     "INSERT INTO `key_policies` (`key_id`, `key_instance`, `sharing_policy`, `pending_policy`, `denial`, `clear_grants`) " +
                         "SELECT `key_id`, `id`, `sharing_policy`, NULL, NULL, 0 FROM `keys`"
                 )
-                val recorded = try {
-                    denials()
-                } catch (e: Exception) {
-                    Log.e("XKeyDatabase", "Reading recorded key policy denials failed; every key denied until its policy is set again", e)
-                    db.execSQL("UPDATE `key_policies` SET `denial` = 'PRIVATE'")
-                    return
-                }
-                for ((keyId, record) in recorded) {
-                    val instance = record.substringBefore('@', "").toLongOrNull() ?: continue
-                    val denial = record.substringAfter('@')
-                    if (denial != "PRIVATE" && denial != "SELECTED_PEERS") continue
-                    db.execSQL(
-                        "UPDATE `key_policies` SET `pending_policy` = ?, `denial` = ?, " +
-                            "`clear_grants` = CASE WHEN ? = 'PRIVATE' THEN 1 ELSE `clear_grants` END " +
-                            "WHERE `key_id` = ? AND `key_instance` = ?",
-                        arrayOf<Any>(denial, denial, denial, keyId, instance)
-                    )
-                }
+                KeyPolicyStore.owedAtMigration(db, denials)
             }
         }
 

@@ -338,14 +338,18 @@ class KeySharingPendingIntentHandlerTest {
 
         assertTrue(tables.isGranted(key, PEER_A))
         assertFalse("a failed withdrawal left its peer authorized", shares(key, PEER_A))
-        assertTrue(shares(key, PEER_B))
+        // It owes the key's grant clear (#193): every peer is denied until the next policy write.
+        assertFalse(shares(key, PEER_B))
 
         tables.failing.clear()
         advanceUntilIdle()
 
         assertFalse(tables.isGranted(key, PEER_A))
         assertFalse(shares(key, PEER_A))
-        assertTrue(shares(key, PEER_B))
+        assertFalse(shares(key, PEER_B))
+
+        assertTrue(peers.setKeyPolicy(com.automatethethings.xkey.ui.SharingPolicyType.SELECTED_PEERS, instance))
+        assertFalse("the owed clear left a grant", tables.isGranted(key, PEER_B))
     }
 
     @Test
