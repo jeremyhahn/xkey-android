@@ -697,7 +697,10 @@ class OathActivity : AppCompatActivity() {
             item.credential.issuer?.let { append("$it: ") }
             append(item.credential.accountName)
         }
-        val desktopEntries = desktopActions.menuEntries(item.credential)
+        // Bound to the desktop connected as the menu opens, not to whichever
+        // is connected when an entry is picked.
+        val desktopMenu = desktopActions.openMenu(item.credential)
+        val desktopEntries = desktopMenu.entries
         val labels = mutableListOf(
             getString(R.string.oath_context_view_details),
             getString(R.string.oath_context_delete)
@@ -716,8 +719,8 @@ class OathActivity : AppCompatActivity() {
                     0 -> showCredentialDetails(item)
                     1 -> showDeleteConfirmation(item)
                     else -> when (desktopEntries.getOrNull(which - 2)) {
-                        OathDesktopActions.Entry.COPY -> copyToDesktop(item.credential)
-                        OathDesktopActions.Entry.DESKTOP_CODE -> showDesktopCode(item.credential)
+                        OathDesktopActions.Entry.COPY -> copyToDesktop(desktopMenu)
+                        OathDesktopActions.Entry.DESKTOP_CODE -> showDesktopCode(desktopMenu)
                         null -> Unit
                     }
                 }
@@ -725,15 +728,15 @@ class OathActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun copyToDesktop(credential: OathCredentialEntity) {
+    private fun copyToDesktop(menu: OathDesktopActions.Menu) {
         lifecycleScope.launch {
-            showDesktopOutcome(desktopActions.copyToDesktop(credential))
+            showDesktopOutcome(menu.copyToDesktop())
         }
     }
 
-    private fun showDesktopCode(credential: OathCredentialEntity) {
+    private fun showDesktopCode(menu: OathDesktopActions.Menu) {
         lifecycleScope.launch {
-            showDesktopOutcome(desktopActions.desktopCode(credential))
+            showDesktopOutcome(menu.desktopCode())
         }
     }
 
@@ -1040,8 +1043,31 @@ class OathDesktopActions(
     fun isConnected(): Boolean = desktop() != null
 
     /** Desktop entries for [credential]'s context menu; empty with no desktop. */
-    fun menuEntries(credential: OathCredentialEntity): List<Entry> {
-        val peer = desktop() ?: return emptyList()
+    fun menuEntries(credential: OathCredentialEntity): List<Entry> = entriesFor(desktop(), credential)
+
+    /**
+     * Opens [credential]'s context menu on the desktop connected now. Its
+     * actions go to that desktop's own connection whenever they fire: a
+     * desktop that replaces it while the menu is open receives nothing and
+     * inherits no link, and a menu opened with no desktop sends nothing.
+     */
+    fun openMenu(credential: OathCredentialEntity): Menu {
+        val peer = desktop()
+        return Menu(peer, credential, entriesFor(peer, credential))
+    }
+
+    /** A context menu bound to the desktop present when it opened. */
+    inner class Menu internal constructor(
+        private val peer: ConnectedDesktop?,
+        private val credential: OathCredentialEntity,
+        val entries: List<Entry>
+    ) {
+        suspend fun copyToDesktop(): Outcome = copyTo(peer, credential)
+        suspend fun desktopCode(): Outcome = codeFrom(peer, credential)
+    }
+
+    private fun entriesFor(peer: ConnectedDesktop?, credential: OathCredentialEntity): List<Entry> {
+        peer ?: return emptyList()
         return if (links.get(peer.peerKeyHex, credential.oathId) != null) {
             listOf(Entry.COPY, Entry.DESKTOP_CODE)
         } else {
@@ -1050,8 +1076,13 @@ class OathDesktopActions(
     }
 
     /** Sends remote.oathAdd for [credential] and remembers the desktop ID. */
-    suspend fun copyToDesktop(credential: OathCredentialEntity): Outcome {
-        val peer = desktop() ?: return Outcome.NotConnected
+    suspend fun copyToDesktop(credential: OathCredentialEntity): Outcome = copyTo(desktop(), credential)
+
+    /** Sends remote.oathGenerate for the desktop copy of [credential]. */
+    suspend fun desktopCode(credential: OathCredentialEntity): Outcome = codeFrom(desktop(), credential)
+
+    private suspend fun copyTo(peer: ConnectedDesktop?, credential: OathCredentialEntity): Outcome {
+        peer ?: return Outcome.NotConnected
         val remote = RemoteOathClient(peer)
         return try {
             val raw = secretOf(credential)
@@ -1082,9 +1113,8 @@ class OathDesktopActions(
         }
     }
 
-    /** Sends remote.oathGenerate for the desktop copy of [credential]. */
-    suspend fun desktopCode(credential: OathCredentialEntity): Outcome {
-        val peer = desktop() ?: return Outcome.NotConnected
+    private suspend fun codeFrom(peer: ConnectedDesktop?, credential: OathCredentialEntity): Outcome {
+        peer ?: return Outcome.NotConnected
         val desktopId = links.get(peer.peerKeyHex, credential.oathId) ?: return Outcome.NotOnDesktop
         return try {
             val result = RemoteOathClient(peer).oathGenerate(desktopId)
