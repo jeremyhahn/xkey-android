@@ -19,6 +19,7 @@ import com.automatethethings.xkey.ble.XKeyGattService
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.transport.StreamPairingSession
 import com.automatethethings.xkey.usb.UsbAccessoryServer
+import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -101,6 +102,23 @@ class ConnectedDesktopBindingTest {
                 "${transport.simpleName} re-resolves its session at send time; it must hand out bound senders",
                 SessionSender::class.java.isAssignableFrom(transport)
             )
+        }
+    }
+
+    @Test
+    fun noTransportSendIsReachableOutsideABoundSessionSender() {
+        transports.forEach { transport ->
+            assertFalse(
+                "${transport.simpleName} is a MessageSender: anyone holding it sends on its current session",
+                MessageSender::class.java.isAssignableFrom(transport)
+            )
+            // An internal Kotlin method compiles to a public one named
+            // send...$app_debug, so only private methods are out of reach.
+            val exposed = transport.declaredMethods
+                .filterNot { it.isSynthetic || Modifier.isPrivate(it.modifiers) }
+                .filter { it.name.startsWith("send") }
+                .map { it.name }
+            assertTrue("${transport.simpleName} exposes unbound sends $exposed", exposed.isEmpty())
         }
     }
 
