@@ -2190,19 +2190,52 @@ class RequestHandler(
             subtitle = "Verify your identity to prove key ownership"
         )
 
-        val certChain = keystoreManager.getKeyAttestationWithChallenge(
-            attestParams.keyId, attestParams.getNonceBytes()
-        ) ?: throw ProtocolException(
-            "Attestation not available for key: ${attestParams.keyId}",
-            errorCode = ErrorCodes.ATTESTATION_FAILED
-        )
+        val key = keyDao.getByKeyId(attestParams.keyId)
+        val keyLabel = key?.label ?: attestParams.keyId
+        val keyType = key?.keyType ?: "unknown"
 
-        val certsBase64 = certChain.map { cert ->
-            Base64.getEncoder().encodeToString(cert.encoded)
+        val startTime = System.currentTimeMillis()
+        // Every attempt from here on records exactly one KEY_ATTESTED entry,
+        // whether the keystore returns no chain, throws (API 28+ reports
+        // failures as AttestationException), or the chain cannot be read.
+        var recorded = false
+        fun recordAttestation(success: Boolean, securityLevel: String? = null, errorMessage: String? = null) {
+            recorded = true
+            AuditLogger.logKeyAttested(
+                keyId = attestParams.keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                securityLevel = securityLevel,
+                success = success,
+                errorMessage = errorMessage,
+                durationMs = System.currentTimeMillis() - startTime
+            )
         }
 
-        val leafCert = certChain[0] as java.security.cert.X509Certificate
-        val securityLevel = parseAttestationSecurityLevel(leafCert)
+        val certsBase64: List<String>
+        val securityLevel: String
+        try {
+            val certChain = keystoreManager.getKeyAttestationWithChallenge(
+                attestParams.keyId, attestParams.getNonceBytes()
+            )
+            if (certChain == null) {
+                val message = "Attestation not available for key: ${attestParams.keyId}"
+                recordAttestation(success = false, errorMessage = message)
+                throw ProtocolException(message, errorCode = ErrorCodes.ATTESTATION_FAILED)
+            }
+
+            certsBase64 = certChain.map { cert ->
+                Base64.getEncoder().encodeToString(cert.encoded)
+            }
+
+            val leafCert = certChain[0] as java.security.cert.X509Certificate
+            securityLevel = parseAttestationSecurityLevel(leafCert)
+        } catch (e: Exception) {
+            if (!recorded) recordAttestation(success = false, errorMessage = e.message ?: e.javaClass.simpleName)
+            throw e
+        }
+
+        recordAttestation(success = true, securityLevel = securityLevel)
 
         val result = LocalAttestKeyResult(
             certificateChain = certsBase64,
