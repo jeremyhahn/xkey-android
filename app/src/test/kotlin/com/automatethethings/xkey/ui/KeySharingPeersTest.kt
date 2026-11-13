@@ -133,8 +133,8 @@ class KeySharingPeersTest {
     private fun List<KeySharingPeers.Peer>.of(peer: String) = single { it.device.publicKeyHex == peer }
 
     /** The request handler's check for [peer]: refused while a withdrawal or revocation is pending, else the enforced policy and the rows decide. */
-    private fun hasAccess(peer: String, keyId: String = KEY) =
-        !KeySharingPeers.isWithdrawalPending(keyId, peer) && !repo.isRevocationPending(peer) &&
+    private fun hasAccess(peer: String, keyId: String = KEY, keyInstance: Long = instance) =
+        !KeySharingPeers.isWithdrawalPending(keyId, keyInstance, peer) && !repo.isRevocationPending(peer) &&
             when (tables.enforced(keyId)) {
                 StoredPolicy.ALL_PEERS -> true
                 StoredPolicy.SELECTED_PEERS -> tables.isGranted(keyId, peer)
@@ -849,6 +849,96 @@ class KeySharingPeersTest {
         peers.setAllowedOrRedraw(PEER_B, true, null, attached = { true }, redraw = { redraws++ }, unsaved = { unsaved++ })
         peers.setAllowedOrRedraw(PEER_A, false, null, attached = { true }, redraw = { redraws++ }, unsaved = { unsaved++ })
         assertEquals(1, unsaved)
+    }
+
+    /**
+     * Round 8 (1): a withdrawal queued behind a grant whose sheet is
+     * dismissed, then held only in the process, is shown not saved by the
+     * next sheet opened for the key and by the key list, not only by the
+     * dismissed sheet (which shows nothing); the retry's durable delete
+     * clears it.
+     */
+    @Test
+    fun aDismissedSheetsUnsavedWithdrawalIsShownUnsavedOnReopening() = runTest {
+        rows(KEY to PEER_A)
+        val gate = holdGrants()
+        val peers = peersOf()
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
+        assertFalse(grant.isCompleted)
+
+        var unsaved = 0
+        val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
+        sheet.launch {
+            peers.setAllowedOrRedraw(PEER_A, false, repo.pairingGeneration(PEER_A), attached = { true }, redraw = {}, unsaved = { unsaved++ })
+        }
+        sheet.cancel()
+
+        tables.failing += setOf("deleteGrant", "putPolicyRow")
+        gate.complete(Unit)
+        assertTrue(grant.await())
+        runCurrent()
+        assertEquals("the dismissed sheet drew nothing", 0, unsaved)
+
+        val reopened = peersOf().peers().first().of(PEER_A)
+        assertFalse(reopened.allowed)
+        assertTrue("a sheet opened later does not show the withdrawal unsaved", reopened.unsaved)
+        assertEquals("the key list does not show the withdrawal unsaved", setOf(KEY), KeySharingPeers.unsavedWithdrawalKeys.first())
+        assertFalse(hasAccess(PEER_A))
+
+        tables.failing.clear()
+        advanceUntilIdle()
+        assertFalse("a landed retry still shows unsaved", peersOf().peers().first().of(PEER_A).unsaved)
+        assertEquals(emptySet<String>(), KeySharingPeers.unsavedWithdrawalKeys.first())
+    }
+
+    /**
+     * Round 8 (3): a withdrawal retry pending for a key row, then the key
+     * replaced under its id (insertKey): the stale entry denies nothing on
+     * the new key, in authorization and in the peer list.
+     */
+    @Test
+    fun aKeyReplacedWhileAWithdrawalRetryIsPendingKeepsTheNewKeysPolicy() = runTest {
+        rows(KEY to PEER_A)
+        tables.failing += "deleteGrant"
+        assertTrue(peersOf().setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A)))
+        assertTrue(KeySharingPeers.isWithdrawalPending(KEY, instance, PEER_A))
+        tables.failing.clear()
+
+        val replaced = store.insertKey(FakeKeyPolicyTables.entity(KEY, StoredPolicy.ALL_PEERS))
+        assertTrue(replaced != instance)
+        assertFalse("the old key's withdrawal denies its replacement", KeySharingPeers.isWithdrawalPending(KEY, replaced, PEER_A))
+        assertTrue("the new key's All Peers is not in force", hasAccess(PEER_A, keyInstance = replaced))
+
+        store.setPolicy(KEY, replaced, StoredPolicy.SELECTED_PEERS)
+        tables.grant(KEY, PEER_A)
+        val listed = KeySharingPeers(KEY, replaced, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+            .peers().first().of(PEER_A)
+        assertTrue("the new key's grant is hidden by the old key's withdrawal", listed.allowed)
+        assertFalse(listed.unsaved)
+        assertTrue(hasAccess(PEER_A, keyInstance = replaced))
+        advanceUntilIdle()
+    }
+
+    /**
+     * Round 8 (3) bypass guard (ruling 554): every main-source check of a
+     * pending withdrawal names the key row instance it is checked for
+     * (`entity.id` or the sheet's `instance`).
+     */
+    @Test
+    fun everyPendingWithdrawalCheckNamesTheKeyInstance() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue("main sources not found from ${java.io.File(".").absolutePath}", root.isDirectory)
+        val bound = Regex("""isWithdrawalPending\([^,]+,\s*(\w+\.id|instance)\s*,""")
+        val unbound = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" }
+            .flatMap { file ->
+                file.readLines().mapIndexedNotNull { i, line ->
+                    val call = "isWithdrawalPending(" in line && "fun isWithdrawalPending(" !in line && !line.trimStart().startsWith("*")
+                    if (call && !bound.containsMatchIn(line)) "${file.name}:${i + 1}" else null
+                }
+            }
+            .toList()
+        assertEquals("a pending-withdrawal check not bound to the key instance", emptyList<String>(), unbound)
     }
 
     /**

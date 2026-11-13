@@ -19,7 +19,10 @@ import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.storage.entity.SharingPolicyType.ALL_PEERS
 import com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE
 import com.automatethethings.xkey.storage.entity.SharingPolicyType.SELECTED_PEERS
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -276,6 +279,79 @@ class KeyPolicyStoreTest {
             emptyList<String>(),
             hits(sources.filter { it.path.contains("/protocol/") }) { "forgetKey(" in it && "material =" !in it }
         )
+    }
+
+    /**
+     * Round 8 (2): a key deleted and generated again under its id while the
+     * delete's material step waits keeps the new key's material. The delete
+     * deletes the material only for the key row it was bound to, inside the
+     * serialisation the generation takes ([KeyPolicyStore.withKeyMaterial]).
+     */
+    @Test
+    fun aKeyGeneratedAgainDuringTheDeleteWindowKeepsItsNewMaterial() = runBlocking {
+        val old = tables.addKey("k", SELECTED_PEERS)
+        val store = store()
+        val material = mutableSetOf("k")
+        val window = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+
+        val delete = async {
+            store.deleteKey("k", old) {
+                window.complete(Unit)
+                release.await()
+                material -= "k"
+            }
+        }
+        window.await()
+
+        // The rows are gone; the key is generated again under its id.
+        val regenerate = async {
+            store.withKeyMaterial("k") {
+                material += "k"
+                store.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS))
+            }
+        }
+        yield()
+        release.complete(Unit)
+
+        assertTrue(delete.await())
+        val recreated = regenerate.await()
+        assertEquals(recreated, tables.keyInstance("k"))
+        assertTrue("the new key's material was deleted by the old key's delete", "k" in material)
+    }
+
+    /**
+     * Round 8 (2) bypass guard (ruling 554): every keyId-scoped key-material
+     * write or delete in the main sources runs inside the store's one
+     * serialisation: a [KeyPolicyStore.withKeyMaterial] block, or a
+     * `material` delete handed to [KeyPolicyStore.deleteKey] (through
+     * `forgetKey`) or [KeyPolicyStore.deleteMaterial].
+     */
+    @Test
+    fun everyKeyMaterialWriteAndDeleteIsSerialisedByTheStore() {
+        val root = java.io.File("src/main/kotlin")
+        assertTrue("main sources not found from ${java.io.File(".").absolutePath}", root.isDirectory)
+        val materialCall = Regex(
+            """\.(generateSymmetricKey|generateHMACKey|generateKeyForAlgorithm|generateRSAEncryptionKey|deleteGeneralKey|deleteByAlias)\(|SoftwareKeyStore\([^)]*\)\.(put|delete)\(|\bstore\.put\("""
+        )
+        val opener = Regex("""withKeyMaterial\(|material(: suspend \(\) -> Unit)? = \{""")
+        val bypasses = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name !in setOf("KeystoreManager.kt", "SoftwareKeyStore.kt", "KeyPolicyStore.kt") }
+            .flatMap { file ->
+                val lines = file.readLines()
+                // Depth of the braces opened by a serialised block, line by line.
+                var open = 0
+                var depth = 0
+                lines.mapIndexedNotNull { i, line ->
+                    if (open == 0 && opener.containsMatchIn(line)) open = depth + 1
+                    val inside = open != 0
+                    depth += line.count { it == '{' } - line.count { it == '}' }
+                    if (open != 0 && depth < open) open = 0
+                    if (materialCall.containsMatchIn(line) && !inside) "${file.name}:${i + 1}" else null
+                }
+            }
+            .toList()
+        assertEquals("a key-material write or delete outside the store's serialisation", emptyList<String>(), bypasses)
     }
 
     private suspend fun expectFailure(edit: suspend () -> Unit) {
