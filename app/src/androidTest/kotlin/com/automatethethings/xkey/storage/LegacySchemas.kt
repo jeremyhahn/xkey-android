@@ -27,9 +27,10 @@ package com.automatethethings.xkey.storage
  * shape a user of that app version would have, including the
  * `room_master_table` identity hash Room checks when it opens the file.
  *
- * Only versions 3..12 are present because only those schema JSONs were ever
- * exported; schemas 1 and 2 predate `exportSchema`, so migrations 1->2 and 2->3
- * cannot be reproduced faithfully and are not covered.
+ * Versions 3..14 are present: 3..13 from their exported schema JSONs, and 14,
+ * never exported, from 15's (see its entry). Schemas 1 and 2 predate
+ * `exportSchema`, so migrations 1->2 and 2->3 cannot be reproduced faithfully
+ * and are not covered.
  */
 object LegacySchemas {
 
@@ -37,7 +38,7 @@ object LegacySchemas {
     const val OLDEST = 3
 
     /** The schema version the app currently ships. */
-    const val CURRENT = 13
+    const val CURRENT = 15
 
     /** Every version that can serve as a migration starting point. */
     val TESTABLE_VERSIONS: List<Int> get() = SCHEMAS.keys.sorted()
@@ -352,17 +353,16 @@ object LegacySchemas {
             "CREATE INDEX IF NOT EXISTS `index_passwords_source` ON `passwords` (`source`)",
             "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
             "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '346118e31d0992f85496533bbc1b5d5b')"
-        )
-    ).let {
-        // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim
-        // (11.json differs from 10.json in its version number alone).
-        it + (11 to it.getValue(10))
-    } + (12 to listOf(
+        ),
+        // 13.json, the schema main shipped (#178): keys.policy_revision, and the
+        // keys_policy_revision_forward trigger MIGRATION_12_13 and onCreate add
+        // (Room exports no triggers).
+        13 to listOf(
             "CREATE TABLE IF NOT EXISTS `credential_metadata` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `credential_id` TEXT NOT NULL, `rp_id` TEXT NOT NULL, `rp_name` TEXT NOT NULL, `user_id` TEXT NOT NULL, `user_name` TEXT NOT NULL, `user_display_name` TEXT NOT NULL, `public_key_cose` BLOB NOT NULL, `sign_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `is_discoverable` INTEGER NOT NULL)",
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_credential_metadata_credential_id` ON `credential_metadata` (`credential_id`)",
             "CREATE INDEX IF NOT EXISTS `index_credential_metadata_rp_id` ON `credential_metadata` (`rp_id`)",
             "CREATE INDEX IF NOT EXISTS `index_credential_metadata_user_id_rp_id` ON `credential_metadata` (`user_id`, `rp_id`)",
-            "CREATE TABLE IF NOT EXISTS `keys` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `key_id` TEXT NOT NULL, `key_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `label` TEXT NOT NULL, `public_key_der` BLOB, `public_key_cose` BLOB, `key_size_bits` INTEGER NOT NULL, `strongbox_backed` INTEGER NOT NULL, `biometric_required` INTEGER NOT NULL, `auth_duration_seconds` INTEGER NOT NULL, `exportable` INTEGER NOT NULL, `shareable` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `source` TEXT NOT NULL, `remote_backend` TEXT, `use_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `rp_id` TEXT, `rp_name` TEXT, `user_id` TEXT, `user_name` TEXT, `user_display_name` TEXT, `is_discoverable` INTEGER NOT NULL, `sign_count` INTEGER NOT NULL, `is_system_key` INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS `keys` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `key_id` TEXT NOT NULL, `key_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `label` TEXT NOT NULL, `public_key_der` BLOB, `public_key_cose` BLOB, `key_size_bits` INTEGER NOT NULL, `strongbox_backed` INTEGER NOT NULL, `biometric_required` INTEGER NOT NULL, `auth_duration_seconds` INTEGER NOT NULL, `exportable` INTEGER NOT NULL, `shareable` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `policy_revision` INTEGER NOT NULL DEFAULT 0, `source` TEXT NOT NULL, `remote_backend` TEXT, `use_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `rp_id` TEXT, `rp_name` TEXT, `user_id` TEXT, `user_name` TEXT, `user_display_name` TEXT, `is_discoverable` INTEGER NOT NULL, `sign_count` INTEGER NOT NULL, `is_system_key` INTEGER NOT NULL)",
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_keys_key_id` ON `keys` (`key_id`)",
             "CREATE INDEX IF NOT EXISTS `index_keys_key_type` ON `keys` (`key_type`)",
             "CREATE INDEX IF NOT EXISTS `index_keys_algorithm` ON `keys` (`algorithm`)",
@@ -401,7 +401,66 @@ object LegacySchemas {
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_passwords_password_id` ON `passwords` (`password_id`)",
             "CREATE INDEX IF NOT EXISTS `index_passwords_name` ON `passwords` (`name`)",
             "CREATE INDEX IF NOT EXISTS `index_passwords_source` ON `passwords` (`source`)",
+            "CREATE TRIGGER IF NOT EXISTS `keys_policy_revision_forward` AFTER UPDATE OF `sharing_policy`, `policy_revision` ON `keys` FOR EACH ROW WHEN NEW.`policy_revision` <= OLD.`policy_revision` BEGIN UPDATE `keys` SET `policy_revision` = OLD.`policy_revision` + 1 WHERE `id` = NEW.`id`; END",
             "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-            "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '346118e31d0992f85496533bbc1b5d5b')"
-        ))
+            "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e02480570d8c7a895d2410493d8e9e08')"
+        ),
+        // Never exported: 13 plus the key_policies table MIGRATION_13_14 adds
+        // (#193), transcribed from 15.json, which only adds key_deletions. Room
+        // checks no identity hash when it upgrades, so 15's is a stand-in.
+        14 to listOf(
+            "CREATE TABLE IF NOT EXISTS `credential_metadata` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `credential_id` TEXT NOT NULL, `rp_id` TEXT NOT NULL, `rp_name` TEXT NOT NULL, `user_id` TEXT NOT NULL, `user_name` TEXT NOT NULL, `user_display_name` TEXT NOT NULL, `public_key_cose` BLOB NOT NULL, `sign_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `is_discoverable` INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_credential_metadata_credential_id` ON `credential_metadata` (`credential_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_credential_metadata_rp_id` ON `credential_metadata` (`rp_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_credential_metadata_user_id_rp_id` ON `credential_metadata` (`user_id`, `rp_id`)",
+            "CREATE TABLE IF NOT EXISTS `keys` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `key_id` TEXT NOT NULL, `key_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `label` TEXT NOT NULL, `public_key_der` BLOB, `public_key_cose` BLOB, `key_size_bits` INTEGER NOT NULL, `strongbox_backed` INTEGER NOT NULL, `biometric_required` INTEGER NOT NULL, `auth_duration_seconds` INTEGER NOT NULL, `exportable` INTEGER NOT NULL, `shareable` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `policy_revision` INTEGER NOT NULL DEFAULT 0, `source` TEXT NOT NULL, `remote_backend` TEXT, `use_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `rp_id` TEXT, `rp_name` TEXT, `user_id` TEXT, `user_name` TEXT, `user_display_name` TEXT, `is_discoverable` INTEGER NOT NULL, `sign_count` INTEGER NOT NULL, `is_system_key` INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_keys_key_id` ON `keys` (`key_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_keys_key_type` ON `keys` (`key_type`)",
+            "CREATE INDEX IF NOT EXISTS `index_keys_algorithm` ON `keys` (`algorithm`)",
+            "CREATE INDEX IF NOT EXISTS `index_keys_source` ON `keys` (`source`)",
+            "CREATE INDEX IF NOT EXISTS `index_keys_rp_id` ON `keys` (`rp_id`)",
+            "CREATE TABLE IF NOT EXISTS `key_sharing_policies` (`key_id` TEXT NOT NULL, `peer_public_key_hex` TEXT NOT NULL, `allowed` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`key_id`, `peer_public_key_hex`), FOREIGN KEY(`key_id`) REFERENCES `keys`(`key_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+            "CREATE INDEX IF NOT EXISTS `index_key_sharing_policies_key_id` ON `key_sharing_policies` (`key_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_key_sharing_policies_peer_public_key_hex` ON `key_sharing_policies` (`peer_public_key_hex`)",
+            "CREATE TABLE IF NOT EXISTS `audit_logs` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `timestamp` INTEGER NOT NULL, `operation_type` TEXT NOT NULL, `key_id` TEXT, `key_label` TEXT, `key_type` TEXT, `device_id` TEXT, `device_name` TEXT, `success` INTEGER NOT NULL, `error_message` TEXT, `details` TEXT, `duration_ms` INTEGER)",
+            "CREATE INDEX IF NOT EXISTS `index_audit_logs_timestamp` ON `audit_logs` (`timestamp`)",
+            "CREATE INDEX IF NOT EXISTS `index_audit_logs_operation_type` ON `audit_logs` (`operation_type`)",
+            "CREATE INDEX IF NOT EXISTS `index_audit_logs_key_id` ON `audit_logs` (`key_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_audit_logs_key_type` ON `audit_logs` (`key_type`)",
+            "CREATE INDEX IF NOT EXISTS `index_audit_logs_device_id` ON `audit_logs` (`device_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_audit_logs_success` ON `audit_logs` (`success`)",
+            "CREATE TABLE IF NOT EXISTS `certificates` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `serial_number` TEXT NOT NULL, `subject_dn` TEXT NOT NULL, `issuer_dn` TEXT NOT NULL, `not_before` INTEGER NOT NULL, `not_after` INTEGER NOT NULL, `profile` TEXT NOT NULL, `fingerprint` TEXT NOT NULL, `certificate_pem` TEXT NOT NULL, `chain_pem` TEXT, `key_id` TEXT, `device_id` TEXT, `revoked` INTEGER NOT NULL, `revoked_at` INTEGER, `revoked_reason` INTEGER, `is_ca` INTEGER NOT NULL, `created_at` INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_certificates_serial_number` ON `certificates` (`serial_number`)",
+            "CREATE INDEX IF NOT EXISTS `index_certificates_profile` ON `certificates` (`profile`)",
+            "CREATE INDEX IF NOT EXISTS `index_certificates_key_id` ON `certificates` (`key_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_certificates_revoked` ON `certificates` (`revoked`)",
+            "CREATE INDEX IF NOT EXISTS `index_certificates_not_after` ON `certificates` (`not_after`)",
+            "CREATE INDEX IF NOT EXISTS `index_certificates_is_ca` ON `certificates` (`is_ca`)",
+            "CREATE INDEX IF NOT EXISTS `index_certificates_fingerprint` ON `certificates` (`fingerprint`)",
+            "CREATE TABLE IF NOT EXISTS `contacts` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `public_key_der` BLOB NOT NULL, `public_key_fingerprint` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `imported_at` INTEGER NOT NULL, `source` TEXT NOT NULL, `notes` TEXT)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_contacts_public_key_fingerprint` ON `contacts` (`public_key_fingerprint`)",
+            "CREATE INDEX IF NOT EXISTS `index_contacts_name` ON `contacts` (`name`)",
+            "CREATE INDEX IF NOT EXISTS `index_contacts_algorithm` ON `contacts` (`algorithm`)",
+            "CREATE TABLE IF NOT EXISTS `oath_credentials` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `oath_id` TEXT NOT NULL, `oath_type` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `digits` INTEGER NOT NULL, `period_seconds` INTEGER NOT NULL, `counter` INTEGER NOT NULL, `issuer` TEXT, `account_name` TEXT NOT NULL, `secret_encrypted` BLOB NOT NULL, `source` TEXT NOT NULL, `remote_device_id` TEXT, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER, `use_count` INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_oath_credentials_oath_id` ON `oath_credentials` (`oath_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_oath_credentials_issuer` ON `oath_credentials` (`issuer`)",
+            "CREATE INDEX IF NOT EXISTS `index_oath_credentials_source` ON `oath_credentials` (`source`)",
+            "CREATE TABLE IF NOT EXISTS `piv_slots` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `slot_id` TEXT NOT NULL, `algorithm` TEXT, `public_key_der` BLOB, `certificate_der` BLOB, `has_key` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER, `use_count` INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_piv_slots_slot_id` ON `piv_slots` (`slot_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_piv_slots_has_key` ON `piv_slots` (`has_key`)",
+            "CREATE TABLE IF NOT EXISTS `passwords` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `password_id` TEXT NOT NULL, `name` TEXT NOT NULL, `title` TEXT, `username` TEXT, `password_encrypted` BLOB NOT NULL, `url` TEXT, `notes` TEXT, `folder_path` TEXT, `source` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `expires_at` TEXT, `shared` INTEGER NOT NULL, `tenant_id` TEXT NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_passwords_password_id` ON `passwords` (`password_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_passwords_name` ON `passwords` (`name`)",
+            "CREATE INDEX IF NOT EXISTS `index_passwords_source` ON `passwords` (`source`)",
+            "CREATE TABLE IF NOT EXISTS `key_policies` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `pending_policy` TEXT, `denial` TEXT, `clear_grants` INTEGER NOT NULL, PRIMARY KEY(`key_id`), FOREIGN KEY(`key_instance`) REFERENCES `keys`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_key_policies_key_instance` ON `key_policies` (`key_instance`)",
+            "CREATE TRIGGER IF NOT EXISTS `keys_policy_revision_forward` AFTER UPDATE OF `sharing_policy`, `policy_revision` ON `keys` FOR EACH ROW WHEN NEW.`policy_revision` <= OLD.`policy_revision` BEGIN UPDATE `keys` SET `policy_revision` = OLD.`policy_revision` + 1 WHERE `id` = NEW.`id`; END",
+            "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+            "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '9131d18aa77079c253ca6bd2ee494e1f')"
+        )
+    ).let {
+        // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim
+        // (11.json differs from 10.json in its version number alone).
+        it + (11 to it.getValue(10))
+    }
 }
