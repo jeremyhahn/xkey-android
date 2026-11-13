@@ -113,14 +113,22 @@ object RecentActivityRows {
     }
 
     /**
-     * The key text of [entry]: the stored key's label for its key id, else the
-     * logged label unless it is a key id (some call sites log the id as the
-     * label), else none.
+     * The key text of [entry]: the first of its candidates (the stored key's
+     * label for its key id, then the logged label) that [isShowable], else
+     * none. Every candidate, whatever its source, passes that one filter.
      */
-    private fun keyText(entry: AuditLogEntity, keyLabels: Map<String, String>): String? {
-        entry.keyId?.let { keyLabels[it] }?.let { return it }
-        return entry.keyLabel?.takeUnless { it == entry.keyId || it in keyLabels }
-    }
+    private fun keyText(entry: AuditLogEntity, keyLabels: Map<String, String>): String? =
+        listOf(entry.keyId?.let { keyLabels[it] }, entry.keyLabel)
+            .firstOrNull { isShowable(it, entry, keyLabels) }
+
+    /**
+     * Whether [candidate] may be shown as key text: not blank and not a raw
+     * key id, neither [entry]'s own nor any stored key's. Keys created without
+     * a label and discovered general keys store their id as the label, and
+     * some call sites log the id as the label.
+     */
+    private fun isShowable(candidate: String?, entry: AuditLogEntity, keyLabels: Map<String, String>): Boolean =
+        !candidate.isNullOrBlank() && candidate != entry.keyId && candidate !in keyLabels
 
     /** How long ago [elapsedMillis] is; a time ahead of the clock reads "just now". */
     private fun age(elapsedMillis: Long): Pair<Int, Long> {

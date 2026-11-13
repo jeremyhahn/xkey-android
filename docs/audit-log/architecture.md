@@ -45,8 +45,13 @@ maps the entries to rows, newest first, at most the limit:
 
 - the operation label, from `AuditOperationLabels`, the same mapping the
   audit screen uses for its badges and filter chips;
-- the key's label when the entry has one; never the key id or the
-  `details` JSON;
+- the key's label: the stored key's label for the entry's key id, else
+  the logged label. Every candidate passes one filter inside
+  `RecentActivityRows` that drops a blank value or a raw key id (the
+  entry's own or any stored key's; keys created without a label and
+  discovered general keys store their id as the label), falling back to
+  no key text. `MainActivity` renders only the row's `keyLabel`. Never
+  the key id or the `details` JSON;
 - the outcome (succeeded or failed; a failure is drawn in the error colour);
 - how long ago, against an injected `java.time.Clock`: just now, minutes,
   hours or days.
