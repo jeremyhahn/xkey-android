@@ -70,6 +70,7 @@ object AuditOperationLabels {
         AuditOperationType.OATH_CREDENTIAL_DELETED -> R.string.audit_log_op_oath_deleted
         AuditOperationType.OATH_CODE_GENERATED -> R.string.audit_log_op_oath_code
         AuditOperationType.OATH_SYNC_PERFORMED -> R.string.audit_log_op_oath_sync
+        AuditOperationType.PASSWORD_SYNC_PERFORMED -> R.string.audit_log_op_password_sync
         AuditOperationType.COSIGN_INITIATED -> R.string.audit_log_op_cosign_initiated
         AuditOperationType.COSIGN_RECEIVED -> R.string.audit_log_op_cosign_received
         AuditOperationType.PIN_SO_SET -> R.string.audit_log_op_pin_so_set
