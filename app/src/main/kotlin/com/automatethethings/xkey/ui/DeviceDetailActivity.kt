@@ -55,6 +55,9 @@ import com.automatethethings.xkey.ca.EnrolledDeviceRepository
 import com.automatethethings.xkey.ca.EnrollmentRefusal
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -174,6 +177,9 @@ class DeviceDetailActivity : AppCompatActivity() {
     private lateinit var gracePeriodRemainingText: TextView
     private lateinit var reattestButton: MaterialButton
 
+    /** Opens [DesktopKeysActivity]; shown only while this desktop's session is up. */
+    private lateinit var desktopKeysButton: MaterialButton
+
     /**
      * The refusal rows, and the whole rows rather than their values.
      *
@@ -223,6 +229,15 @@ class DeviceDetailActivity : AppCompatActivity() {
 
         buildPremiumLayout()
         setContentView(scrollView)
+
+        // The desktop keys entry follows this device's desktop session while visible.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                desktopSessionUp(publicKeyHex, { gattService?.desktopSessionPeer() }).collect { up ->
+                    desktopKeysButton.visibility = if (up) View.VISIBLE else View.GONE
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -530,6 +545,23 @@ class DeviceDetailActivity : AppCompatActivity() {
             connectionDurationRow = row
             connectionDurationText = value
         }
+
+        desktopKeysButton = MaterialButton(
+            this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle
+        ).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = UIHelpers.dpToPxInt(context, 12)
+            }
+            text = getString(R.string.desktop_keys_open)
+            visibility = View.GONE
+            setOnClickListener {
+                startActivity(DesktopKeysActivity.intent(this@DeviceDetailActivity, publicKeyHex))
+            }
+        }
+        cardContent.addView(desktopKeysButton)
 
         card.addView(cardContent)
         contentLayout.addView(card)
@@ -1120,6 +1152,10 @@ class DeviceDetailActivity : AppCompatActivity() {
 
         // Update hero badge
         updateConnectionBadge(isConnected)
+
+        // Desktop keys need this device's desktop session to be up.
+        desktopKeysButton.visibility =
+            if (gattService?.desktopSessionPeer() == publicKeyHex) View.VISIBLE else View.GONE
 
         // Update connection card
         if (isConnected) {
