@@ -49,12 +49,15 @@ private val Context.usbHsmSettingsDataStore: DataStore<Preferences> by preferenc
  * Uses Jetpack DataStore for persistence, following the same pattern as
  * [com.automatethethings.xkey.settings.BiometricSettingsRepository].
  *
- * @param context The Android context used to access DataStore.
+ * @param dataStore The DataStore holding the settings.
  */
-class UsbHsmSettingsRepository(
-    private val context: Context
+class UsbHsmSettingsRepository internal constructor(
+    private val dataStore: DataStore<Preferences>
 ) {
-    private val dataStore: DataStore<Preferences> = context.usbHsmSettingsDataStore
+    /**
+     * @param context The Android context used to access DataStore.
+     */
+    constructor(context: Context) : this(context.usbHsmSettingsDataStore)
 
     /**
      * Flow of USB settings that emits whenever settings change.
