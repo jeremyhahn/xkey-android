@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.storage
 
 import com.automatethethings.xkey.storage.dao.KeyPolicyDao
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
@@ -25,7 +26,7 @@ import kotlinx.coroutines.flow.map
 import java.io.IOException
 
 /**
- * The three tables [KeyPolicyStore] writes, as its DAO and its transactor: a
+ * The four tables [KeyPolicyStore] writes (keys, policy rows, grant rows, deletion tombstones), as its DAO and its transactor: a
  * transaction snapshots them and puts the snapshot back if its block throws.
  * Each name in [failing] makes that DAO call throw. A "restart" is a new
  * store over the same tables: nothing the store relies on is in memory.
@@ -35,6 +36,7 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
     val keys = MutableStateFlow(mapOf<String, KeyEntity>())
     val rows = MutableStateFlow(mapOf<String, KeyPolicyEntity>())
     val grants = MutableStateFlow(setOf<Pair<String, String>>())
+    val deletions = MutableStateFlow(mapOf<String, KeyDeletionEntity>())
     private var nextInstance = 1L
     val failing = mutableSetOf<String>()
 
@@ -86,6 +88,7 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
 
     override suspend fun <T> run(block: suspend () -> T): T {
         val snapshot = Triple(keys.value, rows.value, grants.value)
+        val tombstones = deletions.value
         val saved = nextInstance
         return try {
             block()
@@ -93,6 +96,7 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
             keys.value = snapshot.first
             rows.value = snapshot.second
             grants.value = snapshot.third
+            deletions.value = tombstones
             nextInstance = saved
             throw e
         }
@@ -101,6 +105,35 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
     override suspend fun keyInstance(keyId: String): Long? {
         check("keyInstance")
         return keys.value[keyId]?.id
+    }
+
+    override fun observeKeyInstance(keyId: String): Flow<Long?> = keys.map { it[keyId]?.id }
+
+    override suspend fun keySource(keyId: String): String? {
+        check("keySource")
+        return keys.value[keyId]?.source
+    }
+
+    override suspend fun putDeletion(row: KeyDeletionEntity) {
+        check("putDeletion")
+        deletions.value = deletions.value + (row.keyId to row)
+    }
+
+    override suspend fun deletion(keyId: String): KeyDeletionEntity? {
+        check("deletion")
+        return deletions.value[keyId]
+    }
+
+    override suspend fun deletions(): List<KeyDeletionEntity> {
+        check("deletions")
+        return deletions.value.values.toList()
+    }
+
+    override suspend fun dropDeletion(keyId: String, instance: Long): Int {
+        check("dropDeletion")
+        val row = deletions.value[keyId]?.takeIf { it.keyInstance == instance } ?: return 0
+        deletions.value = deletions.value - row.keyId
+        return 1
     }
 
     override suspend fun policyRow(keyId: String): KeyPolicyEntity? {
