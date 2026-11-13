@@ -4,3 +4,5 @@
 #   group:name  reason, who decided, YYYY-MM-DD
 #
 # A line without a reason fails the check. Remove the line with the bump.
+
+org.robolectric:android-all-instrumented  its version names the Android API level (14-robolectric-* is API 34), so the newest is always the newest API, not a newer build of ours; pinned to targetSdk 34, bump it with targetSdk, #225, 2026-11-13

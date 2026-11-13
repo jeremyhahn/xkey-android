@@ -27,6 +27,8 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -84,6 +86,9 @@ class CryptoSigningActivityUserVerificationKeyTest {
     private val results: MutableList<Intent> = Collections.synchronizedList(mutableListOf())
     private val received = CountDownLatch(1)
 
+    /** The prompt owner's entry this test holds ACTIVE, if any. */
+    private var heldKey: String? = null
+
     @Before
     fun setUp() {
         keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
@@ -104,6 +109,7 @@ class CryptoSigningActivityUserVerificationKeyTest {
 
     @After
     fun tearDown() {
+        heldKey?.let { PromptOwnership.process.end(it) }
         receiver?.let { context.unregisterReceiver(it) }
         receiver = null
         listOf(uvkAlias, CREDENTIAL_PREFIX + credentialId).forEach { alias ->
@@ -127,6 +133,7 @@ class CryptoSigningActivityUserVerificationKeyTest {
         val requestId = "uvk-activity-cancel-$suffix"
         val cancels = AtomicInteger()
 
+        holdTheScreen(requestId)
         ActivityScenario.launch<CryptoSigningActivity>(intentFor(requestId, uvkAlias)).use { scenario ->
             assertNotEquals(
                 "the activity finished before prompting: ${describe(results)}",
@@ -180,6 +187,7 @@ class CryptoSigningActivityUserVerificationKeyTest {
         generateCredentialKey()
         val requestId = "uvk-activity-alias-$suffix"
 
+        holdTheScreen(requestId)
         ActivityScenario.launch<CryptoSigningActivity>(
             intentFor(requestId, "xkey_uvk_activity_missing_$suffix")
         ).use {
@@ -199,6 +207,22 @@ class CryptoSigningActivityUserVerificationKeyTest {
     }
 
     // ------------------------------------------------------------- helpers
+
+    /**
+     * Makes [requestId]'s signature entry ACTIVE in the process prompt owner,
+     * as the launcher's request holds it while its prompt is up: the activity
+     * refuses a request the owner does not hold ACTIVE. [tearDown] lets go.
+     */
+    private fun holdTheScreen(requestId: String) {
+        val key = NotificationKeys.signature(requestId)
+        PromptOwnership.process.enqueue(
+            key, PromptOwnership.Kind.CRYPTO_SIGNING,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
+        heldKey = key
+        assertEquals("nothing else holds the screen", key, PromptOwnership.process.activeKey)
+    }
 
     private fun intentFor(requestId: String, keyAlias: String): Intent =
         CryptoSigningActivity.createIntent(
