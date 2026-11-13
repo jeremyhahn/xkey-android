@@ -153,6 +153,29 @@ class AndroidCA internal constructor(
         private fun openAndroidKeyStore(): KeyStore =
             KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
+        /**
+         * The rows of [revoked] whose stored certificate [issuer] signed: the
+         * certificate's issuer name equals [issuer]'s subject (DER compare) and
+         * its signature verifies with [issuer]'s public key. The signature tells
+         * apart two issuers of the same name, as after [reset] and a fresh
+         * initialise. A row whose certificate does not parse is left out.
+         */
+        internal fun revokedIssuedBy(
+            revoked: List<CertificateEntity>,
+            issuer: X509Certificate
+        ): List<CertificateEntity> = revoked.filter { row ->
+            val cert = try {
+                CertificateFactory.getInstance("X.509")
+                    .generateCertificate(ByteArrayInputStream(row.certificatePEM.toByteArray()))
+                    as X509Certificate
+            } catch (e: Exception) {
+                Log.w(TAG, "CRL: stored certificate does not parse, left out: serial=${row.serialNumber}")
+                return@filter false
+            }
+            cert.issuerX500Principal.encoded.contentEquals(issuer.subjectX500Principal.encoded) &&
+                runCatching { cert.verify(issuer.publicKey) }.isSuccess
+        }
+
         const val ROOT_CA_ALIAS = "xkey_root_ca"
         const val INTERMEDIATE_CA_ALIAS = "xkey_intermediate_ca"
 
@@ -621,13 +644,20 @@ class AndroidCA internal constructor(
      * Revoke a certificate by serial number.
      *
      * @param serialNumber Hex-encoded certificate serial number.
+     * A revocation is final: revoking a certificate that is already revoked
+     * keeps its first date and reason and writes no audit entry.
+     *
      * @param reason RFC 5280 CRLReason code (default: UNSPECIFIED).
+     * @return True if the certificate was revoked now, false if it already was.
      */
-    suspend fun revoke(serialNumber: String, reason: Int = CRLReason.UNSPECIFIED) {
+    suspend fun revoke(serialNumber: String, reason: Int = CRLReason.UNSPECIFIED): Boolean {
         val dao = certificateDao ?: throw IllegalStateException("CertificateDao not configured")
         val cert = dao.getBySerial(serialNumber)
             ?: throw IllegalArgumentException("Certificate not found: $serialNumber")
-        dao.revoke(serialNumber, System.currentTimeMillis(), reason)
+        if (dao.revoke(serialNumber, System.currentTimeMillis(), reason) == 0) {
+            Log.i(TAG, "Certificate already revoked: serial=$serialNumber")
+            return false
+        }
 
         AuditLogger.logCertificateRevoked(
             serialNumber = serialNumber,
@@ -636,6 +666,7 @@ class AndroidCA internal constructor(
         )
 
         Log.i(TAG, "Certificate revoked: serial=$serialNumber, reason=$reason")
+        return true
     }
 
     /**
@@ -659,9 +690,10 @@ class AndroidCA internal constructor(
         }
 
         val dao = certificateDao ?: throw IllegalStateException("CertificateDao not configured")
-        val revokedCerts = dao.getRevoked()
-
         val intermediateCert = getIntermediateCertificate()
+        // A direct CRL (RFC 5280 section 5.1) lists only what its issuer signed.
+        val revokedCerts = revokedIssuedBy(dao.getRevoked(), intermediateCert)
+
         val signingKey = keyStore.getKey(INTERMEDIATE_CA_ALIAS, null) as PrivateKey
 
         val now = Date()

@@ -15,9 +15,14 @@
 package com.automatethethings.xkey.auth
 
 import android.Manifest
+import android.app.Activity
+import android.app.Application
 import android.app.Notification
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.service.notification.StatusBarNotification
@@ -26,9 +31,16 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.XKeyApplication
+import com.automatethethings.xkey.ui.TransparentBiometricActivity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -36,6 +48,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Instrumented tests for [BiometricNotificationHelper].
@@ -62,6 +75,33 @@ class BiometricNotificationHelperTest {
     private lateinit var notificationManager: NotificationManager
     private lateinit var helper: BiometricNotificationHelper
 
+    /** The key each test posts under, and tearDown takes down. */
+    private val requestId = NotificationKeys.wakeOnly("notificationHelperTest")
+
+    /**
+     * Runs [post] on [key]'s own prompt queue turn, as every caller of the
+     * helper does (it refuses a key that is not ACTIVE), then hands the
+     * screen on. The notification stays up after the turn: only the helper's
+     * timeout or a cancel takes it down.
+     */
+    private fun <T> onTurn(key: String, post: () -> T): T {
+        PromptOwnership.process.enqueue(
+            key,
+            clock = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job()),
+            onQueueExpired = {},
+        ) {}
+        try {
+            assertEquals(
+                "another prompt holds the screen",
+                PromptOwnership.State.ACTIVE,
+                PromptOwnership.process.state(key)
+            )
+            return post()
+        } finally {
+            PromptOwnership.process.end(key)
+        }
+    }
+
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
@@ -72,7 +112,7 @@ class BiometricNotificationHelperTest {
 
     @After
     fun tearDown() {
-        helper.cancelNotification()
+        helper.cancelNotification(requestId)
         notificationManager.cancel(notificationId)
     }
 
@@ -118,11 +158,11 @@ class BiometricNotificationHelperTest {
 
     @Test
     fun showBiometricRequiredNotification_postsOnTheBiometricChannel() {
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}"
-        )
+            requestId = requestId
+        ) }
 
         val notification = awaitPosted().notification
         assertEquals(XKeyApplication.BIOMETRIC_CHANNEL_ID, notification.channelId)
@@ -136,11 +176,11 @@ class BiometricNotificationHelperTest {
 
     @Test
     fun showBiometricRequiredNotification_namesTheRelyingParty() {
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}"
-        )
+            requestId = requestId
+        ) }
 
         val text = awaitPosted().notification.extras
             .getCharSequence(Notification.EXTRA_TEXT)?.toString()
@@ -155,11 +195,11 @@ class BiometricNotificationHelperTest {
 
     @Test
     fun showBiometricRequiredNotification_fallsBackToTheAppNameWithoutARelyingParty() {
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "decrypt",
             rpName = null,
-            requestId = "request-${System.nanoTime()}"
-        )
+            requestId = requestId
+        ) }
 
         val text = awaitPosted().notification.extras
             .getCharSequence(Notification.EXTRA_TEXT)?.toString()
@@ -169,14 +209,14 @@ class BiometricNotificationHelperTest {
 
     @Test
     fun cancelNotification_removesIt() {
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}"
-        )
+            requestId = requestId
+        ) }
         awaitPosted()
 
-        helper.cancelNotification()
+        helper.cancelNotification(requestId)
 
         awaitGone()
     }
@@ -185,13 +225,13 @@ class BiometricNotificationHelperTest {
     fun theTimeoutCallbackFiresAndTakesTheNotificationWithIt() {
         val timedOut = CountDownLatch(1)
 
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}",
+            requestId = requestId,
             timeoutMs = 400L,
             onTimeout = { timedOut.countDown() }
-        )
+        ) }
 
         assertTrue(
             "the timeout callback never ran",
@@ -204,16 +244,16 @@ class BiometricNotificationHelperTest {
     fun cancellingBeforeTheTimeoutSuppressesTheCallback() {
         val timedOut = CountDownLatch(1)
 
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
-            requestId = "request-${System.nanoTime()}",
+            requestId = requestId,
             timeoutMs = 1_500L,
             onTimeout = { timedOut.countDown() }
-        )
+        ) }
         awaitPosted()
 
-        helper.cancelNotification()
+        helper.cancelNotification(requestId)
 
         // The helper's timeout sits on the main looper. A marker posted there now
         // with the same delay runs after the timeout's deadline, so by the time it
@@ -231,34 +271,221 @@ class BiometricNotificationHelperTest {
         )
     }
 
+    /** The notification posted under [key], or null when none is up. */
+    private fun postedUnder(key: String): StatusBarNotification? =
+        notificationManager.activeNotifications.firstOrNull { it.id == notificationId && it.tag == key }
+
+    private fun awaitGoneUnder(key: String, timeoutMs: Long = 5_000L) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (postedUnder(key) == null) return
+            Thread.sleep(25)
+        }
+        throw AssertionError("the notification under $key was still showing")
+    }
+
+    /** Waits [delayMs] on the main looper, where the helper's timeouts run. */
+    private fun passOnTheMainLooper(delayMs: Long) {
+        val passed = CountDownLatch(1)
+        Handler(Looper.getMainLooper()).postDelayed({ passed.countDown() }, delayMs)
+        assertTrue("the main looper never got that far", passed.await(10, TimeUnit.SECONDS))
+    }
+
+    /** Posts under [key] on a queue turn of its own. */
+    private fun show(key: String, timeoutMs: Long, timedOut: CountDownLatch) =
+        onTurn(key) { post(key, timeoutMs, timedOut) }
+
+    /** Posts under [key], which must already be ACTIVE. */
+    private fun post(key: String, timeoutMs: Long, timedOut: CountDownLatch) =
+        helper.showBiometricRequiredNotification(
+            operationType = "sign",
+            rpName = key,
+            requestId = key,
+            timeoutMs = timeoutMs,
+            onTimeout = { timedOut.countDown() }
+        )
+
     @Test
-    fun aSecondRequestReplacesThePendingTimeout() {
+    fun differentRequestsExpireAndCancelIndependently() {
+        val first = "$requestId-a"
+        val second = "$requestId-b"
+        val third = "$requestId-c"
         val firstTimedOut = CountDownLatch(1)
         val secondTimedOut = CountDownLatch(1)
+        val thirdTimedOut = CountDownLatch(1)
+        try {
+            show(first, 600L, firstTimedOut)
+            show(second, 600L, secondTimedOut)
+            show(third, 1_500L, thirdTimedOut)
 
-        helper.showBiometricRequiredNotification(
-            operationType = "sign",
-            rpName = "First",
-            requestId = "request-a-${System.nanoTime()}",
-            timeoutMs = 600L,
-            onTimeout = { firstTimedOut.countDown() }
-        )
-        helper.showBiometricRequiredNotification(
-            operationType = "sign",
-            rpName = "Second",
-            requestId = "request-b-${System.nanoTime()}",
-            timeoutMs = 600L,
-            onTimeout = { secondTimedOut.countDown() }
-        )
+            assertTrue("the first request's callback never ran", firstTimedOut.await(10, TimeUnit.SECONDS))
+            assertTrue("the second request's callback never ran", secondTimedOut.await(10, TimeUnit.SECONDS))
+            awaitGoneUnder(first)
+            awaitGoneUnder(second)
+            assertNotNull("the others' expiry left the third request's notification up", postedUnder(third))
 
-        assertTrue(
-            "the surviving request's callback never ran",
-            secondTimedOut.await(10, TimeUnit.SECONDS)
-        )
-        assertEquals(
-            "the superseded request's callback should have been removed",
-            1L,
-            firstTimedOut.count
-        )
+            helper.cancelNotification(third)
+            passOnTheMainLooper(1_500L)
+
+            assertEquals("the third request's callback ran after its cancel", 1L, thirdTimedOut.count)
+            awaitGoneUnder(third)
+        } finally {
+            listOf(first, second, third).forEach(helper::cancelNotification)
+        }
+    }
+
+    @Test
+    fun twoKeysWithEqualHashCodesNeverShareOrRewriteAPendingIntent() {
+        // Process-safe approval ids are large; these two hash alike, so a
+        // request code drawn from hashCode() alone cannot tell them apart.
+        val older = "approval-3363295394234823610"
+        val newer = "approval-2315463952855601407"
+        assertEquals("the keys must collide for this test to mean anything", older.hashCode(), newer.hashCode())
+        val unused = CountDownLatch(1)
+        try {
+            show(older, 30_000L, unused)
+            val olderIntent = awaitPostedUnder(older).notification.contentIntent
+            assertNotNull(olderIntent)
+
+            show(newer, 30_000L, unused)
+            val newerIntent = awaitPostedUnder(newer).notification.contentIntent
+            assertNotNull(newerIntent)
+
+            assertNotEquals(
+                "the newer request's notification took over the older one's pending intent",
+                olderIntent,
+                newerIntent
+            )
+            assertEquals(
+                "posting the newer request replaced the older notification's pending intent",
+                olderIntent,
+                postedUnder(older)!!.notification.contentIntent
+            )
+            // Each key has a pending intent of its own: a plain intent that
+            // differs only in extras, as both did before, matches neither.
+            assertNull(
+                "an intent without the key's data still matches a notification's pending intent",
+                PendingIntent.getActivity(
+                    context,
+                    older.hashCode(),
+                    Intent(context, TransparentBiometricActivity::class.java),
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+        } finally {
+            helper.cancelNotification(older)
+            helper.cancelNotification(newer)
+        }
+    }
+
+    private fun awaitPostedUnder(key: String, timeoutMs: Long = 5_000L): StatusBarNotification {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            postedUnder(key)?.let { return it }
+            Thread.sleep(25)
+        }
+        throw AssertionError("no notification was posted under $key")
+    }
+
+    @Test
+    fun repostingTheSameRequestReplacesItsTimeout() {
+        val replacedTimedOut = CountDownLatch(1)
+        val currentTimedOut = CountDownLatch(1)
+
+        // Both posts on the request's one turn: its key is enqueued only once.
+        onTurn(requestId) {
+            post(requestId, 600L, replacedTimedOut)
+            post(requestId, 2_000L, currentTimedOut)
+        }
+        passOnTheMainLooper(900L)
+
+        assertEquals("the replaced timeout's callback ran", 1L, replacedTimedOut.count)
+        assertNotNull("the replaced timeout took the notification down", postedUnder(requestId))
+        assertTrue("the current timeout's callback never ran", currentTimedOut.await(10, TimeUnit.SECONDS))
+        awaitGoneUnder(requestId)
+    }
+
+    /**
+     * The notification of a request whose prompt the launcher started directly
+     * reaches that prompt: Android routes the pending intent to the live
+     * activity (onNewIntent), so no second prompt instance is created, and the
+     * request settles with its prompt's own result, not a cancel from a
+     * replaced prompt.
+     *
+     * The pending intent is sent on the main looper right after the direct
+     * start, before the prompt activity can run, so the direct prompt is
+     * still live when the send reaches the activity manager. The emulator has
+     * no enrolled biometric, so the prompt then fails at once and the request
+     * settles (as in TransparentBiometricActivityTest).
+     */
+    @Test
+    fun theNotificationOfALiveDirectPromptReachesItInsteadOfStartingAnother() {
+        val app = context as Application
+        val created = AtomicInteger()
+        val createdAtSend = AtomicInteger(-1)
+        val callbacks = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                if (activity is TransparentBiometricActivity) created.incrementAndGet()
+            }
+            override fun onActivityStarted(activity: Activity) = Unit
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+        }
+        app.registerActivityLifecycleCallbacks(callbacks)
+        val launcher = BiometricActivityLauncher(context).apply { register() }
+        var key: String? = null
+        var tap: PendingIntent? = null
+        try {
+            val failure = runBlocking(Dispatchers.Main) {
+                runCatching {
+                    withTimeout(15_000L) {
+                        launcher.requestAuthentication(
+                            title = "Approve",
+                            subtitle = "example.com",
+                            showOnLockScreen = true,
+                            onLaunch = { requestKey, prompt ->
+                                key = requestKey
+                                helper.showBiometricRequiredNotification(
+                                    operationType = "approve",
+                                    rpName = null,
+                                    requestId = requestKey,
+                                    promptIntent = prompt
+                                )
+                                // The notification's own pending intent: this
+                                // lookup creates none.
+                                tap = PendingIntent.getActivity(
+                                    context,
+                                    requestKey.hashCode(),
+                                    Intent(prompt).setData(BiometricNotificationHelper.intentData(requestKey)),
+                                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+                                )
+                                Handler(Looper.getMainLooper()).post {
+                                    createdAtSend.set(created.get())
+                                    tap?.send()
+                                }
+                            }
+                        )
+                    }
+                }.exceptionOrNull()
+            }
+            // Room for a second instance, were one started, to come up.
+            passOnTheMainLooper(1_000L)
+
+            assertNotNull("the notification has a pending intent", tap)
+            assertEquals("the pending intent was sent while the direct prompt was live", 0, createdAtSend.get())
+            assertEquals("the notification started a second prompt", 1, created.get())
+            assertNotNull("the request settled with its prompt's error", failure)
+            assertTrue(
+                "the request was cancelled instead of answered: $failure",
+                failure !is CancellationException
+            )
+        } finally {
+            app.unregisterActivityLifecycleCallbacks(callbacks)
+            launcher.unregister()
+            key?.let(helper::cancelNotification)
+        }
     }
 }

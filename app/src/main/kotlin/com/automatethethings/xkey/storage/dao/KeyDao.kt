@@ -207,6 +207,9 @@ interface KeyDao {
      * - ALL_PEERS -> shareable = true
      * - SELECTED_PEERS -> shareable = true
      *
+     * It moves [KeyEntity.policyRevision] forward in the same statement, so
+     * an approval taken before this write no longer matches the row.
+     *
      * @param keyId The unique key identifier.
      * @param policy The new sharing policy type.
      */
@@ -214,11 +217,55 @@ interface KeyDao {
         """
         UPDATE keys SET
             sharing_policy = :policy,
-            shareable = CASE WHEN :policy = 'PRIVATE' THEN 0 ELSE 1 END
+            shareable = CASE WHEN :policy = 'PRIVATE' THEN 0 ELSE 1 END,
+            policy_revision = policy_revision + 1
         WHERE key_id = :keyId
         """
     )
     suspend fun updateSharingPolicy(keyId: String, policy: SharingPolicyType)
+
+    /**
+     * Set the sharing policy for a key only while it is still [expected].
+     *
+     * A compare-and-set for a caller that decided on the transition from a
+     * policy it read earlier: a change that landed since that read makes this
+     * write nothing, so the caller can re-read and decide again instead of
+     * overwriting it. Keeps the legacy [shareable] field in step, as
+     * [updateSharingPolicy] does.
+     *
+     * The write is bound to the row the caller read, not only to its key id:
+     * a key deleted and re-created under the same id is a new row with a new
+     * [KeyEntity.id] (AUTOINCREMENT never reuses one), so it is not written.
+     *
+     * It is bound to the policy revision the caller read, not only to the
+     * policy: a policy changed away and back reads the same but is a later
+     * [KeyEntity.policyRevision], so an approval taken before a revocation
+     * never reopens the key. The write moves the revision forward too.
+     *
+     * @param id The immutable row id of the key the caller read.
+     * @param keyId The unique key identifier.
+     * @param expectedRevision The policy revision the caller read.
+     * @param expected The policy the caller read and decided on.
+     * @param policy The new sharing policy type.
+     * @return The number of rows changed: 1 when that row is still at [expectedRevision], else 0.
+     */
+    @Query(
+        """
+        UPDATE keys SET
+            sharing_policy = :policy,
+            shareable = CASE WHEN :policy = 'PRIVATE' THEN 0 ELSE 1 END,
+            policy_revision = policy_revision + 1
+        WHERE id = :id AND key_id = :keyId AND policy_revision = :expectedRevision
+            AND sharing_policy = :expected
+        """
+    )
+    suspend fun compareAndSetSharingPolicy(
+        id: Long,
+        keyId: String,
+        expectedRevision: Long,
+        expected: SharingPolicyType,
+        policy: SharingPolicyType
+    ): Int
 
     /**
      * Get all keys with a specific sharing policy.
