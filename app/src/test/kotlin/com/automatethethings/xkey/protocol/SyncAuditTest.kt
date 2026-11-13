@@ -18,6 +18,7 @@ package com.automatethethings.xkey.protocol
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
@@ -66,6 +67,7 @@ import org.junit.Test
 class SyncAuditTest {
 
     private lateinit var handler: RequestHandler
+    private lateinit var context: Context
 
     @Before
     fun setUp() {
@@ -98,7 +100,7 @@ class SyncAuditTest {
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
-        val context = mockk<Context>(relaxed = true)
+        context = mockk<Context>(relaxed = true)
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns
             mockk<KeyguardManager>(relaxed = true)
         every { context.getSystemService(NotificationManager::class.java) } returns
@@ -262,6 +264,45 @@ class SyncAuditTest {
             ErrorCodes.PASSWORD_STORE_LOCKED,
             call(MethodNames.LOCAL_SYNC_PASSWORDS, "passwords").error?.code
         )
+    }
+
+    // --- Unreadable paired-device store -------------------------------------
+
+    /**
+     * Every inbound sync handler audits through one path: with the paired
+     * device store unreadable (its encrypted preferences throw), each still
+     * syncs and records its entry under the connection's peer id with no
+     * name. A handler that looked the name up outside that path fails here.
+     */
+    @Test
+    fun `every sync handler audits with the peer id and no name when the paired store is unreadable`() = runTest {
+        mockkObject(AuditLogger)
+        val prefs = mockk<SharedPreferences>()
+        every { prefs.getString(any(), any()) } throws SecurityException("keystore unavailable")
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = mockk<KeystoreManager>(relaxed = true),
+            biometricLauncher = mockk(relaxed = true),
+            sessionAuthManager = null,
+            pairedDeviceRepository = PairedDeviceRepository(prefs)
+        )
+        handler.setConnectedDevicePublicKeyHex(DESK_PEER)
+
+        assertOathResponseUnchanged(call(MethodNames.LOCAL_SYNC_OATH, "credentials"))
+        assertNull(call(MethodNames.LOCAL_SYNC_PASSWORDS, "passwords").error)
+
+        verify(exactly = 1) {
+            AuditLogger.logOathSyncPerformed(
+                deviceId = DESK_PEER, deviceName = null, count = 1, direction = AuditLogger.SYNC_INBOUND,
+                added = 2, updated = 1, skipped = 3, success = true, errorMessage = null
+            )
+        }
+        verify(exactly = 1) {
+            AuditLogger.logPasswordSyncPerformed(
+                deviceId = DESK_PEER, deviceName = null, count = 2, direction = AuditLogger.SYNC_INBOUND,
+                added = 1, updated = 2, skipped = 0, success = true, errorMessage = null
+            )
+        }
     }
 
     // --- Helpers ------------------------------------------------------------
