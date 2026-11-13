@@ -18,16 +18,21 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.annotation.RequiresApi
+import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricPrompt
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
+import java.security.Key
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.KeyStoreException
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.Signature
@@ -35,6 +40,7 @@ import java.security.cert.Certificate
 import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
 import java.security.spec.ECGenParameterSpec
+import java.security.spec.InvalidKeySpecException
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
@@ -42,7 +48,26 @@ import javax.crypto.KeyAgreement
 import javax.crypto.KeyGenerator
 import javax.crypto.Mac
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+
+/**
+ * Where a key's material lives, read from the key's own [KeyInfo].
+ *
+ * @property wire The `securityLevel` value on the wire.
+ */
+enum class KeySecurityLevel(val wire: String) {
+    SOFTWARE("software"),
+    TEE("tee"),
+    STRONGBOX("strongbox")
+}
+
+/**
+ * The Keystore entry [alias] exists but its [KeyInfo] cannot be read, so its
+ * security level is unknown. Never reported as [KeySecurityLevel.SOFTWARE].
+ */
+class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
+    KeyStoreException("Cannot read the KeyInfo of $alias", cause)
 
 /**
  * Manages cryptographic keys in Android Keystore for FIDO2 operations.
@@ -172,7 +197,10 @@ class KeystoreManager(private val context: Context) {
             keyPairGenerator.initialize(specBuilder.build())
 
             val keyPair = keyPairGenerator.generateKeyPair()
-            val strongBoxBacked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()
+            markStrongBoxSpec(alias, Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable())
+            // The audit line only; callers read the level themselves and see a failure.
+            val strongBoxBacked =
+                runCatching { credentialSecurityLevel(credentialId) }.getOrNull() == KeySecurityLevel.STRONGBOX
 
             // Log key creation
             AuditLogger.logKeyCreated(
@@ -191,6 +219,7 @@ class KeystoreManager(private val context: Context) {
                 !requireStrongBox
             ) {
                 return generateKeyWithoutStrongBox(alias, requireBiometric)
+                    .also { markStrongBoxSpec(alias, false) }
             }
             throw KeyGenerationException("Failed to generate key", e)
         }
@@ -295,6 +324,7 @@ class KeystoreManager(private val context: Context) {
             keyPairGenerator.initialize(specBuilder.build())
 
             val keyPair = keyPairGenerator.generateKeyPair()
+            markStrongBoxSpec(alias, Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable())
             return encodeCOSEPublicKey(keyPair.public)
         } catch (e: Exception) {
             // Handle StrongBox fallback - some devices claim StrongBox but fail
@@ -303,6 +333,7 @@ class KeystoreManager(private val context: Context) {
                 !requireStrongBox
             ) {
                 return generateKeyWithAuthDurationWithoutStrongBox(alias, authDurationSeconds)
+                    .also { markStrongBoxSpec(alias, false) }
             }
             throw KeyGenerationException("Failed to generate key with auth duration", e)
         }
@@ -628,18 +659,114 @@ class KeystoreManager(private val context: Context) {
     /**
      * Check if a key is backed by StrongBox.
      *
-     * Note: This requires accessing the key's security level from the
-     * certificate chain extension, which may not be available on all devices.
+     * Reads the key's own level ([keySecurityLevel]), not the device's: a key
+     * generated without StrongBox, or one whose StrongBox spec fell back to
+     * the TEE, is not StrongBox-backed on a StrongBox device.
      *
-     * @param credentialId Base64-encoded credential ID.
-     * @return true if the key is StrongBox-backed, false otherwise or if unknown.
+     * @param credentialId Credential ID or general key ID.
+     * @return true if the key is StrongBox-backed, false otherwise or if missing.
      */
-    fun isKeyStrongBoxBacked(credentialId: String): Boolean {
-        // Key security level is in the attestation extension
-        // Simplified check: if StrongBox was available during generation
-        // and the key exists, assume it's StrongBox-backed
-        if (!isStrongBoxAvailable()) return false
-        return keyExists(credentialId)
+    fun isKeyStrongBoxBacked(credentialId: String): Boolean =
+        keySecurityLevel(credentialId) == KeySecurityLevel.STRONGBOX
+
+    /**
+     * The security level of a key, read from its [KeyInfo].
+     *
+     * Resolves [keyId] as [resolveKeystoreAlias] does, so a credential wins
+     * over a general key of the same id: callers that know which namespace
+     * they generated in use [credentialSecurityLevel] or
+     * [generalKeySecurityLevel]. A key with no Keystore entry (an Ed25519 key
+     * in EncryptedSharedPreferences) is [KeySecurityLevel.SOFTWARE].
+     *
+     * @param keyId Credential ID, general key ID or raw alias.
+     * @return The key's level, or null if no such key exists.
+     * @throws KeyInfoUnavailableException if a Keystore entry exists but its
+     *         KeyInfo cannot be read.
+     */
+    fun keySecurityLevel(keyId: String): KeySecurityLevel? {
+        val alias = resolveKeystoreAlias(keyId) ?: return null
+        if (!keyStore.containsAlias(alias)) return KeySecurityLevel.SOFTWARE
+        return aliasSecurityLevel(alias)
+    }
+
+    /**
+     * The security level of the FIDO2 credential [credentialId]
+     * (`xkey_credential_<id>`), or null if it does not exist.
+     *
+     * @throws KeyInfoUnavailableException if its KeyInfo cannot be read.
+     */
+    fun credentialSecurityLevel(credentialId: String): KeySecurityLevel? {
+        val alias = buildAlias(credentialId)
+        if (!keyStore.containsAlias(alias)) return null
+        return aliasSecurityLevel(alias)
+    }
+
+    /**
+     * The security level of the general key [keyId] (`xkey_key_<id>`, or its
+     * Ed25519 entry in EncryptedSharedPreferences, which is software), or null
+     * if it does not exist. Never consults a credential of the same id.
+     *
+     * @throws KeyInfoUnavailableException if its KeyInfo cannot be read.
+     */
+    fun generalKeySecurityLevel(keyId: String): KeySecurityLevel? {
+        val alias = buildGeneralAlias(keyId)
+        if (keyStore.containsAlias(alias)) return aliasSecurityLevel(alias)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)) {
+            return KeySecurityLevel.SOFTWARE
+        }
+        return null
+    }
+
+    /**
+     * Reads the [KeyInfo] of the Keystore key held at an alias. Replaceable
+     * so tests can make the read fail.
+     */
+    @VisibleForTesting
+    internal var keyInfoReader: (alias: String, key: Key) -> KeyInfo = { _, key ->
+        when (key) {
+            is PrivateKey -> KeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
+                .getKeySpec(key, KeyInfo::class.java)
+            is SecretKey -> SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
+                .getKeySpec(key, KeyInfo::class.java) as KeyInfo
+            else -> throw InvalidKeySpecException("no KeyInfo for a ${key.javaClass.name}")
+        }
+    }
+
+    /**
+     * The security level of the existing Keystore entry [alias].
+     *
+     * @throws KeyInfoUnavailableException if the entry holds no key or its
+     *         [KeyInfo] cannot be read: a failed read is never software.
+     */
+    private fun aliasSecurityLevel(alias: String): KeySecurityLevel {
+        val info = try {
+            val key = keyStore.getKey(alias, null)
+                ?: throw KeyInfoUnavailableException(alias, null)
+            keyInfoReader(alias, key)
+        } catch (e: KeyInfoUnavailableException) {
+            throw e
+        } catch (e: Exception) {
+            throw KeyInfoUnavailableException(alias, e)
+        }
+
+        val keyInfoLevel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            info.securityLevel
+        } else {
+            KEY_INFO_LEVEL_UNKNOWN
+        }
+        @Suppress("DEPRECATION")
+        val insideSecureHardware = info.isInsideSecureHardware
+        return securityLevelOf(
+            Build.VERSION.SDK_INT,
+            keyInfoLevel,
+            insideSecureHardware,
+            alias in strongBoxSpecAliases
+        )
+    }
+
+    /** Records whether the spec that generated [alias] asked for StrongBox. */
+    private fun markStrongBoxSpec(alias: String, strongBoxSpec: Boolean) {
+        if (strongBoxSpec) strongBoxSpecAliases.add(alias) else strongBoxSpecAliases.remove(alias)
     }
 
     // -------------------------------------------------------------------------
@@ -694,10 +821,10 @@ class KeystoreManager(private val context: Context) {
                 else -> generateRSAKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
             }
 
-            // Log key creation
-            val strongBoxBacked = preferStrongBox &&
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                isStrongBoxAvailable()
+            // Log key creation. The audit line only; callers read the level
+            // themselves and see a failure.
+            val strongBoxBacked =
+                runCatching { generalKeySecurityLevel(keyId) }.getOrNull() == KeySecurityLevel.STRONGBOX
             AuditLogger.logKeyCreated(
                 keyId = keyId,
                 keyLabel = keyId,
@@ -741,7 +868,7 @@ class KeystoreManager(private val context: Context) {
             .setDigests(digest)
 
         applyAuthDuration(specBuilder, authDurationSeconds)
-        applyStrongBox(specBuilder, preferStrongBox)
+        val strongBoxSpec = applyStrongBox(specBuilder, preferStrongBox)
         applyAttestationChallenge(specBuilder)
 
         try {
@@ -750,7 +877,7 @@ class KeystoreManager(private val context: Context) {
                 KEYSTORE_PROVIDER
             )
             keyPairGenerator.initialize(specBuilder.build())
-            return keyPairGenerator.generateKeyPair()
+            return keyPairGenerator.generateKeyPair().also { markStrongBoxSpec(alias, strongBoxSpec) }
         } catch (e: Exception) {
             // StrongBox fallback
             if (preferStrongBox && isStrongBoxAvailable()) {
@@ -769,7 +896,7 @@ class KeystoreManager(private val context: Context) {
                     KEYSTORE_PROVIDER
                 )
                 keyPairGenerator.initialize(fallbackBuilder.build())
-                return keyPairGenerator.generateKeyPair()
+                return keyPairGenerator.generateKeyPair().also { markStrongBoxSpec(alias, false) }
             }
             throw e
         }
@@ -851,7 +978,7 @@ class KeystoreManager(private val context: Context) {
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
 
         applyAuthDuration(specBuilder, authDurationSeconds)
-        applyStrongBox(specBuilder, preferStrongBox)
+        val strongBoxSpec = applyStrongBox(specBuilder, preferStrongBox)
         applyAttestationChallenge(specBuilder)
 
         try {
@@ -860,7 +987,7 @@ class KeystoreManager(private val context: Context) {
                 KEYSTORE_PROVIDER
             )
             keyPairGenerator.initialize(specBuilder.build())
-            return keyPairGenerator.generateKeyPair()
+            return keyPairGenerator.generateKeyPair().also { markStrongBoxSpec(alias, strongBoxSpec) }
         } catch (e: Exception) {
             // StrongBox fallback
             if (preferStrongBox && isStrongBoxAvailable()) {
@@ -881,7 +1008,7 @@ class KeystoreManager(private val context: Context) {
                     KEYSTORE_PROVIDER
                 )
                 keyPairGenerator.initialize(fallbackBuilder.build())
-                return keyPairGenerator.generateKeyPair()
+                return keyPairGenerator.generateKeyPair().also { markStrongBoxSpec(alias, false) }
             }
             throw e
         }
@@ -999,6 +1126,7 @@ class KeystoreManager(private val context: Context) {
             )
             keyGenerator.init(specBuilder.build())
             keyGenerator.generateKey()
+            markStrongBoxSpec(alias, false)
         } catch (e: KeyGenerationException) {
             throw e
         } catch (e: Exception) {
@@ -1043,6 +1171,7 @@ class KeystoreManager(private val context: Context) {
             val keyGenerator = KeyGenerator.getInstance(jcaAlgorithm, KEYSTORE_PROVIDER)
             keyGenerator.init(specBuilder.build())
             keyGenerator.generateKey()
+            markStrongBoxSpec(alias, false)
         } catch (e: UnsupportedAlgorithmException) {
             throw e
         } catch (e: Exception) {
@@ -1500,15 +1629,22 @@ class KeystoreManager(private val context: Context) {
         val generalAlias = KEY_ALIAS_PREFIX_GENERAL + keyId
         if (keyStore.containsAlias(generalAlias)) return generalAlias
 
-        if (keyStore.containsAlias(keyId)) return keyId
+        // A PIV slot key is reached only through PivKeyManager, which keeps
+        // its piv_slots row in step; a raw alias must not resolve to it.
+        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return keyId
 
-        // Check Ed25519 software-backed keys
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (hasEd25519Key(generalAlias) || hasEd25519Key(keyId)) return keyId
-        }
+        // Check Ed25519 software-backed keys. Callers use the result as a
+        // Keystore alias, so a key stored under the general alias resolves to
+        // that alias, never to keyId: keyId may be a PIV slot's raw alias.
+        if (hasSoftwareEd25519Key(generalAlias)) return generalAlias
+        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && hasSoftwareEd25519Key(keyId)) return keyId
 
         return null
     }
+
+    /** True if an Ed25519 software key is stored under [alias] (API 33+ only). */
+    internal fun hasSoftwareEd25519Key(alias: String): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)
 
     /**
      * List all key aliases managed by xKey.
@@ -1551,6 +1687,8 @@ class KeystoreManager(private val context: Context) {
      * @return true if the key was deleted, false if it didn't exist.
      */
     fun deleteByAlias(alias: String): Boolean {
+        // PIV slot keys are deleted through PivKeyManager with their row.
+        if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
         if (!keyStore.containsAlias(alias)) return false
         keyStore.deleteEntry(alias)
         return true
@@ -1639,17 +1777,21 @@ class KeystoreManager(private val context: Context) {
 
     /**
      * Apply StrongBox backing to a key spec builder if available and preferred.
+     *
+     * @return true if the spec now asks for StrongBox.
      */
     private fun applyStrongBox(
         specBuilder: KeyGenParameterSpec.Builder,
         preferStrongBox: Boolean
-    ) {
+    ): Boolean {
         if (preferStrongBox &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
             isStrongBoxAvailable()
         ) {
             specBuilder.setIsStrongBoxBacked(true)
+            return true
         }
+        return false
     }
 
     /**
@@ -1930,5 +2072,52 @@ class KeystoreManager(private val context: Context) {
          * Value of 5 seconds balances UX with security.
          */
         private const val AUTH_TIMEOUT_SECONDS = 5
+
+        /** `KeyProperties.SECURITY_LEVEL_*` values (API 31), inlined for API 28-30. */
+        private const val KEY_INFO_LEVEL_UNKNOWN_SECURE = -2
+        private const val KEY_INFO_LEVEL_UNKNOWN = -1
+        private const val KEY_INFO_LEVEL_SOFTWARE = 0
+        private const val KEY_INFO_LEVEL_TRUSTED_ENVIRONMENT = 1
+        private const val KEY_INFO_LEVEL_STRONGBOX = 2
+
+        /**
+         * Aliases whose generating spec asked for StrongBox and succeeded.
+         * KeyInfo cannot tell StrongBox from the TEE before API 31, so this is
+         * the API 28-30 signal; it is per process, so after a restart such a
+         * key reads as the TEE, an under-claim and never an over-claim.
+         */
+        private val strongBoxSpecAliases: MutableSet<String> =
+            java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+        /**
+         * Maps a key's [KeyInfo] to its [KeySecurityLevel].
+         *
+         * @param sdkInt The platform API level.
+         * @param keyInfoLevel `KeyInfo.securityLevel` on API 31+, else
+         *                     `SECURITY_LEVEL_UNKNOWN` (-1).
+         * @param insideSecureHardware `KeyInfo.isInsideSecureHardware`.
+         * @param strongBoxSpec Whether the spec that generated the key asked
+         *                      for StrongBox and succeeded.
+         */
+        fun securityLevelOf(
+            sdkInt: Int,
+            keyInfoLevel: Int,
+            insideSecureHardware: Boolean,
+            strongBoxSpec: Boolean
+        ): KeySecurityLevel {
+            if (sdkInt >= Build.VERSION_CODES.S) {
+                when (keyInfoLevel) {
+                    KEY_INFO_LEVEL_STRONGBOX -> return KeySecurityLevel.STRONGBOX
+                    KEY_INFO_LEVEL_TRUSTED_ENVIRONMENT,
+                    KEY_INFO_LEVEL_UNKNOWN_SECURE -> return KeySecurityLevel.TEE
+                    KEY_INFO_LEVEL_SOFTWARE -> return KeySecurityLevel.SOFTWARE
+                }
+            }
+            return when {
+                !insideSecureHardware -> KeySecurityLevel.SOFTWARE
+                strongBoxSpec -> KeySecurityLevel.STRONGBOX
+                else -> KeySecurityLevel.TEE
+            }
+        }
     }
 }

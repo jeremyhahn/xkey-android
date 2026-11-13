@@ -182,6 +182,37 @@ class VerifiedMediaViewerFlowTest {
     }
 
     /**
+     * The badge names the contact the signature was checked against, not the
+     * name the file embeds: a file signed by the contact that claims another
+     * name verifies under the contact's name, and the embedded name shows
+     * only as a marked claim on its own line.
+     */
+    @Test
+    fun aDifferingEmbeddedNameIsShownAsAClaimNotAsTheBadgeName() {
+        val claimedName = "Someone Else $suffix"
+        plantSidecar(pngFile, PNG_EXTENSION, signedEntry(pngFile).copy(signerName = claimedName))
+
+        val scenario = launchView(pngFile, "image/png")
+
+        assertSignerCount(scenario, 1)
+        assertSignerRow(scenario, contactName, VERIFIED_GLYPH)
+        val claimLine = withActivity(scenario) {
+            it.getString(R.string.verified_viewer_claims, claimedName)
+        }
+        assertShownTextInTree(scenario, claimLine)
+        assertFalse(
+            "the embedded name must never sit in a badge row",
+            withActivity(scenario) { activity ->
+                val container = activity.findViewById<ViewGroup>(R.id.signerListContainer)
+                (0 until container.childCount).any { index ->
+                    val row = container.getChildAt(index)
+                    row is ViewGroup && findShownTextView(row, claimedName) != null
+                }
+            }
+        )
+    }
+
+    /**
      * A key the device owns but has no public key material for cannot be
      * checked cryptographically, so it never matches: its keyId and the
      * file's fingerprint both come from data under test. The signer is
