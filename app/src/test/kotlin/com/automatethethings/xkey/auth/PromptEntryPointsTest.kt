@@ -185,7 +185,7 @@ class PromptEntryPointsTest {
         }.joinToString("\n")
         val approval = Regex("""requestAuthentication\(|\.approve\(|requireUserPresenceForAttestation\(|requestCryptoSignature\(""")
         val rowRead = Regex("""getByKeyId\(|\.getAll\(\)""")
-        val keyUse = Regex("""signWithAlgorithm\(|withKeyLock\(""")
+        val keyUse = Regex("""signWithAlgorithm\(|signWithoutBiometric\(""")
         val functions = Regex("""\n    (?:private |internal |override )?(?:suspend )?fun (\w+)""").findAll(code).toList()
         val unchecked = functions.mapIndexedNotNull { i, fn ->
             val body = code.substring(fn.range.first, functions.getOrNull(i + 1)?.range?.first ?: code.length)

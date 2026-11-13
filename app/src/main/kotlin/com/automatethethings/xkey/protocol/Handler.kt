@@ -1607,6 +1607,10 @@ class RequestHandler(
             false
         }
 
+        // The stored key as it was before the approval, so the key signed
+        // with is the one the owner approved.
+        val selected = keyDao.getByKeyId(signParams.keyId)
+        var approved = false
         if (biometricRequired && biometricLauncher != null) {
             val notice = OwnNotifications(operationType = "sign", rpName = null)
             try {
@@ -1617,15 +1621,20 @@ class RequestHandler(
                     onLaunch = notice.onLaunch
                 )
                 sessionAuthManager?.recordAuthentication(currentSessionId)
+                approved = true
             } finally {
                 notice.close()
             }
+        }
+        val signingKey = if (approved && selected != null) revalidateApprovedKey(selected) else selected
+        if (approved && selected == null && !keystoreManager.generalKeyExists(signParams.keyId)) {
+            throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
         }
 
         // `algorithm` is an optional override; default to the key's own
         // algorithm from the key store.
         val signAlgorithm = signParams.algorithm.ifEmpty {
-            keyDao.getByKeyId(signParams.keyId)?.algorithm
+            signingKey?.algorithm
                 ?: throw ProtocolException(
                     "Missing 'algorithm' and key has no recorded algorithm",
                     errorCode = ErrorCodes.INVALID_PARAMS
@@ -3162,16 +3171,8 @@ class RequestHandler(
         // hold the lock across the counter increment, the signature and the
         // counter write, so each assertion signs a distinct, increasing count.
         val (newSignCount, authData, signature) = keyIds.withKeyLock("key:${assertionParams.credentialId}") {
-            val current = keyDao.getByKeyId(assertionParams.credentialId)
-                ?: throw ProtocolException(
-                    "Credential not found: ${assertionParams.credentialId}",
-                    errorCode = ErrorCodes.KEY_NOT_FOUND
-                )
-            if (current.keyType != KeyTypes.FIDO2 ||
-                (current.rpId != null && current.rpId != assertionParams.rpId)
-            ) {
-                throw ProtocolException("Credential changed during approval", errorCode = ErrorCodes.INVALID_PARAMS)
-            }
+            // Still the passkey the owner approved; its counter may have moved.
+            val current = revalidateApprovedKey(entity)
             if (!canShareKeyWithPeer(current, peerPublicKeyHex)) {
                 throw ProtocolException(
                     "Credential is not shareable with this peer",
@@ -3715,6 +3716,31 @@ class RequestHandler(
     }
 
     /**
+     * The stored key [approved] names, as it is once the owner has approved
+     * its use. An approval can wait a minute for the owner, and the key can
+     * be deleted, re-policied or replaced under its id meanwhile; what the
+     * owner approved is the row read before the prompt, so the key is used
+     * only while it is still that key ([isSameKeyAs]). Every approval-gated
+     * use of a stored key calls this between the approval and the use.
+     *
+     * @throws ProtocolException with [ErrorCodes.KEY_NOT_FOUND] when the key
+     * is gone, or [ErrorCodes.OPERATION_DENIED] when it changed.
+     */
+    private suspend fun revalidateApprovedKey(approved: KeyEntity): KeyEntity {
+        val current = keyDao.getByKeyId(approved.keyId) ?: throw ProtocolException(
+            "Key ${approved.keyId} was deleted while its approval waited",
+            errorCode = ErrorCodes.KEY_NOT_FOUND
+        )
+        if (!current.isSameKeyAs(approved)) {
+            throw ProtocolException(
+                "Key ${approved.keyId} changed while its approval waited",
+                errorCode = ErrorCodes.OPERATION_DENIED
+            )
+        }
+        return current
+    }
+
+    /**
      * The confirmed peer of the connection this request arrived on.
      *
      * One handler serves BLE, TCP and USB at once, and a transport's teardown
@@ -3997,13 +4023,15 @@ class RequestHandler(
         } finally {
             notice.close()
         }
+        // The owner approved the key as it was when the prompt went up.
+        val approvedKey = revalidateApprovedKey(signingKey)
 
         // Sign the content hash
         return try {
             val signatureBytes = keystoreManager.signWithAlgorithm(
-                signingKey.keyId, hashBytes, signingKey.algorithm
+                approvedKey.keyId, hashBytes, approvedKey.algorithm
             )
-            val publicKeyDer = keystoreManager.getPublicKeyDER(signingKey.keyId)
+            val publicKeyDer = keystoreManager.getPublicKeyDER(approvedKey.keyId)
                 ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
             val fingerprint = computeFingerprint(publicKeyDer)
 
@@ -4015,8 +4043,8 @@ class RequestHandler(
             val result = JSONObject().apply {
                 put("signature", Base64.getEncoder().encodeToString(signatureBytes))
                 put("keyFingerprint", fingerprint)
-                put("algorithm", signingKey.algorithm)
-                put("signerName", signingKey.label.ifEmpty { signingKey.keyId })
+                put("algorithm", approvedKey.algorithm)
+                put("signerName", approvedKey.label.ifEmpty { approvedKey.keyId })
             }
             Response.success(request.id, result)
         } catch (e: Exception) {
@@ -4410,3 +4438,21 @@ class RequestHandler(
         return digest.digest(publicKeyDer).joinToString("") { "%02x".format(it) }
     }
 }
+
+/**
+ * Whether this row is still the key [other] was: the same row, type,
+ * algorithm, key material, relying party, origin and sharing policy
+ * revision. Use counters and the label may move on.
+ */
+private fun KeyEntity.isSameKeyAs(other: KeyEntity): Boolean =
+    id == other.id &&
+        keyId == other.keyId &&
+        keyType == other.keyType &&
+        algorithm == other.algorithm &&
+        source == other.source &&
+        rpId == other.rpId &&
+        sharingPolicy == other.sharingPolicy &&
+        policyRevision == other.policyRevision &&
+        biometricRequired == other.biometricRequired &&
+        publicKeyDer.contentEquals(other.publicKeyDer) &&
+        publicKeyCose.contentEquals(other.publicKeyCose)
