@@ -14,12 +14,10 @@
  */
 package com.automatethethings.xkey.ui
 
-import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -100,25 +98,12 @@ class OathActivity : AppCompatActivity() {
     private val qrScanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            val uri = result.data?.getStringExtra(QrScannerActivity.EXTRA_SCANNED_URI)
-            if (uri != null && uri.startsWith("otpauth://")) {
-                importScannedUri(uri)
-            }
-        }
-    }
-
-    private val cameraPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            launchQrScanner()
-        } else {
-            Snackbar.make(
-                rootLayout,
-                R.string.error_permission_denied,
-                Snackbar.LENGTH_SHORT
-            ).show()
+        // The scanner asks for CAMERA itself; a denial comes back as a result.
+        when (val scan = QrScanResult.from(result)) {
+            is QrScanResult.Scanned -> if (scan.value.startsWith("otpauth://")) importScannedUri(scan.value)
+            QrScanResult.CameraDenied ->
+                Snackbar.make(rootLayout, R.string.qr_camera_denied, Snackbar.LENGTH_LONG).show()
+            QrScanResult.Cancelled -> Unit
         }
     }
 
@@ -793,21 +778,11 @@ class OathActivity : AppCompatActivity() {
                 )
             ) { _, which ->
                 when (which) {
-                    0 -> requestCameraAndScan()
+                    0 -> launchQrScanner()
                     1 -> showManualEntryDialog()
                 }
             }
             .show()
-    }
-
-    private fun requestCameraAndScan() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED
-        ) {
-            launchQrScanner()
-        } else {
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
     }
 
     private fun launchQrScanner() {

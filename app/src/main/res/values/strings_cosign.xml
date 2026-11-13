@@ -4,6 +4,7 @@
 -->
 <resources>
     <string name="cosign_qr_invalid">Not a co-sign QR code</string>
+    <string name="qr_camera_denied">Camera access is needed to scan a QR code. Allow it in the app\'s settings.</string>
     <string name="cosign_scan_response">Scan the witness\'s response QR code</string>
     <string name="cosign_approve_request_message">Sign this content as %1$s?\n\nContent hash (%2$s):\n%3$s\n\nOwner key:\n%4$s</string>
     <string name="cosign_no_signature_data">This media has no xKey signature data. Sign it first, then ask a witness to co-sign.</string>

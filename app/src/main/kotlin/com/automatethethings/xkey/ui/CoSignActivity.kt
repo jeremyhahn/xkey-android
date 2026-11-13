@@ -58,7 +58,9 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -90,24 +92,68 @@ class CoSignActivity : AppCompatActivity() {
     }
 
     private val requestScanner = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == RESULT_OK) {
-            result.data?.getStringExtra(QrScannerActivity.EXTRA_SCANNED_URI)?.let { onRequestScanned(it) }
-        }
+        onScanResult(QrScanResult.from(result)) { onRequestScanned(it) }
     }
 
     private val responseScanner = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == RESULT_OK) {
-            result.data?.getStringExtra(QrScannerActivity.EXTRA_SCANNED_URI)?.let { onResponseScanned(it) }
-        }
+        onScanResult(QrScanResult.from(result)) { onResponseScanned(it) }
     }
+
+    /** The signing keys, once loaded; the request prompt waits for them after a recreation. */
+    private val signingKeysLoaded = CompletableDeferred<Unit>()
+
+    /** The key id to select once the key list loads (restored after a recreation). */
+    private var pendingKeyId: String? = null
+
+    /** The signature read of [selectedUri]; an append waits for it. */
+    private var mediaLoad: Job? = null
 
     private fun coSignScanIntent(): Intent = Intent(this, QrScannerActivity::class.java)
         .putExtra(QrScannerActivity.EXTRA_PAYLOAD_KIND, QrPayloadKind.COSIGN.name)
 
+    private fun onScanResult(scan: QrScanResult, onScanned: (String) -> Unit) {
+        when (scan) {
+            is QrScanResult.Scanned -> onScanned(scan.value)
+            QrScanResult.CameraDenied ->
+                Snackbar.make(rootLayout, getString(R.string.qr_camera_denied), Snackbar.LENGTH_LONG).show()
+            QrScanResult.Cancelled -> Unit
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         keystoreManager = KeystoreManager(this)
+        // Restored before buildUI loads the keys, and before onStart delivers a
+        // scan result that was pending when the previous instance went away.
+        pendingKeyId = savedInstanceState?.getString(STATE_KEY_ID)
         buildUI()
+        savedInstanceState?.let { restoreExchange(it) }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_MEDIA_URI, selectedUri?.toString())
+        outState.putBoolean(STATE_WITNESS_MODE, witnessSection.visibility == View.VISIBLE)
+        outState.putString(STATE_KEY_ID, selectedKeyId() ?: pendingKeyId)
+    }
+
+    private fun restoreExchange(state: Bundle) {
+        if (state.getBoolean(STATE_WITNESS_MODE)) {
+            initiatorSection.visibility = View.GONE
+            witnessSection.visibility = View.VISIBLE
+        }
+        state.getString(STATE_MEDIA_URI)?.let { uri ->
+            val restored = Uri.parse(uri)
+            selectedUri = restored
+            selectedFileText.text = restored.lastPathSegment ?: uri
+            loadSignatures(restored)
+        }
+    }
+
+    /** The key the spinner selects, or null before the key list has loaded. */
+    private fun selectedKeyId(): String? {
+        val index = keySpinner.selectedItemPosition
+        return if (signingKeysLoaded.isCompleted && index in signingKeyIds.indices) signingKeyIds[index] else null
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
@@ -474,7 +520,12 @@ class CoSignActivity : AppCompatActivity() {
             // The provider grants no persistable permission; the session grant still covers this screen.
         }
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        loadSignatures(uri)
+    }
+
+    /** Reads the media's signature data into [currentSignatureData] and the card. */
+    private fun loadSignatures(uri: Uri) {
+        mediaLoad = lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val mimeType = contentResolver.getType(uri)
                 val sigData = XmpMetadataHelper.readSignatureFromUri(contentResolver, uri, mimeType)
@@ -615,14 +666,20 @@ class CoSignActivity : AppCompatActivity() {
             }
         }
 
-        val selectedKeyIndex = keySpinner.selectedItemPosition
-        if (selectedKeyIndex < 0 || signingKeyIds.isEmpty()) {
-            Snackbar.make(rootLayout, getString(R.string.file_operation_no_keys), Snackbar.LENGTH_SHORT).show()
-            return
+        // After a recreation the result arrives before the key list reloads.
+        lifecycleScope.launch {
+            signingKeysLoaded.await()
+            val keyId = selectedKeyId()
+            if (keyId == null) {
+                Snackbar.make(rootLayout, getString(R.string.file_operation_no_keys), Snackbar.LENGTH_SHORT).show()
+                return@launch
+            }
+            val keyLabel = keySpinner.selectedItem?.toString() ?: keyId
+            promptWitnessApproval(request, keyId, keyLabel)
         }
-        val keyId = signingKeyIds[selectedKeyIndex]
-        val keyLabel = keySpinner.selectedItem?.toString() ?: keyId
+    }
 
+    private fun promptWitnessApproval(request: CoSignRequest, keyId: String, keyLabel: String) {
         witnessQrImage.visibility = View.GONE
         witnessQrLabel.visibility = View.GONE
 
@@ -647,9 +704,10 @@ class CoSignActivity : AppCompatActivity() {
      * the selected media, unless its key has already signed.
      */
     private fun onResponseScanned(raw: String) {
+        // Only the Uri: after a recreation the signature data is still reloading,
+        // and the append reads the file's own data anyway.
         val uri = selectedUri
-        val data = currentSignatureData
-        if (uri == null || data == null) {
+        if (uri == null) {
             Snackbar.make(rootLayout, getString(R.string.cosign_select_media_first), Snackbar.LENGTH_SHORT).show()
             return
         }
@@ -665,9 +723,12 @@ class CoSignActivity : AppCompatActivity() {
             }
         }
         val entry = response.toAttestorEntry(Clock.systemUTC())
+        val pendingLoad = mediaLoad
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
+                // A reload that finished after the append would show the old signatures.
+                pendingLoad?.join()
                 val result = appendToMedia(uri, entry)
                 withContext(Dispatchers.Main) {
                     when (result) {
@@ -690,7 +751,7 @@ class CoSignActivity : AppCompatActivity() {
                     }
                 }
                 if (result is CoSignAppendResult.Appended) {
-                    AuditLogger.logCoSignReceived(data.contentHash, entry.keyFingerprint)
+                    AuditLogger.logCoSignReceived(result.data.contentHash, entry.keyFingerprint)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -743,19 +804,27 @@ class CoSignActivity : AppCompatActivity() {
 
     private fun loadSigningKeys() {
         lifecycleScope.launch(Dispatchers.IO) {
-            val db = XKeyDatabase.getInstance(this@CoSignActivity)
-            val keys = db.keyDao().getAll().filter {
-                !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh")
-            }
-            signingKeyIds = keys.map { it.keyId }
-            val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
+            try {
+                val db = XKeyDatabase.getInstance(this@CoSignActivity)
+                val keys = db.keyDao().getAll().filter {
+                    !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh")
+                }
+                val keyIds = keys.map { it.keyId }
+                val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
 
-            withContext(Dispatchers.Main) {
-                keySpinner.adapter = ArrayAdapter(
-                    this@CoSignActivity,
-                    android.R.layout.simple_spinner_dropdown_item,
-                    keyLabels
-                )
+                withContext(Dispatchers.Main) {
+                    signingKeyIds = keyIds
+                    keySpinner.adapter = ArrayAdapter(
+                        this@CoSignActivity,
+                        android.R.layout.simple_spinner_dropdown_item,
+                        keyLabels
+                    )
+                    // The key chosen before a recreation, if it still exists.
+                    pendingKeyId?.let { id -> keyIds.indexOf(id).takeIf { it >= 0 }?.let(keySpinner::setSelection) }
+                    pendingKeyId = null
+                }
+            } finally {
+                signingKeysLoaded.complete(Unit)
             }
         }
     }
@@ -772,4 +841,10 @@ class CoSignActivity : AppCompatActivity() {
      * Reads a colour from the xKey design-system palette.
      */
     private fun paletteColor(resId: Int): Int = ContextCompat.getColor(this, resId)
+
+    private companion object {
+        const val STATE_MEDIA_URI = "cosign_media_uri"
+        const val STATE_WITNESS_MODE = "cosign_witness_mode"
+        const val STATE_KEY_ID = "cosign_key_id"
+    }
 }
