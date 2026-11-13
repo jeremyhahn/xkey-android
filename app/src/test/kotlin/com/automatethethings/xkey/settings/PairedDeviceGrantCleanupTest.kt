@@ -23,6 +23,7 @@ import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.storage.FakeKeyPolicyTables
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -455,6 +456,8 @@ class PairedDeviceGrantCleanupTest {
         }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keySharingPolicyDao() } returns dao
+        // No policy row: the stored policy decides (#193).
+        every { database.keyPolicyDao() } returns FakeKeyPolicyTables()
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         val context = mockk<Context>(relaxed = true)

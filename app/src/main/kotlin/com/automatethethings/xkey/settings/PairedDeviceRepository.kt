@@ -471,36 +471,26 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     fun isRevocationPending(publicKeyHex: String): Boolean = publicKeyHex in pendingRevocations()
 
     /**
-     * Records [policy] (a sharing policy name) as [keyId]'s pending policy
-     * for its key row [instance] (#193): a narrowing accepted but not yet
-     * stored, enforced over the stored policy until [clearPendingKeyPolicy],
-     * a process restart included.
-     *
-     * @throws IOException if the record did not reach disk.
+     * The key policy denials builds before the database's version 13
+     * recorded here, by key id, each as "instance@POLICY" (#193). Read once,
+     * by the 12 -> 13 migration, which moves them into the key policy rows;
+     * nothing records them any more.
      */
-    fun recordPendingKeyPolicy(keyId: String, instance: Long, policy: String) {
-        val written = prefs.edit()
-            .putString(KEY_PENDING_KEY_POLICY + keyId, "$instance$GENERATION_SEPARATOR$policy")
-            .commit()
-        if (!written) throw IOException("Recording a pending key policy did not reach disk")
-    }
+    fun legacyKeyPolicyDenials(): Map<String, String> =
+        prefs.all.mapNotNull { (name, value) ->
+            if (name.startsWith(KEY_PENDING_KEY_POLICY) && value is String) {
+                name.removePrefix(KEY_PENDING_KEY_POLICY) to value
+            } else {
+                null
+            }
+        }.toMap()
 
-    /**
-     * Drops [keyId]'s pending policy: its change landed, or the key is gone.
-     * A removal that does not reach disk leaves the record denying, so it is
-     * only logged.
-     */
-    fun clearPendingKeyPolicy(keyId: String) {
-        if (!prefs.edit().remove(KEY_PENDING_KEY_POLICY + keyId).commit()) {
-            Log.e(TAG, "Clearing a pending key policy did not reach disk")
-        }
-    }
-
-    /** [keyId]'s pending policy name recorded for key row [instance], or null. */
-    fun pendingKeyPolicy(keyId: String, instance: Long): String? {
-        val record = prefs.getString(KEY_PENDING_KEY_POLICY + keyId, null) ?: return null
-        val recorded = record.substringBefore(GENERATION_SEPARATOR, "").toLongOrNull()
-        return record.substringAfter(GENERATION_SEPARATOR).takeIf { recorded == instance }
+    /** Deletes the records [legacyKeyPolicyDenials] read, once the migration has committed them. */
+    fun dropLegacyKeyPolicyDenials(keyIds: Collection<String>) {
+        if (keyIds.isEmpty()) return
+        val edit = prefs.edit()
+        keyIds.forEach { edit.remove(KEY_PENDING_KEY_POLICY + it) }
+        if (!edit.commit()) Log.w(TAG, "Dropping moved key policy denials did not reach disk; they are not read again")
     }
 
     /** The generation of [publicKeyHex]'s pending revocation, or null if none is pending. */

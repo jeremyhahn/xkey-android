@@ -56,6 +56,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -119,6 +120,7 @@ class KeyManagementActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     private val keyDao by lazy { XKeyDatabase.getInstance(this).keyDao() }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this)) }
     private val credentialDao by lazy { XKeyDatabase.getInstance(this).credentialMetadataDao() }
     private val keystoreManager by lazy { KeystoreManager(this) }
     private val syncManager by lazy { KeyStoreSyncManager(keystoreManager, credentialDao, keyDao) }
@@ -1168,7 +1170,7 @@ class KeyManagementActivity : AppCompatActivity() {
                     source = "local",
                     createdAt = System.currentTimeMillis()
                 )
-                keyDao.insert(entity)
+                keyPolicyStore.insertKey(entity)
                 Snackbar.make(rootLayout, getString(R.string.key_create_success), Snackbar.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 android.util.Log.e("KeyManagement", "Key creation failed", e)
@@ -1263,7 +1265,8 @@ class KeyManagementActivity : AppCompatActivity() {
                     keystoreManager.deleteByAlias(alias)
                 }
             }
-            keyDao.deleteByKeyId(key.keyId)
+            // With its policy row and grant rows, in one transaction (#193)
+            KeySharingPeers.forgetKey(key.keyId, keyPolicyStore)
             Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
         }
     }

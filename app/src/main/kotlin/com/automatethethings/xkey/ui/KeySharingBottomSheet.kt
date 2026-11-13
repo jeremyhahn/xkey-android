@@ -29,6 +29,7 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.lifecycleScope
@@ -38,6 +39,7 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.google.android.material.card.MaterialCardView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
@@ -99,9 +101,9 @@ enum class SharingPolicyType {
 class KeySharingBottomSheet : BottomSheetDialogFragment() {
 
     private val keyDao by lazy { XKeyDatabase.getInstance(requireContext()).keyDao() }
-    private val keySharingPolicyDao by lazy { XKeyDatabase.getInstance(requireContext()).keySharingPolicyDao() }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(requireContext())) }
     private val pairedDeviceRepository by lazy { PairedDeviceRepository(requireContext()) }
-    private val sharingPeers by lazy { KeySharingPeers(keyId, keySharingPolicyDao, pairedDeviceRepository) }
+    private val sharingPeers by lazy { KeySharingPeers(keyId, keyPolicyStore, pairedDeviceRepository) }
 
     private var keyId: String = ""
     private var keyEntity: KeyEntity? = null
@@ -669,16 +671,15 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
      * Selecting peers again therefore always starts from nothing.
      */
     private suspend fun persistSharingPolicy(policy: SharingPolicyType) {
-        if (keyEntity == null) return
+        val key = keyEntity ?: return
 
-        // Convert local policy type to entity policy type and update both columns
-        val entityPolicy = when (policy) {
-            SharingPolicyType.PRIVATE -> EntitySharingPolicyType.PRIVATE
-            SharingPolicyType.ALL_PEERS -> EntitySharingPolicyType.ALL_PEERS
-            SharingPolicyType.SELECTED_PEERS -> EntitySharingPolicyType.SELECTED_PEERS
+        // In the order of the user's actions, after every grant tapped before
+        // it (#174, #193), bound to the key row this sheet loaded.
+        if (!sharingPeers.setKeyPolicy(policy, key.id)) {
+            context?.let {
+                Toast.makeText(it, R.string.key_sharing_policy_not_saved, Toast.LENGTH_LONG).show()
+            }
         }
-        // In the order of the user's actions, after every grant tapped before it (#174, #193).
-        sharingPeers.setKeyPolicy(policy) { keyDao.updateSharingPolicy(keyId, entityPolicy) }
     }
 
     private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?) {

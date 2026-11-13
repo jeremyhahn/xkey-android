@@ -41,6 +41,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -188,6 +189,9 @@ class RequestHandler(
 
     // Per-key sharing policy DAO
     private val keySharingPolicyDao: KeySharingPolicyDao = XKeyDatabase.getInstance(context).keySharingPolicyDao()
+
+    // A key's policy state, grant rows and key row, written together (#193)
+    private val keyPolicyStore: KeyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(context)) }
 
     // Weak reference to activity for biometric prompts
     private var activityRef: WeakReference<FragmentActivity>? = null
@@ -1202,7 +1206,7 @@ class RequestHandler(
             publicKeyDer = ByteArray(0) // No public key for symmetric/HMAC
 
             // Store in unified key store
-            keyDao.insert(
+            keyPolicyStore.insertKey(
                 KeyEntity(
                     keyId = genParams.keyId,
                     keyType = genParams.keyType,
@@ -1254,7 +1258,7 @@ class RequestHandler(
         }
 
         // Store in unified key store
-        keyDao.insert(
+        keyPolicyStore.insertKey(
             KeyEntity(
                 keyId = genParams.keyId,
                 keyType = genParams.keyType,
@@ -1356,7 +1360,7 @@ class RequestHandler(
             )
         )
 
-        keyDao.insert(
+        keyPolicyStore.insertKey(
             KeyEntity(
                 keyId = genParams.keyId,
                 keyType = genParams.keyType,
@@ -1849,10 +1853,10 @@ class RequestHandler(
         keystoreManager.deleteGeneralKey(keyId)
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
 
-        // Delete from unified key store, under the sharing edits' order: a
-        // pending policy change or withdrawal of this key is dropped with it,
-        // never retried onto a key generated again under its id (#193).
-        KeySharingPeers.forgetKey(keyId, pairedDeviceRepository) { keyDao.deleteByKeyId(keyId) }
+        // Delete from unified key store with its policy row and grant rows,
+        // in one transaction, under the sharing edits' order (#193). A failed
+        // delete throws to the caller, never a logged success.
+        KeySharingPeers.forgetKey(keyId, keyPolicyStore)
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
@@ -1867,31 +1871,29 @@ class RequestHandler(
 
         val policyParams = LocalSetKeyPolicyParams.fromJson(params)
 
-        keyDao.getByKeyId(policyParams.keyId)
+        val entity = keyDao.getByKeyId(policyParams.keyId)
             ?: throw ProtocolException("Key not found: ${policyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
         if (policyParams.shareable != null) {
             val policy = if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
-            // Through the sheet's ordering (#174): this write supersedes an
-            // older policy change still being retried, which would otherwise
-            // land over it, and a failure of it is enforced and retried.
-            // updateSharingPolicy, not updateShareable: it keeps `shareable` and
-            // `sharing_policy` in step, which KeyEntity requires. Writing the
-            // legacy flag alone could leave shareable=1 with policy=PRIVATE.
+            // Through the sheet's ordering (#174), bound to the key row read
+            // above (#193): a key deleted or generated again since is refused.
+            // The store keeps `shareable` and `sharing_policy` in step, which
+            // KeyEntity requires.
             val landed = KeySharingPeers.setKeyPolicy(
                 policyParams.keyId,
-                keySharingPolicyDao,
+                keyPolicyStore,
                 SheetPolicy.valueOf(policy.name),
-                repository = pairedDeviceRepository
-            ) { keyDao.updateSharingPolicy(policyParams.keyId, policy) }
-            // Never reported updated before it is stored (#193): the change
-            // is enforced, its denial recorded on disk, and retried.
+                entity.id
+            )
+            // Never reported updated unless stored (#193); a failed
+            // narrowing's denial stays enforced until a later change lands.
             if (!landed) {
-                Log.w(TAG, "Policy for key ${policyParams.keyId} not stored yet; enforced and retried")
+                Log.w(TAG, "Policy for key ${policyParams.keyId} not stored; the change was refused")
                 return Response.error(
                     request.id,
                     ErrorCodes.INTERNAL_ERROR,
-                    "Key policy not stored yet; it is enforced and retried"
+                    "Key policy not stored; the change was refused"
                 )
             }
         }
@@ -2738,17 +2740,15 @@ class RequestHandler(
      */
     private suspend fun canShareKeyWithPeer(entity: KeyEntity, peerPublicKeyHex: String?): Boolean {
         if (KeySharingPeers.isWithdrawalPending(entity.keyId, peerPublicKeyHex)) {
-            // Fail closed (#174): the user withdrew this peer, or made the
-            // key Private, and that write is still being retried.
+            // Fail closed (#174): the user withdrew this peer and that write
+            // is still being retried.
             Log.w(TAG, "Key sharing refused: withdrawal pending persistence")
             return false
         }
-        // A policy change not yet stored is enforced over the stored one, so
-        // a narrowing from All Peers to Selected Peers denies at once. Its
-        // recorded denial does so after a restart too (#193).
-        val recorded = pairedDeviceRepository?.pendingKeyPolicy(entity.keyId, entity.id)
-            ?.let { SharingPolicyType.valueOf(it) }
-        return when (KeySharingPeers.enforcedPolicy(entity.keyId) ?: recorded ?: entity.sharingPolicy) {
+        // The key's policy row carries the denial of a narrowing whose write
+        // failed, so it is enforced over the stored policy, a restart
+        // included (#193).
+        return when (keyPolicyStore.enforcedPolicy(entity)) {
             SharingPolicyType.PRIVATE -> false
             SharingPolicyType.ALL_PEERS -> true
             SharingPolicyType.SELECTED_PEERS -> {

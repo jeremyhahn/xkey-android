@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.storage
 
 import android.content.Context
+import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -29,6 +30,7 @@ import com.automatethethings.xkey.ca.CertificateEntity
 import com.automatethethings.xkey.storage.dao.ContactDao
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.KeyPolicyDao
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
@@ -39,7 +41,9 @@ import com.automatethethings.xkey.piv.PivSlotEntity
 import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -66,6 +70,8 @@ import java.util.concurrent.atomic.AtomicReference
  * - v10: Added `passwords` table for the encrypted password manager.
  * - v11: Migrated key source token "keychaind" -> "xkmsd" (go-xkms daemon rename).
  * - v12: Added expires_at, shared and tenant_id columns to passwords table.
+ * - v13: Added `key_policies` table: one row per key holding its sharing
+ *        policy state, written only by [KeyPolicyStore] (#193).
  *
  * Usage:
  * ```kotlin
@@ -94,9 +100,10 @@ import java.util.concurrent.atomic.AtomicReference
         ContactEntity::class,
         OathCredentialEntity::class,
         PivSlotEntity::class,
-        PasswordEntity::class
+        PasswordEntity::class,
+        KeyPolicyEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = true
 )
 @TypeConverters(AuditOperationTypeConverter::class)
@@ -126,6 +133,12 @@ abstract class XKeyDatabase : RoomDatabase() {
      * SELECTED_PEERS.
      */
     abstract fun keySharingPolicyDao(): KeySharingPolicyDao
+
+    /**
+     * Get the DAO for a key's policy row and the writes [KeyPolicyStore]
+     * composes into its transactions. Use the store, not this DAO.
+     */
+    abstract fun keyPolicyDao(): KeyPolicyDao
 
     /**
      * Get the DAO for audit log operations.
@@ -579,6 +592,44 @@ abstract class XKeyDatabase : RoomDatabase() {
         }
 
         /**
+         * Migration from v12 to v13: every key gets its policy row (#193),
+         * bound to its key row and holding its stored policy, and a denial a
+         * failed narrowing recorded outside the database is moved into it.
+         * [denials] gives those records by key id, each "instance@POLICY"
+         * ([PairedDeviceRepository.legacyKeyPolicyDenials]). A record for
+         * another key row than the stored one is dropped; a PRIVATE denial
+         * also owes the key's grant clear.
+         */
+        fun migration12To13(denials: () -> Map<String, String>): Migration = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `key_policies` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, " +
+                        "`sharing_policy` TEXT NOT NULL, `pending_policy` TEXT, `denial` TEXT, `clear_grants` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`key_id`), FOREIGN KEY(`key_instance`) REFERENCES `keys`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_key_policies_key_instance` ON `key_policies` (`key_instance`)")
+                db.execSQL(
+                    "INSERT INTO `key_policies` (`key_id`, `key_instance`, `sharing_policy`, `pending_policy`, `denial`, `clear_grants`) " +
+                        "SELECT `key_id`, `id`, `sharing_policy`, NULL, NULL, 0 FROM `keys`"
+                )
+                for ((keyId, record) in denials()) {
+                    val instance = record.substringBefore('@', "").toLongOrNull() ?: continue
+                    val denial = record.substringAfter('@')
+                    if (denial != "PRIVATE" && denial != "SELECTED_PEERS") continue
+                    db.execSQL(
+                        "UPDATE `key_policies` SET `pending_policy` = ?, `denial` = ?, " +
+                            "`clear_grants` = CASE WHEN ? = 'PRIVATE' THEN 1 ELSE `clear_grants` END " +
+                            "WHERE `key_id` = ? AND `key_instance` = ?",
+                        arrayOf<Any>(denial, denial, denial, keyId, instance)
+                    )
+                }
+            }
+        }
+
+        /** [migration12To13] with no recorded denials. */
+        val MIGRATION_12_13: Migration = migration12To13 { emptyMap() }
+
+        /**
          * Get the singleton database instance.
          *
          * Uses double-checked locking with AtomicReference for thread-safe
@@ -599,12 +650,35 @@ abstract class XKeyDatabase : RoomDatabase() {
          * Build the database instance.
          */
         private fun buildDatabase(context: Context): XKeyDatabase {
+            // The 12 -> 13 migration moves the key policy denials recorded in
+            // the paired-device store; they are dropped there only once the
+            // migration has committed (onOpen runs after it).
+            val pairedDevices = lazy { PairedDeviceRepository(context.applicationContext) }
+            val moved = AtomicReference<Collection<String>>(emptyList())
             return Room.databaseBuilder(
                 context.applicationContext,
                 XKeyDatabase::class.java,
                 DATABASE_NAME
             )
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                .addMigrations(
+                    migration12To13 {
+                        // Unreadable prefs must not leave the database unopenable:
+                        // the denials are then lost, and the stored policies hold.
+                        try {
+                            pairedDevices.value.legacyKeyPolicyDenials().also { moved.set(it.keys) }
+                        } catch (e: Exception) {
+                            Log.e("XKeyDatabase", "Reading recorded key policy denials failed; none moved", e)
+                            emptyMap()
+                        }
+                    }
+                )
+                .addCallback(object : Callback() {
+                    override fun onOpen(db: SupportSQLiteDatabase) {
+                        val keyIds = moved.getAndSet(emptyList())
+                        if (keyIds.isNotEmpty()) pairedDevices.value.dropLegacyKeyPolicyDenials(keyIds)
+                    }
+                })
                 .build()
         }
 
