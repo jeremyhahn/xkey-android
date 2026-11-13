@@ -100,7 +100,7 @@ class BleClientStaleCallbackTest {
         assertTrue(h.client.connect(h.address, randomKey()))
         h.holdWrites = true
         val call = async(Dispatchers.Default) { h.client.sendRequest(REQUEST) }
-        awaitUntil("the request's write") { h.heldWrites == 1 }
+        h.awaitUntil("the request's write") { h.heldWrites == 1 }
         val requestWrite = h.probe.writeCompletion.get()
 
         paused.resume()
@@ -136,7 +136,7 @@ class BleClientStaleCallbackTest {
         }
         h.holdWrites = true
         val reconnect = async(Dispatchers.Default) { h.client.connect(h.address, randomKey()) }
-        awaitUntil("the reconnection's identity write") { h.heldWrites == 1 }
+        h.awaitUntil("the reconnection's identity write") { h.heldWrites == 1 }
         val handshakeWrite = h.probe.writeCompletion.get()
 
         h.probe.gattCallback.onConnectionStateChange(
@@ -158,7 +158,7 @@ class BleClientStaleCallbackTest {
         h.client.connect(h.address, randomKey())
         h.holdWrites = true
         val call = async(Dispatchers.Default) { runCatching { h.client.sendRequest(REQUEST) } }
-        awaitUntil("the request's write") { h.heldWrites == 1 }
+        h.awaitUntil("the request's write") { h.heldWrites == 1 }
 
         h.probe.gattCallback.onConnectionStateChange(
             h.gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
@@ -167,9 +167,7 @@ class BleClientStaleCallbackTest {
         // At once, not at a deadline.
         val failure = withTimeout(QUICK_MS) { call.await() }.exceptionOrNull()
         assertTrue("the write must be failed, not left waiting: $failure", failure is BleClientException)
-        awaitUntil("the link to be torn down") {
-            h.client.connectionState.value == ClientConnectionState.Disconnected
-        }
+        h.awaitConnectionState(ClientConnectionState.Disconnected)
         assertNull(h.probe.gattConnection)
         assertFalse(h.client.isConnected())
         verify { h.gatt.close() }
@@ -199,9 +197,7 @@ class BleClientStaleCallbackTest {
 
         val failure = withTimeout(TIMEOUT_MS) { call.await() }.exceptionOrNull()
         assertTrue("the request must be failed, not left waiting: $failure", failure is BleClientException)
-        awaitUntil("the link to be torn down") {
-            h.client.connectionState.value == ClientConnectionState.Disconnected
-        }
+        h.awaitConnectionState(ClientConnectionState.Disconnected)
         assertNull(h.probe.gattConnection)
         assertNull("no waiter may be left behind", h.probe.pendingResponse)
         assertFalse(h.client.isConnected())
@@ -231,14 +227,6 @@ class BleClientStaleCallbackTest {
         }
 
         fun resume() = released.countDown()
-    }
-
-    private fun awaitUntil(what: String, condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + TIMEOUT_MS
-        while (!condition()) {
-            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting for $what")
-            Thread.sleep(2)
-        }
     }
 
     private fun randomKey(): ByteArray = ByteArray(32).also { SecureRandom().nextBytes(it) }
