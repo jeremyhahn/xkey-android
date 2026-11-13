@@ -84,7 +84,7 @@ class KeyPolicyStoreTest {
     fun anEditBoundToAReplacedKeyRefusesAndLeavesTheNewKeysGrants() = runBlocking {
         val old = tables.addKey("k", SELECTED_PEERS)
         val store = store()
-        store.deleteKey("k")
+        assertTrue(store.deleteKey("k", old))
         val recreated = tables.addKey("k", SELECTED_PEERS)
         tables.grant("k", PEER)
         assertTrue(recreated != old)
@@ -136,7 +136,7 @@ class KeyPolicyStoreTest {
         store.grant("k", instance, PEER)
         assertEquals(setOf(PEER), tables.grantsOf("k"))
 
-        assertTrue(store.deleteKey("k"))
+        assertTrue(store.deleteKey("k", instance))
         assertEquals(null, store.policy("k"))
         assertEquals(emptySet<String>(), tables.grantsOf("k"))
         assertEquals(null, tables.keyInstance("k"))

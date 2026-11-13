@@ -2081,7 +2081,7 @@ class KeyDetailActivity : AppCompatActivity() {
                 }
             }
             // With its policy row and grant rows, in one transaction (#193)
-            KeySharingPeers.forgetKey(key.keyId, keyPolicyStore)
+            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore)
             finish()
         }
     }

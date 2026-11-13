@@ -124,6 +124,9 @@ class KeySharingPeers(
                         repository.writeGrant(peerPublicKeyHex, pairing) { store.grant(keyId, instance, peerPublicKeyHex) }
                     } catch (e: KeyPolicyStore.GrantRefusedException) {
                         false
+                    } catch (e: KeyPolicyStore.KeyChangedException) {
+                        // The key this sheet was opened for is gone or replaced.
+                        false
                     }
                 }
                 // The later choice stands: an earlier failed withdrawal is not retried over it.
@@ -254,12 +257,14 @@ class KeySharingPeers(
          * Deletes [keyId] with its policy row and grant rows
          * ([KeyPolicyStore.deleteKey]) under the edits lock, and drops its
          * pending withdrawals: no retry of an edit of the deleted key lands
-         * on one generated again under its id (#193). Throws if the delete
-         * failed. Returns whether a key was deleted.
+         * on one generated again under its id (#193). Only the key row
+         * [instance] the delete was approved for is deleted: false, with
+         * nothing deleted, if the key is gone or was generated again under
+         * its id meanwhile. Throws if the delete failed.
          */
-        suspend fun forgetKey(keyId: String, store: KeyPolicyStore): Boolean =
+        suspend fun forgetKey(keyId: String, instance: Long, store: KeyPolicyStore): Boolean =
             accepted(acceptedEdits) {
-                store.deleteKey(keyId).also { settle { it.first == keyId } }
+                store.deleteKey(keyId, instance).also { if (it) settle { it.first == keyId } }
             }
 
         /**

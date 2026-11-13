@@ -1848,15 +1848,20 @@ class RequestHandler(
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
 
+        // Delete from unified key store with its policy row and grant rows,
+        // in one transaction, under the sharing edits' order (#193), only if
+        // the key row is still the one this request found: a delete queued
+        // behind other edits never removes a key generated again under its
+        // id. A failed delete throws to the caller, never a logged success.
+        val entity = keyDao.getByKeyId(keyId)
+        if (entity != null && !KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore)) {
+            return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
+        }
+
         // Delete from Android Keystore and the software key store (only one
         // of the two will actually hold the key).
         keystoreManager.deleteGeneralKey(keyId)
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
-
-        // Delete from unified key store with its policy row and grant rows,
-        // in one transaction, under the sharing edits' order (#193). A failed
-        // delete throws to the caller, never a logged success.
-        KeySharingPeers.forgetKey(keyId, keyPolicyStore)
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))

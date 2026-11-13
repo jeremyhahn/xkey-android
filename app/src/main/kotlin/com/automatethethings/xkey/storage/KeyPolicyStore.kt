@@ -137,12 +137,13 @@ class KeyPolicyStore(
      * policy row owes a grant clear or denies every peer: the clear would
      * delete it, or it would authorize nothing.
      *
-     * @throws KeyChangedException if the key does not exist.
+     * @throws KeyChangedException if the key row is not [instance]: the key
+     *   is gone, or was generated again under its id since the grant was made.
      * @throws GrantRefusedException if the key's policy state refuses grants.
      */
     suspend fun grant(keyId: String, instance: Long, peerPublicKeyHex: String) {
         transactor.run {
-            if (dao.keyInstance(keyId) == null) throw KeyChangedException(keyId)
+            if (dao.keyInstance(keyId) != instance) throw KeyChangedException(keyId)
             if (unrecordedDenials[keyId] == instance || refusesGrants(dao.policyRow(keyId))) throw GrantRefusedException(keyId)
             dao.putGrant(KeySharingPolicy(keyId = keyId, peerPublicKeyHex = peerPublicKeyHex, allowed = true))
         }
@@ -164,9 +165,14 @@ class KeyPolicyStore(
             instance
         }
 
-    /** Deletes [keyId]'s grant rows, policy row and key row in one transaction. Returns whether a key was deleted. */
-    suspend fun deleteKey(keyId: String): Boolean =
+    /**
+     * Deletes [keyId]'s grant rows, policy row and key row in one
+     * transaction, if its key row is still [instance]. Returns false, with
+     * nothing deleted, if the key is gone or was generated again under its id.
+     */
+    suspend fun deleteKey(keyId: String, instance: Long): Boolean =
         transactor.run {
+            if (dao.keyInstance(keyId) != instance) return@run false
             dao.deleteGrants(keyId)
             dao.deleteKey(keyId) > 0
         }

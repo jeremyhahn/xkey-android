@@ -414,7 +414,7 @@ class KeySharingPendingIntentHandlerTest {
 
         // The key is deleted (as the key screens do) and generated again
         // under its id, not shareable, and granted to a peer.
-        assertTrue(KeySharingPeers.forgetKey(key, store))
+        assertTrue(KeySharingPeers.forgetKey(key, first, store))
         val second = tables.addKey(key, SharingPolicyType.PRIVATE)
         tables.grant(key, PEER_A)
         advanceUntilIdle()

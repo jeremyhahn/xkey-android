@@ -1266,7 +1266,7 @@ class KeyManagementActivity : AppCompatActivity() {
                 }
             }
             // With its policy row and grant rows, in one transaction (#193)
-            KeySharingPeers.forgetKey(key.keyId, keyPolicyStore)
+            KeySharingPeers.forgetKey(key.keyId, key.id, keyPolicyStore)
             Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
         }
     }

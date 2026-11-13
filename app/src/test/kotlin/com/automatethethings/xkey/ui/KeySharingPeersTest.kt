@@ -606,7 +606,7 @@ class KeySharingPeersTest {
     @Test
     fun aPolicyChangeForAReplacedKeyIsRefused() = runTest {
         val peers = peersOf()
-        assertTrue(KeySharingPeers.forgetKey(KEY, store))
+        assertTrue(KeySharingPeers.forgetKey(KEY, instance, store))
         val recreated = tables.addKey(KEY, StoredPolicy.SELECTED_PEERS)
         rows(KEY to PEER_A)
 
