@@ -76,7 +76,27 @@ class BiometricNotificationHelperTest {
     private lateinit var helper: BiometricNotificationHelper
 
     /** The key each test posts under, and tearDown takes down. */
-    private val requestId = "request-${System.nanoTime()}"
+    private val requestId = NotificationKeys.wakeOnly("notificationHelperTest")
+
+    /**
+     * Runs [post] on [key]'s own prompt queue turn, as every caller of the
+     * helper does (it refuses a key that is not ACTIVE), then hands the
+     * screen on. The notification stays up after the turn: only the helper's
+     * timeout or a cancel takes it down.
+     */
+    private fun <T> onTurn(key: String, post: () -> T): T {
+        PromptOwnership.process.enqueue(key) {}
+        try {
+            assertEquals(
+                "another prompt holds the screen",
+                PromptOwnership.State.ACTIVE,
+                PromptOwnership.process.state(key)
+            )
+            return post()
+        } finally {
+            PromptOwnership.process.end(key)
+        }
+    }
 
     @Before
     fun setUp() {
@@ -134,11 +154,11 @@ class BiometricNotificationHelperTest {
 
     @Test
     fun showBiometricRequiredNotification_postsOnTheBiometricChannel() {
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
             requestId = requestId
-        )
+        ) }
 
         val notification = awaitPosted().notification
         assertEquals(XKeyApplication.BIOMETRIC_CHANNEL_ID, notification.channelId)
@@ -152,11 +172,11 @@ class BiometricNotificationHelperTest {
 
     @Test
     fun showBiometricRequiredNotification_namesTheRelyingParty() {
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
             requestId = requestId
-        )
+        ) }
 
         val text = awaitPosted().notification.extras
             .getCharSequence(Notification.EXTRA_TEXT)?.toString()
@@ -171,11 +191,11 @@ class BiometricNotificationHelperTest {
 
     @Test
     fun showBiometricRequiredNotification_fallsBackToTheAppNameWithoutARelyingParty() {
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "decrypt",
             rpName = null,
             requestId = requestId
-        )
+        ) }
 
         val text = awaitPosted().notification.extras
             .getCharSequence(Notification.EXTRA_TEXT)?.toString()
@@ -185,11 +205,11 @@ class BiometricNotificationHelperTest {
 
     @Test
     fun cancelNotification_removesIt() {
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
             requestId = requestId
-        )
+        ) }
         awaitPosted()
 
         helper.cancelNotification(requestId)
@@ -201,13 +221,13 @@ class BiometricNotificationHelperTest {
     fun theTimeoutCallbackFiresAndTakesTheNotificationWithIt() {
         val timedOut = CountDownLatch(1)
 
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
             requestId = requestId,
             timeoutMs = 400L,
             onTimeout = { timedOut.countDown() }
-        )
+        ) }
 
         assertTrue(
             "the timeout callback never ran",
@@ -220,13 +240,13 @@ class BiometricNotificationHelperTest {
     fun cancellingBeforeTheTimeoutSuppressesTheCallback() {
         val timedOut = CountDownLatch(1)
 
-        helper.showBiometricRequiredNotification(
+        onTurn(requestId) { helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = "Example Corp",
             requestId = requestId,
             timeoutMs = 1_500L,
             onTimeout = { timedOut.countDown() }
-        )
+        ) }
         awaitPosted()
 
         helper.cancelNotification(requestId)
@@ -267,7 +287,12 @@ class BiometricNotificationHelperTest {
         assertTrue("the main looper never got that far", passed.await(10, TimeUnit.SECONDS))
     }
 
+    /** Posts under [key] on a queue turn of its own. */
     private fun show(key: String, timeoutMs: Long, timedOut: CountDownLatch) =
+        onTurn(key) { post(key, timeoutMs, timedOut) }
+
+    /** Posts under [key], which must already be ACTIVE. */
+    private fun post(key: String, timeoutMs: Long, timedOut: CountDownLatch) =
         helper.showBiometricRequiredNotification(
             operationType = "sign",
             rpName = key,
@@ -363,8 +388,11 @@ class BiometricNotificationHelperTest {
         val replacedTimedOut = CountDownLatch(1)
         val currentTimedOut = CountDownLatch(1)
 
-        show(requestId, 600L, replacedTimedOut)
-        show(requestId, 2_000L, currentTimedOut)
+        // Both posts on the request's one turn: its key is enqueued only once.
+        onTurn(requestId) {
+            post(requestId, 600L, replacedTimedOut)
+            post(requestId, 2_000L, currentTimedOut)
+        }
         passOnTheMainLooper(900L)
 
         assertEquals("the replaced timeout's callback ran", 1L, replacedTimedOut.count)

@@ -23,6 +23,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -78,7 +80,12 @@ class TransparentBiometricActivityTest {
     fun tearDown() {
         receiver?.let { context.unregisterReceiver(it) }
         receiver = null
+        held.forEach { PromptOwnership.process.end(it) }
+        held.clear()
     }
+
+    /** Queue keys this test holds ACTIVE ([newRequestId]), let go in tearDown. */
+    private val held = mutableListOf<String>()
 
     // ---------------------------------------------------------------
     // createIntent() factory
@@ -274,12 +281,33 @@ class TransparentBiometricActivityTest {
         }
     }
 
+    /** An id whose key is not ACTIVE gets no prompt: another approval may hold the screen. */
+    @Test
+    fun anIdOutsideItsQueueTurn_finishesWithoutAPrompt() {
+        val scenario = ActivityScenario.launch<TransparentBiometricActivity>(
+            TransparentBiometricActivity.createIntent(context, NotificationKeys.wakeOnly("uiTest-unqueued"))
+        )
+
+        awaitCondition("The prompt activity should finish without prompting") {
+            scenario.state == Lifecycle.State.DESTROYED
+        }
+    }
+
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
 
-    /** A per-run id so results from one test can never be mistaken for another's. */
-    private fun newRequestId(): String = "ui-test-" + UUID.randomUUID()
+    /**
+     * A per-run id so results from one test can never be mistaken for
+     * another's, held ACTIVE in the one prompt queue as a caller's turn holds
+     * it: the activity shows a prompt only for an id whose key is ACTIVE.
+     * tearDown hands the screen on.
+     */
+    private fun newRequestId(): String = NotificationKeys.wakeOnly("uiTest-" + UUID.randomUUID()).also { key ->
+        PromptOwnership.process.enqueue(key) {}
+        held += key
+        assertEquals("another prompt holds the screen", PromptOwnership.State.ACTIVE, PromptOwnership.process.state(key))
+    }
 
     /**
      * Registers a receiver for the biometric-result broadcast, launches [intent],
