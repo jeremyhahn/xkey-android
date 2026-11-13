@@ -19,8 +19,11 @@ import com.automatethethings.xkey.crypto.SyncCodec
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /**
  * Stores opaque, already-encrypted backup blobs created by a paired desktop
@@ -71,9 +74,20 @@ import java.nio.ByteBuffer
  * id), so the file is rewritten as an `XKB2` record with sequence 0 and its
  * modification time as the creation time.
  *
+ * ## Writes
+ *
+ * [store] writes a record to `.<record name>.tmp` in the same directory,
+ * syncs it, and renames it over the record, so a failed or interrupted write
+ * leaves the earlier record under that id as it was. A failed write deletes
+ * its temp file; one left by a crash is deleted on first access, never
+ * migrated as a legacy blob.
+ *
  * ## Failures
  *
- * A record whose header is truncated or carries an unknown magic is skipped.
+ * A file that is not a record — shorter than a magic, an unknown magic, or an
+ * `XKB2` header cut short before its sequence and creation time — is skipped
+ * by [latestId] and [store]. A record whose header is whole but whose id or
+ * id length is cut short is an [IOException] from [latestId] and [load].
  * Any other read failure is an [IOException] from [store], [latestId] and
  * [createdAtMillis]: an unreadable backup is never treated as absent, so a
  * restore without an id cannot silently fall back to an older backup.
@@ -82,6 +96,18 @@ class BackupStore(context: Context, private val clock: () -> Long = System::curr
     private val dir: File = File(context.filesDir, "backups").apply { mkdirs() }
 
     private var migrated = false
+
+    /**
+     * Writes bytes to a new temp file and syncs them to disk before
+     * [writeRecord] renames it into place; a seam for tests that fail a write
+     * partway.
+     */
+    internal var writeFile: (File, ByteArray) -> Unit = { file, bytes ->
+        FileOutputStream(file).use { out ->
+            out.write(bytes)
+            out.fd.sync()
+        }
+    }
 
     /**
      * Store a backup blob. If [backupId] is blank a unique id is generated.
@@ -102,11 +128,15 @@ class BackupStore(context: Context, private val clock: () -> Long = System::curr
             }
             generated
         }
-        recordFile(id).writeBytes(encodeRecord(Header(sequence, now), id, data))
+        writeRecord(recordFile(id), encodeRecord(Header(sequence, now), id, data))
         id
     }
 
-    /** Returns the stored blob for [backupId], or null if absent. */
+    /**
+     * Returns the stored blob for [backupId], or null if absent.
+     *
+     * @throws IOException if the record cannot be read or is cut short.
+     */
     fun load(backupId: String): ByteArray? = synchronized(LOCK) {
         migrateLegacyRecords()
         val file = recordFile(backupId)
@@ -184,7 +214,14 @@ class BackupStore(context: Context, private val clock: () -> Long = System::curr
         }
     }
 
-    /** Splits a record into (id, blob), or null if [bytes] is not a record. */
+    /**
+     * Splits a record into (id, blob), or null if [bytes] is not a record
+     * (shorter than a magic, or an unknown magic).
+     *
+     * @throws IOException if [bytes] carries a record magic but is cut short:
+     *   a header shorter than its fixed size, or an id length that is negative
+     *   or runs past the end.
+     */
     private fun decodeRecord(bytes: ByteArray): Pair<String, ByteArray>? {
         if (bytes.size < MAGIC_V1.size) return null
         val magic = bytes.copyOfRange(0, MAGIC_V1.size)
@@ -193,11 +230,38 @@ class BackupStore(context: Context, private val clock: () -> Long = System::curr
             MAGIC_V1.contentEquals(magic) -> V1_HEADER_SIZE
             else -> return null
         }
-        if (bytes.size < headerSize) return null
+        if (bytes.size < headerSize) {
+            throw IOException("Backup record cut short: ${bytes.size} bytes, header needs $headerSize")
+        }
         val idLength = ByteBuffer.wrap(bytes, headerSize - 4, 4).int
-        if (idLength < 0 || headerSize + idLength > bytes.size) return null
+        if (idLength < 0 || headerSize + idLength > bytes.size) {
+            throw IOException("Backup record cut short: id length $idLength, ${bytes.size - headerSize} bytes follow the header")
+        }
         val id = String(bytes, headerSize, idLength, Charsets.UTF_8)
         return id to bytes.copyOfRange(headerSize + idLength, bytes.size)
+    }
+
+    /**
+     * Writes [bytes] to a temp file beside [target], then renames it over
+     * [target], so a failed or interrupted write never leaves a cut-short
+     * record and never replaces the earlier one. A failed write deletes the
+     * temp file.
+     */
+    private fun writeRecord(target: File, bytes: ByteArray) {
+        val temp = File(dir, ".${target.name}$TEMP_SUFFIX")
+        var moved = false
+        try {
+            writeFile(temp, bytes)
+            Files.move(
+                temp.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE
+            )
+            moved = true
+        } finally {
+            if (!moved) temp.delete()
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -214,11 +278,16 @@ class BackupStore(context: Context, private val clock: () -> Long = System::curr
         val files = dir.listFiles() ?: return
         for (file in files) {
             if (RECORD_NAME.matches(file.name)) continue
+            // A temp file left by an interrupted write is not a legacy blob.
+            if (TEMP_NAME.matches(file.name)) {
+                file.delete()
+                continue
+            }
             val id = file.name
             val target = recordFile(id)
             if (!target.exists()) {
                 val modified = file.lastModified()
-                target.writeBytes(encodeRecord(Header(0L, modified), id, file.readBytes()))
+                writeRecord(target, encodeRecord(Header(0L, modified), id, file.readBytes()))
                 target.setLastModified(modified)
             }
             file.delete()
@@ -241,5 +310,9 @@ class BackupStore(context: Context, private val clock: () -> Long = System::curr
 
         const val RECORD_SUFFIX = ".backup"
         val RECORD_NAME = Regex("[0-9a-f]{64}\\.backup")
+
+        /** A record being written: `.<record name>.tmp`, never a [RECORD_NAME]. */
+        const val TEMP_SUFFIX = ".tmp"
+        val TEMP_NAME = Regex("\\.[0-9a-f]{64}\\.backup\\.tmp")
     }
 }
