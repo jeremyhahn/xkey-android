@@ -17,6 +17,8 @@ import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConfirmedConnection
+import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.MessageSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -221,6 +223,15 @@ class GattServer(
     private var connectedDevice: BluetoothDevice? = null
     @Volatile
     private var noiseSession: NoiseSession? = null
+
+    /**
+     * The id assigned each connection's Noise session when the device
+     * connected. Every request on it carries this id to the handler, which
+     * keys PER_SESSION approval on it rather than on anything handler-wide
+     * (#134). Weak, so an ended session's entry goes with it.
+     */
+    private val connectionIds: MutableMap<NoiseSession, String> =
+        java.util.Collections.synchronizedMap(java.util.WeakHashMap())
 
     /**
      * The queue of the connection [noiseSession] was made on. Written before
@@ -1127,6 +1138,7 @@ class GattServer(
             Log.i(TAG, "Static key loaded")
 
             sessionQueue = currentCoroutineContext()[EventQueue]
+            connectionIds[session] = "ble:${UUID.randomUUID()}"
             noiseSession = session
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create Noise session", e)
@@ -1631,6 +1643,8 @@ class GattServer(
         val caller = RequestHandler.servedConnection(
             SessionBindingProvider { binding?.takeIf { isCurrent(session) }?.copyOf() },
             binding?.initiatorStaticPublicKey?.toHexString(),
+            // A session with no id shares no approval with anything.
+            session?.let { connectionIds[it] } ?: "ble:${UUID.randomUUID()}",
         )
         val router = messageRouter
         return withContext(caller) {
@@ -2453,6 +2467,20 @@ class GattServer(
     }
 
     /**
+     * The established session's own authenticated peer, while that session is
+     * confirmed, current and not revoked. A revocation clears the
+     * confirmation at once, before the deferred teardown clears the handler's
+     * peer key, so this answers null from the moment of the revocation.
+     */
+    override fun confirmedConnection(): ConfirmedConnection? {
+        val session = establishedSession ?: return null
+        val peer = authenticatedPeerKeyHex
+        if (!pairingConfirmed || peer.isNullOrEmpty()) return null
+        if (!isCurrent(session) || !session.isHandshakeComplete()) return null
+        return ConfirmedConnection(peer, session)
+    }
+
+    /**
      * Sends an encrypted message to the connected device.
      *
      * Used by [RemoteKeyClient] for outbound remote.* requests. The peer is
@@ -2474,6 +2502,23 @@ class GattServer(
     }
 
     /**
+     * Sends [data] on [connection]'s own Noise session alone. Admission
+     * refuses it unless that session is still the established, current one,
+     * confirmed for the same peer, so a share authorized for one desktop is
+     * never encrypted to a desktop that reconnected since.
+     *
+     * @throws ConnectionChangedException if [connection] is not current;
+     *   nothing is encrypted.
+     */
+    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+        val session = connection.connection as? NoiseSession ?: throw ConnectionChangedException()
+        if (!connection.sameAs(confirmedConnection())) throw ConnectionChangedException()
+        val device = connectedDevice
+            ?: throw java.io.IOException("No connected device")
+        sendOnSession(session, device, data, revalidatePeer = true, expected = connection)
+    }
+
+    /**
      * Encrypts [plaintext] on [session] and notifies it to [device].
      *
      * Waiting for the notification channel happens first and may be
@@ -2483,6 +2528,8 @@ class GattServer(
      * paired and confirmed on it) and encryption share [revocationLock] with the removal, so a
      * refused send writes nothing and consumes no nonce, and once a nonce is
      * consumed the frame is delivered or the session is torn down.
+     * A send scoped to [expected] is admitted only while [session] is still
+     * that confirmed connection.
      *
      * @throws PeerNotPairedException if the session was revoked or its peer is no longer paired
      * @throws java.io.IOException if the session is gone, its connection is
@@ -2492,7 +2539,8 @@ class GattServer(
         session: NoiseSession,
         device: BluetoothDevice,
         plaintext: ByteArray,
-        revalidatePeer: Boolean
+        revalidatePeer: Boolean,
+        expected: ConfirmedConnection? = null
     ) {
         val channel = openChannel(device)
             ?: throw java.io.IOException("No notification channel to ${device.address}")
@@ -2505,6 +2553,14 @@ class GattServer(
                     synchronized(revocationLock) {
                         val peerKeyHex = session.getRemoteStaticKey()?.toHexString()
                         if (session === revokedSession) throw PeerNotPairedException(peerKeyHex)
+                        // A scoped send whose connection was replaced or ended
+                        // fails as a changed connection, so the caller decides
+                        // again on whatever session is current now.
+                        if (expected != null &&
+                            (expected.connection !== session || !expected.sameAs(confirmedConnection()))
+                        ) {
+                            throw ConnectionChangedException()
+                        }
                         if (!isCurrent(session)) throw java.io.IOException("The session is no longer live")
                         // Its connection's disconnect was seen: the session
                         // still decrypts the replies queued before it, but
@@ -2777,6 +2833,14 @@ class GattServer(
         val session = establishedSession ?: return false
         return isCurrent(session) && session.isHandshakeComplete()
     }
+
+    /**
+     * The peer this BLE session confirmed, or null while no session is
+     * established and confirmed. [stop] and a disconnect clear it, unlike the
+     * request handler's peer, which every transport shares.
+     */
+    fun confirmedPeerKeyHex(): String? =
+        authenticatedPeerKeyHex?.takeIf { pairingConfirmed && isSessionEstablished() }
 }
 
 /**

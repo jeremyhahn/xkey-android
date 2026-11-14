@@ -15,8 +15,23 @@
 
 package com.automatethethings.xkey.ble
 
+import java.util.PriorityQueue
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Delay
+import kotlinx.coroutines.DisposableHandle
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -45,4 +60,165 @@ internal fun awaitScopeFinished(owner: Any, timeoutMs: Long = 5_000L) {
             "${owner.javaClass.simpleName}'s coroutines still run $timeoutMs ms after destroy(): " +
                 job.children.toList()
         )
+}
+
+/**
+ * Puts a [TrackingDispatcher] under [owner]'s scope, in place of the
+ * dispatcher it was built with, and returns it. Call it before the test
+ * delivers the first callback: a coroutine already started stays on the
+ * old scope.
+ */
+internal fun trackScope(owner: Any): TrackingDispatcher {
+    val field = try {
+        owner.javaClass.getDeclaredField("scope").apply { isAccessible = true }
+    } catch (e: NoSuchFieldException) {
+        throw AssertionError("${owner.javaClass.simpleName}.scope is a seam these BLE tests drive", e)
+    }
+    val dispatcher = TrackingDispatcher()
+    field.set(owner, CoroutineScope(SupervisorJob() + dispatcher))
+    return dispatcher
+}
+
+/**
+ * A dispatcher that knows when the coroutines it runs have nothing left to
+ * do, so a test waits on what the server does rather than for a settle
+ * window (#160).
+ *
+ * It counts the steps it has been handed and not yet finished. A callback,
+ * a `Mutex.unlock` or a `complete` dispatches the coroutine it resumes
+ * before it returns, and a step that resumes another dispatches it before
+ * it ends, so the count reaches zero only once everything they set going
+ * has run up to its next suspension: a lock, a readiness, a timer, or its
+ * end.
+ *
+ * It also holds the scope's timers (`delay`, `withTimeout`): a timer fires
+ * only when the test moves [now] past it with [advanceTimeBy], never on the
+ * wall clock (#252). So what a test sees before it advances was caused by
+ * the events it delivered, not by a wait expiring, however slow the runner;
+ * a wall-clock bound in [awaitIdle] or [eventually] only stops a hung test.
+ */
+@OptIn(InternalCoroutinesApi::class)
+internal class TrackingDispatcher : CoroutineDispatcher(), Delay {
+
+    private companion object {
+        const val TIMEOUT_MS = 5_000L
+
+        // How often [eventually] re-checks when no step finishes, for state
+        // a thread other than this dispatcher's sets.
+        const val RECHECK_MS = 100L
+    }
+
+    /** A held timer: [fire] runs when [now] reaches [due]. */
+    private class Timer(val due: Long, val seq: Long, val fire: () -> Unit)
+
+    private val lock = ReentrantLock()
+    private val stepFinished = lock.newCondition()
+    private var running = 0
+    private var finished = 0L
+    private val threads = AtomicInteger()
+    private var clock = 0L
+    private var timerSeq = 0L
+    private val timers = PriorityQueue<Timer>(compareBy<Timer>({ it.due }, { it.seq }))
+
+    /** The scope's time, in ms: zero until the test advances it. */
+    val now: Long get() = lock.withLock { clock }
+
+    /** How many timers wait for [now] to reach them. */
+    val pendingTimers: Int get() = lock.withLock { timers.size }
+
+    private fun hold(timeMillis: Long, fire: () -> Unit): Timer = lock.withLock {
+        Timer(clock + timeMillis.coerceAtLeast(0), timerSeq++, fire).also { timers.add(it) }
+    }
+
+    private fun release(timer: Timer) {
+        lock.withLock { timers.remove(timer) }
+    }
+
+    override fun scheduleResumeAfterDelay(timeMillis: Long, continuation: CancellableContinuation<Unit>) {
+        val timer = hold(timeMillis) { continuation.resume(Unit) }
+        continuation.invokeOnCancellation { release(timer) }
+    }
+
+    override fun invokeOnTimeout(timeMillis: Long, block: Runnable, context: CoroutineContext): DisposableHandle {
+        val timer = hold(timeMillis) { block.run() }
+        return DisposableHandle { release(timer) }
+    }
+
+    /**
+     * Moves [now] on by [ms], firing each timer it passes in due order, and
+     * waits after each until what it set going is idle.
+     */
+    fun advanceTimeBy(ms: Long) {
+        val target = lock.withLock { clock + ms }
+        while (true) {
+            val timer = lock.withLock {
+                timers.peek()?.takeIf { it.due <= target }?.also {
+                    timers.poll()
+                    clock = it.due
+                }
+            } ?: break
+            timer.fire()
+            awaitIdle("the timer due at ${timer.due} ms has run")
+        }
+        lock.withLock { clock = target }
+    }
+
+    // A thread per step that needs one, gone a second after it is idle.
+    private val executor = ThreadPoolExecutor(0, Int.MAX_VALUE, 1, TimeUnit.SECONDS, SynchronousQueue()) { task ->
+        Thread(task, "tracked-scope-${threads.incrementAndGet()}").apply { isDaemon = true }
+    }
+
+    override fun dispatch(context: CoroutineContext, block: Runnable) {
+        lock.withLock { running++ }
+        try {
+            executor.execute {
+                try {
+                    block.run()
+                } finally {
+                    stepEnded()
+                }
+            }
+        } catch (e: Throwable) {
+            stepEnded()
+            throw e
+        }
+    }
+
+    private fun stepEnded() = lock.withLock {
+        running--
+        finished++
+        stepFinished.signalAll()
+    }
+
+    /**
+     * Waits until no step is queued or running: every coroutine on the
+     * scope is suspended or done. Fails the test after [timeoutMs].
+     */
+    fun awaitIdle(what: String, timeoutMs: Long = TIMEOUT_MS) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        lock.withLock {
+            while (running > 0) {
+                val left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
+                if (left <= 0) throw AssertionError("timed out waiting until $what: $running steps still run")
+                stepFinished.await(left, TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+
+    /**
+     * Waits until [check] holds, re-checking it each time a step finishes
+     * and at least every [RECHECK_MS]. Fails the test after [timeoutMs].
+     */
+    fun eventually(what: String, timeoutMs: Long = TIMEOUT_MS, check: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (true) {
+            val seen = lock.withLock { finished }
+            if (check()) return
+            val left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
+            if (left <= 0) throw AssertionError("timed out waiting until $what")
+            lock.withLock {
+                if (finished == seen) stepFinished.await(minOf(left, RECHECK_MS), TimeUnit.MILLISECONDS)
+            }
+        }
+    }
 }

@@ -264,6 +264,75 @@ class RemoteBackupClientTest {
         }
     }
 
+    // --- remote.listBackups (go-xkms RemoteListBackups*, BackupInfo) --------
+
+    @Test
+    fun `listBackups sends remote listBackups with empty params and no password`() = runTest {
+        sender.succeedWith("""{"backups":[]}""")
+
+        client.listBackups()
+
+        assertEquals("remote.listBackups", sender.lastRequest.method)
+        assertEquals("RemoteListBackupsParams is struct{}", emptySet<String>(), sentParams().keySet())
+    }
+
+    @Test
+    fun `listBackups parses each BackupInfo`() = runTest {
+        sender.succeedWith(
+            """{"backups":[
+                {"backup_id":"phone-1","created_at":"2026-11-01T10:00:00Z","label":"weekly","size":4294967296},
+                {"backup_id":"phone-2","created_at":"2026-11-02T10:00:00Z","size":512}
+            ]}"""
+        )
+
+        val backups = client.listBackups()
+
+        assertEquals(
+            listOf(
+                RemoteBackupClient.BackupInfo("phone-1", "2026-11-01T10:00:00Z", "weekly", 4_294_967_296L),
+                RemoteBackupClient.BackupInfo("phone-2", "2026-11-02T10:00:00Z", null, 512L)
+            ),
+            backups
+        )
+    }
+
+    @Test
+    fun `listBackups reads a nil Go slice as no backups`() = runTest {
+        sender.succeedWith("""{"backups":null}""")
+        assertEquals(emptyList<RemoteBackupClient.BackupInfo>(), client.listBackups())
+
+        sender.succeedWith("""{}""")
+        assertEquals(emptyList<RemoteBackupClient.BackupInfo>(), client.listBackups())
+    }
+
+    @Test
+    fun `listBackups refuses a backups field that is not a list of objects`() = runTest {
+        sender.succeedWith("""{"backups":"phone-1"}""")
+        expect<RemoteBackupException.MalformedReply> { client.listBackups() }
+
+        sender.succeedWith("""{"backups":["phone-1"]}""")
+        expect<RemoteBackupException.MalformedReply> { client.listBackups() }
+    }
+
+    @Test
+    fun `listBackups maps the desktop's error codes`() = runTest {
+        sender.failWith(-32035, "backup not configured")
+
+        val e = expect<RemoteBackupException.NotConfigured> { client.listBackups() }
+
+        assertEquals(-32035, e.code)
+    }
+
+    @Test
+    fun `listBackups times out and removes its router entry`() = runTest {
+        sender.neverReply()
+
+        expect<RemoteBackupException.TimedOut> { client.listBackups() }
+
+        val id = sender.lastRequest.id
+        verify { router.removePendingResponse(id) }
+    }
+
     // --- Password hygiene ---------------------------------------------------
 
     @Test

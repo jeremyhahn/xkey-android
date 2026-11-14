@@ -19,7 +19,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
@@ -73,6 +75,13 @@ class CABundleFetchException(message: String, cause: Throwable? = null) : Except
  * The endpoints return PEM-encoded certificate chains with
  * Content-Type: application/pem-certificate-chain
  *
+ * Limits, the same as `BootstrapClient` applies to `/v1/ca/bootstrap`:
+ * - the response body is read up to [MAX_RESPONSE_SIZE] (1 MB), counted on
+ *   the decoded stream so a compressed reply is bounded too;
+ * - a bundle with more than [MAX_BUNDLE_CERTIFICATES] (64) certificate
+ *   blocks is refused before any block is parsed.
+ * Either failure raises [CABundleFetchException].
+ *
  * Example usage:
  * ```kotlin
  * val fetcher = CABundleFetcher()
@@ -97,6 +106,17 @@ class CABundleFetcher(
         private const val PEM_CERT_BEGIN = "-----BEGIN CERTIFICATE-----"
         private const val PEM_CERT_END = "-----END CERTIFICATE-----"
         private const val DEFAULT_TIMEOUT_SECONDS = 30L
+        private const val READ_CHUNK_SIZE = 8192
+
+        // Same limits as BootstrapClient.MAX_RESPONSE_SIZE and
+        // BootstrapClient.MAX_BUNDLE_CERTIFICATES: both endpoints serve a
+        // trust bundle and get the same bounds.
+
+        /** Largest decoded response body accepted, in bytes. */
+        internal const val MAX_RESPONSE_SIZE = 1 * 1024 * 1024 // 1 MB
+
+        /** Most certificate blocks accepted in one bundle. */
+        internal const val MAX_BUNDLE_CERTIFICATES = 64
     }
 
     /**
@@ -137,8 +157,7 @@ class CABundleFetcher(
                 Log.w(TAG, "Unexpected Content-Type: $contentType (expected $EXPECTED_CONTENT_TYPE)")
             }
 
-            val pemBundle = resp.body?.bytes()
-                ?: throw CABundleFetchException("Empty response body from $url")
+            val pemBundle = readBoundedBody(resp, url)
 
             val certificates = parsePEMBundle(pemBundle)
             if (certificates.isEmpty()) {
@@ -158,13 +177,21 @@ class CABundleFetcher(
      *
      * This method extracts individual certificates from a PEM bundle and
      * parses them into X509Certificate objects. Malformed certificates
-     * are logged and skipped.
+     * are logged and skipped. A bundle declaring more than
+     * [MAX_BUNDLE_CERTIFICATES] blocks is refused before any is parsed.
      *
      * @param pemData The raw PEM-encoded certificate chain bytes
      * @return List of parsed X509Certificate objects
+     * @throws CABundleFetchException if the bundle has too many certificate blocks
      */
     private fun parsePEMBundle(pemData: ByteArray): List<X509Certificate> {
         val pemString = String(pemData, Charsets.UTF_8)
+        val blocks = countPemBlocks(pemString)
+        if (blocks > MAX_BUNDLE_CERTIFICATES) {
+            throw CABundleFetchException(
+                "CA bundle contains $blocks certificates, limit is $MAX_BUNDLE_CERTIFICATES"
+            )
+        }
         val certFactory = CertificateFactory.getInstance("X.509")
         val certificates = mutableListOf<X509Certificate>()
 
@@ -190,6 +217,45 @@ class CABundleFetcher(
         }
 
         return certificates
+    }
+
+    /**
+     * Reads the response body, refusing to buffer more than [MAX_RESPONSE_SIZE]
+     * bytes so a hostile endpoint cannot exhaust memory. The limit is applied
+     * to the decoded stream, which also bounds a compressed reply.
+     *
+     * @throws CABundleFetchException if the body is empty or too large
+     */
+    private fun readBoundedBody(response: Response, url: String): ByteArray {
+        val stream = response.body?.byteStream()
+            ?: throw CABundleFetchException("Empty response body from $url")
+        val buffer = ByteArrayOutputStream()
+        val chunk = ByteArray(READ_CHUNK_SIZE)
+        stream.use { input ->
+            while (true) {
+                val read = input.read(chunk)
+                if (read < 0) break
+                if (buffer.size() + read > MAX_RESPONSE_SIZE) {
+                    throw CABundleFetchException(
+                        "CA bundle response too large: exceeds $MAX_RESPONSE_SIZE bytes from $url"
+                    )
+                }
+                buffer.write(chunk, 0, read)
+            }
+        }
+        if (buffer.size() == 0) throw CABundleFetchException("Empty response body from $url")
+        return buffer.toByteArray()
+    }
+
+    /** Counts the PEM certificate blocks in [pem] without parsing them. */
+    private fun countPemBlocks(pem: String): Int {
+        var count = 0
+        var index = pem.indexOf(PEM_CERT_BEGIN)
+        while (index >= 0) {
+            count++
+            index = pem.indexOf(PEM_CERT_BEGIN, index + PEM_CERT_BEGIN.length)
+        }
+        return count
     }
 
     /**

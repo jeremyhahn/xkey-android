@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test build-image-test image-tag-test fetch-test
+	reaper-test revert-red-main-test code-review-test build-image-test image-tag-test fetch-test release-check
 
 .DEFAULT_GOAL := help
 
@@ -81,6 +81,15 @@ build: ## Build debug APK
 	@echo ""
 	@echo "APK: $(DEBUG_APK)"
 
+# A throwaway keystore in build/release-check/ (deleted on exit, never
+# committed) signs the release; the check fails unless apksigner reports that
+# one certificate. RELEASE_CHECK_OMIT=XKEY_KEY_ALIAS (any of the four) builds
+# without that variable, so the target fails: the script exits 1 when the
+# release guard refuses the build with its own message (make reports Error 1),
+# 2 with GUARD BROKEN when it does not (Error 2).
+release-check: ## Build a release APK signed with a throwaway key and verify its signer with apksigner
+	GRADLE="$(GRADLE)" ./scripts/release-check.sh
+
 # build/docker/ is tracked source (the devcontainer image), so the root build/
 # is emptied around it, never removed. Gradle's clean is app:clean (the root
 # project applies no plugin, so has no clean task) and only touches app/build.
@@ -110,7 +119,7 @@ lint: android-lint ## Android lint on the debug variant (the repository's own ga
 # of lint: CI's lint-gates job runs `make lint-gates` in parallel with the
 # image job's `make lint`, so nothing runs twice there. It runs without -k,
 # so the first failing gate ends the run.
-lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test fetch-test deps-check-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures
+lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test fetch-test deps-check-test code-review-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -130,6 +139,9 @@ closing-links-test: ## Test revert-red-main.yml's closing-link parse against fix
 
 revert-red-main-test: ## Test that revert-red-main.yml resumes a partial run, against a stubbed forge API and a local remote (bash + git + jq)
 	./scripts/revert-red-main-test.sh
+
+code-review-test: ## Test code-review.yml's twin filter, owner-resume freshness and reconcile, verdict marker and paginated history reads, read out of the workflow and run against stubbed forge reads (bash + jq, offline)
+	./scripts/code-review-test.sh
 
 reaper-test: ## Test reap-stale-ci-stacks.sh's image and lease rules against a stubbed docker (bash)
 	./scripts/reap-stale-ci-stacks-test.sh

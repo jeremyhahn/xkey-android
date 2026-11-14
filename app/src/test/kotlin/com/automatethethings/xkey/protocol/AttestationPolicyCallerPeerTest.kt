@@ -273,7 +273,7 @@ class AttestationPolicyCallerPeerTest {
 
     /** Runs [block] as the transport routes a request from a served connection. */
     private suspend fun <T> onServedConnection(peerPublicKeyHex: String?, block: suspend () -> T): T =
-        withContext(RequestHandler.servedConnection(incomingBinding, peerPublicKeyHex)) { block() }
+        withContext(RequestHandler.servedConnection(incomingBinding, peerPublicKeyHex, "test:connection")) { block() }
 
     private fun attestRequest(): ByteArray {
         val nonce = ByteArray(AttestTranscript.BINDING_SIZE) { (it + 1).toByte() }
@@ -286,7 +286,7 @@ class AttestationPolicyCallerPeerTest {
 
     private fun assertPrompts(expected: Int) {
         coVerify(exactly = expected) {
-            biometricLauncher.requestAuthentication(any(), any(), any(), any())
+            biometricLauncher.requestAuthentication(any(), any(), any(), any(), any())
         }
     }
 

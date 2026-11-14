@@ -250,6 +250,54 @@ class AuditLoggerDispatchTest {
     }
 
     @Test
+    fun `logHmacRequest writes HMAC_REQUEST with key, device and algorithm`() {
+        AuditLogger.logHmacRequest(
+            keyId = "k1",
+            keyLabel = "Key",
+            keyType = "symmetric",
+            algorithm = "HMAC-SHA256",
+            deviceId = "dev-1",
+            deviceName = "Laptop",
+            durationMs = 4L
+        )
+        val entry = only()
+        assertEquals(AuditOperationType.HMAC_REQUEST, entry.operationType)
+        assertEquals("k1", entry.keyId)
+        assertEquals("dev-1", entry.deviceId)
+        assertEquals("Laptop", entry.deviceName)
+        assertEquals(4L, entry.durationMs)
+        assertTrue(entry.success)
+        assertEquals("HMAC-SHA256", details(entry).getString("algorithm"))
+    }
+
+    @Test
+    fun `logKeyDerivationRequest writes KEY_DERIVATION_REQUEST with key and device`() {
+        AuditLogger.logKeyDerivationRequest(
+            keyId = "k2",
+            keyLabel = "Key",
+            keyType = "ecdh",
+            algorithm = "ECDH",
+            deviceId = "dev-1",
+            deviceName = "Laptop",
+            durationMs = 7L
+        )
+        val entry = only()
+        assertEquals(AuditOperationType.KEY_DERIVATION_REQUEST, entry.operationType)
+        assertEquals("k2", entry.keyId)
+        assertEquals("dev-1", entry.deviceId)
+        assertEquals("Laptop", entry.deviceName)
+        assertEquals(7L, entry.durationMs)
+        assertTrue(entry.success)
+        assertEquals("ECDH", details(entry).getString("algorithm"))
+    }
+
+    @Test
+    fun `logKeyDerivationRequest omits details when the algorithm is unknown`() {
+        AuditLogger.logKeyDerivationRequest("k2", "Key", "ecdh")
+        assertNull(only().details)
+    }
+
+    @Test
     fun `logEncryptionRequest records the algorithm`() {
         AuditLogger.logEncryptionRequest("k1", "Key", "secret", algorithm = "AES/GCM/NoPadding")
         val entry = only()
@@ -824,5 +872,69 @@ class AuditLoggerDispatchTest {
         assertEquals("piv_9d", entry.keyId)
         assertEquals("piv", entry.keyType)
         assertEquals("9d", details(entry).getString("slotId"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Password vault
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `logPasswordCreated records the entry id and display name only`() {
+        AuditLogger.logPasswordCreated("pwd-1", "Example Login")
+        val entry = only()
+        assertEquals(AuditOperationType.PASSWORD_CREATED, entry.operationType)
+        assertEquals("pwd-1", entry.keyId)
+        assertEquals("Example Login", entry.keyLabel)
+        assertEquals("password", entry.keyType)
+        assertTrue(entry.success)
+        assertNull(entry.deviceId)
+        assertNull(entry.errorMessage)
+        assertEquals(listOf("name"), details(entry).keys().asSequence().toList())
+        assertEquals("Example Login", details(entry).getString("name"))
+    }
+
+    @Test
+    fun `logPasswordDeleted records the entry id and display name only`() {
+        AuditLogger.logPasswordDeleted("pwd-1", "Example Login")
+        val entry = only()
+        assertEquals(AuditOperationType.PASSWORD_DELETED, entry.operationType)
+        assertEquals("pwd-1", entry.keyId)
+        assertEquals("Example Login", entry.keyLabel)
+        assertEquals("password", entry.keyType)
+        assertTrue(entry.success)
+        assertNull(entry.deviceId)
+        assertNull(entry.errorMessage)
+        assertEquals(listOf("name"), details(entry).keys().asSequence().toList())
+        assertEquals("Example Login", details(entry).getString("name"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Desktop backups
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `logBackupCreated records the backup id, size and requesting device`() {
+        AuditLogger.logBackupCreated("backup-1-1", 42, "aabbcc", "Laptop")
+        val entry = only()
+        assertEquals(AuditOperationType.BACKUP_CREATED, entry.operationType)
+        assertEquals("aabbcc", entry.deviceId)
+        assertEquals("Laptop", entry.deviceName)
+        assertTrue(entry.success)
+        val details = details(entry)
+        assertEquals("backup-1-1", details.getString("backupId"))
+        assertEquals(42, details.getInt("sizeBytes"))
+    }
+
+    @Test
+    fun `logBackupRestored records the backup id and size without a device`() {
+        AuditLogger.logBackupRestored("backup-2-1", 7, null, null)
+        val entry = only()
+        assertEquals(AuditOperationType.BACKUP_RESTORED, entry.operationType)
+        assertNull(entry.deviceId)
+        assertNull(entry.deviceName)
+        assertTrue(entry.success)
+        val details = details(entry)
+        assertEquals("backup-2-1", details.getString("backupId"))
+        assertEquals(7, details.getInt("sizeBytes"))
     }
 }

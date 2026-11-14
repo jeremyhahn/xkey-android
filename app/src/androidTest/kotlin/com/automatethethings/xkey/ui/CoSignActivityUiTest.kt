@@ -155,14 +155,29 @@ class CoSignActivityUiTest {
     }
 
     @Test
-    fun signingAsWitnessWithoutAHash_raisesASnackbar() {
+    fun scanningAResponseWithoutMedia_raisesASnackbar() {
+        val scenario = launch()
+
+        clickClickableWithExactText(scenario, withString(scenario, R.string.cosign_scan_response))
+
+        assertShownTextInTree(scenario, NO_MEDIA_SNACKBAR)
+    }
+
+    /** The witness signs only what it scans: a scan button, no typed hash and no bare approve button. */
+    @Test
+    fun witnessSection_offersTheRequestScanInsteadOfATypedHash() {
         val scenario = launch()
         clickClickableWithExactText(scenario, withString(scenario, R.string.cosign_witness_title))
         assertShownTextInTree(scenario, WITNESS_DESCRIPTION)
 
-        clickClickableWithExactText(scenario, withString(scenario, R.string.cosign_approve))
-
-        assertShownTextInTree(scenario, NO_HASH_SNACKBAR)
+        assertShownTextInTree(scenario, withString(scenario, R.string.cosign_scan_request))
+        assertHidden(scenario, withString(scenario, R.string.cosign_approve))
+        assertTrue(
+            "The witness section must not offer a hash text field",
+            withActivity(scenario) { activity ->
+                collectViews(activity.window.decorView) { it is android.widget.EditText && it.isShown }.isEmpty()
+            }
+        )
     }
 
     // -----------------------------------------------------------------
@@ -208,6 +223,5 @@ class CoSignActivityUiTest {
         const val WITNESS_DESCRIPTION =
             "As a witness, you sign someone else's content hash to attest your presence."
         const val NO_MEDIA_SNACKBAR = "Select a signed media file first"
-        const val NO_HASH_SNACKBAR = "Please enter the content hash"
     }
 }

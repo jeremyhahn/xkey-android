@@ -16,8 +16,14 @@ package com.automatethethings.xkey.backup
 
 import android.content.Context
 import com.automatethethings.xkey.crypto.SyncCodec
+import java.io.DataInputStream
+import java.io.EOFException
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.ByteBuffer
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /**
  * Stores opaque, already-encrypted backup blobs created by a paired desktop
@@ -35,64 +41,135 @@ import java.nio.ByteBuffer
  * file and overwrite each other.
  *
  * A digest is one-way, so the id the peer actually sent is written into the
- * record itself:
+ * record itself. Records written by this build are:
  *
  * ```
- * "XKB1" | id length (4 bytes, big endian) | id (UTF-8) | blob
+ * "XKB2" | sequence (8 bytes) | created-at millis (8 bytes)
+ *        | id length (4 bytes) | id (UTF-8) | blob          (all big endian)
  * ```
  *
- * [latestId] therefore returns the peer's own id rather than a mangled
- * filename.
+ * ## Ids
+ *
+ * A peer may name a backup; `local.createBackup` does not, so [store] then
+ * generates `backup-<creation millis>-<sequence>`. The sequence is one more
+ * than the highest sequence of any record in the directory, so two backups
+ * stored in the same millisecond still get distinct ids and neither
+ * overwrites the other.
+ *
+ * ## Latest backup
+ *
+ * [latestId] orders records by sequence, then by creation time. It never
+ * depends on the file modification time of an `XKB2` record, whose
+ * granularity can be a whole second.
  *
  * ## Records written by older builds
+ *
+ * `XKB1` records (`"XKB1" | id length | id | blob`) are still read as they
+ * are: their sequence is 0, so every backup stored by this build sorts after
+ * them, and their creation time is the file modification time.
  *
  * Earlier builds named files `sanitize(id)` and stored the bare blob. Such
  * files are migrated on first access: the filename is the best available
  * reconstruction of the id (for every id this app generated itself it *is* the
- * id, and it is exactly what the old [latestId] returned), so the file is
- * rewritten as a record under that id with its modification time preserved.
+ * id), so the file is rewritten as an `XKB2` record with sequence 0 and its
+ * modification time as the creation time.
+ *
+ * ## Writes
+ *
+ * [store] writes a record to `.<record name>.tmp` in the same directory,
+ * syncs it, and renames it over the record, so a failed or interrupted write
+ * leaves the earlier record under that id as it was. A failed write deletes
+ * its temp file; one left by a crash is deleted on first access, never
+ * migrated as a legacy blob.
+ *
+ * ## Failures
+ *
+ * A file that is not a record — shorter than a magic, an unknown magic, or an
+ * `XKB2` header cut short before its sequence and creation time — is skipped
+ * by [latestId] and [store]. A record whose header is whole but whose id or
+ * id length is cut short is an [IOException] from [latestId] and [load].
+ * Any other read failure is an [IOException] from [store], [latestId] and
+ * [createdAtMillis]: an unreadable backup is never treated as absent, so a
+ * restore without an id cannot silently fall back to an older backup.
  */
-class BackupStore(context: Context) {
+class BackupStore(context: Context, private val clock: () -> Long = System::currentTimeMillis) {
     private val dir: File = File(context.filesDir, "backups").apply { mkdirs() }
 
     private var migrated = false
 
     /**
-     * Store a backup blob. If [backupId] is blank a timestamp-based id is
-     * generated. Returns the id under which the blob was stored.
+     * Writes bytes to a new temp file and syncs them to disk before
+     * [writeRecord] renames it into place; a seam for tests that fail a write
+     * partway.
      */
-    fun store(backupId: String, data: ByteArray): String {
-        migrateLegacyRecords()
-        val id = backupId.ifBlank { "backup-${System.currentTimeMillis()}" }
-        recordFile(id).writeBytes(encodeRecord(id, data))
-        return id
+    internal var writeFile: (File, ByteArray) -> Unit = { file, bytes ->
+        FileOutputStream(file).use { out ->
+            out.write(bytes)
+            out.fd.sync()
+        }
     }
 
-    /** Returns the stored blob for [backupId], or null if absent. */
-    fun load(backupId: String): ByteArray? {
+    /**
+     * Store a backup blob. If [backupId] is blank a unique id is generated.
+     * Returns the id under which the blob was stored. Storing an existing id
+     * again replaces it and makes it the latest backup.
+     */
+    fun store(backupId: String, data: ByteArray): String = synchronized(LOCK) {
+        migrateLegacyRecords()
+        var sequence = nextSequence()
+        val now = clock()
+        val id = if (backupId.isNotBlank()) {
+            backupId
+        } else {
+            var generated = "backup-$now-$sequence"
+            while (recordFile(generated).exists()) {
+                sequence++
+                generated = "backup-$now-$sequence"
+            }
+            generated
+        }
+        writeRecord(recordFile(id), encodeRecord(Header(sequence, now), id, data))
+        id
+    }
+
+    /**
+     * Returns the stored blob for [backupId], or null if absent.
+     *
+     * @throws IOException if the record cannot be read or is cut short.
+     */
+    fun load(backupId: String): ByteArray? = synchronized(LOCK) {
         migrateLegacyRecords()
         val file = recordFile(backupId)
         if (!file.exists()) return null
-        return decodeRecord(file.readBytes())?.second
+        decodeRecord(file.readBytes())?.second
     }
 
     /** Id of the most-recently-stored backup, or null if none exist. */
-    fun latestId(): String? {
+    fun latestId(): String? = synchronized(LOCK) {
         migrateLegacyRecords()
-        return recordFiles()
-            .sortedByDescending { it.lastModified() }
-            .firstNotNullOfOrNull { decodeRecord(it.readBytes())?.first }
+        recordFiles()
+            .mapNotNull { file -> readHeader(file)?.let { file to it } }
+            .sortedWith(
+                compareByDescending<Pair<File, Header>> { it.second.sequence }
+                    .thenByDescending { it.second.createdAtMillis }
+            )
+            .firstNotNullOfOrNull { decodeRecord(it.first.readBytes())?.first }
     }
 
-    /** Creation (last-modified) time of [backupId] in Unix millis, or 0. */
-    fun createdAtMillis(backupId: String): Long {
+    /** Creation time of [backupId] in Unix millis, or 0. */
+    fun createdAtMillis(backupId: String): Long = synchronized(LOCK) {
         migrateLegacyRecords()
-        return recordFile(backupId).let { if (it.exists()) it.lastModified() else 0L }
+        val file = recordFile(backupId)
+        if (!file.exists()) return 0L
+        readHeader(file)?.createdAtMillis ?: 0L
     }
 
     // -------------------------------------------------------------------------
     // Record format
     // -------------------------------------------------------------------------
+
+    /** Order and creation time of a record. */
+    private data class Header(val sequence: Long, val createdAtMillis: Long)
 
     private fun recordFile(id: String): File =
         File(dir, "${SyncCodec.sha256Hex(id.toByteArray(Charsets.UTF_8))}$RECORD_SUFFIX")
@@ -100,25 +177,91 @@ class BackupStore(context: Context) {
     private fun recordFiles(): List<File> =
         dir.listFiles()?.filter { RECORD_NAME.matches(it.name) } ?: emptyList()
 
-    private fun encodeRecord(id: String, data: ByteArray): ByteArray {
+    private fun nextSequence(): Long =
+        (recordFiles().mapNotNull { readHeader(it)?.sequence }.maxOrNull() ?: 0L) + 1
+
+    private fun encodeRecord(header: Header, id: String, data: ByteArray): ByteArray {
         val idBytes = id.toByteArray(Charsets.UTF_8)
-        return ByteBuffer.allocate(MAGIC.size + 4 + idBytes.size + data.size)
-            .put(MAGIC)
+        return ByteBuffer.allocate(V2_HEADER_SIZE + idBytes.size + data.size)
+            .put(MAGIC_V2)
+            .putLong(header.sequence)
+            .putLong(header.createdAtMillis)
             .putInt(idBytes.size)
             .put(idBytes)
             .put(data)
             .array()
     }
 
-    /** Splits a record into (id, blob), or null if [bytes] is not a record. */
+    /**
+     * Reads only the header of [file]: an `XKB2` record's sequence and
+     * creation time, or sequence 0 and the modification time for an `XKB1`
+     * record. Null if [file] is not a record (unknown magic, or a header cut
+     * short). Any other read failure propagates.
+     *
+     * @throws IOException if [file] cannot be opened or read.
+     */
+    private fun readHeader(file: File): Header? = DataInputStream(file.inputStream().buffered()).use { input ->
+        try {
+            val magic = ByteArray(MAGIC_V2.size)
+            input.readFully(magic)
+            when {
+                MAGIC_V2.contentEquals(magic) -> Header(input.readLong(), input.readLong())
+                MAGIC_V1.contentEquals(magic) -> Header(0L, file.lastModified())
+                else -> null
+            }
+        } catch (e: EOFException) {
+            null
+        }
+    }
+
+    /**
+     * Splits a record into (id, blob), or null if [bytes] is not a record
+     * (shorter than a magic, or an unknown magic).
+     *
+     * @throws IOException if [bytes] carries a record magic but is cut short:
+     *   a header shorter than its fixed size, or an id length that is negative
+     *   or runs past the end.
+     */
     private fun decodeRecord(bytes: ByteArray): Pair<String, ByteArray>? {
-        val headerSize = MAGIC.size + 4
-        if (bytes.size < headerSize) return null
-        if (!MAGIC.contentEquals(bytes.copyOfRange(0, MAGIC.size))) return null
-        val idLength = ByteBuffer.wrap(bytes, MAGIC.size, 4).int
-        if (idLength < 0 || headerSize + idLength > bytes.size) return null
+        if (bytes.size < MAGIC_V1.size) return null
+        val magic = bytes.copyOfRange(0, MAGIC_V1.size)
+        val headerSize = when {
+            MAGIC_V2.contentEquals(magic) -> V2_HEADER_SIZE
+            MAGIC_V1.contentEquals(magic) -> V1_HEADER_SIZE
+            else -> return null
+        }
+        if (bytes.size < headerSize) {
+            throw IOException("Backup record cut short: ${bytes.size} bytes, header needs $headerSize")
+        }
+        val idLength = ByteBuffer.wrap(bytes, headerSize - 4, 4).int
+        if (idLength < 0 || headerSize + idLength > bytes.size) {
+            throw IOException("Backup record cut short: id length $idLength, ${bytes.size - headerSize} bytes follow the header")
+        }
         val id = String(bytes, headerSize, idLength, Charsets.UTF_8)
         return id to bytes.copyOfRange(headerSize + idLength, bytes.size)
+    }
+
+    /**
+     * Writes [bytes] to a temp file beside [target], then renames it over
+     * [target], so a failed or interrupted write never leaves a cut-short
+     * record and never replaces the earlier one. A failed write deletes the
+     * temp file.
+     */
+    private fun writeRecord(target: File, bytes: ByteArray) {
+        val temp = File(dir, ".${target.name}$TEMP_SUFFIX")
+        var moved = false
+        try {
+            writeFile(temp, bytes)
+            Files.move(
+                temp.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE
+            )
+            moved = true
+        } finally {
+            if (!moved) temp.delete()
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -135,11 +278,16 @@ class BackupStore(context: Context) {
         val files = dir.listFiles() ?: return
         for (file in files) {
             if (RECORD_NAME.matches(file.name)) continue
+            // A temp file left by an interrupted write is not a legacy blob.
+            if (TEMP_NAME.matches(file.name)) {
+                file.delete()
+                continue
+            }
             val id = file.name
             val target = recordFile(id)
             if (!target.exists()) {
                 val modified = file.lastModified()
-                target.writeBytes(encodeRecord(id, file.readBytes()))
+                writeRecord(target, encodeRecord(Header(0L, modified), id, file.readBytes()))
                 target.setLastModified(modified)
             }
             file.delete()
@@ -147,9 +295,24 @@ class BackupStore(context: Context) {
     }
 
     private companion object {
-        /** Record marker; distinguishes a record from a legacy bare blob. */
-        val MAGIC = "XKB1".toByteArray(Charsets.US_ASCII)
+        /** Guards the directory: [store] reads the highest sequence, then writes. */
+        val LOCK = Any()
+
+        /** Record markers; distinguish a record from a legacy bare blob. */
+        val MAGIC_V1 = "XKB1".toByteArray(Charsets.US_ASCII)
+        val MAGIC_V2 = "XKB2".toByteArray(Charsets.US_ASCII)
+
+        /** Magic and id length. */
+        const val V1_HEADER_SIZE = 4 + 4
+
+        /** Magic, sequence, created-at and id length. */
+        const val V2_HEADER_SIZE = 4 + 8 + 8 + 4
+
         const val RECORD_SUFFIX = ".backup"
         val RECORD_NAME = Regex("[0-9a-f]{64}\\.backup")
+
+        /** A record being written: `.<record name>.tmp`, never a [RECORD_NAME]. */
+        const val TEMP_SUFFIX = ".tmp"
+        val TEMP_NAME = Regex("\\.[0-9a-f]{64}\\.backup\\.tmp")
     }
 }

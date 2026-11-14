@@ -46,6 +46,14 @@
     <string name="device_info_not_available">Not Available</string>
     <string name="connected_device_title">Connected Device</string>
     <string name="recent_activity_title">Recent Activity</string>
+    <string name="recent_activity_empty">No recent activity</string>
+    <string name="recent_activity_succeeded">Succeeded</string>
+    <string name="recent_activity_failed">Failed</string>
+    <string name="recent_activity_just_now">just now</string>
+    <string name="recent_activity_minutes_ago">%1$d min ago</string>
+    <string name="recent_activity_hours_ago">%1$d h ago</string>
+    <string name="recent_activity_days_ago">%1$d d ago</string>
+    <string name="recent_activity_pair">%1$s · %2$s</string>
     <string name="auth_request_title">Authentication Request</string>
 
     <!-- Authentication -->
@@ -870,6 +878,9 @@
     <string name="sync_in_progress">Syncing…</string>
     <string name="sync_complete">Sync complete: %1$d sent, %2$d received</string>
     <string name="sync_failed">Sync failed: %1$s</string>
+    <string name="sync_desktop_last_sync">Desktop last synced %1$s</string>
+    <string name="sync_desktop_never">The desktop has not synced before</string>
+    <string name="sync_desktop_status_unavailable">The desktop\'s sync status is unavailable</string>
 
     <!-- Phone-initiated desktop backup and restore (remote.createBackup / remote.restoreBackup) -->
     <string name="desktop_backup_title">Desktop Backup</string>
@@ -891,6 +902,9 @@
     <string name="desktop_backup_restore_in_progress">Restoring backup on the desktop…</string>
     <string name="desktop_backup_complete">Backup %1$s stored (%2$d items)</string>
     <string name="desktop_backup_none_stored">No backup is stored on this phone</string>
+    <string name="desktop_backup_listed_match">Backups on the desktop: %1$d, this one among them.</string>
+    <string name="desktop_backup_listed">Backups on the desktop: %1$d. The phone\'s copy of this backup is restored.</string>
+    <string name="desktop_backup_list_failed">Could not list the desktop\'s backups. The phone\'s copy of this backup is restored.</string>
     <string name="desktop_backup_error_read_stored">Could not read the backups stored on this phone. Check free storage and try again.</string>
     <string name="desktop_backup_restore_complete">Restore complete</string>
     <string name="desktop_backup_restore_partial">Restore finished with skipped items</string>
@@ -1071,6 +1085,7 @@
     <string name="verified_viewer_no_signatures">No signatures found in this file</string>
     <string name="verified_viewer_verification_title">Signature Verification</string>
     <string name="verified_viewer_signers">Signers (%1$d)</string>
+    <string name="verified_viewer_claims">Claims: %1$s</string>
     <string name="verified_viewer_signed_at">Signed: %1$s</string>
 
     <!-- Audit Log - New Operation Types -->
@@ -1085,6 +1100,7 @@
     <string name="audit_log_op_oath_deleted">OATH Credential Deleted</string>
     <string name="audit_log_op_oath_code">OATH Code Generated</string>
     <string name="audit_log_op_oath_sync">OATH Sync Performed</string>
+    <string name="audit_log_op_password_sync">Password Sync Performed</string>
     <string name="audit_log_op_cosign_initiated">Co-Sign Initiated</string>
     <string name="audit_log_op_cosign_received">Co-Sign Received</string>
 
@@ -1103,6 +1119,10 @@
     <string name="audit_log_op_piv_cert_imported">PIV Cert Imported</string>
     <string name="audit_log_op_piv_sign_request">PIV Sign Request</string>
     <string name="audit_log_op_piv_key_deleted">PIV Key Deleted</string>
+    <string name="audit_log_op_password_created">Password Added</string>
+    <string name="audit_log_op_password_deleted">Password Deleted</string>
+    <string name="audit_log_op_backup_created">Backup Stored</string>
+    <string name="audit_log_op_backup_restored">Backup Restored</string>
 
     <!-- PIV Smart Card -->
     <string name="piv_title">PIV Smart Card</string>
@@ -1176,6 +1196,14 @@
     <string name="piv_fingerprint_copied">Fingerprint copied to clipboard</string>
     <string name="piv_no_certificate">No certificate imported</string>
     <string name="piv_cert_parse_failed">Failed to parse certificate</string>
+    <string name="piv_section_desktop">PAIRED DESKTOP SLOTS</string>
+    <string name="piv_desktop_slot_empty">No key on the desktop</string>
+    <string name="piv_desktop_cert_subject">Certificate: %s</string>
+    <string name="piv_detail_location">Location</string>
+    <string name="piv_location_desktop">Paired desktop</string>
+    <string name="piv_desktop_not_connected">No desktop connected. Connect the paired desktop to see this slot.</string>
+    <string name="piv_desktop_cert_failed">The desktop could not return the certificate: %s</string>
+    <string name="piv_desktop_sign_test_success">The desktop signed the test data (%1$s, %2$d ms)</string>
     <string name="piv_public_key_der_copied">Public key DER copied to clipboard</string>
     <string name="piv_certificate_der_copied">Certificate DER copied to clipboard</string>
 

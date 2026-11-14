@@ -94,6 +94,50 @@ object DesktopBackupForm {
             LatestBackup.Failed(e, R.string.desktop_backup_error_read_stored)
         }
 
+    /** What asking the desktop for its backups (`remote.listBackups`) found. */
+    sealed interface DesktopListing {
+        /** The desktop holds [backups]. */
+        data class Listed(val backups: List<RemoteBackupClient.BackupInfo>) : DesktopListing
+
+        /** The desktop could not be asked, or refused. */
+        data class Failed(val error: Exception) : DesktopListing
+    }
+
+    /**
+     * Runs [lookup] for the desktop's backups and turns any failure into
+     * [DesktopListing.Failed] instead of throwing it: the restore sends the
+     * phone's own envelope, so a listing failure does not block it.
+     * Cancellation still propagates.
+     */
+    suspend fun listDesktop(lookup: suspend () -> List<RemoteBackupClient.BackupInfo>): DesktopListing =
+        try {
+            DesktopListing.Listed(lookup())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            DesktopListing.Failed(e)
+        }
+
+    /** The restore dialog's line about the desktop's backups: [message] takes [count]. */
+    data class ListingNote(@StringRes val message: Int, val count: Int)
+
+    /**
+     * The line the restore dialog shows about [listing]: how many backups the
+     * desktop holds and whether [backupId], the phone's chosen backup, is one
+     * of them, or that the desktop could not list them.
+     */
+    fun listingNote(listing: DesktopListing, backupId: String): ListingNote = when (listing) {
+        is DesktopListing.Failed -> ListingNote(R.string.desktop_backup_list_failed, 0)
+        is DesktopListing.Listed -> ListingNote(
+            if (listing.backups.any { it.backupId == backupId }) {
+                R.string.desktop_backup_listed_match
+            } else {
+                R.string.desktop_backup_listed
+            },
+            listing.backups.size
+        )
+    }
+
     /** Whether the user should be offered to retype the password after [e]. */
     fun canRetry(e: Throwable): Boolean = e is RemoteBackupException.WrongPasswordOrDamaged
 

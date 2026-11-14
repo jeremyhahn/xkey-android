@@ -133,4 +133,49 @@ class DesktopBackupFormTest {
         assertEquals(R.string.desktop_backup_item_ca, DesktopBackupForm.itemLabel("ca"))
         assertNull(DesktopBackupForm.itemLabel("fido2"))
     }
+
+    // --- Listing the desktop's backups before a restore ---------------------
+
+    private fun info(id: String) = RemoteBackupClient.BackupInfo(id, "2026-11-01T10:00:00Z", null, 10L)
+
+    @Test
+    fun `a desktop listing reports the backups it found`() = runTest {
+        val listing = DesktopBackupForm.listDesktop { listOf(info("a"), info("b")) }
+        assertEquals(DesktopBackupForm.DesktopListing.Listed(listOf(info("a"), info("b"))), listing)
+    }
+
+    @Test
+    fun `a failed desktop listing is reported, not thrown`() = runTest {
+        val failure = RemoteBackupException.NotConfigured("no backup dir")
+        val listing = DesktopBackupForm.listDesktop { throw failure }
+        assertEquals(DesktopBackupForm.DesktopListing.Failed(failure), listing)
+    }
+
+    @Test
+    fun `a cancelled desktop listing still propagates the cancellation`() = runTest {
+        val cancelled = CancellationException("activity destroyed")
+        val thrown = runCatching { DesktopBackupForm.listDesktop { throw cancelled } }.exceptionOrNull()
+        assertSame(cancelled, thrown)
+    }
+
+    @Test
+    fun `the listing note says whether the desktop holds the chosen backup`() {
+        val listed = DesktopBackupForm.DesktopListing.Listed(listOf(info("a"), info("phone-7")))
+        assertEquals(
+            DesktopBackupForm.ListingNote(R.string.desktop_backup_listed_match, 2),
+            DesktopBackupForm.listingNote(listed, "phone-7")
+        )
+        assertEquals(
+            DesktopBackupForm.ListingNote(R.string.desktop_backup_listed, 2),
+            DesktopBackupForm.listingNote(listed, "phone-8")
+        )
+        assertEquals(
+            DesktopBackupForm.ListingNote(R.string.desktop_backup_listed, 0),
+            DesktopBackupForm.listingNote(DesktopBackupForm.DesktopListing.Listed(emptyList()), "phone-8")
+        )
+        assertEquals(
+            DesktopBackupForm.ListingNote(R.string.desktop_backup_list_failed, 0),
+            DesktopBackupForm.listingNote(DesktopBackupForm.DesktopListing.Failed(IOException("down")), "phone-8")
+        )
+    }
 }

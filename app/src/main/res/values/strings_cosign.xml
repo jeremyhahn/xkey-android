@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Co-sign QR exchange strings (#218). Every new co-sign string goes here.
+-->
+<resources>
+    <string name="cosign_qr_invalid">Not a co-sign QR code</string>
+    <string name="qr_camera_denied">Camera access is needed to scan a QR code. Allow it in the app\'s settings.</string>
+    <string name="cosign_scan_response">Scan the witness\'s response QR code</string>
+    <string name="cosign_approve_request_message">Sign this content as %1$s?\n\nContent hash (%2$s):\n%3$s\n\nOwner key:\n%4$s</string>
+    <string name="cosign_no_signature_data">This media has no xKey signature data. Sign it first, then ask a witness to co-sign.</string>
+    <string name="cosign_request_refused">Request refused: %1$s</string>
+    <string name="cosign_response_refused">Response refused: %1$s</string>
+    <string name="cosign_error_not_json">it is not a co-sign payload</string>
+    <string name="cosign_error_version">unsupported payload version</string>
+    <string name="cosign_error_missing_field">the field \"%1$s\" is missing</string>
+    <string name="cosign_error_hash_algorithm">unsupported hash algorithm %1$s</string>
+    <string name="cosign_error_hash">the content hash is malformed</string>
+    <string name="cosign_error_signature">the signature is not base64</string>
+    <string name="cosign_duplicate_signer">Key %1$s has already signed this media; nothing was added</string>
+    <string name="cosign_appended">Co-signature from %1$s added</string>
+    <string name="cosign_append_failed">Could not write the co-signature: %1$s</string>
+</resources>

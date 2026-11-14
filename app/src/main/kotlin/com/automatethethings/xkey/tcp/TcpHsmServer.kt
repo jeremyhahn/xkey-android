@@ -37,6 +37,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.UUID
 
 /**
  * TCP pairing server for ADB-forwarded (and emulator) connections.
@@ -100,6 +101,13 @@ class TcpHsmServer(
 
     /** Observable state of the TCP server. */
     val state: StateFlow<TcpHsmState> = _state.asStateFlow()
+
+    /**
+     * The peer this connection's session confirmed, or null while none is
+     * established and confirmed. It ends with the session, unlike the request
+     * handler's peer, which every transport shares.
+     */
+    fun confirmedPeerKeyHex(): String? = pairingSession.confirmedPeerKeyHex()
 
     private var serverScope: CoroutineScope? = null
     private var serverSocket: ServerSocket? = null
@@ -181,6 +189,9 @@ class TcpHsmServer(
                 input = socket.getInputStream(),
                 output = socket.getOutputStream().let { outputStreamForTest?.invoke(it) ?: it },
                 noiseSession = noiseSession,
+                // Each accepted socket is its own connection, so its approval
+                // is its own (#134).
+                connectionId = "tcp:${UUID.randomUUID()}",
                 isActive = { serverScope?.isActive == true && !socket.isClosed },
                 onConnected = { _state.value = TcpHsmState.Connected(remote) },
             )
@@ -201,6 +212,18 @@ class TcpHsmServer(
     override suspend fun sendEncryptedMessage(data: ByteArray) {
         pairingSession.sendEncryptedMessage(data)
     }
+
+    /**
+     * Sends on [connection] alone, refused unless it is still the current TCP
+     * connection (see [StreamPairingSession.sendEncryptedMessageOn]).
+     */
+    override suspend fun sendEncryptedMessageOn(
+        connection: com.automatethethings.xkey.remote.ConfirmedConnection,
+        data: ByteArray
+    ) = pairingSession.sendEncryptedMessageOn(connection, data)
+
+    /** The TCP connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
+    override fun confirmedConnection() = pairingSession.confirmedConnection()
 
     private fun closeQuietly(closeable: java.io.Closeable?) {
         try {

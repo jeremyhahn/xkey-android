@@ -15,6 +15,9 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -24,16 +27,21 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.security.KeyFactory
+import java.security.KeyPairGenerator
 import java.security.SecureRandom
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
+import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 
 /**
@@ -134,6 +142,179 @@ class KeystoreManagerGeneralKeysTest {
             assertEquals(algorithm, bits, publicKey.modulus.bitLength())
             assertTrue(algorithm, keystoreManager.generalKeyExists(keyId))
         }
+    }
+
+    // --------------------------------------------------------- security level
+
+    /**
+     * A key generated with `preferStrongBox = false` lives in the TEE even on a
+     * device that has StrongBox: the level is the key's, not the device's.
+     */
+    @Test
+    fun aKeyGeneratedWithoutTheStrongBoxPreferenceIsNeverReportedAsStrongBox() {
+        val (keyId, _) = generate("ES256", "level-nopref")
+
+        val level = keystoreManager.keySecurityLevel(keyId)
+        assertNotNull(level)
+        assertNotEquals(KeySecurityLevel.STRONGBOX, level)
+        assertFalse(keystoreManager.isKeyStrongBoxBacked(keyId))
+
+        assumeTrue("the TEE case needs a StrongBox device", keystoreManager.isStrongBoxAvailable())
+        assertEquals(KeySecurityLevel.TEE, level)
+    }
+
+    /** AES and HMAC keys are generated without StrongBox and report their own level. */
+    @Test
+    fun aesAndHmacKeysReportTheLevelOfTheKeyNotTheDevice() {
+        val aesId = newKeyId("level-aes")
+        val hmacId = newKeyId("level-hmac")
+        runBlocking {
+            keystoreManager.generateSymmetricKey(aesId, 256, -1)
+            keystoreManager.generateHMACKey(hmacId, "HMAC-SHA512")
+        }
+
+        listOf(aesId, hmacId).forEach { keyId ->
+            val level = keystoreManager.keySecurityLevel(keyId)
+            assertNotNull(keyId, level)
+            assertNotEquals(keyId, KeySecurityLevel.STRONGBOX, level)
+            if (keystoreManager.isStrongBoxAvailable()) {
+                assertEquals(keyId, KeySecurityLevel.TEE, level)
+            }
+        }
+    }
+
+    /**
+     * StrongBox implements neither P-384, P-521 nor RSA-4096, so a request that
+     * prefers StrongBox falls back to the TEE and must report the fallback's
+     * level, not the device's StrongBox.
+     */
+    @Test
+    fun aStrongBoxPreferenceThatFallsBackReportsTheLevelTheFallbackProduced() {
+        listOf("ES384", "ES512", "RS512").forEach { algorithm ->
+            val keyId = newKeyId("level-fallback-${algorithm.lowercase()}")
+            runBlocking {
+                keystoreManager.generateKeyForAlgorithm(
+                    keyId = keyId,
+                    algorithm = algorithm,
+                    authDurationSeconds = -1,
+                    preferStrongBox = true
+                )
+            }
+
+            val level = keystoreManager.keySecurityLevel(keyId)
+            assertNotNull(algorithm, level)
+            assertNotEquals(algorithm, KeySecurityLevel.STRONGBOX, level)
+            assertFalse(algorithm, keystoreManager.isKeyStrongBoxBacked(keyId))
+        }
+    }
+
+    /**
+     * A P-256 key that prefers StrongBox reports the level its own KeyInfo
+     * gives. The StrongBox feature flag is no proof of this key's backing:
+     * generation falls back to the TEE when StrongBox refuses the key.
+     */
+    @Test
+    fun aP256KeyThatPrefersStrongBoxReportsStrongBoxOnlyOnAStrongBoxDevice() {
+        val keyId = newKeyId("level-p256-sb")
+        runBlocking {
+            keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1, preferStrongBox = true)
+        }
+
+        val level = keystoreManager.keySecurityLevel(keyId)
+        assertNotNull(level)
+        if (!keystoreManager.isStrongBoxAvailable()) {
+            assertNotEquals(KeySecurityLevel.STRONGBOX, level)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val keyStore = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            val key = keyStore.getKey("xkey_key_$keyId", null)
+            val info = java.security.KeyFactory.getInstance(key.algorithm, "AndroidKeyStore")
+                .getKeySpec(key, android.security.keystore.KeyInfo::class.java)
+            val inStrongBox = info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
+            assertEquals(inStrongBox, level == KeySecurityLevel.STRONGBOX)
+            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(keyId))
+        } else {
+            assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(keyId))
+        }
+    }
+
+    @Test
+    fun aMissingKeyHasNoSecurityLevel() {
+        assertNull(keystoreManager.keySecurityLevel("missing-${System.nanoTime()}"))
+    }
+
+    /**
+     * A credential `k` (xkey_credential_k) and a general key `k` (xkey_key_k)
+     * can coexist; the general key's level is read from its own alias, never
+     * from the credential that [KeystoreManager.resolveKeystoreAlias] prefers.
+     * The credential's KeyInfo read is made to fail, so a lookup that strayed
+     * to the credential would throw on every device.
+     */
+    @Test
+    fun aGeneralKeyLevelIsReadFromItsOwnAliasWhenACredentialSharesItsId() {
+        val keyId = newKeyId("level-collision")
+        runBlocking { keystoreManager.generateKey(keyId, requireBiometric = false, requireStrongBox = false) }
+        try {
+            runBlocking { keystoreManager.generateSymmetricKey(keyId, 256, -1) }
+            keystoreManager.keyInfoReader = failingFor("xkey_credential_$keyId")
+
+            val level = keystoreManager.generalKeySecurityLevel(keyId)
+            assertNotNull(level)
+            assertNotEquals(KeySecurityLevel.STRONGBOX, level)
+            assertThrows(KeyInfoUnavailableException::class.java) {
+                keystoreManager.credentialSecurityLevel(keyId)
+            }
+        } finally {
+            keystoreManager.deleteKey(keyId)
+        }
+    }
+
+    /**
+     * A Keystore entry whose KeyInfo cannot be read is an error, never a
+     * software-backed key.
+     */
+    @Test
+    fun aKeyInfoReadFailureIsAnErrorNotSoftware() {
+        val (keyId, _) = generate("ES256", "level-keyinfo-fails")
+        keystoreManager.keyInfoReader = failingFor("xkey_key_$keyId")
+
+        assertThrows(KeyInfoUnavailableException::class.java) {
+            keystoreManager.generalKeySecurityLevel(keyId)
+        }
+        assertThrows(KeyInfoUnavailableException::class.java) {
+            keystoreManager.keySecurityLevel(keyId)
+        }
+        assertThrows(KeyInfoUnavailableException::class.java) {
+            keystoreManager.isKeyStrongBoxBacked(keyId)
+        }
+    }
+
+    /** A KeyInfo reader that throws for [alias] and reads every other key. */
+    private fun failingFor(alias: String): (String, java.security.Key) -> android.security.keystore.KeyInfo {
+        val real = keystoreManager.keyInfoReader
+        return { a, key ->
+            if (a == alias) throw java.security.spec.InvalidKeySpecException("KeyInfo unreadable: $a")
+            real(a, key)
+        }
+    }
+
+    /** The KeyInfo mapping per API level, as docs/plans/198.md tabulates it. */
+    @Test
+    fun keyInfoMapsToTheWireLevelPerApiLevel() {
+        val s = Build.VERSION_CODES.S
+        val p = Build.VERSION_CODES.P
+        fun level(sdk: Int, keyInfoLevel: Int, inside: Boolean, strongBoxSpec: Boolean) =
+            KeystoreManager.securityLevelOf(sdk, keyInfoLevel, inside, strongBoxSpec)
+
+        assertEquals(KeySecurityLevel.STRONGBOX, level(s, KeyProperties.SECURITY_LEVEL_STRONGBOX, true, false))
+        assertEquals(KeySecurityLevel.TEE, level(s, KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT, true, true))
+        assertEquals(KeySecurityLevel.TEE, level(s, KeyProperties.SECURITY_LEVEL_UNKNOWN_SECURE, true, false))
+        assertEquals(KeySecurityLevel.SOFTWARE, level(s, KeyProperties.SECURITY_LEVEL_SOFTWARE, false, true))
+        assertEquals(KeySecurityLevel.TEE, level(s, KeyProperties.SECURITY_LEVEL_UNKNOWN, true, false))
+        assertEquals(KeySecurityLevel.STRONGBOX, level(p, KeyProperties.SECURITY_LEVEL_UNKNOWN, true, true))
+        assertEquals(KeySecurityLevel.TEE, level(p, KeyProperties.SECURITY_LEVEL_UNKNOWN, true, false))
+        assertEquals(KeySecurityLevel.SOFTWARE, level(p, KeyProperties.SECURITY_LEVEL_UNKNOWN, false, true))
+
+        assertEquals(listOf("software", "tee", "strongbox"), KeySecurityLevel.entries.map { it.wire })
     }
 
     @Test
@@ -405,6 +586,32 @@ class KeystoreManagerGeneralKeysTest {
         assertThrows(ECDHException::class.java) {
             runBlocking { keystoreManager.performECDH(keyId, byteArrayOf(1, 2, 3, 4)) }
         }
+    }
+
+    /**
+     * An EC key generated before an upgrade to API 31 has no agree purpose:
+     * performECDH must say so rather than report a generic failure.
+     */
+    @Test
+    fun ecdhWithALegacyKeyWithoutTheAgreePurposeNamesThePurpose() {
+        assumeTrue("Keystore ECDH is API 31+", Build.VERSION.SDK_INT >= 31)
+        val (_, peerDer) = generate("ES256", label = "ecdh-legacy-peer")
+        val keyId = newKeyId("ecdh-legacy")
+        // The alias performECDH reads (KeystoreManager's general key prefix).
+        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore").apply {
+            initialize(
+                KeyGenParameterSpec.Builder("xkey_key_$keyId", KeyProperties.PURPOSE_SIGN)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .build()
+            )
+            generateKeyPair()
+        }
+
+        val error = assertThrows(ECDHException::class.java) {
+            runBlocking { keystoreManager.performECDH(keyId, peerDer) }
+        }
+        assertTrue(error.message.orEmpty(), error.message.orEmpty().contains("not generated with PURPOSE_AGREE_KEY"))
     }
 
     // ------------------------------------------------------------ RSA decrypt

@@ -137,20 +137,16 @@ class SyncEngine(
                 continue
             }
             val existed = db.oathCredentialDao().getByOathId(id) != null
-            val type = obj.optString("type", "totp").lowercase()
-            val issuer = obj.optString("issuer", "").ifBlank { null }
-            val uri = buildString {
-                append("otpauth://$type/")
-                if (issuer != null) append("$issuer:")
-                append(accountName)
-                append("?secret=$secret")
-                if (issuer != null) append("&issuer=$issuer")
-                append("&algorithm=${obj.optString("algorithm", "SHA1")}")
-                append("&digits=${obj.optInt("digits", 6)}")
-                append("&period=${obj.optInt("period", 30)}")
-                if (type == "hotp") append("&counter=${obj.optLong("counter", 0)}")
-            }
-            oathRepo.importFromUri(uri)
+            oathRepo.importStructured(
+                type = obj.optString("type", "totp"),
+                issuer = obj.optString("issuer", "").ifBlank { null },
+                accountName = accountName,
+                secret = secret,
+                algorithm = obj.optString("algorithm", "SHA1"),
+                digits = obj.optInt("digits", 6),
+                period = obj.optInt("period", 30),
+                counter = obj.optLong("counter", 0)
+            )
             if (existed) updated++ else added++
         }
         return ItemCounts(added, updated, skipped)

@@ -16,6 +16,7 @@
 package com.automatethethings.xkey.protocol
 
 import android.content.Context
+import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.auth.SessionAuthManager
@@ -32,6 +33,7 @@ import org.junit.AfterClass
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -131,13 +133,18 @@ class RequestHandlerLocalKeyFamilyTest {
         handler.setSessionId(null)
         handler.setMessageSender(null)
         handler.setActivity(null)
-        handler.updateSettings(
-            BiometricSettingsData(
-                uvPolicy = UserVerificationPolicy.DISABLED,
-                attestationBiometricPolicy = AttestationBiometricPolicy.NEVER
-            )
-        )
+        handler.updateSettings(headlessSettings())
     }
+
+    /**
+     * No user verification and no auth-bound keys: a handler built with the
+     * REQUIRED/PER_OPERATION defaults makes AES/EC generation need enrolled
+     * biometrics, which a headless device does not have.
+     */
+    private fun headlessSettings() = BiometricSettingsData(
+        uvPolicy = UserVerificationPolicy.DISABLED,
+        attestationBiometricPolicy = AttestationBiometricPolicy.NEVER
+    )
 
     // ------------------------------------------------------------------
     // Handler wiring
@@ -176,6 +183,59 @@ class RequestHandlerLocalKeyFamilyTest {
         // A null session id means "disconnected", which drops the peer.
         handler.setSessionId(null)
         assertNull(handler.getConnectedDevicePublicKeyHex())
+    }
+
+    // ------------------------------------------------------------------
+    // local.getCapabilities: the ECDH API floor
+    // ------------------------------------------------------------------
+
+    /**
+     * Keystore key agreement needs `PURPOSE_AGREE_KEY`, which exists only from
+     * API 31, so the capability must match the device under test; below 31
+     * local.ecdh refuses plainly instead of failing inside the Keystore.
+     */
+    @Test
+    fun getCapabilitiesAdvertisesEcdhOnlyFromApi31() {
+        val sdk = Build.VERSION.SDK_INT
+        val result = call("local.getCapabilities").ok()
+        assertEquals("supportsECDH on API $sdk", sdk >= 31, result.getBoolean("supportsECDH"))
+
+        if (sdk < 31) {
+            val response = call(
+                "local.ecdh",
+                JSONObject().put("keyId", "ecdh-floor-$runId").put("peerPublicKey", b64(ByteArray(91)))
+            )
+            assertEquals(ErrorCodes.ECDH_FAILED, response.errorCode())
+            val message = response.error?.message.orEmpty()
+            assertTrue(message, message.contains("requires Android 12 (API 31)"))
+        }
+    }
+
+    /**
+     * The capability contract: a client may pick any advertised algorithm, so
+     * local.generateKey must create it and an asymmetric one must sign.
+     */
+    @Test
+    fun everyAdvertisedAlgorithmCanBeGeneratedAndUsed() {
+        val algorithms = call("local.getCapabilities").ok().getJSONArray("algorithms")
+        assertTrue("capabilities list at least one algorithm", algorithms.length() > 0)
+        for (i in 0 until algorithms.length()) {
+            val algorithm = algorithms.getString(i)
+            val keyType = when {
+                algorithm.startsWith("AES") -> KeyTypes.SECRET
+                algorithm.startsWith("HMAC") -> KeyTypes.HMAC
+                else -> KeyTypes.SIGNING
+            }
+            val keyId = generateKey("advertised-${algorithm.lowercase()}-$runId", keyType, algorithm)
+            if (keyType == KeyTypes.SIGNING) {
+                val response = call(
+                    "local.sign",
+                    JSONObject().put("keyId", keyId).put("data", b64("advertised".toByteArray()))
+                        .put("algorithm", algorithm)
+                )
+                assertTrue("$algorithm must sign: " + response.toJsonString(), response.isSuccess())
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -294,22 +354,57 @@ class RequestHandlerLocalKeyFamilyTest {
     // ------------------------------------------------------------------
 
     /**
-     * Sharing is granted after the fact from the desktop. The flag has to reach
-     * the row, otherwise `local.importSharedKey` keeps refusing.
+     * Widening a key to every peer needs a confirmed peer and the owner's
+     * approval on the phone (#178). This handler is headless: with no
+     * confirmed peer the request is refused outright, and with one there is
+     * still no prompt to approve on, so the key stays private either way.
      */
     @Test
-    fun setKeyPolicyTogglesShareableOnTheStoredKey() {
+    fun setKeyPolicyRefusesToWidenAKeyWithoutTheOwnersApproval() {
         val keyId = generateKey("policy-$runId", KeyTypes.SECRET, "AES256")
-        assertFalse(storedKey(keyId).shareable)
+        val widen = JSONObject().put("keyId", keyId).put("shareable", true)
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, call("local.setKeyPolicy", widen).errorCode())
+        assertStaysPrivate(keyId)
+
+        handler.setConnectedDevicePublicKeyHex("cd".repeat(32))
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, call("local.setKeyPolicy", widen).errorCode())
+        assertStaysPrivate(keyId)
+    }
+
+    /**
+     * Narrowing needs no approval: from a key generated shareable, the flag
+     * and the policy both reach the row, so `local.importSharedKey` refuses it
+     * again.
+     */
+    @Test
+    fun setKeyPolicyNarrowsASharedKeyWithoutAPrompt() {
+        val keyId = "policy-shared-$runId"
+        createdKeyIds.add(keyId)
+        val generated = call(
+            "local.generateKey",
+            JSONObject()
+                .put("keyId", keyId)
+                .put("keyType", KeyTypes.SECRET)
+                .put("algorithm", "AES256")
+                .put("shareable", true)
+                .put("requireUserVerification", false)
+                .put("preferStrongBox", false)
+        )
+        assertTrue("key generation must succeed: " + generated.toJsonString(), generated.isSuccess())
+        assertEquals(SharingPolicyType.ALL_PEERS, storedKey(keyId).sharingPolicy)
 
         assertTrue(
-            call("local.setKeyPolicy", JSONObject().put("keyId", keyId).put("shareable", true))
+            call("local.setKeyPolicy", JSONObject().put("keyId", keyId).put("shareable", false))
                 .ok().getBoolean("updated")
         )
-        assertTrue(storedKey(keyId).shareable)
+        assertStaysPrivate(keyId)
+    }
 
-        call("local.setKeyPolicy", JSONObject().put("keyId", keyId).put("shareable", false))
-        assertFalse(storedKey(keyId).shareable)
+    private fun assertStaysPrivate(keyId: String) {
+        val stored = storedKey(keyId)
+        assertFalse(stored.shareable)
+        assertEquals(SharingPolicyType.PRIVATE, stored.sharingPolicy)
     }
 
     /** A request that names no flag is accepted but changes nothing. */
@@ -546,6 +641,192 @@ class RequestHandlerLocalKeyFamilyTest {
         val stored = storedKey(keyId)
         assertFalse(stored.shareable)
         assertEquals(SharingPolicyType.PRIVATE, stored.sharingPolicy)
+    }
+
+    // ------------------------------------------------------------------
+    // local.generateKey security level
+    // ------------------------------------------------------------------
+
+    /**
+     * `securityLevel` and the stored `strongBoxBacked` are the generated key's
+     * own level, read back from its KeyInfo: with `preferStrongBox = false`
+     * neither an EC, an AES nor an HMAC key is StrongBox, even on a device
+     * that has StrongBox.
+     */
+    @Test
+    fun generateKeyReportsTheLevelOfTheKeyItMadeNotTheDevice() {
+        val keystoreManager = KeystoreManager(context)
+        listOf(
+            Triple("level-ec-$runId", KeyTypes.SIGNING, "ES256"),
+            Triple("level-aes-$runId", KeyTypes.SECRET, "AES256"),
+            Triple("level-hmac-$runId", KeyTypes.HMAC, "HMAC-SHA256")
+        ).forEach { (keyId, keyType, algorithm) ->
+            createdKeyIds.add(keyId)
+            val result = call(
+                "local.generateKey",
+                JSONObject()
+                    .put("keyId", keyId)
+                    .put("keyType", keyType)
+                    .put("algorithm", algorithm)
+                    .put("requireUserVerification", false)
+                    .put("preferStrongBox", false)
+            ).ok()
+
+            val level = keystoreManager.keySecurityLevel(keyId)
+                ?: throw AssertionError("$algorithm: the generated key must have a level")
+            assertEquals(algorithm, level.wire, result.getString("securityLevel"))
+            assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
+            assertFalse(algorithm, storedKey(keyId).strongBoxBacked)
+        }
+    }
+
+    /**
+     * A credential `k` exists, then general keys named `k` are generated: the
+     * result and the stored row report each general key's own level, not the
+     * credential's. The credential's KeyInfo read fails, so a lookup that
+     * resolved to xkey_credential_k would turn the call into an error.
+     */
+    @Test
+    fun generateKeyReportsTheGeneralKeyLevelWhenACredentialSharesItsId() {
+        val keystoreManager = KeystoreManager(context)
+        val collidingHandler = RequestHandler(
+            context = context,
+            keystoreManager = keystoreManager,
+            biometricLauncher = null,
+            sessionAuthManager = SessionAuthManager()
+        )
+        collidingHandler.updateSettings(headlessSettings())
+        listOf(
+            Pair(KeyTypes.SECRET, "AES256"),
+            Pair(KeyTypes.HMAC, "HMAC-SHA256"),
+            Pair(KeyTypes.SIGNING, "ES256")
+        ).forEach { (keyType, algorithm) ->
+            val keyId = "collide-${algorithm.lowercase()}-$runId"
+            createdKeyIds.add(keyId)
+            runBlocking { keystoreManager.generateKey(keyId, requireBiometric = false, requireStrongBox = false) }
+            try {
+                val real = keystoreManager.keyInfoReader
+                keystoreManager.keyInfoReader = { alias, key ->
+                    if (alias == "xkey_credential_$keyId") {
+                        throw java.security.spec.InvalidKeySpecException("credential KeyInfo unreadable")
+                    }
+                    real(alias, key)
+                }
+                val request = Request(
+                    nextRequestId.getAndIncrement(),
+                    "local.generateKey",
+                    JSONObject()
+                        .put("keyId", keyId)
+                        .put("keyType", keyType)
+                        .put("algorithm", algorithm)
+                        .put("requireUserVerification", false)
+                        .put("preferStrongBox", false)
+                )
+                val result = runBlocking { collidingHandler.handleRequest(request) }.ok()
+                keystoreManager.keyInfoReader = real
+
+                val level = keystoreManager.generalKeySecurityLevel(keyId)
+                    ?: throw AssertionError("$algorithm: the general key must have a level")
+                assertEquals(algorithm, level.wire, result.getString("securityLevel"))
+                assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
+                assertFalse(algorithm, storedKey(keyId).strongBoxBacked)
+            } finally {
+                keystoreManager.deleteKey(keyId)
+            }
+        }
+    }
+
+    /**
+     * A generated key whose KeyInfo cannot be read is an error: nothing is
+     * reported or persisted as software, and the key is not left behind.
+     */
+    @Test
+    fun aKeyInfoReadFailureDuringGenerateKeyIsAnErrorNotSoftware() {
+        val keystoreManager = KeystoreManager(context)
+        val readAliases = mutableListOf<String>()
+        keystoreManager.keyInfoReader = { alias, _ ->
+            readAliases.add(alias)
+            throw java.security.spec.InvalidKeySpecException("KeyInfo unreadable: $alias")
+        }
+        val failingHandler = RequestHandler(
+            context = context,
+            keystoreManager = keystoreManager,
+            biometricLauncher = null,
+            sessionAuthManager = SessionAuthManager()
+        )
+        failingHandler.updateSettings(headlessSettings())
+        listOf(
+            Pair(KeyTypes.SECRET, "AES256"),
+            Pair(KeyTypes.SIGNING, "ES256")
+        ).forEach { (keyType, algorithm) ->
+            val keyId = "keyinfo-fails-${algorithm.lowercase()}-$runId"
+            createdKeyIds.add(keyId)
+            val request = Request(
+                nextRequestId.getAndIncrement(),
+                "local.generateKey",
+                JSONObject()
+                    .put("keyId", keyId)
+                    .put("keyType", keyType)
+                    .put("algorithm", algorithm)
+                    .put("requireUserVerification", false)
+                    .put("preferStrongBox", false)
+            )
+            readAliases.clear()
+            val response = runBlocking { failingHandler.handleRequest(request) }
+
+            assertFalse(algorithm + ": " + response.toJsonString(), response.isSuccess())
+            // The key was generated and its KeyInfo read was attempted: the
+            // error is the read failure, not a generation refusal.
+            assertTrue(
+                "$algorithm: the injected KeyInfo reader must be reached, got: " + response.toJsonString(),
+                readAliases.isNotEmpty()
+            )
+            assertEquals(algorithm + ": " + response.toJsonString(), ErrorCodes.INTERNAL_ERROR, response.errorCode())
+            assertNull(
+                algorithm,
+                runBlocking { XKeyDatabase.getInstance(context).keyDao().getByKeyId(keyId) }
+            )
+            assertFalse(algorithm, keystoreManager.generalKeyExists(keyId))
+        }
+    }
+
+    /** A hardware HMAC-SHA512 key reports 512 bits, like its software twin. */
+    @Test
+    fun aHardwareSha512HmacKeyReports512Bits() {
+        val keyId = "hmac-hw-512-$runId"
+        createdKeyIds.add(keyId)
+        val result = call(
+            "local.generateKey",
+            JSONObject()
+                .put("keyId", keyId)
+                .put("keyType", KeyTypes.HMAC)
+                .put("algorithm", "HMAC-SHA512")
+                .put("requireUserVerification", false)
+                .put("preferStrongBox", false)
+        ).ok()
+
+        assertEquals(512, result.getInt("keySizeBits"))
+        assertEquals(512, storedKey(keyId).keySizeBits)
+    }
+
+    /** An exportable key lives in app memory and stays "software". */
+    @Test
+    fun anExportableKeyReportsSoftware() {
+        val keyId = "level-sw-$runId"
+        createdKeyIds.add(keyId)
+        val result = call(
+            "local.generateKey",
+            JSONObject()
+                .put("keyId", keyId)
+                .put("keyType", KeyTypes.SECRET)
+                .put("algorithm", "AES256")
+                .put("exportable", true)
+                .put("requireUserVerification", false)
+                .put("preferStrongBox", false)
+        ).ok()
+
+        assertEquals("software", result.getString("securityLevel"))
+        assertFalse(storedKey(keyId).strongBoxBacked)
     }
 
     // ------------------------------------------------------------------

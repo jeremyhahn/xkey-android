@@ -23,6 +23,10 @@ import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.ConnectionChangedException
+import com.automatethethings.xkey.remote.RemoteShareClient
+import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -60,6 +64,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -444,9 +449,132 @@ class StreamPairingSessionRevocationTest {
 
         assertEquals("the old approval answers nothing", null, withTimeout(TIMEOUT_MS) { pending.await() })
         assertFalse("the removed peer must not be re-added", repo.isDeviceKnown(old.desktop.publicKeyHex))
-        verify(exactly = 0) { requestHandler.setConnectedDevicePublicKeyHex(old.desktop.publicKeyHex) }
+        verify(exactly = 0) { requestHandler.setConnectedDevicePublicKeyHex(old.desktop.publicKeyHex, any()) }
         val reply = replacement.desktop.request("system.ping")
         assertEquals(ErrorCodes.PAIRING_REQUIRED, reply.getJSONObject("error").getInt("code"))
+    }
+
+    // ---------------------------------------------------------------------
+    // The confirmed peer a key share is checked against
+    // ---------------------------------------------------------------------
+
+    /**
+     * A key share is authorized against the peer confirmed on the connection
+     * it goes out on. That is this connection's own authenticated peer, never
+     * the handler-wide key, and the answer ends with the connection's
+     * revocation, before its teardown has run.
+     */
+    @Test
+    fun theConfirmedConnectionIsThisConnectionsOwnPeerUntilItIsRevoked() = runBlocking<Unit> {
+        val unconfirmed = connectUnpaired()
+        assertNull("an unconfirmed connection confirms no one", pairing.confirmedConnection())
+        unconfirmed.desktop.close()
+        unconfirmed.awaitServeEnded()
+
+        val phone = connectPaired()
+        val confirmed = pairing.confirmedConnection()
+        assertEquals(phone.desktop.publicKeyHex, confirmed?.peerPublicKeyHex)
+
+        repo.removeDevice(phone.desktop.publicKeyHex)
+        assertNull("a revoked connection confirms no one", pairing.confirmedConnection())
+        phone.awaitServeEnded()
+    }
+
+    /**
+     * A share goes out on the connection it was authorized on, or not at
+     * all: a second paired desktop that connects after the check passed for
+     * the first, and before the bytes reach the transport, receives nothing.
+     */
+    @Test
+    fun aShareAuthorizedForOnePeerNeverReachesAPeerThatConnectedBeforeTheSend() = runBlocking<Unit> {
+        val first = connectPaired()
+        var second: Phone? = null
+        val router = BidirectionalMessageRouter(requestHandler)
+        // The check (same connection, same peer) has passed for the first
+        // desktop when this runs; the second one, paired alongside it (so the
+        // first is not revoked), connects in that window.
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) {
+            if (second == null) second = runBlocking { connectPaired(deviceName = "second desktop") }
+            true
+        }!!
+        assertEquals(first.desktop.publicKeyHex, session.peerPublicKeyHex)
+
+        val share = RemoteShareClient.PublicKeyShare("k1", "-----BEGIN PUBLIC KEY-----", null, "ECDSA-P256", null, null)
+        val outcome = runCatching { session.client(300).sharePublicKey(share) }
+
+        assertTrue(
+            "the share must be refused as a changed connection, got $outcome",
+            outcome.exceptionOrNull() is ConnectionChangedException
+        )
+        val late = second ?: error("the second desktop never connected")
+        assertTrue(
+            "the second desktop is another peer",
+            late.desktop.publicKeyHex != first.desktop.publicKeyHex
+        )
+        late.desktop.assertNoFrame()
+    }
+
+    /**
+     * The connection-scoped send works: on the current confirmed connection
+     * the frame goes out on that connection's own session and its peer
+     * decrypts it.
+     */
+    @Test
+    fun aScopedSendOnTheCurrentConfirmedConnectionReachesItsPeer() = runBlocking<Unit> {
+        val phone = connectPaired()
+        val confirmed = pairing.confirmedConnection() ?: error("the connection confirms no one")
+
+        pairing.sendEncryptedMessageOn(confirmed, REQUEST)
+
+        assertEquals("remote.sync", phone.desktop.readEncrypted().getString("method"))
+    }
+
+    /**
+     * The production share path, end to end: a [ShareSession] taken on the
+     * shared stream session sends `remote.sharePublicKey` to the confirmed
+     * desktop, which decrypts the request.
+     */
+    @Test
+    fun aShareOnTheCurrentConnectionReachesTheConfirmedDesktop() = runBlocking<Unit> {
+        val phone = connectPaired()
+        val router = BidirectionalMessageRouter(requestHandler)
+        val session = ShareSession.of(listOf(ShareSession.Transport(pairing, router))) { true }!!
+        assertEquals(phone.desktop.publicKeyHex, session.peerPublicKeyHex)
+
+        val share = RemoteShareClient.PublicKeyShare("k1", "-----BEGIN PUBLIC KEY-----", null, "ECDSA-P256", null, null)
+        // No reply comes back to this router; only the request is checked.
+        val sending = scope.async { runCatching { session.client(TIMEOUT_MS).sharePublicKey(share) } }
+
+        val request = phone.desktop.readEncrypted()
+        assertEquals("remote.sharePublicKey", request.getString("method"))
+        assertEquals("k1", request.getJSONObject("params").getString("key_id"))
+        sending.cancel()
+    }
+
+    /**
+     * Admission itself refuses a scoped send whose connection was replaced
+     * after the early check: a second paired desktop that connects at that
+     * point receives nothing, and neither does the first.
+     */
+    @Test
+    fun aScopedSendReplacedAfterTheEarlyCheckIsRefusedAtAdmission() = runBlocking<Unit> {
+        val first = connectPaired()
+        val confirmed = pairing.confirmedConnection() ?: error("the connection confirms no one")
+        var second: Phone? = null
+        pairing.beforeAdmissionForTest = {
+            if (second == null) second = connectPaired(deviceName = "second desktop")
+        }
+
+        val outcome = runCatching { pairing.sendEncryptedMessageOn(confirmed, REQUEST) }
+        pairing.beforeAdmissionForTest = null
+
+        val late = second ?: error("the second desktop never connected")
+        assertTrue(
+            "admission must refuse the replaced connection, got $outcome",
+            outcome.exceptionOrNull() is ConnectionChangedException
+        )
+        late.desktop.assertNoFrame()
+        first.desktop.assertNoFrame()
     }
 
     // ---------------------------------------------------------------------
@@ -495,10 +623,11 @@ class StreamPairingSessionRevocationTest {
     private suspend fun connectPaired(
         gate: GatedOutputStream? = null,
         staticPrivateKey: ByteArray? = null,
+        deviceName: String = "desktop",
     ): Phone {
         val socket = Socket(listener.inetAddress, listener.localPort)
         val desktop = if (staticPrivateKey != null) DesktopPeer(socket, staticPrivateKey) else DesktopPeer(socket)
-        repo.addDevice(desktop.publicKeyHex, "desktop")
+        repo.addDevice(desktop.publicKeyHex, deviceName)
         val phone = serve(desktop, gate)
         desktop.handshake()
         withTimeout(TIMEOUT_MS) { phone.connected.await() }
@@ -535,6 +664,7 @@ class StreamPairingSessionRevocationTest {
                     input = accepted.getInputStream(),
                     output = output,
                     noiseSession = noise,
+                    connectionId = "test:${java.util.UUID.randomUUID()}",
                     isActive = { !accepted.isClosed },
                     onConnected = { connected.complete(Unit) },
                 )

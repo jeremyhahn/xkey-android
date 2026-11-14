@@ -73,12 +73,6 @@ class GattServerEventOrderTest {
         const val ADDRESS = "AA:BB:CC:DD:EE:FF"
         const val TIMEOUT_MS = 5_000L
 
-        // Long enough for a disconnect handled out of order to have settled
-        // the pending requests. The window is the check: the consumer waits
-        // on the Noise lock, which shows no waiter, and "not settled" has no
-        // event to await.
-        const val SETTLE_MS = 300L
-
         // GattServer.EVENT_QUEUE_CAPACITY.
         const val EVENT_QUEUE_CAPACITY = 1024
 
@@ -101,6 +95,7 @@ class GattServerEventOrderTest {
     private lateinit var device: BluetoothDevice
     private lateinit var controlPoint: BluetoothGattCharacteristic
     private lateinit var server: GattServer
+    private lateinit var signals: TrackingDispatcher
     private lateinit var desktop: NoiseInitiatorSession
     private lateinit var keyHex: String
 
@@ -137,6 +132,7 @@ class GattServerEventOrderTest {
             pairingCallback = mockk(),
             pairedDeviceRepository = repo,
         )
+        signals = trackScope(server)
         setField("gattServer", gatt)
         setField("responseCharacteristic", mockk<BluetoothGattCharacteristic>(relaxed = true))
 
@@ -169,7 +165,9 @@ class GattServerEventOrderTest {
         withNoiseHeld {
             onThread { write(frame) }
             onThread { disconnect() }
-            Thread.sleep(SETTLE_MS)
+            // A disconnect handled out of order would have settled the
+            // requests by the time the consumer waits on the Noise lock.
+            signals.awaitIdle("the consumer waits on the Noise lock")
             assertFalse("nothing settles before the write is handled", answered.isCompleted)
             assertFalse("nothing settles before the write is handled", unanswered.isCompleted)
         }
@@ -194,7 +192,7 @@ class GattServerEventOrderTest {
         withNoiseHeld {
             onThread { frames.forEach { write(it) } }
             onThread { disconnect() }
-            Thread.sleep(SETTLE_MS)
+            signals.awaitIdle("the consumer waits on the Noise lock")
         }
 
         val ok = withTimeout(TIMEOUT_MS) { first.await() }
@@ -235,7 +233,7 @@ class GattServerEventOrderTest {
         withNoiseHeld {
             onThread { write(frame) }
             onThread { disconnect() }
-            Thread.sleep(SETTLE_MS)
+            signals.awaitIdle("the consumer waits on the Noise lock")
             assertFalse("the prompt waits until the disconnect is handled", cancelled.get())
         }
 
@@ -254,7 +252,7 @@ class GattServerEventOrderTest {
 
         withNoiseHeld {
             onThread { write(frame) }
-            Thread.sleep(SETTLE_MS)
+            signals.awaitIdle("the consumer waits on the Noise lock")
             repo.removeDevice(keyHex)
             eventually("the revocation settles the request") { answered.isCompleted }
         }
@@ -284,7 +282,7 @@ class GattServerEventOrderTest {
             // The first write is taken by the consumer, which then waits on
             // the Noise lock while the rest fill the queue.
             onThread { write(frame) }
-            Thread.sleep(SETTLE_MS)
+            signals.awaitIdle("the consumer waits on the Noise lock")
             onThread { repeat(EVENT_QUEUE_CAPACITY + 1) { writeFragment(byteArrayOf(0)) } }
             verify(exactly = 1) { gatt.cancelConnection(device) }
             assertFalse(unanswered.isCompleted)
@@ -390,13 +388,7 @@ class GattServerEventOrderTest {
         verify(exactly = 0) { gatt.notifyCharacteristicChanged(any(), any(), any(), any<ByteArray>()) }
     }
 
-    private fun eventually(what: String, check: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + TIMEOUT_MS
-        while (!check()) {
-            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting until $what")
-            Thread.sleep(10)
-        }
-    }
+    private fun eventually(what: String, check: () -> Boolean) = signals.eventually(what, TIMEOUT_MS, check)
 
     private fun setField(name: String, value: Any?) {
         GattServer::class.java.getDeclaredField(name).apply { isAccessible = true }.set(server, value)

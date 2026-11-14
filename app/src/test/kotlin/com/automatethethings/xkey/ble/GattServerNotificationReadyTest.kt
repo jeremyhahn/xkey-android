@@ -57,15 +57,10 @@ class GattServerNotificationReadyTest {
         const val MTU = 247
         const val TIMEOUT_MS = 5_000L
 
-        // GattServer.NOTIFICATION_READY_TIMEOUT_MS.
+        // GattServer.NOTIFICATION_READY_TIMEOUT_MS. The tracked scope holds
+        // its timer: it never fires here, so what arrives was not released
+        // by the wait expiring (#252).
         const val NOTIFICATION_READY_TIMEOUT_MS = 5_000L
-
-        // Well inside the five-second wait, so what arrives in it was not
-        // released by the wait expiring.
-        const val PROMPTLY_MS = 2_000L
-
-        // Long enough for a send that was not waiting to have gone out.
-        const val SETTLE_MS = 300L
 
         val ENABLE = byteArrayOf(0x01, 0x00)
         val DISABLE = byteArrayOf(0x00, 0x00)
@@ -80,6 +75,7 @@ class GattServerNotificationReadyTest {
     private lateinit var controlPoint: BluetoothGattCharacteristic
     private lateinit var cccd: BluetoothGattDescriptor
     private lateinit var server: GattServer
+    private lateinit var signals: TrackingDispatcher
     private lateinit var desktop: NoiseInitiatorSession
     private val fragments = Collections.synchronizedList(mutableListOf<ByteArray>())
 
@@ -117,6 +113,7 @@ class GattServerNotificationReadyTest {
             pairingCallback = mockk(),
             pairedDeviceRepository = PairedDeviceRepository(InMemorySharedPreferences()),
         )
+        signals = trackScope(server)
         setField("gattServer", gatt)
         setField("responseCharacteristic", response)
         desktop = NoiseInitiatorSession(randomKey())
@@ -139,11 +136,12 @@ class GattServerNotificationReadyTest {
         connect()
         mtu(MTU)
         write(identityFrame())
-        Thread.sleep(SETTLE_MS)
+        // A send that was not waiting would have gone out by the time the server is idle.
+        signals.awaitIdle("the identity frame is handled up to its wait")
         assertEquals("nothing is sent before notifications are enabled", 0, messages().size)
 
         enableNotifications()
-        eventually("the identity acknowledgement is sent", PROMPTLY_MS) { messages().isNotEmpty() }
+        eventually("the identity acknowledgement is sent") { messages().isNotEmpty() }
         assertArrayEquals(IDENTITY_ACK_UNKNOWN, messages()[0])
 
         write(desktop.createHandshakeMessage1())
@@ -163,7 +161,7 @@ class GattServerNotificationReadyTest {
         mtu(MTU)
         enableNotifications()
 
-        eventually("the identity acknowledgement is sent", PROMPTLY_MS) { messages().isNotEmpty() }
+        eventually("the identity acknowledgement is sent") { messages().isNotEmpty() }
         assertArrayEquals(IDENTITY_ACK_UNKNOWN, messages()[0])
     }
 
@@ -177,16 +175,16 @@ class GattServerNotificationReadyTest {
         connect()
         mtu(MTU)
         write(identityFrame())
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("the identity frame is handled up to its wait")
 
         disconnect()
-        eventually("the disconnect is handled", PROMPTLY_MS) {
+        eventually("the disconnect is handled") {
             server.connectionState.value == ConnectionState.Disconnected &&
                 getField<BluetoothDevice?>("connectedDevice") == null
         }
 
         enableNotifications()
-        Thread.sleep(SETTLE_MS)
+        signals.awaitIdle("the enable is handled")
         assertEquals("nothing is sent for the ended connection", 0, messages().size)
     }
 
@@ -234,13 +232,8 @@ class GattServerNotificationReadyTest {
         return synchronized(fragments) { fragments.toList() }.mapNotNull { reassembler.addFragment(it) }
     }
 
-    private fun eventually(what: String, timeoutMs: Long = TIMEOUT_MS, check: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (!check()) {
-            if (System.currentTimeMillis() > deadline) throw AssertionError("timed out waiting until $what")
-            Thread.sleep(10)
-        }
-    }
+    private fun eventually(what: String, timeoutMs: Long = TIMEOUT_MS, check: () -> Boolean) =
+        signals.eventually(what, timeoutMs, check)
 
     private fun setField(name: String, value: Any?) {
         GattServer::class.java.getDeclaredField(name).apply { isAccessible = true }.set(server, value)

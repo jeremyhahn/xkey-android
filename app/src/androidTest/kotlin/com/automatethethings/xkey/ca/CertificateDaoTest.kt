@@ -247,6 +247,22 @@ class CertificateDaoTest {
         }
     }
 
+    @Test
+    fun revokingTwiceKeepsTheFirstDateAndReason() {
+        runBlocking {
+            dao.insert(certificate("0a"))
+
+            assertEquals(1, dao.revoke("0a", now, AndroidCA.CRLReason.KEY_COMPROMISE))
+            assertEquals(0, dao.revoke("0a", now + 1000, AndroidCA.CRLReason.SUPERSEDED))
+
+            val revoked = dao.getBySerial("0a")!!
+            assertTrue(revoked.revoked)
+            assertEquals(now, revoked.revokedAt)
+            assertEquals(AndroidCA.CRLReason.KEY_COMPROMISE, revoked.revokedReason)
+            assertEquals(1, dao.countRevoked())
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Expiry windows
     // -------------------------------------------------------------------------
