@@ -860,8 +860,13 @@ class CoSignActivity : AppCompatActivity() {
 /**
  * The fingerprint an initiator QR names its key by: the hash of the public key
  * stored for [keyId], or [keyId] itself when no public key is found.
+ *
+ * The screen offers FIDO2 credentials (credential alias) and general keys
+ * (general alias), so the alias is resolved across both. This only names the
+ * key; nothing is signed here, so it needs no approved-key lookup.
  */
 internal fun initiatorFingerprint(keystoreManager: KeystoreManager, keyId: String): String {
-    val pubKeyDer = keystoreManager.publicKeyDERAt(KeystoreManager.generalKeyAlias(keyId))
+    val pubKeyDer = keystoreManager.resolveKeystoreAlias(keyId)
+        ?.let { keystoreManager.publicKeyDERAt(it) }
     return if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 }
