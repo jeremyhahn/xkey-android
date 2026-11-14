@@ -598,9 +598,7 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        // The fingerprint of the key under the alias the signatures use.
-        val pubKeyDer = keystoreManager.publicKeyDERAt(KeystoreManager.generalKeyAlias(keyId))
-        val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
+        val fingerprint = initiatorFingerprint(keystoreManager, keyId)
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
 
@@ -857,4 +855,13 @@ class CoSignActivity : AppCompatActivity() {
         const val STATE_WITNESS_MODE = "cosign_witness_mode"
         const val STATE_KEY_ID = "cosign_key_id"
     }
+}
+
+/**
+ * The fingerprint an initiator QR names its key by: the hash of the public key
+ * stored for [keyId], or [keyId] itself when no public key is found.
+ */
+internal fun initiatorFingerprint(keystoreManager: KeystoreManager, keyId: String): String {
+    val pubKeyDer = keystoreManager.publicKeyDERAt(KeystoreManager.generalKeyAlias(keyId))
+    return if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 }
