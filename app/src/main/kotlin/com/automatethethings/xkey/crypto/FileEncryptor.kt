@@ -202,7 +202,7 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
      * @param keyId Unique identifier for the ephemeral key.
      */
     private fun generateEphemeralKey(keyId: String) {
-        val alias = "xkey_key_$keyId"
+        val alias = KeystoreManager.generalKeyAlias(keyId)
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
 
         if (keyStore.containsAlias(alias)) {

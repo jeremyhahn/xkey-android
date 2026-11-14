@@ -53,8 +53,8 @@ class KeyStoreSyncManager(
     companion object {
         private const val TAG = "KeyStoreSyncManager"
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
-        private const val KEY_ALIAS_PREFIX = "xkey_credential_"
-        private const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
+        private const val KEY_ALIAS_PREFIX = KeystoreManager.KEY_ALIAS_PREFIX
+        private const val KEY_ALIAS_PREFIX_GENERAL = KeystoreManager.KEY_ALIAS_PREFIX_GENERAL
 
         private const val ROOT_CA_ALIAS = "xkey_root_ca"
         private const val INTERMEDIATE_CA_ALIAS = "xkey_intermediate_ca"

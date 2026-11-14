@@ -1250,6 +1250,30 @@ class KeystoreManager(private val context: Context) {
         keyStore.getCertificate(alias)?.publicKey?.encoded
 
     /**
+     * The Keystore alias the key of key row [keyId] (of [keyType]) lives under.
+     *
+     * Every row but a FIDO2 one is a general key ([generalKeyAlias]). A FIDO2
+     * row is a credential ([credentialAlias]) when the phone registered it,
+     * but a general key when the desktop created it with `local.generateKey`.
+     * A credential and a general key may share an id, so a FIDO2 row takes
+     * the alias whose public key is the row's own [storedPublicKeyDer]; a row
+     * with no stored key (or one neither alias holds) takes the credential if
+     * there is one, else the general key. This never resolves by id alone,
+     * which prefers the credential whatever the row is.
+     */
+    fun keyRowAlias(keyId: String, keyType: String, storedPublicKeyDer: ByteArray?): String {
+        val general = generalKeyAlias(keyId)
+        if (keyType != FIDO2_KEY_TYPE) return general
+        val credential = credentialAlias(keyId)
+        if (storedPublicKeyDer != null && storedPublicKeyDer.isNotEmpty()) {
+            listOf(credential, general)
+                .firstOrNull { publicKeyDERAt(it)?.contentEquals(storedPublicKeyDer) == true }
+                ?.let { return it }
+        }
+        return if (publicKeyDERAt(credential) != null) credential else general
+    }
+
+    /**
      * Signs [data] with JCA [jcaAlgorithm] using the key under [alias], only
      * if that key is still the one the owner approved: the public key under
      * [alias] must equal [approvedPublicKeyDer]. The key approved and the key
@@ -2073,13 +2097,14 @@ class KeystoreManager(private val context: Context) {
     /**
      * Build the keystore alias from a credential ID.
      */
-    private fun buildAlias(credentialId: String): String {
-        return KEY_ALIAS_PREFIX + credentialId
-    }
+    private fun buildAlias(credentialId: String): String = credentialAlias(credentialId)
 
     companion object {
         /** The full Keystore alias of general-purpose key [keyId]. */
         fun generalKeyAlias(keyId: String): String = KEY_ALIAS_PREFIX_GENERAL + keyId
+
+        /** The full Keystore alias of FIDO2 credential [credentialId]. */
+        fun credentialAlias(credentialId: String): String = KEY_ALIAS_PREFIX + credentialId
 
         /**
          * The JCA signature algorithm a key of COSE/JOSE [algorithm] signs with.
@@ -2156,11 +2181,18 @@ class KeystoreManager(private val context: Context) {
         /** Android Keystore provider name. */
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
 
-        /** Prefix for all xKey credential key aliases. */
-        private const val KEY_ALIAS_PREFIX = "xkey_credential_"
+        /**
+         * Prefix for all xKey credential key aliases. Code outside this class
+         * names an alias through [credentialAlias], [generalKeyAlias] or
+         * [keyRowAlias], never by hand (KeystoreAliasNamingChokePointTest).
+         */
+        internal const val KEY_ALIAS_PREFIX = "xkey_credential_"
 
-        /** Prefix for general-purpose key aliases. */
-        private const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
+        /** Prefix for general-purpose key aliases (see [KEY_ALIAS_PREFIX]). */
+        internal const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
+
+        /** A FIDO2 key row's type (protocol KeyTypes.FIDO2; crypto does not import protocol). */
+        private const val FIDO2_KEY_TYPE = "fido2"
 
         /** EncryptedSharedPreferences file for Ed25519 software-backed keys. */
         private const val ED25519_PREFS_NAME = "xkey_ed25519_keys"

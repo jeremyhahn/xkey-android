@@ -85,6 +85,7 @@ class CoSignActivity : AppCompatActivity() {
 
     /** Each offered row's key type, index-aligned with [signingKeyIds]. */
     private var signingKeyTypes = listOf<String>()
+    private var signingKeyMaterials = listOf<ByteArray?>()
 
     private lateinit var witnessQrImage: ImageView
     private lateinit var witnessQrLabel: TextView
@@ -601,7 +602,12 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        val fingerprint = initiatorFingerprint(keystoreManager, keyId, signingKeyTypes[selectedKeyIndex])
+        val fingerprint = initiatorFingerprint(
+            keystoreManager,
+            keyId,
+            signingKeyTypes[selectedKeyIndex],
+            signingKeyMaterials[selectedKeyIndex]
+        )
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
 
@@ -822,11 +828,13 @@ class CoSignActivity : AppCompatActivity() {
                 }
                 val keyIds = keys.map { it.keyId }
                 val keyTypes = keys.map { it.keyType }
+                val keyMaterials = keys.map { it.publicKeyDer }
                 val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
 
                 withContext(Dispatchers.Main) {
                     signingKeyIds = keyIds
                     signingKeyTypes = keyTypes
+                    signingKeyMaterials = keyMaterials
                     keySpinner.adapter = ArrayAdapter(
                         this@CoSignActivity,
                         android.R.layout.simple_spinner_dropdown_item,
@@ -866,17 +874,19 @@ class CoSignActivity : AppCompatActivity() {
  * The fingerprint an initiator QR names its key by: the hash of the public key
  * the selected row holds, or [keyId] itself when no public key is found.
  *
- * A FIDO2 row's key is the credential alias; every other row ([keyType]
- * signing, tls, ssh) is the general alias. A credential and a general key may
- * share an id, so the lookup reads exactly the row's own namespace and never
- * the id-only resolution, which prefers the credential. This only names the
- * key; nothing is signed here, so it needs no approved-key lookup.
+ * The row's key is read under the alias it really lives under
+ * ([KeystoreManager.keyRowAlias], from the row's [keyType] and its
+ * [storedPublicKeyDer]): a phone-registered FIDO2 row is a credential, a
+ * desktop-created one a general key, every other row a general key. This only
+ * names the key; nothing is signed here, so it needs no approved-key lookup.
  */
-internal fun initiatorFingerprint(keystoreManager: KeystoreManager, keyId: String, keyType: String): String {
-    val alias = if (keyType == "fido2") CREDENTIAL_ALIAS_PREFIX + keyId else KeystoreManager.generalKeyAlias(keyId)
+internal fun initiatorFingerprint(
+    keystoreManager: KeystoreManager,
+    keyId: String,
+    keyType: String,
+    storedPublicKeyDer: ByteArray?
+): String {
+    val alias = keystoreManager.keyRowAlias(keyId, keyType, storedPublicKeyDer)
     val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
     return if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 }
-
-/** The Keystore alias prefix of a FIDO2 credential (KeystoreManager's own). */
-private const val CREDENTIAL_ALIAS_PREFIX = "xkey_credential_"

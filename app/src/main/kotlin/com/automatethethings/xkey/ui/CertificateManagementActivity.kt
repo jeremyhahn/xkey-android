@@ -1214,7 +1214,7 @@ class CertificateManagementActivity : AppCompatActivity() {
                 }
 
                 val keyId = UUID.randomUUID().toString()
-                val keystoreAlias = "xkey_key_$keyId"
+                val keystoreAlias = KeystoreManager.generalKeyAlias(keyId)
                 val publicKeyDer = withContext(Dispatchers.IO) {
                     keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1)
                 }

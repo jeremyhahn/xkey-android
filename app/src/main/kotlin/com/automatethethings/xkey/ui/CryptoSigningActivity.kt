@@ -26,6 +26,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.crypto.KeystoreManager
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.Signature
@@ -175,7 +176,7 @@ class CryptoSigningActivity : FragmentActivity() {
     ) {
         // Get private key from keystore; a full alias names a key outside the
         // credential namespace (the user verification key).
-        val alias = intent.getStringExtra(EXTRA_KEY_ALIAS) ?: (KEY_ALIAS_PREFIX + credentialId)
+        val alias = intent.getStringExtra(EXTRA_KEY_ALIAS) ?: KeystoreManager.credentialAlias(credentialId)
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
 
         val privateKey = keyStore.getKey(alias, null) as? PrivateKey
@@ -340,9 +341,6 @@ class CryptoSigningActivity : FragmentActivity() {
 
         /** Android Keystore provider name. */
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
-
-        /** Prefix for all xKey credential key aliases. */
-        private const val KEY_ALIAS_PREFIX = "xkey_credential_"
 
         /** Signature algorithm (ECDSA with SHA-256). */
         private const val SIGNATURE_ALGORITHM = "SHA256withECDSA"
