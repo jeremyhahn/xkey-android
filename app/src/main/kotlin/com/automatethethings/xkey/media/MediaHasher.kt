@@ -68,18 +68,26 @@ object MediaHasher {
      *
      * The domain is therefore chosen to be metadata-independent by construction:
      * for JPEG, every `APPn` and `COM` segment is skipped and the remaining
-     * structure plus the entropy-coded scan is hashed. Anything else is hashed
-     * whole, which is already stable because its signature lives in a sidecar.
+     * structure plus the entropy-coded scan is hashed. For MP4/MOV, PNG and
+     * WebP, exactly the XMP box or chunk [XmpContainers.embed] writes is left
+     * out ([XmpContainers.strip]), so the hash is the file's own as it was
+     * before signing; an unsigned file is hashed whole. Anything else is
+     * hashed whole, which is already stable because its signature lives in a
+     * sidecar.
      */
     fun hashCanonical(data: ByteArray, mimeType: String?): String =
         hashBytes(canonicalContent(data, mimeType))
 
-    /** The bytes [hashCanonical] covers. Exposed for tests and diagnostics. */
     fun canonicalContent(data: ByteArray, mimeType: String?): ByteArray {
-        return if (isCanonicalisedJpeg(mimeType)) jpegWithoutMetadata(data) else data
+        if (isCanonicalisedJpeg(mimeType)) return jpegWithoutMetadata(data)
+        val format = XmpContainers.formatOf(mimeType) ?: return data
+        return XmpContainers.strip(data, format)
     }
 
-    /** Whether [hashCanonical] strips metadata for [mimeType]; otherwise it hashes the file whole. */
+    /**
+     * Whether [hashCanonical] strips JPEG metadata for [mimeType]. Otherwise it
+     * hashes the file whole, less only an embedded xKey XMP box or chunk.
+     */
     fun isCanonicalisedJpeg(mimeType: String?): Boolean {
         val type = mimeType.orEmpty().lowercase()
         return type.startsWith("image/jpeg") || type.startsWith("image/jpg")
