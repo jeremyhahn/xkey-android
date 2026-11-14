@@ -14,6 +14,10 @@
  */
 package com.automatethethings.xkey.remote
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -70,6 +74,17 @@ class ConnectionSendersTest {
         assertTrue(senders.isEmpty)
         assertEquals(listOf(c), zeroed)
         assertNull("no lookup re-caches it", lookup(c))
+    }
+
+    @Test
+    fun `a retirement into a scope cancelled before it runs still zeroes the keys`() = runBlocking {
+        val c = Conn()
+        lookup(c)
+        c.live = false
+        val scope = CoroutineScope(Dispatchers.Default + Job()).apply { cancel() }
+        senders.retire(c, scope).join()
+        assertTrue(senders.isEmpty)
+        assertEquals(listOf(c), zeroed)
     }
 
     @Test

@@ -515,6 +515,27 @@ class GattServerReconnectTest {
         }
     }
 
+    /**
+     * destroy() retires the live session and cancels the server's scope at
+     * once, before the retirement job can be dispatched: the session's keys
+     * are zeroed all the same.
+     */
+    @Test
+    fun destroyZeroesTheSessionKeysThoughItsScopeIsCancelledBeforeTheRetirementRuns() = runBlocking<Unit> {
+        val desktop = NoiseInitiatorSession(randomKey())
+        val keyHex = desktop.getLocalStaticPublicKey().hex()
+        repo.addDevice(keyHex, "desktop")
+        val session = reconnect(desktop, claimedPeerKeyHex = keyHex)
+        val secrets = session.secretArraysForTest().filterKeys { it == "sendKey" || it == "recvKey" }
+        assertEquals("the session has its traffic keys", 2, secrets.size)
+        server.boundSender()!!
+
+        server.destroy()
+
+        assertTrue("no sender is cached", server.sendersEmptyForTest)
+        eventually("the session keys are zeroed") { secrets.values.all { k -> k.all { it == 0.toByte() } } }
+    }
+
     /** As XKeyGattService.shareSession: a fresh lookup, re-read on every check. */
     private fun shareSessionAsTheServiceReadsIt(): ShareSession? =
         server.connectedDesktop(router)?.let { d ->
