@@ -35,7 +35,8 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Instrumented tests for the JPEG half of [XmpMetadataHelper].
+ * Instrumented tests for the JPEG half of [XmpMetadataHelper], and for the
+ * URI reader over an embedded MP4 and PNG signature.
  *
  * `XmpMetadataHelperTest` covers the sidecar branch in the JVM; the JPEG branch
  * writes into an EXIF `UserComment` and needs a real encoder to produce a file
@@ -311,8 +312,8 @@ class XmpMetadataHelperInstrumentedTest {
         val file = jpeg()
         XmpMetadataHelper.writeSignature(file.path, sampleData())
 
-        // The URI reader only knows how to read EXIF, so anything else is a miss
-        // even when the underlying bytes do carry a signature.
+        // The mime type picks the reader: JPEG bytes read as an MP4 carry no
+        // `uuid` XMP box, so they are a miss even though the EXIF is signed.
         val read = XmpMetadataHelper.readSignatureFromUri(
             context.contentResolver,
             Uri.fromFile(file),
@@ -320,6 +321,57 @@ class XmpMetadataHelperInstrumentedTest {
         )
 
         assertNull(read)
+    }
+
+    private fun be32(value: Long) = byteArrayOf(
+        (value shr 24).toByte(), (value shr 16).toByte(), (value shr 8).toByte(), value.toByte()
+    )
+
+    private fun box(type: String, payload: ByteArray) = be32(8L + payload.size) + type.toByteArray() + payload
+
+    private fun pngChunk(type: String, data: ByteArray): ByteArray {
+        val crc = java.util.zip.CRC32().apply { update(type.toByteArray()); update(data) }.value
+        return be32(data.size.toLong()) + type.toByteArray() + data + be32(crc)
+    }
+
+    /** A minimal MP4 or PNG, written by hand: no encoder is needed to embed XMP. */
+    private fun container(extension: String): File {
+        val bytes = when (extension) {
+            "mp4" -> box("ftyp", "isom".toByteArray() + be32(0x200) + "isom".toByteArray()) +
+                box("moov", ByteArray(8)) + box("mdat", byteArrayOf(1, 2, 3, 4))
+            else -> byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) +
+                pngChunk("IHDR", be32(1) + be32(1) + byteArrayOf(8, 2, 0, 0, 0)) +
+                pngChunk("IDAT", byteArrayOf(0x78, 0x9C.toByte(), 1, 2)) +
+                pngChunk("IEND", ByteArray(0))
+        }
+        val file = File(context.cacheDir, "xkey-media-${System.nanoTime()}.$extension")
+        file.writeBytes(bytes)
+        created.add(file)
+        return file
+    }
+
+    @Test
+    fun readSignatureFromUri_readsAnEmbeddedMp4Signature() {
+        val file = container("mp4")
+        val data = sampleData(hash = "7".repeat(64))
+        XmpMetadataHelper.writeSignature(file.path, data)
+        assertFalse(File(XmpMetadataHelper.getSidecarPath(file.path)).exists())
+
+        val read = XmpMetadataHelper.readSignatureFromUri(context.contentResolver, Uri.fromFile(file), "video/mp4")
+
+        assertEquals(data, read)
+    }
+
+    @Test
+    fun readSignatureFromUri_readsAnEmbeddedPngSignature() {
+        val file = container("png")
+        val data = sampleData(hash = "6".repeat(64))
+        XmpMetadataHelper.writeSignature(file.path, data)
+        assertFalse(File(XmpMetadataHelper.getSidecarPath(file.path)).exists())
+
+        val read = XmpMetadataHelper.readSignatureFromUri(context.contentResolver, Uri.fromFile(file), "image/png")
+
+        assertEquals(data, read)
     }
 
     @Test
@@ -344,5 +396,50 @@ class XmpMetadataHelperInstrumentedTest {
         )
 
         assertNull(read)
+    }
+
+    @Test
+    fun replaceEmbeddedSignature_signedCopyThroughAUriShowsTheSecondSigner() {
+        val file = container("png")
+        val uri = Uri.fromFile(file)
+        val copy = File(file.parentFile, "copy-${file.name}")
+        val copyUri = Uri.fromFile(copy)
+        val resolver = context.contentResolver
+        XmpMetadataHelper.writeSignature(file.path, sampleData(hash = "5".repeat(64)))
+        val second = ContentAuthenticityData(
+            contentHash = "5".repeat(64),
+            signatures = listOf(
+                SignatureEntry(
+                    keyFingerprint = "d".repeat(64),
+                    signerName = "Second Signer",
+                    algorithm = "ES256",
+                    value = "c2Vjb25k",
+                    timestamp = "2026-01-02T00:00:00Z",
+                    role = SignerRole.CREATOR
+                )
+            )
+        )
+
+        val original = file.readBytes()
+
+        // The streams the Share-sheet signer opens: the shared URI read only,
+        // the signed copy written to the document the user picked.
+        assertEquals(
+            XmpMetadataHelper.SharedSigning.SIGNED_COPY,
+            XmpMetadataHelper.sharedSigning({ resolver.openInputStream(uri)!! }, XmpContainers.Format.PNG)
+        )
+        val replaced = XmpMetadataHelper.replaceEmbeddedSignature(
+            open = { resolver.openInputStream(uri)!! },
+            openOutput = { resolver.openOutputStream(copyUri, "w")!! },
+            format = XmpContainers.Format.PNG,
+            data = second,
+            workDir = context.cacheDir,
+            destination = copyUri.toString()
+        )
+
+        assertTrue(replaced)
+        assertTrue(original.contentEquals(file.readBytes()))
+        assertFalse(File(XmpMetadataHelper.getSidecarPath(copy.path)).exists())
+        assertEquals(second, XmpMetadataHelper.readSignatureFromUri(resolver, copyUri, "image/png"))
     }
 }

@@ -1,6 +1,6 @@
 # Media signing architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
+> **Status: REFERENCE** · Last verified: 2026-11-12
 > As-built description of how `MediaSigningService` fits into xKey and the auto-sign flow.
 
 ## Service Layer
@@ -10,7 +10,14 @@
 Foreground service that monitors `MediaStore` via `ContentObserver` for new
 photos and videos. When new media is detected, it computes a SHA-256 hash,
 signs it with the configured key via `KeystoreManager.signWithAlgorithm()`,
-and embeds the signature in EXIF/XMP metadata using `XmpMetadataHelper`.
+and embeds the signature in the file using `XmpMetadataHelper`: EXIF
+`UserComment` for JPEG, an XMP box or chunk for MP4/MOV, PNG and WebP
+(`XmpContainers`). HEIC, MKV, unknown types, a file the embed refuses and one
+above the embed bound (`XmpMetadataHelper.maxEmbedBytes`, hashed by streaming)
+get a `<name>.xkeysig` sidecar, and readers fall back to a sidecar, so files
+signed before embedding still verify. Embedded writes go through a unique,
+exclusively created staging file, serialized per path. See
+[engineering.md](engineering.md#mp4--mov-png-webp-embedded-xmp).
 
 - Foreground service type: `dataSync`
 - Notification channel: `media_signing_channel`
@@ -60,7 +67,7 @@ graph LR
     F -->|In hardware| G[Android Keystore]
     G -->|Signature| F
     F -->|Signature| D
-    D -->|Write EXIF| H[XmpMetadataHelper]
+    D -->|Write EXIF/XMP| H[XmpMetadataHelper]
     D -->|Log| I[AuditLogger]
 ```
 
@@ -106,7 +113,7 @@ sequenceDiagram
 
     Svc->>MS: Query file path from URI
     Svc->>XMP: writeSignature(filePath, data)
-    Note over XMP: Write to EXIF TAG_USER_COMMENT
+    Note over XMP: JPEG: EXIF TAG_USER_COMMENT<br/>MP4/MOV, PNG, WebP: XMP box or chunk
 
     Note over User: User opens photo later in Verified Viewer<br/>and sees green verification badge
 ```

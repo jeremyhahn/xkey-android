@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.content.ContentResolver
 import android.content.Intent
 import android.graphics.Color
 import androidx.core.content.ContextCompat
@@ -48,6 +49,7 @@ import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.SignerVerification
+import com.automatethethings.xkey.media.XmpContainers
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.ContactDao
@@ -62,6 +64,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.time.Instant
 
 /**
@@ -144,8 +147,20 @@ class FileOperationActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { verifySidecarSignature(it) } }
 
-    // Deferred writes: the sidecar JSON, or staged files awaiting a save location
+    private val createSignedCopyLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*")
+    ) { uri -> uri?.let { saveSignedCopyToUri(it) } }
+
+    /** A signed copy of [source] waiting for the document the user picks. */
+    private class PendingSignedCopy(
+        val source: Uri,
+        val format: XmpContainers.Format,
+        val data: ContentAuthenticityData
+    )
+
+    // Deferred writes: the sidecar JSON, a signed copy, or staged files awaiting a save location
     private var pendingSignatureJson: String? = null
+    private var pendingSignedCopy: PendingSignedCopy? = null
 
     // Staging files for sign, encrypt and decrypt (see FileOperationStaging)
     private lateinit var staging: FileOperationStaging
@@ -972,6 +987,30 @@ class FileOperationActivity : AppCompatActivity() {
                     withContext(Dispatchers.Main) {
                         showResult(getString(R.string.file_operation_sign_success))
                     }
+                } else if (sharedSigning(uri, mimeType) == XmpMetadataHelper.SharedSigning.SIGNED_COPY) {
+                    // It carries an embedded signature, which readers prefer
+                    // to a sidecar. The shared original is never truncated:
+                    // a file is replaced atomically, any other provider gets
+                    // a signed copy at a document the user picks.
+                    val path = uri.path
+                    if (uri.scheme == ContentResolver.SCHEME_FILE && path != null) {
+                        XmpMetadataHelper.writeSignature(path, cad)
+                        keyDao.recordUsage(key.keyId)
+                        AuditLogger.logFileSigned(key.keyId, key.label, fileName)
+
+                        withContext(Dispatchers.Main) {
+                            showResult(getString(R.string.file_operation_sign_success))
+                        }
+                    } else {
+                        pendingSignedCopy = PendingSignedCopy(uri, XmpContainers.formatOf(mimeType)!!, cad)
+
+                        keyDao.recordUsage(key.keyId)
+                        AuditLogger.logFileSigned(key.keyId, key.label, fileName)
+
+                        withContext(Dispatchers.Main) {
+                            createSignedCopyLauncher.launch(signedCopyName(fileName))
+                        }
+                    }
                 } else {
                     // Save as sidecar: prompt user for output location
                     pendingSignatureJson = cad.toJsonString()
@@ -985,6 +1024,51 @@ class FileOperationActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { showError(e) }
+            }
+        }
+    }
+
+    /**
+     * How the shared media at [uri] is signed, reading it only, so media
+     * shared with read access alone keeps the sidecar path.
+     */
+    private fun sharedSigning(uri: Uri, mimeType: String): XmpMetadataHelper.SharedSigning =
+        XmpMetadataHelper.sharedSigning(
+            open = { contentResolver.openInputStream(uri) ?: throw IOException("Cannot open $uri") },
+            format = XmpContainers.formatOf(mimeType)
+        )
+
+    /** "clip.mp4" becomes "clip-signed.mp4". */
+    private fun signedCopyName(fileName: String): String {
+        val dot = fileName.lastIndexOf('.')
+        return if (dot > 0) fileName.substring(0, dot) + "-signed" + fileName.substring(dot) else "$fileName-signed"
+    }
+
+    /**
+     * Write the pending signed copy to the user-selected URI. The shared
+     * original is only read; if the write fails, the complete signed copy
+     * stays in the cache directory and the error names it.
+     */
+    private fun saveSignedCopyToUri(outputUri: Uri) {
+        val pending = pendingSignedCopy ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val written = XmpMetadataHelper.replaceEmbeddedSignature(
+                    open = { contentResolver.openInputStream(pending.source) ?: throw IOException("Cannot open ${pending.source}") },
+                    openOutput = { contentResolver.openOutputStream(outputUri, "w") ?: throw IOException("Cannot write $outputUri") },
+                    format = pending.format,
+                    data = pending.data,
+                    workDir = cacheDir,
+                    destination = outputUri.toString()
+                )
+                if (!written) throw IOException("${pending.source} cannot carry a new embedded signature")
+                withContext(Dispatchers.Main) {
+                    showResult(getString(R.string.file_operation_sign_success))
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { showError(e) }
+            } finally {
+                pendingSignedCopy = null
             }
         }
     }

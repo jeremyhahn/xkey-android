@@ -125,7 +125,51 @@ co-signers, well within EXIF limits.
 The `XKEY_SIG:` prefix allows xKey to identify its own metadata and distinguish
 it from other applications that may use the same EXIF field.
 
-### PNG / WebP
+### MP4 / MOV, PNG, WebP: embedded XMP
+
+The same JSON is embedded as an XMP packet (`XmpContainers`, pure byte-level
+edits): one `rdf:Description` declaring
+`xmlns:xkey="http://ns.automatethethings.com/xkey/media/1.0/"`, whose
+`xkey:signature` element holds the XML-escaped JSON. A packet is xKey's when
+it declares that namespace.
+
+| Type | Where the packet goes |
+|------|-----------------------|
+| MP4, MOV (ISO BMFF) | Top-level `uuid` box, usertype `BE7ACFCB-97A9-42E8-9C71-999491E3AFAC`, appended after the last box so no `stco`/`co64` offset moves |
+| PNG | Uncompressed `iTXt` chunk, keyword `XML:com.adobe.xmp`, just before `IEND`, with its CRC |
+| WebP | RIFF `XMP ` chunk at the end, VP8X XMP flag (0x04) set, RIFF size updated; a simple (VP8/VP8L-only) file gets a VP8X with only that flag and the canvas size from the bitstream |
+
+Rewriting replaces xKey's box or chunk; it never adds a second. The new bytes
+go to a staging file beside the media, created exclusively under a unique
+name for that write (`.<name>.<random>.xkeytmp`), which then replaces the
+media by rename. Every write and append to one path is serialized, so two
+signing jobs for the same capture never share or delete each other's staging
+file, and the result is one job's complete output.
+
+The canonical hash (`MediaHasher.canonicalContent`) leaves out exactly that
+box or chunk and undoes what embedding changed (WebP: the XMP flag, a VP8X
+whose flags are then 0, the RIFF size), so it is the file's hash as it was
+before signing and survives every re-embed. A file without xKey's packet is
+hashed whole, as before. In MP4/MOV only a trailing run of xKey boxes is left
+out, the only place the writer puts one: sample offsets are absolute, so an
+xKey box before any other box would shift the media they address. Such a file
+is hashed whole, so its signature never verifies.
+
+The automatic signer (`AutoSignHash.contentHashUri`) hashes these types in the
+same canonical domain, so media that already carries an embedded signature (an
+import, or a capture notified again after a restart) verifies once
+`writeSignature` replaces the packet.
+
+### Large media
+
+Embedding holds the file in memory about three times over, so it is bounded by
+`XmpMetadataHelper.maxEmbedBytes` (128 MiB, or a sixth of the heap when that is
+less). A larger MP4/MOV, PNG or WebP is hashed whole by streaming and signed
+with a sidecar; the file is never read whole. One that already carries an
+embedded signature is refused instead, keeping that signature, since a
+sidecar would be shadowed by it.
+
+### Sidecar fallback
 
 ```
 Method:  Sidecar file (.xkeysig)
@@ -133,25 +177,25 @@ Format:  JSON file alongside the media file
 Path:    <original_path>.xkeysig
 ```
 
-The `ExifInterface` on Android does not reliably write to PNG or WebP metadata.
-A sidecar JSON file is used instead.
-
-### Video (MP4, MKV, MOV)
-
-```
-Method:  Sidecar file (.xkeysig)
-Format:  JSON file alongside the video file
-Path:    <original_path>.xkeysig
-```
-
-Video containers do not support EXIF metadata. A sidecar file is always used.
+A sidecar is written for HEIC, MKV and unknown types, and for an MP4/MOV, PNG
+or WebP the embed refuses: bytes that do not parse, a foreign XMP packet
+(never overwritten), an MP4 whose last box runs to the end of the file (size
+0), a WebP whose VP8X has no flags, or a file above the embed bound (see Large
+media). Files signed before embedding keep
+their sidecar: it still reads, and `appendSignature` adds a co-signer to the
+sidecar rather than moving the signature into the file.
 
 ### Read Priority
 
 When reading signatures, `XmpMetadataHelper.readSignature()` checks in order:
 
-1. EXIF `TAG_USER_COMMENT` (for JPEG)
+1. EXIF `TAG_USER_COMMENT` (JPEG) or the embedded XMP packet (MP4/MOV, PNG,
+   WebP)
 2. Sidecar `.xkeysig` file (fallback for all formats)
+
+`readSignatureFromUri()` reads the embedded form only (a URI has no sidecar
+beside it); for MP4/MOV, PNG and WebP it walks the box or chunk headers and
+skips every payload but the XMP one, so a video is never loaded whole.
 
 ## ContentAuthenticityData Schema
 

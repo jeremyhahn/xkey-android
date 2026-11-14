@@ -18,9 +18,15 @@ import android.content.ContentResolver
 import android.net.Uri
 import io.mockk.every
 import io.mockk.mockk
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.File
 import java.io.InputStream
 
 /**
@@ -87,5 +93,91 @@ class AutoSignHashTest {
     @Test
     fun `the default bound is 32 MiB`() {
         assertEquals(32 * 1024 * 1024, AutoSignHash.MAX_CANONICAL_JPEG_BYTES)
+    }
+
+    @get:Rule
+    val tempFolder = TemporaryFolder()
+
+    private fun resolverFor(mimeType: String, file: File): Pair<ContentResolver, Uri> {
+        val resolver = mockk<ContentResolver>()
+        val uri = mockk<Uri>()
+        every { resolver.getType(uri) } returns mimeType
+        every { resolver.openInputStream(uri) } answers { file.inputStream() }
+        return resolver to uri
+    }
+
+    private fun signatureOver(hash: String) = ContentAuthenticityData(
+        contentHash = hash,
+        signatures = listOf(
+            SignatureEntry(
+                keyFingerprint = "SHA256:autofp",
+                signerName = "Auto",
+                algorithm = "ES256",
+                value = "MEUCIQD",
+                timestamp = "2026-01-15T10:30:00Z",
+                role = SignerRole.CREATOR
+            )
+        )
+    )
+
+    @Test
+    fun `already signed png and mp4 signed again through the uri path verify after the packet is replaced`() {
+        for ((name, mime) in listOf("photo.png" to "image/png", "clip.mp4" to "video/mp4")) {
+            val format = XmpContainers.formatOf(mime)!!
+            val original = XmpFixtures.all.getValue(mime)
+            val earlier = XmpContainers.embed(original, format, XmpFixtures.json(MediaHasher.hashCanonical(original, mime)))!!
+            val file = tempFolder.newFile(name).apply { writeBytes(earlier) }
+            val (resolver, uri) = resolverFor(mime, file)
+
+            val hash = AutoSignHash.contentHashUri(resolver, uri)
+            XmpMetadataHelper.writeSignature(file.path, signatureOver(hash))
+
+            val read = XmpMetadataHelper.readSignature(file.path)!!
+            assertEquals(mime, hash, read.contentHash)
+            assertTrue(
+                mime,
+                MediaHasher.contentHashMatches(read.contentHash, file.readBytes(), mime, MediaHasher.SignatureSource.IN_BAND)
+            )
+        }
+    }
+
+    @Test
+    fun `media above the embed bound is signed with a sidecar and the file left as it was`() {
+        val mime = "video/mp4"
+        val original = XmpFixtures.mp4()
+        val bound = XmpMetadataHelper.maxEmbedBytes
+        XmpMetadataHelper.maxEmbedBytes = original.size - 1
+        try {
+            val file = tempFolder.newFile("long.mp4").apply { writeBytes(original) }
+            val (resolver, uri) = resolverFor(mime, file)
+
+            val hash = AutoSignHash.contentHashUri(resolver, uri)
+            assertEquals(MediaHasher.hashBytes(original), hash)
+            XmpMetadataHelper.writeSignature(file.path, signatureOver(hash))
+
+            assertArrayEquals("the media is not rewritten", original, file.readBytes())
+            val sidecar = File(XmpMetadataHelper.getSidecarPath(file.path))
+            assertTrue("the signature persists in a sidecar", sidecar.exists())
+            val read = XmpMetadataHelper.readSignature(file.path)!!
+            assertTrue(
+                MediaHasher.contentHashMatches(read.contentHash, file.readBytes(), mime, MediaHasher.SignatureSource.SIDECAR)
+            )
+
+            // Oversized media already carrying an embedded signature keeps it:
+            // a sidecar would be shadowed by it, so both steps refuse.
+            val signed = XmpContainers.embed(original, XmpContainers.Format.ISO_BMFF, XmpFixtures.json())!!
+            val carried = tempFolder.newFile("carried.mp4").apply { writeBytes(signed) }
+            val (signedResolver, signedUri) = resolverFor(mime, carried)
+            assertThrows(AutoSignHash.TooLargeException::class.java) {
+                AutoSignHash.contentHashUri(signedResolver, signedUri)
+            }
+            assertThrows(java.io.IOException::class.java) {
+                XmpMetadataHelper.writeSignature(carried.path, signatureOver(hash))
+            }
+            assertArrayEquals(signed, carried.readBytes())
+            assertFalse(File(XmpMetadataHelper.getSidecarPath(carried.path)).exists())
+        } finally {
+            XmpMetadataHelper.maxEmbedBytes = bound
+        }
     }
 }

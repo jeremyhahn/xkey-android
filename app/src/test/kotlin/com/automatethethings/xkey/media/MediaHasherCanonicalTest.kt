@@ -121,6 +121,103 @@ class MediaHasherCanonicalTest {
     }
 
     // -----------------------------------------------------------------
+    // Embedded XMP (MP4/MOV, PNG, WebP)
+    // -----------------------------------------------------------------
+
+    private fun embed(data: ByteArray, mime: String, hash: String = "a".repeat(64)) =
+        XmpContainers.embed(data, XmpContainers.formatOf(mime)!!, XmpFixtures.json(hash))!!
+
+    @Test
+    fun `an unsigned mp4, mov, png or webp is hashed whole`() {
+        for ((mime, file) in XmpFixtures.all) {
+            assertEquals(mime, MediaHasher.hashBytes(file), MediaHasher.hashCanonical(file, mime))
+        }
+    }
+
+    @Test
+    fun `the canonical hash survives embedding and a second embed`() {
+        for ((mime, file) in XmpFixtures.all) {
+            val before = MediaHasher.hashCanonical(file, mime)
+            val once = embed(file, mime)
+            val twice = embed(once, mime, hash = "b".repeat(64))
+
+            assertNotEquals(mime, MediaHasher.hashBytes(file), MediaHasher.hashBytes(once))
+            assertEquals(mime, before, MediaHasher.hashCanonical(once, mime))
+            assertEquals(mime, before, MediaHasher.hashCanonical(twice, mime))
+        }
+    }
+
+    @Test
+    fun `the canonical hash of a simple webp survives the VP8X the embed adds`() {
+        val file = XmpFixtures.simpleWebp()
+        assertEquals(
+            MediaHasher.hashCanonical(file, "image/webp"),
+            MediaHasher.hashCanonical(embed(file, "image/webp"), "image/webp")
+        )
+    }
+
+    @Test
+    fun `changing one media byte of a signed file changes the canonical hash`() {
+        val pairs = listOf(
+            Triple("video/mp4", XmpFixtures.mp4(), XmpFixtures.mp4(XmpFixtures.bytes(0x10, 0x20, 0x30, 0x41))),
+            Triple("video/quicktime", XmpFixtures.mov(), XmpFixtures.mov(XmpFixtures.bytes(0x11, 0x22, 0x34))),
+            Triple("image/png", XmpFixtures.png(), XmpFixtures.png(XmpFixtures.bytes(0x78, 0x9C, 0x01, 0x02, 0x04))),
+            Triple("image/webp", XmpFixtures.webp(), XmpFixtures.webp(XmpFixtures.bytes(0x55, 0x66, 0x78)))
+        )
+        for ((mime, original, edited) in pairs) {
+            assertNotEquals(
+                mime,
+                MediaHasher.hashCanonical(embed(original, mime), mime),
+                MediaHasher.hashCanonical(embed(edited, mime), mime)
+            )
+        }
+    }
+
+    @Test
+    fun `a tampered embedded payload fails contentHashMatches`() {
+        for ((mime, file) in XmpFixtures.all) {
+            val stored = MediaHasher.hashCanonical(file, mime)
+            val signed = embed(file, mime, hash = stored)
+            assertTrue(mime, MediaHasher.contentHashMatches(stored, signed, mime, SignatureSource.IN_BAND))
+            assertFalse(
+                "$mime: an in-band signature never covers the whole file",
+                MediaHasher.contentHashMatches(MediaHasher.hashBytes(signed), signed, mime, SignatureSource.IN_BAND)
+            )
+
+            // Break the namespace declaration: the packet is no longer ours, so
+            // it is no longer left out of the hash.
+            val text = String(signed, Charsets.ISO_8859_1)
+            val at = text.indexOf(XmpContainers.XKEY_NAMESPACE)
+            val tampered = signed.copyOf().also { it[at] = 'X'.code.toByte() }
+            assertFalse(mime, MediaHasher.contentHashMatches(stored, tampered, mime, SignatureSource.IN_BAND))
+
+            // Rewrite the stored hash inside the payload: it no longer matches.
+            val forged = embed(file, mime, hash = "f".repeat(64))
+            val read = ContentAuthenticityData.fromJsonString(
+                XmpContainers.extract(forged, XmpContainers.formatOf(mime)!!)!!
+            )
+            assertFalse(mime, MediaHasher.contentHashMatches(read.contentHash, forged, mime, SignatureSource.IN_BAND))
+        }
+    }
+
+    @Test
+    fun `an xKey uuid box inserted before the media data fails contentHashMatches`() {
+        val mime = "video/mp4"
+        val file = XmpFixtures.mp4()
+        val stored = MediaHasher.hashCanonical(file, mime)
+        val signed = embed(file, mime, hash = stored)
+        assertTrue(MediaHasher.contentHashMatches(stored, signed, mime, SignatureSource.IN_BAND))
+
+        // A second recognised box before mdat moves every sample the stco/co64
+        // offsets address, while the trailing signature stays as it was.
+        val ours = signed.copyOfRange(file.size, signed.size)
+        val mdatAt = file.size - (8 + 4)
+        val inserted = signed.copyOfRange(0, mdatAt) + ours + signed.copyOfRange(mdatAt, signed.size)
+
+        assertFalse(MediaHasher.contentHashMatches(stored, inserted, mime, SignatureSource.IN_BAND))
+    }
+
+    // -----------------------------------------------------------------
     // contentHashMatches
     // -----------------------------------------------------------------
 
