@@ -62,7 +62,7 @@ private suspend fun DesktopKeyShare.send(
     permission: SharePermission,
     currentEntity: suspend (String) -> KeyEntity?
 ): DesktopKeyShare.Outcome = send(
-    SharePermissionLedger.baseline(entity?.keyId ?: ""),
+    SharePermissionLedger.baselineForTest(entity?.keyId ?: ""),
     entity, software, publicKeyPem, certificatePem, permission, currentEntity
 )
 

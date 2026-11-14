@@ -363,9 +363,9 @@ class RemoteShareClientTest {
     fun `a stale baseline stays refused after its key is reclaimed`() {
         val keyId = "reclaimed-${System.nanoTime()}"
         val before = SharePermissionLedger.retainedKeyCount()
-        val stale = SharePermissionLedger.baseline(keyId)
+        val stale = SharePermissionLedger.baselineForTest(keyId)
         runBlocking { SharePermissionLedger.revoking(keyId) { } }
-        val completed = SharePermissionLedger.baseline(keyId)
+        val completed = SharePermissionLedger.baselineForTest(keyId)
         SharePermissionLedger.requireUnchanged(completed.keyId, completed.revision)
         completed.close()
         stale.close()
@@ -377,7 +377,7 @@ class RemoteShareClientTest {
         } catch (_: SharePermissionRevokedException) {
         }
         // A baseline taken after the reclaim is admitted.
-        val fresh = SharePermissionLedger.baseline(keyId)
+        val fresh = SharePermissionLedger.baselineForTest(keyId)
         SharePermissionLedger.requireUnchanged(fresh.keyId, fresh.revision)
         fresh.close()
     }

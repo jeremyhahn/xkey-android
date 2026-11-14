@@ -550,7 +550,7 @@ class GattServerReconnectTest {
         val share = ShareSession.of(listOf(ShareSession.Transport(server.boundSender()!!.second, router))) { true }!!
         assertEquals(keyHex, share.peerPublicKeyHex)
         val store = SharedKeyStore(keyHex)
-        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val baseline = SharePermissionLedger.baselineForTest(store.keyId)
         val fragments = captureFragments()
         val paused = CompletableDeferred<Unit>()
         val resume = CompletableDeferred<Unit>()

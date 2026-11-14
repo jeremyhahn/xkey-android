@@ -488,17 +488,17 @@ class PairedDeviceGrantCleanupTest {
         var checks = 0
         val earlyPasses = permissionOf { k, p -> checks++ == 0 || grant(k, p) }
         val toA = desktopShare(PEER_A)
-        val out = toA.first.send(SharePermissionLedger.baseline(key.keyId), key, null, pem, null, earlyPasses) { key }
+        val out = toA.first.send(SharePermissionLedger.baselineForTest(key.keyId), key, null, pem, null, earlyPasses) { key }
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
         assertTrue("no public key reaches the re-paired peer", toA.second.sent.isEmpty())
         assertEquals(
             DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED),
-            desktopShare(PEER_A).first.send(SharePermissionLedger.baseline(key.keyId), key, null, pem, null, permission) { key }
+            desktopShare(PEER_A).first.send(SharePermissionLedger.baselineForTest(key.keyId), key, null, pem, null, permission) { key }
         )
 
         // Control: B's grant still authorizes B.
         val toB = desktopShare(PEER_B)
-        val sent = toB.first.send(SharePermissionLedger.baseline(key.keyId), key, null, pem, null, permission) { key }
+        val sent = toB.first.send(SharePermissionLedger.baselineForTest(key.keyId), key, null, pem, null, permission) { key }
         assertTrue("B's grant still admits B, got $sent", sent is DesktopKeyShare.Outcome.Sent)
     }
 

@@ -134,7 +134,7 @@ class KeyMaterialRemovalShareTest {
             },
             200
         )
-        val out = waiting.send(SharePermissionLedger.baseline(hardware.keyId), hardware, null, pem, null, isShared, current)
+        val out = waiting.send(SharePermissionLedger.baselineForTest(hardware.keyId), hardware, null, pem, null, isShared, current)
 
         assertTrue("$path: the delete ran while the share waited", checks >= 2)
         assertFalse("$path removes the software key", "xkey_key_a" in softwareStore)
@@ -193,7 +193,7 @@ class KeyMaterialRemovalShareTest {
             200
         )
         val out = try {
-            waiting.send(SharePermissionLedger.baseline(keyId), ephemeral, null, pem, null, isShared, current)
+            waiting.send(SharePermissionLedger.baselineForTest(keyId), ephemeral, null, pem, null, isShared, current)
         } finally {
             release.countDown()
             encryption.join(5_000)

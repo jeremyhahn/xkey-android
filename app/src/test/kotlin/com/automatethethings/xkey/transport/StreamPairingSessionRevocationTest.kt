@@ -864,7 +864,7 @@ class StreamPairingSessionRevocationTest {
         coEvery { keyDao.deleteByKeyId(any()) } coAnswers { callOriginal() }
         coEvery { keyDao.insert(any()) } coAnswers { callOriginal() }
 
-        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val baseline = SharePermissionLedger.baselineForTest(store.keyId)
         val loadedEntity = store.entity!!
         val loadedPem = PEM
         // Deleted and recreated, still shared with the peer, after the load.
@@ -1047,7 +1047,7 @@ class StreamPairingSessionRevocationTest {
         val store = SharedKeyStore(phone.desktop.publicKeyHex, slot.keystoreAlias)
 
         val generated = manager.generateKey(slot, PivAlgorithm.ES256)
-        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val baseline = SharePermissionLedger.baselineForTest(store.keyId)
         val newPem = "-----BEGIN PUBLIC KEY-----\n" +
             Base64.getEncoder().encodeToString(generated.publicKeyDer) + "\n-----END PUBLIC KEY-----\n"
         // No reply comes back to this router; only the request is checked.
@@ -1133,7 +1133,7 @@ class StreamPairingSessionRevocationTest {
         val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!
         val store = keyId?.let { SharedKeyStore(phone.desktop.publicKeyHex, it) }
             ?: SharedKeyStore(phone.desktop.publicKeyHex)
-        val baseline = SharePermissionLedger.baseline(store.keyId)
+        val baseline = SharePermissionLedger.baselineForTest(store.keyId)
         val paused = CompletableDeferred<Unit>()
         val resume = CompletableDeferred<Unit>()
         pairing.beforeAdmissionForTest = {

@@ -131,7 +131,7 @@ class LegacyGenerateKeyShareLedgerTest {
         assertNotNull("a second generation of a pending ID must be refused, got $second", second.optJSONObject("error"))
 
         // A share of the ID reads its inputs now, while A waits.
-        val share = SharePermissionLedger.baseline(credentialId)
+        val share = SharePermissionLedger.baselineForTest(credentialId)
 
         approve.complete(Unit)
         val firstResponse = withTimeout(TIMEOUT_MS) { first.await() }

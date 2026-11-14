@@ -235,7 +235,7 @@ class UsbConnectedDesktopTest {
             val permission = SharePermission(mockk<KeySharingPolicyDao>(relaxed = true), harness.repo)
             val outcome = async {
                 DesktopKeyShare(session, 10_000).send(
-                    SharePermissionLedger.baseline(key.keyId), key, null, PEM, null, permission
+                    SharePermissionLedger.baselineForTest(key.keyId), key, null, PEM, null, permission
                 ) { key }
             }
 
