@@ -61,6 +61,16 @@ class BiometricRequiredException : XKeyCryptoException(
 )
 
 /**
+ * Exception thrown when the key under an alias is no longer the one the owner
+ * approved: its public key differs from the approved one, so nothing is signed.
+ *
+ * @param alias The Keystore alias whose key changed.
+ */
+class ApprovedKeyChangedException(
+    val alias: String
+) : XKeyCryptoException("The key under $alias is not the approved key")
+
+/**
  * Exception thrown when the user cancels biometric authentication.
  */
 class UserCancelledException : XKeyCryptoException(

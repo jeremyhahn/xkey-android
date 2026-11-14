@@ -132,6 +132,14 @@ class PasskeySignCounterHandlerTest {
             signed += secondArg<ByteArray>()
             SIGNATURE
         }
+        // The phone backend signs the passkey the owner approved, under the
+        // alias its approval read (#177): the same faked signer records it.
+        every { keystoreManager.resolveKeystoreAlias(ID) } returns ALIAS
+        every { keystoreManager.publicKeyDERAt(ALIAS) } returns APPROVED_DER
+        coEvery { keystoreManager.signApproved(ALIAS, APPROVED_DER, any(), any()) } answers {
+            signed += thirdArg<ByteArray>()
+            SIGNATURE
+        }
         biometricHelper = mockk(relaxed = true)
         every { biometricHelper.isBiometricAvailable() } returns true
         biometricLauncher = mockk(relaxed = true)
@@ -375,5 +383,7 @@ class PasskeySignCounterHandlerTest {
         const val RP_ID = "example.com"
         val CLIENT_DATA_HASH = ByteArray(32) { 0x21 }
         val SIGNATURE = byteArrayOf(0x30, 0x00)
+        const val ALIAS = "xkey_credential_credential-216"
+        val APPROVED_DER = ByteArray(91) { 3 }
     }
 }

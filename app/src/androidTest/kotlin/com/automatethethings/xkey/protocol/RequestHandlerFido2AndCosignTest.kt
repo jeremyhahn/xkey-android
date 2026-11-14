@@ -462,57 +462,37 @@ class RequestHandlerFido2AndCosignTest {
 
     /**
      * Co-signing is an Android-side extension: the desktop hands over a
-     * content hash and the phone answers with a signature plus the fingerprint
-     * of the key that produced it, so the initiator can attribute it.
+     * content hash and the phone signs it only once the owner approves a
+     * prompt on the phone (#177). This suite's handler has no biometric
+     * launcher, so a well-formed request is refused with BIOMETRIC_FAILED and
+     * nothing is signed. The approved path, with its result shape, is pinned
+     * by the JVM test CosignRequestHandlerTest.
      */
     @Test
-    fun cosignRequestSignsTheContentHashWithTheNamedKey() {
+    fun cosignRequestWithNoApprovalPromptSignsNothing() {
         val keyId = generateSigningKey("cosign-$runId")
         val contentHash = MessageDigest.getInstance("SHA-256").digest("a witnessed document".toByteArray())
         val contentHashHex = contentHash.joinToString("") { "%02x".format(it) }
 
-        val result = call(
+        val response = call(
             "cosign.request",
             JSONObject()
                 .put("hash", contentHashHex)
                 .put("hashAlgorithm", "SHA-256")
                 .put("keyId", keyId)
-        ).ok()
+        )
 
-        assertEquals("ES256", result.getString("algorithm"))
         assertEquals(
-            "the signer name falls back to the key id when the key has no label",
-            keyId,
-            result.getString("signerName")
+            "without the owner's approval the phone must not co-sign",
+            ErrorCodes.BIOMETRIC_FAILED,
+            response.errorCode()
         )
-
-        val publicKeyDer = keystoreManager.getPublicKeyDER(keyId)
-            ?: throw AssertionError("the signing key has no public key")
-        val expectedFingerprint = MessageDigest.getInstance("SHA-256")
-            .digest(publicKeyDer)
-            .joinToString("") { "%02x".format(it) }
-        assertEquals(
-            "the fingerprint must identify the key that signed",
-            expectedFingerprint,
-            result.getString("keyFingerprint")
-        )
-
-        val verifier = Signature.getInstance("SHA256withECDSA")
-        verifier.initVerify(
-            java.security.KeyFactory.getInstance("EC").generatePublic(
-                java.security.spec.X509EncodedKeySpec(publicKeyDer)
-            )
-        )
-        verifier.update(contentHash)
-        assertTrue(
-            "the co-signature must verify over the content hash the peer sent",
-            verifier.verify(Base64.getDecoder().decode(result.getString("signature")))
-        )
+        assertEquals(null, response.result)
     }
 
     /**
-     * `keyId` is optional: the handler falls back to any stored signing or
-     * FIDO2 key rather than refusing the request outright.
+     * `keyId` is optional: the handler falls back to a stored signing key
+     * (never a FIDO2 key) rather than refusing the request as malformed.
      */
     @Test
     fun cosignRequestFallsBackToAStoredSigningKey() {
@@ -520,12 +500,11 @@ class RequestHandlerFido2AndCosignTest {
         val contentHashHex = "ab".repeat(32)
 
         val response = call("cosign.request", JSONObject().put("hash", contentHashHex))
-        val code: Int? = response.error?.code
 
-        assertNotEquals(
-            "omitting keyId must select a stored key, not reject the request",
-            ErrorCodes.INVALID_PARAMS,
-            code
+        assertEquals(
+            "omitting keyId must select a stored key and reach the approval prompt",
+            ErrorCodes.BIOMETRIC_FAILED,
+            response.errorCode()
         )
     }
 
@@ -534,12 +513,27 @@ class RequestHandlerFido2AndCosignTest {
     fun cosignRequestRejectsAMalformedContentHash() {
         val keyId = generateSigningKey("cosign-badhex-$runId")
 
-        val response = call(
-            "cosign.request",
-            JSONObject().put("hash", "abc").put("keyId", keyId)
+        assertEquals(
+            ErrorCodes.INVALID_PARAMS,
+            call("cosign.request", JSONObject().put("hash", "abc").put("keyId", keyId)).errorCode()
         )
+        assertEquals(
+            "a 31-byte value is not a SHA-256 digest",
+            ErrorCodes.INVALID_PARAMS,
+            call("cosign.request", JSONObject().put("hash", "ab".repeat(31)).put("keyId", keyId)).errorCode()
+        )
+    }
 
-        assertEquals(ErrorCodes.SIGNING_FAILED, response.errorCode())
+    /** An anonymous session cannot ask the owner to vouch for a hash. */
+    @Test
+    fun cosignRequestRefusesASessionWithNoConfirmedPeer() {
+        val keyId = generateSigningKey("cosign-anon-$runId")
+        handler.setConnectedDevicePublicKeyHex(null)
+
+        assertEquals(
+            ErrorCodes.OPERATION_DENIED,
+            call("cosign.request", JSONObject().put("hash", "ab".repeat(32)).put("keyId", keyId)).errorCode()
+        )
     }
 
     @Test

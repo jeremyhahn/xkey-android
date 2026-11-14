@@ -17,6 +17,7 @@ package com.automatethethings.xkey.auth
 
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -136,6 +137,211 @@ class PromptEntryPointsTest {
             entry.guards.forEach { guard ->
                 assertTrue("$path raises a prompt without $guard: ${entry.reason}", guard in text)
             }
+        }
+    }
+
+    /**
+     * The approval prompt activity starts only on a queue turn: every
+     * `TransparentBiometricActivity.createIntent` in the main sources is
+     * built inside a `pendingRequests.await` launch, and that await enqueues
+     * the request with [PromptOwnership] before it launches anything. A prompt
+     * started from anywhere else (#177's co-sign kept a queue of its own) is
+     * shown beside the ACTIVE one, and the two swallow each other.
+     */
+    @Test
+    fun everyApprovalPromptActivityStartsOnAQueueTurn() {
+        val launch = Regex("""TransparentBiometricActivity\.createIntent\(""")
+        val bypasses = sourceRoot.walkTopDown().filter { it.isFile && it.extension == "kt" }.flatMap { file ->
+            val code = file.readLines().filterNot { line ->
+                line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+            }.joinToString("\n")
+            val path = file.relativeTo(sourceRoot).invariantSeparatorsPath
+            launch.findAll(code).filterNot { match ->
+                // The function the launch is written in, up to the launch
+                "pendingRequests.await" in code.substring(0, match.range.first).substringAfterLast("fun ")
+            }.map { path }
+        }.toList()
+        assertTrue("TransparentBiometricActivity started outside a PromptOwnership turn: $bypasses", bypasses.isEmpty())
+
+        val await = sourceRoot.resolve("auth/BiometricActivityLauncher.kt").readText()
+            .substringAfter("class PendingAuthentications").substringAfter("suspend fun await(")
+            .substringBefore("fun complete(")
+        val enqueued = await.indexOf("prompts.enqueue(")
+        val launched = await.indexOf("launch(id.toString())")
+        assertTrue("PendingAuthentications.await launches without a queue entry", enqueued in 0 until launched)
+    }
+
+    /**
+     * An approval can wait a minute for the owner, and the stored key it was
+     * asked for can be deleted, re-policied or replaced under its id while it
+     * does. Every handler operation that reads a stored key row and uses a
+     * key after its approval runs the one post-approval check,
+     * `revalidateApprovedKey`, between the last approval and the first use,
+     * and that check compares what makes the row the same key.
+     */
+    @Test
+    fun everyApprovalGatedKeyUseRevalidatesTheKeyAfterTheApproval() {
+        val code = sourceRoot.resolve("protocol/Handler.kt").readLines().filterNot { line ->
+            line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+        }.joinToString("\n")
+        val approval = Regex("""requestAuthentication\(|\.approve\(|requireUserPresenceForAttestation\(|requestCryptoSignature\(""")
+        val rowRead = Regex("""getByKeyId\(|\.getAll\(\)""")
+        val keyUse = Regex("""signWithAlgorithm\(|signWithoutBiometric\(|signApproved\(|\.sign\(""")
+        val functions = Regex("""\n    (?:private |internal |override )?(?:suspend )?fun (\w+)""").findAll(code).toList()
+        val unchecked = functions.mapIndexedNotNull { i, fn ->
+            val body = code.substring(fn.range.first, functions.getOrNull(i + 1)?.range?.first ?: code.length)
+            val lastApproval = approval.findAll(body).lastOrNull() ?: return@mapIndexedNotNull null
+            if (!rowRead.containsMatchIn(body)) return@mapIndexedNotNull null
+            val use = keyUse.find(body, lastApproval.range.last) ?: return@mapIndexedNotNull null
+            val between = body.substring(lastApproval.range.last, use.range.first)
+            // The key material approved is read before the prompt goes up.
+            val before = body.substring(0, approval.find(body)!!.range.first)
+            val choked = Regex("""useApprovedKey(OrAlias)?\(""").containsMatchIn(between)
+            if (choked && "approvalSnapshot(" in before) null else fn.groupValues[1]
+        }
+        assertTrue("approval-gated key use outside useApprovedKey: $unchecked", unchecked.isEmpty())
+
+        // The recheck and the use share the key's lock, which key creation and
+        // deletion take too: nothing replaces the key between check and use.
+        assertEquals(
+            "revalidateApprovedKey is called other than from useApprovedKey",
+            1,
+            Regex("""revalidateApprovedKey\(""").findAll(code).count() - 1
+        )
+        val choke = code.substringAfter("fun <T> useApprovedKey(", "").substringBefore("\n\n")
+        assertTrue(
+            "useApprovedKey does not recheck under the key's lock",
+            choke.indexOf("withKeyLock(keyLockId(") in 0 until choke.indexOf("revalidateApprovedKey(")
+        )
+        val delete = code.substringAfter("fun handleLocalDeleteKey(", "").substringBefore("\n    }")
+        assertTrue(
+            "local.deleteKey deletes outside the key's lock",
+            delete.indexOf("withKeyLock(keyLockId(") in 0 until delete.indexOf("deleteGeneralKey(")
+        )
+        assertTrue(
+            "local.generateKey does not reserve the key's lock",
+            "val reservation = keyLockId(genParams.keyId)" in code
+        )
+
+        // A per-operation key co-signs only in a crypto-bound prompt, and only
+        // the approved key's signature over the requested hash is answered.
+        val cosign = code.substringAfter("fun handleCosignRequest(", "").substringBefore("\n    }\n")
+        listOf("authDurationSeconds == 0", "approvals.sign(", "signedBy(publicKeyDer").forEach {
+            assertTrue("handleCosignRequest does not use $it", it in cosign)
+        }
+
+        val check = code.substringAfter("fun revalidateApprovedKey(", "").substringBefore("\n    }")
+        // The row and the key material signed with: the keystore key under
+        // the alias must still be the one read before the approval.
+        listOf("getByKeyId(", "isSameKeyAs(", "publicKeyDERAt(snapshot.alias)", "contentEquals(").forEach {
+            assertTrue("revalidateApprovedKey does not call $it", it in check)
+        }
+        assertFalse("revalidateApprovedKey resolves the alias again", "getPublicKeyDER(" in check)
+    }
+
+    /**
+     * The key an approval names and the key its signer signs with are one
+     * lookup: the snapshot reads the public key under one alias, and the only
+     * signer after an approval, `signApproved`, signs under that same alias
+     * and refuses when the key there is not the approved one. A function that
+     * prompts and then signs or reads a public key by a resolving lookup
+     * (`signWithAlgorithm`, `signWithoutBiometric`, `getPublicKeyDER`) splits
+     * the two and is a bypass.
+     */
+    @Test
+    fun everyApprovedSignatureUsesTheAliasItsApprovalRead() {
+        val strip = { text: String ->
+            text.lines().filterNot { line ->
+                line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+            }.joinToString("\n")
+        }
+        val code = strip(sourceRoot.resolve("protocol/Handler.kt").readText())
+        val approval = Regex("""requestAuthentication\(|\.approve\(|approvals\.sign\(|requireUserPresenceForAttestation\(""")
+        val splitLookup = Regex("""signWithAlgorithm\(|signWithoutBiometric\(|getPublicKeyDER\(""")
+        val functions = Regex("""\n    (?:private |internal |override )?(?:suspend )?fun (\w+)""").findAll(code).toList()
+        val split = functions.mapIndexedNotNull { i, fn ->
+            val body = code.substring(fn.range.first, functions.getOrNull(i + 1)?.range?.first ?: code.length)
+            val firstApproval = approval.find(body) ?: return@mapIndexedNotNull null
+            if (splitLookup.containsMatchIn(body.substring(firstApproval.range.last))) fn.groupValues[1] else null
+        }
+        assertTrue("signs or names a key after an approval by a second lookup: $split", split.isEmpty())
+
+        val snapshot = code.substringAfter("fun approvalSnapshot(", "").substringBefore("\n\n")
+        assertTrue("approvalSnapshot does not read the alias it records", "publicKeyDERAt(alias)" in snapshot)
+        val signer = code.substringAfter("class ApprovedKey(", "").substringBefore("\n}")
+        assertTrue("ApprovedKey.sign does not sign under the snapshot's alias", "signApproved(snapshot.alias" in signer)
+        val choke = code.substringAfter("fun <T> useApprovedKey(", "").substringBefore("\n\n")
+        assertTrue("useApprovedKey does not hand out an ApprovedKey", "ApprovedKey(" in choke)
+
+        val keystore = strip(sourceRoot.resolve("crypto/KeystoreManager.kt").readText())
+            .substringAfter("suspend fun signApproved(", "").substringBefore("\n    }")
+        assertTrue(
+            "signApproved signs before checking the key under the alias is the approved one",
+            keystore.indexOf("ApprovedKeyChangedException(") in 0 until keystore.indexOf("keyStore.getKey(alias")
+        )
+        val same = code.substringAfter("fun KeyEntity.isSameKeyAs(", "").substringBefore("\n}")
+        listOf("id ==", "keyType ==", "algorithm ==", "policyRevision ==", "publicKeyDer", "rpId ==").forEach {
+            assertTrue("isSameKeyAs does not compare $it", it in same)
+        }
+    }
+
+    /**
+     * No key can be replaced between `signApproved`'s check and its signature:
+     * it compares, reads and signs inside `withAliasGate(alias)`, and every
+     * keystore write that can land under a signing alias (a delete or a key
+     * generation, in `KeystoreManager` and `FileEncryptor`, which files its
+     * ephemeral keys under `xkey_key_`) takes the same gate for its alias.
+     * A write outside the gate is a bypass.
+     */
+    @Test
+    fun everySigningAliasWriteTakesTheSignersGate() {
+        val strip = { text: String ->
+            text.lines().filterNot { line ->
+                line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+            }.joinToString("\n")
+        }
+        val write = Regex("""keyStore\.deleteEntry\(|\.generateKeyPair\(\)|\.generateKey\(\)""")
+        val ungated = listOf("crypto/KeystoreManager.kt", "crypto/FileEncryptor.kt").flatMap { file ->
+            strip(sourceRoot.resolve(file).readText()).lines()
+                .filter { write.containsMatchIn(it) && "withAliasGate(" !in it }
+                .map { "$file: ${it.trim()}" }
+        }
+        assertTrue("a keystore write outside the signer's alias gate: $ungated", ungated.isEmpty())
+
+        val signer = strip(sourceRoot.resolve("crypto/KeystoreManager.kt").readText())
+            .substringAfter("suspend fun signApproved(", "").substringBefore("\n    }")
+        val gate = signer.indexOf("withAliasGate(alias)")
+        assertTrue(
+            "signApproved checks or signs outside its alias gate",
+            gate in 0 until signer.indexOf("publicKeyDERAt(alias)") &&
+                gate < signer.indexOf("signature.sign()")
+        )
+    }
+
+    /**
+     * A request withdrawn with its prompt on screen (a co-sign's timeout, a
+     * cancelled caller) has that prompt taken down before the queue starts
+     * the next one: every owner's withdrawal (`prompts.end`) in the launcher
+     * dismisses a shown prompt in the step that runs before the next turn,
+     * so no stale prompt is left answerable once its entry has gone.
+     */
+    @Test
+    fun everyWithdrawalDismissesAShownPromptBeforeTheNextTurn() {
+        listOf("auth/BiometricActivityLauncher.kt", "auth/PendingCryptoSignatures.kt").forEach { path ->
+            val code = sourceRoot.resolve(path).readLines().filterNot { line ->
+                line.trimStart().let { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }
+            }.joinToString("\n")
+            val ends = Regex("""prompts\.end\(key\)""").findAll(code).toList()
+            assertTrue("$path withdraws nothing through prompts.end", ends.isNotEmpty())
+            ends.forEach { end ->
+                val beforeNext = code.substring(end.range.last).substringBefore("\n        }")
+                assertTrue("$path withdraws a shown prompt without dismissing it: $beforeNext", "cancelPrompt(" in beforeNext)
+            }
+        }
+        val withdraw = sourceRoot.resolve("ui/TransparentBiometricActivity.kt").readText()
+            .substringAfter("fun withdraw(", "").substringBefore("\n        }")
+        listOf("expired.add(", "finishWithResult(").forEach {
+            assertTrue("TransparentBiometricActivity.withdraw does not call $it", it in withdraw)
         }
     }
 
