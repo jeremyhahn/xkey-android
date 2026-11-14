@@ -169,13 +169,20 @@ class AssertionSignCountTest {
     }
 
     /**
-     * Bypass guard (#255 review): every user key signature in the app is
-     * taken inside [com.automatethethings.xkey.storage.KeyPolicyStore.withUsableKey].
+     * Bypass guard (#255 review, r4): every use of user key material in the
+     * app (signature, ECDH, decryption, encryption, MAC) is taken inside
+     * [com.automatethethings.xkey.storage.KeyPolicyStore.withUsableKey], the
+     * file encryptor's key agreement included.
      */
     @Test
     fun `every user key signature is taken under the material-use lock`() {
         val root = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
-        val call = Regex("""[kK]eystoreManager\??\.(sign|signWithoutBiometric|signWithAlgorithm)\(""")
+        val call = Regex(
+            """[kK]eystoreManager\??\.(sign|signWithoutBiometric|signWithAlgorithm|performECDH|rsaDecrypt|rsaDecryptWithAlgorithm|""" +
+                """symmetricEncrypt|symmetricDecrypt|computeHMAC|computeHMACWithAlgorithm)\("""
+        )
+        val encryptor = java.io.File(root, "com/automatethethings/xkey/crypto/FileEncryptor.kt").readText()
+        assertEquals("the file encryptor's ECDH calls", 2, call.findAll(encryptor).count())
         val unguarded = root.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .flatMap { file ->

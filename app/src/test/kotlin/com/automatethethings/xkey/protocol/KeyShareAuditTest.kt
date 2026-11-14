@@ -54,6 +54,7 @@ import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -170,6 +171,8 @@ class KeyShareAuditTest {
 
         keystoreManager = mockk(relaxed = true)
         every { keystoreManager.getPublicKeyPEM(any(), any()) } returns null
+        // No Keystore key holds an id: a share reads the general namespace.
+        every { keystoreManager.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         handler = RequestHandler(
             context = context,
             keystoreManager = keystoreManager,
@@ -1110,6 +1113,108 @@ class KeyShareAuditTest {
     }
 
     /**
+     * #255 review r4: a hardware key shares its public key from either
+     * namespace (SPEC key sharing). A key that lives only under its
+     * credential alias exports its own public key through local.getPublicKey
+     * and shares it through local.importSharedKey, never KEY_NOT_FOUND.
+     */
+    @Test
+    fun aCredentialOnlyKeySharesAndExportsItsPublicKey() = runTest {
+        val credential = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = KeystoreManager(context),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val expected = Base64.getEncoder().encodeToString(credential.public.encoded)
+        val getPublicKey = Request(
+            id = 8,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+
+        assertEquals("getPublicKey exports the credential's key", expected, success(served(getPublicKey)).getString("publicKey"))
+        val pem = success(served(importSharedKey())).getString("public_key_pem")
+        assertTrue("importSharedKey shares the credential's key: $pem", expected in pem.replace("\n", "").replace("\r", ""))
+    }
+
+    /**
+     * #255 review r4: generateKey and local.generateKey of one id at once,
+     * the first holding its creation open, make exactly one key: the second
+     * is refused, never run beside the first (the two RPC families reserve
+     * the id under one name, and check it inside the shared material lock).
+     */
+    @Test
+    fun concurrentGeneratorsOfOneIdMakeOneKey() = runTest {
+        val keys = java.util.concurrent.ConcurrentHashMap<String, java.security.KeyPair>()
+        platformKeystore(keys)
+        val keystore = io.mockk.spyk(KeystoreManager(context))
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val generated = java.util.concurrent.atomic.AtomicInteger()
+        coEvery { keystore.generateKeyWithAuthDuration(KEY_ID, any(), any()) } coAnswers {
+            release.await()
+            generated.incrementAndGet()
+            keys["xkey_credential_$KEY_ID"] = ecKeyPair()
+            keystore.getCOSEPublicKey(KEY_ID, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)!!
+        }
+        coEvery { keystore.generateKeyForAlgorithm(KEY_ID, any(), any(), any()) } coAnswers {
+            release.await()
+            generated.incrementAndGet()
+            val pair = ecKeyPair()
+            keys["xkey_key_$KEY_ID"] = pair
+            pair.public.encoded
+        }
+        every { keystore.credentialSecurityLevel(KEY_ID) } returns com.automatethethings.xkey.crypto.KeySecurityLevel.TEE
+        every { keystore.generalKeySecurityLevel(KEY_ID) } returns com.automatethethings.xkey.crypto.KeySecurityLevel.TEE
+        // The store on in-memory tables: a relaxed database's transaction never ends.
+        val tables = com.automatethethings.xkey.storage.FakeKeyPolicyTables()
+        mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any(), any()) } returns
+            tables.store(com.automatethethings.xkey.storage.KeyPolicyStore.KeyResolver { id, kind -> keystore.resolveKey(id, kind) })
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val legacy = Request(
+            id = 9,
+            method = MethodNames.GENERATE_KEY,
+            params = JSONObject().put("credentialId", KEY_ID).put("algorithm", -7).put("requireUserVerification", false)
+        ).toJson()
+        val local = Request(
+            id = 10,
+            method = MethodNames.LOCAL_GENERATE_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("keyType", "signing").put("algorithm", "ES256")
+                .put("requireUserVerification", false)
+        ).toJson()
+
+        for (order in listOf(listOf(legacy, local), listOf(local, legacy))) {
+            keys.clear()
+            generated.set(0)
+            // Two connections, as two peers' requests arrive.
+            val first = backgroundScope.async { Response.fromJson(served(order[0], connection = "test:first")) }
+            kotlinx.coroutines.yield()
+            val second = Response.fromJson(
+                kotlinx.coroutines.withTimeout(10_000) { served(order[1], connection = "test:second") }
+            )
+            assertTrue("the second creation is refused while the first runs: $second", second.error != null && second.result == null)
+            if (!release.isCompleted) release.complete(Unit)
+            val made = first.await()
+            assertTrue("the first creation makes its key: $made", made.error == null)
+            assertEquals("exactly one key under the id", 1, generated.get())
+            assertEquals("exactly one namespace holds the id", 1, keys.size)
+        }
+    }
+
+    /**
      * #255 review r3, the bypass check: no caller resolves a key id without
      * naming its namespace. KeystoreManager has no resolver, lookup, sign,
      * exists or delete of a key id without a non-null kind, and each derives
@@ -1185,6 +1290,16 @@ class KeyShareAuditTest {
             }
         }
 
+        // #255 review r4: the share and export paths resolve the key's kind
+        // once and gate and read that kind, never a hardcoded namespace.
+        val sheet = java.io.File(main, "com/automatethethings/xkey/ui/KeySharingBottomSheet.kt").readText()
+        assertTrue("the desktop share reads through the one share read", "keyPolicyStore.readShareable(" in sheet)
+        assertFalse("the desktop share reads no key itself", Regex("getPublicKey\\w*\\(").containsMatchIn(sheet))
+        assertTrue("importSharedKey reads through the one share read", "keyPolicyStore.readShareable(keyId, keystoreManager)" in source)
+        assertTrue("getPublicKey gates the kind it exports", "keyPolicyStore.withUsableKey(pubKeyParams.keyId, exportKind)" in source)
+        val share = java.io.File(main, "com/automatethethings/xkey/storage/ShareableKeyRead.kt").readText()
+        assertTrue("the share read resolves its kind once", "val kind = keystore.exportKind(keyId)" in share && "withUsableKey(keyId, kind)" in share)
+
         val store = java.io.File(main, "com/automatethethings/xkey/storage/KeyPolicyStore.kt").readText()
         assertTrue("the gate resolves as the lookups do", "keys = KeyResolver { keyId, kind -> keystore.resolveKey(keyId, kind) }" in store)
         assertTrue("requireUsable checks the key the lookup reaches", "keys.resolve(keyId, kind)" in store)
@@ -1221,8 +1336,8 @@ class KeyShareAuditTest {
     }
 
     /** Handles [request] as one arriving on a served connection whose peer is [peer]. */
-    private suspend fun served(request: ByteArray, peer: String? = PEER): ByteArray =
-        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer, "test:connection")) {
+    private suspend fun served(request: ByteArray, peer: String? = PEER, connection: String = "test:connection"): ByteArray =
+        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer, connection)) {
             handler.handleRawRequest(request)
         }
 

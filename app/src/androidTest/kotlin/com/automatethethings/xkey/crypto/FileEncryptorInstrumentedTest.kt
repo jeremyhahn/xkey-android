@@ -74,7 +74,13 @@ class FileEncryptorInstrumentedTest {
     @Before
     fun setUp() = runBlocking<Unit> {
         keystoreManager = KeystoreManager(ApplicationProvider.getApplicationContext())
-        encryptor = FileEncryptor(keystoreManager)
+        encryptor = FileEncryptor(
+            keystoreManager,
+            com.automatethethings.xkey.storage.KeyPolicyStore.of(
+                XKeyDatabase.getInstance(ApplicationProvider.getApplicationContext()),
+                keystoreManager
+            )
+        )
         preExistingEphemerals = ephemeralAliases()
 
         keystoreManager.generateKeyForAlgorithm(

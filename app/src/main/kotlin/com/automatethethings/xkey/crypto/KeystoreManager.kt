@@ -1660,6 +1660,24 @@ class KeystoreManager(private val context: Context) {
     }
 
     /**
+     * The namespace a public-key share or export of [keyId] reads (#255
+     * review r4): the credential namespace when only a credential holds the
+     * id, so a credential that lives only under its credential alias shares
+     * and exports like a general key (SPEC key-sharing allows hardware
+     * public-key sharing in either namespace); otherwise the general
+     * namespace, where the general key, a software key or no key is found.
+     * A general key beside a credential of its id exports its own key, never
+     * the credential's (#255 review r2). A caller resolves this once, then
+     * gates and reads with the same kind.
+     */
+    fun exportKind(keyId: String): UserKeyKind =
+        if (resolveKey(keyId, UserKeyKind.GENERAL) == null && resolveKey(keyId, UserKeyKind.CREDENTIAL) != null) {
+            UserKeyKind.CREDENTIAL
+        } else {
+            UserKeyKind.GENERAL
+        }
+
+    /**
      * Whether [keyId] is in use in either user-key namespace: a key is
      * created under an id only when this is false (#255 review r3), so a
      * credential and a general key never come to share an id.

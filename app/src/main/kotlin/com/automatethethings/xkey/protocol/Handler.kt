@@ -41,6 +41,7 @@ import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SigningException
+import com.automatethethings.xkey.storage.readShareable
 import com.automatethethings.xkey.crypto.StrongBoxUnavailableException
 import com.automatethethings.xkey.crypto.UnsupportedAlgorithmException
 import com.automatethethings.xkey.crypto.UserCancelledException
@@ -710,7 +711,9 @@ class RequestHandler(
 
         // As in local.generateKey: the reservation holds the id from this check
         // until the creation ends, and the creation rechecks after the approval.
-        val reservation = "credential:${generateParams.credentialId}"
+        // Both generators reserve the id under one name (#255 review r4), so a
+        // concurrent local.generateKey of this id is refused, never run beside it.
+        val reservation = generatorReservation(generateParams.credentialId)
         if (keystoreManager.userKeyIdInUse(generateParams.credentialId) || !keyIds.tryReserve(reservation)) {
             throw credentialExists()
         }
@@ -719,13 +722,15 @@ class RequestHandler(
             val authDurationSeconds = calculateAuthDuration(currentSettings)
             approveRegistration(generateParams)
             keyIds.withKeyLock(reservation) {
-                if (keystoreManager.userKeyIdInUse(generateParams.credentialId)) {
-                    throw credentialExists()
-                }
                 // In the store's serialisation of the id's material, as
                 // local.generateKey: an owed delete under the id is settled
-                // first, and none ever reaches the credential made here.
+                // first, and none ever reaches the credential made here. The
+                // existence check runs inside it (#255 review r4), in the one
+                // lock every generator of this id takes.
                 keyPolicyStore.withKeyMaterial(generateParams.credentialId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) { held ->
+                    if (keystoreManager.userKeyIdInUse(generateParams.credentialId)) {
+                        throw credentialExists()
+                    }
                     createCredential(request, generateParams, authDurationSeconds, held)
                 }
             }
@@ -736,6 +741,14 @@ class RequestHandler(
 
     private fun credentialExists() =
         ProtocolException("Credential already exists", errorCode = ErrorCodes.INVALID_PARAMS)
+
+    /**
+     * The one reservation name of a key id for every generator (#255 review
+     * r4): `generateKey` and `local.generateKey` reserve an id under the same
+     * name, so two creations of one id through the two methods never pass
+     * their existence checks together.
+     */
+    private fun generatorReservation(keyId: String) = "key:$keyId"
 
     /** Asks the owner to approve a `generateKey` registration when verification applies. */
     private suspend fun approveRegistration(generateParams: GenerateKeyParams) {
@@ -1379,7 +1392,7 @@ class RequestHandler(
         // this creation ends. An id a credential holds is refused too (#255
         // review r3): a general key beside it would share its id, and a
         // passkey use would sign with a key other than the one returned here.
-        val reservation = "key:${genParams.keyId}"
+        val reservation = generatorReservation(genParams.keyId)
         if (keystoreManager.userKeyIdInUse(genParams.keyId) || !keyIds.tryReserve(reservation)) {
             throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
         }
@@ -1389,17 +1402,19 @@ class RequestHandler(
             // The approval waited: recheck under the id's lock, since every
             // generator replaces an existing alias, destroying that key.
             keyIds.withKeyLock(reservation) {
-                if (keystoreManager.userKeyIdInUse(genParams.keyId)) {
-                    throw ProtocolException(
-                        "Key already exists: ${genParams.keyId}",
-                        errorCode = ErrorCodes.KEY_EXISTS
-                    )
-                }
                 // The material write and its row insert in the store's one
                 // serialisation of this key id's material, which every delete
                 // takes (#193 r8): a delete of an earlier key under this id
-                // never deletes the material generated here.
+                // never deletes the material generated here. The existence
+                // check runs inside it (#255 review r4), in the one lock both
+                // generators of this id take.
                 keyPolicyStore.withKeyMaterial(genParams.keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) { held ->
+                    if (keystoreManager.userKeyIdInUse(genParams.keyId)) {
+                        throw ProtocolException(
+                            "Key already exists: ${genParams.keyId}",
+                            errorCode = ErrorCodes.KEY_EXISTS
+                        )
+                    }
                     createLocalKey(request, genParams, algorithmName, authDurationSeconds, held)
                 }
             }
@@ -2174,25 +2189,28 @@ class RequestHandler(
         val keyEntity = keyDao.getByKeyId(pubKeyParams.keyId)
             ?: throw ProtocolException("Key not found: ${pubKeyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
-        // Read inside the use gate (#255 review r2): the gate resolves the id
-        // as the export does, so a credential pending deletion beside this
-        // general key's row is refused rather than exported as this key.
-        val publicKey: String = keyPolicyStore.withUsableKey(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { when (pubKeyParams.format) {
+        // The namespace is resolved once (#255 review r4): a credential that
+        // lives only under its credential alias exports like a general key.
+        // The use gate and every read below name that same kind, so a key
+        // pending deletion is refused rather than exported, and an id both
+        // namespaces hold is refused, never exported as either key.
+        val exportKind = keystoreManager.exportKind(pubKeyParams.keyId)
+        val publicKey: String = keyPolicyStore.withUsableKey(pubKeyParams.keyId, exportKind) { when (pubKeyParams.format) {
             ExportFormats.DER -> {
-                val der = keystoreManager.getPublicKeyDER(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+                val der = keystoreManager.getPublicKeyDER(pubKeyParams.keyId, exportKind)
                     ?: throw ProtocolException("Cannot export public key", errorCode = ErrorCodes.EXPORT_FAILED)
                 Base64.getEncoder().encodeToString(der)
             }
             ExportFormats.PEM -> {
-                keystoreManager.getPublicKeyPEM(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+                keystoreManager.getPublicKeyPEM(pubKeyParams.keyId, exportKind)
                     ?: throw ProtocolException("Cannot export public key", errorCode = ErrorCodes.EXPORT_FAILED)
             }
             ExportFormats.SSH -> {
-                keystoreManager.getPublicKeySSH(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+                keystoreManager.getPublicKeySSH(pubKeyParams.keyId, exportKind)
                     ?: throw ProtocolException("Cannot export public key", errorCode = ErrorCodes.EXPORT_FAILED)
             }
             ExportFormats.COSE -> {
-                val cose = keystoreManager.getCOSEPublicKey(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+                val cose = keystoreManager.getCOSEPublicKey(pubKeyParams.keyId, exportKind)
                     ?: throw ProtocolException("Cannot export COSE key", errorCode = ErrorCodes.EXPORT_FAILED)
                 Base64.getEncoder().encodeToString(cose)
             }
@@ -4308,14 +4326,13 @@ class RequestHandler(
         }
         val peerPublicKeyHex = requireConfirmedPeer("importSharedKey")
         return try {
-            // Both lookups inside the use gate (#255 review r2), which resolves
-            // the id as getPublicKeyPEM does: a credential pending deletion
-            // beside this general key's row is refused, never exported under
-            // the general key's sharing grant.
-            val (software, publicKeyPem) = keyPolicyStore.withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
-                val sw = com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId)
-                sw to (if (sw == null) keystoreManager.getPublicKeyPEM(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) else null)
+            // The one read of what a share sends (#255 review r4): its
+            // namespace resolved once, then gated and read with that kind.
+            val shareable = keyPolicyStore.readShareable(keyId, keystoreManager) {
+                com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(it)
             }
+            val software = shareable.software
+            val publicKeyPem = shareable.publicKeyPem
             if (software == null && publicKeyPem == null) {
                 return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key not found: $keyId")
             }

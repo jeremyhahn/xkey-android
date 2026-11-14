@@ -1223,7 +1223,10 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Encrypt to a staging file
-                val fileEncryptor = FileEncryptor(keystoreManager)
+                val fileEncryptor = FileEncryptor(
+                    keystoreManager,
+                    com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
+                )
                 stageForSave(
                     staging,
                     "$fileName.xkeyenc",
@@ -1313,7 +1316,10 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Decrypt to a staging file
-                val fileEncryptor = FileEncryptor(keystoreManager)
+                val fileEncryptor = FileEncryptor(
+                    keystoreManager,
+                    com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
+                )
                 stageForSave(
                     staging,
                     outputName,

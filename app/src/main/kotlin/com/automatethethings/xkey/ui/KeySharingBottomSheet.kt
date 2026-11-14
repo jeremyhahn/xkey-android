@@ -57,6 +57,7 @@ import com.automatethethings.xkey.remote.loadZeroedOnCancel
 import com.automatethethings.xkey.remote.shareSessionChanges
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.KeyPolicyStore
+import com.automatethethings.xkey.storage.readShareable
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
@@ -725,9 +726,17 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     ) {
         val context = requireContext().applicationContext
         val entity = keyDao.getByKeyId(keyId)
-        val software = SoftwareKeyStore(context).get(keyId)
-        val pem = if (software == null) runCatching { KeystoreManager(context).getPublicKeyPEM(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) }.getOrNull() else null
-        ShareInputs(entity, software, pem)
+        // The one read of what a share sends (#255 review r4): a credential
+        // that lives only under its credential alias shares its public key
+        // too, and a key whose delete was acknowledged sends nothing.
+        val shareable = try {
+            keyPolicyStore.readShareable(keyId, KeystoreManager(context)) { SoftwareKeyStore(context).get(it) }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            com.automatethethings.xkey.storage.ShareableKey(null, null)
+        }
+        ShareInputs(entity, shareable.software, shareable.publicKeyPem)
     }
 
     /** The one share decision, the inbound handlers' rule (a pending revocation refuses SELECTED_PEERS). */

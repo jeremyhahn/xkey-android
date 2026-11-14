@@ -47,9 +47,19 @@ import javax.crypto.spec.SecretKeySpec
  * [version:1 byte][ephemeral_pubkey_len:2 bytes big-endian][ephemeral_pubkey][salt:32 bytes][iv:12 bytes][ciphertext][tag:16 bytes]
  * ```
  *
+ * Every ECDH runs inside the key's use gate
+ * ([com.automatethethings.xkey.storage.KeyPolicyStore.withUsableKey], #255
+ * review r4): a key whose delete was acknowledged, though its material may
+ * remain, never decrypts, and a delete that starts while a decryption runs
+ * waits until its key agreement ends.
+ *
  * @param keystoreManager The [KeystoreManager] instance used for ECDH and key operations.
+ * @param keyPolicyStore The store whose use gate every ECDH passes.
  */
-class FileEncryptor(private val keystoreManager: KeystoreManager) {
+class FileEncryptor(
+    private val keystoreManager: KeystoreManager,
+    private val keyPolicyStore: com.automatethethings.xkey.storage.KeyPolicyStore
+) {
 
     companion object {
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
@@ -89,7 +99,9 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
                 ?: throw EncryptionException("Failed to get ephemeral public key", null)
 
             // Perform ECDH in hardware
-            val sharedSecret = keystoreManager.performECDH(ephemeralKeyId, recipientPublicKeyDer)
+            val sharedSecret = keyPolicyStore.withUsableKey(ephemeralKeyId, UserKeyKind.GENERAL) {
+                keystoreManager.performECDH(ephemeralKeyId, recipientPublicKeyDer)
+            }
 
             // Generate random salt
             val salt = ByteArray(SALT_SIZE)
@@ -173,8 +185,11 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
         val iv = ByteArray(IV_SIZE)
         readFully(input, iv)
 
-        // Perform ECDH with local key
-        val sharedSecret = keystoreManager.performECDH(localKeyId, ephemeralPubKeyDer)
+        // Perform ECDH with the local key inside its use gate (#255 review r4):
+        // a key whose delete was acknowledged is refused here, before any crypto.
+        val sharedSecret = keyPolicyStore.withUsableKey(localKeyId, UserKeyKind.GENERAL) {
+            keystoreManager.performECDH(localKeyId, ephemeralPubKeyDer)
+        }
 
         // HKDF derive AES key
         val aesKey = hkdfDerive(sharedSecret, salt, AES_KEY_SIZE)
