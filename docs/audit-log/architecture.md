@@ -101,6 +101,8 @@ connection, never the phone's last served desktop, so two desktops syncing at
 once each get their own entry; and `device_name` is null when the paired-device store cannot be read, so the
 sync still runs and is audited. See [store-sync](../store-sync/architecture.md#audit).
 
+Trust store events: `TrustStoreRepository` records `TRUST_STORE_IMPORT` (subject, fingerprint, source: `manual`, `url:<url>`, `internal-ca`, ...) for each stored certificate and `TRUST_STORE_DELETE` (subject, fingerprint) for each removed one, `clearAll` included; duplicates and refused certificates record nothing.
+
 ## Index Strategy
 
 ### audit_logs

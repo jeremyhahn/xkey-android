@@ -981,8 +981,15 @@ object AuditLogger {
      *
      * @param certSubject The certificate subject.
      * @param certFingerprint The certificate fingerprint.
+     * @param success Whether the certificate was actually removed.
+     * @param errorMessage Why the removal failed (null on success).
      */
-    fun logTrustStoreDelete(certSubject: String, certFingerprint: String) {
+    fun logTrustStoreDelete(
+        certSubject: String,
+        certFingerprint: String,
+        success: Boolean = true,
+        errorMessage: String? = null
+    ) {
         val details = JSONObject().apply {
             put("subject", certSubject)
             put("fingerprint", certFingerprint)
@@ -990,7 +997,8 @@ object AuditLogger {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.TRUST_STORE_DELETE,
-                success = true,
+                success = success,
+                errorMessage = errorMessage,
                 details = details.toString()
             )
         )
