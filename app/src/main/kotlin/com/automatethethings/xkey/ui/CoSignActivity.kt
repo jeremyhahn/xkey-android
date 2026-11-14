@@ -52,7 +52,9 @@ import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.MediaPublisher
+import com.automatethethings.xkey.media.MediaSaveRuns
 import com.automatethethings.xkey.media.SignatureEntry
+import com.automatethethings.xkey.media.SignedCopyDocument
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.qr.QrCodeGenerator
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -67,6 +69,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.time.Clock
+import java.util.UUID
 
 class CoSignActivity : AppCompatActivity() {
 
@@ -100,8 +103,11 @@ class CoSignActivity : AppCompatActivity() {
         onScanResult(QrScanResult.from(result)) { onResponseScanned(it) }
     }
 
-    /** Where a co-signed copy goes when the selected media cannot be replaced in place. */
-    private val coSignedCopyLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+    /**
+     * Where a co-signed copy goes when the selected media cannot be replaced
+     * in place: created as the media's own type, named after its display name.
+     */
+    private val coSignedCopyLauncher = registerForActivityResult(SignedCopyDocument.Create()) { uri ->
         onCoSignedCopyPicked(uri)
     }
 
@@ -119,6 +125,24 @@ class CoSignActivity : AppCompatActivity() {
     )
 
     private var pendingCopy: PendingCoSignedCopy? = null
+
+    /**
+     * A co-signed copy whose document the user picked, writing now. Its
+     * write runs in [MediaSaveRuns], not this instance's scope, and it is
+     * kept in the saved state, so the instance after a recreation waits on
+     * the same write and selects [target] when it ends (after process death
+     * the write runs again while [PendingCoSignedCopy.staged] remains).
+     */
+    private class RunningCoSignedCopy(val id: String, val target: Uri, val copy: PendingCoSignedCopy)
+
+    private var runningCopy: RunningCoSignedCopy? = null
+
+    /**
+     * Ends once [runningCopy] has ended and its outcome is shown: a witness
+     * response scanned meanwhile waits for it, so it is appended to the copy
+     * holding the previous co-signature, never to the original.
+     */
+    private var copyShown: Job? = null
 
     /** The signing keys, once loaded; the request prompt waits for them after a recreation. */
     private val signingKeysLoaded = CompletableDeferred<Unit>()
@@ -149,6 +173,7 @@ class CoSignActivity : AppCompatActivity() {
         pendingKeyId = savedInstanceState?.getString(STATE_KEY_ID)
         buildUI()
         savedInstanceState?.let { restoreExchange(it) }
+        runningCopy?.let { runCopy(it) }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -156,25 +181,40 @@ class CoSignActivity : AppCompatActivity() {
         outState.putString(STATE_MEDIA_URI, selectedUri?.toString())
         outState.putBoolean(STATE_WITNESS_MODE, witnessSection.visibility == View.VISIBLE)
         outState.putString(STATE_KEY_ID, selectedKeyId() ?: pendingKeyId)
-        pendingCopy?.let {
-            outState.putString(STATE_COPY_STAGED, it.staged.path)
-            outState.putString(STATE_COPY_SIGNER, it.signerName)
-            outState.putString(STATE_COPY_FINGERPRINT, it.fingerprint)
-            outState.putString(STATE_COPY_DATA, it.data.toJsonString())
+        pendingCopy?.let { saveCopy(outState, STATE_COPY_PREFIX, it) }
+        runningCopy?.let {
+            outState.putString(STATE_RUNNING_ID, it.id)
+            outState.putString(STATE_RUNNING_TARGET, it.target.toString())
+            saveCopy(outState, STATE_RUNNING_PREFIX, it.copy)
+        }
+    }
+
+    private fun saveCopy(state: Bundle, prefix: String, copy: PendingCoSignedCopy) {
+        state.putString(prefix + STATE_COPY_STAGED, copy.staged.path)
+        state.putString(prefix + STATE_COPY_SIGNER, copy.signerName)
+        state.putString(prefix + STATE_COPY_FINGERPRINT, copy.fingerprint)
+        state.putString(prefix + STATE_COPY_DATA, copy.data.toJsonString())
+    }
+
+    private fun restoreCopy(state: Bundle, prefix: String): PendingCoSignedCopy? {
+        val staged = state.getString(prefix + STATE_COPY_STAGED) ?: return null
+        val signer = state.getString(prefix + STATE_COPY_SIGNER) ?: return null
+        val fingerprint = state.getString(prefix + STATE_COPY_FINGERPRINT) ?: return null
+        val data = state.getString(prefix + STATE_COPY_DATA) ?: return null
+        return try {
+            PendingCoSignedCopy(File(staged), signer, fingerprint, ContentAuthenticityData.fromJsonString(data))
+        } catch (_: Exception) {
+            null
         }
     }
 
     private fun restoreExchange(state: Bundle) {
-        val staged = state.getString(STATE_COPY_STAGED)
-        val signer = state.getString(STATE_COPY_SIGNER)
-        val fingerprint = state.getString(STATE_COPY_FINGERPRINT)
-        val data = state.getString(STATE_COPY_DATA)
-        if (staged != null && signer != null && fingerprint != null && data != null) {
-            pendingCopy = try {
-                PendingCoSignedCopy(File(staged), signer, fingerprint, ContentAuthenticityData.fromJsonString(data))
-            } catch (_: Exception) {
-                null
-            }
+        pendingCopy = restoreCopy(state, STATE_COPY_PREFIX)
+        val runningId = state.getString(STATE_RUNNING_ID)
+        val runningTarget = state.getString(STATE_RUNNING_TARGET)
+        val running = restoreCopy(state, STATE_RUNNING_PREFIX)
+        if (runningId != null && runningTarget != null && running != null) {
+            runningCopy = RunningCoSignedCopy(runningId, Uri.parse(runningTarget), running)
         }
         if (state.getBoolean(STATE_WITNESS_MODE)) {
             initiatorSection.visibility = View.GONE
@@ -742,6 +782,15 @@ class CoSignActivity : AppCompatActivity() {
      * the selected media, unless its key has already signed.
      */
     private fun onResponseScanned(raw: String) {
+        // A co-signed copy still writing becomes the selected media when it
+        // ends; this response is appended to it, keeping its co-signature.
+        copyShown?.takeIf { it.isActive }?.let { shown ->
+            lifecycleScope.launch {
+                shown.join()
+                onResponseScanned(raw)
+            }
+            return
+        }
         // Only the Uri: after a recreation the signature data is still reloading,
         // and the append reads the file's own data anyway.
         val uri = selectedUri
@@ -773,7 +822,7 @@ class CoSignActivity : AppCompatActivity() {
                         is CoSignOutcome.Replaced -> showAppended(result.data, response.signerName)
                         is CoSignOutcome.NeedsCopy -> {
                             pendingCopy = PendingCoSignedCopy(result.staged, response.signerName, entry.keyFingerprint, result.data)
-                            coSignedCopyLauncher.launch(coSignedCopyName(uri))
+                            coSignedCopyLauncher.launch(SignedCopyDocument.of(contentResolver, uri, "cosigned"))
                         }
                         is CoSignOutcome.Duplicate -> {
                             Snackbar.make(
@@ -854,13 +903,6 @@ class CoSignActivity : AppCompatActivity() {
         }
     }
 
-    /** "clip.mp4" becomes "clip-cosigned.mp4". */
-    private fun coSignedCopyName(uri: Uri): String {
-        val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')?.ifBlank { null } ?: "media"
-        val dot = name.lastIndexOf('.')
-        return if (dot > 0) name.substring(0, dot) + "-cosigned" + name.substring(dot) else "$name-cosigned"
-    }
-
     /**
      * The document for the co-signed copy: the staged copy is written there
      * ([MediaPublisher.writeCopy]) and, once written and closed, deleted;
@@ -874,18 +916,44 @@ class CoSignActivity : AppCompatActivity() {
             pending.staged.delete()
             return
         }
+        runCopy(RunningCoSignedCopy(UUID.randomUUID().toString(), target, pending))
+    }
+
+    /**
+     * Run [run], or wait on it when it already runs (this instance restored
+     * it after a recreation). It ends by selecting the copy and showing its
+     * signatures, or by naming the kept bytes; an instance that goes first
+     * leaves the write and its outcome to the next.
+     */
+    private fun runCopy(run: RunningCoSignedCopy) {
+        runningCopy = run
         val resolver = applicationContext.contentResolver
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                MediaPublisher.writeCopy(pending.staged) { MediaPublisher.openCreated(resolver, target) }
-                AuditLogger.logCoSignReceived(pending.data.contentHash, pending.fingerprint)
-                withContext(Dispatchers.Main) {
-                    selectedUri = target
-                    selectedFileText.text = target.lastPathSegment ?: target.toString()
-                    showAppended(pending.data, pending.signerName)
-                }
+        val copy = run.copy
+        val write = MediaSaveRuns.attach(run.id) {
+            // Gone only once written and closed: a write before process death.
+            if (!copy.staged.exists()) return@attach
+            MediaPublisher.writeCopy(copy.staged) { MediaPublisher.openCreated(resolver, run.target) }
+            AuditLogger.logCoSignReceived(copy.data.contentHash, copy.fingerprint)
+        }
+        copyShown = lifecycleScope.launch {
+            val failure = try {
+                write.await()
+                null
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { showAppendFailed(e) }
+                // This instance went away first: the next one waits on the write.
+                if (!write.isCompleted) throw e
+                e
+            }
+            MediaSaveRuns.finished(run.id)
+            runningCopy = null
+            if (failure == null) {
+                // A read of the original that ended later would show its old signatures.
+                mediaLoad?.join()
+                selectedUri = run.target
+                selectedFileText.text = run.target.lastPathSegment ?: run.target.toString()
+                showAppended(copy.data, copy.signerName)
+            } else {
+                showAppendFailed(failure)
             }
         }
     }
@@ -941,6 +1009,10 @@ class CoSignActivity : AppCompatActivity() {
 
     private companion object {
         const val STATE_MEDIA_URI = "cosign_media_uri"
+        const val STATE_COPY_PREFIX = "cosign_pending_"
+        const val STATE_RUNNING_PREFIX = "cosign_running_"
+        const val STATE_RUNNING_ID = "cosign_running_id"
+        const val STATE_RUNNING_TARGET = "cosign_running_target"
         const val STATE_COPY_STAGED = "cosign_copy_staged"
         const val STATE_COPY_SIGNER = "cosign_copy_signer"
         const val STATE_COPY_DATA = "cosign_copy_data"

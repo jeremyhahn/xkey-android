@@ -47,6 +47,8 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.MediaPublisher
+import com.automatethethings.xkey.media.MediaSaveRuns
+import com.automatethethings.xkey.media.SignedCopyDocument
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.SignerVerification
@@ -60,11 +62,7 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.progressindicator.CircularProgressIndicator
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -72,7 +70,6 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.time.Instant
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Activity that handles file operations received via the Android Share sheet.
@@ -186,8 +183,9 @@ class FileOperationActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { verifySidecarSignature(it) } }
 
+    // Typed per launch: the copy is created as the source's own type and suffix.
     private val createSignedCopyLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("*/*")
+        SignedCopyDocument.Create()
     ) { uri -> onSavePicked(uri, { pendingSignedCopy = null }, ::saveSignedCopyToUri) }
 
     /**
@@ -214,7 +212,7 @@ class FileOperationActivity : AppCompatActivity() {
     /**
      * A save whose destination the user picked, writing now: the sidecar
      * JSON or a signed copy. It is a separate state from a pending picker.
-     * Its write runs in [SaveRuns], not in an instance's scope, and the save
+     * Its write runs in [MediaSaveRuns], not in an instance's scope, and the save
      * is kept in the saved state, so the instance after a recreation waits
      * on the same write (after process death it writes again, to the same
      * destination) and frees the screen when it ends.
@@ -225,20 +223,6 @@ class FileOperationActivity : AppCompatActivity() {
         val signatureJson: String?,
         val signedCopy: PendingSignedCopy?
     )
-
-    /** The saves running in this process by [RunningSave.id]; the instance showing one waits on it here. */
-    private object SaveRuns {
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        private val runs = ConcurrentHashMap<String, Deferred<Unit>>()
-
-        /** The write of [id], started with [write] unless it already runs. */
-        fun attach(id: String, write: () -> Unit): Deferred<Unit> =
-            runs.computeIfAbsent(id) { scope.async { write() } }
-
-        fun finished(id: String) {
-            runs.remove(id)
-        }
-    }
 
     // Picker pending: the sidecar JSON or a signed copy, waiting for a save location
     private var pendingSignatureJson: String? = null
@@ -1135,7 +1119,7 @@ class FileOperationActivity : AppCompatActivity() {
                         AuditLogger.logFileSigned(key.keyId, key.label, fileName)
 
                         withContext(Dispatchers.Main) {
-                            createSignedCopyLauncher.launch(signedCopyName(fileName))
+                            createSignedCopyLauncher.launch(SignedCopyDocument.named(fileName, mimeType.ifBlank { null }, "signed"))
                         }
                     }
                 } else {
@@ -1164,12 +1148,6 @@ class FileOperationActivity : AppCompatActivity() {
             open = { contentResolver.openInputStream(uri) ?: throw IOException("Cannot open $uri") },
             format = XmpContainers.formatOf(mimeType)
         )
-
-    /** "clip.mp4" becomes "clip-signed.mp4". */
-    private fun signedCopyName(fileName: String): String {
-        val dot = fileName.lastIndexOf('.')
-        return if (dot > 0) fileName.substring(0, dot) + "-signed" + fileName.substring(dot) else "$fileName-signed"
-    }
 
     /**
      * Write the pending signed copy to the user-selected URI. The shared
@@ -1204,7 +1182,7 @@ class FileOperationActivity : AppCompatActivity() {
         showProgress(true)
         val resolver = applicationContext.contentResolver
         val recovery = MediaPublisher.recoveryDirectory(applicationContext)
-        val run = SaveRuns.attach(save.id) { writeSave(resolver, recovery, save) }
+        val run = MediaSaveRuns.attach(save.id) { writeSave(resolver, recovery, save) }
         lifecycleScope.launch {
             val failure = try {
                 run.await()
@@ -1214,7 +1192,7 @@ class FileOperationActivity : AppCompatActivity() {
                 if (!run.isCompleted) throw e
                 e
             }
-            SaveRuns.finished(save.id)
+            MediaSaveRuns.finished(save.id)
             runningSave = null
             if (failure == null) showResult(getString(R.string.file_operation_sign_success)) else showError(failure)
         }

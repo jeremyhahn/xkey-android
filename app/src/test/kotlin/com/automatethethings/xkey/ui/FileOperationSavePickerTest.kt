@@ -22,6 +22,7 @@ import android.os.Looper
 import android.view.View
 import androidx.activity.result.ActivityResultLauncher
 import com.automatethethings.xkey.media.ContentAuthenticityData
+import com.automatethethings.xkey.media.SignedCopyDocument
 import com.automatethethings.xkey.media.XmpContainers
 import com.automatethethings.xkey.media.XmpFixtures
 import com.automatethethings.xkey.media.XmpMetadataHelper
@@ -105,7 +106,12 @@ class FileOperationSavePickerTest {
     /** Open the save picker [launcher] names; its request code. */
     @Suppress("UNCHECKED_CAST")
     private fun openPicker(activity: FileOperationActivity, launcher: String): Int {
-        (field(launcher).get(activity) as ActivityResultLauncher<String>).launch("clip-signed.png")
+        if (launcher == "createSignedCopyLauncher") {
+            (field(launcher).get(activity) as ActivityResultLauncher<SignedCopyDocument>)
+                .launch(SignedCopyDocument("clip-signed.png", "image/png"))
+        } else {
+            (field(launcher).get(activity) as ActivityResultLauncher<String>).launch("clip-signed.png")
+        }
         val started = shadowOf(activity).nextStartedActivityForResult
         assertNotNull("$launcher opened a picker", started)
         assertEquals(Intent.ACTION_CREATE_DOCUMENT, started.intent.action)
