@@ -250,6 +250,54 @@ class AuditLoggerDispatchTest {
     }
 
     @Test
+    fun `logHmacRequest writes HMAC_REQUEST with key, device and algorithm`() {
+        AuditLogger.logHmacRequest(
+            keyId = "k1",
+            keyLabel = "Key",
+            keyType = "symmetric",
+            algorithm = "HMAC-SHA256",
+            deviceId = "dev-1",
+            deviceName = "Laptop",
+            durationMs = 4L
+        )
+        val entry = only()
+        assertEquals(AuditOperationType.HMAC_REQUEST, entry.operationType)
+        assertEquals("k1", entry.keyId)
+        assertEquals("dev-1", entry.deviceId)
+        assertEquals("Laptop", entry.deviceName)
+        assertEquals(4L, entry.durationMs)
+        assertTrue(entry.success)
+        assertEquals("HMAC-SHA256", details(entry).getString("algorithm"))
+    }
+
+    @Test
+    fun `logKeyDerivationRequest writes KEY_DERIVATION_REQUEST with key and device`() {
+        AuditLogger.logKeyDerivationRequest(
+            keyId = "k2",
+            keyLabel = "Key",
+            keyType = "ecdh",
+            algorithm = "ECDH",
+            deviceId = "dev-1",
+            deviceName = "Laptop",
+            durationMs = 7L
+        )
+        val entry = only()
+        assertEquals(AuditOperationType.KEY_DERIVATION_REQUEST, entry.operationType)
+        assertEquals("k2", entry.keyId)
+        assertEquals("dev-1", entry.deviceId)
+        assertEquals("Laptop", entry.deviceName)
+        assertEquals(7L, entry.durationMs)
+        assertTrue(entry.success)
+        assertEquals("ECDH", details(entry).getString("algorithm"))
+    }
+
+    @Test
+    fun `logKeyDerivationRequest omits details when the algorithm is unknown`() {
+        AuditLogger.logKeyDerivationRequest("k2", "Key", "ecdh")
+        assertNull(only().details)
+    }
+
+    @Test
     fun `logEncryptionRequest records the algorithm`() {
         AuditLogger.logEncryptionRequest("k1", "Key", "secret", algorithm = "AES/GCM/NoPadding")
         val entry = only()
