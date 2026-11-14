@@ -18,11 +18,18 @@ import android.content.Context
 import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
 import com.automatethethings.xkey.oath.OathCredentialEntity
+import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.SessionSender
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.remote.stubAndroidLog
+import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.transport.StreamSessionHarness
 import com.automatethethings.xkey.ui.DesktopOathLinks
 import com.automatethethings.xkey.ui.OathDesktopActions
@@ -30,7 +37,10 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import java.io.IOException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -202,12 +212,52 @@ class UsbConnectedDesktopTest {
         }
     }
 
+    /**
+     * A key shared as the service shares it: the share session comes from one
+     * desktop lookup, and every send re-checks it against a fresh lookup on
+     * the same live connection. The `remote.sharePublicKey` request reaches
+     * the desktop and its answer completes the share.
+     */
+    @Test
+    fun `a key shared over one live connection reaches the desktop across lookups`() = runBlocking {
+        StreamSessionHarness().use { harness ->
+            fun shareSession(): ShareSession? =
+                server.connectedDesktop(UsbAccessoryState.Connected("acc"), harness.pairing.boundSender(), router)
+                    ?.let { d -> ShareSession.of(listOf(ShareSession.Transport(d.sender, d.router))) { it.sameAs(shareSession()) } }
+            val desktop = harness.connectPaired()
+            val session = shareSession()!!
+            assertEquals(desktop.publicKeyHex, session.peerPublicKeyHex)
+
+            val key = KeyEntity(
+                keyId = "k", keyType = "signing", algorithm = "EC", label = "label", keySizeBits = 256,
+                sharingPolicy = SharingPolicyType.ALL_PEERS, source = "local"
+            )
+            val permission = SharePermission(mockk<KeySharingPolicyDao>(relaxed = true), harness.repo)
+            val outcome = async {
+                DesktopKeyShare(session, 10_000).send(
+                    SharePermissionLedger.baseline(key.keyId), key, null, PEM, null, permission
+                ) { key }
+            }
+
+            val request = withContext(Dispatchers.IO) { desktop.readEncrypted() }
+            assertEquals(MethodNames.REMOTE_SHARE_PUBLIC_KEY, request.getString("method"))
+            assertEquals("k", request.getJSONObject("params").getString("key_id"))
+            router.processMessage(
+                """{"jsonrpc":"2.0","id":${request.getLong("id")},"result":{"accepted":true,"import_id":"desk-k","backend":"software"}}"""
+                    .toByteArray()
+            )
+
+            assertTrue(outcome.await().toString(), outcome.await() is DesktopKeyShare.Outcome.Sent)
+        }
+    }
+
     private val bound = object : SessionSender {
         override suspend fun sendEncryptedMessage(data: ByteArray) = Unit
     }
 
     private companion object {
         const val PEER = "aa01"
+        const val PEM = "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"
         val REQUEST = """{"jsonrpc":"2.0","id":9,"method":"remote.oathAdd","params":{}}""".toByteArray()
     }
 }
