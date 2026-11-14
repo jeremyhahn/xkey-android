@@ -92,6 +92,11 @@ class KeyShareAuditTest {
     private lateinit var pairedDevices: PairedDeviceRepository
     private lateinit var context: Context
     private lateinit var grants: KeySharingPolicyDao
+    private val policies = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+        coEvery { deletion(any()) } returns null
+        // No policy row: the store enforces the key row's own policy.
+        coEvery { policyRow(any()) } returns null
+    }
     private lateinit var handler: RequestHandler
     private val entries = mutableListOf<AuditLogEntity>()
 
@@ -130,8 +135,11 @@ class KeyShareAuditTest {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
         every { database.contactDao() } returns contactDao
+        // No delete of any key is pending: a relaxed DAO would report one.
+        every { database.keyPolicyDao() } returns policies
         grants = mockk(relaxed = true)
         coEvery { grants.isKeySharedWithPeer(any(), any()) } returns false
+        coEvery { grants.isPeerGranted(any(), any()) } returns false
         every { database.keySharingPolicyDao() } returns grants
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
@@ -500,6 +508,7 @@ class KeyShareAuditTest {
     fun aSelectedPeerGrantFollowsTheCallerNotTheHandlerWidePeer() = runTest {
         givenSoftwareKey(exportable = true, shareable = true, policy = SharingPolicyType.SELECTED_PEERS)
         coEvery { grants.isKeySharedWithPeer(KEY_ID, PEER) } returns true
+        coEvery { grants.isPeerGranted(KEY_ID, PEER) } returns true
 
         handler.setConnectedDevicePublicKeyHex(USB_PEER)
         val granted = success(served(importSharedKey(), peer = PEER))
@@ -653,6 +662,7 @@ class KeyShareAuditTest {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
         every { database.contactDao() } returns dao
+        every { database.keyPolicyDao() } returns policies
         every { XKeyDatabase.getInstance(any()) } returns database
     }
 
@@ -678,9 +688,26 @@ class KeyShareAuditTest {
             1,
             Regex("withContext\\(NonCancellable\\)").findAll(source).count()
         )
+        // The sharing-policy change is written by KeyPolicyStore.setPolicy,
+        // which runs the decision's audit after its commit, uncancellably:
+        // the handler's one policy write passes a decision that records it.
+        val setPolicyStart = source.indexOf("private suspend fun handleLocalSetKeyPolicy(")
+        assertTrue("handleLocalSetKeyPolicy found", setPolicyStart >= 0)
+        val setPolicy = source.substring(setPolicyStart, source.indexOf("\n    }\n", setPolicyStart))
         assertTrue(
-            "the sharing-policy change records through persistAudited",
-            Regex("persistAudited\\(\\s*write = \\{\\s*keyDao\\.compareAndSetSharingPolicy\\(").containsMatchIn(source)
+            "the sharing-policy change records through the store decision's audit",
+            Regex(
+                "KeyPolicyStore\\.RemoteDecision\\([^)]*\\)\\s*\\{\\s*replaced ->[^}]*" +
+                    "AuditLogger\\.logKeySharingChanged\\("
+            ).containsMatchIn(setPolicy)
+        )
+        assertTrue(
+            "the sharing-policy change is written through the store with that decision",
+            Regex("KeySharingPeers\\.setKeyPolicy\\([^{}]*?decision = decision\\s*\\)").containsMatchIn(setPolicy)
+        )
+        assertFalse(
+            "no sharing-policy write bypasses the store",
+            Regex("keyDao\\.(compareAndSetSharingPolicy|setSharingPolicy|updateSharingPolicy)\\(").containsMatchIn(source)
         )
         for ((fn, write, record) in listOf(
             Triple("handleSharePublicKey", "dao.insert(", "AuditLogger.logContactImported("),

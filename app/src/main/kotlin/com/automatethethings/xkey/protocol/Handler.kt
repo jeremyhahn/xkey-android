@@ -4194,18 +4194,18 @@ class RequestHandler(
             val keyId = params.optString("label", "").ifBlank {
                 params.optString("key_id", "").ifBlank { "shared-sym-${System.currentTimeMillis()}" }
             }
-            val softwareStore = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
+            val store = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
             val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
             // The check and the write in the store's one serialisation of
             // this id's key material (#193 r8); the write and its audit are
             // one step (#234).
             keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) {
-                if (softwareStore.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
+                if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
                     return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
                 }
                 persistAudited(
                     write = {
-                        softwareStore.put(
+                        store.put(
                             com.automatethethings.xkey.crypto.SoftwareKey(
                                 keyId = keyId,
                                 algorithm = algorithm,
