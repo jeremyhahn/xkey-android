@@ -126,7 +126,7 @@ class RequestHandlerFido2AndCosignTest {
                     if (entity.keyId.contains(runId)) ids.add(entity.keyId)
                 }
                 for (keyId in ids) {
-                    runCatching { keystoreManager.deleteKey(keyId) }
+                    runCatching { keystoreManager.deleteKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
                     runCatching { keystoreManager.deleteGeneralKey(keyId) }
                     runCatching { db.keySharingPolicyDao().clearPoliciesForKey(keyId) }
                     runCatching { db.keyDao().deleteByKeyId(keyId) }
@@ -308,7 +308,7 @@ class RequestHandlerFido2AndCosignTest {
 
         val signedData = authData + clientDataHash
         val dataHash = MessageDigest.getInstance("SHA-256").digest(signedData)
-        val publicKey = keystoreManager.getPublicKey(credentialId)
+        val publicKey = keystoreManager.getPublicKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
             ?: throw AssertionError("the credential has no public key")
         val verifier = Signature.getInstance("SHA256withECDSA")
         verifier.initVerify(publicKey)
@@ -486,7 +486,7 @@ class RequestHandlerFido2AndCosignTest {
             result.getString("signerName")
         )
 
-        val publicKeyDer = keystoreManager.getPublicKeyDER(keyId)
+        val publicKeyDer = keystoreManager.getPublicKeyDER(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
             ?: throw AssertionError("the signing key has no public key")
         val expectedFingerprint = MessageDigest.getInstance("SHA-256")
             .digest(publicKeyDer)

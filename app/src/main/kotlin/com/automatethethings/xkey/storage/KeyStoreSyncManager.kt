@@ -133,7 +133,7 @@ class KeyStoreSyncManager(
         for (cred in credentials) {
             if (keyDao.exists(cred.credentialId)) continue
 
-            if (keystoreManager.resolveKeystoreAlias(cred.credentialId) == null) {
+            if (!keystoreManager.holdsAnyKey(cred.credentialId)) {
                 skipped++
                 Log.d(TAG, "Skipped credential with no Keystore key: ${cred.credentialId}")
                 continue
@@ -219,7 +219,7 @@ class KeyStoreSyncManager(
      *
      * Only removes entries with local sources (not "xkmsd" remote references).
      * A PIV slot alias listed by an earlier sync is removed as well, because
-     * [KeystoreManager.resolveKeystoreAlias] never resolves a raw PIV alias.
+     * [KeystoreManager.holdsAnyKey] never finds a raw PIV alias.
      *
      * @return Number of stale entries removed.
      */
@@ -231,7 +231,7 @@ class KeyStoreSyncManager(
             // Classify by the resolved alias, never the logical id: a general
             // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
             // a raw PIV slot alias row never resolves and so is removed here.
-            if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
+            if (!keystoreManager.holdsAnyKey(key.keyId)) {
                 keyDao.deleteByKeyId(key.keyId)
                 removed++
                 Log.d(TAG, "Removed stale key entry: ${key.keyId}")

@@ -672,7 +672,7 @@ class RequestHandlerLocalKeyFamilyTest {
                     .put("preferStrongBox", false)
             ).ok()
 
-            val level = keystoreManager.keySecurityLevel(keyId)
+            val level = keystoreManager.keySecurityLevel(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
                 ?: throw AssertionError("$algorithm: the generated key must have a level")
             assertEquals(algorithm, level.wire, result.getString("securityLevel"))
             assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
@@ -731,7 +731,7 @@ class RequestHandlerLocalKeyFamilyTest {
                 assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
                 assertFalse(algorithm, storedKey(keyId).strongBoxBacked)
             } finally {
-                keystoreManager.deleteKey(keyId)
+                keystoreManager.deleteKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
             }
         }
     }

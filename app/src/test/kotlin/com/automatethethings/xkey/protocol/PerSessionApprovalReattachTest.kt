@@ -108,8 +108,8 @@ class PerSessionApprovalReattachTest {
         // The Keystore signs without a prompt only inside its auth window,
         // which a successful prompt opens.
         keystore = mockk(relaxed = true)
-        every { keystore.keyExists(any()) } returns true
-        coEvery { keystore.signWithoutBiometric(any(), any()) } answers {
+        every { keystore.soleKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        coEvery { keystore.signWithoutBiometric(any(), any(), any()) } answers {
             if (!keystoreWindowOpen) throw BiometricRequiredException()
             ByteArray(64) { 7 }
         }

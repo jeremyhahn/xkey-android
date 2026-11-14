@@ -137,7 +137,9 @@ class KeySharingPendingIntentHandlerTest {
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
         // No Keystore alias unless a test gives its key one.
-        every { keystore.resolveKeystoreAlias(any()) } returns null
+        every { keystore.holdsAnyKey(any()) } returns false
+        every { keystore.holdsInternalKey(any()) } returns false
+        every { keystore.soleKind(any()) } returns null
         handler = newHandler()
     }
 
@@ -492,7 +494,7 @@ class KeySharingPendingIntentHandlerTest {
         // The key's Keystore alias, gone once deleted.
         val alias = "xkey_key_$key"
         var aliasHeld = true
-        every { keystore.resolveKeystoreAlias(key) } answers { alias.takeIf { aliasHeld } }
+        every { keystore.holdsAnyKey(key) } answers { aliasHeld }
         every { keystore.userKeyGeneration(key) } answers { if (aliasHeld) mapOf("keystore:$alias" to "1") else emptyMap() }
         every { keystore.deleteUserKeyGeneration(key, any()) } answers { aliasHeld = false; emptyMap() }
         val gate = CompletableDeferred<Unit>()
@@ -520,7 +522,8 @@ class KeySharingPendingIntentHandlerTest {
     @Test
     fun aDeleteOfAnInternalKeyIsRefusedOnTheRpcPath() = runTest {
         val internal = "xkey_seal_store_key"
-        every { keystore.resolveKeystoreAlias(internal) } returns internal
+        every { keystore.holdsAnyKey(internal) } returns true
+        every { keystore.holdsInternalKey(internal) } returns true
         every { keystore.deleteByAlias(any()) } returns true
         tables.addKey(internal, SharingPolicyType.PRIVATE)
 
@@ -540,7 +543,8 @@ class KeySharingPendingIntentHandlerTest {
     @Test
     fun aDeleteOfAnInternalKeyIsRefusedOnTheReplayPath() = runTest {
         val internal = "xkey_seal_store_key"
-        every { keystore.resolveKeystoreAlias(internal) } returns internal
+        every { keystore.holdsAnyKey(internal) } returns true
+        every { keystore.holdsInternalKey(internal) } returns true
         every { keystore.deleteByAlias(any()) } returns true
         val store = store
         assertTrue(store.deleteMaterial(internal, materialDelete { false }))
@@ -562,7 +566,8 @@ class KeySharingPendingIntentHandlerTest {
         val id = "xkey_seal_store_key"
         val userAlias = "xkey_key_$id"
         var userHeld = true
-        every { keystore.resolveKeystoreAlias(id) } answers { if (userHeld) userAlias else id }
+        every { keystore.holdsAnyKey(id) } returns true
+        every { keystore.holdsInternalKey(id) } answers { !userHeld }
         every { keystore.userKeyGeneration(id) } answers { if (userHeld) mapOf("keystore:$userAlias" to "1") else emptyMap() }
         every { keystore.deleteUserKeyGeneration(id, any()) } answers { userHeld = false; emptyMap() }
         every { keystore.deleteByAlias(any()) } returns true
@@ -586,8 +591,8 @@ class KeySharingPendingIntentHandlerTest {
         fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
         val held = mutableSetOf("k-row", "k-bare", "k-legacy")
         for (id in held.toList()) {
-            every { keystore.resolveKeystoreAlias(id) } answers { "xkey_credential_$id".takeIf { id in held } }
-            every { keystore.keyExists(id) } answers { id in held }
+            every { keystore.holdsAnyKey(id) } answers { id in held }
+            every { keystore.userKeyIdInUse(id) } answers { id in held }
             every { keystore.userKeyGeneration(id) } answers { if (id in held) mapOf("keystore:xkey_credential_$id" to "1") else emptyMap() }
             every { keystore.deleteUserKeyGeneration(id, any()) } answers { held -= id; emptyMap() }
         }
@@ -603,7 +608,7 @@ class KeySharingPendingIntentHandlerTest {
         assertTrue("a delete left its material", held.isEmpty())
         // The legacy delete takes the store's path: its material is deleted
         // by its generation, never by a raw alias outside the store.
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(any()) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(any(), any()) }
     }
 
     /**
@@ -617,8 +622,9 @@ class KeySharingPendingIntentHandlerTest {
         every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
         fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
         val id = "k-owed"
-        every { keystore.resolveKeystoreAlias(id) } returns "xkey_key_$id"
-        every { keystore.keyExists(id) } returns true
+        every { keystore.holdsAnyKey(id) } returns true
+        every { keystore.soleKind(id) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystore.userKeyIdInUse(id) } returns true
         every { keystore.generalKeyExists(id) } returns true
         every { keystore.userKeyGeneration(id) } returns mapOf("keystore:xkey_key_$id" to "1")
         val instance = tables.addKey(id, SharingPolicyType.SELECTED_PEERS)

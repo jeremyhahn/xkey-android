@@ -2058,7 +2058,8 @@ class KeyDetailActivity : AppCompatActivity() {
      * Exports the public key in PEM format to clipboard.
      */
     private fun exportPublicKey(key: KeyEntity) {
-        val pem = keystoreManager.getPublicKeyPEM(key.keyId)
+        // The key's one namespace (#255 review r3); an id held in both shows none.
+        val pem = keystoreManager.soleKind(key.keyId)?.let { keystoreManager.getPublicKeyPEM(key.keyId, it) }
 
         if (pem != null) {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

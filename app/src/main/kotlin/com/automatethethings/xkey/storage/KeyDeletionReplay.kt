@@ -175,10 +175,7 @@ private const val TAG = "KeyDeletionReplay"
  * namespace ([KeystoreManager.userKeyAliases]): an internal key of the
  * app, which no key delete may touch (#193 r11).
  */
-fun isInternalKey(keyId: String, keystore: KeystoreManager): Boolean {
-    val alias = keystore.resolveKeystoreAlias(keyId) ?: return false
-    return alias !in KeystoreManager.userKeyAliases(keyId)
-}
+fun isInternalKey(keyId: String, keystore: KeystoreManager): Boolean = keystore.holdsInternalKey(keyId)
 
 /**
  * The app's one [KeyMaterial]: [readKeyMaterialGeneration] for a delete's

@@ -106,8 +106,8 @@ class SignAfterDeleteTest {
             mockk<NotificationManager>(relaxed = true)
 
         keystore = mockk(relaxed = true)
-        every { keystore.keyExists(any()) } returns true
-        coEvery { keystore.signWithoutBiometric(any(), any()) } returns ByteArray(64) { 7 }
+        every { keystore.soleKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        coEvery { keystore.signWithoutBiometric(any(), any(), any()) } returns ByteArray(64) { 7 }
 
         // The prompt stays open until the test approves it.
         biometricLauncher = mockk(relaxed = true)
@@ -147,7 +147,7 @@ class SignAfterDeleteTest {
         val response = pending.await()
 
         assertEquals(ErrorCodes.KEY_NOT_FOUND, response.error?.code)
-        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any(), any()) }
     }
 
     @Test
@@ -157,7 +157,7 @@ class SignAfterDeleteTest {
         approval.complete(Unit)
 
         assertEquals(null, pending.await().error)
-        coVerify(exactly = 1) { keystore.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 1) { keystore.signWithoutBiometric(any(), any(), any()) }
     }
 
     @Test

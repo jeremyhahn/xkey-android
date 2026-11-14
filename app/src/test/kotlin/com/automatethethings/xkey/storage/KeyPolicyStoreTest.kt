@@ -533,7 +533,7 @@ class KeyPolicyStoreTest {
         val assertion = passkey.substringAfter("suspend fun handleGetCredential(")
         assertTrue(
             "the passkey assertion signs before the deleted-key gate",
-            assertion.indexOf("keyPolicyStore.requireUsable(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)") in 0 until assertion.indexOf("keystoreManager.sign")
+            assertion.indexOf("keyPolicyStore.requireUsable(credentialId, passkeyKind)") in 0 until assertion.indexOf("keystoreManager.sign")
         )
     }
 

@@ -133,8 +133,9 @@ class PasskeySignCounterHandlerTest {
             mockk<NotificationManager>(relaxed = true)
 
         keystoreManager = mockk(relaxed = true)
-        coEvery { keystoreManager.signWithoutBiometric(ID, any()) } answers {
-            signed += secondArg<ByteArray>()
+        every { keystoreManager.soleKind(ID) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        coEvery { keystoreManager.signWithoutBiometric(ID, any(), any()) } answers {
+            signed += thirdArg<ByteArray>()
             SIGNATURE
         }
         biometricHelper = mockk(relaxed = true)

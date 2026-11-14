@@ -101,7 +101,7 @@ class CreateCredentialHandlerTest {
         runBlocking {
             for (rpId in touchedRpIds) {
                 for (row in credentialDao.getByRpId(rpId)) {
-                    runCatching { keystoreManager.deleteKey(row.credentialId) }
+                    runCatching { keystoreManager.deleteKey(row.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
                     credentialDao.deleteByCredentialId(row.credentialId)
                     keyDao.deleteByKeyId(row.credentialId)
                 }
@@ -358,7 +358,7 @@ class CreateCredentialHandlerTest {
         val inner = response.getJSONObject("response")
 
         val advertised = CredentialRequestFixtures.decodeUrl(inner.getString("publicKey"))
-        val fromKeystore = keystoreManager.getPublicKey(credentialId)
+        val fromKeystore = keystoreManager.getPublicKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
 
         assertNotNull("The Keystore should hold the generated key", fromKeystore)
         assertArrayEquals(

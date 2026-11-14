@@ -83,7 +83,7 @@ class FileEncryptorInstrumentedTest {
             authDurationSeconds = -1,
             preferStrongBox = false
         )
-        recipientPublicKeyDer = keystoreManager.getPublicKeyDER(recipientKeyId)!!
+        recipientPublicKeyDer = keystoreManager.getPublicKeyDER(recipientKeyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)!!
         Unit
     }
 

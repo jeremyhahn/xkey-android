@@ -75,7 +75,7 @@ class KeyStoreSyncManagerTest {
         every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
 
         keystoreManager = mockk(relaxed = true)
-        every { keystoreManager.resolveKeystoreAlias(any()) } answers { firstArg() }
+        every { keystoreManager.holdsAnyKey(any()) } returns true
         credentialDao = mockk(relaxed = true)
         coEvery { credentialDao.getAll() } returns emptyList()
         keyDao = mockk(relaxed = true)
@@ -104,7 +104,7 @@ class KeyStoreSyncManagerTest {
         every { listed.source } returns "local"
         coEvery { keyDao.getAll() } returns listOf(listed)
         // KeystoreManager never resolves a raw PIV slot alias.
-        every { keystoreManager.resolveKeystoreAlias(pivAlias) } returns null
+        every { keystoreManager.holdsAnyKey(pivAlias) } returns false
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).syncAll()
 
@@ -119,7 +119,7 @@ class KeyStoreSyncManagerTest {
         every { listed.source } returns "local"
         coEvery { keyDao.getAll() } returns listOf(listed)
         // local.generateKey stores it at the general alias xkey_key_<keyId>.
-        every { keystoreManager.resolveKeystoreAlias(generalId) } returns "xkey_key_$generalId"
+        every { keystoreManager.holdsAnyKey(generalId) } returns true
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).syncAll()
 

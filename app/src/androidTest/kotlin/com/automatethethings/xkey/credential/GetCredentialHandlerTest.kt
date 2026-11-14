@@ -103,7 +103,7 @@ class GetCredentialHandlerTest {
         if (!this::credentialDao.isInitialized) return
         runBlocking {
             for (credentialId in seededCredentialIds) {
-                runCatching { keystoreManager.deleteKey(credentialId) }
+                runCatching { keystoreManager.deleteKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
                 credentialDao.deleteByCredentialId(credentialId)
                 keyDao.deleteByKeyId(credentialId)
             }
@@ -216,7 +216,7 @@ class GetCredentialHandlerTest {
         val signature = CredentialRequestFixtures.decodeUrl(inner.getString("signature"))
 
         val verifier = Signature.getInstance("SHA256withECDSA")
-        verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId)!!)
+        verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)!!)
         verifier.update(authData + clientDataHash)
 
         assertTrue(
@@ -237,7 +237,7 @@ class GetCredentialHandlerTest {
         val signature = CredentialRequestFixtures.decodeUrl(inner.getString("signature"))
 
         val verifier = Signature.getInstance("SHA256withECDSA")
-        verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId)!!)
+        verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)!!)
         verifier.update(authData + MessageDigest.getInstance("SHA-256").digest("other".toByteArray()))
 
         assertFalse(
@@ -377,7 +377,7 @@ class GetCredentialHandlerTest {
             assertEquals("UP|UV", 0x05, AuthenticatorData(authData).flags)
 
             val verifier = Signature.getInstance("SHA256withECDSA")
-            verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId)!!)
+            verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)!!)
             verifier.update(authData + clientDataHash)
             assertTrue(
                 "The UV bit is inside the signed authenticator data, so the " +

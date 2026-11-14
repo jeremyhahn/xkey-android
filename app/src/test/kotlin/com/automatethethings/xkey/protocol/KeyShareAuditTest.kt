@@ -997,32 +997,138 @@ class KeyShareAuditTest {
         assertTrue("importSharedKey exports the general key's own key: $pem", Base64.getEncoder().encodeToString(generalKey) in pem)
         assertFalse(Base64.getEncoder().encodeToString(credentialKey) in pem)
 
-        // No general key under the id: the lookup would read the credential.
+        // No general key under the id: the general lookup finds none, and
+        // never reads the credential (#255 review r3).
         aliases.remove("xkey_key_$KEY_ID")
         for (request in listOf(getPublicKey, importSharedKey())) {
             val response = Response.fromJson(served(request))
-            assertEquals("refused: $response", ErrorCodes.KEY_NOT_FOUND, response.error?.code)
+            assertTrue("refused: $response", response.error != null && response.result == null)
         }
     }
 
+    /** A platform Keystore holding [keys] by alias, read by a real [KeystoreManager]. */
+    private fun platformKeystore(keys: Map<String, java.security.KeyPair>) {
+        val platform = mockk<KeyStore>(relaxed = true)
+        every { platform.containsAlias(any()) } answers { firstArg<String>() in keys }
+        every { platform.getKey(any(), any()) } answers { keys[firstArg()]?.private }
+        every { platform.getCertificate(any()) } answers {
+            keys[firstArg()]?.let { pair -> mockk<java.security.cert.Certificate> { every { publicKey } returns pair.public } }
+        }
+        every { KeyStore.getInstance("AndroidKeyStore") } returns platform
+    }
+
+    private fun ecKeyPair(): java.security.KeyPair =
+        java.security.KeyPairGenerator.getInstance("EC").apply { initialize(java.security.spec.ECGenParameterSpec("secp256r1")) }.generateKeyPair()
+
     /**
-     * #255 review r2, the bypass check: every public-key or material lookup
-     * an RPC makes in Handler names the user key it reads, so it resolves
-     * through [KeystoreManager.resolveKey] with the kind its use gate is
-     * given, and the gate ([com.automatethethings.xkey.storage.KeyPolicyStore.requireUsable])
-     * resolves through the same resolver: Handler reads no Keystore alias
-     * itself, and every store is built with the Keystore's resolver.
+     * #255 review r3: local.generateKey of an id a credential already holds
+     * is refused before any key is made, so no general key is ever created
+     * beside a credential of its id.
+     */
+    @Test
+    fun aKeyIsNeverGeneratedUnderAnIdACredentialHolds() = runTest {
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to ecKeyPair()))
+        val keystore = io.mockk.spyk(KeystoreManager(context))
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val generate = Request(
+            id = 6,
+            method = MethodNames.LOCAL_GENERATE_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("keyType", "fido2").put("algorithm", "ES256")
+                .put("rpId", "example.com").put("requireUserVerification", false)
+        ).toJson()
+
+        val response = Response.fromJson(served(generate))
+
+        assertEquals("refused: $response", ErrorCodes.KEY_EXISTS, response.error?.code)
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyWithAuthDuration(any(), any(), any()) }
+    }
+
+    /**
+     * #255 review r3: a passkey assertion signs with the key whose COSE key
+     * the passkey's creation returned. With a general key and a credential
+     * both under the id the assertion is refused, never signed with the
+     * other key; with the general key alone (a passkey made through
+     * local.generateKey) the signature verifies against the general key's
+     * public key, the one its COSE key encodes, and not the credential's.
+     */
+    @Test
+    fun aPasskeyAssertionSignsWithTheKeyWhosePublicKeyWasReturned() = runTest {
+        val general = ecKeyPair()
+        val credential = ecKeyPair()
+        val keys = mutableMapOf("xkey_key_$KEY_ID" to general, "xkey_credential_$KEY_ID" to credential)
+        platformKeystore(keys)
+        val keystore = KeystoreManager(context)
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns
+            keyEntity(SharingPolicyType.ALL_PEERS, shareable = true, keyType = "fido2")
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val clientDataHash = java.security.MessageDigest.getInstance("SHA-256").digest("client-data".toByteArray())
+        val assertion = Request(
+            id = 7,
+            method = MethodNames.LOCAL_SIGN_FIDO2_ASSERTION,
+            params = JSONObject().put("credentialId", KEY_ID).put("rpId", "example.com")
+                .put("clientDataHash", Base64.getEncoder().encodeToString(clientDataHash))
+                .put("userVerificationRequired", false)
+        ).toJson()
+
+        // Both namespaces hold the id: no key is the passkey's for certain.
+        assertEquals(null, keystore.soleKind(KEY_ID))
+        val refused = Response.fromJson(served(assertion))
+        assertEquals("refused: $refused", ErrorCodes.KEY_NOT_FOUND, refused.error?.code)
+
+        // The general key alone: its COSE key is the one generateKey returned.
+        keys.remove("xkey_credential_$KEY_ID")
+        val cose = keystore.getCOSEPublicKey(KEY_ID, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+        fun coordinate(key: java.security.PublicKey) = (key as java.security.interfaces.ECPublicKey).w.affineX.toByteArray().takeLast(32).toByteArray()
+        assertTrue("the COSE key encodes the general key", cose != null && java.util.Collections.indexOfSubList(cose.toList(), coordinate(general.public).toList()) >= 0)
+        assertFalse("the COSE key encodes the credential", java.util.Collections.indexOfSubList(cose!!.toList(), coordinate(credential.public).toList()) >= 0)
+        val result = success(served(assertion))
+        val authData = Base64.getDecoder().decode(result.getString("authenticatorData"))
+        val signature = Base64.getDecoder().decode(result.getString("signature"))
+        val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(authData + clientDataHash)
+        fun verifies(key: java.security.PublicKey) = java.security.Signature.getInstance("SHA256withECDSA").run {
+            initVerify(key)
+            update(dataHash)
+            verify(signature)
+        }
+        assertTrue("the assertion verifies against the returned public key", verifies(general.public))
+        assertFalse("the assertion signed with the credential", verifies(credential.public))
+    }
+
+    /**
+     * #255 review r3, the bypass check: no caller resolves a key id without
+     * naming its namespace. KeystoreManager has no resolver, lookup, sign,
+     * exists or delete of a key id without a non-null kind, and each derives
+     * its alias from that kind alone; every sign of a user key in Handler and
+     * the credential provider runs inside the use gate of the key id and kind
+     * it signs with; the gate resolves through the same resolver. Any
+     * unqualified resolver (a nullable or defaulted kind, a one-argument
+     * resolve) fails this test.
      */
     @Test
     fun everyKeyLookupInHandlerResolvesTheKindItsGateChecks() {
         val source = handlerSource()
-        val lookups = Regex("keystoreManager\\.(getPublicKeyDER|getPublicKeyPEM|getPublicKeySSH|getCOSEPublicKey|getPublicKey|getAttestationChain|keySecurityLevel|resolveKeystoreAlias|resolveKey)\\(([^)]*)\\)")
+        val lookups = Regex("keystoreManager\\.(getPublicKeyDER|getPublicKeyPEM|getPublicKeySSH|getCOSEPublicKey|getPublicKey|getAttestationChain|keySecurityLevel|resolveKeystoreAlias|resolveKey|keyExists|deleteKey|isKeyStrongBoxBacked)\\(([^)]*)\\)")
             .findAll(source).toList()
         assertTrue("lookups found: ${lookups.size}", lookups.size >= 9)
         for (lookup in lookups) {
             assertTrue(
                 "a lookup names the user key it reads: ${lookup.value}",
-                Regex(",\\s*com\\.automatethethings\\.xkey\\.crypto\\.UserKeyKind\\.(GENERAL|CREDENTIAL)$").containsMatchIn(lookup.groupValues[2])
+                Regex(",\\s*(com\\.automatethethings\\.xkey\\.crypto\\.UserKeyKind\\.(GENERAL|CREDENTIAL)|[a-z]\\w*Kind)$").containsMatchIn(lookup.groupValues[2])
             )
         }
         for (raw in listOf("xkey_credential_", "xkey_key_", "KEY_ALIAS_PREFIX", "keyStore.", "containsAlias(")) {
@@ -1032,16 +1138,53 @@ class KeyShareAuditTest {
 
         val main = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
         val manager = java.io.File(main, "com/automatethethings/xkey/crypto/KeystoreManager.kt").readText()
+        Regex("\\w+\\s*:\\s*UserKeyKind\\?").findAll(manager).forEach {
+            org.junit.Assert.fail("KeystoreManager takes a nullable kind, an unqualified resolver: ${it.value}")
+        }
         assertTrue(
             "resolveKeystoreAlias is the resolver's alias",
-            "fun resolveKeystoreAlias(keyId: String, kind: UserKeyKind? = null): String? = resolveKey(keyId, kind)?.alias" in manager
+            "fun resolveKeystoreAlias(keyId: String, kind: UserKeyKind): String? = resolveKey(keyId, kind)?.alias" in manager
         )
-        for (getter in listOf("getPublicKeyDER", "getPublicKeySSH", "getPublicKey", "getCOSEPublicKey", "getAttestationChain", "keySecurityLevel")) {
-            val start = manager.indexOf("fun $getter(")
-            assertTrue("$getter found", start >= 0)
-            val body = manager.substring(start, manager.indexOf("\n    }\n", start))
-            assertTrue("$getter resolves with its kind", Regex("resolveKeystoreAlias\\(\\w+, kind\\)").containsMatchIn(body))
+        assertTrue("resolveKey names its namespace", "fun resolveKey(keyId: String, kind: UserKeyKind): ResolvedKey? {\n        val own = userKeyAlias(keyId, kind)" in manager)
+        assertEquals("one resolveKey", 1, Regex("fun resolveKey\\(").findAll(manager).count())
+        assertEquals("one resolveKeystoreAlias", 1, Regex("fun resolveKeystoreAlias\\(").findAll(manager).count())
+        for (fn in listOf(
+            "getPublicKeyDER", "getPublicKeySSH", "getPublicKey", "getCOSEPublicKey", "getAttestationChain", "keySecurityLevel",
+            "sign", "signWithoutBiometric", "keyExists", "deleteKey", "isKeyStrongBoxBacked"
+        )) {
+            val starts = Regex("fun $fn\\(").findAll(manager).map { it.range.first }.toList()
+            assertEquals("one $fn", 1, starts.size)
+            val start = starts.single()
+            val header = manager.substring(start, manager.indexOf(")", manager.indexOf("kind", start)) + 1)
+            assertTrue("$fn takes a non-null kind: $header", Regex("\\bkind: UserKeyKind[,)\\s]").containsMatchIn(header + " "))
+            val body = manager.substring(start, manager.indexOf("\n\n", start).let { if (it < 0) manager.length else it })
+            assertTrue("$fn resolves with its kind", Regex("(resolveKeystoreAlias|keySecurityLevel)\\(\\w+, kind\\)").containsMatchIn(body))
         }
+        val pem = manager.substring(manager.indexOf("fun getPublicKeyPEM("))
+        assertTrue("getPublicKeyPEM reads the DER of its kind", Regex("getPublicKeyDER\\(\\w+, kind\\)").containsMatchIn(pem.substring(0, pem.indexOf("\n    }\n"))))
+
+        // No caller anywhere resolves a key id without a namespace.
+        main.walkTopDown().filter { it.extension == "kt" }.forEach { file ->
+            val text = file.readText()
+            Regex("\\bresolve(KeystoreAlias|Key)\\(\\s*[\\w.]+\\s*\\)").findAll(text).forEach {
+                org.junit.Assert.fail("${file.name}: an unqualified resolver call: ${it.value}")
+            }
+        }
+
+        // Each user-key sign runs inside the gate of the id and kind it signs with.
+        val credentialProvider = java.io.File(main, "com/automatethethings/xkey/credential/handler/GetCredentialHandler.kt").readText()
+        for ((name, text) in listOf("Handler" to source, "GetCredentialHandler" to credentialProvider)) {
+            val calls = Regex("keystoreManager\\.(sign|signWithoutBiometric)\\(").findAll(text).count()
+            val gated = Regex("withUsableKey\\(([\\w.]+), (\\w+)\\) \\{\\s*keystoreManager\\.(sign|signWithoutBiometric)\\(\\s*(credentialId = )?([\\w.]+),\\s*(kind = )?(\\w+)")
+                .findAll(text).toList()
+            assertTrue("$name signs a user key", calls > 0)
+            assertEquals("$name: every sign runs in its gate", calls, gated.size)
+            for (call in gated) {
+                assertEquals("$name signs the id it gates: ${call.value}", call.groupValues[1], call.groupValues[5])
+                assertEquals("$name signs with the kind it gates: ${call.value}", call.groupValues[2], call.groupValues[7])
+            }
+        }
+
         val store = java.io.File(main, "com/automatethethings/xkey/storage/KeyPolicyStore.kt").readText()
         assertTrue("the gate resolves as the lookups do", "keys = KeyResolver { keyId, kind -> keystore.resolveKey(keyId, kind) }" in store)
         assertTrue("requireUsable checks the key the lookup reaches", "keys.resolve(keyId, kind)" in store)

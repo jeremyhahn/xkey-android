@@ -726,7 +726,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         val context = requireContext().applicationContext
         val entity = keyDao.getByKeyId(keyId)
         val software = SoftwareKeyStore(context).get(keyId)
-        val pem = if (software == null) runCatching { KeystoreManager(context).getPublicKeyPEM(keyId) }.getOrNull() else null
+        val pem = if (software == null) runCatching { KeystoreManager(context).getPublicKeyPEM(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) }.getOrNull() else null
         ShareInputs(entity, software, pem)
     }
 

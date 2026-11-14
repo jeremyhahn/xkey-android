@@ -172,10 +172,14 @@ class GetCredentialHandler(
 
         val credential = credentialDao.getByCredentialId(credentialId)
             ?: throw NoCredentialsFoundException(credentialId)
+        // The one namespace holding the passkey (#255 review r3); the gate
+        // and every signature name it, and an id held in both is refused.
+        val passkeyKind = keystoreManager.soleKind(credentialId)
+            ?: throw NoCredentialsFoundException(credentialId)
         // The store's deleted-key gate (#193 r12): a passkey whose delete
         // reported success signs nothing, though its material is still owed.
         try {
-            keyPolicyStore.requireUsable(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
+            keyPolicyStore.requireUsable(credentialId, passkeyKind)
         } catch (e: KeyPolicyStore.KeyDeletedException) {
             throw NoCredentialsFoundException(credentialId)
         }
@@ -344,9 +348,9 @@ class GetCredentialHandler(
                         // (#255 review): a delete acknowledged while the
                         // prompt waited signs nothing; one that comes later
                         // waits for this signature.
-                        keyPolicyStore.withUsableKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) {
+                        keyPolicyStore.withUsableKey(credentialId, passkeyKind) {
                             keystoreManager.sign(
-                                credentialId, data, helper,
+                                credentialId, passkeyKind, data, helper,
                                 title = "Sign In",
                                 subtitle = "Authenticate to $rpId"
                             )
@@ -363,7 +367,7 @@ class GetCredentialHandler(
             try {
                 Log.d(TAG, "Signing without verification, credentialId=$credentialId")
                 signOnNextCount { data ->
-                    keyPolicyStore.withUsableKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(credentialId, data) }
+                    keyPolicyStore.withUsableKey(credentialId, passkeyKind) { keystoreManager.signWithoutBiometric(credentialId, passkeyKind, data) }
                 }
             } catch (e: KeyPolicyStore.KeyDeletedException) {
                 throw NoCredentialsFoundException(credentialId)

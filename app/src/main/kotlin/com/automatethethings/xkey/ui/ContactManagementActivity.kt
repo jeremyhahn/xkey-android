@@ -1013,7 +1013,7 @@ class ContactManagementActivity : AppCompatActivity() {
      */
     private suspend fun loadOwnPublicKeys(): List<OwnPublicKey> {
         return keyDao.getAll().mapNotNull { key ->
-            keystoreManager.getPublicKeyPEM(key.keyId)?.let { pem ->
+            keystoreManager.soleKind(key.keyId)?.let { keystoreManager.getPublicKeyPEM(key.keyId, it) }?.let { pem ->
                 OwnPublicKey(
                     keyId = key.keyId,
                     label = key.label,

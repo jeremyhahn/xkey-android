@@ -711,7 +711,7 @@ class RequestHandler(
         // As in local.generateKey: the reservation holds the id from this check
         // until the creation ends, and the creation rechecks after the approval.
         val reservation = "credential:${generateParams.credentialId}"
-        if (keystoreManager.keyExists(generateParams.credentialId) || !keyIds.tryReserve(reservation)) {
+        if (keystoreManager.userKeyIdInUse(generateParams.credentialId) || !keyIds.tryReserve(reservation)) {
             throw credentialExists()
         }
         try {
@@ -719,7 +719,7 @@ class RequestHandler(
             val authDurationSeconds = calculateAuthDuration(currentSettings)
             approveRegistration(generateParams)
             keyIds.withKeyLock(reservation) {
-                if (keystoreManager.keyExists(generateParams.credentialId)) {
+                if (keystoreManager.userKeyIdInUse(generateParams.credentialId)) {
                     throw credentialExists()
                 }
                 // In the store's serialisation of the id's material, as
@@ -794,7 +794,7 @@ class RequestHandler(
         val level = generatedKeyLevel(
             generateParams.credentialId,
             read = { keystoreManager.credentialSecurityLevel(generateParams.credentialId) },
-            discard = { keystoreManager.deleteKey(generateParams.credentialId) }
+            discard = { keystoreManager.deleteKey(generateParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
         )
 
         // The leaf of the Keystore chain is the key attestation certificate; the
@@ -834,13 +834,14 @@ class RequestHandler(
 
         val signParams = SignParams.fromJson(params)
 
-        // Check if key exists
-        if (!keystoreManager.keyExists(signParams.credentialId)) {
-            throw ProtocolException(
+        // The one namespace holding the passkey (#255 review r3): a credential,
+        // or a general key made through local.generateKey. The gate and the
+        // signature both name it; an id held in both is refused.
+        val signKind = keystoreManager.soleKind(signParams.credentialId)
+            ?: throw ProtocolException(
                 "Credential not found",
                 errorCode = ErrorCodes.KEY_NOT_FOUND
             )
-        }
 
         // Decode data hash
         val dataHash = signParams.getDataHashBytes()
@@ -858,8 +859,9 @@ class RequestHandler(
         if (!biometricRequired) {
             // Try signing without biometric (session/time-window still valid, or UV disabled)
             try {
-                signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(
+                signature = keyPolicyStore.withUsableKey(signParams.credentialId, signKind) { keystoreManager.signWithoutBiometric(
                     credentialId = signParams.credentialId,
+                    kind = signKind,
                     dataHash = dataHash
                 ) }
                 userVerified = currentSettings.uvPolicy == UserVerificationPolicy.REQUIRED
@@ -869,16 +871,16 @@ class RequestHandler(
                 // This can happen if key was created with different settings
                 // Fall through to biometric authentication
                 Log.d(TAG, "Key requires biometric despite session auth - falling back to prompt")
-                return@withContext signWithBiometric(request, signParams, dataHash)
+                return@withContext signWithBiometric(request, signParams, signKind, dataHash)
             } catch (e: SigningException) {
                 // Signing failed - likely auth timeout or key invalidation
                 // Fall through to biometric authentication to retry
                 Log.d(TAG, "Signing failed (${e.message}) - falling back to biometric prompt")
-                return@withContext signWithBiometric(request, signParams, dataHash)
+                return@withContext signWithBiometric(request, signParams, signKind, dataHash)
             }
         } else {
             // Biometric authentication is required
-            return@withContext signWithBiometric(request, signParams, dataHash)
+            return@withContext signWithBiometric(request, signParams, signKind, dataHash)
         }
 
         val signatureBase64 = Base64.getEncoder().encodeToString(signature)
@@ -910,6 +912,7 @@ class RequestHandler(
     private suspend fun signWithBiometric(
         request: Request,
         signParams: SignParams,
+        signKind: com.automatethethings.xkey.crypto.UserKeyKind,
         dataHash: ByteArray
     ): Response {
         // On a locked phone the notification opens the launcher's own prompt
@@ -927,12 +930,14 @@ class RequestHandler(
                     // PER_OPERATION mode: Use crypto-bound signing directly
                     // This performs biometric auth and signing in a single activity
                     Log.d(TAG, "Using crypto-bound signing for PER_OPERATION mode")
-                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { biometricLauncher.requestCryptoSignature(
+                    // The alias of the passkey's own namespace (#255 review r3).
+                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId, signKind) { biometricLauncher.requestCryptoSignature(
                         credentialId = signParams.credentialId,
                         dataHash = dataHash,
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
                         showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        keyAlias = com.automatethethings.xkey.crypto.KeystoreManager.userKeyAlias(signParams.credentialId, signKind),
                         onLaunch = notice.onLaunch
                     ) }
 
@@ -964,8 +969,9 @@ class RequestHandler(
                         sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) != false
                     if (!sessionUnapproved) try {
                         Log.d(TAG, "Trying signWithoutBiometric (optimistic for TIME_WINDOW/PER_SESSION)")
-                        val signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(
+                        val signature = keyPolicyStore.withUsableKey(signParams.credentialId, signKind) { keystoreManager.signWithoutBiometric(
                             credentialId = signParams.credentialId,
+                            kind = signKind,
                             dataHash = dataHash
                         ) }
 
@@ -998,8 +1004,9 @@ class RequestHandler(
 
                     // Now sign within the fresh auth window
                     Log.d(TAG, "Biometric succeeded, signing within auth window")
-                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(
+                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId, signKind) { keystoreManager.signWithoutBiometric(
                         credentialId = signParams.credentialId,
+                        kind = signKind,
                         dataHash = dataHash
                     ) }
 
@@ -1023,8 +1030,9 @@ class RequestHandler(
 
             // The activity's own prompt answers no launcher request; it takes
             // its queue turn, and the notification only wakes the phone for it.
-            val signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.sign(
+            val signature = keyPolicyStore.withUsableKey(signParams.credentialId, signKind) { keystoreManager.sign(
                 credentialId = signParams.credentialId,
+                kind = signKind,
                 dataHash = dataHash,
                 biometricHelper = helper,
                 title = "xKey Authentication",
@@ -1255,7 +1263,7 @@ class RequestHandler(
         val deleteParams = DeleteKeyParams.fromJson(params)
 
         // Check if key exists
-        if (!keystoreManager.keyExists(deleteParams.credentialId)) {
+        if (!keystoreManager.holdsAnyKey(deleteParams.credentialId)) {
             throw ProtocolException(
                 "Credential not found",
                 errorCode = ErrorCodes.KEY_NOT_FOUND
@@ -1276,10 +1284,12 @@ class RequestHandler(
 
         val loadParams = LoadKeyParams.fromJson(params)
 
-        val exists = keystoreManager.keyExists(loadParams.credentialId)
+        // The passkey's one namespace, as the sign RPC signs with (#255
+        // review r3): the public key loaded is the one its signatures verify.
+        val loadKind = keystoreManager.soleKind(loadParams.credentialId)
 
-        val result = if (exists) {
-            val cosePublicKey = keystoreManager.getCOSEPublicKey(loadParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
+        val result = if (loadKind != null) {
+            val cosePublicKey = keystoreManager.getCOSEPublicKey(loadParams.credentialId, loadKind)
             if (cosePublicKey != null) {
                 LoadKeyResult(
                     exists = true,
@@ -1366,9 +1376,11 @@ class RequestHandler(
 
         // Approval prompts take turns, so another creation of this id can pass
         // this check while this one waits; the reservation refuses it until
-        // this creation ends.
+        // this creation ends. An id a credential holds is refused too (#255
+        // review r3): a general key beside it would share its id, and a
+        // passkey use would sign with a key other than the one returned here.
         val reservation = "key:${genParams.keyId}"
-        if (keystoreManager.generalKeyExists(genParams.keyId) || !keyIds.tryReserve(reservation)) {
+        if (keystoreManager.userKeyIdInUse(genParams.keyId) || !keyIds.tryReserve(reservation)) {
             throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
         }
         try {
@@ -1377,7 +1389,7 @@ class RequestHandler(
             // The approval waited: recheck under the id's lock, since every
             // generator replaces an existing alias, destroying that key.
             keyIds.withKeyLock(reservation) {
-                if (keystoreManager.generalKeyExists(genParams.keyId)) {
+                if (keystoreManager.userKeyIdInUse(genParams.keyId)) {
                     throw ProtocolException(
                         "Key already exists: ${genParams.keyId}",
                         errorCode = ErrorCodes.KEY_EXISTS
@@ -3475,6 +3487,17 @@ class RequestHandler(
                 )
             }
 
+            // The one namespace holding the passkey (#255 review r3): a
+            // credential, or a general key made through local.generateKey,
+            // whose COSE public key that call returned. The gate and the
+            // signature name it, so the assertion signs with the key the
+            // relying party registered; an id held in both is refused.
+            val passkeyKind = keystoreManager.soleKind(assertionParams.credentialId)
+                ?: throw ProtocolException(
+                    "Credential not found: ${assertionParams.credentialId}",
+                    errorCode = ErrorCodes.KEY_NOT_FOUND
+                )
+
             // The credential provider serves this passkey too, so the counter
             // comes from the one both paths share. It advances before signing:
             // a failed signature leaves a gap, never a reused value.
@@ -3510,8 +3533,9 @@ class RequestHandler(
             val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
 
             // Sign using the credential key
-            val signature = keyPolicyStore.withUsableKey(assertionParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(
+            val signature = keyPolicyStore.withUsableKey(assertionParams.credentialId, passkeyKind) { keystoreManager.signWithoutBiometric(
                 credentialId = assertionParams.credentialId,
+                kind = passkeyKind,
                 dataHash = dataHash
             ) }
 
@@ -4224,7 +4248,8 @@ class RequestHandler(
             // this id's key material (#193 r8); the write and its audit are
             // one step (#234).
             keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) {
-                if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
+                // A Keystore key of either namespace holds the id too (#255 review r3).
+                if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null || keystoreManager.userKeyIdInUse(keyId)) {
                     return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
                 }
                 persistAudited(

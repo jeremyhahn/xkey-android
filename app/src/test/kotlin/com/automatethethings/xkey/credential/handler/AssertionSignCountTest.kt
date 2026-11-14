@@ -90,8 +90,10 @@ class AssertionSignCountTest {
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
         mockkConstructor(KeystoreManager::class)
-        coEvery { anyConstructed<KeystoreManager>().sign(any(), any(), any(), any(), any(), any()) } answers {
-            val data = secondArg<ByteArray>()
+        every { anyConstructed<KeystoreManager>().soleKind(CREDENTIAL_ID) } returns
+            com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        coEvery { anyConstructed<KeystoreManager>().sign(any(), any(), any(), any(), any(), any(), any()) } answers {
+            val data = thirdArg<ByteArray>()
             // authData = rpIdHash (32) || flags (1) || signCount (4, big-endian)
             signedCounters += (33..36).fold(0L) { acc, i -> (acc shl 8) or (data[i].toLong() and 0xFF) }
             ByteArray(8)

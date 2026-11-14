@@ -745,6 +745,7 @@ class FileOperationFlowTest {
         val signature = runBlocking {
             keystoreManager.signWithoutBiometric(
                 signingKeyId,
+                com.automatethethings.xkey.crypto.UserKeyKind.GENERAL,
                 SignatureVerifier.hexToBytes(contentHash)
             )
         }

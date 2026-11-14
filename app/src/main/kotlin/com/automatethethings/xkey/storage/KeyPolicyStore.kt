@@ -564,27 +564,22 @@ class KeyPolicyStore(
      * every use of the id is refused.
      *
      * The key a use reaches is the one its lookup reads, which [keys]
-     * resolves as every Keystore lookup naming [kind] does
-     * ([KeystoreManager.resolveKey]): its own key's alias when present, so
-     * the general key beside a pending credential delete stays usable; with
-     * its own key absent, whatever the id falls back to, so a use naming the
-     * general key that would read the credential is gated as that credential
-     * too, and one that would read a raw alias, neither key, is refused.
+     * resolves as every Keystore lookup does ([KeystoreManager.resolveKey]):
+     * a lookup names its namespace and reads that key's own alias only, so
+     * the general key beside a pending credential delete stays usable and a
+     * use naming it never reads the credential.
      */
     suspend fun requireUsable(keyId: String, kind: UserKeyKind? = null) {
         val tombstone = dao.deletion(keyId) ?: return
         if (kind != null && isBesideRow(tombstone)) {
-            val reached = reachedKinds(keyId, kind)
-            if (reached != null && reached.none { tombstoneOwes(tombstone, it) }) return
+            if (reachedKinds(keyId, kind).none { tombstoneOwes(tombstone, it) }) return
         }
         throw KeyDeletedException(keyId)
     }
 
-    /** The user keys a use naming [kind] reaches, or null if it reaches a raw alias. */
-    private fun reachedKinds(keyId: String, kind: UserKeyKind): Set<UserKeyKind>? {
-        val resolved = keys.resolve(keyId, kind) ?: return setOf(kind)
-        return setOf(kind, resolved.kind ?: return null)
-    }
+    /** The user keys a use naming [kind] reaches: that key alone, as its lookup resolves it. */
+    private fun reachedKinds(keyId: String, kind: UserKeyKind): Set<UserKeyKind> =
+        setOf(kind, keys.resolve(keyId, kind)?.kind ?: kind)
 
     /** Whether [tombstone] is a delete beside its id's surviving key row, the other key of a shared id. */
     private suspend fun isBesideRow(tombstone: KeyDeletionEntity): Boolean =

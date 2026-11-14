@@ -79,13 +79,15 @@ class KeystoreManagerPivAliasTest {
 
     @Test
     fun `a raw PIV slot alias does not resolve as a general key`() {
-        assertNull(keystoreManager.resolveKeystoreAlias(pivAlias))
-        assertFalse(keystoreManager.keyExists(pivAlias))
+        assertNull(keystoreManager.resolveKeystoreAlias(pivAlias, UserKeyKind.GENERAL))
+        assertFalse(keystoreManager.keyExists(pivAlias, UserKeyKind.GENERAL))
+        assertFalse(keystoreManager.keyExists(pivAlias, UserKeyKind.CREDENTIAL))
+        assertFalse(keystoreManager.holdsAnyKey(pivAlias))
     }
 
     @Test
     fun `deleteKey of a raw PIV slot alias leaves the slot key`() {
-        assertFalse(keystoreManager.deleteKey(pivAlias))
+        assertFalse(keystoreManager.deleteKey(pivAlias, UserKeyKind.GENERAL))
         assertNotNull(fake.live)
         verify(exactly = 0) { fake.keyStore.deleteEntry(pivAlias) }
     }
@@ -99,15 +101,15 @@ class KeystoreManagerPivAliasTest {
 
     @Test
     fun `a general key whose id starts with the PIV prefix resolves and deletes`() {
-        assertEquals(generalAlias, keystoreManager.resolveKeystoreAlias(generalId))
-        assertTrue(keystoreManager.deleteKey(generalId))
+        assertEquals(generalAlias, keystoreManager.resolveKeystoreAlias(generalId, UserKeyKind.GENERAL))
+        assertTrue(keystoreManager.deleteKey(generalId, UserKeyKind.GENERAL))
         verify { fake.keyStore.deleteEntry(generalAlias) }
-        assertNull(keystoreManager.resolveKeystoreAlias(generalId))
+        assertNull(keystoreManager.resolveKeystoreAlias(generalId, UserKeyKind.GENERAL))
     }
 
     @Test
     fun `deleteByAlias removes a general key whose id starts with the PIV prefix`() {
-        val alias = keystoreManager.resolveKeystoreAlias(generalId)
+        val alias = keystoreManager.resolveKeystoreAlias(generalId, UserKeyKind.GENERAL)
         assertEquals(generalAlias, alias)
         assertTrue(keystoreManager.deleteByAlias(alias!!))
         verify { fake.keyStore.deleteEntry(generalAlias) }
@@ -125,9 +127,9 @@ class KeystoreManagerPivAliasTest {
         every { manager.hasSoftwareEd25519Key(any()) } returns false
         every { manager.hasSoftwareEd25519Key("xkey_key_$pivAlias") } returns true
 
-        assertNotEquals(pivAlias, manager.resolveKeystoreAlias(pivAlias))
-        assertFalse(manager.keyExists(pivAlias))
-        manager.deleteKey(pivAlias)
+        assertNotEquals(pivAlias, manager.resolveKeystoreAlias(pivAlias, UserKeyKind.GENERAL))
+        assertFalse(manager.keyExists(pivAlias, UserKeyKind.CREDENTIAL))
+        manager.deleteKey(pivAlias, UserKeyKind.GENERAL)
         assertNotNull(fake.live)
         verify(exactly = 0) { fake.keyStore.deleteEntry(pivAlias) }
     }
@@ -138,8 +140,9 @@ class KeystoreManagerPivAliasTest {
         every { manager.hasSoftwareEd25519Key(any()) } returns false
         every { manager.hasSoftwareEd25519Key(pivAlias) } returns true
 
-        assertNull(manager.resolveKeystoreAlias(pivAlias))
-        assertFalse(manager.deleteKey(pivAlias))
+        assertNull(manager.resolveKeystoreAlias(pivAlias, UserKeyKind.GENERAL))
+        assertFalse(manager.holdsAnyKey(pivAlias))
+        assertFalse(manager.deleteKey(pivAlias, UserKeyKind.GENERAL))
         assertNotNull(fake.live)
         verify(exactly = 0) { fake.keyStore.deleteEntry(pivAlias) }
     }

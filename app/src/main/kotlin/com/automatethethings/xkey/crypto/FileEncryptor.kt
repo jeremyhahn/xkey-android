@@ -85,7 +85,7 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
             generateEphemeralKey(ephemeralKeyId)
 
             // Get ephemeral public key DER
-            val ephemeralPubKeyDer = keystoreManager.getPublicKeyDER(ephemeralKeyId)
+            val ephemeralPubKeyDer = keystoreManager.getPublicKeyDER(ephemeralKeyId, UserKeyKind.GENERAL)
                 ?: throw EncryptionException("Failed to get ephemeral public key", null)
 
             // Perform ECDH in hardware
@@ -125,7 +125,7 @@ class FileEncryptor(private val keystoreManager: KeystoreManager) {
             }
         } finally {
             // Always delete ephemeral key
-            keystoreManager.deleteKey(ephemeralKeyId)
+            keystoreManager.deleteKey(ephemeralKeyId, UserKeyKind.GENERAL)
         }
     }
 

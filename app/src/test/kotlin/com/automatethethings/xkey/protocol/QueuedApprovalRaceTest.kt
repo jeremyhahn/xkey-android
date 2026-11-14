@@ -146,8 +146,8 @@ class QueuedApprovalRaceTest {
         every { AuditLogger.logFido2Authentication(any(), any(), any()) } just runs
 
         keystore = mockk(relaxed = true)
-        coEvery { keystore.generalKeyExists(any()) } answers { firstArg<String>() in aliases }
-        coEvery { keystore.keyExists(any()) } answers { firstArg<String>() in aliases }
+        coEvery { keystore.userKeyIdInUse(any()) } answers { firstArg<String>() in aliases }
+        coEvery { keystore.soleKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
         coEvery { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) } answers {
             create(firstArg())
             ByteArray(91) { 1 }
@@ -156,7 +156,7 @@ class QueuedApprovalRaceTest {
             create(firstArg())
             ByteArray(77) { 2 }
         }
-        coEvery { keystore.signWithoutBiometric(credentialId, any()) } returns ByteArray(70) { 3 }
+        coEvery { keystore.signWithoutBiometric(credentialId, any(), any()) } returns ByteArray(70) { 3 }
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
