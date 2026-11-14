@@ -85,6 +85,8 @@ object AuditOperationLabels {
         AuditOperationType.PIV_CERT_IMPORTED -> R.string.audit_log_op_piv_cert_imported
         AuditOperationType.PIV_SIGN_REQUEST -> R.string.audit_log_op_piv_sign_request
         AuditOperationType.PIV_KEY_DELETED -> R.string.audit_log_op_piv_key_deleted
+        AuditOperationType.PASSWORD_CREATED -> R.string.audit_log_op_password_created
+        AuditOperationType.PASSWORD_DELETED -> R.string.audit_log_op_password_deleted
         AuditOperationType.BACKUP_CREATED -> R.string.audit_log_op_backup_created
         AuditOperationType.BACKUP_RESTORED -> R.string.audit_log_op_backup_restored
     }
