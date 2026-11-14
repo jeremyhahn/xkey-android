@@ -38,6 +38,7 @@ import com.automatethethings.xkey.usb.PasswordStoreMethods
 import com.automatethethings.xkey.usb.SealStoreMethods
 import com.automatethethings.xkey.storage.SealStore
 import com.automatethethings.xkey.usb.UsbAccessoryServer
+import com.automatethethings.xkey.usb.UsbAccessoryServerSlot
 import com.automatethethings.xkey.password.FilePasswordVaultFactorStore
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordVault
@@ -115,8 +116,6 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private var keystoreManager: KeystoreManager? = null
     private var bleMessageRouter: BidirectionalMessageRouter? = null
 
-    private var usbMessageRouter: BidirectionalMessageRouter? = null
-
     private var tcpMessageRouter: BidirectionalMessageRouter? = null
 
     // Auth and settings components
@@ -126,7 +125,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     private var currentSettings: BiometricSettingsData = BiometricSettingsData()
 
     // USB HSM components
-    private var usbAccessoryServer: UsbAccessoryServer? = null
+    private val usbServerSlot = UsbAccessoryServerSlot()
     private var usbHsmSettingsRepository: UsbHsmSettingsRepository? = null
     private var tcpHsmServer: TcpHsmServer? = null
     private var pairedDeviceRepository: PairedDeviceRepository? = null
@@ -696,7 +695,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * @param accessory The attached USB accessory.
      */
     fun onUsbAccessoryAttached(accessory: android.hardware.usb.UsbAccessory) {
-        if (usbAccessoryServer != null) {
+        if (usbServerSlot.isActive) {
             Log.w(TAG, "USB accessory server already active, ignoring attach")
             return
         }
@@ -704,6 +703,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             Log.e(TAG, "RequestHandler not initialized, cannot handle USB accessory")
             return
         }
+        // One observer of the slot's server for the service's lifetime (#134).
+        usbAttachPath.observe()
 
         // Check if native USB is enabled before accepting the accessory
         serviceScope.launch {
@@ -714,7 +715,6 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             }
 
             val usbRouter = BidirectionalMessageRouter(handler)
-            usbMessageRouter = usbRouter
             // The password and seal stores are served over USB only, so their
             // methods go to this session rather than the RequestHandler BLE and
             // TCP share. A vault per session: every new USB connection starts
@@ -730,19 +730,22 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 ),
                 SealStoreMethods(SealStore(java.io.File(filesDir, SEAL_STORE_DIR)))
             )
-            usbAccessoryServer = UsbAccessoryServer(
-                handler,
-                usbRouter,
-                this@XKeyGattService,
-                pairedDeviceRepository,
-                storeMethods
-            ).also { server ->
-                server.connect(this@XKeyGattService, accessory)
-                // The desktop is ready only once the USB session is Connected,
-                // and is lost as soon as that session ends, detached or not.
-                usbStateJob = desktopSessionTracker.follow(serviceScope, server.state)
+            // The slot drops a server that closes, so the next attach builds
+            // a fresh one without a service restart (#134).
+            usbAttachPath.attach {
+                open(
+                    context = this@XKeyGattService,
+                    accessory = accessory,
+                    requestHandler = handler,
+                    router = usbRouter,
+                    pairingCallback = this@XKeyGattService,
+                    pairedDeviceRepository = pairedDeviceRepository,
+                    storeMethods = storeMethods,
+                )
+            } ?: run {
+                Log.w(TAG, "USB accessory server already active, ignoring attach")
+                return@launch
             }
-            refreshDesktopSession()
             Log.i(TAG, "USB accessory server started")
             AuditLogger.logConnectionEstablished(
                 deviceId = accessory.toString(),
@@ -756,11 +759,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * Called when the USB accessory is detached.
      */
     fun onUsbAccessoryDetached() {
-        usbStateJob?.cancel()
-        usbStateJob = null
-        usbAccessoryServer?.disconnect()
-        usbAccessoryServer = null
-        usbMessageRouter = null
+        usbServerSlot.clear()
         refreshDesktopSession()
         Log.i(TAG, "USB accessory server stopped")
     }
@@ -814,7 +813,15 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     fun connectedDesktop(): com.automatethethings.xkey.remote.ConnectedDesktop? =
         gattServer?.connectedDesktop(bleMessageRouter)
             ?: tcpHsmServer?.connectedDesktop(tcpMessageRouter)
-            ?: usbAccessoryServer?.connectedDesktop(usbMessageRouter)
+            ?: usbConnectedDesktop()
+
+    /**
+     * The USB desktop from one slot snapshot: the server and router of a
+     * single attach generation, so the bound sender and the router are that
+     * connection's own.
+     */
+    private fun usbConnectedDesktop(): com.automatethethings.xkey.remote.ConnectedDesktop? =
+        usbServerSlot.current()?.let { (server, router) -> server.connectedDesktop(router) }
 
     /**
      * Every transport with an established desktop session, in the priority
@@ -830,8 +837,10 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         tcpHsmServer?.let { server ->
             server.connectedDesktop(tcpMessageRouter)?.let { add(DesktopTransport(it, true, server.confirmedPeerKeyHex())) }
         }
-        usbAccessoryServer?.let { server ->
-            server.connectedDesktop(usbMessageRouter)?.let { add(DesktopTransport(it, true, server.confirmedPeerKeyHex())) }
+        // One slot snapshot: the server and router of a single attach
+        // generation, so the confirmed peer is that connection's own.
+        usbServerSlot.current()?.let { (server, router) ->
+            server.connectedDesktop(router)?.let { add(DesktopTransport(it, true, server.confirmedPeerKeyHex())) }
         }
     }
 
@@ -876,14 +885,20 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         listOfNotNull(
             gattServer?.connectedDesktop(bleMessageRouter),
             tcpHsmServer?.connectedDesktop(tcpMessageRouter),
-            usbAccessoryServer?.connectedDesktop(usbMessageRouter),
+            usbConnectedDesktop(),
         ).map { ShareSession.Transport(it.sender, it.router) }
 
     /** Collects the TCP server's state into [desktopSession] while it runs. */
     private var tcpStateJob: Job? = null
 
-    /** Collects the USB session's state into [desktopSession] while attached. */
-    private var usbStateJob: Job? = null
+    /**
+     * The USB attach path: opens through [usbServerSlot] and keeps one
+     * observer of its server's state on [desktopSession] until [serviceScope]
+     * ends.
+     */
+    private val usbAttachPath by lazy {
+        UsbAttachPath(usbServerSlot, desktopSessionTracker, serviceScope)
+    }
 
     /**
      * Recomputes [desktopSession] from the active transport. Called on every

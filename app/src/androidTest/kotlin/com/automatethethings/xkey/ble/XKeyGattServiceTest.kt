@@ -313,8 +313,7 @@ class XKeyGattServiceTest {
         val usb = usbServerWithSession(usbRouter)
         probe.gattServer = gatt.server
         probe.bleMessageRouter = gatt.messageRouter
-        probe.usbAccessoryServer = usb.server
-        probe.usbMessageRouter = usbRouter
+        probe.installUsbServer(usb.server, usbRouter)
 
         val connected = probe.connectedDesktop()!!
 
@@ -327,12 +326,11 @@ class XKeyGattServiceTest {
     fun aDisconnectedUsbServerIsNotOffered(): Unit = runBlocking {
         val gatt = gattProbe()
         val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
-        probe.usbAccessoryServer = UsbAccessoryServer(gatt.requestHandler, usbRouter)
-        probe.usbMessageRouter = usbRouter
+        probe.installUsbServer(UsbAccessoryServer(gatt.requestHandler, usbRouter), usbRouter)
         assertNull("a server that never connected", probe.connectedDesktop())
 
         val usb = usbServerWithSession(usbRouter)
-        probe.usbAccessoryServer = usb.server
+        probe.installUsbServer(usb.server, usbRouter)
         assertNotNull(probe.connectedDesktop())
 
         usb.server.disconnect()
@@ -348,8 +346,7 @@ class XKeyGattServiceTest {
         val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
         probe.gattServer = gatt.server
         probe.bleMessageRouter = gatt.messageRouter
-        probe.usbAccessoryServer = usbServerWithSession(usbRouter).server
-        probe.usbMessageRouter = usbRouter
+        probe.installUsbServer(usbServerWithSession(usbRouter).server, usbRouter)
 
         assertEquals(desktop.getLocalStaticPublicKey().toHex(), probe.connectedDesktop()!!.peerKeyHex)
     }
@@ -475,13 +472,11 @@ class XKeyGattServiceTest {
     fun detachingTheUsbAccessoryClearsItsTransport() {
         val gatt = gattProbe()
         val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
-        probe.usbAccessoryServer = UsbAccessoryServer(gatt.requestHandler, usbRouter)
-        probe.usbMessageRouter = usbRouter
+        probe.installUsbServer(UsbAccessoryServer(gatt.requestHandler, usbRouter), usbRouter)
 
         probe.service.onUsbAccessoryDetached()
 
-        assertNull(probe.usbAccessoryServer)
-        assertNull(probe.usbMessageRouter)
+        assertNull(probe.usbServerSlot.current())
         assertNull(probe.connectedDesktop())
     }
 

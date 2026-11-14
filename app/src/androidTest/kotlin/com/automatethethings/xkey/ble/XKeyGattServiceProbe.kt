@@ -26,6 +26,7 @@ import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.usb.UsbAccessoryServer
+import com.automatethethings.xkey.usb.UsbAccessoryServerSlot
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -88,17 +89,22 @@ class XKeyGattServiceProbe(context: Context) {
         get() = read("tcpMessageRouter") as BidirectionalMessageRouter?
         set(value) = write("tcpMessageRouter", value)
 
-    var usbMessageRouter: BidirectionalMessageRouter?
-        get() = read("usbMessageRouter") as BidirectionalMessageRouter?
-        set(value) = write("usbMessageRouter", value)
-
     var tcpHsmServer: TcpHsmServer?
         get() = read("tcpHsmServer") as TcpHsmServer?
         set(value) = write("tcpHsmServer", value)
 
-    var usbAccessoryServer: UsbAccessoryServer?
-        get() = read("usbAccessoryServer") as UsbAccessoryServer?
-        set(value) = write("usbAccessoryServer", value)
+    /** The service's USB server slot, which holds the server and its router (#134). */
+    val usbServerSlot: UsbAccessoryServerSlot
+        get() = read("usbServerSlot") as UsbAccessoryServerSlot
+
+    /**
+     * Puts [server] and [router] in [usbServerSlot] as an attach would, without
+     * opening an accessory: `UsbAccessoryServerSlot.open` connects, and these
+     * tests have no accessory to connect to.
+     */
+    fun installUsbServer(server: UsbAccessoryServer, router: BidirectionalMessageRouter) {
+        usbServerSlot.install(server, router)
+    }
 
     var pairedDeviceRepository: PairedDeviceRepository?
         get() = read("pairedDeviceRepository") as PairedDeviceRepository?
@@ -187,6 +193,7 @@ class XKeyGattServiceProbe(context: Context) {
     } catch (e: NoSuchFieldException) {
         throw AssertionError("XKeyGattService.$name is a seam these tests drive", e)
     }
+
 
     companion object {
         private val attachBaseContext: Method =

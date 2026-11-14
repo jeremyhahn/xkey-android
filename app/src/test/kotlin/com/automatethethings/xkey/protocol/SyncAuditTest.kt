@@ -25,6 +25,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.settings.PairedDeviceData
+import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.sync.SyncEngine
@@ -110,8 +111,8 @@ class SyncAuditTest {
         val desk = mockk<PairedDeviceData>()
         every { desk.deviceName } returns DESK_NAME
         val pairedDevices = mockk<PairedDeviceRepository>(relaxed = true)
-        every { pairedDevices.getDevice(DESK_PEER) } returns desk
-        every { pairedDevices.getDevice(OTHER_PEER) } returns null
+        every { pairedDevices.lookupDevice(any()) } returns DeviceLookup.NotPaired
+        every { pairedDevices.lookupDevice(DESK_PEER) } returns DeviceLookup.Paired(desk)
 
         handler = RequestHandler(
             context = context,
@@ -157,7 +158,7 @@ class SyncAuditTest {
     fun `syncOATH on a served connection names that connection's peer`() = runTest {
         mockkObject(AuditLogger)
 
-        withContext(RequestHandler.servedConnection(binding, OTHER_PEER)) {
+        withContext(RequestHandler.servedConnection(binding, OTHER_PEER, "served")) {
             call(MethodNames.LOCAL_SYNC_OATH, "credentials")
         }
 
@@ -330,12 +331,12 @@ class SyncAuditTest {
         }
 
         val a = async(Dispatchers.Default) {
-            withContext(RequestHandler.servedConnection(binding, DESK_PEER)) {
+            withContext(RequestHandler.servedConnection(binding, DESK_PEER, "served")) {
                 call(MethodNames.LOCAL_SYNC_OATH, "credentials")
             }
         }
         aInMerge.await()
-        withContext(RequestHandler.servedConnection(binding, null)) {
+        withContext(RequestHandler.servedConnection(binding, null, "served")) {
             assertOathResponseUnchanged(call(MethodNames.LOCAL_SYNC_OATH, "credentials"))
             assertNull(call(MethodNames.LOCAL_SYNC_PASSWORDS, "passwords").error)
         }

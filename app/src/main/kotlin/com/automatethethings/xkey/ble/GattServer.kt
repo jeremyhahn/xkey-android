@@ -226,6 +226,15 @@ class GattServer(
     private var noiseSession: NoiseSession? = null
 
     /**
+     * The id assigned each connection's Noise session when the device
+     * connected. Every request on it carries this id to the handler, which
+     * keys PER_SESSION approval on it rather than on anything handler-wide
+     * (#134). Weak, so an ended session's entry goes with it.
+     */
+    private val connectionIds: MutableMap<NoiseSession, String> =
+        java.util.Collections.synchronizedMap(java.util.WeakHashMap())
+
+    /**
      * The queue of the connection [noiseSession] was made on. Written before
      * the session, and cleared after it under [noiseMutex], so a send that
      * finds its session current finds its connection's queue here.
@@ -1130,6 +1139,7 @@ class GattServer(
             Log.i(TAG, "Static key loaded")
 
             sessionQueue = currentCoroutineContext()[EventQueue]
+            connectionIds[session] = "ble:${UUID.randomUUID()}"
             noiseSession = session
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create Noise session", e)
@@ -1634,6 +1644,8 @@ class GattServer(
         val caller = RequestHandler.servedConnection(
             SessionBindingProvider { binding?.takeIf { isCurrent(session) }?.copyOf() },
             binding?.initiatorStaticPublicKey?.toHexString(),
+            // A session with no id shares no approval with anything.
+            session?.let { connectionIds[it] } ?: "ble:${UUID.randomUUID()}",
         )
         val router = messageRouter
         return withContext(caller) {

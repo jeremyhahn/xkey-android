@@ -386,15 +386,11 @@ public class BiometricSettingsRepository(
      * @param policy The new user verification policy.
      */
     public suspend fun updateUserVerificationPolicy(policy: UserVerificationPolicy) {
-        val oldValue = getSettings().uvPolicy.name
-        dataStore.edit { preferences ->
+        AuditLogger.editAuditedSetting(dataStore, "userVerificationPolicy") { preferences ->
+            val oldValue = mapPreferencesToSettings(preferences).uvPolicy.name
             preferences[KEY_UV_POLICY] = policy.name
+            AuditLogger.SettingChange(oldValue, policy.name)
         }
-        AuditLogger.logSettingsChanged(
-            settingName = "userVerificationPolicy",
-            oldValue = oldValue,
-            newValue = policy.name
-        )
     }
 
     /**
@@ -403,15 +399,11 @@ public class BiometricSettingsRepository(
      * @param mode The new authentication mode.
      */
     public suspend fun updateAuthMode(mode: BiometricAuthMode) {
-        val oldValue = getSettings().authMode.name
-        dataStore.edit { preferences ->
+        AuditLogger.editAuditedSetting(dataStore, "authMode") { preferences ->
+            val oldValue = mapPreferencesToSettings(preferences).authMode.name
             preferences[KEY_AUTH_MODE] = mode.name
+            AuditLogger.SettingChange(oldValue, mode.name)
         }
-        AuditLogger.logSettingsChanged(
-            settingName = "authMode",
-            oldValue = oldValue,
-            newValue = mode.name
-        )
     }
 
     /**
@@ -441,15 +433,11 @@ public class BiometricSettingsRepository(
      * @param policy The new attestation biometric policy.
      */
     public suspend fun updateAttestationBiometricPolicy(policy: AttestationBiometricPolicy) {
-        val oldValue = getSettings().attestationBiometricPolicy.name
-        dataStore.edit { preferences ->
+        AuditLogger.editAuditedSetting(dataStore, "attestationBiometricPolicy") { preferences ->
+            val oldValue = mapPreferencesToSettings(preferences).attestationBiometricPolicy.name
             preferences[KEY_ATTESTATION_BIOMETRIC_POLICY] = policy.name
+            AuditLogger.SettingChange(oldValue, policy.name)
         }
-        AuditLogger.logSettingsChanged(
-            settingName = "attestationBiometricPolicy",
-            oldValue = oldValue,
-            newValue = policy.name
-        )
     }
 
     /**

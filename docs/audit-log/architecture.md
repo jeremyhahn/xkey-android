@@ -21,6 +21,66 @@ no certificate chain writes one failed `KEY_ATTESTED` entry before the
 (missing parameters, a stale device attestation, a refused user-presence
 check) records none.
 
+Key-use requests write one entry per successful operation, naming the key,
+the requesting device and the duration; the output and the inputs (data,
+MAC, shared secret, peer key) are never logged:
+
+| Request | Operation type | Writer |
+|---------|----------------|--------|
+| `local.sign` | `SIGNING_REQUEST` | `AuditLogger.logSigningRequest` |
+| `local.hmac` (Keystore and software keys) | `HMAC_REQUEST` | `AuditLogger.logHmacRequest` |
+| `local.ecdh` | `KEY_DERIVATION_REQUEST` | `AuditLogger.logKeyDerivationRequest` |
+
+The entry's `keyType` is the type the key is stored with, never the
+operation: the operation type already names the operation, and the audit
+screen filters by `keyType`. An ECDH on an EC key stored as `signing` is
+recorded as `signing`; an HMAC as its key's stored type (the key row's,
+else the software key's). A key with no stored metadata is recorded as
+`unknown`. `RequestHandler.auditKeyType` is the one source of this value
+for sign, decrypt, encrypt, HMAC and ECDH entries.
+
+The entry's `algorithm` (in `details`) is the algorithm the operation ran,
+never the key's stored metadata, which is not validated: the sign
+request's algorithm (`signWithAlgorithm` refuses any other), the Keystore
+HMAC's own MAC (`computeHMACWithAlgorithm`), the software HMAC's mapping
+(`SoftwareKeyOps.hmacAlgorithm`: `HMAC-SHA512` or `HMAC-SHA256`), and
+the RSA decrypt's OAEP parameters, named from the one explicit spec its
+cipher is initialised with (`KeystoreManager.rsaOaepSpec`: SHA-256 OAEP
+with SHA-1 MGF1, passed explicitly because the MGF1 default differs by
+provider, so the entry reads `RSA-OAEP-SHA-256-MGF1-SHA-1`; JOSE
+`RSA-OAEP-256` would mean SHA-256 for both), and `AES-GCM` and `ECDH` for the fixed transformations.
+`RequestHandler.logKeyUse` writes every key-use entry;
+`AuditKeyTypeChokePointTest` fails on a writer outside it.
+
+The entry's `deviceId` and `deviceName` name the desktop that sent the
+request: each key-use handler captures it once with
+`RequestHandler.auditCaller` (the peer of the session the request arrived
+on) before any prompt or crypto call, and `logKeyUse` takes the device from
+that capture alone. The handler-wide connected device is never used: a
+second desktop confirming over another transport overwrites it while the
+first request is still running. The same scan test fails on a call that
+passes its own device or captures the caller late.
+
+### Key-sharing transfers
+
+Each transfer between the phone and a paired desktop records one entry with
+`device_id` (the peer's static key, hex) and `device_name` (its pairing name).
+No entry carries key material.
+
+| Method | Operation type | Details |
+|--------|----------------|---------|
+| `local.importSharedKey` (a key leaves the phone) | `KEY_EXPORTED` | `format`: `raw` (software material), `metadata` (software key, no material), `public` (hardware key, public key only). A sharing-policy refusal records `success = false`. Granted or refused, `keyType` is the key's stored type (`RequestHandler.auditKeyType`), never the format. An unknown key records nothing. |
+| `local.shareSymmetric` (material arrives) | `KEY_CREATED` | `algorithm`, `strongBox = false`, `source = shared`. A refused duplicate id records nothing. |
+| `local.sharePublicKey` (a public key arrives) | `CONTACT_IMPORTED` | `name`, `fingerprint`, `source = shared`. A key already in contacts records nothing. |
+
+An arriving key's write and its entry run together, outside cancellation
+(`persistAudited` in `RequestHandler`). If the connection drops mid-write,
+the stored key still gets its entry. A request cancelled before the write,
+or already cancelled when it reaches it, stores and records nothing. The
+device name comes from `auditPeerName`, which every audit record uses: when
+the paired-device store cannot be read the entry still lands, with a null
+`device_name`.
+
 ### Sync events
 
 Operation types are stored by name (the type converter in `XKeyDatabase.kt`),
@@ -41,6 +101,8 @@ connection, never the phone's last served desktop, so two desktops syncing at
 once each get their own entry; and `device_name` is null when the paired-device store cannot be read, so the
 sync still runs and is audited. See [store-sync](../store-sync/architecture.md#audit).
 
+Trust store events: `TrustStoreRepository` records `TRUST_STORE_IMPORT` (subject, fingerprint, source: `manual`, `url:<url>`, `internal-ca`, ...) for each stored certificate and `TRUST_STORE_DELETE` (subject, fingerprint) for each removed one, `clearAll` included; duplicates and refused certificates record nothing.
+
 ## Index Strategy
 
 ### audit_logs
@@ -53,6 +115,40 @@ sync still runs and is audited. See [store-sync](../store-sync/architecture.md#a
 | `index_audit_logs_key_type` | `key_type` | No | Aggregate by key type |
 | `index_audit_logs_device_id` | `device_id` | No | Device-specific audit trail |
 | `index_audit_logs_success` | `success` | No | Filter failures for alerting |
+
+## Views
+
+### Audit screen (`AuditLogActivity`)
+
+The full log: search, operation and key-type filters, date range, export to
+JSON or CSV, and deletion.
+
+### Recent activity on the home screen (`MainActivity`)
+
+The Audit Log card on the home screen carries a Recent Activity section
+(`layoutRecentActivity`). `MainActivity.observeRecentActivity` collects
+`AuditLogDao.observeRecent(RecentActivityRows.DEFAULT_LIMIT)` (5 entries,
+uses `index_audit_logs_timestamp`) while the activity is started and
+redraws the section on every change. Tapping the card opens the audit
+screen.
+
+`RecentActivityRows.build` (pure, JVM-tested in `RecentActivityRowsTest`)
+maps the entries to rows, newest first, at most the limit:
+
+- the operation label, from `AuditOperationLabels`, the same mapping the
+  audit screen uses for its badges and filter chips;
+- the key's label: the stored key's label for the entry's key id, else
+  the logged label. Every candidate passes one filter inside
+  `RecentActivityRows` that drops a blank value or a raw key id (the
+  entry's own or any stored key's; keys created without a label and
+  discovered general keys store their id as the label), falling back to
+  no key text. `MainActivity` renders only the row's `keyLabel`. Never
+  the key id or the `details` JSON;
+- the outcome (succeeded or failed; a failure is drawn in the error colour);
+- how long ago, against an injected `java.time.Clock`: just now, minutes,
+  hours or days.
+
+No entries give a single "No recent activity" row.
 
 ## Retention
 

@@ -203,7 +203,7 @@ class TcpHsmServerRevocationTest {
 
         desktop.assertClosedByPhone()
         withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
-        verify(timeout = TIMEOUT_MS) { requestHandler.setConnectedDevicePublicKeyHex(null) }
+        verify(timeout = TIMEOUT_MS) { requestHandler.clearConnectedDevicePublicKeyHex(any()) }
         approval.complete(Unit)
         // A request the revocation left waiting would run now; either way its body ends.
         withTimeout(TIMEOUT_MS) { finished.await() }
@@ -248,7 +248,7 @@ class TcpHsmServerRevocationTest {
         withTimeout(TIMEOUT_MS) { dismissed.await() }
         desktop.assertClosedByPhone()
         withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
-        verify(timeout = TIMEOUT_MS) { requestHandler.setConnectedDevicePublicKeyHex(null) }
+        verify(timeout = TIMEOUT_MS) { requestHandler.clearConnectedDevicePublicKeyHex(any()) }
 
         val next = connectPaired()
         assertTrue(next.request("system.ping").getJSONObject("result").getBoolean("ok"))
@@ -283,7 +283,7 @@ class TcpHsmServerRevocationTest {
         withTimeout(TIMEOUT_MS) { dismissed.await() }
         desktop.assertClosedByPhone()
         withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
-        verify(timeout = TIMEOUT_MS) { requestHandler.setConnectedDevicePublicKeyHex(null) }
+        verify(timeout = TIMEOUT_MS) { requestHandler.clearConnectedDevicePublicKeyHex(any()) }
 
         val next = connectPaired()
         assertTrue(next.request("system.ping").getJSONObject("result").getBoolean("ok"))
@@ -363,7 +363,7 @@ class TcpHsmServerRevocationTest {
 
         withTimeout(TIMEOUT_MS) { sender.join() }
         withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
-        verify(timeout = TIMEOUT_MS) { requestHandler.setConnectedDevicePublicKeyHex(null) }
+        verify(timeout = TIMEOUT_MS) { requestHandler.clearConnectedDevicePublicKeyHex(any()) }
         desktop.close()
 
         val next = connectPaired()

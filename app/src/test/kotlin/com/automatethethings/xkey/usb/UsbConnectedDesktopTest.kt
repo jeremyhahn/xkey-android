@@ -56,7 +56,12 @@ class UsbConnectedDesktopTest {
     fun setUp() {
         stubAndroidLog()
         router = BidirectionalMessageRouter(mockk<RequestHandler>())
-        server = UsbAccessoryServer(requestHandler = mockk(relaxed = true), messageRouter = router)
+        server = UsbAccessoryServer(
+            requestHandler = mockk(relaxed = true),
+            messageRouter = router,
+            // No system broadcasts in a JVM test: the attach watches nothing.
+            detachWatcher = mockk<AccessoryDetachWatcher>(relaxed = true),
+        )
     }
 
     @After

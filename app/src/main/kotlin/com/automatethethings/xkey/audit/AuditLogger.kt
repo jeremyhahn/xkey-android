@@ -17,11 +17,17 @@ package com.automatethethings.xkey.audit
 import android.content.Context
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicReference
 
@@ -122,17 +128,24 @@ object AuditLogger {
      * @param keyType The key type (e.g., "fido2", "signing").
      * @param algorithm The key algorithm (e.g., "ES256", "AES256").
      * @param strongBox Whether StrongBox hardware was used.
+     * @param source Where the key came from (e.g., "shared"), if not generated here.
+     * @param deviceId Remote device ID the key came from, if applicable.
+     * @param deviceName Remote device name, if applicable.
      */
     fun logKeyCreated(
         keyId: String,
         keyLabel: String,
         keyType: String,
         algorithm: String,
-        strongBox: Boolean = false
+        strongBox: Boolean = false,
+        source: String? = null,
+        deviceId: String? = null,
+        deviceName: String? = null
     ) {
         val details = JSONObject().apply {
             put("algorithm", algorithm)
             put("strongBox", strongBox)
+            if (source != null) put("source", source)
         }
         log(
             AuditLogEntity(
@@ -140,6 +153,8 @@ object AuditLogger {
                 keyId = keyId,
                 keyLabel = keyLabel,
                 keyType = keyType,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true,
                 details = details.toString()
             )
@@ -272,18 +287,28 @@ object AuditLogger {
     }
 
     /**
-     * Log a public key export event.
+     * Log a key export event: a key, or its public half, leaving the device.
+     *
+     * Never pass key material: the entry records the export, not its content.
      *
      * @param keyId The unique key identifier.
      * @param keyLabel Human-readable key label.
      * @param keyType The key type.
-     * @param format The export format (e.g., "PEM", "DER").
+     * @param format The export format (e.g., "PEM", "DER", "raw", "public").
+     * @param deviceId Remote device ID the key went to, if applicable.
+     * @param deviceName Remote device name, if applicable.
+     * @param success Whether the export was allowed.
+     * @param errorMessage Why the export was refused, if it was.
      */
     fun logKeyExported(
         keyId: String,
         keyLabel: String,
         keyType: String,
-        format: String
+        format: String,
+        deviceId: String? = null,
+        deviceName: String? = null,
+        success: Boolean = true,
+        errorMessage: String? = null
     ) {
         val details = JSONObject().apply {
             put("format", format)
@@ -294,7 +319,10 @@ object AuditLogger {
                 keyId = keyId,
                 keyLabel = keyLabel,
                 keyType = keyType,
-                success = true,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
                 details = details.toString()
             )
         )
@@ -334,6 +362,93 @@ object AuditLogger {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.SIGNING_REQUEST,
+                keyId = keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = details,
+                durationMs = durationMs
+            )
+        )
+    }
+
+    /**
+     * Log an HMAC request. The MAC and the authenticated data are never logged.
+     *
+     * @param keyId The unique key identifier.
+     * @param keyLabel Human-readable key label.
+     * @param keyType The key type.
+     * @param algorithm The HMAC algorithm used.
+     * @param deviceId Remote device ID if applicable.
+     * @param deviceName Remote device name if applicable.
+     * @param success Whether the operation succeeded.
+     * @param errorMessage Error message if failed.
+     * @param durationMs Operation duration in milliseconds.
+     */
+    fun logHmacRequest(
+        keyId: String,
+        keyLabel: String,
+        keyType: String,
+        algorithm: String? = null,
+        deviceId: String? = null,
+        deviceName: String? = null,
+        success: Boolean = true,
+        errorMessage: String? = null,
+        durationMs: Long? = null
+    ) {
+        val details = algorithm?.let {
+            JSONObject().apply { put("algorithm", it) }.toString()
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.HMAC_REQUEST,
+                keyId = keyId,
+                keyLabel = keyLabel,
+                keyType = keyType,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = details,
+                durationMs = durationMs
+            )
+        )
+    }
+
+    /**
+     * Log a key derivation (ECDH key agreement) request. The shared secret and
+     * the peer public key are never logged.
+     *
+     * @param keyId The unique key identifier.
+     * @param keyLabel Human-readable key label.
+     * @param keyType The key type.
+     * @param algorithm The key agreement algorithm used.
+     * @param deviceId Remote device ID if applicable.
+     * @param deviceName Remote device name if applicable.
+     * @param success Whether the operation succeeded.
+     * @param errorMessage Error message if failed.
+     * @param durationMs Operation duration in milliseconds.
+     */
+    fun logKeyDerivationRequest(
+        keyId: String,
+        keyLabel: String,
+        keyType: String,
+        algorithm: String? = null,
+        deviceId: String? = null,
+        deviceName: String? = null,
+        success: Boolean = true,
+        errorMessage: String? = null,
+        durationMs: Long? = null
+    ) {
+        val details = algorithm?.let {
+            JSONObject().apply { put("algorithm", it) }.toString()
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.KEY_DERIVATION_REQUEST,
                 keyId = keyId,
                 keyLabel = keyLabel,
                 keyType = keyType,
@@ -767,7 +882,50 @@ object AuditLogger {
     // -------------------------------------------------------------------------
 
     /**
+     * The audited change a settings write made: the values recorded in its
+     * `SETTINGS_CHANGED` entry.
+     */
+    data class SettingChange(val oldValue: String?, val newValue: String)
+
+    /**
+     * The one path for an audited settings write: runs [dataStore]'s edit
+     * with [transform] and then records the [SettingChange] it returns, both
+     * under [NonCancellable]. DataStore can commit a write while a caller
+     * cancelled mid-edit (an activity closed or recreated) stops `edit` from
+     * returning; running the pair as one non-cancellable unit means a
+     * committed write is always audited. A `null` change records nothing
+     * (the stored value did not change).
+     *
+     * Every `logSettingsChanged` call in the app goes through here
+     * (`AuditedSettingsChokePointTest`).
+     *
+     * @param dataStore The settings DataStore to write.
+     * @param settingName The setting name recorded in the audit entry.
+     * @param transform Applies the write and returns the change to audit, or null.
+     */
+    suspend fun editAuditedSetting(
+        dataStore: DataStore<Preferences>,
+        settingName: String,
+        transform: (MutablePreferences) -> SettingChange?
+    ) {
+        withContext(NonCancellable) {
+            var change: SettingChange? = null
+            dataStore.edit { preferences -> change = transform(preferences) }
+            change?.let {
+                logSettingsChanged(
+                    settingName = settingName,
+                    oldValue = it.oldValue,
+                    newValue = it.newValue
+                )
+            }
+        }
+    }
+
+    /**
      * Log a settings change.
+     *
+     * Settings repositories do not call this directly: they write through
+     * [editAuditedSetting], which keeps the write and the entry together.
      *
      * @param settingName The name of the setting that was changed.
      * @param oldValue The previous value (as a string).
@@ -823,8 +981,15 @@ object AuditLogger {
      *
      * @param certSubject The certificate subject.
      * @param certFingerprint The certificate fingerprint.
+     * @param success Whether the certificate was actually removed.
+     * @param errorMessage Why the removal failed (null on success).
      */
-    fun logTrustStoreDelete(certSubject: String, certFingerprint: String) {
+    fun logTrustStoreDelete(
+        certSubject: String,
+        certFingerprint: String,
+        success: Boolean = true,
+        errorMessage: String? = null
+    ) {
         val details = JSONObject().apply {
             put("subject", certSubject)
             put("fingerprint", certFingerprint)
@@ -832,7 +997,8 @@ object AuditLogger {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.TRUST_STORE_DELETE,
-                success = true,
+                success = success,
+                errorMessage = errorMessage,
                 details = details.toString()
             )
         )
@@ -1153,7 +1319,13 @@ object AuditLogger {
     // Contact Operations
     // -------------------------------------------------------------------------
 
-    fun logContactImported(name: String, fingerprint: String, source: String) {
+    fun logContactImported(
+        name: String,
+        fingerprint: String,
+        source: String,
+        deviceId: String? = null,
+        deviceName: String? = null
+    ) {
         val details = JSONObject().apply {
             put("name", name)
             put("fingerprint", fingerprint)
@@ -1162,6 +1334,8 @@ object AuditLogger {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.CONTACT_IMPORTED,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true,
                 details = details.toString()
             )
@@ -1413,6 +1587,32 @@ object AuditLogger {
     fun logPivKeyDeleted(slotId: String) {
         val details = JSONObject().apply { put("slotId", slotId) }
         log(AuditLogEntity(operationType = AuditOperationType.PIV_KEY_DELETED, keyId = "piv_$slotId", keyType = "piv", success = true, details = details.toString()))
+    }
+
+    // -------------------------------------------------------------------------
+    // Password Vault Operations
+    // -------------------------------------------------------------------------
+    // Only the entry id and its display name are recorded: never the
+    // password, username, URL or notes.
+
+    fun logPasswordCreated(passwordId: String, name: String) =
+        logPasswordEdit(AuditOperationType.PASSWORD_CREATED, passwordId, name)
+
+    fun logPasswordDeleted(passwordId: String, name: String) =
+        logPasswordEdit(AuditOperationType.PASSWORD_DELETED, passwordId, name)
+
+    private fun logPasswordEdit(type: AuditOperationType, passwordId: String, name: String) {
+        val details = JSONObject().apply { put("name", name) }
+        log(
+            AuditLogEntity(
+                operationType = type,
+                keyId = passwordId,
+                keyLabel = name,
+                keyType = "password",
+                success = true,
+                details = details.toString()
+            )
+        )
     }
 
     // -------------------------------------------------------------------------

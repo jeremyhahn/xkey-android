@@ -69,6 +69,7 @@ internal class StreamSessionHarness : Closeable {
                     input = accepted.getInputStream(),
                     output = accepted.getOutputStream(),
                     noiseSession = NoiseSession().also { it.loadStaticKey(context) },
+                    connectionId = "test:desktop-$paired",
                     isActive = { !accepted.isClosed },
                     onConnected = { connected.complete(Unit) },
                 )
