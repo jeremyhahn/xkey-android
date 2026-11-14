@@ -320,6 +320,32 @@ class KeyShareAuditTest {
         assertNoKeyBytes(entry)
     }
 
+    /**
+     * A refused hardware key is recorded with the type it is stored with, as
+     * its granted export is, never "public": the audit screen filters by key
+     * type, so a denied export must sit under its key's filter.
+     */
+    @Test
+    fun aRefusedHardwareExportRecordsTheStoredKeyType() = runTest {
+        every { keystoreManager.getPublicKeyPEM(KEY_ID) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns
+            keyEntity(SharingPolicyType.PRIVATE, keyType = "signing")
+
+        val response = Response.fromJson(served(importSharedKey()))
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        val entry = single(AuditOperationType.KEY_EXPORTED)
+        assertFalse(entry.success)
+        assertEquals("signing", entry.keyType)
+        assertEquals("public", JSONObject(entry.details!!).getString("format"))
+
+        entries.clear()
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns
+            keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        success(served(importSharedKey()))
+        assertEquals("a granted export reads the same type", "signing", single(AuditOperationType.KEY_EXPORTED).keyType)
+    }
+
     @Test
     fun anUnknownKeyRecordsNothing() = runTest {
         val response = Response.fromJson(served(importSharedKey()))
@@ -891,10 +917,11 @@ class KeyShareAuditTest {
     private fun keyEntity(
         policy: SharingPolicyType,
         exportable: Boolean = false,
-        shareable: Boolean = false
+        shareable: Boolean = false,
+        keyType: String = "symmetric"
     ) = KeyEntity(
         keyId = KEY_ID,
-        keyType = "symmetric",
+        keyType = keyType,
         algorithm = "AES",
         label = KEY_ID,
         keySizeBits = 256,
