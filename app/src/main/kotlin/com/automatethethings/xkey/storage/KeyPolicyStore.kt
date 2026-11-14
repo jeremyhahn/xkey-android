@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.storage
 
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.UserKeyKind
 import android.util.Log
 import androidx.room.withTransaction
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -534,10 +535,22 @@ class KeyPolicyStore(
      * [KeyDeletedException] if [keyId] has a deletion tombstone. A write of
      * the id's material takes [withKeyMaterial] instead, which settles the
      * tombstone first.
+     *
+     * [kind] is the user key the use reaches (#255 review): a credential and
+     * a general key can share an id, and a delete of one beside the other's
+     * surviving row ([deleteMaterial]) refuses only uses of the key it
+     * deletes ([tombstoneOwes]). With no [kind], or for any other tombstone,
+     * every use of the id is refused.
      */
-    suspend fun requireUsable(keyId: String) {
-        if (isDeletionPending(keyId)) throw KeyDeletedException(keyId)
+    suspend fun requireUsable(keyId: String, kind: UserKeyKind? = null) {
+        val tombstone = dao.deletion(keyId) ?: return
+        if (kind != null && isBesideRow(tombstone) && !tombstoneOwes(tombstone, kind)) return
+        throw KeyDeletedException(keyId)
     }
+
+    /** Whether [tombstone] is a delete beside its id's surviving key row, the other key of a shared id. */
+    private suspend fun isBesideRow(tombstone: KeyDeletionEntity): Boolean =
+        tombstone.keyInstance != NO_ROW && dao.keyInstance(tombstone.keyId) == tombstone.keyInstance
 
     /** A use of a deleted key refused by [requireUsable]. */
     class KeyDeletedException(keyId: String) : IOException("Key $keyId was deleted")
@@ -620,11 +633,11 @@ class KeyPolicyStore(
      * gate's earlier [requireUsable] refuses early; this one refuses late.
      * [block] must not take [keyId]'s exclusive lock.
      */
-    suspend inline fun <T> withUsableKey(keyId: String, block: () -> T): T {
+    suspend inline fun <T> withUsableKey(keyId: String, kind: UserKeyKind? = null, block: () -> T): T {
         val lock = acquireMaterialLock(keyId)
         try {
             lock.mutex.withLock {
-                requireUsable(keyId)
+                requireUsable(keyId, kind)
                 lock.beginUse()
             }
             try {

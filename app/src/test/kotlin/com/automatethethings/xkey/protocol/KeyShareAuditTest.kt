@@ -725,6 +725,34 @@ class KeyShareAuditTest {
         }
     }
 
+/**
+     * #255 review: every crypto use of a software key reads its material
+     * through `withUsableSoftwareKey`, inside the store's use gate, so a use
+     * that waited out a delete never runs with bytes read before it. Only
+     * the choke point itself, the audit's key-type read and the share
+     * handler's (gated at dispatch, no crypto) read the store.
+     */
+    @Test
+    fun everySoftwareKeyUseReadsItsMaterialInsideTheUseGate() {
+        val source = handlerSource()
+        val members = source.split(Regex("\n(?=    (?:(?:private|internal|public|override) )*(?:suspend )?(?:inline )?fun )"))
+        val readers = members.filter { "SoftwareKeyStore(context).get(" in it }
+            .map { Regex("fun (?:<[^>]*> )?(\\w+)").find(it)!!.groupValues[1] }
+        assertEquals(setOf("withUsableSoftwareKey", "auditKeyType", "handleImportSharedKey"), readers.toSet())
+        assertTrue(
+            "the choke point reads the record inside withUsableKey",
+            Regex(
+                "fun <T> withUsableSoftwareKey\\([\\s\\S]*?withUsableKey\\([^)]*\\)\\s*\\{\\s*" +
+                    "com\\.automatethethings\\.xkey\\.crypto\\.SoftwareKeyStore\\(context\\)\\.get\\("
+            ).containsMatchIn(source)
+        )
+        for (fn in listOf("handleLocalSymmetricEncrypt", "handleLocalSymmetricDecrypt", "handleLocalHMAC")) {
+            val start = source.indexOf("private suspend fun $fn(")
+            assertTrue("$fn found", start >= 0)
+            assertTrue("$fn uses withUsableSoftwareKey", "withUsableSoftwareKey(" in source.substring(start, source.indexOf("\n    }\n", start)))
+        }
+    }
+
     /**
      * Every audit record takes the peer's paired name from `auditPeerName`,
      * which never throws: no audit path reads the paired-device store itself,

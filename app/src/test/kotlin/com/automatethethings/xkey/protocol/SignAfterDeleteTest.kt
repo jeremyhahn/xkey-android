@@ -173,6 +173,11 @@ class SignAfterDeleteTest {
                 lines.mapIndexedNotNull { i, line ->
                     val code = line.substringBefore("//")
                     if (!crypto.containsMatchIn(code) || "withUsableKey(" in code) return@mapIndexedNotNull null
+                    // A software key's crypto runs in the use block of
+                    // withUsableSoftwareKey, the gate's software-key choke point.
+                    if (lines.getOrNull(i - 1)?.trimEnd()?.endsWith("{ sw ->") == true &&
+                        "withUsableSoftwareKey(" in lines[i - 1]
+                    ) return@mapIndexedNotNull null
                     // The user-verification key is the app's own, never a peer's key to delete.
                     if (lines.getOrNull(i + 1)?.contains("\"user-verification\"") == true) return@mapIndexedNotNull null
                     "${file.name}:${i + 1}"

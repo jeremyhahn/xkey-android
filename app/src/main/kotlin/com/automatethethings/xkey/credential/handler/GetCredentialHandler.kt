@@ -175,7 +175,7 @@ class GetCredentialHandler(
         // The store's deleted-key gate (#193 r12): a passkey whose delete
         // reported success signs nothing, though its material is still owed.
         try {
-            keyPolicyStore.requireUsable(credentialId)
+            keyPolicyStore.requireUsable(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
         } catch (e: KeyPolicyStore.KeyDeletedException) {
             throw NoCredentialsFoundException(credentialId)
         }
@@ -344,7 +344,7 @@ class GetCredentialHandler(
                         // (#255 review): a delete acknowledged while the
                         // prompt waited signs nothing; one that comes later
                         // waits for this signature.
-                        keyPolicyStore.withUsableKey(credentialId) {
+                        keyPolicyStore.withUsableKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) {
                             keystoreManager.sign(
                                 credentialId, data, helper,
                                 title = "Sign In",
@@ -363,7 +363,7 @@ class GetCredentialHandler(
             try {
                 Log.d(TAG, "Signing without verification, credentialId=$credentialId")
                 signOnNextCount { data ->
-                    keyPolicyStore.withUsableKey(credentialId) { keystoreManager.signWithoutBiometric(credentialId, data) }
+                    keyPolicyStore.withUsableKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(credentialId, data) }
                 }
             } catch (e: KeyPolicyStore.KeyDeletedException) {
                 throw NoCredentialsFoundException(credentialId)

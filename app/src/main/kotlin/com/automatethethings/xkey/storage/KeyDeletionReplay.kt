@@ -84,6 +84,25 @@ private fun decodeGeneration(encoded: String): Map<String, String> {
 }
 
 /**
+ * Whether [tombstone] owes a delete of [kind]'s material under its id: its
+ * recorded generation holds an entry of that user key (the software store
+ * record is the general key's, as in [keyMaterialGeneration]). A tombstone
+ * whose generation is not recorded or cannot be read owes every kind.
+ */
+internal fun tombstoneOwes(tombstone: KeyDeletionEntity, kind: UserKeyKind): Boolean {
+    val encoded = tombstone.generation ?: return true
+    val entries = try {
+        decodeGeneration(encoded)
+    } catch (e: org.json.JSONException) {
+        return true
+    }
+    return entries.keys.any { entry ->
+        if (entry == SOFTWARE_ENTRY) kind == UserKeyKind.GENERAL
+        else KeystoreManager.isEntryOf(entry, tombstone.keyId, kind)
+    }
+}
+
+/**
  * The generation of [keyId]'s key material in every backend that holds a
  * user key's material: the Android Keystore entries and Ed25519 software
  * keys of its user-key namespace ([KeystoreManager.userKeyGeneration]) and

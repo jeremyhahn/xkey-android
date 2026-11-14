@@ -29,6 +29,8 @@ import io.mockk.mockkConstructor
 import io.mockk.mockkStatic
 import io.mockk.spyk
 import io.mockk.unmockkAll
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -320,6 +322,78 @@ class KeyDeletionMaterialTypesTest {
         assertFalse("the credential was left", "xkey_credential_k" in entries)
         assertEquals("the retry deleted the general key beside its row", setOf("xkey_key_k"), entries.keys)
         assertFalse(store.isDeletionPending("k"))
+    }
+
+    /**
+     * #255 review: a credential delete still owed beside the general key's
+     * surviving row refuses uses of the credential only; the general key,
+     * whose material and policy the delete kept, stays usable. A whole-key
+     * delete still owed refuses both kinds.
+     */
+    @Test
+    fun aPendingCredentialDeleteLeavesTheGeneralKeyBesideItsRowUsable() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val row = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        stuck += "xkey_credential_k"
+        assertTrue(store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
+        assertTrue("the credential delete is owed", store.isDeletionPending("k"))
+
+        store.requireUsable("k", UserKeyKind.GENERAL)
+        assertTrue("the general key was refused", store.withUsableKey("k", UserKeyKind.GENERAL) { true })
+        for (kind in listOf(UserKeyKind.CREDENTIAL, null)) {
+            org.junit.Assert.assertThrows(KeyPolicyStore.KeyDeletedException::class.java) {
+                kotlinx.coroutines.runBlocking { store.requireUsable("k", kind) }
+            }
+        }
+
+        val whole = tables.addKey("g", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
+        keystoreKey("xkey_key_g", certificate = true)
+        stuck += "xkey_key_g"
+        assertTrue(store.deleteKey("g", whole, keyMaterialDeleter(context, keystore, UserKeyKind.GENERAL)))
+        for (kind in listOf(UserKeyKind.GENERAL, UserKeyKind.CREDENTIAL, null)) {
+            org.junit.Assert.assertThrows(KeyPolicyStore.KeyDeletedException::class.java) {
+                kotlinx.coroutines.runBlocking { store.requireUsable("g", kind) }
+            }
+        }
+    }
+
+    /**
+     * #255 review: a use that waited while a delete held the key, and
+     * resumed only once the delete succeeded and dropped its tombstone,
+     * reads the software key inside the use gate and so finds nothing; a
+     * record read before the gate would still hold the deleted bytes.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun aUseThatWaitedOutACompletedDeleteReadsNoDeletedSoftwareKey() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val instance = tables.addKey("s", com.automatethethings.xkey.storage.entity.SharingPolicyType.ALL_PEERS)
+        softwareKey("s")
+        val deleter = keyMaterialDeleter(context, keystore, UserKeyKind.GENERAL)
+        val inDelete = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val slow = object : KeyMaterial by deleter {
+            override suspend fun delete(held: KeyPolicyStore.KeyMaterialHeld, tombstone: KeyDeletionEntity): Boolean {
+                inDelete.complete(Unit)
+                release.await()
+                return deleter.delete(held, tombstone)
+            }
+        }
+
+        val delete = async { store.deleteKey("s", instance, slow) }
+        inDelete.await()
+        val use = async { store.withUsableKey("s", UserKeyKind.GENERAL) { SoftwareKeyStore(context).get("s") } }
+        runCurrent()
+        assertFalse("the use ran while the delete held the key", use.isCompleted)
+
+        release.complete(Unit)
+        assertTrue(delete.await())
+        assertFalse("the delete left its tombstone", store.isDeletionPending("s"))
+        org.junit.Assert.assertNull("the waiting use read the deleted key", use.await())
     }
 
     /**

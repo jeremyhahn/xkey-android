@@ -582,17 +582,18 @@ class RequestHandler(
     private suspend fun requestSessionId(): String =
         currentCoroutineContext()[ApprovalSession]?.sessionId ?: unsharedApprovalId()
 
-    /**
-     * The key ids [request] uses, each refused by the store's deleted-key
-     * gate ([KeyPolicyStore.requireUsable]) before its handler runs: every
-     * key id parameter of every method but [KEY_WRITING_METHODS], whose
-     * writes the store serialises in [KeyPolicyStore.withKeyMaterial] and
-     * whose deletes settle a tombstone themselves.
-     */
-    private fun keyIdsUsedBy(request: Request): List<String> {
+    private fun keyIdsUsedBy(request: Request): List<Pair<String, com.automatethethings.xkey.crypto.UserKeyKind>> {
         if (request.method in KEY_WRITING_METHODS) return emptyList()
         val params = request.params ?: return emptyList()
-        return KEY_ID_PARAMS.mapNotNull { name -> params.optString(name, "").takeIf { it.isNotEmpty() } }.distinct()
+        // A credentialId names a credential, every other key id parameter a
+        // general key: a delete of one key of a shared id refuses only uses
+        // of that key (#255 review).
+        return KEY_ID_PARAMS.mapNotNull { name ->
+            params.optString(name, "").takeIf { it.isNotEmpty() }?.let { keyId ->
+                keyId to if (name == "credentialId") com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+                else com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+            }
+        }.distinct()
     }
 
     private suspend fun dispatch(request: Request): Response {
@@ -610,7 +611,7 @@ class RequestHandler(
 
         return try {
             // The deleted-key gate, before any handler reads the key (#193 r12).
-            for (keyId in keyIdsUsedBy(request)) keyPolicyStore.requireUsable(keyId)
+            for ((keyId, kind) in keyIdsUsedBy(request)) keyPolicyStore.requireUsable(keyId, kind)
             handler(request)
         } catch (e: KeyPolicyStore.KeyDeletedException) {
             Log.w(TAG, "Deleted key refused: ${e.message}")
@@ -857,7 +858,7 @@ class RequestHandler(
         if (!biometricRequired) {
             // Try signing without biometric (session/time-window still valid, or UV disabled)
             try {
-                signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
+                signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(
                     credentialId = signParams.credentialId,
                     dataHash = dataHash
                 ) }
@@ -926,7 +927,7 @@ class RequestHandler(
                     // PER_OPERATION mode: Use crypto-bound signing directly
                     // This performs biometric auth and signing in a single activity
                     Log.d(TAG, "Using crypto-bound signing for PER_OPERATION mode")
-                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { biometricLauncher.requestCryptoSignature(
+                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { biometricLauncher.requestCryptoSignature(
                         credentialId = signParams.credentialId,
                         dataHash = dataHash,
                         title = "xKey Authentication",
@@ -963,7 +964,7 @@ class RequestHandler(
                         sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) != false
                     if (!sessionUnapproved) try {
                         Log.d(TAG, "Trying signWithoutBiometric (optimistic for TIME_WINDOW/PER_SESSION)")
-                        val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
+                        val signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(
                             credentialId = signParams.credentialId,
                             dataHash = dataHash
                         ) }
@@ -997,7 +998,7 @@ class RequestHandler(
 
                     // Now sign within the fresh auth window
                     Log.d(TAG, "Biometric succeeded, signing within auth window")
-                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
+                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(
                         credentialId = signParams.credentialId,
                         dataHash = dataHash
                     ) }
@@ -1022,7 +1023,7 @@ class RequestHandler(
 
             // The activity's own prompt answers no launcher request; it takes
             // its queue turn, and the notification only wakes the phone for it.
-            val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.sign(
+            val signature = keyPolicyStore.withUsableKey(signParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.sign(
                 credentialId = signParams.credentialId,
                 dataHash = dataHash,
                 biometricHelper = helper,
@@ -1756,7 +1757,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val signature = keyPolicyStore.withUsableKey(signParams.keyId) { keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm) }
+        val signature = keyPolicyStore.withUsableKey(signParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm) }
         val durationMs = System.currentTimeMillis() - startTime
 
         // Record usage
@@ -1800,7 +1801,7 @@ class RequestHandler(
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val decrypted = keyPolicyStore.withUsableKey(decryptParams.keyId) { keystoreManager.rsaDecryptWithAlgorithm(
+        val decrypted = keyPolicyStore.withUsableKey(decryptParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.rsaDecryptWithAlgorithm(
             decryptParams.keyId, decryptParams.getCiphertextBytes()
         ) }
         val durationMs = System.currentTimeMillis() - startTime
@@ -1820,6 +1821,23 @@ class RequestHandler(
         )
         return Response.success(request.id, result.toJson())
     }
+
+/**
+     * The one read of a software key's material for a crypto use (#255
+     * review, ruling 554): the record is read inside the store's use gate
+     * ([KeyPolicyStore.withUsableKey]) and [use] runs before the gate is
+     * left, so a delete that waited for the use deletes the material only
+     * after it, and a use that waited for a delete reads nothing deleted.
+     * Returns the key with [use]'s result, or null if [keyId] has no
+     * software key.
+     */
+    private suspend inline fun <T> withUsableSoftwareKey(
+        keyId: String,
+        use: (com.automatethethings.xkey.crypto.SoftwareKey) -> T
+    ): Pair<com.automatethethings.xkey.crypto.SoftwareKey, T>? =
+        keyPolicyStore.withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId)?.let { sw -> sw to use(sw) }
+        }
 
     /**
      * Handles local.symmetricEncrypt - AES-GCM encryption.
@@ -1841,10 +1859,11 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val ct = keyPolicyStore.withUsableKey(symParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
+        withUsableSoftwareKey(symParams.keyId) { sw ->
+            com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            ) }
+            )
+        }?.let { (_, ct) ->
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
@@ -1853,7 +1872,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val ciphertext = keyPolicyStore.withUsableKey(symParams.keyId) { keystoreManager.symmetricEncrypt(
+        val ciphertext = keyPolicyStore.withUsableKey(symParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.symmetricEncrypt(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
         ) }
         val durationMs = System.currentTimeMillis() - startTime
@@ -1895,10 +1914,11 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val pt = keyPolicyStore.withUsableKey(symParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
+        withUsableSoftwareKey(symParams.keyId) { sw ->
+            com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            ) }
+            )
+        }?.let { (_, pt) ->
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
@@ -1907,7 +1927,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val plaintext = keyPolicyStore.withUsableKey(symParams.keyId) { keystoreManager.symmetricDecrypt(
+        val plaintext = keyPolicyStore.withUsableKey(symParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.symmetricDecrypt(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
         ) }
         val durationMs = System.currentTimeMillis() - startTime
@@ -2027,11 +2047,12 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
-            val swStart = System.currentTimeMillis()
-            val swMac = keyPolicyStore.withUsableKey(hmacParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
+        val swStart = System.currentTimeMillis()
+        withUsableSoftwareKey(hmacParams.keyId) { sw ->
+            com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
                 sw.material, hmacParams.getDataBytes(), sw.algorithm
-            ) }
+            )
+        }?.let { (sw, swMac) ->
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
             // The MAC and the data stay out of the entry.
@@ -2049,7 +2070,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val hmac = keyPolicyStore.withUsableKey(hmacParams.keyId) { keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes()) }
+        val hmac = keyPolicyStore.withUsableKey(hmacParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes()) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
@@ -2089,7 +2110,7 @@ class RequestHandler(
         val ecdhParams = LocalECDHParams.fromJson(params)
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val sharedSecret = keyPolicyStore.withUsableKey(ecdhParams.keyId) { keystoreManager.performECDH(
+        val sharedSecret = keyPolicyStore.withUsableKey(ecdhParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.performECDH(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
         ) }
         val durationMs = System.currentTimeMillis() - startTime
@@ -3486,7 +3507,7 @@ class RequestHandler(
             val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
 
             // Sign using the credential key
-            val signature = keyPolicyStore.withUsableKey(assertionParams.credentialId) { keystoreManager.signWithoutBiometric(
+            val signature = keyPolicyStore.withUsableKey(assertionParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) { keystoreManager.signWithoutBiometric(
                 credentialId = assertionParams.credentialId,
                 dataHash = dataHash
             ) }
@@ -4367,7 +4388,7 @@ class RequestHandler(
         // Sign the content hash
         return try {
             val hashBytes = hexToBytes(contentHash)
-            val signatureBytes = keyPolicyStore.withUsableKey(signingKey.keyId) { keystoreManager.signWithAlgorithm(
+            val signatureBytes = keyPolicyStore.withUsableKey(signingKey.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(
                 signingKey.keyId, hashBytes, signingKey.algorithm
             ) }
             val publicKeyDer = keystoreManager.getPublicKeyDER(signingKey.keyId)
