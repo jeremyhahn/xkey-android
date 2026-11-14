@@ -49,6 +49,7 @@ import com.automatethethings.xkey.ca.AndroidCA
 import com.automatethethings.xkey.ca.CertificateEntity
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.truststore.TrustStoreRepository
+import com.automatethethings.xkey.truststore.removeTrustedCertificate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -960,9 +961,21 @@ class CertificateDetailActivity : AppCompatActivity() {
     private fun deleteCertificate(cert: CertificateEntity) {
         lifecycleScope.launch {
             try {
-                withContext(Dispatchers.IO) {
-                    certificateDao.deleteBySerial(cert.serialNumber)
-                    TrustStoreRepository(this@CertificateDetailActivity).deleteCertificate(cert.fingerprint)
+                // The row goes only once the trust store has removed the
+                // certificate; one that stays trusted stays listed.
+                val removed = withContext(Dispatchers.IO) {
+                    removeTrustedCertificate(
+                        TrustStoreRepository(this@CertificateDetailActivity),
+                        cert.fingerprint
+                    ) { certificateDao.deleteBySerial(cert.serialNumber) }
+                }
+                if (!removed) {
+                    Snackbar.make(
+                        coordinatorLayout,
+                        "Certificate could not be removed; it is still trusted",
+                        Snackbar.LENGTH_LONG
+                    ).show()
+                    return@launch
                 }
                 Snackbar.make(
                     coordinatorLayout,

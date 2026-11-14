@@ -46,6 +46,14 @@
     <string name="device_info_not_available">Not Available</string>
     <string name="connected_device_title">Connected Device</string>
     <string name="recent_activity_title">Recent Activity</string>
+    <string name="recent_activity_empty">No recent activity</string>
+    <string name="recent_activity_succeeded">Succeeded</string>
+    <string name="recent_activity_failed">Failed</string>
+    <string name="recent_activity_just_now">just now</string>
+    <string name="recent_activity_minutes_ago">%1$d min ago</string>
+    <string name="recent_activity_hours_ago">%1$d h ago</string>
+    <string name="recent_activity_days_ago">%1$d d ago</string>
+    <string name="recent_activity_pair">%1$s · %2$s</string>
     <string name="auth_request_title">Authentication Request</string>
 
     <!-- Authentication -->
@@ -1111,6 +1119,8 @@
     <string name="audit_log_op_piv_cert_imported">PIV Cert Imported</string>
     <string name="audit_log_op_piv_sign_request">PIV Sign Request</string>
     <string name="audit_log_op_piv_key_deleted">PIV Key Deleted</string>
+    <string name="audit_log_op_password_created">Password Added</string>
+    <string name="audit_log_op_password_deleted">Password Deleted</string>
     <string name="audit_log_op_backup_created">Backup Stored</string>
     <string name="audit_log_op_backup_restored">Backup Restored</string>
 

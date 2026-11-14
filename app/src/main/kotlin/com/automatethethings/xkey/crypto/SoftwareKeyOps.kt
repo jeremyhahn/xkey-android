@@ -46,9 +46,17 @@ object SoftwareKeyOps {
         return cipher.doFinal(ct)
     }
 
+    /**
+     * The HMAC [hmac] runs for a key stored with [algorithm]: "HMAC-SHA512"
+     * when the name says 512, else "HMAC-SHA256". The stored name is not
+     * validated, so an audit entry records this, never [algorithm] itself.
+     */
+    fun hmacAlgorithm(algorithm: String): String =
+        if (algorithm.contains("512")) "HMAC-SHA512" else "HMAC-SHA256"
+
     /** HMAC over [data] using [algorithm] ("HMAC-SHA256" or "HMAC-SHA512"). */
     fun hmac(keyMaterial: ByteArray, data: ByteArray, algorithm: String): ByteArray {
-        val javaAlg = if (algorithm.contains("512")) "HmacSHA512" else "HmacSHA256"
+        val javaAlg = if (hmacAlgorithm(algorithm) == "HMAC-SHA512") "HmacSHA512" else "HmacSHA256"
         val mac = Mac.getInstance(javaAlg)
         mac.init(SecretKeySpec(keyMaterial, javaAlg))
         return mac.doFinal(data)

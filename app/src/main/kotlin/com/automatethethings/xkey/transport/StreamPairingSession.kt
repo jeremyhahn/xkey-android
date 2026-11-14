@@ -188,6 +188,8 @@ class StreamPairingSession(
         val input: InputStream,
         val output: OutputStream,
         val noise: NoiseSession,
+        /** The id its transport assigned it at connect; see [serve]. */
+        val id: String,
     ) : PairedDeviceRemovalListener {
         val state = Any()
 
@@ -358,6 +360,9 @@ class StreamPairingSession(
      * streams closed, and this returns (#64).
      *
      * @param noiseSession a session with its static key already loaded.
+     * @param connectionId the id the transport assigned this connection when it
+     *   connected; every request on it carries this id to the handler, which
+     *   keys PER_SESSION approval on it (#134).
      * @param isActive returns false to stop the message loop (e.g., on shutdown).
      * @param onConnected invoked once the encrypted session is established.
      */
@@ -365,10 +370,11 @@ class StreamPairingSession(
         input: InputStream,
         output: OutputStream,
         noiseSession: NoiseSession,
+        connectionId: String,
         isActive: () -> Boolean,
         onConnected: suspend () -> Unit,
     ) {
-        val connection = Connection(input, output, noiseSession)
+        val connection = Connection(input, output, noiseSession, connectionId)
         PairedDeviceRepository.addRemovalListener(connection)
         // A blocking read cannot be cancelled, so the deadline closes the
         // streams under it. Once the handshake is installed it no longer
@@ -410,7 +416,10 @@ class StreamPairingSession(
                 if (activeConnection === connection) {
                     activeConnection = null
                     messageRouter?.cancelAllPending()
-                    requestHandler.setConnectedDevicePublicKeyHex(null)
+                    // Only if this connection still owns the identity: a
+                    // replacement session (a USB reattach, #134) may have set
+                    // its own before this teardown ran.
+                    requestHandler.clearConnectedDevicePublicKeyHex(owner = connection)
                 }
             }
         }
@@ -678,6 +687,7 @@ class StreamPairingSession(
         val caller = if (connection == null) EmptyCoroutineContext else RequestHandler.servedConnection(
             SessionBindingProvider { connection.binding?.takeIf { connection.isCurrent }?.copyOf() },
             connection.peerKeyHex,
+            connection.id,
         )
         return withContext(routingContext + caller) {
             if (router != null) router.processMessage(plaintext)
@@ -729,7 +739,7 @@ class StreamPairingSession(
     private fun confirm(connection: Connection, peerKeyHex: String): Boolean = synchronized(connection.state) {
         if (!connection.isCurrent) return false
         connection.confirmed = true
-        requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex, owner = connection)
         true
     }
 

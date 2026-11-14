@@ -588,7 +588,8 @@ class RequestHandlerBiometricGateTest {
         // connection with a binding, and the biometric gate is what fails.
         val connection = RequestHandler.servedConnection(
             { SessionBinding(ByteArray(32) { 0x11 }, ByteArray(32) { 0x22 }, ByteArray(0)) },
-            servedPeer
+            servedPeer,
+            "test:connection",
         )
         return runBlocking { withContext(connection) { handler.handleRequest(request) } }
     }

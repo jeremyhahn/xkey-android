@@ -38,6 +38,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.password.PasswordEdits
 import com.automatethethings.xkey.password.PasswordEntryTooLargeException
 import com.automatethethings.xkey.password.PasswordRecord
 import com.automatethethings.xkey.password.PasswordRepository
@@ -61,6 +62,8 @@ class PasswordManagementActivity : AppCompatActivity() {
     private val repository: PasswordRepository by lazy {
         PasswordRepository(XKeyDatabase.getInstance(this).passwordDao())
     }
+
+    private val edits: PasswordEdits by lazy { PasswordEdits(repository) }
 
     private lateinit var adapter: PasswordAdapter
     private lateinit var emptyView: TextView
@@ -270,7 +273,7 @@ class PasswordManagementActivity : AppCompatActivity() {
                         source = "local"
                     )
                     try {
-                        repository.upsert(record)
+                        edits.add(record)
                     } catch (e: PasswordEntryTooLargeException) {
                         Toast.makeText(
                             this@PasswordManagementActivity,
@@ -319,7 +322,7 @@ class PasswordManagementActivity : AppCompatActivity() {
             ))
             .setPositiveButton(R.string.password_delete) { _, _ ->
                 lifecycleScope.launch {
-                    repository.delete(record.passwordId)
+                    edits.delete(record)
                     reload()
                 }
             }

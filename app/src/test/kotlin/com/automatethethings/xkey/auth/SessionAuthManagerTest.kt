@@ -229,15 +229,15 @@ class SessionAuthManagerTest {
     }
 
     @Test
-    fun `per session re-prompts when a different device connects`() {
+    fun `per session prompts on a different connection and keeps the first one's approval`() {
         val perSession = settings(BiometricAuthMode.PER_SESSION)
         manager.recordAuthentication("device-a")
 
         assertTrue(manager.isBiometricRequired(perSession, "device-b"))
-        // The switch is sticky: device-b stays unauthenticated until it verifies.
+        // device-b stays unauthenticated until it verifies.
         assertTrue(manager.isBiometricRequired(perSession, "device-b"))
-        // Going back to device-a does not resurrect its old authentication.
-        assertTrue(manager.isBiometricRequired(perSession, "device-a"))
+        // A request on device-b, still live, does not discard device-a's approval (#134).
+        assertFalse(manager.isBiometricRequired(perSession, "device-a"))
     }
 
     @Test
@@ -279,6 +279,7 @@ class SessionAuthManagerTest {
         manager.recordAuthentication("device-b")
 
         assertFalse(manager.isBiometricRequired(perSession, "device-b"))
+        assertFalse(manager.isBiometricRequired(perSession, "device-a"))
     }
 
     // -------------------------------------------------------------------------

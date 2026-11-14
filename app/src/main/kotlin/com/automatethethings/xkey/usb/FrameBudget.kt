@@ -46,11 +46,11 @@ internal object FrameBudget {
 
     /**
      * The widest top-level generation member a response may carry,
-     * `,"generation":18446744073709551615` (a Go `uint64` at its maximum),
-     * reserved for go-xkms#128 / #10, which echoes the request generation in
-     * every response. [Response] has no generation here yet; the reserve is
-     * kept for every response, with or without one, so a result sized against
-     * [RESULT_BUDGET] fits the frame either way.
+     * `,"generation":18446744073709551615` (a Go `uint64` at its maximum).
+     * [Response] carries the request's generation (go-xkms#128): the handler
+     * echoes it in every answer to a request that sent one. The reserve is
+     * kept for every response, with or without one, so a result sized
+     * against [RESULT_BUDGET] fits the frame either way.
      */
     val GENERATION_RESERVE: Int =
         ",${JSONObject.quote(GENERATION_KEY)}:${ULong.MAX_VALUE}".toByteArray(Charsets.UTF_8).size

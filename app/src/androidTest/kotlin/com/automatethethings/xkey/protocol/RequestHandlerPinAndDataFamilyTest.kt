@@ -679,6 +679,9 @@ class RequestHandlerPinAndDataFamilyTest {
     private fun call(method: String, params: JSONObject): Response = dispatch(method, params)
 
     /**
+     * Every request is served for the confirmed peer, as a served transport
+     * installs it; the handler-wide peer never stands in for it.
+     *
      * Written without default arguments on purpose: a function that carries a
      * default argument and also builds a coroutine lambda has repeatedly
      * crashed the Kotlin JVM backend in these suites
@@ -686,7 +689,8 @@ class RequestHandlerPinAndDataFamilyTest {
      */
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
-        return runBlocking { handler.handleRequest(request) }
+        val caller = RequestHandler.servedConnection(SessionBindingProvider { null }, peerKeyHex, "test:connection")
+        return runBlocking(caller) { handler.handleRequest(request) }
     }
 
     private fun setSoPin() {

@@ -1637,9 +1637,14 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal"
+                    android:orientation="vertical"
                     android:padding="20dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
                     <ImageView
                         android:layout_width="32dp"
@@ -1679,6 +1684,33 @@
                         android:contentDescription="@null"
                         android:src="@drawable/ic_chevron_right"
                         app:tint="?attr/colorOnSurfaceVariant" />
+
+                </LinearLayout>
+
+                <!-- Recent Activity: the newest audit entries (MainActivity.observeRecentActivity) -->
+                <LinearLayout
+                    android:id="@+id/layoutRecentActivity"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="@string/recent_activity_title"
+                        android:textAppearance="?attr/textAppearanceTitleSmall"
+                        android:textColor="?attr/colorOnSurface" />
+
+                    <LinearLayout
+                        android:id="@+id/layoutRecentActivityRows"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="vertical" />
+
+                </LinearLayout>
 
                 </LinearLayout>
 
@@ -1791,19 +1823,6 @@
 
             <TextView
                 android:id="@+id/textDeviceInfo"
-                android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:visibility="gone" />
-
-            <!-- Hidden views for backward compatibility with Recent Activity -->
-            <View
-                android:id="@+id/layoutRecentActivity"
-                android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:visibility="gone" />
-
-            <TextView
-                android:id="@+id/textRecentActivity"
                 android:layout_width="0dp"
                 android:layout_height="0dp"
                 android:visibility="gone" />

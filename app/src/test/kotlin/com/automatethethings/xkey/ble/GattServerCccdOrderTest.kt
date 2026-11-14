@@ -73,14 +73,11 @@ class GattServerCccdOrderTest(private val row: String) {
         private const val MTU = 247
         private const val TIMEOUT_MS = 5_000L
 
-        // The notification-ready wait this test gives the server, in place of
-        // the production five seconds, so a row that waits it out costs
-        // 0.6 s.
+        // The notification-ready wait this test gives the server. The
+        // tracked scope holds its timer: it expires only when a row moves
+        // the scope's clock past it, so what happens before was not caused
+        // by the wait expiring, however slow the runner (#252).
         private const val NOTIFICATION_READY_TIMEOUT_MS = 600L
-
-        // Well inside the wait, so what happens in it was not caused by the
-        // wait expiring.
-        private const val PROMPTLY_MS = 300L
 
         private val ENABLE = byteArrayOf(0x01, 0x00)
         private val DISABLE = byteArrayOf(0x00, 0x00)
@@ -241,7 +238,7 @@ class GattServerCccdOrderTest(private val row: String) {
                 "E" -> cccdWrite(ENABLE)
                 "D" -> cccdWrite(DISABLE)
                 "I" -> {
-                    frameWritten = System.currentTimeMillis()
+                    frameWritten = signals.now
                     write(identityFrame())
                 }
                 "X" -> disconnect()
@@ -249,7 +246,8 @@ class GattServerCccdOrderTest(private val row: String) {
                 else -> throw AssertionError("$row: unknown event $token")
             }
             if (i == releasedBy) {
-                eventually("$row: the acknowledgement is sent on event ${i + 1}", PROMPTLY_MS) {
+                // No timer fires before the row's end: the event sent it.
+                eventually("$row: the acknowledgement is sent on event ${i + 1}") {
                     messages().isNotEmpty()
                 }
             } else if (frameAt in 0..i) {
@@ -267,13 +265,17 @@ class GattServerCccdOrderTest(private val row: String) {
             }
             disconnectAt >= 0 -> assertEquals("$row: nothing is sent for the ended connection", 0, messages().size)
             else -> {
-                eventually("$row: the identity exchange gives up", NOTIFICATION_READY_TIMEOUT_MS + TIMEOUT_MS) {
+                signals.awaitIdle("$row: the row is handled")
+                signals.advanceTimeBy(NOTIFICATION_READY_TIMEOUT_MS - 1)
+                assertEquals("$row: nothing is decided before the wait expires", false, getField<Boolean>("identityExchangeComplete"))
+                signals.advanceTimeBy(1)
+                eventually("$row: the identity exchange gives up") {
                     getField<Boolean>("identityExchangeComplete")
                 }
-                val waited = System.currentTimeMillis() - frameWritten
+                val waited = signals.now - frameWritten
                 assertTrue(
                     "$row: it waited the full $NOTIFICATION_READY_TIMEOUT_MS ms: $waited",
-                    waited >= NOTIFICATION_READY_TIMEOUT_MS - 100
+                    waited >= NOTIFICATION_READY_TIMEOUT_MS
                 )
                 assertEquals("$row: the acknowledgement is dropped", 0, messages().size)
             }
@@ -293,10 +295,13 @@ class GattServerCccdOrderTest(private val row: String) {
         eventually("the connect is handled") { getField<BluetoothDevice?>("connectedDevice") != null }
     }
 
-    /** Disconnects, and checks the disconnect is handled at once, not when a wait expires. */
+    /**
+     * Disconnects, and checks the disconnect is handled at once, not when a
+     * wait expires: no timer fires before the row's end.
+     */
     private fun disconnect() {
         callback.onConnectionStateChange(device, 0, BluetoothProfile.STATE_DISCONNECTED)
-        eventually("$row: the disconnect is handled", PROMPTLY_MS) {
+        eventually("$row: the disconnect is handled") {
             server.connectionState.value == ConnectionState.Disconnected &&
                 getField<BluetoothDevice?>("connectedDevice") == null
         }

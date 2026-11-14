@@ -295,8 +295,7 @@ class XKeyGattServiceTest {
         val gatt = gattProbe()
         val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
         val usbServer = UsbAccessoryServer(gatt.requestHandler, usbRouter)
-        probe.usbAccessoryServer = usbServer
-        probe.usbMessageRouter = usbRouter
+        probe.installUsbServer(usbServer, usbRouter)
 
         val (sender, router) = probe.activeTransport()!!
 
@@ -311,8 +310,7 @@ class XKeyGattServiceTest {
         val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
         probe.gattServer = gatt.server
         probe.bleMessageRouter = gatt.messageRouter
-        probe.usbAccessoryServer = UsbAccessoryServer(gatt.requestHandler, usbRouter)
-        probe.usbMessageRouter = usbRouter
+        probe.installUsbServer(UsbAccessoryServer(gatt.requestHandler, usbRouter), usbRouter)
 
         assertSame(gatt.server, probe.activeTransport()!!.first)
     }
@@ -438,13 +436,11 @@ class XKeyGattServiceTest {
     fun detachingTheUsbAccessoryClearsItsTransport() {
         val gatt = gattProbe()
         val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
-        probe.usbAccessoryServer = UsbAccessoryServer(gatt.requestHandler, usbRouter)
-        probe.usbMessageRouter = usbRouter
+        probe.installUsbServer(UsbAccessoryServer(gatt.requestHandler, usbRouter), usbRouter)
 
         probe.service.onUsbAccessoryDetached()
 
-        assertNull(probe.usbAccessoryServer)
-        assertNull(probe.usbMessageRouter)
+        assertNull(probe.usbServerSlot.current())
         assertNull(probe.activeTransport())
     }
 

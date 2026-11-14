@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.ble
 
+import java.util.PriorityQueue
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -22,8 +23,13 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Delay
+import kotlinx.coroutines.DisposableHandle
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
@@ -84,8 +90,15 @@ internal fun trackScope(owner: Any): TrackingDispatcher {
  * it ends, so the count reaches zero only once everything they set going
  * has run up to its next suspension: a lock, a readiness, a timer, or its
  * end.
+ *
+ * It also holds the scope's timers (`delay`, `withTimeout`): a timer fires
+ * only when the test moves [now] past it with [advanceTimeBy], never on the
+ * wall clock (#252). So what a test sees before it advances was caused by
+ * the events it delivered, not by a wait expiring, however slow the runner;
+ * a wall-clock bound in [awaitIdle] or [eventually] only stops a hung test.
  */
-internal class TrackingDispatcher : CoroutineDispatcher() {
+@OptIn(InternalCoroutinesApi::class)
+internal class TrackingDispatcher : CoroutineDispatcher(), Delay {
 
     private companion object {
         const val TIMEOUT_MS = 5_000L
@@ -95,11 +108,60 @@ internal class TrackingDispatcher : CoroutineDispatcher() {
         const val RECHECK_MS = 100L
     }
 
+    /** A held timer: [fire] runs when [now] reaches [due]. */
+    private class Timer(val due: Long, val seq: Long, val fire: () -> Unit)
+
     private val lock = ReentrantLock()
     private val stepFinished = lock.newCondition()
     private var running = 0
     private var finished = 0L
     private val threads = AtomicInteger()
+    private var clock = 0L
+    private var timerSeq = 0L
+    private val timers = PriorityQueue<Timer>(compareBy<Timer>({ it.due }, { it.seq }))
+
+    /** The scope's time, in ms: zero until the test advances it. */
+    val now: Long get() = lock.withLock { clock }
+
+    /** How many timers wait for [now] to reach them. */
+    val pendingTimers: Int get() = lock.withLock { timers.size }
+
+    private fun hold(timeMillis: Long, fire: () -> Unit): Timer = lock.withLock {
+        Timer(clock + timeMillis.coerceAtLeast(0), timerSeq++, fire).also { timers.add(it) }
+    }
+
+    private fun release(timer: Timer) {
+        lock.withLock { timers.remove(timer) }
+    }
+
+    override fun scheduleResumeAfterDelay(timeMillis: Long, continuation: CancellableContinuation<Unit>) {
+        val timer = hold(timeMillis) { continuation.resume(Unit) }
+        continuation.invokeOnCancellation { release(timer) }
+    }
+
+    override fun invokeOnTimeout(timeMillis: Long, block: Runnable, context: CoroutineContext): DisposableHandle {
+        val timer = hold(timeMillis) { block.run() }
+        return DisposableHandle { release(timer) }
+    }
+
+    /**
+     * Moves [now] on by [ms], firing each timer it passes in due order, and
+     * waits after each until what it set going is idle.
+     */
+    fun advanceTimeBy(ms: Long) {
+        val target = lock.withLock { clock + ms }
+        while (true) {
+            val timer = lock.withLock {
+                timers.peek()?.takeIf { it.due <= target }?.also {
+                    timers.poll()
+                    clock = it.due
+                }
+            } ?: break
+            timer.fire()
+            awaitIdle("the timer due at ${timer.due} ms has run")
+        }
+        lock.withLock { clock = target }
+    }
 
     // A thread per step that needs one, gone a second after it is idle.
     private val executor = ThreadPoolExecutor(0, Int.MAX_VALUE, 1, TimeUnit.SECONDS, SynchronousQueue()) { task ->

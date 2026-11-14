@@ -15,11 +15,13 @@
 package com.automatethethings.xkey.truststore
 
 import android.content.Context
+import com.automatethethings.xkey.audit.AuditLogger
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.CertPathValidator
@@ -27,6 +29,7 @@ import java.security.cert.CertificateFactory
 import java.security.cert.PKIXParameters
 import java.security.cert.TrustAnchor
 import java.security.cert.X509Certificate
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -65,6 +68,20 @@ public data class ImportResult(
 )
 
 /**
+ * Result of [TrustStoreRepository.clearAll]: the fingerprints actually
+ * removed, those whose file or metadata row could not be removed (still
+ * trusted), and whether the store directory could not be listed for files
+ * no metadata row names.
+ */
+public data class ClearResult(
+    val removed: List<String>,
+    val failed: List<String>,
+    val unlisted: Boolean = false
+) {
+    val complete: Boolean get() = failed.isEmpty() && !unlisted
+}
+
+/**
  * Repository for managing trusted CA certificates.
  *
  * Certificates are stored in the app's private directory and used
@@ -74,11 +91,23 @@ public data class ImportResult(
  */
 public class TrustStoreRepository(
     private val context: Context,
-    private val caFetcher: CABundleFetcher = CABundleFetcher()
+    private val caFetcher: CABundleFetcher = CABundleFetcher(),
+    /** Deletes one file; tests inject a deleter that refuses. */
+    private val fileDeleter: (File) -> Boolean = { it.delete() },
+    /** Writes text to one file; tests inject a writer that fails part-way. */
+    private val fileWriter: (File, String) -> Unit = { file, text -> file.writeText(text) }
 ) {
     private val trustStoreDir: File by lazy {
         context.getDir("trust_store", Context.MODE_PRIVATE)
     }
+
+    private val storeLock: Any by lazy { lockFor(trustStoreDir) }
+
+    /**
+     * Run [block], which reads, modifies or writes the trust store, as the
+     * only writer of this directory in the process. [block] must not suspend.
+     */
+    private inline fun <T> withStoreLock(block: () -> T): T = synchronized(storeLock, block)
 
     private val certFactory: CertificateFactory by lazy {
         CertificateFactory.getInstance("X.509")
@@ -94,6 +123,7 @@ public class TrustStoreRepository(
     public suspend fun importFromURL(url: String, label: String? = null): ImportResult =
         withContext(Dispatchers.IO) {
             val bundle = caFetcher.fetchBundle(url)
+            val source = "url:${redactedUrl(url)}"
             var imported = 0
             var skipped = 0
             val errors = mutableListOf<String>()
@@ -105,15 +135,12 @@ public class TrustStoreRepository(
                     continue
                 }
 
-                val fingerprint = computeFingerprint(cert)
-                if (getCertificateFile(fingerprint).exists()) {
-                    skipped++
-                    continue
-                }
-
                 try {
-                    storeCertificate(cert, label, "url:$url")
-                    imported++
+                    if (storeIfAbsent(cert, label, source) != null) {
+                        imported++
+                    } else {
+                        skipped++
+                    }
                 } catch (e: Exception) {
                     errors.add("Failed to store certificate: ${e.message}")
                 }
@@ -140,12 +167,7 @@ public class TrustStoreRepository(
                 throw IllegalArgumentException("Self-signed certificates are not accepted")
             }
 
-            val fingerprint = computeFingerprint(cert)
-            if (getCertificateFile(fingerprint).exists()) {
-                return@withContext null
-            }
-
-            storeCertificate(cert, label, "manual")
+            storeIfAbsent(cert, label, "manual")
         }
 
     /**
@@ -256,33 +278,138 @@ public class TrustStoreRepository(
     /**
      * Delete a certificate from the trust store.
      *
+     * Records a successful deletion only when the certificate's file and
+     * metadata row are both gone; a removal that fails is recorded as a
+     * failure and leaves the certificate trusted.
+     *
      * @param fingerprint The SHA-256 fingerprint of the certificate to delete
-     * @return true if deleted, false if not found
+     * @return true if deleted, false if not found or it could not be removed
      */
     public suspend fun deleteCertificate(fingerprint: String): Boolean =
-        withContext(Dispatchers.IO) {
-            val certFile = getCertificateFile(fingerprint)
-            val all = readMetadataSync()
-            val remaining = all.filter { it.fingerprint != fingerprint }
-            val hadEntry = remaining.size != all.size
+        withContext(Dispatchers.IO) { withStoreLock { deleteCertificateLocked(fingerprint) } }
 
-            // The DER file may already be gone while the metadata row survives.
-            // Returning early there would strand the row: it stays listed
-            // forever and only clearAll() can remove it.
-            val deletedFile = certFile.exists() && certFile.delete()
-            if (!deletedFile && !hadEntry) {
-                return@withContext false
-            }
+    private fun deleteCertificateLocked(fingerprint: String): Boolean {
+        val certFile = getCertificateFile(fingerprint)
+        val all = readMetadataSync()
+        val entry = all.firstOrNull { it.fingerprint == fingerprint }
+        val fileExisted = certFile.exists()
 
-            saveMetadataSync(remaining)
-            true
+        // The DER file may already be gone while the metadata row survives.
+        // Returning early there would strand the row: it stays listed
+        // forever and only clearAll() can remove it.
+        if (!fileExisted && entry == null) {
+            return false
         }
+        val subject = entry?.subjectDN ?: ""
+
+        // Read the DER before deleting it, so a failed metadata rewrite can
+        // write it back. A file that exists but cannot be read is kept.
+        val der = if (fileExisted) readOrNull(certFile) else null
+        if (fileExisted && (der == null || !removeFile(certFile))) {
+            auditDelete(subject, fingerprint, FILE_NOT_DELETED)
+            return false
+        }
+        if (entry != null) {
+            try {
+                saveMetadataSync(all.filter { it.fingerprint != fingerprint })
+            } catch (e: IOException) {
+                val error = "$METADATA_NOT_UPDATED: ${e.message}"
+                // The row is still in the metadata: with its file written back
+                // the CA stays trusted everywhere (listed and a chain anchor).
+                if (der != null && restoreFile(certFile, der)) {
+                    auditDelete(subject, fingerprint, error)
+                    return false
+                }
+                // No file on disk: no chain verifies against this CA, so it
+                // is removed; its stale row is left for a later delete or clear.
+                auditDelete(subject, fingerprint, "$error; $METADATA_ROW_LEFT", removed = true)
+                return true
+            }
+        }
+        auditDelete(subject, fingerprint)
+        return true
+    }
 
     /**
      * Clear all certificates from the trust store.
+     *
+     * Each certificate in the metadata is removed on its own. A deletion
+     * is recorded as successful only when the certificate's file and its
+     * metadata row are both gone; one that could not be removed stays
+     * listed and trusted, is recorded as a failure, and is returned in
+     * [ClearResult.failed].
      */
-    public suspend fun clearAll(): Unit = withContext(Dispatchers.IO) {
-        trustStoreDir.listFiles()?.forEach { it.delete() }
+    public suspend fun clearAll(): ClearResult =
+        withContext(Dispatchers.IO) { withStoreLock { clearAllLocked() } }
+
+    private fun clearAllLocked(): ClearResult {
+        val entries = readMetadataSync()
+        // Read each DER before deleting it, so a failed metadata rewrite can
+        // write it back. A file that exists but cannot be read is kept.
+        val backups = entries.associate { it.fingerprint to readOrNull(getCertificateFile(it.fingerprint)) }
+        val filesRemoved = entries.filter {
+            val file = getCertificateFile(it.fingerprint)
+            (!file.exists() || backups[it.fingerprint] != null) && removeFile(file)
+        }
+        val kept = entries.filter { it !in filesRemoved }
+
+        val metadataFile = File(trustStoreDir, "metadata.json")
+        val metadataError: String? = try {
+            if (kept.isNotEmpty()) {
+                saveMetadataSync(kept)
+            } else if (metadataFile.exists() && !removeFile(metadataFile)) {
+                saveMetadataSync(emptyList())
+            }
+            null
+        } catch (e: IOException) {
+            "$METADATA_NOT_UPDATED: ${e.message}"
+        }
+
+        // The failed rewrite left the previous metadata, rows of the removed
+        // certificates included: write their files back so they stay trusted
+        // everywhere (listed and chain anchors). One whose file is not on disk
+        // anchors no chain, so it counts as removed; its stale row is left
+        // for a later delete or clear.
+        val restored = if (metadataError == null) {
+            emptyList()
+        } else {
+            filesRemoved.filter { entry ->
+                backups[entry.fingerprint]?.let { restoreFile(getCertificateFile(entry.fingerprint), it) } == true
+            }
+        }
+        val removed = filesRemoved - restored.toSet()
+
+        // Files no metadata row names (strays): remove them too, except the
+        // ones kept or restored above. A directory that cannot be listed is a
+        // failure.
+        val keepNames = (kept + restored).map { getCertificateFile(it.fingerprint).name }.toSet() +
+            metadataFile.name
+        val listing = trustStoreDir.listFiles()
+        val (strays, strayLeft) = listing.orEmpty()
+            .filter { it.name !in keepNames }
+            .partition { removeFile(it) }
+        // A removed certificate file is a removed certificate even when its
+        // metadata row was lost: audit it, with no subject to name.
+        val strayRemoved = strays.filter { it.name.endsWith(".der") }.map { it.name.removeSuffix(".der") }
+        val strayFailed = strayLeft.map { it.name.removeSuffix(".der") }
+
+        removed.forEach {
+            if (metadataError == null) {
+                auditDelete(it.subjectDN, it.fingerprint)
+            } else {
+                auditDelete(it.subjectDN, it.fingerprint, "$metadataError; $METADATA_ROW_LEFT", removed = true)
+            }
+        }
+        restored.forEach { auditDelete(it.subjectDN, it.fingerprint, metadataError) }
+        kept.forEach { auditDelete(it.subjectDN, it.fingerprint, FILE_NOT_DELETED) }
+        strayRemoved.forEach { auditDelete("", it) }
+        strayFailed.forEach { auditDelete("", it, FILE_NOT_DELETED) }
+
+        return ClearResult(
+            removed = removed.map { it.fingerprint } + strayRemoved,
+            failed = (entries - removed.toSet()).map { it.fingerprint } + strayFailed,
+            unlisted = listing == null
+        )
     }
 
     /**
@@ -348,12 +475,8 @@ public class TrustStoreRepository(
         cert: X509Certificate,
         label: String
     ): String = withContext(Dispatchers.IO) {
-        val fingerprint = computeFingerprint(cert)
-        if (getCertificateFile(fingerprint).exists()) {
-            return@withContext fingerprint
-        }
-        storeCertificate(cert, label, "internal-ca")
-        fingerprint
+        storeIfAbsent(cert, label, "internal-ca")
+        computeFingerprint(cert)
     }
 
     /**
@@ -385,17 +508,19 @@ public class TrustStoreRepository(
             return@withContext
         }
 
-        val certs = getAllCertificates()
-        val updated = certs.map { cert ->
-            val isInstalled = systemFingerprints.contains(cert.fingerprint)
-            if (cert.systemInstalled != isInstalled) {
-                cert.copy(systemInstalled = isInstalled)
-            } else {
-                cert
+        withStoreLock {
+            val certs = readMetadataSync()
+            val updated = certs.map { cert ->
+                val isInstalled = systemFingerprints.contains(cert.fingerprint)
+                if (cert.systemInstalled != isInstalled) {
+                    cert.copy(systemInstalled = isInstalled)
+                } else {
+                    cert
+                }
             }
-        }
-        if (updated != certs) {
-            saveMetadata(updated)
+            if (updated != certs) {
+                saveMetadataSync(updated)
+            }
         }
     }
 
@@ -409,15 +534,16 @@ public class TrustStoreRepository(
         fingerprint: String,
         installed: Boolean
     ): Unit = withContext(Dispatchers.IO) {
-        val certs = getAllCertificates()
-        val updated = certs.map { cert ->
-            if (cert.fingerprint == fingerprint) {
-                cert.copy(systemInstalled = installed)
-            } else {
-                cert
+        withStoreLock {
+            val updated = readMetadataSync().map { cert ->
+                if (cert.fingerprint == fingerprint) {
+                    cert.copy(systemInstalled = installed)
+                } else {
+                    cert
+                }
             }
+            saveMetadataSync(updated)
         }
-        saveMetadata(updated)
     }
 
     private fun isSelfSigned(cert: X509Certificate): Boolean {
@@ -433,6 +559,21 @@ public class TrustStoreRepository(
     private fun getCertificateFile(fingerprint: String): File {
         return File(trustStoreDir, "$fingerprint.der")
     }
+
+/**
+     * Store [cert] unless its file is already present, deciding and writing
+     * under the store lock so two imports of one certificate store it once.
+     *
+     * @return the stored entry, or null if the certificate was already present
+     */
+    private fun storeIfAbsent(cert: X509Certificate, label: String?, source: String): TrustedCA? =
+        withStoreLock {
+            if (getCertificateFile(computeFingerprint(cert)).exists()) {
+                null
+            } else {
+                storeCertificate(cert, label, source)
+            }
+        }
 
     private fun storeCertificate(
         cert: X509Certificate,
@@ -459,7 +600,105 @@ public class TrustStoreRepository(
         val updated = existing.filter { it.fingerprint != fingerprint } + trustedCA
         saveMetadataSync(updated)
 
+        if (AuditLogger.isInitialized()) {
+            AuditLogger.logTrustStoreImport(trustedCA.subjectDN, fingerprint, source)
+        }
+
         return trustedCA
+    }
+
+    /**
+     * Record a trust store deletion: a success when [error] is null, else a
+     * failure carrying it; [removed] records a success that carries [error]
+     * (a certificate gone from disk whose metadata row was left). Only when
+     * the audit logger is initialized: its drop path calls `Log.w`, which
+     * callers that never initialize it (JVM tests, sync) must not reach.
+     */
+    private fun auditDelete(
+        subject: String,
+        fingerprint: String,
+        error: String? = null,
+        removed: Boolean = error == null
+    ) {
+        if (AuditLogger.isInitialized()) {
+            AuditLogger.logTrustStoreDelete(subject, fingerprint, removed, error)
+        }
+    }
+
+    /** Delete [file] through [fileDeleter]; true only if it is gone. */
+    private fun removeFile(file: File): Boolean {
+        fileDeleter(file)
+        return !file.exists()
+    }
+
+    /** The bytes of [file], or null when it is missing or cannot be read. */
+    private fun readOrNull(file: File): ByteArray? = try {
+        file.readBytes()
+    } catch (e: IOException) {
+        null
+    }
+
+    /** Write [bytes] back to [file]; true only if it holds them again. */
+    private fun restoreFile(file: File, bytes: ByteArray): Boolean = try {
+        file.writeBytes(bytes)
+        true
+    } catch (e: IOException) {
+        file.delete()
+        false
+    }
+
+    private companion object {
+        const val FILE_NOT_DELETED = "could not delete the certificate file"
+        const val METADATA_NOT_UPDATED = "could not update the trust store metadata"
+        const val METADATA_ROW_LEFT = "certificate file removed, its metadata row left"
+
+        /**
+         * One lock per trust store directory, shared by every repository
+         * instance in the process: SyncEngine and the screens each create
+         * their own, and their metadata read/modify/writes must not interleave.
+         */
+        private val storeLocks = ConcurrentHashMap<String, Any>()
+
+        fun lockFor(dir: File): Any = storeLocks.computeIfAbsent(dir.canonicalPath) { Any() }
+
+        const val UNPARSEABLE_URL = "[unparseable url]"
+        const val ILLEGAL_URI_CHARS = " \"<>\\^`{|}"
+
+        /**
+         * The import source recorded for [url]: scheme, host, port and path
+         * only. Userinfo, the query and the fragment can carry credentials
+         * (basic auth, signed-URL tokens), and the source is stored in the
+         * metadata and in audit details that the audit log exports, so they
+         * are dropped. Characters a URI never allows (quotes, spaces, braces)
+         * are percent-encoded before parsing and the path is recorded decoded.
+         * A URL that still does not parse as a hierarchical URL with a
+         * server-based authority and a host is recorded without its text.
+         */
+        fun redactedUrl(url: String): String {
+            val escaped = buildString {
+                url.trim().forEach { c ->
+                    if (c < ' ' || c == '\u007f' || c in ILLEGAL_URI_CHARS) {
+                        append('%').append("%02X".format(c.code))
+                    } else {
+                        append(c)
+                    }
+                }
+            }
+            val uri = try {
+                java.net.URI(escaped)
+            } catch (e: java.net.URISyntaxException) {
+                return UNPARSEABLE_URL
+            }
+            val scheme = uri.scheme
+            if (uri.isOpaque || scheme == null) return UNPARSEABLE_URL
+            // No host: a registry-based authority (e.g. a host with "_") keeps
+            // the userinfo in its raw text, and a hostless URI such as
+            // "https:///user:secret@host/" puts it in the path, which OkHttp
+            // still fetches from that host. Record nothing of either.
+            val host = uri.host ?: return UNPARSEABLE_URL
+            val port = if (uri.port != -1) ":${uri.port}" else ""
+            return "$scheme://$host$port${uri.path.orEmpty()}"
+        }
     }
 
     private fun saveMetadataSync(certs: List<TrustedCA>) {
@@ -479,11 +718,21 @@ public class TrustStoreRepository(
                 }
             )
         }
-        File(trustStoreDir, "metadata.json").writeText(array.toString())
-    }
-
-    private suspend fun saveMetadata(certs: List<TrustedCA>): Unit = withContext(Dispatchers.IO) {
-        saveMetadataSync(certs)
+        // Write a temp file and rename it over the metadata, so a write that
+        // fails part-way leaves the previous document in place. The temp file
+        // is this writer's own: created exclusively under a unique name, it is
+        // written, renamed and removed by this call alone. Callers hold the
+        // store lock, so no other writer reads or replaces the metadata between.
+        val metadataFile = File(trustStoreDir, "metadata.json")
+        val tempFile = File.createTempFile("metadata.json.", ".tmp", trustStoreDir)
+        try {
+            fileWriter(tempFile, array.toString())
+            if (!tempFile.renameTo(metadataFile)) {
+                throw IOException("cannot replace ${metadataFile.name}")
+            }
+        } finally {
+            tempFile.delete()
+        }
     }
 
     /**

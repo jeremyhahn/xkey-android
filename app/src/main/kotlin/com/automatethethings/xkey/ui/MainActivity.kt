@@ -28,6 +28,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.biometric.BiometricManager
 import androidx.core.content.ContextCompat
@@ -49,7 +50,9 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.time.Clock
 import java.time.ZoneId
 import java.util.Locale
 
@@ -295,6 +298,7 @@ class MainActivity : AppCompatActivity() {
             animateCardPress(it)
             startActivity(Intent(this, AuditLogActivity::class.java))
         }
+        observeRecentActivity()
 
         // PIV Smart Card card
         binding.cardPivSmartCard.setOnClickListener {
@@ -756,6 +760,60 @@ class MainActivity : AppCompatActivity() {
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 gattService?.serviceState?.collectLatest { state ->
                     handleServiceStateChange(state)
+                }
+            }
+        }
+    }
+
+    companion object {
+        /** The clock the Recent Activity times are measured against; tests replace it. */
+        @VisibleForTesting
+        internal var recentActivityClock: Clock = Clock.systemDefaultZone()
+    }
+
+    /**
+     * Shows the newest audit entries in the Audit Log card's Recent Activity
+     * section; tapping the card opens the full audit screen. The relative
+     * times are recomputed once a minute while the activity is resumed.
+     */
+    private fun observeRecentActivity() {
+        val database = XKeyDatabase.getInstance(this)
+        val dao = database.auditLogDao()
+        val keyLabels = database.keyDao().observeAll().map { keys -> keys.associate { it.keyId to it.label } }
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                RecentActivityRows.observe(dao, recentActivityClock, keyLabels = keyLabels).collectLatest { rows ->
+                    renderRecentActivity(rows)
+                }
+            }
+        }
+    }
+
+    private fun renderRecentActivity(rows: List<RecentActivityRow>) {
+        val container = binding.layoutRecentActivityRows
+        container.removeAllViews()
+        val secondary = UIHelpers.resolveThemeColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant)
+        val error = UIHelpers.resolveThemeColor(this, androidx.appcompat.R.attr.colorError)
+        rows.forEach { row ->
+            when (row) {
+                is RecentActivityRow.Empty -> container.addView(TextView(this).apply {
+                    text = getString(row.messageRes)
+                    textSize = 13f
+                    setTextColor(secondary)
+                })
+                is RecentActivityRow.Entry -> {
+                    val label = getString(row.labelRes)
+                    val time = getString(row.timeRes, row.timeCount)
+                    container.addView(TextView(this).apply {
+                        text = row.keyLabel?.let { getString(R.string.recent_activity_pair, label, it) } ?: label
+                        textSize = 14f
+                        setPadding(0, UIHelpers.dpToPxInt(this@MainActivity, 6), 0, 0)
+                    })
+                    container.addView(TextView(this).apply {
+                        text = getString(R.string.recent_activity_pair, getString(row.outcomeRes), time)
+                        textSize = 12f
+                        setTextColor(if (row.success) secondary else error)
+                    })
                 }
             }
         }

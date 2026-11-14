@@ -525,15 +525,9 @@ class AuditLogActivity : AppCompatActivity() {
             )
         }
 
-        val operationFilters = listOf(
-            null to getString(R.string.audit_log_filter_all),
-            AuditOperationType.KEY_CREATED to getString(R.string.audit_log_op_key_created),
-            AuditOperationType.KEY_DELETED to getString(R.string.audit_log_op_key_deleted),
-            AuditOperationType.SIGNING_REQUEST to getString(R.string.audit_log_op_signing),
-            AuditOperationType.FIDO2_AUTHENTICATION to getString(R.string.audit_log_op_fido2),
-            AuditOperationType.PAIRING_APPROVED to getString(R.string.audit_log_op_pairing),
-            AuditOperationType.CONNECTION_ESTABLISHED to getString(R.string.audit_log_op_connection)
-        )
+        val operationFilters = listOf<Pair<AuditOperationType?, String>>(
+            null to getString(R.string.audit_log_filter_all)
+        ) + AuditOperationLabels.filterTypes.map { it to getOperationTypeDisplayName(it) }
 
         operationFilters.forEachIndexed { index, (type, label) ->
             val chip = createFilterChip(label, index == 0)
@@ -1032,69 +1026,8 @@ class AuditLogActivity : AppCompatActivity() {
     // Helpers
     // -------------------------------------------------------------------------
 
-    private fun getOperationTypeDisplayName(type: AuditOperationType): String = when (type) {
-        AuditOperationType.KEY_CREATED -> getString(R.string.audit_log_op_key_created)
-        AuditOperationType.KEY_DELETED -> getString(R.string.audit_log_op_key_deleted)
-        AuditOperationType.KEY_USED -> getString(R.string.audit_log_op_key_used)
-        AuditOperationType.KEY_ATTESTED -> getString(R.string.audit_log_op_key_attested)
-        AuditOperationType.KEY_SHARING_CHANGED -> getString(R.string.audit_log_op_sharing_changed)
-        AuditOperationType.KEY_EXPORTED -> getString(R.string.audit_log_op_exported)
-        AuditOperationType.SIGNING_REQUEST -> getString(R.string.audit_log_op_signing)
-        AuditOperationType.ENCRYPTION_REQUEST -> getString(R.string.audit_log_op_encryption)
-        AuditOperationType.DECRYPTION_REQUEST -> getString(R.string.audit_log_op_decryption)
-        AuditOperationType.KEY_DERIVATION_REQUEST -> getString(R.string.audit_log_op_derivation)
-        AuditOperationType.HMAC_REQUEST -> getString(R.string.audit_log_op_hmac)
-        AuditOperationType.FIDO2_REGISTRATION -> getString(R.string.audit_log_op_fido2_reg)
-        AuditOperationType.FIDO2_AUTHENTICATION -> getString(R.string.audit_log_op_fido2)
-        AuditOperationType.PAIRING_APPROVED -> getString(R.string.audit_log_op_pairing)
-        AuditOperationType.PAIRING_DENIED -> getString(R.string.audit_log_op_pairing_denied)
-        AuditOperationType.DEVICE_UNPAIRED -> getString(R.string.audit_log_op_unpaired)
-        AuditOperationType.CONNECTION_ESTABLISHED -> getString(R.string.audit_log_op_connection)
-        AuditOperationType.CONNECTION_CLOSED -> getString(R.string.audit_log_op_disconnection)
-        AuditOperationType.DEVICE_ATTESTED -> getString(R.string.audit_log_op_device_attested)
-        AuditOperationType.DEVICE_ENROLLED -> getString(R.string.audit_log_op_device_enrolled)
-        AuditOperationType.SETTINGS_CHANGED -> getString(R.string.audit_log_op_settings)
-        AuditOperationType.TRUST_STORE_IMPORT -> getString(R.string.audit_log_op_trust_import)
-        AuditOperationType.TRUST_STORE_DELETE -> getString(R.string.audit_log_op_trust_delete)
-        AuditOperationType.BIOMETRIC_SUCCESS -> getString(R.string.audit_log_op_biometric_ok)
-        AuditOperationType.BIOMETRIC_FAILURE -> getString(R.string.audit_log_op_biometric_fail)
-        AuditOperationType.POLICY_DENIED -> getString(R.string.audit_log_op_policy_denied)
-        AuditOperationType.SERVICE_STARTED -> getString(R.string.audit_log_op_service_started)
-        AuditOperationType.SERVICE_STOPPED -> getString(R.string.audit_log_op_service_stopped)
-        AuditOperationType.CERTIFICATE_ISSUED -> getString(R.string.audit_log_op_cert_issued)
-        AuditOperationType.CERTIFICATE_REVOKED -> getString(R.string.audit_log_op_cert_revoked)
-        AuditOperationType.CSR_SIGNED -> getString(R.string.audit_log_op_csr_signed)
-        AuditOperationType.CRL_GENERATED -> getString(R.string.audit_log_op_crl_generated)
-        AuditOperationType.CERTIFICATE_EXPORTED -> getString(R.string.audit_log_op_cert_exported)
-        AuditOperationType.FILE_SIGNED -> getString(R.string.audit_log_op_file_signed)
-        AuditOperationType.FILE_VERIFIED -> getString(R.string.audit_log_op_file_verified)
-        AuditOperationType.FILE_ENCRYPTED -> getString(R.string.audit_log_op_file_encrypted)
-        AuditOperationType.FILE_DECRYPTED -> getString(R.string.audit_log_op_file_decrypted)
-        AuditOperationType.MEDIA_AUTO_SIGNED -> getString(R.string.audit_log_op_media_auto_signed)
-        AuditOperationType.CONTACT_IMPORTED -> getString(R.string.audit_log_op_contact_imported)
-        AuditOperationType.CONTACT_DELETED -> getString(R.string.audit_log_op_contact_deleted)
-        AuditOperationType.OATH_CREDENTIAL_CREATED -> getString(R.string.audit_log_op_oath_created)
-        AuditOperationType.OATH_CREDENTIAL_DELETED -> getString(R.string.audit_log_op_oath_deleted)
-        AuditOperationType.OATH_CODE_GENERATED -> getString(R.string.audit_log_op_oath_code)
-        AuditOperationType.OATH_SYNC_PERFORMED -> getString(R.string.audit_log_op_oath_sync)
-        AuditOperationType.PASSWORD_SYNC_PERFORMED -> getString(R.string.audit_log_op_password_sync)
-        AuditOperationType.COSIGN_INITIATED -> getString(R.string.audit_log_op_cosign_initiated)
-        AuditOperationType.COSIGN_RECEIVED -> getString(R.string.audit_log_op_cosign_received)
-        AuditOperationType.PIN_SO_SET -> getString(R.string.audit_log_op_pin_so_set)
-        AuditOperationType.PIN_SO_CHANGED -> getString(R.string.audit_log_op_pin_so_changed)
-        AuditOperationType.PIN_USER_SET -> getString(R.string.audit_log_op_pin_user_set)
-        AuditOperationType.PIN_USER_CHANGED -> getString(R.string.audit_log_op_pin_user_changed)
-        AuditOperationType.PIN_VERIFICATION_SUCCESS -> getString(R.string.audit_log_op_pin_verify_ok)
-        AuditOperationType.PIN_VERIFICATION_FAILED -> getString(R.string.audit_log_op_pin_verify_fail)
-        AuditOperationType.PIN_LOCKOUT_TRIGGERED -> getString(R.string.audit_log_op_pin_lockout)
-        AuditOperationType.PIN_LOCKOUT_RESET -> getString(R.string.audit_log_op_pin_lockout_reset)
-        AuditOperationType.PIV_KEY_GENERATED -> getString(R.string.audit_log_op_piv_key_generated)
-        AuditOperationType.PIV_CERT_IMPORTED -> getString(R.string.audit_log_op_piv_cert_imported)
-        AuditOperationType.PIV_SIGN_REQUEST -> getString(R.string.audit_log_op_piv_sign_request)
-        AuditOperationType.PIV_KEY_DELETED -> getString(R.string.audit_log_op_piv_key_deleted)
-        AuditOperationType.BACKUP_CREATED -> getString(R.string.audit_log_op_backup_created)
-        AuditOperationType.BACKUP_RESTORED -> getString(R.string.audit_log_op_backup_restored)
-    }
+    private fun getOperationTypeDisplayName(type: AuditOperationType): String =
+        getString(AuditOperationLabels.labelRes(type))
 
     private fun getOperationTypeColor(type: AuditOperationType): Pair<Int, Int> = when (type) {
         AuditOperationType.KEY_CREATED,

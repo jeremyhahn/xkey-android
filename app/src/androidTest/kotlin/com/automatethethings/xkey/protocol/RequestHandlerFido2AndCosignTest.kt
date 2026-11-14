@@ -138,10 +138,14 @@ class RequestHandlerFido2AndCosignTest {
         }
     }
 
+    /** The peer each request is served for; null is an anonymous connection. */
+    private var servedPeer: String? = null
+
     /** Baseline: a confirmed peer and no user verification, so nothing prompts. */
     @Before
     fun resetHandlerState() {
         handler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        servedPeer = peerKeyHex
         pairedDevices.updateDeviceSettings(
             publicKeyHex = peerKeyHex,
             requireAttestationForKeyUse = false,
@@ -207,13 +211,13 @@ class RequestHandlerFido2AndCosignTest {
             listedCredentialIds().contains(credentialId)
         )
 
-        handler.setConnectedDevicePublicKeyHex(otherPeerHex)
+        servedPeer = otherPeerHex
         assertFalse(
             "a peer with no policy row must not see the credential",
             listedCredentialIds().contains(credentialId)
         )
 
-        handler.setConnectedDevicePublicKeyHex(null)
+        servedPeer = null
         assertFalse(
             "an anonymous session cannot satisfy a SELECTED_PEERS policy",
             listedCredentialIds().contains(credentialId)
@@ -364,11 +368,40 @@ class RequestHandlerFido2AndCosignTest {
 
         assertTrue(signAssertion(credentialId, rpId).isSuccess())
 
-        handler.setConnectedDevicePublicKeyHex(otherPeerHex)
+        servedPeer = otherPeerHex
         assertEquals(
             ErrorCodes.OPERATION_DENIED,
             signAssertion(credentialId, rpId).errorCode()
         )
+    }
+
+    /**
+     * The SELECTED_PEERS grant is checked against the request's own caller:
+     * a granted handler-wide peer never lends its grant to another caller,
+     * and an ungranted one never hides the credential from the granted caller.
+     */
+    @Test
+    fun selectedPeersFollowTheRequestCallerNotTheHandlerWidePeer() {
+        val credentialId = seedPasskey("caller-selected-$runId", SharingPolicyType.SELECTED_PEERS)
+        grantPolicy(credentialId, peerKeyHex)
+
+        servedPeer = otherPeerHex
+        assertFalse(
+            "the handler-wide grant must not list the credential for another caller",
+            listedCredentialIds().contains(credentialId)
+        )
+        assertEquals(
+            ErrorCodes.OPERATION_DENIED,
+            signAssertion(credentialId, rpId).errorCode()
+        )
+
+        handler.setConnectedDevicePublicKeyHex(otherPeerHex)
+        servedPeer = peerKeyHex
+        assertTrue(
+            "the granted caller must see the credential whatever the handler-wide peer",
+            listedCredentialIds().contains(credentialId)
+        )
+        assertTrue(signAssertion(credentialId, rpId).isSuccess())
     }
 
     /**
@@ -650,6 +683,10 @@ class RequestHandlerFido2AndCosignTest {
     private fun call(method: String, params: JSONObject): Response = dispatch(method, params)
 
     /**
+     * Every request carries its own caller, [servedPeer] (null is an explicit
+     * anonymous connection), as a served transport installs it; the
+     * handler-wide peer never stands in for it.
+     *
      * Written without default arguments on purpose: a function that carries a
      * default argument and also builds a coroutine lambda has repeatedly
      * crashed the Kotlin JVM backend in these suites
@@ -657,7 +694,8 @@ class RequestHandlerFido2AndCosignTest {
      */
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
-        return runBlocking { handler.handleRequest(request) }
+        val caller = RequestHandler.servedConnection(SessionBindingProvider { null }, servedPeer, "test:connection")
+        return runBlocking(caller) { handler.handleRequest(request) }
     }
 
     /**

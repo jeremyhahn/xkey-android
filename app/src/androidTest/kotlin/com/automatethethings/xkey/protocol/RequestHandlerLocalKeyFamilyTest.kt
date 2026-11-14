@@ -16,6 +16,7 @@
 package com.automatethethings.xkey.protocol
 
 import android.content.Context
+import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.auth.SessionAuthManager
@@ -182,6 +183,59 @@ class RequestHandlerLocalKeyFamilyTest {
         // A null session id means "disconnected", which drops the peer.
         handler.setSessionId(null)
         assertNull(handler.getConnectedDevicePublicKeyHex())
+    }
+
+    // ------------------------------------------------------------------
+    // local.getCapabilities: the ECDH API floor
+    // ------------------------------------------------------------------
+
+    /**
+     * Keystore key agreement needs `PURPOSE_AGREE_KEY`, which exists only from
+     * API 31, so the capability must match the device under test; below 31
+     * local.ecdh refuses plainly instead of failing inside the Keystore.
+     */
+    @Test
+    fun getCapabilitiesAdvertisesEcdhOnlyFromApi31() {
+        val sdk = Build.VERSION.SDK_INT
+        val result = call("local.getCapabilities").ok()
+        assertEquals("supportsECDH on API $sdk", sdk >= 31, result.getBoolean("supportsECDH"))
+
+        if (sdk < 31) {
+            val response = call(
+                "local.ecdh",
+                JSONObject().put("keyId", "ecdh-floor-$runId").put("peerPublicKey", b64(ByteArray(91)))
+            )
+            assertEquals(ErrorCodes.ECDH_FAILED, response.errorCode())
+            val message = response.error?.message.orEmpty()
+            assertTrue(message, message.contains("requires Android 12 (API 31)"))
+        }
+    }
+
+    /**
+     * The capability contract: a client may pick any advertised algorithm, so
+     * local.generateKey must create it and an asymmetric one must sign.
+     */
+    @Test
+    fun everyAdvertisedAlgorithmCanBeGeneratedAndUsed() {
+        val algorithms = call("local.getCapabilities").ok().getJSONArray("algorithms")
+        assertTrue("capabilities list at least one algorithm", algorithms.length() > 0)
+        for (i in 0 until algorithms.length()) {
+            val algorithm = algorithms.getString(i)
+            val keyType = when {
+                algorithm.startsWith("AES") -> KeyTypes.SECRET
+                algorithm.startsWith("HMAC") -> KeyTypes.HMAC
+                else -> KeyTypes.SIGNING
+            }
+            val keyId = generateKey("advertised-${algorithm.lowercase()}-$runId", keyType, algorithm)
+            if (keyType == KeyTypes.SIGNING) {
+                val response = call(
+                    "local.sign",
+                    JSONObject().put("keyId", keyId).put("data", b64("advertised".toByteArray()))
+                        .put("algorithm", algorithm)
+                )
+                assertTrue("$algorithm must sign: " + response.toJsonString(), response.isSuccess())
+            }
+        }
     }
 
     // ------------------------------------------------------------------

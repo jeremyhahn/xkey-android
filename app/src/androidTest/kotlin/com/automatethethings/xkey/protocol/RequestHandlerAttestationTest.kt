@@ -657,7 +657,7 @@ class RequestHandlerAttestationTest {
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
         return runBlocking {
-            withContext(RequestHandler.servedConnection(connectionBinding, servedPeer)) {
+            withContext(RequestHandler.servedConnection(connectionBinding, servedPeer, "test:connection")) {
                 handler.handleRequest(request)
             }
         }

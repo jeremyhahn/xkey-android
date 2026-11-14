@@ -156,7 +156,7 @@ class TcpHsmServerHandshakeTimeoutTest {
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
         assertTrue("cut after ${elapsedMs} ms, before the deadline", elapsedMs >= DEADLINE_MS)
         // The cut connection never reached the encrypted session.
-        verify(exactly = 0) { requestHandler.setConnectedDevicePublicKeyHex(any()) }
+        verify(exactly = 0) { requestHandler.setConnectedDevicePublicKeyHex(any(), any()) }
 
         next.handshake()
         withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Connected } }

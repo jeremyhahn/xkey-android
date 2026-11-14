@@ -40,7 +40,8 @@ USB `Password*` methods are described in
 | `PasswordSync` | `app/src/main/kotlin/com/automatethethings/xkey/sync/PasswordSync.kt` | Sync gather and merge behind the lock |
 | `PasswordStoreMethods` | `app/src/main/kotlin/com/automatethethings/xkey/usb/PasswordStoreMethods.kt` | USB `Password*` methods; `routingContext()` adds `SessionPasswordVault` to every USB request |
 | `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | Builds one `PasswordVault` per USB accessory session |
-| `PasswordManagementActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/PasswordManagementActivity.kt` | On-phone list, add, edit and delete through `PasswordRepository` |
+| `PasswordEdits` | `app/src/main/kotlin/com/automatethethings/xkey/password/PasswordEdits.kt` | On-phone `add` and `delete`: writes through `PasswordRepository`, then audits the edit |
+| `PasswordManagementActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/PasswordManagementActivity.kt` | On-phone list and detail through `PasswordRepository`; add and delete through `PasswordEdits` |
 
 ## Wire methods and entry points
 
@@ -105,6 +106,17 @@ sequenceDiagram
   keeps changing locally (`PasswordUpdateConflictException`) is counted as
   skipped and nothing is written for it.
 
+## Audit
+
+An add or delete on the phone (`PasswordEdits`) writes one audit entry,
+`PASSWORD_CREATED` or `PASSWORD_DELETED`, after the repository write
+succeeds. The entry holds only the password id (`keyId`) and its display
+name, the title or else the name (`keyLabel` and `details.name`); never the
+password, username, URL or notes. An add refused with
+`PasswordEntryTooLargeException`, and a delete that removed nothing, write no
+entry. `PasswordRepository` itself does not log, so sync writes are not
+audited here.
+
 ## Errors and refusals
 
 | Exception | Meaning |
@@ -126,6 +138,7 @@ before it reads the factors, so a lock that throws never leaves the store open.
 | `PasswordVaultTest` (`app/src/test/.../password/`) | Unlock, lock, enrollment, lockout |
 | `PinSettingsVaultUnlockAttemptStoreTest` (`app/src/test/.../password/`) | Persisted unlock counter |
 | `PasswordRepositoryTest`, `PasswordRepositoryPolicyTest`, `PasswordRepositoryUpdateTest`, `PasswordEntityTest` (`app/src/test/.../password/`) | Repository, policy fields, updates, entity |
+| `PasswordEditsTest` (`app/src/test/.../password/`), `AuditLoggerDispatchTest` (`app/src/test/.../audit/`) | On-phone add and delete audit entries |
 | `PasswordSyncTest` (`app/src/test/.../sync/`) | Sync gather and merge behind the lock |
 | `PasswordStoreMethodsTest`, `UsbWireContractTest` (`app/src/test/.../usb/`) | USB `Password*` methods |
 | `PasswordDaoTest` (`app/src/androidTest/.../password/`) | Room queries |
