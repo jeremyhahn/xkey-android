@@ -864,14 +864,19 @@ class CoSignActivity : AppCompatActivity() {
 
 /**
  * The fingerprint an initiator QR names its key by: the hash of the public key
- * stored for [keyId], or [keyId] itself when no public key is found.
+ * the selected row holds, or [keyId] itself when no public key is found.
  *
- * The screen offers FIDO2 credentials (credential alias) and general keys
- * (general alias), so the alias is resolved across both. This only names the
+ * A FIDO2 row's key is the credential alias; every other row ([keyType]
+ * signing, tls, ssh) is the general alias. A credential and a general key may
+ * share an id, so the lookup reads exactly the row's own namespace and never
+ * the id-only resolution, which prefers the credential. This only names the
  * key; nothing is signed here, so it needs no approved-key lookup.
  */
 internal fun initiatorFingerprint(keystoreManager: KeystoreManager, keyId: String, keyType: String): String {
-    val pubKeyDer = keystoreManager.resolveKeystoreAlias(keyId)
-        ?.let { keystoreManager.publicKeyDERAt(it) }
+    val alias = if (keyType == "fido2") CREDENTIAL_ALIAS_PREFIX + keyId else KeystoreManager.generalKeyAlias(keyId)
+    val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
     return if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 }
+
+/** The Keystore alias prefix of a FIDO2 credential (KeystoreManager's own). */
+private const val CREDENTIAL_ALIAS_PREFIX = "xkey_credential_"
