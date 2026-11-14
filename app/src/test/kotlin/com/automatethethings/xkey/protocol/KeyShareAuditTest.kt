@@ -346,6 +346,24 @@ class KeyShareAuditTest {
         assertEquals("a granted export reads the same type", "signing", single(AuditOperationType.KEY_EXPORTED).keyType)
     }
 
+    /** Every export record, granted or refused, takes its keyType from the one stored-type lookup. */
+    @Test
+    fun everyExportRecordTakesTheStoredKeyType() {
+        val source = handlerSource()
+        val calls = Regex("AuditLogger\\.logKeyExported\\(([^)]*)\\)").findAll(source).toList()
+        assertTrue("export records found: ${calls.size}", calls.size >= 2)
+        for (call in calls) {
+            assertTrue(
+                "an export record takes keyType from auditKeyType: ${call.groupValues[1].trim()}",
+                Regex("keyType = keyType,").containsMatchIn(call.groupValues[1])
+            )
+        }
+        assertTrue(
+            "the export's keyType is the stored type",
+            "val keyType = auditKeyType(keyId, software)" in source
+        )
+    }
+
     @Test
     fun anUnknownKeyRecordsNothing() = runTest {
         val response = Response.fromJson(served(importSharedKey()))

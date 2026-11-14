@@ -4176,13 +4176,17 @@ class RequestHandler(
             }
 
             val peerName = auditPeerName(peerPublicKeyHex)
+            // The key's stored type, read apart from the authorization result,
+            // so a refused export is filed under the same key type as a
+            // granted one (the audit screen filters by it).
+            val keyType = auditKeyType(keyId, software)
             val entity = authorizeShare(keyId, peerPublicKeyHex)
             if (entity == null) {
                 val message = "Key is not shareable with this peer: $keyId"
                 AuditLogger.logKeyExported(
                     keyId = keyId,
                     keyLabel = keyId,
-                    keyType = software?.keyType ?: "public",
+                    keyType = keyType,
                     format = if (software != null) "raw" else "public",
                     deviceId = peerPublicKeyHex,
                     deviceName = peerName,
@@ -4220,7 +4224,7 @@ class RequestHandler(
             AuditLogger.logKeyExported(
                 keyId = keyId,
                 keyLabel = entity.label,
-                keyType = software?.keyType ?: entity.keyType,
+                keyType = keyType,
                 format = format,
                 deviceId = peerPublicKeyHex,
                 deviceName = peerName
