@@ -42,7 +42,10 @@ import java.io.File
  */
 class UserKeyDeleteTest {
 
-    private val dao = mockk<KeyPolicyDao>(relaxed = true)
+    private val dao = mockk<KeyPolicyDao>(relaxed = true) {
+        // No earlier delete of any id is owed.
+        coEvery { deletion(any()) } returns null
+    }
     private val store = KeyPolicyStore(dao, object : KeyPolicyStore.Transactor {
         override suspend fun <T> run(block: suspend () -> T): T = block()
     })

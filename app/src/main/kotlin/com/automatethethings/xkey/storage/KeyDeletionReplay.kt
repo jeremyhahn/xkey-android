@@ -101,8 +101,13 @@ fun keyMaterialGeneration(
     kind: UserKeyKind? = null
 ): Map<String, String> {
     val all = keystore.userKeyGeneration(keyId)
-    val generation = LinkedHashMap(if (kind == null) all else all.filterKeys { KeystoreManager.isEntryOf(it, keyId, kind) })
-    if (kind != UserKeyKind.CREDENTIAL) SoftwareKeyStore(context).generation(keyId)?.let { generation[SOFTWARE_ENTRY] = it }
+    val software = SoftwareKeyStore(context).generation(keyId)
+    val present = if (software != null) all.keys + SOFTWARE_ENTRY else all.keys
+    // The kind whose material is there, not only the one the row's type
+    // names (#255 verify): the one place a user delete's kind is resolved.
+    val target = kind?.let { KeystoreManager.presentKind(keyId, present, it) }
+    val generation = LinkedHashMap(if (target == null) all else all.filterKeys { KeystoreManager.isEntryOf(it, keyId, target) })
+    if (target != UserKeyKind.CREDENTIAL && software != null) generation[SOFTWARE_ENTRY] = software
     return generation
 }
 

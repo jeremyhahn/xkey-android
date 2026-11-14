@@ -2347,11 +2347,10 @@ class RequestHandler(
             val policy = if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
             // What the key enforces now: a denial left by a failed narrowing
             // (#193) counts, so lifting it is a widening like any other.
+            // Whether the key is already at [policy] is decided in the edit's
+            // turn in the queue, never here: an edit queued ahead of this one
+            // may still change it (#255 verify).
             val enforced = keyPolicyStore.enforcedPolicy(entity)
-            if (enforced == policy && entity.sharingPolicy == policy) {
-                Log.i(TAG, "Policy for key ${policyParams.keyId} is already $policy")
-                return Response.success(request.id, JSONObject().put("updated", true))
-            }
             val widening = policy == SharingPolicyType.ALL_PEERS && enforced != SharingPolicyType.ALL_PEERS
             if (widening) {
                 requireConfirmedPeer("Sharing a key with all peers")

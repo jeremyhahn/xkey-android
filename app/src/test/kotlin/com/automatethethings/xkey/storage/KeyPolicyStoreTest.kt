@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.storage
 
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.storage.entity.SharingPolicyType.ALL_PEERS
@@ -636,6 +637,51 @@ class KeyPolicyStoreTest {
         assertEquals(key, store.instance("k"))
         store.requireUsable("k")
     }
+
+    /**
+     * #255 verify: a rowless second delete of an id, naming other material,
+     * never replaces the tombstone an earlier delete still owes: that one is
+     * settled first, and while its material cannot be deleted the second is
+     * refused.
+     */
+    @Test
+    fun aSecondRowlessDeleteNeverReplacesAnOwedTombstone() = runBlocking {
+        val store = store()
+        assertTrue(store.deleteMaterial("k", generationDelete("credential") { false }))
+
+        assertFalse("a second delete replaced an owed tombstone", store.deleteMaterial("k", generationDelete("general") { false }))
+        val owed = mutableListOf<String?>()
+        store.replayDeletions(tombstoneDelete { _, tombstone -> owed += tombstone.generation; false })
+        assertEquals("the owed material was dropped", listOf<String?>("credential"), owed)
+
+        val deleted = mutableListOf<String?>()
+        assertTrue(store.deleteMaterial("k", generationDelete("general") { deleted += it.generation; true }))
+        assertEquals(listOf<String?>("credential", "general"), deleted)
+        assertFalse(store.isDeletionPending("k"))
+    }
+
+    /** #255 verify: a row delete never replaces a delete beside that row still owed. */
+    @Test
+    fun aRowDeleteNeverReplacesAnOwedDeleteBesideIt() = runBlocking {
+        val key = tables.addKey("k", SELECTED_PEERS)
+        val store = store()
+        assertTrue(store.deleteMaterial("k", generationDelete("credential") { false }, besideRow = key))
+
+        assertFalse("a row delete replaced an owed tombstone", store.deleteKey("k", key, generationDelete("general") { false }))
+        assertEquals(key, store.instance("k"))
+        val owed = mutableListOf<String?>()
+        store.replayDeletions(tombstoneDelete { _, tombstone -> owed += tombstone.generation; false })
+        assertEquals("the owed material was dropped", listOf<String?>("credential"), owed)
+    }
+
+    /** A [KeyMaterial] of generation [generation] whose delete of a tombstone is [delete]. */
+    private fun generationDelete(generation: String, delete: suspend (KeyDeletionEntity) -> Boolean): KeyMaterial =
+        object : KeyMaterial {
+            override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String = generation
+
+            override suspend fun delete(held: KeyPolicyStore.KeyMaterialHeld, tombstone: KeyDeletionEntity): Boolean =
+                delete(tombstone)
+        }
 
     /**
      * Round 11 (2): a write under an id whose earlier delete is owed settles

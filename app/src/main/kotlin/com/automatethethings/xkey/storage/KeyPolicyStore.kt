@@ -217,7 +217,13 @@ class KeyPolicyStore(
                 val row = bound(keyId, instance)
                 if (decision != null) {
                     val stored = dao.storedPolicy(keyId) ?: throw KeyChangedException(keyId)
-                    val enforced = if (held(keyId, instance) != null) SharingPolicyType.PRIVATE else row?.enforced ?: stored
+                    val pending = held(keyId, instance)
+                    val enforced = if (pending != null) SharingPolicyType.PRIVATE else row?.enforced ?: stored
+                    // Already at it, read here in the edit's turn, not before
+                    // it (#255 verify): nothing is written, nothing audited.
+                    if (enforced == policy && stored == policy && pending == null && row?.clearGrants != true) {
+                        return@run false
+                    }
                     replaced = enforced
                     if (widens(enforced, policy)) {
                         if (!decision.approved) throw DecisionRefusedException(keyId, "it needs the owner's approval")
@@ -389,6 +395,9 @@ class KeyPolicyStore(
     suspend fun deleteKey(keyId: String, instance: Long, material: KeyMaterial = KeyMaterial.NONE): Boolean =
         lockKeyMaterial(keyId) { held ->
             if (dao.keyInstance(keyId) != instance) return@lockKeyMaterial false
+            // An earlier delete beside this row still owing material is
+            // settled first: this tombstone never replaces it (#255 verify).
+            if (!noTombstoneOwed(held, material)) return@lockKeyMaterial false
             val source = dao.keySource(keyId)
             // Under the lock every write of the id's material takes, so this
             // is the generation of the row being deleted (#193 r12).
@@ -422,16 +431,10 @@ class KeyPolicyStore(
             // and a general key share the id) and stays, with its policy and
             // grants; [material] names only the deleted key's (#255 review).
             if (dao.keyInstance(keyId) != besideRow) return@lockKeyMaterial false
-            if (besideRow != null) {
-                // An earlier delete beside the row is settled first, so this
-                // narrowed generation never replaces material still owed.
-                settleDeletion(held, material)
-                if (dao.deletion(keyId) != null) return@lockKeyMaterial false
-            }
-            // The generation read now holds whatever an earlier tombstone
-            // under the id still owes (that material is unchanged, as no
-            // write lands under a tombstone), so replacing it drops nothing.
             val source = dao.deletion(keyId)?.source
+            // A delete names one key's material, so its generation need not
+            // hold what an earlier tombstone owes: that one is settled first.
+            if (!noTombstoneOwed(held, material)) return@lockKeyMaterial false
             val generation = material.generation(held, source)
             // A delete beside a row records that row's instance: the one
             // tombstone whose row is still there, which [settleDeletion]
@@ -449,6 +452,20 @@ class KeyPolicyStore(
             }
             absent
         }
+
+    /**
+     * The one guard before a delete writes its tombstone (#255 verify): the
+     * id holds one tombstone, so a pending one is settled first
+     * ([settleDeletion]), and while it still owes material no other replaces
+     * it. A delete naming one key of a shared id, or a rowless second
+     * delete, reads a generation that need not hold what the earlier one
+     * owes. False, with nothing written, if a tombstone is still owed.
+     */
+    private suspend fun noTombstoneOwed(held: KeyMaterialHeld, material: KeyMaterial): Boolean {
+        if (dao.deletion(held.keyId) == null) return true
+        settleDeletion(held, material)
+        return dao.deletion(held.keyId) == null
+    }
 
     /**
      * Deletes [tombstone]'s generation with [material], the one place a

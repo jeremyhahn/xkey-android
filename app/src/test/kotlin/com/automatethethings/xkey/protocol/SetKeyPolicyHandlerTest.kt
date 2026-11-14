@@ -289,6 +289,47 @@ class SetKeyPolicyHandlerTest {
         }
     )
 
+    /**
+     * #255 verify: a request for the policy the key has when it is read is
+     * not answered there. A sheet edit made before it may still be queued,
+     * so the request takes its turn behind it and lands after it: the
+     * user's later choice stands.
+     */
+    @Test
+    fun `a request for the policy it read is queued behind an earlier sheet edit`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        write = { policy ->
+            if (policy == SharingPolicyType.ALL_PEERS) {
+                writing.complete(Unit)
+                release.await()
+            }
+            writes += policy
+            stored = policy
+            storedRevision++
+            1
+        }
+        val store = KeyPolicyStore.of(mockk())
+        // The sheet's widening, made first, holds the edits queue in its write.
+        val sheet = async(Dispatchers.Default) {
+            com.automatethethings.xkey.ui.KeySharingPeers.setKeyPolicy(
+                keyId, store, com.automatethethings.xkey.ui.SharingPolicyType.ALL_PEERS, storedRowId
+            )
+        }
+        withContext(Dispatchers.Default) { kotlinx.coroutines.withTimeout(5_000) { writing.await() } }
+        // The later remote narrowing reads the key still Private, then the sheet's write lands.
+        afterPolicyRead = { release.complete(Unit) }
+        val remote = withContext(Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(5_000) { handler().handleRequest(request(shareable = false)) }
+        }
+        assertTrue(sheet.await())
+
+        assertUpdated(remote)
+        assertEquals("the earlier edit landed over the later request", SharingPolicyType.PRIVATE, stored)
+        assertEquals(listOf(SharingPolicyType.ALL_PEERS, SharingPolicyType.PRIVATE), writes)
+    }
+
     /** Handles [request] as one arriving on a served connection whose peer is [callerPeer]. */
     private suspend fun RequestHandler.handleFromCaller(request: Request, callerPeer: String?): Response =
         withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, callerPeer, "caller")) {
@@ -589,7 +630,10 @@ class SetKeyPolicyHandlerTest {
 
         val response = handler().handleRequest(request(shareable = true))
 
-        assertUpdated(response)
+        // Decided in the edit's turn (#255 verify): the key no longer has
+        // ALL_PEERS, so this is an unapproved widening, refused, never
+        // reported done.
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
         assertEquals(SharingPolicyType.PRIVATE, stored)
         assertNoPrompt()
         assertNothingWrittenOrAudited()

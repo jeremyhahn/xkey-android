@@ -269,6 +269,27 @@ class KeyDeletionMaterialTypesTest {
     }
 
     /**
+     * #255 verify: `local.generateKey` makes a fido2-typed key under the
+     * general alias. The key screens' delete names the row type's kind
+     * (CREDENTIAL); it still deletes that key's material, the only one
+     * under the id, and a credential sharing the id still bounds it.
+     */
+    @Test
+    fun aFido2RowsGeneralAliasMaterialIsDeletedByItsRowsKind() {
+        keystoreKey("xkey_key_k", certificate = true)
+        ed25519["xkey_key_j"] = "c2VjcmV0"
+        assertTrue(delete("k", KeystoreManager.userKeyKindOf("fido2")))
+        assertTrue(delete("j", KeystoreManager.userKeyKindOf("fido2")))
+        assertTrue("a fido2 row's general-alias key was left", entries.isEmpty())
+        assertTrue("a fido2 row's general-alias Ed25519 key was left", ed25519.isEmpty())
+
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        assertTrue(delete("k", UserKeyKind.CREDENTIAL))
+        assertEquals(setOf("xkey_key_k"), entries.keys)
+    }
+
+    /**
      * A failed Ed25519 commit stays owed across replays and a restart
      * (#255 review): SharedPreferences' remove() empties the in-memory
      * cache at once, so a replay that read the cache as the truth would

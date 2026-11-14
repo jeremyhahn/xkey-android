@@ -2167,6 +2167,18 @@ class KeystoreManager(private val context: Context) {
             }
         }
 
+        /**
+         * The user key a delete naming [kind] removes, given the id's
+         * material [generation] entries: [kind], unless only the other kind
+         * holds material under the id. A key row's type does not say where
+         * its material is: `local.generateKey` makes a fido2-typed key under
+         * the general alias (#255 verify), and its delete must reach it.
+         */
+        fun presentKind(keyId: String, generation: Set<String>, kind: UserKeyKind): UserKeyKind {
+            val other = if (kind == UserKeyKind.CREDENTIAL) UserKeyKind.GENERAL else UserKeyKind.CREDENTIAL
+            return if (!holdsKind(keyId, generation, kind) && holdsKind(keyId, generation, other)) other else kind
+        }
+
         /** Whether [generation] holds material of [keyId]'s [kind] key; a software key is a general key. */
         fun holdsKind(keyId: String, generation: Set<String>, kind: UserKeyKind): Boolean = generation.any {
             isEntryOf(it, keyId, kind) || kind == UserKeyKind.GENERAL && it == com.automatethethings.xkey.storage.SOFTWARE_ENTRY
