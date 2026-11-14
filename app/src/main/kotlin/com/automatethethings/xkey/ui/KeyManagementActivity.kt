@@ -120,7 +120,7 @@ class KeyManagementActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     private val keyDao by lazy { XKeyDatabase.getInstance(this).keyDao() }
-    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this)) }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this), keystoreManager) }
     private val credentialDao by lazy { XKeyDatabase.getInstance(this).credentialMetadataDao() }
     private val keystoreManager by lazy { KeystoreManager(this) }
     private val syncManager by lazy {

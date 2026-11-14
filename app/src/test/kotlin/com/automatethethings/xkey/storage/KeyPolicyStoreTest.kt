@@ -428,7 +428,7 @@ class KeyPolicyStoreTest {
     @Test
     fun aDeleteIsAuditedOnceWhenItCommits() = runBlocking {
         val audited = mutableListOf<String>()
-        val store = KeyPolicyStore(tables, tables, tables.unrecordedDenials) { audited += it.keyId }
+        val store = KeyPolicyStore(tables, tables, tables.unrecordedDenials, audit = { audited += it.keyId })
         val key = tables.addKey("k", SELECTED_PEERS)
 
         assertFalse(store.deleteKey("k", key + 1, materialDelete { true }))

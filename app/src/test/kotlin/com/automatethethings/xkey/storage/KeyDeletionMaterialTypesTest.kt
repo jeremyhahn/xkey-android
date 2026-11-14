@@ -328,12 +328,13 @@ class KeyDeletionMaterialTypesTest {
      * #255 review: a credential delete still owed beside the general key's
      * surviving row refuses uses of the credential only; the general key,
      * whose material and policy the delete kept, stays usable. A whole-key
-     * delete still owed refuses both kinds.
+     * delete still owed refuses both kinds. The gate uses the app's resolver
+     * (#255 review r2), so it sees the alias each lookup reads.
      */
     @Test
     fun aPendingCredentialDeleteLeavesTheGeneralKeyBesideItsRowUsable() = kotlinx.coroutines.test.runTest {
         val tables = FakeKeyPolicyTables()
-        val store = tables.store()
+        val store = tables.store(KeyPolicyStore.KeyResolver { id, kind -> keystore.resolveKey(id, kind) })
         val row = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
         keystoreKey("xkey_credential_k", certificate = true)
         keystoreKey("xkey_key_k", certificate = true)
@@ -343,6 +344,10 @@ class KeyDeletionMaterialTypesTest {
 
         store.requireUsable("k", UserKeyKind.GENERAL)
         assertTrue("the general key was refused", store.withUsableKey("k", UserKeyKind.GENERAL) { true })
+        // A general key's lookup reads its own alias while the credential's
+        // is still in the Keystore: never the deleted credential.
+        assertEquals("xkey_key_k", store.withUsableKey("k", UserKeyKind.GENERAL) { keystore.resolveKeystoreAlias("k", UserKeyKind.GENERAL) })
+        assertEquals("xkey_credential_k", keystore.resolveKeystoreAlias("k"))
         for (kind in listOf(UserKeyKind.CREDENTIAL, null)) {
             org.junit.Assert.assertThrows(KeyPolicyStore.KeyDeletedException::class.java) {
                 kotlinx.coroutines.runBlocking { store.requireUsable("k", kind) }
@@ -358,6 +363,32 @@ class KeyDeletionMaterialTypesTest {
                 kotlinx.coroutines.runBlocking { store.requireUsable("g", kind) }
             }
         }
+    }
+
+    /**
+     * #255 review r2: a use naming the general key whose own key is absent
+     * resolves to the credential sharing its id, as every lookup does; with
+     * that credential's delete still owed, the gate refuses it, because the
+     * gate resolves the id through the same resolver as the lookup.
+     */
+    @Test
+    fun aGeneralUseThatWouldReadAPendingCredentialIsRefused() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store(KeyPolicyStore.KeyResolver { id, kind -> keystore.resolveKey(id, kind) })
+        val row = tables.addKey("c", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
+        keystoreKey("xkey_credential_c", certificate = true)
+        stuck += "xkey_credential_c"
+        assertTrue(store.deleteMaterial("c", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
+        assertTrue("the credential delete is owed", store.isDeletionPending("c"))
+        assertEquals("xkey_credential_c", keystore.resolveKeystoreAlias("c", UserKeyKind.GENERAL))
+
+        for (kind in listOf(UserKeyKind.GENERAL, UserKeyKind.CREDENTIAL)) {
+            org.junit.Assert.assertThrows(KeyPolicyStore.KeyDeletedException::class.java) {
+                kotlinx.coroutines.runBlocking { store.withUsableKey("c", kind) { keystore.getPublicKeyDER("c", kind) } }
+            }
+        }
+        // Without the resolver the gate would pass the general use that reads it.
+        tables.store().requireUsable("c", UserKeyKind.GENERAL)
     }
 
     /**

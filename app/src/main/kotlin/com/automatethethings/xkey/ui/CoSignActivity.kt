@@ -598,7 +598,7 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
+        val pubKeyDer = keystoreManager.getPublicKeyDER(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
         val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
@@ -618,11 +618,11 @@ class CoSignActivity : AppCompatActivity() {
                     ?: throw Exception("Key not found")
 
                 // Under the material-use lock and its deleted-key recheck (#255 review).
-                val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db)
+                val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
                     .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(keyId, request.hashBytes(), keyEntity.algorithm) }
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
-                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
+                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
                 val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 
                 val responsePayload = CoSignResponse(

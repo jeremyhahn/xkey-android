@@ -915,7 +915,7 @@ class FileOperationActivity : AppCompatActivity() {
 
                 // Sign the hash, under the material-use lock and its
                 // deleted-key recheck (#255 review).
-                val store = com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity))
+                val store = com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
                 val signatureBytes = store.withUsableKey(key.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(
                     key.keyId,
                     hashBytes,

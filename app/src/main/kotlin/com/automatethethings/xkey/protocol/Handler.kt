@@ -230,7 +230,7 @@ class RequestHandler(
     private val keySharingPolicyDao: KeySharingPolicyDao = XKeyDatabase.getInstance(context).keySharingPolicyDao()
 
     // A key's policy state, grant rows and key row, written together (#193)
-    private val keyPolicyStore: KeyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(context)) }
+    private val keyPolicyStore: KeyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(context), keystoreManager) }
 
     // Weak reference to activity for biometric prompts
     private var activityRef: WeakReference<FragmentActivity>? = null
@@ -801,7 +801,7 @@ class RequestHandler(
         // issuing chain is served by local.attestKey. Devices without hardware
         // attestation return nothing, and the field stays absent.
         val attestationBase64 = runCatching {
-            keystoreManager.getAttestationChain(generateParams.credentialId)
+            keystoreManager.getAttestationChain(generateParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
                 ?.firstOrNull()
                 ?.encoded
                 ?.let { Base64.getEncoder().encodeToString(it) }
@@ -1279,7 +1279,7 @@ class RequestHandler(
         val exists = keystoreManager.keyExists(loadParams.credentialId)
 
         val result = if (exists) {
-            val cosePublicKey = keystoreManager.getCOSEPublicKey(loadParams.credentialId)
+            val cosePublicKey = keystoreManager.getCOSEPublicKey(loadParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
             if (cosePublicKey != null) {
                 LoadKeyResult(
                     exists = true,
@@ -1519,7 +1519,7 @@ class RequestHandler(
 
         // Get COSE-encoded public key for FIDO2 keys
         val publicKeyCose = if (genParams.keyType == KeyTypes.FIDO2 && algorithmName.startsWith("ES")) {
-            keystoreManager.getCOSEPublicKey(genParams.keyId)
+            keystoreManager.getCOSEPublicKey(genParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
         } else {
             null
         }
@@ -2162,22 +2162,25 @@ class RequestHandler(
         val keyEntity = keyDao.getByKeyId(pubKeyParams.keyId)
             ?: throw ProtocolException("Key not found: ${pubKeyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
-        val publicKey: String = when (pubKeyParams.format) {
+        // Read inside the use gate (#255 review r2): the gate resolves the id
+        // as the export does, so a credential pending deletion beside this
+        // general key's row is refused rather than exported as this key.
+        val publicKey: String = keyPolicyStore.withUsableKey(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { when (pubKeyParams.format) {
             ExportFormats.DER -> {
-                val der = keystoreManager.getPublicKeyDER(pubKeyParams.keyId)
+                val der = keystoreManager.getPublicKeyDER(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
                     ?: throw ProtocolException("Cannot export public key", errorCode = ErrorCodes.EXPORT_FAILED)
                 Base64.getEncoder().encodeToString(der)
             }
             ExportFormats.PEM -> {
-                keystoreManager.getPublicKeyPEM(pubKeyParams.keyId)
+                keystoreManager.getPublicKeyPEM(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
                     ?: throw ProtocolException("Cannot export public key", errorCode = ErrorCodes.EXPORT_FAILED)
             }
             ExportFormats.SSH -> {
-                keystoreManager.getPublicKeySSH(pubKeyParams.keyId)
+                keystoreManager.getPublicKeySSH(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
                     ?: throw ProtocolException("Cannot export public key", errorCode = ErrorCodes.EXPORT_FAILED)
             }
             ExportFormats.COSE -> {
-                val cose = keystoreManager.getCOSEPublicKey(pubKeyParams.keyId)
+                val cose = keystoreManager.getCOSEPublicKey(pubKeyParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
                     ?: throw ProtocolException("Cannot export COSE key", errorCode = ErrorCodes.EXPORT_FAILED)
                 Base64.getEncoder().encodeToString(cose)
             }
@@ -2185,7 +2188,7 @@ class RequestHandler(
                 "Unsupported format: ${pubKeyParams.format}",
                 errorCode = ErrorCodes.UNSUPPORTED_FORMAT
             )
-        }
+        } }
 
         val result = LocalGetPublicKeyResult(
             publicKey = publicKey,
@@ -4280,8 +4283,14 @@ class RequestHandler(
         }
         val peerPublicKeyHex = requireConfirmedPeer("importSharedKey")
         return try {
-            val software = com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId)
-            val publicKeyPem = if (software == null) keystoreManager.getPublicKeyPEM(keyId) else null
+            // Both lookups inside the use gate (#255 review r2), which resolves
+            // the id as getPublicKeyPEM does: a credential pending deletion
+            // beside this general key's row is refused, never exported under
+            // the general key's sharing grant.
+            val (software, publicKeyPem) = keyPolicyStore.withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+                val sw = com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId)
+                sw to (if (sw == null) keystoreManager.getPublicKeyPEM(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) else null)
+            }
             if (software == null && publicKeyPem == null) {
                 return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key not found: $keyId")
             }
@@ -4341,6 +4350,8 @@ class RequestHandler(
                 deviceName = peerName
             )
             Response.success(request.id, result)
+        } catch (e: KeyPolicyStore.KeyDeletedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "importSharedKey failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "importSharedKey failed: ${e.message}")
@@ -4388,11 +4399,14 @@ class RequestHandler(
         // Sign the content hash
         return try {
             val hashBytes = hexToBytes(contentHash)
-            val signatureBytes = keyPolicyStore.withUsableKey(signingKey.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(
+            // The signature and the public key it is checked by are read
+            // under one use gate (#255 review r2), from the alias it resolves.
+            val (signatureBytes, publicKeyDer) = keyPolicyStore.withUsableKey(signingKey.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(
                 signingKey.keyId, hashBytes, signingKey.algorithm
-            ) }
-            val publicKeyDer = keystoreManager.getPublicKeyDER(signingKey.keyId)
-                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
+            ) to keystoreManager.getPublicKeyDER(signingKey.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) }
+            if (publicKeyDer == null) {
+                return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
+            }
             val fingerprint = computeFingerprint(publicKeyDer)
 
             AuditLogger.logCoSignReceived(

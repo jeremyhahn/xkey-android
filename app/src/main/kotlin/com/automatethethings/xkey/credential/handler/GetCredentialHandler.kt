@@ -70,7 +70,7 @@ class GetCredentialHandler(
     private val credentialDao = database.credentialMetadataDao()
     private val keyDao = database.keyDao()
     private val signCounter = PasskeySignCounter(credentialDao, keyDao)
-    private val keyPolicyStore = KeyPolicyStore.of(database)
+    private val keyPolicyStore = KeyPolicyStore.of(database, keystoreManager)
 
     /**
      * Handle the begin phase of credential assertion.

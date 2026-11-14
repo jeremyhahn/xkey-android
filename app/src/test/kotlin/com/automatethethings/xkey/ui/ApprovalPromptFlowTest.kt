@@ -134,7 +134,7 @@ class ApprovalPromptFlowTest {
             1
         }
         mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
-        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any()) } answers {
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any(), any()) } answers {
             com.automatethethings.xkey.storage.KeyPolicyStore(
                 policyDao,
                 object : com.automatethethings.xkey.storage.KeyPolicyStore.Transactor {

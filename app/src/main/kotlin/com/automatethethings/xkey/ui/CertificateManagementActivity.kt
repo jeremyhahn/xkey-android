@@ -142,7 +142,7 @@ class CertificateManagementActivity : AppCompatActivity() {
     private val androidCA by lazy { AndroidCA(this) }
     private val keystoreManager by lazy { KeystoreManager(this) }
     private val keyDao by lazy { XKeyDatabase.getInstance(this).keyDao() }
-    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this)) }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this), keystoreManager) }
 
     // -------------------------------------------------------------------------
     // UI Components

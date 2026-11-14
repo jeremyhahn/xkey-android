@@ -169,7 +169,7 @@ class KeyShareAuditTest {
             DeviceLookup.Paired(PairedDeviceData(USB_PEER, USB_PEER_NAME, 0L))
 
         keystoreManager = mockk(relaxed = true)
-        every { keystoreManager.getPublicKeyPEM(any()) } returns null
+        every { keystoreManager.getPublicKeyPEM(any(), any()) } returns null
         handler = RequestHandler(
             context = context,
             keystoreManager = keystoreManager,
@@ -209,7 +209,7 @@ class KeyShareAuditTest {
 
     @Test
     fun sharingAHardwareKeyRecordsOnePublicExport() = runTest {
-        every { keystoreManager.getPublicKeyPEM(KEY_ID) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
+        every { keystoreManager.getPublicKeyPEM(KEY_ID, any()) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
         coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS)
 
         val result = success(served(importSharedKey()))
@@ -335,7 +335,7 @@ class KeyShareAuditTest {
      */
     @Test
     fun aRefusedHardwareExportRecordsTheStoredKeyType() = runTest {
-        every { keystoreManager.getPublicKeyPEM(KEY_ID) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
+        every { keystoreManager.getPublicKeyPEM(KEY_ID, any()) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
         coEvery { keyDao.getByKeyId(KEY_ID) } returns
             keyEntity(SharingPolicyType.PRIVATE, keyType = "signing")
 
@@ -936,6 +936,120 @@ class KeyShareAuditTest {
         assertFalse("the old caller-only resolver is gone", functions.any { nameOf(it) == "callerPeerPublicKeyHex" })
         val choke = functions.single { nameOf(it) == "currentPeerPublicKeyHex" }
         assertTrue("the choke point reads the CallerSession first", "[CallerSession] ?: return connectedDevicePublicKeyHex" in choke)
+    }
+
+    // -----------------------------------------------------------------
+    // A credential and a general key sharing an id (#255 review r2)
+    // -----------------------------------------------------------------
+
+    /**
+     * #255 review r2: with the credential's delete still owed beside the
+     * general key's surviving row, local.getPublicKey and
+     * local.importSharedKey of the id export the general key's own public
+     * key, never the deleted credential's under the general key's grant;
+     * with no general key under the id, the lookup would reach the
+     * credential, and both are refused. A real [KeystoreManager] resolves.
+     */
+    @Test
+    fun aPendingCredentialDeleteNeverExportsTheCredentialAsTheGeneralKey() = runTest {
+        val aliases = HashMap<String, ByteArray>()
+        val platform = mockk<KeyStore>(relaxed = true)
+        every { platform.containsAlias(any()) } answers { firstArg<String>() in aliases }
+        every { platform.getCertificate(any()) } answers {
+            aliases[firstArg()]?.let { bytes ->
+                mockk<java.security.cert.Certificate> {
+                    every { publicKey } returns mockk { every { encoded } returns bytes }
+                }
+            }
+        }
+        every { KeyStore.getInstance("AndroidKeyStore") } returns platform
+        val credentialKey = "credential".toByteArray()
+        val generalKey = "general".toByteArray()
+        aliases["xkey_credential_$KEY_ID"] = credentialKey
+        aliases["xkey_key_$KEY_ID"] = generalKey
+        // The credential's delete is owed beside the general key's row 7.
+        coEvery { policies.keyInstance(KEY_ID) } returns 7L
+        coEvery { policies.deletion(KEY_ID) } returns com.automatethethings.xkey.storage.entity.KeyDeletionEntity(
+            KEY_ID, 7L, "keystore",
+            JSONObject().put("${KeystoreManager.KEYSTORE_ENTRY}xkey_credential_$KEY_ID", "1").toString()
+        )
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = KeystoreManager(context),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val getPublicKey = Request(
+            id = 5,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+
+        assertEquals(
+            "getPublicKey exports the general key's own key",
+            Base64.getEncoder().encodeToString(generalKey),
+            success(served(getPublicKey)).getString("publicKey")
+        )
+        val pem = success(served(importSharedKey())).getString("public_key_pem")
+        assertTrue("importSharedKey exports the general key's own key: $pem", Base64.getEncoder().encodeToString(generalKey) in pem)
+        assertFalse(Base64.getEncoder().encodeToString(credentialKey) in pem)
+
+        // No general key under the id: the lookup would read the credential.
+        aliases.remove("xkey_key_$KEY_ID")
+        for (request in listOf(getPublicKey, importSharedKey())) {
+            val response = Response.fromJson(served(request))
+            assertEquals("refused: $response", ErrorCodes.KEY_NOT_FOUND, response.error?.code)
+        }
+    }
+
+    /**
+     * #255 review r2, the bypass check: every public-key or material lookup
+     * an RPC makes in Handler names the user key it reads, so it resolves
+     * through [KeystoreManager.resolveKey] with the kind its use gate is
+     * given, and the gate ([com.automatethethings.xkey.storage.KeyPolicyStore.requireUsable])
+     * resolves through the same resolver: Handler reads no Keystore alias
+     * itself, and every store is built with the Keystore's resolver.
+     */
+    @Test
+    fun everyKeyLookupInHandlerResolvesTheKindItsGateChecks() {
+        val source = handlerSource()
+        val lookups = Regex("keystoreManager\\.(getPublicKeyDER|getPublicKeyPEM|getPublicKeySSH|getCOSEPublicKey|getPublicKey|getAttestationChain|keySecurityLevel|resolveKeystoreAlias|resolveKey)\\(([^)]*)\\)")
+            .findAll(source).toList()
+        assertTrue("lookups found: ${lookups.size}", lookups.size >= 9)
+        for (lookup in lookups) {
+            assertTrue(
+                "a lookup names the user key it reads: ${lookup.value}",
+                Regex(",\\s*com\\.automatethethings\\.xkey\\.crypto\\.UserKeyKind\\.(GENERAL|CREDENTIAL)$").containsMatchIn(lookup.groupValues[2])
+            )
+        }
+        for (raw in listOf("xkey_credential_", "xkey_key_", "KEY_ALIAS_PREFIX", "keyStore.", "containsAlias(")) {
+            assertFalse("Handler reads a Keystore alias itself: $raw", raw in source.lines().filterNot { it.trim().startsWith("//") || it.trim().startsWith("*") }.joinToString("\n"))
+        }
+        assertTrue("Handler's store gates through the Keystore resolver", "KeyPolicyStore.of(XKeyDatabase.getInstance(context), keystoreManager)" in source)
+
+        val main = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
+        val manager = java.io.File(main, "com/automatethethings/xkey/crypto/KeystoreManager.kt").readText()
+        assertTrue(
+            "resolveKeystoreAlias is the resolver's alias",
+            "fun resolveKeystoreAlias(keyId: String, kind: UserKeyKind? = null): String? = resolveKey(keyId, kind)?.alias" in manager
+        )
+        for (getter in listOf("getPublicKeyDER", "getPublicKeySSH", "getPublicKey", "getCOSEPublicKey", "getAttestationChain", "keySecurityLevel")) {
+            val start = manager.indexOf("fun $getter(")
+            assertTrue("$getter found", start >= 0)
+            val body = manager.substring(start, manager.indexOf("\n    }\n", start))
+            assertTrue("$getter resolves with its kind", Regex("resolveKeystoreAlias\\(\\w+, kind\\)").containsMatchIn(body))
+        }
+        val store = java.io.File(main, "com/automatethethings/xkey/storage/KeyPolicyStore.kt").readText()
+        assertTrue("the gate resolves as the lookups do", "keys = KeyResolver { keyId, kind -> keystore.resolveKey(keyId, kind) }" in store)
+        assertTrue("requireUsable checks the key the lookup reaches", "keys.resolve(keyId, kind)" in store)
+        main.walkTopDown().filter { it.extension == "kt" }.forEach { file ->
+            Regex("KeyPolicyStore\\.of\\(([^\\n]*)\\)").findAll(file.readText()).forEach { call ->
+                assertTrue("${file.name}: every store resolves through the Keystore: ${call.value}", "," in call.groupValues[1])
+            }
+        }
     }
 
     // -----------------------------------------------------------------

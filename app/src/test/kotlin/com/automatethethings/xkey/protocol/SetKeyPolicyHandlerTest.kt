@@ -180,7 +180,7 @@ class SetKeyPolicyHandlerTest {
         coEvery { policyDao.putPolicyRow(any()) } answers { denial = firstArg<KeyPolicyEntity>().denial }
         coEvery { policyDao.setKeyPolicy(keyId, any()) } coAnswers { write(secondArg()) }
         mockkObject(KeyPolicyStore.Companion)
-        every { KeyPolicyStore.of(any()) } answers {
+        every { KeyPolicyStore.of(any(), any()) } answers {
             KeyPolicyStore(
                 policyDao,
                 object : KeyPolicyStore.Transactor {
@@ -310,7 +310,7 @@ class SetKeyPolicyHandlerTest {
             storedRevision++
             1
         }
-        val store = KeyPolicyStore.of(mockk())
+        val store = KeyPolicyStore.of(mockk(), mockk())
         // The sheet's widening, made first, holds the edits queue in its write.
         val sheet = async(Dispatchers.Default) {
             com.automatethethings.xkey.ui.KeySharingPeers.setKeyPolicy(

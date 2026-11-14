@@ -15,6 +15,8 @@
 package com.automatethethings.xkey.storage
 
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.ResolvedKey
 import com.automatethethings.xkey.crypto.UserKeyKind
 import android.util.Log
 import androidx.room.withTransaction
@@ -110,8 +112,27 @@ class KeyPolicyStore(
     private val dao: KeyPolicyDao,
     private val transactor: Transactor,
     private val unrecorded: MutableMap<String, Held> = processObligations,
-    private val audit: DeletionAudit = DeletionAudit.APP
+    private val audit: DeletionAudit = DeletionAudit.APP,
+    private val keys: KeyResolver = KeyResolver.NONE
 ) {
+
+    /**
+     * Which user key a lookup of an id reaches (#255 review r2): in the app,
+     * [KeystoreManager.resolveKey], the resolver every Keystore lookup reads
+     * through, so [requireUsable] gates the key the lookup will read.
+     */
+    fun interface KeyResolver {
+        /**
+         * The alias and kind a use of [keyId] naming [kind] reads, or null if
+         * the Keystore holds none.
+         */
+        fun resolve(keyId: String, kind: UserKeyKind): ResolvedKey?
+
+        companion object {
+            /** No Keystore: every use is gated by the kind it names alone. */
+            val NONE = KeyResolver { _, _ -> null }
+        }
+    }
 
     /**
      * Records a key delete once it is committed (#193 r12): the one place a
@@ -541,11 +562,28 @@ class KeyPolicyStore(
      * surviving row ([deleteMaterial]) refuses only uses of the key it
      * deletes ([tombstoneOwes]). With no [kind], or for any other tombstone,
      * every use of the id is refused.
+     *
+     * The key a use reaches is the one its lookup reads, which [keys]
+     * resolves as every Keystore lookup naming [kind] does
+     * ([KeystoreManager.resolveKey]): its own key's alias when present, so
+     * the general key beside a pending credential delete stays usable; with
+     * its own key absent, whatever the id falls back to, so a use naming the
+     * general key that would read the credential is gated as that credential
+     * too, and one that would read a raw alias, neither key, is refused.
      */
     suspend fun requireUsable(keyId: String, kind: UserKeyKind? = null) {
         val tombstone = dao.deletion(keyId) ?: return
-        if (kind != null && isBesideRow(tombstone) && !tombstoneOwes(tombstone, kind)) return
+        if (kind != null && isBesideRow(tombstone)) {
+            val reached = reachedKinds(keyId, kind)
+            if (reached != null && reached.none { tombstoneOwes(tombstone, it) }) return
+        }
         throw KeyDeletedException(keyId)
+    }
+
+    /** The user keys a use naming [kind] reaches, or null if it reaches a raw alias. */
+    private fun reachedKinds(keyId: String, kind: UserKeyKind): Set<UserKeyKind>? {
+        val resolved = keys.resolve(keyId, kind) ?: return setOf(kind)
+        return setOf(kind, resolved.kind ?: return null)
     }
 
     /** Whether [tombstone] is a delete beside its id's surviving key row, the other key of a shared id. */
@@ -822,13 +860,17 @@ class KeyPolicyStore(
         fun refusesGrants(row: KeyPolicyEntity?): Boolean =
             row != null && (row.clearGrants || row.denial == SharingPolicyType.PRIVATE)
 
-        /** The store over [database], each write in a Room transaction. */
-        fun of(database: XKeyDatabase): KeyPolicyStore =
+        /**
+         * The store over [database], each write in a Room transaction, its
+         * use gate resolving ids through [keystore] (#255 review r2).
+         */
+        fun of(database: XKeyDatabase, keystore: KeystoreManager): KeyPolicyStore =
             KeyPolicyStore(
                 database.keyPolicyDao(),
                 object : Transactor {
                     override suspend fun <T> run(block: suspend () -> T): T = database.withTransaction { block() }
-                }
+                },
+                keys = KeyResolver { keyId, kind -> keystore.resolveKey(keyId, kind) }
             )
     }
 }

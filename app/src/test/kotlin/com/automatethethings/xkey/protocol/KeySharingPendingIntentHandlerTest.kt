@@ -130,7 +130,7 @@ class KeySharingPendingIntentHandlerTest {
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         mockkObject(KeyPolicyStore.Companion)
-        every { KeyPolicyStore.of(any()) } answers { tables.store() }
+        every { KeyPolicyStore.of(any(), any()) } answers { tables.store() }
         context = mockk(relaxed = true)
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns
             mockk<KeyguardManager>(relaxed = true)

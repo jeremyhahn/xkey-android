@@ -129,7 +129,7 @@ class QueuedApprovalRaceTest {
         // The store's transaction runs inline: a mock database has no Room
         // transaction executor, so withTransaction would never return (#193).
         mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
-        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any()) } answers {
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any(), any()) } answers {
             com.automatethethings.xkey.storage.KeyPolicyStore(
                 policies,
                 object : com.automatethethings.xkey.storage.KeyPolicyStore.Transactor {

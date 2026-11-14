@@ -39,7 +39,7 @@ class XKeyApplication : Application() {
     private fun replayOwedKeyDeletions() {
         val app = this
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            com.automatethethings.xkey.storage.replayKeyDeletions(app, KeyPolicyStore.of(XKeyDatabase.getInstance(app)))
+            com.automatethethings.xkey.storage.replayKeyDeletions(app, KeyPolicyStore.of(XKeyDatabase.getInstance(app), com.automatethethings.xkey.crypto.KeystoreManager(app)))
         }
     }
 

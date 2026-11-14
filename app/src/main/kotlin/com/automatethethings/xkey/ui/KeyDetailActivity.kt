@@ -117,7 +117,7 @@ class KeyDetailActivity : AppCompatActivity() {
     }
 
     private val keyDao by lazy { XKeyDatabase.getInstance(this).keyDao() }
-    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this)) }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this), keystoreManager) }
     private val keySharingPolicyDao: KeySharingPolicyDao by lazy {
         XKeyDatabase.getInstance(this).keySharingPolicyDao()
     }

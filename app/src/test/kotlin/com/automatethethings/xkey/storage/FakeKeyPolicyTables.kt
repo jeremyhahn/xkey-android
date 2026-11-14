@@ -49,7 +49,8 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
     /** The obligations a store holds in the process when their write fails; a "restart" keeps them, as one store per process does. */
     val unrecordedDenials: MutableMap<String, KeyPolicyStore.Held> = java.util.concurrent.ConcurrentHashMap()
 
-    fun store() = KeyPolicyStore(this, this, unrecordedDenials)
+    fun store(keys: KeyPolicyStore.KeyResolver = KeyPolicyStore.KeyResolver.NONE) =
+        KeyPolicyStore(this, this, unrecordedDenials, keys = keys)
 
     /** A key row as an unrouted path would leave it, with the row the 12 -> 13 migration seeds. */
     fun addKey(keyId: String, policy: SharingPolicyType): Long {

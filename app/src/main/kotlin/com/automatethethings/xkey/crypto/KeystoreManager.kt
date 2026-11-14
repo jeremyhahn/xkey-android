@@ -627,8 +627,8 @@ class KeystoreManager(private val context: Context) {
      * @param credentialId Base64-encoded credential ID.
      * @return The public key, or null if not found.
      */
-    fun getPublicKey(credentialId: String): PublicKey? {
-        val alias = resolveKeystoreAlias(credentialId) ?: return null
+    fun getPublicKey(credentialId: String, kind: UserKeyKind? = null): PublicKey? {
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: return null
         return keyStore.getCertificate(alias)?.publicKey
     }
 
@@ -638,11 +638,11 @@ class KeystoreManager(private val context: Context) {
      * @param credentialId Base64-encoded credential ID.
      * @return COSE-encoded public key bytes, or null if not found.
      */
-    fun getCOSEPublicKey(credentialId: String): ByteArray? {
+    fun getCOSEPublicKey(credentialId: String, kind: UserKeyKind? = null): ByteArray? {
         // Resolve across BOTH alias namespaces, as the DER/PEM/SSH exports do.
         // Using the FIDO2-only alias here made `local.getPublicKey` with
         // format=cose fail for every key created through local.generateKey.
-        val alias = resolveKeystoreAlias(credentialId) ?: return null
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: return null
         val publicKey = runCatching { keyStore.getCertificate(alias)?.publicKey }.getOrNull()
             ?: return null
         return encodeCOSEPublicKey(publicKey)
@@ -658,9 +658,9 @@ class KeystoreManager(private val context: Context) {
      * @param credentialId Base64-encoded credential ID.
      * @return Certificate chain, or null if not available.
      */
-    fun getAttestationChain(credentialId: String): List<Certificate>? {
+    fun getAttestationChain(credentialId: String, kind: UserKeyKind? = null): List<Certificate>? {
         // Resolve across both alias namespaces, as the export and signing paths do.
-        val alias = resolveKeystoreAlias(credentialId) ?: return null
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: return null
         return keyStore.getCertificateChain(alias)?.toList()
     }
 
@@ -702,8 +702,8 @@ class KeystoreManager(private val context: Context) {
      * @throws KeyInfoUnavailableException if a Keystore entry exists but its
      *         KeyInfo cannot be read.
      */
-    fun keySecurityLevel(keyId: String): KeySecurityLevel? {
-        val alias = resolveKeystoreAlias(keyId) ?: return null
+    fun keySecurityLevel(keyId: String, kind: UserKeyKind? = null): KeySecurityLevel? {
+        val alias = resolveKeystoreAlias(keyId, kind) ?: return null
         if (!keyStore.containsAlias(alias)) return KeySecurityLevel.SOFTWARE
         return aliasSecurityLevel(alias)
     }
@@ -1462,8 +1462,8 @@ class KeystoreManager(private val context: Context) {
      * @param keyId Key identifier.
      * @return DER-encoded public key bytes, or null if the key does not exist.
      */
-    fun getPublicKeyDER(keyId: String): ByteArray? {
-        val alias = resolveKeystoreAlias(keyId) ?: return null
+    fun getPublicKeyDER(keyId: String, kind: UserKeyKind? = null): ByteArray? {
+        val alias = resolveKeystoreAlias(keyId, kind) ?: return null
         val cert = keyStore.getCertificate(alias) ?: return null
         return cert.publicKey.encoded
     }
@@ -1477,8 +1477,8 @@ class KeystoreManager(private val context: Context) {
      * @param keyId Key identifier.
      * @return PEM-encoded public key string, or null if the key does not exist.
      */
-    fun getPublicKeyPEM(keyId: String): String? {
-        val der = getPublicKeyDER(keyId) ?: return null
+    fun getPublicKeyPEM(keyId: String, kind: UserKeyKind? = null): String? {
+        val der = getPublicKeyDER(keyId, kind) ?: return null
         val base64 = Base64.encodeToString(der, Base64.NO_WRAP)
 
         val sb = StringBuilder()
@@ -1508,8 +1508,8 @@ class KeystoreManager(private val context: Context) {
      * @param keyId Key identifier.
      * @return OpenSSH public key string, or null if the key does not exist or type is unsupported.
      */
-    fun getPublicKeySSH(keyId: String): String? {
-        val alias = resolveKeystoreAlias(keyId) ?: return null
+    fun getPublicKeySSH(keyId: String, kind: UserKeyKind? = null): String? {
+        val alias = resolveKeystoreAlias(keyId, kind) ?: return null
         val cert = keyStore.getCertificate(alias) ?: return null
         val publicKey = cert.publicKey
 
@@ -1627,22 +1627,46 @@ class KeystoreManager(private val context: Context) {
      * @param keyId The key identifier to resolve.
      * @return The Keystore alias, or null if no matching entry exists.
      */
-    fun resolveKeystoreAlias(keyId: String): String? {
+    fun resolveKeystoreAlias(keyId: String, kind: UserKeyKind? = null): String? = resolveKey(keyId, kind)?.alias
+
+    /**
+     * The one resolver of a key id (#255 review r2): the Keystore alias every
+     * lookup of [keyId] reads ([resolveKeystoreAlias] is its alias alone),
+     * and which user key that alias is. The deleted-key gate
+     * ([com.automatethethings.xkey.storage.KeyPolicyStore.requireUsable])
+     * asks this same resolver which key a use reaches, so a credential and a
+     * general key sharing an id can never be gated as one and read as the
+     * other.
+     *
+     * A use that names the user key it is for ([kind]) reads that key's own
+     * alias when it exists, so a general key's use never reads a credential
+     * sharing its id; only when its own key is absent does it resolve as an
+     * unnamed use does, and the gate then sees the key it reaches.
+     *
+     * @return The resolved alias and its [ResolvedKey.kind], or null if no
+     *         matching entry exists.
+     */
+    fun resolveKey(keyId: String, kind: UserKeyKind? = null): ResolvedKey? {
+        if (kind != null) {
+            val own = userKeyAlias(keyId, kind)
+            if (keyStore.containsAlias(own)) return ResolvedKey(own, kind)
+            if (kind == UserKeyKind.GENERAL && hasSoftwareEd25519Key(own)) return ResolvedKey(own, kind)
+        }
         val credentialAlias = KEY_ALIAS_PREFIX + keyId
-        if (keyStore.containsAlias(credentialAlias)) return credentialAlias
+        if (keyStore.containsAlias(credentialAlias)) return ResolvedKey(credentialAlias, UserKeyKind.CREDENTIAL)
 
         val generalAlias = KEY_ALIAS_PREFIX_GENERAL + keyId
-        if (keyStore.containsAlias(generalAlias)) return generalAlias
+        if (keyStore.containsAlias(generalAlias)) return ResolvedKey(generalAlias, UserKeyKind.GENERAL)
 
         // A PIV slot key is reached only through PivKeyManager, which keeps
         // its piv_slots row in step; a raw alias must not resolve to it.
-        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return keyId
+        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return ResolvedKey(keyId, null)
 
         // Check Ed25519 software-backed keys. Callers use the result as a
         // Keystore alias, so a key stored under the general alias resolves to
         // that alias, never to keyId: keyId may be a PIV slot's raw alias.
-        if (hasSoftwareEd25519Key(generalAlias)) return generalAlias
-        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && hasSoftwareEd25519Key(keyId)) return keyId
+        if (hasSoftwareEd25519Key(generalAlias)) return ResolvedKey(generalAlias, UserKeyKind.GENERAL)
+        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && hasSoftwareEd25519Key(keyId)) return ResolvedKey(keyId, null)
 
         return null
     }
@@ -2361,3 +2385,10 @@ class KeystoreManager(private val context: Context) {
  * key (`xkey_key_<id>`, with its Ed25519 and software key store material).
  */
 enum class UserKeyKind { CREDENTIAL, GENERAL }
+
+/**
+ * A key id resolved by [KeystoreManager.resolveKey]: the Keystore [alias] a
+ * lookup reads, and the user key it is ([kind]), or null for a raw alias
+ * that is neither a credential nor a general key.
+ */
+data class ResolvedKey(val alias: String, val kind: UserKeyKind?)

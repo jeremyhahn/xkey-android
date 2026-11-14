@@ -265,12 +265,12 @@ class MediaSigningService : Service() {
 
                 // Sign with the configured key
                 // Under the material-use lock and its deleted-key recheck (#255 review).
-                val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db)
+                val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
                     .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(keyId, hashBytes, keyEntity.algorithm) }
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
                 // Compute key fingerprint
-                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
+                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
                 val keyFingerprint = if (pubKeyDer != null) {
                     MediaHasher.hashBytes(pubKeyDer)
                 } else keyId

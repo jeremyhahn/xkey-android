@@ -81,7 +81,7 @@ class KeyStoreSyncChurnTest {
             keystoreManager = KeystoreManager(context),
             credentialDao = database.credentialMetadataDao(),
             keyDao = recordingDao,
-            keyPolicyStore = KeyPolicyStore.of(database)
+            keyPolicyStore = KeyPolicyStore.of(database, KeystoreManager(context))
         )
         keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
     }

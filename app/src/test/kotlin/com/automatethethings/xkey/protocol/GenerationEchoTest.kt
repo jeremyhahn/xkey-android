@@ -124,7 +124,7 @@ class GenerationEchoTest {
     @Test
     fun `a local method echoes the generation on success`() = runTest {
         coEvery { keyDao.getByKeyId("k1") } returns mockk<KeyEntity>(relaxed = true)
-        every { keystoreManager.getPublicKeyPEM("k1") } returns "PEM"
+        every { keystoreManager.getPublicKeyPEM("k1", any()) } returns "PEM"
 
         val response = answer(
             """{"id":2,"generation":43,"method":"local.getPublicKey","params":{"keyId":"k1","format":"${ExportFormats.PEM}"}}"""
