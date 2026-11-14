@@ -1714,9 +1714,6 @@ class RequestHandler(
         val signature = keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm)
         val durationMs = System.currentTimeMillis() - startTime
 
-        // Record usage
-        keyDao.recordUsage(signParams.keyId)
-
         // Log signing request
         // signWithAlgorithm ran signAlgorithm (it refuses any other name).
         logKeyUse(
@@ -1760,8 +1757,6 @@ class RequestHandler(
         )
         val durationMs = System.currentTimeMillis() - startTime
 
-        keyDao.recordUsage(decryptParams.keyId)
-
         // The OAEP parameters the cipher ran (KeystoreManager.rsaOaepSpec).
         logKeyUse(
             KeyUse.DECRYPT, decryptParams.keyId,
@@ -1797,10 +1792,17 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
+            val swStart = System.currentTimeMillis()
             val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
             )
-            keyDao.recordUsage(symParams.keyId)
+            logKeyUse(
+                KeyUse.ENCRYPT, symParams.keyId,
+                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+                durationMs = System.currentTimeMillis() - swStart,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(ct), payloadField = LocalSymmetricResult.FIELD_CIPHERTEXT).toJson()
@@ -1812,8 +1814,6 @@ class RequestHandler(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
         )
         val durationMs = System.currentTimeMillis() - startTime
-
-        keyDao.recordUsage(symParams.keyId)
 
         // Log encryption request
         logKeyUse(
@@ -1851,10 +1851,17 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
+            val swStart = System.currentTimeMillis()
             val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
             )
-            keyDao.recordUsage(symParams.keyId)
+            logKeyUse(
+                KeyUse.DECRYPT, symParams.keyId,
+                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+                durationMs = System.currentTimeMillis() - swStart,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(pt), payloadField = LocalSymmetricResult.FIELD_PLAINTEXT).toJson()
@@ -1866,8 +1873,6 @@ class RequestHandler(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
         )
         val durationMs = System.currentTimeMillis() - startTime
-
-        keyDao.recordUsage(symParams.keyId)
 
         // Log decryption request
         logKeyUse(
@@ -1911,9 +1916,18 @@ class RequestHandler(
     private enum class KeyUse { SIGN, DECRYPT, ENCRYPT, HMAC, KEY_DERIVATION }
 
     /**
-     * The one writer of key-use audit entries (sign, decrypt, encrypt, HMAC,
-     * ECDH): one success entry naming the key, its stored type
-     * ([auditKeyType]) and the algorithm that ran.
+     * The one record of a completed key use (sign, decrypt, encrypt, HMAC,
+     * ECDH): the key's usage ([KeyDao.recordUsage]) and one success audit
+     * entry naming the key, its stored type ([auditKeyType]) and the
+     * algorithm that ran. Every handler calls it once its key operation has
+     * returned, and never records usage itself (KeyUseRecordChokePointTest).
+     *
+     * The record runs under [NonCancellable]: a transport cancels a request
+     * when its desktop disconnects or is unpaired, and the key has already
+     * been used by the time this runs, so a cancel at the usage write or the
+     * key-type lookup must not drop the entry. The caller still sees the
+     * cancellation once this returns. The audit entry is written even when
+     * the usage write fails.
      *
      * [executedAlgorithm] is the algorithm the operation executed, taken from
      * the crypto path (an HmacResult, SoftwareKeyOps.hmacAlgorithm,
@@ -1937,29 +1951,33 @@ class RequestHandler(
         durationMs: Long,
         caller: AuditCaller,
         softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
-    ) {
-        val keyType = auditKeyType(keyId, softwareKey)
-        when (use) {
-            KeyUse.SIGN -> AuditLogger.logSigningRequest(
-                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-            )
-            KeyUse.DECRYPT -> AuditLogger.logDecryptionRequest(
-                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-            )
-            KeyUse.ENCRYPT -> AuditLogger.logEncryptionRequest(
-                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-            )
-            KeyUse.HMAC -> AuditLogger.logHmacRequest(
-                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-            )
-            KeyUse.KEY_DERIVATION -> AuditLogger.logKeyDerivationRequest(
-                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-            )
+    ): Unit = withContext(NonCancellable) {
+        try {
+            keyDao.recordUsage(keyId)
+        } finally {
+            val keyType = auditKeyType(keyId, softwareKey)
+            when (use) {
+                KeyUse.SIGN -> AuditLogger.logSigningRequest(
+                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+                )
+                KeyUse.DECRYPT -> AuditLogger.logDecryptionRequest(
+                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+                )
+                KeyUse.ENCRYPT -> AuditLogger.logEncryptionRequest(
+                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+                )
+                KeyUse.HMAC -> AuditLogger.logHmacRequest(
+                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+                )
+                KeyUse.KEY_DERIVATION -> AuditLogger.logKeyDerivationRequest(
+                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+                )
+            }
         }
     }
 
@@ -1988,7 +2006,6 @@ class RequestHandler(
                 sw.material, hmacParams.getDataBytes(), sw.algorithm
             )
             val swDurationMs = System.currentTimeMillis() - swStart
-            keyDao.recordUsage(hmacParams.keyId)
             // The MAC and the data stay out of the entry.
             logKeyUse(
                 KeyUse.HMAC, hmacParams.keyId,
@@ -2007,7 +2024,6 @@ class RequestHandler(
         val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
         val durationMs = System.currentTimeMillis() - startTime
 
-        keyDao.recordUsage(hmacParams.keyId)
         logKeyUse(
             KeyUse.HMAC, hmacParams.keyId,
             executedAlgorithm = hmac.algorithm,
@@ -2048,8 +2064,6 @@ class RequestHandler(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
         )
         val durationMs = System.currentTimeMillis() - startTime
-
-        keyDao.recordUsage(ecdhParams.keyId)
 
         // Log the key agreement; the shared secret and peer key stay out of it.
         logKeyUse(
@@ -3594,14 +3608,18 @@ class RequestHandler(
                 return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
             }
 
-            val cred = db.oathCredentialDao().getByOathId(credentialId)
+            // The code exists (a HOTP counter has advanced): a cancel at the
+            // credential read must not drop the entry that names it.
+            val cred = withContext(NonCancellable) {
+                db.oathCredentialDao().getByOathId(credentialId).also {
+                    AuditLogger.logOathCodeGenerated(credentialId, it?.issuer, it?.accountName ?: "")
+                }
+            }
             // expires_in: seconds until the current TOTP window ends (0 for HOTP).
             val expiresIn = if (cred?.oathType == "TOTP") {
                 val period = cred.periodSeconds.toLong()
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
-
-            AuditLogger.logOathCodeGenerated(credentialId, cred?.issuer, cred?.accountName ?: "")
 
             val result = JSONObject().apply {
                 put("code", code)
@@ -4274,11 +4292,21 @@ class RequestHandler(
             return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
         }
 
+        val caller = auditCaller()
+
         // Sign the content hash
         return try {
             val hashBytes = hexToBytes(contentHash)
+            val signAlgorithm = signingKey.algorithm
+            val startTime = System.currentTimeMillis()
             val signatureBytes = keystoreManager.signWithAlgorithm(
-                signingKey.keyId, hashBytes, signingKey.algorithm
+                signingKey.keyId, hashBytes, signAlgorithm
+            )
+            logKeyUse(
+                KeyUse.SIGN, signingKey.keyId,
+                executedAlgorithm = signAlgorithm,
+                durationMs = System.currentTimeMillis() - startTime,
+                caller = caller
             )
             val publicKeyDer = keystoreManager.getPublicKeyDER(signingKey.keyId)
                 ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")

@@ -673,10 +673,17 @@ class KeyShareAuditTest {
             "persistAudited refuses a cancelled request, then runs under NonCancellable",
             choke.containsMatchIn(source)
         )
+        // Besides persistAudited, only the completed-key-use record
+        // (logKeyUse, KeyUseRecordChokePointTest) and the OATH code entry
+        // run under NonCancellable; neither writes a share.
+        val nonCancellableIn = Regex("withContext\\(NonCancellable\\)").findAll(source).map { match ->
+            Regex("fun (?:<[^>]*> )?(\\w+)\\(").findAll(source)
+                .last { it.range.first < match.range.first }.groupValues[1]
+        }.toList()
         assertEquals(
             "persistAudited is the one non-cancellable write and record",
-            1,
-            Regex("withContext\\(NonCancellable\\)").findAll(source).count()
+            listOf("handleOathGenerate", "logKeyUse", "persistAudited"),
+            nonCancellableIn.sorted()
         )
         assertTrue(
             "the sharing-policy change records through persistAudited",

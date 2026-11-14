@@ -78,6 +78,7 @@ class HmacEcdhAuditTest {
 
     private lateinit var handler: RequestHandler
     private lateinit var keystore: KeystoreManager
+    private lateinit var keyDao: KeyDao
     private val inserted = mutableListOf<AuditLogEntity>()
 
     private val data = Base64.getEncoder().encodeToString("payload-to-mac".toByteArray())
@@ -109,7 +110,7 @@ class HmacEcdhAuditTest {
         // Stored key types: ECDH runs on an EC key stored as signing, and the
         // Keystore HMAC key is stored as "secret"; neither matches the
         // operation, so a hardcoded keyType shows up as a mismatch.
-        val keyDao = mockk<KeyDao>(relaxed = true)
+        keyDao = mockk<KeyDao>(relaxed = true)
         coEvery { keyDao.getByKeyId(any()) } returns null
         coEvery { keyDao.getByKeyId("hw-ecdh") } returns
             KeyEntity(keyId = "hw-ecdh", keyType = "signing", algorithm = "ES256", label = "ecdh", keySizeBits = 256, source = "local")
@@ -415,6 +416,97 @@ class HmacEcdhAuditTest {
                 listOf(PEER_B to "Desktop B", PEER_A to "Desktop A"),
                 devices
             )
+        }
+    }
+
+    /**
+     * A desktop that disconnects or is unpaired cancels its in-flight
+     * requests. Once the key operation has run, a cancel at either suspension
+     * of its record (the usage write, the key-type lookup) still leaves the
+     * usage and the audit entry for the key that was used.
+     */
+    @Test
+    fun `a request cancelled after its key operation still records usage and audit`() = runTest {
+        val swAes = SoftwareKey(
+            keyId = "sw-aes", algorithm = "AES-256-GCM", keyType = "symmetric", keySize = 256,
+            exportable = true, shareable = true, material = swMaterial
+        )
+        val plain = "symmetric payload".toByteArray()
+        val swCt = Base64.getEncoder().encodeToString(
+            com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(swMaterial, plain, null)
+        )
+        val ct = Base64.getEncoder().encodeToString(ByteArray(256) { 5 })
+
+        // The key operation arms the pause: only a suspension after it waits.
+        var armed = false
+        var gate: CompletableDeferred<Unit>? = null
+        var pausedAt: String? = null
+        suspend fun pause(point: String, at: String) {
+            if (armed && point == at) {
+                armed = false
+                pausedAt = point
+                gate!!.await()
+            }
+        }
+        var at = ""
+        every { anyConstructed<SoftwareKeyStore>().get("sw-aes") } answers { armed = true; swAes }
+        every { anyConstructed<SoftwareKeyStore>().get("sw-hmac") } answers {
+            armed = true
+            swAes.copy(keyId = "sw-hmac", algorithm = "HMAC-SHA256")
+        }
+        coEvery { keystore.generalKeyExists(any()) } returns true
+        coEvery { keystore.signWithAlgorithm("hw-ecdh", any(), any()) } answers { armed = true; ByteArray(64) { 8 } }
+        coEvery { keystore.rsaDecryptWithAlgorithm("hw-ecdh", any()) } answers {
+            armed = true; DecryptResult(ByteArray(16) { 6 }, "RSA-OAEP-SHA-256-MGF1-SHA-1")
+        }
+        coEvery { keystore.symmetricEncrypt("hw-sym", any(), any()) } answers { armed = true; ByteArray(44) { 1 } }
+        coEvery { keystore.symmetricDecrypt("hw-sym", any(), any()) } answers { armed = true; ByteArray(16) { 2 } }
+        coEvery { keystore.computeHMACWithAlgorithm("hw-hmac", any()) } answers {
+            armed = true; HmacResult(keystoreMac, "HMAC-SHA256")
+        }
+        coEvery { keystore.performECDH("hw-ecdh", any()) } answers { armed = true; sharedSecret }
+        coEvery { keyDao.recordUsage(any(), any()) } coAnswers { pause("usage", at) }
+        val stored = mapOf(
+            "hw-ecdh" to KeyEntity(keyId = "hw-ecdh", keyType = "signing", algorithm = "ES256", label = "ecdh", keySizeBits = 256, source = "local"),
+            "hw-hmac" to KeyEntity(keyId = "hw-hmac", keyType = "secret", algorithm = "HMAC-SHA512", label = "hmac", keySizeBits = 256, source = "local")
+        )
+        coEvery { keyDao.getByKeyId(any()) } coAnswers {
+            pause("keyType", at)
+            stored[firstArg()]
+        }
+
+        val requests = listOf(
+            Triple(MethodNames.LOCAL_SIGN, "hw-ecdh", """{"keyId":"hw-ecdh","data":"$data","algorithm":"ES256","userVerificationRequired":false}"""),
+            Triple(MethodNames.LOCAL_DECRYPT, "hw-ecdh", """{"keyId":"hw-ecdh","ciphertext":"$ct"}"""),
+            Triple(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, "hw-sym", """{"keyId":"hw-sym","plaintext":"$data"}"""),
+            Triple(MethodNames.LOCAL_SYMMETRIC_DECRYPT, "hw-sym", """{"keyId":"hw-sym","ciphertext":"$ct"}"""),
+            Triple(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, "sw-aes", """{"keyId":"sw-aes","plaintext":"$data"}"""),
+            Triple(MethodNames.LOCAL_SYMMETRIC_DECRYPT, "sw-aes", """{"keyId":"sw-aes","ciphertext":"$swCt"}"""),
+            Triple(MethodNames.LOCAL_HMAC, "hw-hmac", """{"keyId":"hw-hmac","data":"$data"}"""),
+            Triple(MethodNames.LOCAL_HMAC, "sw-hmac", """{"keyId":"sw-hmac","data":"$data"}"""),
+            Triple(MethodNames.LOCAL_ECDH, "hw-ecdh", """{"keyId":"hw-ecdh","peerPublicKey":"$peerKey"}""")
+        )
+        for (point in listOf("usage", "keyType")) {
+            for ((method, key, params) in requests) {
+                val case = "$method $key, cancelled at the $point"
+                inserted.clear()
+                armed = false
+                pausedAt = null
+                at = point
+                gate = CompletableDeferred()
+                val request = async { servedBy(PEER_A) { call(method, params) } }
+                testScheduler.runCurrent()
+                assertEquals("$case: the request waits after its key operation", point, pausedAt)
+
+                request.cancel()
+                testScheduler.runCurrent()
+                gate?.complete(Unit)
+                testScheduler.advanceUntilIdle()
+
+                val entries = inserted.filter { it.success && it.keyId == key }
+                assertEquals("$case: one success entry", 1, entries.size)
+                assertEquals("$case: the requesting desktop", PEER_A, entries[0].deviceId)
+            }
         }
     }
 
