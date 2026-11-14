@@ -16,9 +16,11 @@
 package com.automatethethings.xkey.protocol
 
 import android.content.Context
+import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.auth.SessionAuthManager
+import com.automatethethings.xkey.crypto.KeystoreCapabilities
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
@@ -34,6 +36,7 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.KeySharingPolicy
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.runBlocking
+import kotlin.coroutines.CoroutineContext
 import org.json.JSONObject
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
@@ -173,10 +176,14 @@ class RequestHandlerErrorPathTest {
     // Baseline: every test starts from a confirmed, unrestricted peer
     // ------------------------------------------------------------------
 
+    /** The peer each request is served for; null is an anonymous connection. */
+    private var servedPeer: String? = null
+
     @Before
     fun resetHandlerState() {
         handler.setConnectedDevicePublicKeyHex(peerKeyHex)
         bareHandler.setConnectedDevicePublicKeyHex(peerKeyHex)
+        servedPeer = peerKeyHex
         requireAttestation(
             forKeyUse = false,
             forKeyAttestation = false,
@@ -317,7 +324,7 @@ class RequestHandlerErrorPathTest {
         for (method in methods) {
             assertEquals(
                 "$method must reject a call with no params",
-                ErrorCodes.INVALID_PARAMS,
+                expectedCode(method, ErrorCodes.INVALID_PARAMS),
                 call(method).errorCode()
             )
         }
@@ -339,7 +346,7 @@ class RequestHandlerErrorPathTest {
         for (entry in cases) {
             assertEquals(
                 "${entry.key} must report the missing field as INVALID_PARAMS",
-                ErrorCodes.INVALID_PARAMS,
+                expectedCode(entry.key, ErrorCodes.INVALID_PARAMS),
                 call(entry.key, entry.value).errorCode()
             )
         }
@@ -511,7 +518,7 @@ class RequestHandlerErrorPathTest {
         for (entry in cases) {
             assertEquals(
                 "${entry.key} on an unknown key must be KEY_NOT_FOUND",
-                ErrorCodes.KEY_NOT_FOUND,
+                expectedCode(entry.key, ErrorCodes.KEY_NOT_FOUND),
                 call(entry.key, entry.value).errorCode()
             )
         }
@@ -730,7 +737,7 @@ class RequestHandlerErrorPathTest {
         for (entry in gatedMethods) {
             assertEquals(
                 "${entry.key} must be gated on device attestation",
-                ErrorCodes.DEVICE_ATTESTATION_REQUIRED,
+                expectedCode(entry.key, ErrorCodes.DEVICE_ATTESTATION_REQUIRED),
                 call(entry.key, entry.value).errorCode()
             )
         }
@@ -786,7 +793,7 @@ class RequestHandlerErrorPathTest {
     @Test
     fun anAnonymousSessionIsNotGated() {
         requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
-        handler.setConnectedDevicePublicKeyHex(null)
+        servedPeer = null
 
         assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
     }
@@ -795,7 +802,7 @@ class RequestHandlerErrorPathTest {
     @Test
     fun aPeerWithNoStoredRecordIsNotGated() {
         requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
-        handler.setConnectedDevicePublicKeyHex(UNKNOWN_PEER_HEX)
+        servedPeer = UNKNOWN_PEER_HEX
 
         assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
     }
@@ -807,7 +814,7 @@ class RequestHandlerErrorPathTest {
     /** Sharing decisions need a peer to decide about. */
     @Test
     fun sharingWithoutAConfirmedPeerIsDenied() {
-        handler.setConnectedDevicePublicKeyHex(null)
+        servedPeer = null
 
         assertEquals(
             ErrorCodes.OPERATION_DENIED,
@@ -926,6 +933,37 @@ class RequestHandlerErrorPathTest {
         assertEquals(
             ErrorCodes.OPERATION_DENIED,
             call("local.importSharedKey", JSONObject().put("key_id", keyId)).errorCode()
+        )
+    }
+
+    /**
+     * The SELECTED_PEERS grant is checked against the request's own caller:
+     * the handler-wide peer's grant never lends itself to another caller, and
+     * an ungranted handler-wide peer never refuses the granted caller.
+     */
+    @Test
+    fun selectedPeersPolicyFollowsTheRequestCallerNotTheHandlerWidePeer() {
+        val keyId = seedSoftwareKey(
+            keyId = "share-caller-peer-$runId",
+            exportable = true,
+            shareable = true,
+            policy = SharingPolicyType.SELECTED_PEERS,
+            material = randomMaterial()
+        )
+        setSharingPolicy(keyId, peerKeyHex)
+
+        servedPeer = UNKNOWN_PEER_HEX
+        assertEquals(
+            "the handler-wide peer's grant must not reach another caller",
+            ErrorCodes.OPERATION_DENIED,
+            call("local.importSharedKey", JSONObject().put("key_id", keyId)).errorCode()
+        )
+
+        handler.setConnectedDevicePublicKeyHex(UNKNOWN_PEER_HEX)
+        servedPeer = peerKeyHex
+        assertTrue(
+            "the granted caller exports whatever the handler-wide peer",
+            call("local.importSharedKey", JSONObject().put("key_id", keyId)).isSuccess()
         )
     }
 
@@ -1058,7 +1096,7 @@ class RequestHandlerErrorPathTest {
         )
 
         for (entry in unmanaged) {
-            val response = runBlocking {
+            val response = runBlocking(servedCaller()) {
                 bareHandler.handleRequest(
                     Request(nextRequestId.getAndIncrement(), entry.first, entry.second)
                 )
@@ -1288,14 +1326,22 @@ class RequestHandlerErrorPathTest {
      */
     private fun dispatch(method: String, params: JSONObject?): Response {
         val request = Request(nextRequestId.getAndIncrement(), method, params)
-        return runBlocking { handler.handleRequest(request) }
+        return runBlocking(servedCaller()) { handler.handleRequest(request) }
     }
 
     private fun rawCall(json: String): Response {
         val bytes = json.toByteArray()
-        val response = runBlocking { handler.handleRawRequest(bytes) }
+        val response = runBlocking(servedCaller()) { handler.handleRawRequest(bytes) }
         return Response.fromJson(response)
     }
+
+    /**
+     * Every request carries its own caller, [servedPeer] (null is an explicit
+     * anonymous connection), as a served transport installs it; the
+     * handler-wide peer never stands in for it.
+     */
+    private fun servedCaller(): CoroutineContext =
+        RequestHandler.servedConnection(SessionBindingProvider { null }, servedPeer, "test:connection")
 
     /**
      * Returns the result of a successful response.
@@ -1308,6 +1354,18 @@ class RequestHandlerErrorPathTest {
 
     private fun Response.errorCode(): Int =
         error?.code ?: throw AssertionError("expected an error response, got: " + toJsonString())
+
+    /**
+     * The code [method] answers on this device when API 31+ would answer
+     * [code]: below API 31 local.ecdh refuses with ECDH_FAILED before it
+     * reads its parameters, the key or the attestation gate.
+     */
+    private fun expectedCode(method: String, code: Int): Int =
+        if (method == "local.ecdh" && !KeystoreCapabilities.supportsEcdh(Build.VERSION.SDK_INT)) {
+            ErrorCodes.ECDH_FAILED
+        } else {
+            code
+        }
 
     private fun Response.errorMessage(): String =
         error?.message ?: throw AssertionError("expected an error response, got: " + toJsonString())

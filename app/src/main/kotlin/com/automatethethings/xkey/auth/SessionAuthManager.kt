@@ -14,10 +14,10 @@
  */
 package com.automatethethings.xkey.auth
 
+import android.os.SystemClock
 import com.automatethethings.xkey.settings.BiometricAuthMode
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.UserVerificationPolicy
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -28,12 +28,18 @@ import java.util.concurrent.atomic.AtomicReference
  * - **DISABLED**: No biometric required, only user presence
  * - **PER_OPERATION**: Biometric required for every operation
  * - **TIME_WINDOW**: Biometric valid for a configurable duration after authentication
- * - **PER_SESSION**: Biometric required once per BLE connection session
+ * - **PER_SESSION**: Biometric required once per connection; each live
+ *   connection (USB, BLE, TCP) keeps its own approval (#134)
+ *
+ * Clock:
+ * - The TIME_WINDOW window is measured on [clock], by default
+ *   `SystemClock.elapsedRealtime()`: milliseconds since boot, monotonic, and
+ *   unaffected by the user or the network setting the wall clock
+ * - A reading below the recorded authentication counts as expired
  *
  * Thread Safety:
- * - [lastAuthTime] uses [AtomicLong] for lock-free timestamp updates
- * - [currentSessionId] uses [AtomicReference] for lock-free session tracking
- * - [sessionAuthenticated] uses volatile for visibility guarantees
+ * - [lastAuthTime] uses [AtomicReference] for lock-free timestamp updates
+ * - [authenticatedSessions] is guarded by its own monitor
  *
  * Usage:
  * ```kotlin
@@ -50,38 +56,30 @@ import java.util.concurrent.atomic.AtomicReference
  * authManager.clearSession()
  * ```
  *
+ * @param clock Monotonic milliseconds; tests pass a fake one.
  * @see BiometricSettingsData
  * @see BiometricAuthMode
  */
-class SessionAuthManager {
+class SessionAuthManager(
+    private val clock: () -> Long = SystemClock::elapsedRealtime
+) {
 
     /**
-     * Timestamp (in milliseconds) of the last successful biometric authentication.
+     * [clock] reading (in milliseconds) at the last successful biometric authentication.
      *
      * Used by [BiometricAuthMode.TIME_WINDOW] to determine if the authentication
-     * window has expired. A value of 0 indicates no prior authentication.
+     * window has expired. Null means never authenticated, or invalidated.
      */
-    private val lastAuthTime: AtomicLong = AtomicLong(0L)
+    private val lastAuthTime: AtomicReference<Long?> = AtomicReference(null)
 
     /**
-     * Current BLE session identifier (typically the device address).
-     *
-     * Used by [BiometricAuthMode.PER_SESSION] to detect session changes and
-     * reset the authenticated state when a new device connects.
+     * The connection ids approved for [BiometricAuthMode.PER_SESSION], oldest
+     * first. A request on one connection never changes another's approval, so
+     * a BLE request between two USB requests leaves USB approved. Bounded by
+     * [MAX_SESSIONS]: past it the oldest approval is dropped, which only
+     * costs that connection a prompt. A null id is a session of its own.
      */
-    private val currentSessionId: AtomicReference<String?> = AtomicReference(null)
-
-    /**
-     * Whether the current session has been authenticated.
-     *
-     * This flag is set to true after successful biometric authentication in
-     * [BiometricAuthMode.PER_SESSION] mode, allowing subsequent operations
-     * to skip biometric prompts until the session ends.
-     *
-     * Volatile ensures visibility across threads without requiring synchronization.
-     */
-    @Volatile
-    private var sessionAuthenticated: Boolean = false
+    private val authenticatedSessions = LinkedHashSet<String>()
 
     /**
      * Determines whether biometric authentication is required for the current operation.
@@ -92,14 +90,12 @@ class SessionAuthManager {
      * - **UV DISABLED**: Always returns `false` - only user presence required
      * - **PER_OPERATION**: Always returns `true` - every operation requires biometric
      * - **TIME_WINDOW**: Returns `true` if elapsed time since last auth >= [BiometricSettingsData.timeWindowSeconds]
-     * - **PER_SESSION**: Returns `true` if this is a new session or session not yet authenticated
+     * - **PER_SESSION**: Returns `true` until [sessionId] has been approved
      *
-     * For [BiometricAuthMode.PER_SESSION], this method has a side effect: if a new
-     * session is detected (different [sessionId]), it resets [sessionAuthenticated]
-     * to `false` and updates [currentSessionId].
+     * The check has no side effect: it never changes another connection's approval.
      *
      * @param settings The current biometric settings containing UV policy and auth mode.
-     * @param sessionId The current BLE session identifier (device address), or null if not connected.
+     * @param sessionId The id of the connection the request arrived on, or null.
      * @return `true` if biometric authentication should be prompted, `false` otherwise.
      */
     fun isBiometricRequired(settings: BiometricSettingsData, sessionId: String?): Boolean {
@@ -116,22 +112,17 @@ class SessionAuthManager {
             }
 
             BiometricAuthMode.TIME_WINDOW -> {
-                // Check if the time window has expired
-                val elapsedMs = System.currentTimeMillis() - lastAuthTime.get()
+                // Check if the time window has expired; a clock below the
+                // recorded reading cannot vouch for the window, so it has
+                val authTime = lastAuthTime.get() ?: return true
+                val now = clock()
                 val windowMs = settings.timeWindowSeconds * MILLIS_PER_SECOND
-                elapsedMs >= windowMs
+                now < authTime || now - authTime >= windowMs
             }
 
             BiometricAuthMode.PER_SESSION -> {
-                // Check if this is a new session
-                val storedSession = currentSessionId.get()
-                if (storedSession != sessionId) {
-                    // New session detected - reset authentication state
-                    sessionAuthenticated = false
-                    currentSessionId.set(sessionId)
-                }
-                // Require biometric if session not yet authenticated
-                !sessionAuthenticated
+                // Require biometric until this connection has been approved
+                synchronized(authenticatedSessions) { key(sessionId) !in authenticatedSessions }
             }
         }
     }
@@ -141,25 +132,28 @@ class SessionAuthManager {
      *
      * This method should be called after the user successfully completes
      * biometric verification. It updates:
-     * - [lastAuthTime] to the current timestamp (for TIME_WINDOW mode)
-     * - [currentSessionId] to the provided session ID
-     * - [sessionAuthenticated] to `true` (for PER_SESSION mode)
+     * - [lastAuthTime] to the current [clock] reading (for TIME_WINDOW mode)
+     * - [authenticatedSessions] to include [sessionId] (for PER_SESSION mode)
      *
-     * @param sessionId The current BLE session identifier (device address), or null if not connected.
+     * @param sessionId The id of the connection the user approved, or null.
      */
     fun recordAuthentication(sessionId: String?) {
-        lastAuthTime.set(System.currentTimeMillis())
-        currentSessionId.set(sessionId)
-        sessionAuthenticated = true
+        lastAuthTime.set(clock())
+        synchronized(authenticatedSessions) {
+            val id = key(sessionId)
+            authenticatedSessions.remove(id)
+            authenticatedSessions.add(id)
+            if (authenticatedSessions.size > MAX_SESSIONS) {
+                authenticatedSessions.remove(authenticatedSessions.first())
+            }
+        }
     }
 
     /**
      * Clears the session state.
      *
      * This method should be called when a BLE connection is disconnected.
-     * It resets:
-     * - [currentSessionId] to null
-     * - [sessionAuthenticated] to `false`
+     * It drops every connection's PER_SESSION approval ([authenticatedSessions]).
      *
      * Note: [lastAuthTime] is intentionally NOT cleared, allowing
      * [BiometricAuthMode.TIME_WINDOW] to maintain its window across sessions.
@@ -167,31 +161,37 @@ class SessionAuthManager {
      * the time window, they won't need to re-authenticate.
      */
     fun clearSession() {
-        currentSessionId.set(null)
-        sessionAuthenticated = false
+        synchronized(authenticatedSessions) { authenticatedSessions.clear() }
     }
 
     /**
      * Invalidates all authentication state, forcing re-authentication.
      *
      * This method clears:
-     * - [lastAuthTime] to 0 (invalidating any TIME_WINDOW grace period)
-     * - [sessionAuthenticated] to `false` (requiring PER_SESSION re-auth)
+     * - [lastAuthTime] to null (invalidating any TIME_WINDOW grace period)
+     * - [authenticatedSessions] (requiring PER_SESSION re-auth on every connection)
      *
      * Use cases:
      * - User explicitly requests re-authentication
      * - Security-sensitive operations require fresh authentication
      * - Administrative action to force re-verification
-     *
-     * Note: [currentSessionId] is not cleared, preserving session tracking.
      */
     fun invalidateAuth() {
-        lastAuthTime.set(0L)
-        sessionAuthenticated = false
+        lastAuthTime.set(null)
+        synchronized(authenticatedSessions) { authenticatedSessions.clear() }
     }
+
+    /** The set key for [sessionId]; null maps to a key no connection id uses. */
+    private fun key(sessionId: String?): String = sessionId?.let { "id:$it" } ?: NULL_SESSION
 
     private companion object {
         /** Conversion factor from seconds to milliseconds. */
         const val MILLIS_PER_SECOND = 1000L
+
+        /** Most connections approved at once before the oldest is dropped. */
+        const val MAX_SESSIONS = 64
+
+        /** The key of the null session id. */
+        const val NULL_SESSION = "null"
     }
 }

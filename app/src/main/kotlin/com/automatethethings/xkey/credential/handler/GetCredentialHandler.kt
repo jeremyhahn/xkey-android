@@ -32,6 +32,7 @@ import com.automatethethings.xkey.credential.UserVerificationCompliance
 import com.automatethethings.xkey.credential.UvRequirement
 import com.automatethethings.xkey.settings.BiometricSettingsRepository
 import com.automatethethings.xkey.credential.InvalidRequestException
+import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.credential.RelyingPartyOrigin
 import com.automatethethings.xkey.credential.NoCredentialsFoundException
 import com.automatethethings.xkey.crypto.BiometricHelper
@@ -39,13 +40,11 @@ import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.security.MessageDigest
-import java.util.concurrent.ConcurrentHashMap
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 /**
  * Handles credential assertion (authentication) requests from CredentialManager.
@@ -60,13 +59,16 @@ import kotlinx.coroutines.sync.withLock
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 class GetCredentialHandler(
     private val context: Context,
-    private val biometricHelper: BiometricHelper? = null
+    private val biometricHelper: BiometricHelper? = null,
+    // Parameters so a unit test can pass fakes: AndroidKeyStore and DataStore
+    // do not exist on the JVM.
+    private val keystoreManager: KeystoreManager = KeystoreManager(context),
+    private val settingsRepository: BiometricSettingsRepository = BiometricSettingsRepository(context)
 ) {
-    private val keystoreManager = KeystoreManager(context)
     private val database = XKeyDatabase.getInstance(context)
     private val credentialDao = database.credentialMetadataDao()
     private val keyDao = database.keyDao()
-    private val settingsRepository = BiometricSettingsRepository(context)
+    private val signCounter = PasskeySignCounter(credentialDao, keyDao)
 
     /**
      * Handle the begin phase of credential assertion.
@@ -359,7 +361,7 @@ class GetCredentialHandler(
         }
         Log.d(TAG, "Signature generated, size=${signature.size}")
 
-        // Record usage in the unified key store (nextSignCount synced its count)
+        // Record usage in the unified key store (the shared counter synced its count)
         try {
             keyDao.recordUsage(credentialId)
         } catch (e: Exception) {
@@ -386,23 +388,19 @@ class GetCredentialHandler(
     }
 
     /**
-     * Reads [credentialId]'s counter, bumps it and persists the new value
-     * (in both stores) as one step per credential, and returns it. A count
-     * whose signature then fails is spent: a counter may skip, never repeat.
+     * The value to sign for [credentialId], from the one counter the phone
+     * backend shares ([PasskeySignCounter]). It advances before signing: a
+     * failed signature leaves a gap, never a reused value. A counter that
+     * cannot be persisted refuses the assertion before anything is signed.
      */
-    private suspend fun nextSignCount(credentialId: String): Long =
-        signCountLocks.computeIfAbsent(credentialId) { Mutex() }.withLock {
-            val current = credentialDao.getByCredentialId(credentialId)
-                ?: throw NoCredentialsFoundException(credentialId)
-            val next = current.signCount + 1
-            credentialDao.updateSignCount(credentialId, next)
-            try {
-                keyDao.updateSignCount(credentialId, next)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to sync sign count to unified key store: ${e.message}")
-            }
-            next
-        }
+    private suspend fun nextSignCount(credentialId: String): Long = try {
+        signCounter.next(credentialId)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.e(TAG, "Could not persist the signature counter", e)
+        throw CredentialAssertionException("Could not persist the signature counter", e)
+    }
 
     /**
      * Build authenticator data for assertion.
@@ -460,9 +458,6 @@ class GetCredentialHandler(
 
     companion object {
         private const val TAG = "GetCredentialHandler"
-
-        /** One lock per credential, process-wide: its counter moves one assertion at a time. */
-        private val signCountLocks = ConcurrentHashMap<String, Mutex>()
 
         // Authenticator data flags
         private const val FLAGS_UP: Byte = 0x01 // User Present

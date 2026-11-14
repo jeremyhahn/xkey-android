@@ -145,6 +145,9 @@ enum class AuditOperationType {
     /** OATH credentials were synced with a paired device. */
     OATH_SYNC_PERFORMED,
 
+    /** Passwords were synced with a paired device. */
+    PASSWORD_SYNC_PERFORMED,
+
     // Co-signing operations
     /** A co-sign request was initiated. */
     COSIGN_INITIATED,
@@ -178,6 +181,12 @@ enum class AuditOperationType {
     PIV_SIGN_REQUEST,
     /** A PIV key was deleted from a slot. */
     PIV_KEY_DELETED,
+
+    // Password vault operations
+    /** A password entry was added on the phone. */
+    PASSWORD_CREATED,
+    /** A password entry was deleted on the phone. */
+    PASSWORD_DELETED,
 
     // Desktop backups (local.createBackup / local.restoreBackup)
     /** A paired desktop stored an encrypted backup on the phone. */
