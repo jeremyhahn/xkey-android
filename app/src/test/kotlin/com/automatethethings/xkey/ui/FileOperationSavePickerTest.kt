@@ -91,9 +91,9 @@ class FileOperationSavePickerTest {
     /** The signed copy [performSign] leaves waiting for the user's document. */
     private fun pendSignedCopy(activity: FileOperationActivity, data: ContentAuthenticityData) {
         val type = Class.forName(FileOperationActivity::class.java.name + "\$PendingSignedCopy")
-        val constructor = type.getDeclaredConstructor(Uri::class.java, XmpContainers.Format::class.java, ContentAuthenticityData::class.java)
+        val constructor = type.getDeclaredConstructor(Uri::class.java, String::class.java, ContentAuthenticityData::class.java)
             .apply { isAccessible = true }
-        field("pendingSignedCopy").set(activity, constructor.newInstance(Uri.fromFile(source), XmpContainers.Format.PNG, data))
+        field("pendingSignedCopy").set(activity, constructor.newInstance(Uri.fromFile(source), "image/png", data))
     }
 
     private fun busy(activity: FileOperationActivity) {
@@ -141,7 +141,7 @@ class FileOperationSavePickerTest {
             requestCode, Activity.RESULT_OK, Intent().setData(Uri.fromFile(output))
         )
         val resultCard = field("resultCard").get(activity) as View
-        idleUntil { resultCard.visibility == View.VISIBLE && field("pendingSignedCopy").get(activity) == null }
+        idleUntil { resultCard.visibility == View.VISIBLE && field("runningSave").get(activity) == null }
 
         val written = XmpMetadataHelper.readSignatureFromUri(activity.contentResolver, Uri.fromFile(output), "image/png")
         assertNotNull("the signed copy was written after recreation", written)
@@ -164,7 +164,7 @@ class FileOperationSavePickerTest {
         activity.activityResultRegistry.dispatchResult(
             requestCode, Activity.RESULT_OK, Intent().setData(Uri.fromFile(output))
         )
-        idleUntil { field("pendingSignatureJson").get(activity) == null }
+        idleUntil { field("pendingSignatureJson").get(activity) == null && field("runningSave").get(activity) == null }
         assertEquals(json, output.readText())
     }
 
@@ -218,6 +218,12 @@ class FileOperationSavePickerTest {
         }
     }
 
+    /** [stream] as what [uri] opens for writing, through the activity's resolver and the application's. */
+    private fun registerOutput(activity: Activity, uri: Uri, stream: OutputStream) {
+        shadowOf(activity.contentResolver).registerOutputStream(uri, stream)
+        shadowOf(activity.applicationContext.contentResolver).registerOutputStream(uri, stream)
+    }
+
     private fun tap(view: View) {
         val now = android.os.SystemClock.uptimeMillis()
         for (action in listOf(android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.ACTION_UP)) {
@@ -243,7 +249,7 @@ class FileOperationSavePickerTest {
         // The restored writer is held open mid-write.
         val output = Uri.parse("content://xkey.test/clip.png.xkeysig")
         val held = HeldOutput()
-        shadowOf(activity.contentResolver).registerOutputStream(output, held)
+        registerOutput(activity, output, held)
         activity.activityResultRegistry.dispatchResult(requestCode, Activity.RESULT_OK, Intent().setData(output))
         shadowOf(Looper.getMainLooper()).idle()
         assertTrue("the restored write started", held.writing.await(10, TimeUnit.SECONDS))
@@ -282,5 +288,56 @@ class FileOperationSavePickerTest {
         activity.activityResultRegistry.dispatchResult(requestCode, Activity.RESULT_CANCELED, null)
         shadowOf(Looper.getMainLooper()).idle()
         assertTrue("a cancel frees the restored screen", processButton(activity).isEnabled)
+    }
+
+    /**
+     * A recreation while [launcher]'s save writes: the new instance shows the
+     * save running (Process disabled, no picker reopened, nothing pending),
+     * and once the write ends the output is whole and Process is enabled.
+     */
+    private fun rotateDuringWrite(launcher: String, pend: (FileOperationActivity) -> Unit, check: (ByteArray) -> Unit) {
+        val controller = launch()
+        pend(controller.get())
+        busy(controller.get())
+        val requestCode = openPicker(controller.get(), launcher)
+
+        val output = Uri.parse("content://xkey.test/$launcher-out")
+        val held = HeldOutput()
+        registerOutput(controller.get(), output, held)
+        controller.get().activityResultRegistry.dispatchResult(requestCode, Activity.RESULT_OK, Intent().setData(output))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("$launcher: the write started", held.writing.await(10, TimeUnit.SECONDS))
+
+        controller.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+        val activity = controller.get()
+        assertFalse("$launcher: the restored save keeps Process disabled", processButton(activity).isEnabled)
+        assertNull("$launcher: no picker is reopened", shadowOf(activity).nextStartedActivityForResult)
+        assertNull("$launcher: a running save is not a pending picker", field("pendingSignatureJson").get(activity))
+        assertNull("$launcher: a running save is not a pending picker", field("pendingSignedCopy").get(activity))
+        assertNotNull("$launcher: the save is restored as running", field("runningSave").get(activity))
+
+        held.release()
+        val resultCard = field("resultCard").get(activity) as View
+        idleUntil { resultCard.visibility == View.VISIBLE && field("runningSave").get(activity) == null }
+        assertTrue("$launcher: Process is enabled once the write ends", processButton(activity).isEnabled)
+        check(held.bytes.toByteArray())
+    }
+
+    @Test
+    fun `a rotation while a sidecar save writes ends with Process enabled and the output written`() {
+        val json = XmpFixtures.json("1".repeat(64))
+        rotateDuringWrite("createSignatureFileLauncher", { field("pendingSignatureJson").set(it, json) }) { written ->
+            assertEquals(json, written.toString(Charsets.UTF_8))
+        }
+    }
+
+    @Test
+    fun `a rotation while a signed copy writes ends with Process enabled and the copy written`() {
+        val data = signature("2".repeat(64))
+        rotateDuringWrite("createSignedCopyLauncher", { pendSignedCopy(it, data) }) { written ->
+            val json = XmpContainers.read(written.inputStream(), XmpContainers.Format.PNG)
+            assertEquals(data.toJsonString(), json)
+        }
     }
 }

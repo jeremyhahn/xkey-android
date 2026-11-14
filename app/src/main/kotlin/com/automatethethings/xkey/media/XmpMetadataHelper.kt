@@ -167,10 +167,11 @@ object XmpMetadataHelper {
      * stream, such as a shared content URI: [open] is copied into a working
      * file under [workDir] (any size; see [writeEmbeddedSignature]), [data] is embedded
      * there, replacing any earlier signature, and only the complete result
-     * is copied to [openOutput], which should not be [open]'s own document.
-     * Replacements naming one [destination] (a URI or a canonical path) are
-     * serialized from the read through the copy. If the copy fails, the
-     * working file is kept and the thrown [IOException] names it.
+     * is copied to [openOutput], a document created for it, never [open]'s
+     * own ([MediaPublisher.writeCopy]). Replacements naming one
+     * [destination] (a URI or a canonical path) are serialized from the read
+     * through the copy. Unless the write and the close both succeed, the
+     * working file is kept and the thrown [MediaPublishException] names it.
      *
      * False, with nothing written, when the media cannot carry an embedded
      * signature and carries none, so a detached sidecar is what verifies.
@@ -184,31 +185,73 @@ object XmpMetadataHelper {
         data: ContentAuthenticityData,
         workDir: File,
         destination: String
+    ): Boolean = signedCopy(open, openOutput, workDir, destination) { writeEmbeddedSignature(it, format, data) }
+
+    /**
+     * [replaceEmbeddedSignature] for any media that carries an embedded
+     * signature, typed by [mimeType]: a JPEG gets its EXIF signature, MP4/MOV,
+     * PNG and WebP their XMP. False, with nothing written, for any other type.
+     */
+    fun writeSignedCopy(
+        open: () -> InputStream,
+        openOutput: () -> OutputStream,
+        mimeType: String,
+        data: ContentAuthenticityData,
+        workDir: File,
+        destination: String
+    ): Boolean {
+        if (isJpeg(mimeType)) {
+            return signedCopy(open, openOutput, workDir, destination) { writeExifSignature(it, data); true }
+        }
+        val format = XmpContainers.formatOf(mimeType) ?: return false
+        return replaceEmbeddedSignature(open, openOutput, format, data, workDir, destination)
+    }
+
+    private fun isJpeg(mimeType: String): Boolean {
+        val type = mimeType.lowercase()
+        return type.startsWith("image/jpeg") || type.startsWith("image/jpg")
+    }
+
+    private fun signedCopy(
+        open: () -> InputStream,
+        openOutput: () -> OutputStream,
+        workDir: File,
+        destination: String,
+        embed: (String) -> Boolean
     ): Boolean = synchronized(lockForKey(destination)) {
+        workDir.mkdirs()
         val work = File.createTempFile(".xkey-sign.", ".xkeytmp", workDir)
-        var keep = false
+        var handed = false
         try {
             open().use { input -> work.outputStream().use { input.copyTo(it) } }
             // The working file is this call's own: no other write shares its lock.
-            if (!writeEmbeddedSignature(work.path, format, data)) return false
-            try {
-                openOutput().use { output -> work.inputStream().use { it.copyTo(output) } }
-            } catch (e: IOException) {
-                keep = true
-                throw IOException("cannot write the signed copy; it is kept at ${work.path}", e)
-            }
+            if (!embed(work.path)) return false
+            // From here the working file is the publisher's: deleted once the
+            // copy is written and closed, kept for recovery otherwise.
+            handed = true
+            MediaPublisher.writeCopy(work, openOutput)
             true
         } finally {
-            if (!keep) work.delete()
+            if (!handed) work.delete()
         }
     }
 
     fun getSidecarPath(filePath: String): String = "$filePath.xkeysig"
 
+    /**
+     * The EXIF signature written into a copy of [filePath] that replaces it
+     * atomically ([MediaPublisher.replaceFile]): `saveAttributes` rewrites a
+     * file in place, so it never runs on the user's media itself.
+     */
     private fun writeExifSignature(filePath: String, data: ContentAuthenticityData) {
-        val exif = ExifInterface(filePath)
-        exif.setAttribute(ExifInterface.TAG_USER_COMMENT, XKEY_SIGNATURE_PREFIX + data.toJsonString())
-        exif.saveAttributes()
+        val file = File(filePath)
+        MediaPublisher.replaceFile(file) { temp ->
+            file.copyTo(temp, overwrite = true)
+            val exif = ExifInterface(temp.path)
+            exif.setAttribute(ExifInterface.TAG_USER_COMMENT, XKEY_SIGNATURE_PREFIX + data.toJsonString())
+            exif.saveAttributes()
+            true
+        }
     }
 
     private fun readExifSignature(filePath: String): ContentAuthenticityData? {
@@ -242,10 +285,9 @@ object XmpMetadataHelper {
      * that already carries an embedded signature it cannot rewrite throws:
      * a sidecar would be shadowed by the stale embedded one.
      *
-     * The new bytes go to a staging file beside the media, created
-     * exclusively under a unique name for this write, and replace it by
-     * rename, so a failed write never leaves half a video and no other write
-     * shares or deletes it. Callers hold [lockFor] the path.
+     * The new bytes replace the media atomically ([MediaPublisher.replaceFile]):
+     * a failed write never leaves half a video, and no other write shares or
+     * deletes its staging file. Callers hold [lockFor] the path.
      */
     private fun writeEmbeddedSignature(
         filePath: String,
@@ -254,8 +296,7 @@ object XmpMetadataHelper {
     ): Boolean {
         val file = File(filePath)
         val json = data.toJsonString()
-        val temp = File.createTempFile(".${file.name}.", ".xkeytmp", file.absoluteFile.parentFile)
-        try {
+        return MediaPublisher.replaceFile(file) { temp ->
             // Media with no XMP packet, the common case, is embedded streaming
             // at any size: a camera video never falls back to a sidecar.
             val streamed = temp.outputStream().buffered().use { XmpContainers.embedFile(file, it, format, json) }
@@ -267,7 +308,7 @@ object XmpMetadataHelper {
                     if (file.inputStream().use { XmpContainers.read(it.buffered(), format) } != null) {
                         throw IOException("$filePath carries an embedded signature that cannot be rewritten")
                     }
-                    return false
+                    return@replaceFile false
                 }
                 XmpContainers.FileEmbed.CARRIES_XMP -> {
                     // A failed read propagates (no catch): it has not shown the file
@@ -277,7 +318,7 @@ object XmpMetadataHelper {
                         if (carried != null) {
                             throw IOException("$filePath is larger than $maxEmbedBytes bytes and carries an embedded signature")
                         }
-                        return false
+                        return@replaceFile false
                     }
                     val bytes = file.readBytes()
                     XmpContainers.embed(bytes, format, json) ?: run {
@@ -286,19 +327,16 @@ object XmpMetadataHelper {
                         if (XmpContainers.read(bytes.inputStream(), format) != null) {
                             throw IOException("$filePath carries an embedded signature that cannot be rewritten")
                         }
-                        return false
+                        return@replaceFile false
                     }
                 }
             }
             if (embedded != null) temp.writeBytes(embedded)
-            if (!temp.renameTo(file)) throw IOException("cannot replace $filePath")
-        } finally {
-            temp.delete()
+            true
         }
-        return true
     }
 
-/** The embedded signature, or null when the file carries none; an [IOException] reading it propagates. */
+    /** The embedded signature, or null when the file carries none; an [IOException] reading it propagates. */
     private fun probeEmbeddedSignature(filePath: String, format: XmpContainers.Format): ContentAuthenticityData? {
         val json = File(filePath).inputStream().use { XmpContainers.read(it.buffered(), format) } ?: return null
         return try {
@@ -327,8 +365,9 @@ object XmpMetadataHelper {
         }
     }
 
+    /** The sidecar beside [filePath], replaced atomically ([MediaPublisher.replaceFile]). */
     private fun writeSidecarSignature(filePath: String, data: ContentAuthenticityData) {
-        File(getSidecarPath(filePath)).writeText(data.toJsonString())
+        MediaPublisher.replaceFile(File(getSidecarPath(filePath))) { temp -> temp.writeText(data.toJsonString()); true }
     }
 
     private fun readSidecarSignature(filePath: String): ContentAuthenticityData? {

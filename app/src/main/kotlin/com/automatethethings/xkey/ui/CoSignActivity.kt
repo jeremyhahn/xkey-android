@@ -51,6 +51,7 @@ import com.automatethethings.xkey.media.CoSignRequest
 import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
+import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.qr.QrCodeGenerator
@@ -99,6 +100,26 @@ class CoSignActivity : AppCompatActivity() {
         onScanResult(QrScanResult.from(result)) { onResponseScanned(it) }
     }
 
+    /** Where a co-signed copy goes when the selected media cannot be replaced in place. */
+    private val coSignedCopyLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+        onCoSignedCopyPicked(uri)
+    }
+
+    /**
+     * Co-signed media waiting for the document the user picks: [staged]
+     * holds it, under [MediaPublisher.recoveryDirectory], so a failed write
+     * keeps it; [signerName] and [fingerprint] name the co-signer when it is
+     * written.
+     */
+    private class PendingCoSignedCopy(
+        val staged: File,
+        val signerName: String,
+        val fingerprint: String,
+        val data: ContentAuthenticityData
+    )
+
+    private var pendingCopy: PendingCoSignedCopy? = null
+
     /** The signing keys, once loaded; the request prompt waits for them after a recreation. */
     private val signingKeysLoaded = CompletableDeferred<Unit>()
 
@@ -135,9 +156,26 @@ class CoSignActivity : AppCompatActivity() {
         outState.putString(STATE_MEDIA_URI, selectedUri?.toString())
         outState.putBoolean(STATE_WITNESS_MODE, witnessSection.visibility == View.VISIBLE)
         outState.putString(STATE_KEY_ID, selectedKeyId() ?: pendingKeyId)
+        pendingCopy?.let {
+            outState.putString(STATE_COPY_STAGED, it.staged.path)
+            outState.putString(STATE_COPY_SIGNER, it.signerName)
+            outState.putString(STATE_COPY_FINGERPRINT, it.fingerprint)
+            outState.putString(STATE_COPY_DATA, it.data.toJsonString())
+        }
     }
 
     private fun restoreExchange(state: Bundle) {
+        val staged = state.getString(STATE_COPY_STAGED)
+        val signer = state.getString(STATE_COPY_SIGNER)
+        val fingerprint = state.getString(STATE_COPY_FINGERPRINT)
+        val data = state.getString(STATE_COPY_DATA)
+        if (staged != null && signer != null && fingerprint != null && data != null) {
+            pendingCopy = try {
+                PendingCoSignedCopy(File(staged), signer, fingerprint, ContentAuthenticityData.fromJsonString(data))
+            } catch (_: Exception) {
+                null
+            }
+        }
         if (state.getBoolean(STATE_WITNESS_MODE)) {
             initiatorSection.visibility = View.GONE
             witnessSection.visibility = View.VISIBLE
@@ -732,16 +770,12 @@ class CoSignActivity : AppCompatActivity() {
                 val result = appendToMedia(uri, entry)
                 withContext(Dispatchers.Main) {
                     when (result) {
-                        is CoSignAppendResult.Appended -> {
-                            currentSignatureData = result.data
-                            updateSignaturesDisplay(result.data)
-                            Snackbar.make(
-                                rootLayout,
-                                getString(R.string.cosign_appended, response.signerName),
-                                Snackbar.LENGTH_SHORT
-                            ).show()
+                        is CoSignOutcome.Replaced -> showAppended(result.data, response.signerName)
+                        is CoSignOutcome.NeedsCopy -> {
+                            pendingCopy = PendingCoSignedCopy(result.staged, response.signerName, entry.keyFingerprint, result.data)
+                            coSignedCopyLauncher.launch(coSignedCopyName(uri))
                         }
-                        is CoSignAppendResult.DuplicateSigner -> {
+                        is CoSignOutcome.Duplicate -> {
                             Snackbar.make(
                                 rootLayout,
                                 getString(R.string.cosign_duplicate_signer, result.fingerprint.take(16)),
@@ -750,49 +784,109 @@ class CoSignActivity : AppCompatActivity() {
                         }
                     }
                 }
-                if (result is CoSignAppendResult.Appended) {
+                // A copy is audited once it is written (onCoSignedCopyPicked).
+                if (result is CoSignOutcome.Replaced) {
                     AuditLogger.logCoSignReceived(result.data.contentHash, entry.keyFingerprint)
                 }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    Snackbar.make(
-                        rootLayout,
-                        getString(R.string.cosign_append_failed, e.message ?: e.javaClass.simpleName),
-                        Snackbar.LENGTH_LONG
-                    ).show()
-                }
+                withContext(Dispatchers.Main) { showAppendFailed(e) }
             }
         }
     }
 
+    private fun showAppended(data: ContentAuthenticityData, signerName: String) {
+        currentSignatureData = data
+        updateSignaturesDisplay(data)
+        Snackbar.make(rootLayout, getString(R.string.cosign_appended, signerName), Snackbar.LENGTH_SHORT).show()
+    }
+
+    private fun showAppendFailed(e: Throwable) {
+        Snackbar.make(
+            rootLayout,
+            getString(R.string.cosign_append_failed, e.message ?: e.javaClass.simpleName),
+            Snackbar.LENGTH_LONG
+        ).show()
+    }
+
+    /** What co-signing the selected media did. */
+    private sealed class CoSignOutcome {
+        /** The media was replaced atomically by its co-signed form. */
+        class Replaced(val data: ContentAuthenticityData) : CoSignOutcome()
+
+        /** The media's provider cannot replace it atomically: [staged] holds the co-signed copy, the media is untouched. */
+        class NeedsCopy(val data: ContentAuthenticityData, val staged: File) : CoSignOutcome()
+
+        /** [fingerprint] has already signed; nothing was written. */
+        class Duplicate(val fingerprint: String) : CoSignOutcome()
+    }
+
     /**
-     * Appends [entry] to the media at [uri]: copies it to a temp file under
-     * cacheDir, checks the file's own signature data for a duplicate signer,
-     * appends, and writes the file back over [uri]. The temp file is always
-     * deleted. A duplicate leaves the media untouched.
+     * Appends [entry] to the media at [uri], never truncating it: the media
+     * is copied to a staging file under [MediaPublisher.recoveryDirectory],
+     * its own signature data is checked for a duplicate signer, the entry is
+     * appended there, and the result replaces [uri] atomically where its
+     * provider allows ([MediaPublisher.replace]). Anywhere else the staged
+     * file is returned for a separate copy the user places. A duplicate, or
+     * a failure before publication, deletes the staged file; a failed
+     * publication keeps it and the [com.automatethethings.xkey.media.MediaPublishException] names it.
      */
-    private fun appendToMedia(uri: Uri, entry: SignatureEntry): CoSignAppendResult {
+    private fun appendToMedia(uri: Uri, entry: SignatureEntry): CoSignOutcome {
         // Typed like the media, so the copy is read and written in the same
         // container (EXIF or XMP) loadSignatures read it from.
         val suffix = XmpMetadataHelper.stagingSuffix(contentResolver.getType(uri))
-        val temp = File.createTempFile("cosign-", suffix, cacheDir)
+        val staged = File.createTempFile("cosign-", suffix, MediaPublisher.recoveryDirectory(this))
+        var handed = false
         try {
             val input = contentResolver.openInputStream(uri)
                 ?: throw IOException("cannot read the selected media")
-            input.use { src -> temp.outputStream().use { dst -> src.copyTo(dst) } }
+            input.use { src -> staged.outputStream().use { dst -> src.copyTo(dst) } }
 
-            val existing = XmpMetadataHelper.readSignature(temp.absolutePath)
+            val existing = XmpMetadataHelper.readSignature(staged.absolutePath)
                 ?: throw IllegalStateException(getString(R.string.cosign_no_signature_data))
             val result = CoSignPayload.appendAttestor(existing, entry)
-            if (result is CoSignAppendResult.Appended) {
-                XmpMetadataHelper.appendSignature(temp.absolutePath, entry)
-                val output = contentResolver.openOutputStream(uri, "rwt")
-                    ?: throw IOException("cannot write the selected media")
-                output.use { dst -> temp.inputStream().use { src -> src.copyTo(dst) } }
-            }
-            return result
+            if (result is CoSignAppendResult.DuplicateSigner) return CoSignOutcome.Duplicate(result.fingerprint)
+            val data = (result as CoSignAppendResult.Appended).data
+            XmpMetadataHelper.appendSignature(staged.absolutePath, entry)
+            handed = true
+            return if (MediaPublisher.replace(uri, staged)) CoSignOutcome.Replaced(data) else CoSignOutcome.NeedsCopy(data, staged)
         } finally {
-            temp.delete()
+            if (!handed) staged.delete()
+        }
+    }
+
+    /** "clip.mp4" becomes "clip-cosigned.mp4". */
+    private fun coSignedCopyName(uri: Uri): String {
+        val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')?.ifBlank { null } ?: "media"
+        val dot = name.lastIndexOf('.')
+        return if (dot > 0) name.substring(0, dot) + "-cosigned" + name.substring(dot) else "$name-cosigned"
+    }
+
+    /**
+     * The document for the co-signed copy: the staged copy is written there
+     * ([MediaPublisher.writeCopy]) and, once written and closed, deleted;
+     * the copy becomes the selected media. A failure keeps it and names it;
+     * a cancel drops it. The original is only ever read.
+     */
+    private fun onCoSignedCopyPicked(target: Uri?) {
+        val pending = pendingCopy ?: return
+        pendingCopy = null
+        if (target == null) {
+            pending.staged.delete()
+            return
+        }
+        val resolver = applicationContext.contentResolver
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                MediaPublisher.writeCopy(pending.staged) { MediaPublisher.openCreated(resolver, target) }
+                AuditLogger.logCoSignReceived(pending.data.contentHash, pending.fingerprint)
+                withContext(Dispatchers.Main) {
+                    selectedUri = target
+                    selectedFileText.text = target.lastPathSegment ?: target.toString()
+                    showAppended(pending.data, pending.signerName)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { showAppendFailed(e) }
+            }
         }
     }
 
@@ -847,6 +941,10 @@ class CoSignActivity : AppCompatActivity() {
 
     private companion object {
         const val STATE_MEDIA_URI = "cosign_media_uri"
+        const val STATE_COPY_STAGED = "cosign_copy_staged"
+        const val STATE_COPY_SIGNER = "cosign_copy_signer"
+        const val STATE_COPY_DATA = "cosign_copy_data"
+        const val STATE_COPY_FINGERPRINT = "cosign_copy_fingerprint"
         const val STATE_WITNESS_MODE = "cosign_witness_mode"
         const val STATE_KEY_ID = "cosign_key_id"
     }

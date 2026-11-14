@@ -46,6 +46,7 @@ import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
+import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.SignerVerification
@@ -59,13 +60,19 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.progressindicator.CircularProgressIndicator
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.time.Instant
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Activity that handles file operations received via the Android Share sheet.
@@ -87,8 +94,38 @@ class FileOperationActivity : AppCompatActivity() {
         // Saved state: output waiting for a save picker
         private const val STATE_SIGNATURE_JSON = "pending_signature_json"
         private const val STATE_SIGNED_COPY_SOURCE = "pending_signed_copy_source"
-        private const val STATE_SIGNED_COPY_FORMAT = "pending_signed_copy_format"
+        private const val STATE_SIGNED_COPY_MIME = "pending_signed_copy_mime"
         private const val STATE_SIGNED_COPY_SIGNATURE = "pending_signed_copy_signature"
+
+        // Saved state: a save writing to the destination the user picked
+        private const val STATE_RUNNING_ID = "running_save_id"
+        private const val STATE_RUNNING_DESTINATION = "running_save_destination"
+        private const val STATE_RUNNING_JSON = "running_save_json"
+        private const val STATE_RUNNING_SOURCE = "running_save_source"
+        private const val STATE_RUNNING_MIME = "running_save_mime"
+        private const val STATE_RUNNING_SIGNATURE = "running_save_signature"
+
+        /**
+         * Write [save] to its destination: the sidecar JSON, or a signed copy
+         * of its source. Static, over the application's resolver, so a write
+         * never holds the activity that started it.
+         */
+        private fun writeSave(resolver: ContentResolver, recovery: File, save: RunningSave) {
+            save.signatureJson?.let { json ->
+                MediaPublisher.openCreated(resolver, save.destination).use { it.write(json.toByteArray(Charsets.UTF_8)) }
+            }
+            save.signedCopy?.let { copy ->
+                val written = XmpMetadataHelper.writeSignedCopy(
+                    open = { resolver.openInputStream(copy.source) ?: throw IOException("Cannot open ${copy.source}") },
+                    openOutput = { MediaPublisher.openCreated(resolver, save.destination) },
+                    mimeType = copy.mimeType,
+                    data = copy.data,
+                    workDir = recovery,
+                    destination = save.destination.toString()
+                )
+                if (!written) throw IOException("${copy.source} cannot carry a new embedded signature")
+            }
+        }
 
         // UI colors
 
@@ -167,16 +204,48 @@ class FileOperationActivity : AppCompatActivity() {
         }
     }
 
-    /** A signed copy of [source] waiting for the document the user picks. */
+    /** A signed copy of [source], of [mimeType], waiting for the document the user picks. */
     private class PendingSignedCopy(
         val source: Uri,
-        val format: XmpContainers.Format,
+        val mimeType: String,
         val data: ContentAuthenticityData
     )
 
-    // Deferred writes: the sidecar JSON, a signed copy, or staged files awaiting a save location
+    /**
+     * A save whose destination the user picked, writing now: the sidecar
+     * JSON or a signed copy. It is a separate state from a pending picker.
+     * Its write runs in [SaveRuns], not in an instance's scope, and the save
+     * is kept in the saved state, so the instance after a recreation waits
+     * on the same write (after process death it writes again, to the same
+     * destination) and frees the screen when it ends.
+     */
+    private class RunningSave(
+        val id: String,
+        val destination: Uri,
+        val signatureJson: String?,
+        val signedCopy: PendingSignedCopy?
+    )
+
+    /** The saves running in this process by [RunningSave.id]; the instance showing one waits on it here. */
+    private object SaveRuns {
+        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val runs = ConcurrentHashMap<String, Deferred<Unit>>()
+
+        /** The write of [id], started with [write] unless it already runs. */
+        fun attach(id: String, write: () -> Unit): Deferred<Unit> =
+            runs.computeIfAbsent(id) { scope.async { write() } }
+
+        fun finished(id: String) {
+            runs.remove(id)
+        }
+    }
+
+    // Picker pending: the sidecar JSON or a signed copy, waiting for a save location
     private var pendingSignatureJson: String? = null
     private var pendingSignedCopy: PendingSignedCopy? = null
+
+    // Save running: the destination was picked and its write has not ended
+    private var runningSave: RunningSave? = null
 
     // Staging files for sign, encrypt and decrypt (see FileOperationStaging)
     private lateinit var staging: FileOperationStaging
@@ -217,8 +286,10 @@ class FileOperationActivity : AppCompatActivity() {
 
         // A restored save is still this screen's operation: Process stays
         // disabled until its picker returns and its write ends (showResult)
-        // or the picker is cancelled (onSavePicked)
+        // or the picker is cancelled (onSavePicked). A save that was writing
+        // is waited on again; it frees the screen when it ends.
         if (pendingSignatureJson != null || pendingSignedCopy != null) showProgress(true)
+        runningSave?.let { runSave(it) }
 
         // Populate file info
         populateFileInfo()
@@ -228,36 +299,53 @@ class FileOperationActivity : AppCompatActivity() {
     }
 
     /**
-     * Keep what an open save picker writes when it returns: the sidecar JSON
-     * and the signed copy (its source, container and signature), so a
-     * configuration change or process death while the picker is open does
-     * not lose the signature. Staged files are this instance's and are
-     * dropped with it (onDestroy).
+     * Keep the saves this screen has open, as two separate states: what an
+     * open save picker writes when it returns (the sidecar JSON, the signed
+     * copy's source, type and signature), and a save already writing to the
+     * destination the user picked. A configuration change or process death
+     * then neither loses the signature nor mistakes a running write for a
+     * picker still open. Staged files are this instance's and are dropped
+     * with it (onDestroy).
      */
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         pendingSignatureJson?.let { outState.putString(STATE_SIGNATURE_JSON, it) }
         pendingSignedCopy?.let {
             outState.putString(STATE_SIGNED_COPY_SOURCE, it.source.toString())
-            outState.putString(STATE_SIGNED_COPY_FORMAT, it.format.name)
+            outState.putString(STATE_SIGNED_COPY_MIME, it.mimeType)
             outState.putString(STATE_SIGNED_COPY_SIGNATURE, it.data.toJsonString())
+        }
+        runningSave?.let { save ->
+            outState.putString(STATE_RUNNING_ID, save.id)
+            outState.putString(STATE_RUNNING_DESTINATION, save.destination.toString())
+            save.signatureJson?.let { outState.putString(STATE_RUNNING_JSON, it) }
+            save.signedCopy?.let {
+                outState.putString(STATE_RUNNING_SOURCE, it.source.toString())
+                outState.putString(STATE_RUNNING_MIME, it.mimeType)
+                outState.putString(STATE_RUNNING_SIGNATURE, it.data.toJsonString())
+            }
         }
     }
 
     private fun restorePendingSaves(state: Bundle?) {
         if (state == null) return
         pendingSignatureJson = state.getString(STATE_SIGNATURE_JSON)
-        val source = state.getString(STATE_SIGNED_COPY_SOURCE) ?: return
-        val format = state.getString(STATE_SIGNED_COPY_FORMAT) ?: return
-        val signature = state.getString(STATE_SIGNED_COPY_SIGNATURE) ?: return
-        pendingSignedCopy = try {
-            PendingSignedCopy(
-                Uri.parse(source),
-                XmpContainers.Format.valueOf(format),
-                ContentAuthenticityData.fromJsonString(signature)
-            )
+        pendingSignedCopy = restoreSignedCopy(state, STATE_SIGNED_COPY_SOURCE, STATE_SIGNED_COPY_MIME, STATE_SIGNED_COPY_SIGNATURE)
+        val id = state.getString(STATE_RUNNING_ID) ?: return
+        val destination = state.getString(STATE_RUNNING_DESTINATION) ?: return
+        val json = state.getString(STATE_RUNNING_JSON)
+        val copy = restoreSignedCopy(state, STATE_RUNNING_SOURCE, STATE_RUNNING_MIME, STATE_RUNNING_SIGNATURE)
+        if (json != null || copy != null) runningSave = RunningSave(id, Uri.parse(destination), json, copy)
+    }
+
+    private fun restoreSignedCopy(state: Bundle, sourceKey: String, mimeKey: String, signatureKey: String): PendingSignedCopy? {
+        val source = state.getString(sourceKey) ?: return null
+        val mimeType = state.getString(mimeKey) ?: return null
+        val signature = state.getString(signatureKey) ?: return null
+        return try {
+            PendingSignedCopy(Uri.parse(source), mimeType, ContentAuthenticityData.fromJsonString(signature))
         } catch (e: Exception) {
-            Log.w(TAG, "Dropping an unreadable pending signed copy", e)
+            Log.w(TAG, "Dropping an unreadable signed copy", e)
             null
         }
     }
@@ -1024,35 +1112,15 @@ class FileOperationActivity : AppCompatActivity() {
                 val mimeType = contentResolver.getType(uri) ?: ""
                 val fileName = getFileName(uri) ?: "file"
 
-                if (mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg")) {
-                    // Copy to a staging file, write EXIF, then copy back. The MIME
-                    // type makes it a .jpg, so the EXIF write lands in it.
-                    val tempFile = staging.stage(fileName, mimeType) { staged ->
-                        contentResolver.openInputStream(uri)?.use { input ->
-                            FileOutputStream(staged).use { output ->
-                                input.copyTo(output)
-                            }
-                        } ?: throw IllegalStateException("Cannot open input file")
-                        XmpMetadataHelper.writeSignature(staged.absolutePath, cad)
-                    }
-
-                    // Copy the signed staging file back to the original URI
-                    staging.deliverTo(tempFile) { contentResolver.openOutputStream(uri) }
-
-                    // Record usage and audit
-                    keyDao.recordUsage(key.keyId)
-                    AuditLogger.logFileSigned(key.keyId, key.label, fileName)
-
-                    withContext(Dispatchers.Main) {
-                        showResult(getString(R.string.file_operation_sign_success))
-                    }
-                } else if (sharedSigning(uri, mimeType) == XmpMetadataHelper.SharedSigning.SIGNED_COPY) {
-                    // It carries an embedded signature, which readers prefer
-                    // to a sidecar. The shared original is never truncated:
-                    // a file is replaced atomically, any other provider gets
-                    // a signed copy at a document the user picks.
-                    val path = uri.path
-                    if (uri.scheme == ContentResolver.SCHEME_FILE && path != null) {
+                val jpeg = MediaHasher.isCanonicalisedJpeg(mimeType)
+                if (jpeg || sharedSigning(uri, mimeType) == XmpMetadataHelper.SharedSigning.SIGNED_COPY) {
+                    // An embedded signature: EXIF for a JPEG, XMP replacing the
+                    // one a PNG, WebP or video carries (readers prefer it to a
+                    // sidecar). The shared original is never truncated: a file
+                    // is replaced atomically (MediaPublisher), any other
+                    // provider gets a signed copy at a document the user picks.
+                    val path = MediaPublisher.replaceableFile(uri)?.path
+                    if (path != null) {
                         XmpMetadataHelper.writeSignature(path, cad)
                         keyDao.recordUsage(key.keyId)
                         AuditLogger.logFileSigned(key.keyId, key.label, fileName)
@@ -1061,7 +1129,7 @@ class FileOperationActivity : AppCompatActivity() {
                             showResult(getString(R.string.file_operation_sign_success))
                         }
                     } else {
-                        pendingSignedCopy = PendingSignedCopy(uri, XmpContainers.formatOf(mimeType)!!, cad)
+                        pendingSignedCopy = PendingSignedCopy(uri, mimeType, cad)
 
                         keyDao.recordUsage(key.keyId)
                         AuditLogger.logFileSigned(key.keyId, key.label, fileName)
@@ -1106,30 +1174,12 @@ class FileOperationActivity : AppCompatActivity() {
     /**
      * Write the pending signed copy to the user-selected URI. The shared
      * original is only read; if the write fails, the complete signed copy
-     * stays in the cache directory and the error names it.
+     * is kept for recovery and the error names it (MediaPublisher).
      */
     private fun saveSignedCopyToUri(outputUri: Uri) {
         val pending = pendingSignedCopy ?: return showProgress(false)
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val written = XmpMetadataHelper.replaceEmbeddedSignature(
-                    open = { contentResolver.openInputStream(pending.source) ?: throw IOException("Cannot open ${pending.source}") },
-                    openOutput = { contentResolver.openOutputStream(outputUri, "w") ?: throw IOException("Cannot write $outputUri") },
-                    format = pending.format,
-                    data = pending.data,
-                    workDir = cacheDir,
-                    destination = outputUri.toString()
-                )
-                if (!written) throw IOException("${pending.source} cannot carry a new embedded signature")
-                withContext(Dispatchers.Main) {
-                    showResult(getString(R.string.file_operation_sign_success))
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) { showError(e) }
-            } finally {
-                pendingSignedCopy = null
-            }
-        }
+        pendingSignedCopy = null
+        runSave(RunningSave(UUID.randomUUID().toString(), outputUri, null, pending))
     }
 
     /**
@@ -1137,19 +1187,36 @@ class FileOperationActivity : AppCompatActivity() {
      */
     private fun saveSignatureToUri(outputUri: Uri) {
         val json = pendingSignatureJson ?: return showProgress(false)
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                contentResolver.openOutputStream(outputUri)?.use { output ->
-                    output.write(json.toByteArray(Charsets.UTF_8))
-                }
-                withContext(Dispatchers.Main) {
-                    showResult(getString(R.string.file_operation_sign_success))
-                }
+        pendingSignatureJson = null
+        runSave(RunningSave(UUID.randomUUID().toString(), outputUri, json, null))
+    }
+
+    /**
+     * Run [save], or wait on it when it already runs (this instance restored
+     * it after a recreation), with the screen busy until it ends. The picker
+     * state was cleared when the save started, so a recreation meanwhile
+     * restores it as running, never as a picker still open. Whether it
+     * succeeds or fails, its end frees the screen; an instance that goes
+     * first leaves the write to the next.
+     */
+    private fun runSave(save: RunningSave) {
+        runningSave = save
+        showProgress(true)
+        val resolver = applicationContext.contentResolver
+        val recovery = MediaPublisher.recoveryDirectory(applicationContext)
+        val run = SaveRuns.attach(save.id) { writeSave(resolver, recovery, save) }
+        lifecycleScope.launch {
+            val failure = try {
+                run.await()
+                null
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { showError(e) }
-            } finally {
-                pendingSignatureJson = null
+                // This instance went away first: the next one waits on the write.
+                if (!run.isCompleted) throw e
+                e
             }
+            SaveRuns.finished(save.id)
+            runningSave = null
+            if (failure == null) showResult(getString(R.string.file_operation_sign_success)) else showError(failure)
         }
     }
 
@@ -1405,7 +1472,7 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                staging.deliverTo(tempFile) { contentResolver.openOutputStream(outputUri) }
+                staging.deliverTo(tempFile) { MediaPublisher.openCreated(contentResolver, outputUri) }
 
                 withContext(Dispatchers.Main) {
                     showResult(getString(R.string.file_operation_encrypt_success))
@@ -1488,7 +1555,7 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                staging.deliverTo(tempFile) { contentResolver.openOutputStream(outputUri) }
+                staging.deliverTo(tempFile) { MediaPublisher.openCreated(contentResolver, outputUri) }
 
                 withContext(Dispatchers.Main) {
                     showResult(getString(R.string.file_operation_decrypt_success))
