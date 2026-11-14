@@ -19,6 +19,7 @@ import android.app.Application
 import androidx.credentials.GetPublicKeyCredentialOption
 import androidx.credentials.provider.ProviderGetCredentialRequest
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.credential.NoCredentialsFoundException
 import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.settings.BiometricSettingsData
@@ -45,6 +46,7 @@ import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -63,6 +65,9 @@ import org.robolectric.annotation.Config
 class AssertionSignCountTest {
 
     private var stored = 7L
+
+    /** Whether the credential's delete has been acknowledged. */
+    @Volatile private var deleted = false
     private val signedCounters = mutableListOf<Long>()
 
     /** Each prompt the helper shows, answered when the test completes it. */
@@ -102,6 +107,12 @@ class AssertionSignCountTest {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.credentialMetadataDao() } returns credentialDao
         every { database.keyDao() } returns keyDao
+        // No key has a pending deletion until a test acknowledges one.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            io.mockk.coEvery { deletion(any()) } answers {
+                if (deleted) com.automatethethings.xkey.storage.entity.KeyDeletionEntity(firstArg(), 1L, "android", null) else null
+            }
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         mockkObject(AuditLogger)
@@ -131,6 +142,50 @@ class AssertionSignCountTest {
 
         assertEquals(listOf(8L, 9L), signedCounters)
         assertEquals(9L, stored)
+    }
+
+    /**
+     * A passkey delete acknowledged while an assertion waits on its prompt
+     * (#255 review): the signature, taken under the material-use lock and
+     * its deleted-key recheck, never happens, and the assertion reports the
+     * credential gone.
+     */
+    @Test
+    fun `a delete acknowledged while the prompt waits signs nothing`() = runTest {
+        val handler = GetCredentialHandler(RuntimeEnvironment.getApplication(), helper)
+
+        val assertion = async { runCatching { handler.handleGetCredential(request(), CREDENTIAL_ID) } }
+        runCurrent()
+        val prompt = prompts.receive()
+        deleted = true
+        prompt.complete(Unit)
+        runCurrent()
+
+        val failure = assertion.await().exceptionOrNull()
+        assertTrue("a deleted passkey signed an assertion: $failure", failure is NoCredentialsFoundException)
+        assertEquals("a deleted passkey was signed with", emptyList<Long>(), signedCounters)
+    }
+
+    /**
+     * Bypass guard (#255 review): every user key signature in the app is
+     * taken inside [com.automatethethings.xkey.storage.KeyPolicyStore.withUsableKey].
+     */
+    @Test
+    fun `every user key signature is taken under the material-use lock`() {
+        val root = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
+        val call = Regex("""[kK]eystoreManager\??\.(sign|signWithoutBiometric|signWithAlgorithm)\(""")
+        val unguarded = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" }
+            .flatMap { file ->
+                val lines = file.readLines()
+                lines.mapIndexedNotNull { i, line ->
+                    val code = line.substringBefore("//")
+                    val guarded = (maxOf(0, i - 2)..i).any { "withUsableKey(" in lines[it] }
+                    if (call.containsMatchIn(code) && !guarded) "${file.name}:${i + 1}" else null
+                }
+            }
+            .toList()
+        assertEquals("a signature outside the material-use lock", emptyList<String>(), unguarded)
     }
 
     private fun request(): ProviderGetCredentialRequest {

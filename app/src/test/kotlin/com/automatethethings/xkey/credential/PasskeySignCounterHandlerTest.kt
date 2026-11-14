@@ -119,6 +119,11 @@ class PasskeySignCounterHandlerTest {
         every { XKeyDatabase.getInstance(any()) } returns mockk(relaxed = true) {
             every { credentialMetadataDao() } returns credentialDao
             every { keyDao() } returns keyDao
+            // No key has a pending deletion or a policy row: the stored policy decides.
+            every { keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+                io.mockk.coEvery { deletion(any()) } returns null
+                io.mockk.coEvery { policyRow(any()) } returns null
+            }
         }
 
         context = mockk(relaxed = true)

@@ -53,6 +53,7 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.snackbar.Snackbar
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -116,6 +117,7 @@ class KeyDetailActivity : AppCompatActivity() {
     }
 
     private val keyDao by lazy { XKeyDatabase.getInstance(this).keyDao() }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this)) }
     private val keySharingPolicyDao: KeySharingPolicyDao by lazy {
         XKeyDatabase.getInstance(this).keySharingPolicyDao()
     }
@@ -2072,13 +2074,16 @@ class KeyDetailActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            if (key.source != "xkmsd") {
-                val alias = keystoreManager.resolveKeystoreAlias(key.keyId)
-                if (alias != null) {
-                    keystoreManager.deleteByAlias(alias)
-                }
+            // With its policy row and grant rows, in one transaction (#193);
+            // the material only once the rows of this key row are deleted,
+            // in the store's serialisation of its material (#193 r8).
+            val outcome = deleteUserKey(key, keyPolicyStore,
+                com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyDetailActivity,
+                    kind = com.automatethethings.xkey.crypto.KeystoreManager.userKeyKindOf(key.keyType)))
+            if (outcome == UserKeyDelete.PROTECTED) {
+                Snackbar.make(coordinatorLayout, getString(R.string.key_system_explanation), Snackbar.LENGTH_LONG).show()
+                return@launch
             }
-            keyDao.deleteByKeyId(key.keyId)
             finish()
         }
     }

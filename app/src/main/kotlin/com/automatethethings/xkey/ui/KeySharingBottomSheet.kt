@@ -33,6 +33,7 @@ import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.widget.NestedScrollView
 import androidx.fragment.app.FragmentManager
@@ -55,14 +56,19 @@ import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.remote.loadZeroedOnCancel
 import com.automatethethings.xkey.remote.shareSessionChanges
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -116,9 +122,9 @@ enum class SharingPolicyType {
 class KeySharingBottomSheet : BottomSheetDialogFragment() {
 
     private val keyDao by lazy { XKeyDatabase.getInstance(requireContext()).keyDao() }
-    private val keySharingPolicyDao by lazy { XKeyDatabase.getInstance(requireContext()).keySharingPolicyDao() }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(requireContext())) }
     private val pairedDeviceRepository by lazy { PairedDeviceRepository(requireContext()) }
-    private val sharingPeers by lazy { KeySharingPeers(keyId, keySharingPolicyDao, pairedDeviceRepository) }
+    private val sharingPeers by lazy { KeySharingPeers(keyId, checkNotNull(keyEntity).id, keyPolicyStore, pairedDeviceRepository) }
 
     private var keyId: String = ""
     private var keyEntity: KeyEntity? = null
@@ -372,8 +378,9 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 RADIO_ID_SELECTED_PEERS -> SharingPolicyType.SELECTED_PEERS
                 else -> SharingPolicyType.PRIVATE
             }
-            lifecycleScope.launch {
-                selectedPolicyFlow.emit(newPolicy)
+            selectedPolicyFlow.value = newPolicy
+            // Undispatched: the change joins the key's edit queue in tap order (#193).
+            lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
                 persistSharingPolicy(newPolicy)
             }
         }
@@ -596,6 +603,17 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             textLayout.addView(lastConnectedText)
         }
 
+        // A withdrawal held only in the process, from this sheet or one
+        // dismissed before it finished (#193 r8).
+        if (peer.unsaved) {
+            val unsavedText = TextView(requireContext()).apply {
+                text = getString(R.string.key_sharing_withdrawal_not_saved)
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelSmall)
+                setTextColor(resolveThemeColor(androidx.appcompat.R.attr.colorError))
+            }
+            textLayout.addView(unsavedText)
+        }
+
         contentLayout.addView(textLayout)
 
         // Checkbox
@@ -607,8 +625,10 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
             setOnCheckedChangeListener { _, checked ->
-                lifecycleScope.launch {
-                    updatePeerPolicy(device.publicKeyHex, checked)
+                // The pairing the user saw when they tapped; the grant is refused if it ends first (#193).
+                val pairing = pairedDeviceRepository.pairingGeneration(device.publicKeyHex)
+                lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    updatePeerPolicy(device.publicKeyHex, checked, pairing)
                 }
             }
         }
@@ -711,7 +731,12 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     }
 
     /** The one share decision, the inbound handlers' rule (a pending revocation refuses SELECTED_PEERS). */
-    private val sharePermission by lazy { SharePermission(keySharingPolicyDao, pairedDeviceRepository) }
+    private val sharePermission by lazy { SharePermission(
+            XKeyDatabase.getInstance(requireContext()).keySharingPolicyDao(),
+            pairedDeviceRepository,
+            keyPolicyStore
+        )
+    }
 
     /**
      * Shows the desktop section when a desktop is connected, with the send
@@ -863,6 +888,31 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         lifecycleScope.launch {
             sharingPeers.peers().collect { peersFlow.emit(it) }
         }
+        // Bound to the key row it was opened for: replaced or deleted, the
+        // sheet closes instead of editing the replacement (#193 r9).
+        lifecycleScope.launch {
+            sharingPeers.stale.first { it }
+            showStaleAndDismiss()
+        }
+        // A policy denial held only in the process, from this sheet or one
+        // dismissed before it was stored, is shown until it is durable.
+        lifecycleScope.launch {
+            var shown: com.google.android.material.snackbar.Snackbar? = null
+            try {
+                sharingPeers.policyUnsaved.collect { unsaved ->
+                    shown?.dismiss()
+                    shown = if (!unsaved) null else view?.let {
+                        com.google.android.material.snackbar.Snackbar.make(
+                            it,
+                            getString(R.string.key_sharing_denial_not_saved),
+                            com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE
+                        ).also { bar -> bar.show() }
+                    }
+                }
+            } finally {
+                shown?.dismiss()
+            }
+        }
     }
 
     /**
@@ -903,31 +953,39 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
      * Selecting peers again therefore always starts from nothing.
      */
     private suspend fun persistSharingPolicy(policy: SharingPolicyType) {
-        if (keyEntity == null) return
+        val key = keyEntity ?: return
 
-        // Convert local policy type to entity policy type and update both columns
-        val entityPolicy = when (policy) {
-            SharingPolicyType.PRIVATE -> EntitySharingPolicyType.PRIVATE
-            SharingPolicyType.ALL_PEERS -> EntitySharingPolicyType.ALL_PEERS
-            SharingPolicyType.SELECTED_PEERS -> EntitySharingPolicyType.SELECTED_PEERS
-        }
-        keyDao.updateSharingPolicy(keyId, entityPolicy)
-
-        if (policy != SharingPolicyType.SELECTED_PEERS) {
-            keySharingPolicyDao.clearPoliciesForKey(keyId)
+        // In the order of the user's actions, after every grant tapped before
+        // it (#174, #193), bound to the key row this sheet loaded.
+        if (!sharingPeers.setKeyPolicy(policy, key.id)) {
+            context?.let {
+                Toast.makeText(it, R.string.key_sharing_policy_not_saved, Toast.LENGTH_LONG).show()
+            }
         }
         refreshDesktopSection()
     }
 
-    /**
-     * Updates the sharing policy for a specific peer. The list follows the
-     * policy rows; a refused change redraws it from the stored state.
-     */
-    private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean) {
-        if (!sharingPeers.setAllowed(peerPublicKeyHex, allowed)) {
-            populatePeerList(peersFlow.value)
-        }
+    private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?) {
+        sharingPeers.setAllowedOrRedraw(
+            peerPublicKeyHex,
+            allowed,
+            pairing,
+            attached = { isAdded && view != null },
+            redraw = { populatePeerList(peersFlow.value) },
+            unsaved = {
+                context?.let {
+                    Toast.makeText(it, R.string.key_sharing_withdrawal_not_saved, Toast.LENGTH_LONG).show()
+                }
+            },
+            stale = { showStaleAndDismiss() }
+        )
         refreshDesktopSection()
+    }
+
+    /** The key this sheet was opened for is gone or replaced (#193 r9): say so, and close. */
+    private fun showStaleAndDismiss() {
+        context?.let { Toast.makeText(it, R.string.key_sharing_key_replaced, Toast.LENGTH_LONG).show() }
+        if (isAdded) dismissAllowingStateLoss()
     }
 
     // -------------------------------------------------------------------------
@@ -1002,4 +1060,42 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             fragment.show(fragmentManager, TAG)
         }
     }
+}
+
+/**
+ * The sheet's peer tap, and the one place its result is shown (#193 r7,
+ * ruling 554): [KeySharingPeers.setAllowedOutcome], then, if the change was
+ * refused, [redraw] of the list from the stored state; a withdrawal that is
+ * not saved ([KeySharingPeers.Outcome.UNSAVED]) is redrawn too, the peer
+ * still denied in the process, and [unsaved] tells the user so. An edit
+ * refused because the sheet's key was deleted or replaced
+ * ([KeySharingPeers.Outcome.STALE]) is shown by [stale] alone, never as a
+ * change that stood (#193 r9). Nothing is drawn if the caller was cancelled
+ * or the sheet is no longer [attached] by the time the queued edit
+ * completes. Returns whether the change stood.
+ */
+internal suspend fun KeySharingPeers.setAllowedOrRedraw(
+    peerPublicKeyHex: String,
+    allowed: Boolean,
+    pairing: Long?,
+    attached: () -> Boolean,
+    redraw: () -> Unit,
+    unsaved: () -> Unit,
+    stale: () -> Unit
+): Boolean {
+    val outcome = setAllowedOutcome(peerPublicKeyHex, allowed, pairing)
+    if (outcome == KeySharingPeers.Outcome.STOOD) return true
+    // The queued edit completes in the edit scope, whatever the caller's job;
+    // check it before drawing: a sheet dismissed meanwhile has no context to
+    // draw with (#193 r2).
+    currentCoroutineContext().ensureActive()
+    if (attached()) {
+        if (outcome == KeySharingPeers.Outcome.STALE) {
+            stale()
+            return false
+        }
+        redraw()
+        if (outcome == KeySharingPeers.Outcome.UNSAVED) unsaved()
+    }
+    return false
 }

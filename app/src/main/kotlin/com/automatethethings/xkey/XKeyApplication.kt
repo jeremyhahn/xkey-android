@@ -8,10 +8,12 @@ import android.os.Build
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.settings.PairedDeviceGrantCleanup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * xKey Application class.
@@ -26,6 +28,19 @@ class XKeyApplication : Application() {
         createNotificationChannels()
         initializeAuditLogger()
         registerGrantCleanup()
+        replayOwedKeyDeletions()
+    }
+
+    /**
+     * Key material whose delete failed, or whose process died after its key
+     * row was deleted, keeps a tombstone; it is deleted here, at start-up
+     * (#193 r9).
+     */
+    private fun replayOwedKeyDeletions() {
+        val app = this
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            com.automatethethings.xkey.storage.replayKeyDeletions(app, KeyPolicyStore.of(XKeyDatabase.getInstance(app)))
+        }
     }
 
     /**

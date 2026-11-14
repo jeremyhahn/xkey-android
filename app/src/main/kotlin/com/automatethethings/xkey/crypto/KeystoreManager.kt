@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
@@ -729,7 +730,7 @@ class KeystoreManager(private val context: Context) {
     fun generalKeySecurityLevel(keyId: String): KeySecurityLevel? {
         val alias = buildGeneralAlias(keyId)
         if (keyStore.containsAlias(alias)) return aliasSecurityLevel(alias)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)) {
+        if (hasSoftwareEd25519Key(alias)) {
             return KeySecurityLevel.SOFTWARE
         }
         return null
@@ -1048,16 +1049,13 @@ class KeystoreManager(private val context: Context) {
 
         // Store private key in EncryptedSharedPreferences since Android Keystore
         // does not support Ed25519
-        val prefs = EncryptedSharedPreferences.create(
-            context,
-            ED25519_PREFS_NAME,
-            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-        prefs.edit()
+        val prefs = checkNotNull(ed25519Prefs())
+        // commit(), not apply(): a key is generated only once its write is
+        // durable; cached presence never stands in for it (#255 review).
+        val stored = prefs.edit()
             .putString(alias, Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP))
-            .apply()
+            .commit()
+        if (!stored) throw KeyGenerationException("Could not store the Ed25519 key $alias")
 
         return keyPair
     }
@@ -1067,36 +1065,11 @@ class KeystoreManager(private val context: Context) {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     fun getEd25519PrivateKey(alias: String): PrivateKey? {
-        val prefs = EncryptedSharedPreferences.create(
-            context,
-            ED25519_PREFS_NAME,
-            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
+        val prefs = ed25519Prefs() ?: return null
         val encoded = prefs.getString(alias, null) ?: return null
         val keyBytes = Base64.decode(encoded, Base64.NO_WRAP)
         val keyFactory = KeyFactory.getInstance("Ed25519")
         return keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
-    }
-
-    /**
-     * Check if an Ed25519 key exists in EncryptedSharedPreferences.
-     */
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-    private fun hasEd25519Key(alias: String): Boolean {
-        return try {
-            val prefs = EncryptedSharedPreferences.create(
-                context,
-                ED25519_PREFS_NAME,
-                MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-            prefs.contains(alias)
-        } catch (e: Exception) {
-            false
-        }
     }
 
     /**
@@ -1676,7 +1649,97 @@ class KeystoreManager(private val context: Context) {
 
     /** True if an Ed25519 software key is stored under [alias] (API 33+ only). */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)
+        try {
+            ed25519Prefs()?.contains(alias) == true
+        } catch (e: Exception) {
+            false
+        }
+
+    /**
+     * The EncryptedSharedPreferences holding Ed25519 software keys, or null
+     * below API 33, where none are generated. Every Ed25519 read, write and
+     * delete goes through it.
+     */
+    internal fun ed25519Prefs(): SharedPreferences? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
+        return EncryptedSharedPreferences.create(
+            context,
+            ED25519_PREFS_NAME,
+            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    /**
+     * The generation of the user key [keyId] held in this manager's backends:
+     * one entry per piece of material in its user-key namespace
+     * ([userKeyAliases]), `keystore:<alias>` for an Android Keystore entry
+     * and `ed25519:<alias>` for an Ed25519 software key, each mapped to a tag
+     * that changes when the material under that alias is replaced (the
+     * entry's creation date and certificate digest, or the digest of the
+     * stored key). Empty when no material is held. A backend that cannot be
+     * read throws: an unreadable Ed25519 store is never taken for an empty
+     * one, so a delete refuses before it removes any row (#255 review).
+     */
+    fun userKeyGeneration(keyId: String): Map<String, String> {
+        val generation = LinkedHashMap<String, String>()
+        val prefs = ed25519Prefs()
+        for (alias in userKeyAliases(keyId)) {
+            keystoreTag(alias)?.let { generation[KEYSTORE_ENTRY + alias] = it }
+            prefs?.getString(alias, null)?.let { generation[ED25519_ENTRY + alias] = digestHex(it.toByteArray()) }
+        }
+        return generation
+    }
+
+    /**
+     * Delete the material of [generation] (from [userKeyGeneration]) that is
+     * still in place: an entry whose alias now holds material with another
+     * tag was replaced by a later write and is left alone. Returns the
+     * entries of [generation] still held after the delete; empty means the
+     * generation is gone. An Ed25519 remove whose commit() fails is still
+     * held: the preferences' in-memory cache already shows it absent, but
+     * nothing durable says so, so only a commit that returned true counts.
+     */
+    fun deleteUserKeyGeneration(keyId: String, generation: Map<String, String>): Map<String, String> {
+        val namespace = userKeyAliases(keyId)
+        val prefs = if (generation.keys.any { it.startsWith(ED25519_ENTRY) }) ed25519Prefs() else null
+        val uncommitted = LinkedHashMap<String, String>()
+        for ((entry, tag) in generation) {
+            when {
+                entry.startsWith(KEYSTORE_ENTRY) -> {
+                    val alias = entry.removePrefix(KEYSTORE_ENTRY)
+                    if (alias in namespace && keystoreTag(alias) == tag) keyStore.deleteEntry(alias)
+                }
+                entry.startsWith(ED25519_ENTRY) -> {
+                    val alias = entry.removePrefix(ED25519_ENTRY)
+                    val stored = prefs?.getString(alias, null)
+                    // Absent from the cache is not absent from disk: a remove
+                    // whose commit() failed already left the cache without it.
+                    // So an absent entry is removed again, and only a commit()
+                    // that returns true counts (a commit after a failed one
+                    // writes the file again); replaced material is left.
+                    val ours = stored == null || digestHex(stored.toByteArray()) == tag
+                    if (alias in namespace && prefs != null && ours) {
+                        if (!prefs.edit().remove(alias).commit()) uncommitted[entry] = tag
+                    }
+                }
+            }
+        }
+        val left = userKeyGeneration(keyId)
+        return generation.filter { (entry, tag) -> left[entry] == tag } + uncommitted
+    }
+
+    /** The tag of the Keystore entry at [alias], or null if there is none. */
+    private fun keystoreTag(alias: String): String? {
+        if (!keyStore.containsAlias(alias)) return null
+        val created = keyStore.getCreationDate(alias)?.time ?: 0L
+        val certificate = keyStore.getCertificate(alias)?.encoded ?: ByteArray(0)
+        return "$created:${digestHex(certificate)}"
+    }
+
+    private fun digestHex(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     /**
      * List all key aliases managed by xKey.
@@ -2048,8 +2111,87 @@ class KeystoreManager(private val context: Context) {
         /** Prefix for general-purpose key aliases. */
         private const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
 
+        /**
+         * The user-key namespace of [keyId]: the only Keystore aliases a
+         * delete of a user's key may touch, its credential and general
+         * aliases. An id that resolves to any other alias
+         * ([resolveKeystoreAlias]) names an internal key (a CA, the
+         * attestation, sealing or encryption keys) or a foreign one.
+         */
+        fun userKeyAliases(keyId: String): List<String> =
+            listOf(KEY_ALIAS_PREFIX + keyId, KEY_ALIAS_PREFIX_GENERAL + keyId)
+
+        /** The one alias of [keyId]'s user key of [kind]. */
+        fun userKeyAlias(keyId: String, kind: UserKeyKind): String = when (kind) {
+            UserKeyKind.CREDENTIAL -> KEY_ALIAS_PREFIX + keyId
+            UserKeyKind.GENERAL -> KEY_ALIAS_PREFIX_GENERAL + keyId
+        }
+
+        /**
+         * Whether the [userKeyGeneration] entry [entry] is material of
+         * [keyId]'s user key of [kind]: a credential and a general key can
+         * share an id, and a delete of one never reaches the other's.
+         */
+        fun isEntryOf(entry: String, keyId: String, kind: UserKeyKind): Boolean {
+            val alias = when {
+                entry.startsWith(KEYSTORE_ENTRY) -> entry.removePrefix(KEYSTORE_ENTRY)
+                entry.startsWith(ED25519_ENTRY) -> entry.removePrefix(ED25519_ENTRY)
+                else -> return false
+            }
+            return alias == userKeyAlias(keyId, kind)
+        }
+
+        /** The kind of user key a key row of [keyType] describes. */
+        fun userKeyKindOf(keyType: String): UserKeyKind =
+            if (keyType == "fido2") UserKeyKind.CREDENTIAL else UserKeyKind.GENERAL
+
+        /**
+         * Which of the keys under [keyId] an RPC delete removes (#255
+         * review), given the id's key row type ([rowKeyType], null with no
+         * row) and its material [generation] entries. With one key under the
+         * id, that key (its row, if any, is its own). With a credential and
+         * a general key sharing the id, the legacy `deleteKey` names the
+         * credential and `local.deleteKey` the row's key, or with no row the
+         * general key. Null with no material under the id: every alias.
+         */
+        fun deleteTarget(keyId: String, rowKeyType: String?, generation: Set<String>, legacy: Boolean): UserKeyKind? {
+            val credential = holdsKind(keyId, generation, UserKeyKind.CREDENTIAL)
+            val general = holdsKind(keyId, generation, UserKeyKind.GENERAL)
+            return when {
+                credential && !general -> UserKeyKind.CREDENTIAL
+                general && !credential -> UserKeyKind.GENERAL
+                !credential -> null
+                legacy -> UserKeyKind.CREDENTIAL
+                rowKeyType != null -> userKeyKindOf(rowKeyType)
+                else -> UserKeyKind.GENERAL
+            }
+        }
+
+        /**
+         * The user key a delete naming [kind] removes, given the id's
+         * material [generation] entries: [kind], unless only the other kind
+         * holds material under the id. A key row's type does not say where
+         * its material is: `local.generateKey` makes a fido2-typed key under
+         * the general alias (#255 verify), and its delete must reach it.
+         */
+        fun presentKind(keyId: String, generation: Set<String>, kind: UserKeyKind): UserKeyKind {
+            val other = if (kind == UserKeyKind.CREDENTIAL) UserKeyKind.GENERAL else UserKeyKind.CREDENTIAL
+            return if (!holdsKind(keyId, generation, kind) && holdsKind(keyId, generation, other)) other else kind
+        }
+
+        /** Whether [generation] holds material of [keyId]'s [kind] key; a software key is a general key. */
+        fun holdsKind(keyId: String, generation: Set<String>, kind: UserKeyKind): Boolean = generation.any {
+            isEntryOf(it, keyId, kind) || kind == UserKeyKind.GENERAL && it == com.automatethethings.xkey.storage.SOFTWARE_ENTRY
+        }
+
         /** EncryptedSharedPreferences file for Ed25519 software-backed keys. */
         private const val ED25519_PREFS_NAME = "xkey_ed25519_keys"
+
+        /** [userKeyGeneration] entry prefix of an Android Keystore entry. */
+        const val KEYSTORE_ENTRY = "keystore:"
+
+        /** [userKeyGeneration] entry prefix of an Ed25519 software key. */
+        const val ED25519_ENTRY = "ed25519:"
 
         /** EC curve for FIDO2 (NIST P-256). */
         private const val EC_CURVE = "secp256r1"
@@ -2212,3 +2354,10 @@ class KeystoreManager(private val context: Context) {
         }
     }
 }
+
+/**
+ * Which of the two user keys that can share an id a delete is for
+ * (#255 review): a FIDO2 credential (`xkey_credential_<id>`) or a general
+ * key (`xkey_key_<id>`, with its Ed25519 and software key store material).
+ */
+enum class UserKeyKind { CREDENTIAL, GENERAL }

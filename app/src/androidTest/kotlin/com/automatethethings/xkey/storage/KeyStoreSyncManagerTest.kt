@@ -77,7 +77,8 @@ class KeyStoreSyncManagerTest {
         manager = KeyStoreSyncManager(
             keystoreManager = KeystoreManager(context),
             credentialDao = database.credentialMetadataDao(),
-            keyDao = database.keyDao()
+            keyDao = database.keyDao(),
+            keyPolicyStore = KeyPolicyStore.of(database)
         )
         keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
     }

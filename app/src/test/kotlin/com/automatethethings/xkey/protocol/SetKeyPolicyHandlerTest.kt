@@ -30,8 +30,11 @@ import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.KeyPolicyDao
+import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import io.mockk.coEvery
@@ -112,6 +115,23 @@ class SetKeyPolicyHandlerTest {
      */
     private var storedRevision = 0L
 
+    /** The denial a failed narrowing left in the key's policy row (#193), or null. */
+    private var denial: SharingPolicyType? = null
+
+    private lateinit var policyDao: KeyPolicyDao
+
+    /** The store's policy write; tests that hold a write back replace it. */
+    private var write: suspend (SharingPolicyType) -> Int = { policy ->
+        if (stored == null) {
+            0
+        } else {
+            writes += policy
+            stored = policy
+            storedRevision++
+            1
+        }
+    }
+
     /** Every policy the fake store was asked to write, by any DAO call. */
     private val writes = mutableListOf<SharingPolicyType>()
 
@@ -120,6 +140,9 @@ class SetKeyPolicyHandlerTest {
 
     /** Runs once, after the next read has taken its snapshot. */
     private var afterNextRead: (() -> Unit)? = null
+
+    /** Runs once, after the next read of the enforced policy has taken its snapshot. */
+    private var afterPolicyRead: (() -> Unit)? = null
 
     @Before
     fun setUp() {
@@ -141,29 +164,30 @@ class SetKeyPolicyHandlerTest {
             afterNextRead?.also { afterNextRead = null }?.invoke()
             snapshot
         }
-        coEvery { keyDao.updateSharingPolicy(keyId, any()) } answers {
-            val policy = secondArg<SharingPolicyType>()
-            writes += policy
-            if (stored != null) {
-                stored = policy
-                storedRevision++
-            }
+        // The policy store (#193) over the same stored row: its writes are
+        // the ones these tests watch.
+        policyDao = mockk(relaxed = true)
+        // No key has a pending deletion.
+        io.mockk.coEvery { policyDao.deletion(any()) } returns null
+        coEvery { policyDao.keyInstance(keyId) } answers { stored?.let { storedRowId } }
+        coEvery { policyDao.storedPolicy(keyId) } answers { stored }
+        coEvery { policyDao.policyRevision(keyId) } answers { stored?.let { storedRevision } }
+        coEvery { policyDao.policyRow(keyId) } answers {
+            val snapshot = stored?.let { KeyPolicyEntity(keyId, storedRowId, it, denial = denial) }
+            afterPolicyRead?.also { afterPolicyRead = null }?.invoke()
+            snapshot
         }
-        coEvery { keyDao.compareAndSetSharingPolicy(any(), keyId, any(), any(), any()) } answers {
-            val rowId = firstArg<Long>()
-            val expectedRevision = thirdArg<Long>()
-            val expected = arg<SharingPolicyType>(3)
-            val policy = arg<SharingPolicyType>(4)
-            if (stored != null && rowId == storedRowId && storedRevision == expectedRevision &&
-                stored == expected
-            ) {
-                writes += policy
-                stored = policy
-                storedRevision++
-                1
-            } else {
-                0
-            }
+        coEvery { policyDao.putPolicyRow(any()) } answers { denial = firstArg<KeyPolicyEntity>().denial }
+        coEvery { policyDao.setKeyPolicy(keyId, any()) } coAnswers { write(secondArg()) }
+        mockkObject(KeyPolicyStore.Companion)
+        every { KeyPolicyStore.of(any()) } answers {
+            KeyPolicyStore(
+                policyDao,
+                object : KeyPolicyStore.Transactor {
+                    override suspend fun <T> run(block: suspend () -> T): T = block()
+                },
+                java.util.concurrent.ConcurrentHashMap()
+            )
         }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
@@ -265,6 +289,47 @@ class SetKeyPolicyHandlerTest {
         }
     )
 
+    /**
+     * #255 verify: a request for the policy the key has when it is read is
+     * not answered there. A sheet edit made before it may still be queued,
+     * so the request takes its turn behind it and lands after it: the
+     * user's later choice stands.
+     */
+    @Test
+    fun `a request for the policy it read is queued behind an earlier sheet edit`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        write = { policy ->
+            if (policy == SharingPolicyType.ALL_PEERS) {
+                writing.complete(Unit)
+                release.await()
+            }
+            writes += policy
+            stored = policy
+            storedRevision++
+            1
+        }
+        val store = KeyPolicyStore.of(mockk())
+        // The sheet's widening, made first, holds the edits queue in its write.
+        val sheet = async(Dispatchers.Default) {
+            com.automatethethings.xkey.ui.KeySharingPeers.setKeyPolicy(
+                keyId, store, com.automatethethings.xkey.ui.SharingPolicyType.ALL_PEERS, storedRowId
+            )
+        }
+        withContext(Dispatchers.Default) { kotlinx.coroutines.withTimeout(5_000) { writing.await() } }
+        // The later remote narrowing reads the key still Private, then the sheet's write lands.
+        afterPolicyRead = { release.complete(Unit) }
+        val remote = withContext(Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(5_000) { handler().handleRequest(request(shareable = false)) }
+        }
+        assertTrue(sheet.await())
+
+        assertUpdated(remote)
+        assertEquals("the earlier edit landed over the later request", SharingPolicyType.PRIVATE, stored)
+        assertEquals(listOf(SharingPolicyType.ALL_PEERS, SharingPolicyType.PRIVATE), writes)
+    }
+
     /** Handles [request] as one arriving on a served connection whose peer is [callerPeer]. */
     private suspend fun RequestHandler.handleFromCaller(request: Request, callerPeer: String?): Response =
         withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, callerPeer, "caller")) {
@@ -313,8 +378,7 @@ class SetKeyPolicyHandlerTest {
         // does between the SQLite commit and the caller resuming.
         val committed = CompletableDeferred<Unit>()
         val answer = CompletableDeferred<Unit>()
-        coEvery { keyDao.compareAndSetSharingPolicy(any(), keyId, any(), any(), any()) } coAnswers {
-            val policy = arg<SharingPolicyType>(4)
+        write = { policy ->
             writes += policy
             stored = policy
             storedRevision++
@@ -331,6 +395,14 @@ class SetKeyPolicyHandlerTest {
         call.cancel()
         answer.complete(Unit)
         call.join()
+        // The store's edit outlives the request, on its own scope.
+        withContext(Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(5_000) {
+                while (writes.isEmpty() || runCatching { assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS) }.isFailure) {
+                    kotlinx.coroutines.delay(10)
+                }
+            }
+        }
 
         assertEquals(SharingPolicyType.ALL_PEERS, stored)
         assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
@@ -552,15 +624,97 @@ class SetKeyPolicyHandlerTest {
     @Test
     fun `a narrowing that lands after the read is not overwritten back to ALL_PEERS`() = runTest {
         stored = SharingPolicyType.ALL_PEERS
-        // The owner narrows the key after this request has read ALL_PEERS.
-        afterNextRead = { stored = SharingPolicyType.PRIVATE }
+        // The owner narrows the key after this request has read that it
+        // enforces ALL_PEERS.
+        afterPolicyRead = { otherWriter(SharingPolicyType.PRIVATE) }
 
         val response = handler().handleRequest(request(shareable = true))
 
-        assertUpdated(response)
+        // Decided in the edit's turn (#255 verify): the key no longer has
+        // ALL_PEERS, so this is an unapproved widening, refused, never
+        // reported done.
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
         assertEquals(SharingPolicyType.PRIVATE, stored)
         assertNoPrompt()
         assertNothingWrittenOrAudited()
+    }
+
+    /**
+     * Round 10 (1): a key stored as ALL_PEERS whose narrowing failed is
+     * denied to every peer until a write lands. Asking for ALL_PEERS again
+     * lifts that denial, so it needs the owner's approval like any widening.
+     */
+    @Test
+    fun `lifting a failed narrowing's denial needs the owner's approval`() = runTest {
+        stored = SharingPolicyType.ALL_PEERS
+        denial = SharingPolicyType.PRIVATE
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } throws UserCancelledException()
+
+        val response = handler().handleRequest(request(shareable = true))
+
+        assertEquals(ErrorCodes.BIOMETRIC_FAILED, response.error?.code)
+        assertEquals(SharingPolicyType.PRIVATE, denial)
+        assertNothingWrittenOrAudited()
+    }
+
+    @Test
+    fun `an approved lift of a denial stores ALL_PEERS and audits the denial it replaced`() = runTest {
+        stored = SharingPolicyType.ALL_PEERS
+        denial = SharingPolicyType.PRIVATE
+
+        assertUpdated(handler().handleRequest(request(shareable = true)))
+
+        coVerify(exactly = 1) { launcher.requestAuthentication(any(), any(), any(), any(), any()) }
+        assertNull(denial)
+        assertAudited(SharingPolicyType.PRIVATE, SharingPolicyType.ALL_PEERS)
+    }
+
+    /**
+     * Round 10 (2): the revision check runs inside the write's transaction.
+     * A change that commits after the approval and before the write (here,
+     * as the transaction reads the key row) refuses the widening.
+     */
+    @Test
+    fun `a change committed between the approval and the write refuses the widening`() = runTest {
+        stored = SharingPolicyType.PRIVATE
+        var moved = false
+        coEvery { policyDao.keyInstance(keyId) } answers {
+            if (!moved) {
+                otherWriter(SharingPolicyType.ALL_PEERS)
+                otherWriter(SharingPolicyType.PRIVATE)
+                moved = true
+            }
+            stored?.let { storedRowId }
+        }
+
+        val response = handler().handleRequest(request(shareable = true))
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertEquals(SharingPolicyType.PRIVATE, stored)
+        assertNothingWrittenOrAudited()
+    }
+
+    /**
+     * Round 10 bypass guards: local.setKeyPolicy decides through the store's
+     * transaction ([KeyPolicyStore.RemoteDecision]), not a check of its own
+     * before the write, its approval rule reads the enforced policy (a
+     * denial included), and its audit is the decision's.
+     */
+    @Test
+    fun `local setKeyPolicy decides and audits only through the store's transaction`() {
+        val source = listOf(
+            java.io.File("src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt"),
+            java.io.File("app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt")
+        ).first { it.isFile }.readText()
+        val start = source.indexOf("private suspend fun handleLocalSetKeyPolicy(")
+        val body = source.substring(start, source.indexOf("\n    private ", start + 1))
+        assertFalse("a revision check outside the transaction", "policyRevision !=" in body)
+        assertTrue("keyPolicyStore.enforcedPolicy(entity)" in body)
+        assertTrue("decision = decision" in body)
+        assertEquals(1, Regex("""KeySharingPeers\.setKeyPolicy\(""").findAll(source).count())
+        assertEquals(1, Regex("""logKeySharingChanged\(""").findAll(body).count())
+        val decision = body.substring(body.indexOf("KeyPolicyStore.RemoteDecision("), body.indexOf("val landed"))
+        assertTrue("the audit is the decision's", "logKeySharingChanged(" in decision)
     }
 
     @Test

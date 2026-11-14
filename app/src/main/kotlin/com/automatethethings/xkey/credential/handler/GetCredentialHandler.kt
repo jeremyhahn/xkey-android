@@ -38,6 +38,7 @@ import com.automatethethings.xkey.credential.NoCredentialsFoundException
 import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import kotlinx.coroutines.CancellationException
@@ -69,6 +70,7 @@ class GetCredentialHandler(
     private val credentialDao = database.credentialMetadataDao()
     private val keyDao = database.keyDao()
     private val signCounter = PasskeySignCounter(credentialDao, keyDao)
+    private val keyPolicyStore = KeyPolicyStore.of(database)
 
     /**
      * Handle the begin phase of credential assertion.
@@ -170,6 +172,13 @@ class GetCredentialHandler(
 
         val credential = credentialDao.getByCredentialId(credentialId)
             ?: throw NoCredentialsFoundException(credentialId)
+        // The store's deleted-key gate (#193 r12): a passkey whose delete
+        // reported success signs nothing, though its material is still owed.
+        try {
+            keyPolicyStore.requireUsable(credentialId)
+        } catch (e: KeyPolicyStore.KeyDeletedException) {
+            throw NoCredentialsFoundException(credentialId)
+        }
         Log.d(TAG, "Found credential: rpId=${credential.rpId}, signCount=${credential.signCount}")
 
         // Log available credential options for debugging
@@ -331,13 +340,21 @@ class GetCredentialHandler(
                         )
                     }
                     signOnNextCount { data ->
-                        keystoreManager.sign(
-                            credentialId, data, helper,
-                            title = "Sign In",
-                            subtitle = "Authenticate to $rpId"
-                        )
+                        // The material-use lock and its deleted-key recheck
+                        // (#255 review): a delete acknowledged while the
+                        // prompt waited signs nothing; one that comes later
+                        // waits for this signature.
+                        keyPolicyStore.withUsableKey(credentialId) {
+                            keystoreManager.sign(
+                                credentialId, data, helper,
+                                title = "Sign In",
+                                subtitle = "Authenticate to $rpId"
+                            )
+                        }
                     }
                 }
+            } catch (e: KeyPolicyStore.KeyDeletedException) {
+                throw NoCredentialsFoundException(credentialId)
             } catch (bioEx: Exception) {
                 Log.e(TAG, "Verified signing failed", bioEx)
                 throw CredentialAssertionException("Biometric signing failed", bioEx)
@@ -345,7 +362,11 @@ class GetCredentialHandler(
         } else {
             try {
                 Log.d(TAG, "Signing without verification, credentialId=$credentialId")
-                signOnNextCount { data -> keystoreManager.signWithoutBiometric(credentialId, data) }
+                signOnNextCount { data ->
+                    keyPolicyStore.withUsableKey(credentialId) { keystoreManager.signWithoutBiometric(credentialId, data) }
+                }
+            } catch (e: KeyPolicyStore.KeyDeletedException) {
+                throw NoCredentialsFoundException(credentialId)
             } catch (e: BiometricRequiredException) {
                 // The key turned out to be auth-bound after all. Rather than
                 // sign with UV=0 baked into authData while actually verifying,

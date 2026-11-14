@@ -47,6 +47,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -82,6 +83,8 @@ import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivAlgorithm
 import com.automatethethings.xkey.settings.PinSettingsRepository
+import com.automatethethings.xkey.ui.KeySharingPeers
+import com.automatethethings.xkey.ui.SharingPolicyType as SheetPolicy
 
 /**
  * Interface for sending messages to the connected laptop.
@@ -155,6 +158,20 @@ class RequestHandler(
 
         // Method names
         private const val METHOD_GENERATE_KEY = "generateKey"
+        /** Every request parameter naming a user key. */
+        private val KEY_ID_PARAMS = listOf("keyId", "credentialId", "key_id")
+
+        /**
+         * The methods whose key id names a key they write or delete, not one
+         * they use: exempt from the deleted-key gate. local.sharePublicKey's
+         * key_id labels a contact.
+         */
+        private val KEY_WRITING_METHODS = setOf(
+            METHOD_GENERATE_KEY, METHOD_DELETE_KEY,
+            MethodNames.LOCAL_GENERATE_KEY, MethodNames.LOCAL_DELETE_KEY,
+            MethodNames.LOCAL_SHARE_SYMMETRIC, MethodNames.LOCAL_SHARE_PUBLIC_KEY
+        )
+
         private const val METHOD_SIGN = "sign"
         private const val METHOD_DELETE_KEY = "deleteKey"
         private const val METHOD_LOAD_KEY = "loadKey"
@@ -211,6 +228,9 @@ class RequestHandler(
 
     // Per-key sharing policy DAO
     private val keySharingPolicyDao: KeySharingPolicyDao = XKeyDatabase.getInstance(context).keySharingPolicyDao()
+
+    // A key's policy state, grant rows and key row, written together (#193)
+    private val keyPolicyStore: KeyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(context)) }
 
     // Weak reference to activity for biometric prompts
     private var activityRef: WeakReference<FragmentActivity>? = null
@@ -562,6 +582,19 @@ class RequestHandler(
     private suspend fun requestSessionId(): String =
         currentCoroutineContext()[ApprovalSession]?.sessionId ?: unsharedApprovalId()
 
+    /**
+     * The key ids [request] uses, each refused by the store's deleted-key
+     * gate ([KeyPolicyStore.requireUsable]) before its handler runs: every
+     * key id parameter of every method but [KEY_WRITING_METHODS], whose
+     * writes the store serialises in [KeyPolicyStore.withKeyMaterial] and
+     * whose deletes settle a tombstone themselves.
+     */
+    private fun keyIdsUsedBy(request: Request): List<String> {
+        if (request.method in KEY_WRITING_METHODS) return emptyList()
+        val params = request.params ?: return emptyList()
+        return KEY_ID_PARAMS.mapNotNull { name -> params.optString(name, "").takeIf { it.isNotEmpty() } }.distinct()
+    }
+
     private suspend fun dispatch(request: Request): Response {
         Log.d(TAG, "Handling request: id=${request.id}, method=${request.method}")
 
@@ -576,7 +609,12 @@ class RequestHandler(
         }
 
         return try {
+            // The deleted-key gate, before any handler reads the key (#193 r12).
+            for (keyId in keyIdsUsedBy(request)) keyPolicyStore.requireUsable(keyId)
             handler(request)
+        } catch (e: KeyPolicyStore.KeyDeletedException) {
+            Log.w(TAG, "Deleted key refused: ${e.message}")
+            Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, e.message ?: "Key was deleted")
         } catch (e: ProtocolException) {
             Log.e(TAG, "Handler error: ${e.message}")
             Response.error(request.id, e.errorCode, e.message ?: "Handler error")
@@ -683,7 +721,12 @@ class RequestHandler(
                 if (keystoreManager.keyExists(generateParams.credentialId)) {
                     throw credentialExists()
                 }
-                createCredential(request, generateParams, authDurationSeconds)
+                // In the store's serialisation of the id's material, as
+                // local.generateKey: an owed delete under the id is settled
+                // first, and none ever reaches the credential made here.
+                keyPolicyStore.withKeyMaterial(generateParams.credentialId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) { held ->
+                    createCredential(request, generateParams, authDurationSeconds, held)
+                }
             }
         } finally {
             keyIds.release(reservation)
@@ -729,11 +772,13 @@ class RequestHandler(
         }
     }
 
-    /** Creates an approved `generateKey` credential; the caller holds its id's lock. */
+    /** Creates an approved `generateKey` credential; [held] proves its id's material lock. */
+    @Suppress("UNUSED_PARAMETER")
     private suspend fun createCredential(
         request: Request,
         generateParams: GenerateKeyParams,
-        authDurationSeconds: Int
+        authDurationSeconds: Int,
+        held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld
     ): Response {
         // Generate the key with appropriate authentication duration
         val cosePublicKey = keystoreManager.generateKeyWithAuthDuration(
@@ -812,10 +857,10 @@ class RequestHandler(
         if (!biometricRequired) {
             // Try signing without biometric (session/time-window still valid, or UV disabled)
             try {
-                signature = keystoreManager.signWithoutBiometric(
+                signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
                     credentialId = signParams.credentialId,
                     dataHash = dataHash
-                )
+                ) }
                 userVerified = currentSettings.uvPolicy == UserVerificationPolicy.REQUIRED
                 Log.d(TAG, "Signed without biometric prompt (cached auth or UV disabled)")
             } catch (e: BiometricRequiredException) {
@@ -881,14 +926,14 @@ class RequestHandler(
                     // PER_OPERATION mode: Use crypto-bound signing directly
                     // This performs biometric auth and signing in a single activity
                     Log.d(TAG, "Using crypto-bound signing for PER_OPERATION mode")
-                    val signature = biometricLauncher.requestCryptoSignature(
+                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { biometricLauncher.requestCryptoSignature(
                         credentialId = signParams.credentialId,
                         dataHash = dataHash,
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
                         showOnLockScreen = keyguardManager.isKeyguardLocked,
                         onLaunch = notice.onLaunch
-                    )
+                    ) }
 
                     // Record successful authentication for session tracking
                     sessionAuthManager?.recordAuthentication(requestSessionId())
@@ -918,10 +963,10 @@ class RequestHandler(
                         sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) != false
                     if (!sessionUnapproved) try {
                         Log.d(TAG, "Trying signWithoutBiometric (optimistic for TIME_WINDOW/PER_SESSION)")
-                        val signature = keystoreManager.signWithoutBiometric(
+                        val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
                             credentialId = signParams.credentialId,
                             dataHash = dataHash
-                        )
+                        ) }
 
                         val signatureBase64 = Base64.getEncoder().encodeToString(signature)
                         val result = SignResult(
@@ -952,10 +997,10 @@ class RequestHandler(
 
                     // Now sign within the fresh auth window
                     Log.d(TAG, "Biometric succeeded, signing within auth window")
-                    val signature = keystoreManager.signWithoutBiometric(
+                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.signWithoutBiometric(
                         credentialId = signParams.credentialId,
                         dataHash = dataHash
-                    )
+                    ) }
 
                     val signatureBase64 = Base64.getEncoder().encodeToString(signature)
                     val result = SignResult(
@@ -977,14 +1022,14 @@ class RequestHandler(
 
             // The activity's own prompt answers no launcher request; it takes
             // its queue turn, and the notification only wakes the phone for it.
-            val signature = keystoreManager.sign(
+            val signature = keyPolicyStore.withUsableKey(signParams.credentialId) { keystoreManager.sign(
                 credentialId = signParams.credentialId,
                 dataHash = dataHash,
                 biometricHelper = helper,
                 title = "xKey Authentication",
                 subtitle = "Verify your identity to sign",
                 onTurn = notice::wake
-            )
+            ) }
 
             // Record successful authentication for session tracking
             sessionAuthManager?.recordAuthentication(requestSessionId())
@@ -1216,17 +1261,9 @@ class RequestHandler(
             )
         }
 
-        // Delete the key
-        val deleted = keystoreManager.deleteKey(deleteParams.credentialId)
-        if (!deleted) {
-            throw ProtocolException(
-                "Failed to delete credential",
-                errorCode = ErrorCodes.INTERNAL_ERROR
-            )
-        }
-
-        Log.i(TAG, "Deleted credential: ${deleteParams.credentialId}")
-        return Response.success(request.id, JSONObject().put("deleted", true))
+        // The same delete as local.deleteKey: through the store, with its
+        // tombstone, generation and audit event (#193 r12).
+        return deleteUserKey(request, deleteParams.credentialId, legacy = true)
     }
 
     /**
@@ -1345,7 +1382,13 @@ class RequestHandler(
                         errorCode = ErrorCodes.KEY_EXISTS
                     )
                 }
-                createLocalKey(request, genParams, algorithmName, authDurationSeconds)
+                // The material write and its row insert in the store's one
+                // serialisation of this key id's material, which every delete
+                // takes (#193 r8): a delete of an earlier key under this id
+                // never deletes the material generated here.
+                keyPolicyStore.withKeyMaterial(genParams.keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) { held ->
+                    createLocalKey(request, genParams, algorithmName, authDurationSeconds, held)
+                }
             }
         } finally {
             keyIds.release(reservation)
@@ -1389,13 +1432,14 @@ class RequestHandler(
         request: Request,
         genParams: LocalGenerateKeyParams,
         algorithmName: String,
-        authDurationSeconds: Int
+        authDurationSeconds: Int,
+        held: KeyPolicyStore.KeyMaterialHeld
     ): Response {
         // Software-backed (exportable) keys take a separate path: the raw
         // material lives in SoftwareKeyStore (app-encrypted) so it can be
         // exported/shared, instead of the non-exportable hardware Keystore.
         if (genParams.exportable) {
-            return generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
+            return generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds, held)
         }
 
         // Generate key based on algorithm type
@@ -1423,7 +1467,7 @@ class RequestHandler(
             )
 
             // Store in unified key store
-            keyDao.insert(
+            keyPolicyStore.insertKey(
                 KeyEntity(
                     keyId = genParams.keyId,
                     keyType = genParams.keyType,
@@ -1480,7 +1524,7 @@ class RequestHandler(
         }
 
         // Store in unified key store
-        keyDao.insert(
+        keyPolicyStore.insertKey(
             KeyEntity(
                 keyId = genParams.keyId,
                 keyType = genParams.keyType,
@@ -1578,7 +1622,8 @@ class RequestHandler(
         request: Request,
         genParams: LocalGenerateKeyParams,
         algorithmName: String,
-        authDurationSeconds: Int
+        authDurationSeconds: Int,
+        held: KeyPolicyStore.KeyMaterialHeld
     ): Response {
         val isSymmetric = algorithmName.startsWith("AES") || algorithmName.startsWith("HMAC")
         if (!isSymmetric) {
@@ -1608,7 +1653,7 @@ class RequestHandler(
             )
         )
 
-        keyDao.insert(
+        keyPolicyStore.insertKey(
             KeyEntity(
                 keyId = genParams.keyId,
                 keyType = genParams.keyType,
@@ -1711,7 +1756,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val signature = keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm)
+        val signature = keyPolicyStore.withUsableKey(signParams.keyId) { keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm) }
         val durationMs = System.currentTimeMillis() - startTime
 
         // Record usage
@@ -1755,9 +1800,9 @@ class RequestHandler(
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(
+        val decrypted = keyPolicyStore.withUsableKey(decryptParams.keyId) { keystoreManager.rsaDecryptWithAlgorithm(
             decryptParams.keyId, decryptParams.getCiphertextBytes()
-        )
+        ) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(decryptParams.keyId)
@@ -1797,9 +1842,9 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
+            val ct = keyPolicyStore.withUsableKey(symParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+            ) }
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
@@ -1808,9 +1853,9 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val ciphertext = keystoreManager.symmetricEncrypt(
+        val ciphertext = keyPolicyStore.withUsableKey(symParams.keyId) { keystoreManager.symmetricEncrypt(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        ) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -1851,9 +1896,9 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
+            val pt = keyPolicyStore.withUsableKey(symParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+            ) }
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
@@ -1862,9 +1907,9 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val plaintext = keystoreManager.symmetricDecrypt(
+        val plaintext = keyPolicyStore.withUsableKey(symParams.keyId) { keystoreManager.symmetricDecrypt(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        ) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -1984,9 +2029,9 @@ class RequestHandler(
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
             val swStart = System.currentTimeMillis()
-            val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
+            val swMac = keyPolicyStore.withUsableKey(hmacParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
                 sw.material, hmacParams.getDataBytes(), sw.algorithm
-            )
+            ) }
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
             // The MAC and the data stay out of the entry.
@@ -2004,7 +2049,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
+        val hmac = keyPolicyStore.withUsableKey(hmacParams.keyId) { keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes()) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
@@ -2044,9 +2089,9 @@ class RequestHandler(
         val ecdhParams = LocalECDHParams.fromJson(params)
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val sharedSecret = keystoreManager.performECDH(
+        val sharedSecret = keyPolicyStore.withUsableKey(ecdhParams.keyId) { keystoreManager.performECDH(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
-        )
+        ) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(ecdhParams.keyId)
@@ -2214,17 +2259,68 @@ class RequestHandler(
         // `deleteKey` shape used `credentialId`. Accept both.
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
+        return deleteUserKey(request, keyId)
+    }
 
-        // Delete from Android Keystore and the software key store (only one
-        // of the two will actually hold the key).
-        keystoreManager.deleteGeneralKey(keyId)
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
-
-        // Delete from unified key store
-        keyDao.deleteByKeyId(keyId)
+    /**
+     * The one RPC key delete, of local.deleteKey and the legacy deleteKey.
+     * The store records its audit event once the delete commits (#193 r12).
+     */
+    private suspend fun deleteUserKey(request: Request, keyId: String, legacy: Boolean = false): Response {
+        // Delete from unified key store with its policy row and grant rows,
+        // in one transaction, under the sharing edits' order (#193), only if
+        // the key row is still the one this request found: a delete queued
+        // behind other edits never removes a key generated again under its
+        // id. A failed delete throws to the caller, never a logged success.
+        // The key's material, in the Android Keystore or the software key
+        // store (only one of the two holds it), is deleted in the same queued
+        // edit once the rows are: a request cancelled while the delete waits
+        // never leaves it behind (#193 r6, ruling 554).
+        // An internal key (a CA, attestation, sealing or encryption key) is
+        // never a peer's to delete: refused before any row or tombstone is
+        // touched. deleteKeyMaterial refuses it again under the lock (#193 r11).
+        if (com.automatethethings.xkey.storage.isInternalKey(keyId, keystoreManager)) {
+            return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "Key $keyId is not a user key; not deleted")
+        }
+        val entity = keyDao.getByKeyId(keyId)
+        // A credential and a general key may share an id: the delete names
+        // one of them, and its material and tombstone hold only that key's
+        // alias, so the other key, its row and its metadata stay (#255 review).
+        val (kind, besideRow) = deleteTarget(keyId, entity, legacy)
+        val material = com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager, kind = kind)
+        if (entity == null || besideRow) {
+            // No key row, or the row is the other key's: the material alone,
+            // in the store's serialisation, and only if the id's row is still
+            // what this request found (#193 r8).
+            if (!keyPolicyStore.deleteMaterial(keyId, material, besideRow = entity?.id.takeIf { besideRow })) {
+                return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
+            }
+        } else if (!KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = material)) {
+            return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
+        }
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
+    }
+
+    /**
+     * The key under [keyId] a delete removes ([KeystoreManager.deleteTarget]),
+     * and whether the id's row is the other key's: a credential and a general
+     * key both hold material under the id and the row is not the target's.
+     */
+    private fun deleteTarget(keyId: String, entity: KeyEntity?, legacy: Boolean): Pair<com.automatethethings.xkey.crypto.UserKeyKind?, Boolean> {
+        // An unreadable store picks by the row alone; the delete then reads
+        // the generation again under the lock and refuses.
+        val generation = try {
+            com.automatethethings.xkey.storage.keyMaterialGeneration(context, keyId, keystoreManager).keys
+        } catch (e: Exception) {
+            emptySet()
+        }
+        val kind = KeystoreManager.deleteTarget(keyId, entity?.keyType, generation, legacy)
+        val other = com.automatethethings.xkey.crypto.UserKeyKind.entries.firstOrNull { it != kind }
+        val besideRow = entity != null && kind != null && other != null &&
+            KeystoreManager.userKeyKindOf(entity.keyType) != kind && KeystoreManager.holdsKind(keyId, generation, other)
+        return kind to besideRow
     }
 
     /**
@@ -2235,16 +2331,18 @@ class RequestHandler(
      * the sharing check, so it needs a confirmed peer and the owner's
      * approval on the phone. Without a launcher, or when the prompt is
      * cancelled or fails, the request answers BIOMETRIC_FAILED and the stored
-     * policy is unchanged. Narrowing needs neither. Every stored change is
-     * audited.
+     * policy is unchanged. Lifting a denial a failed narrowing left
+     * enforced is a widening too (#193 r10). Narrowing needs neither. Every
+     * stored change is audited.
      *
-     * The write is a compare-and-set against the policy revision the
-     * decision was taken on (every policy write moves it forward, so a
-     * policy changed away and back is a new revision), so a change that
-     * lands while the prompt is up, or between the read and the write, is
-     * never overwritten: a widening whose starting
-     * policy moved is refused (OPERATION_DENIED) rather than applied without
-     * an approval for it, and a narrowing re-reads and retries. A key already
+     * The decision is checked inside the write's transaction
+     * ([KeyPolicyStore.RemoteDecision]) against the policy revision it was
+     * taken on (every policy write moves it forward, so a policy changed
+     * away and back is a new revision), so a change that lands while the
+     * prompt is up, or between the read and the write, is never overwritten
+     * by a widening: one whose starting policy moved is refused
+     * (OPERATION_DENIED) rather than applied without an approval for it. A
+     * narrowing always lands. A key already
      * at the requested policy is not written. The audit records only a write
      * that changed the row, with the policy it replaced.
      */
@@ -2257,114 +2355,101 @@ class RequestHandler(
         val entity = keyDao.getByKeyId(policyParams.keyId)
             ?: throw ProtocolException("Key not found: ${policyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
-        val newPolicy = when (policyParams.shareable) {
-            null -> null
-            true -> SharingPolicyType.ALL_PEERS
-            false -> SharingPolicyType.PRIVATE
-        }
-
-        // The compare-and-set, like updateSharingPolicy, keeps `shareable` and
-        // `sharing_policy` in step, which KeyEntity requires. It is bound to
-        // the row read above (its immutable id), so a key deleted and
-        // re-created under the same key id is never written, and to the
-        // policy revision [from] was read at, so a policy that changed and
-        // changed back since is not written either. It returns true only
-        // when it changed the row, and audits exactly that change. The write
-        // and the audit are one non-cancellable step: a request cancelled
-        // after the commit and before its result arrives still audits it.
-        suspend fun setPolicyFrom(from: KeyEntity, policy: SharingPolicyType): Boolean {
-            val expected = from.sharingPolicy
-            return persistAudited(
-                write = { keyDao.compareAndSetSharingPolicy(entity.id, entity.keyId, from.policyRevision, expected, policy) != 0 },
-                record = { changed ->
-                    if (changed) {
-                        AuditLogger.logKeySharingChanged(
-                            keyId = entity.keyId,
-                            keyLabel = entity.label,
-                            keyType = entity.keyType,
-                            oldPolicy = expected.name,
-                            newPolicy = policy.name
+        if (policyParams.shareable != null) {
+            val policy = if (policyParams.shareable) SharingPolicyType.ALL_PEERS else SharingPolicyType.PRIVATE
+            // What the key enforces now: a denial left by a failed narrowing
+            // (#193) counts, so lifting it is a widening like any other.
+            // Whether the key is already at [policy] is decided in the edit's
+            // turn in the queue, never here: an edit queued ahead of this one
+            // may still change it (#255 verify).
+            val enforced = keyPolicyStore.enforcedPolicy(entity)
+            val widening = policy == SharingPolicyType.ALL_PEERS && enforced != SharingPolicyType.ALL_PEERS
+            if (widening) {
+                requireConfirmedPeer("Sharing a key with all peers")
+                val keyName = entity.label.ifBlank { entity.keyId }
+                val launcher = biometricLauncher ?: throw ProtocolException(
+                    "Sharing a key with all peers needs the owner's approval, and no biometric prompt is available",
+                    errorCode = ErrorCodes.BIOMETRIC_FAILED
+                )
+                withContext(Dispatchers.Main) {
+                    // A request withdrawn or timed out while it waited for its
+                    // turn posted no notification, and takes none down: the
+                    // notification up belongs to the request on screen.
+                    val notice = OwnNotifications(operationType = "share", rpName = keyName)
+                    try {
+                        // One launcher-owned request: on a locked phone the
+                        // notification opens this same prompt.
+                        launcher.requestAuthentication(
+                            title = "Share key with all devices",
+                            subtitle = "Allow every paired device to use \"$keyName\"",
+                            showOnLockScreen = keyguardManager.isKeyguardLocked,
+                            onLaunch = notice.onLaunch
                         )
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        throw ProtocolException(
+                            "Owner did not approve sharing the key with all peers: ${e.message}",
+                            errorCode = ErrorCodes.BIOMETRIC_FAILED
+                        )
+                    } finally {
+                        notice.close()
                     }
                 }
-            )
-        }
-
-        // The read row as it is now. A different row under the same key id
-        // is another key: the request, and any approval for it, named the
-        // one read above.
-        suspend fun storedRow(): KeyEntity {
-            val current = keyDao.getByKeyId(entity.keyId)
-                ?: throw ProtocolException("Key not found: ${entity.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
-            if (current.id != entity.id) {
+            }
+            // The decision is checked inside the policy write's transaction
+            // (#193 r10): a widening of what the key enforces then, lifting a
+            // denial included, lands only with the owner's approval taken at
+            // the revision and policy it still has (#178), so a change that
+            // landed while the prompt was up, even one changed back, is not
+            // covered. Through the sheet's ordering (#174), bound to the key
+            // row read above (#193): a key deleted or generated again since is
+            // refused. The committed write is audited with the policy it
+            // replaced, in the store's edit, so a request cancelled after the
+            // commit still audits it.
+            val decision = KeyPolicyStore.RemoteDecision(
+                revision = entity.policyRevision,
+                enforced = enforced,
+                approved = widening
+            ) { replaced ->
+                if (replaced != policy) {
+                    AuditLogger.logKeySharingChanged(
+                        keyId = entity.keyId,
+                        keyLabel = entity.label,
+                        keyType = entity.keyType,
+                        oldPolicy = replaced.name,
+                        newPolicy = policy.name
+                    )
+                }
+            }
+            val landed = try {
+                KeySharingPeers.setKeyPolicy(
+                    policyParams.keyId,
+                    keyPolicyStore,
+                    SheetPolicy.valueOf(policy.name),
+                    entity.id,
+                    decision = decision
+                )
+            } catch (e: KeyPolicyStore.KeyChangedException) {
                 throw ProtocolException(
                     "Key ${entity.keyId} was replaced while the request was in flight; retry",
                     errorCode = ErrorCodes.OPERATION_DENIED
                 )
-            }
-            return current
-        }
-
-        if (newPolicy == SharingPolicyType.ALL_PEERS && entity.sharingPolicy != SharingPolicyType.ALL_PEERS) {
-            requireConfirmedPeer("Sharing a key with all peers")
-            val keyName = entity.label.ifBlank { entity.keyId }
-            val launcher = biometricLauncher ?: throw ProtocolException(
-                "Sharing a key with all peers needs the owner's approval, and no biometric prompt is available",
-                errorCode = ErrorCodes.BIOMETRIC_FAILED
-            )
-            withContext(Dispatchers.Main) {
-                // A request withdrawn or timed out while it waited for its
-                // turn posted no notification, and takes none down: the
-                // notification up belongs to the request on screen.
-                val notice = OwnNotifications(operationType = "share", rpName = keyName)
-                try {
-                    // One launcher-owned request: on a locked phone the
-                    // notification opens this same prompt.
-                    launcher.requestAuthentication(
-                        title = "Share key with all devices",
-                        subtitle = "Allow every paired device to use \"$keyName\"",
-                        showOnLockScreen = keyguardManager.isKeyguardLocked,
-                        onLaunch = notice.onLaunch
-                    )
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    throw ProtocolException(
-                        "Owner did not approve sharing the key with all peers: ${e.message}",
-                        errorCode = ErrorCodes.BIOMETRIC_FAILED
-                    )
-                } finally {
-                    notice.close()
-                }
-            }
-            // The owner approved widening from the policy revision read
-            // above. If any policy write landed while the prompt was up, even
-            // one that changed the policy back, the approval does not cover
-            // the new state: write nothing unless the key is already open.
-            if (!setPolicyFrom(entity, SharingPolicyType.ALL_PEERS) &&
-                storedRow().sharingPolicy != SharingPolicyType.ALL_PEERS
-            ) {
+            } catch (e: KeyPolicyStore.DecisionRefusedException) {
                 throw ProtocolException(
                     "Sharing policy of ${entity.keyId} changed while waiting for approval; retry",
                     errorCode = ErrorCodes.OPERATION_DENIED
                 )
             }
-        } else if (newPolicy == SharingPolicyType.PRIVATE) {
-            // Narrowing needs no approval from any starting policy, so a
-            // change that lands first is re-read and narrowed in turn.
-            var current = entity
-            var attempts = 0
-            val maxAttempts = 3
-            while (current.sharingPolicy != SharingPolicyType.PRIVATE &&
-                !setPolicyFrom(current, SharingPolicyType.PRIVATE)
-            ) {
-                if (++attempts >= maxAttempts) {
-                    throw ProtocolException(
-                        "Sharing policy of ${entity.keyId} kept changing; retry",
-                        errorCode = ErrorCodes.OPERATION_DENIED
-                    )
-                }
-                current = storedRow()
+            // Never reported updated unless stored (#193); a failed
+            // narrowing's denial stays enforced until a later change lands.
+            if (!landed) {
+                Log.w(TAG, "Policy for key ${policyParams.keyId} not stored; the change was refused")
+                return Response.error(
+                    request.id,
+                    ErrorCodes.INTERNAL_ERROR,
+                    "Key policy not stored; the change was refused"
+                )
             }
         }
 
@@ -3259,7 +3344,7 @@ class RequestHandler(
     }
 
     /** The one share decision ([SharePermission]), shared with every outbound share path. */
-    private val sharePermission by lazy { SharePermission(keySharingPolicyDao, pairedDeviceRepository) }
+    private val sharePermission by lazy { SharePermission(keySharingPolicyDao, pairedDeviceRepository, keyPolicyStore) }
 
     /**
      * Handles local.signFido2Assertion - sign a FIDO2 assertion with a shared credential.
@@ -3401,10 +3486,10 @@ class RequestHandler(
             val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
 
             // Sign using the credential key
-            val signature = keystoreManager.signWithoutBiometric(
+            val signature = keyPolicyStore.withUsableKey(assertionParams.credentialId) { keystoreManager.signWithoutBiometric(
                 credentialId = assertionParams.credentialId,
                 dataHash = dataHash
-            )
+            ) }
 
             Triple(newSignCount, authData, signature)
         }
@@ -4110,36 +4195,41 @@ class RequestHandler(
                 params.optString("key_id", "").ifBlank { "shared-sym-${System.currentTimeMillis()}" }
             }
             val store = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
-            if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
-                return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
-            }
             val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
-            persistAudited(
-                write = {
-                    store.put(
-                        com.automatethethings.xkey.crypto.SoftwareKey(
-                            keyId = keyId,
-                            algorithm = algorithm,
-                            keyType = "symmetric",
-                            keySize = params.optInt("key_size", material.size * 8),
-                            exportable = false,
-                            shareable = false,
-                            material = material
-                        )
-                    )
-                },
-                record = {
-                    AuditLogger.logKeyCreated(
-                        keyId = keyId,
-                        keyLabel = keyId,
-                        keyType = "symmetric",
-                        algorithm = algorithm,
-                        source = "shared",
-                        deviceId = peerPublicKeyHex,
-                        deviceName = auditPeerName(peerPublicKeyHex)
-                    )
+            // The check and the write in the store's one serialisation of
+            // this id's key material (#193 r8); the write and its audit are
+            // one step (#234).
+            keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) {
+                if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
+                    return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
                 }
-            )
+                persistAudited(
+                    write = {
+                        store.put(
+                            com.automatethethings.xkey.crypto.SoftwareKey(
+                                keyId = keyId,
+                                algorithm = algorithm,
+                                keyType = "symmetric",
+                                keySize = params.optInt("key_size", material.size * 8),
+                                exportable = false,
+                                shareable = false,
+                                material = material
+                            )
+                        )
+                    },
+                    record = {
+                        AuditLogger.logKeyCreated(
+                            keyId = keyId,
+                            keyLabel = keyId,
+                            keyType = "symmetric",
+                            algorithm = algorithm,
+                            source = "shared",
+                            deviceId = peerPublicKeyHex,
+                            deviceName = auditPeerName(peerPublicKeyHex)
+                        )
+                    }
+                )
+            }
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
                 put("import_id", keyId)
@@ -4277,9 +4367,9 @@ class RequestHandler(
         // Sign the content hash
         return try {
             val hashBytes = hexToBytes(contentHash)
-            val signatureBytes = keystoreManager.signWithAlgorithm(
+            val signatureBytes = keyPolicyStore.withUsableKey(signingKey.keyId) { keystoreManager.signWithAlgorithm(
                 signingKey.keyId, hashBytes, signingKey.algorithm
-            )
+            ) }
             val publicKeyDer = keystoreManager.getPublicKeyDER(signingKey.keyId)
                 ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
             val fingerprint = computeFingerprint(publicKeyDer)

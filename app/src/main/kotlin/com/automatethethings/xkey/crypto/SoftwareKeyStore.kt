@@ -135,6 +135,28 @@ class SoftwareKeyStore(
         File(dir, "$id.meta").delete()
     }
 
+    /**
+     * The generation of the software key [keyId]: a digest of its encrypted
+     * material, which [put] rewrites under a fresh IV, so a key stored again
+     * under the same id has another generation. Null if none is stored.
+     */
+    fun generation(keyId: String): String? {
+        migrateLegacyRecords()
+        val keyFile = File(dir, "${fileId(keyId)}.key")
+        if (!keyFile.exists()) return null
+        return SyncCodec.sha256Hex(keyFile.readBytes())
+    }
+
+    /**
+     * Delete the software key [keyId] only if it is still at [generation];
+     * a key stored again since is left. Returns true when no material of
+     * [generation] remains.
+     */
+    fun deleteGeneration(keyId: String, generation: String): Boolean {
+        if (generation(keyId) == generation) delete(keyId)
+        return generation(keyId) != generation
+    }
+
     /** Filename stem for [keyId]: a digest, so distinct ids stay distinct. */
     private fun fileId(keyId: String): String =
         SyncCodec.sha256Hex(keyId.toByteArray(Charsets.UTF_8))

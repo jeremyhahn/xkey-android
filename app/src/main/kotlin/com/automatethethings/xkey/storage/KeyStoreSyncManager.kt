@@ -44,11 +44,15 @@ import javax.crypto.SecretKey
  * @param keystoreManager Manager for Android Keystore operations.
  * @param credentialDao DAO for the credential_metadata table.
  * @param keyDao DAO for the unified keys table.
+ * @param keyPolicyStore The store whose deletion tombstones the sync
+ *   honours ([KeyPolicyStore.insertDiscovered]): material whose delete is
+ *   still owed is not discovered.
  */
 class KeyStoreSyncManager(
     private val keystoreManager: KeystoreManager,
     private val credentialDao: CredentialMetadataDao,
-    private val keyDao: KeyDao
+    private val keyDao: KeyDao,
+    private val keyPolicyStore: KeyPolicyStore
 ) {
     companion object {
         private const val TAG = "KeyStoreSyncManager"
@@ -65,6 +69,24 @@ class KeyStoreSyncManager(
             "_androidx_",       // AndroidX Security Crypto (master key for EncryptedSharedPreferences)
             "AndroidKeyStore",  // Android platform internal keys
         )
+
+        /**
+         * Whether the Keystore entry [alias] is protected from a user delete:
+         * every alias but a user key's (KeystoreManager.userKeyAliases), so
+         * the app's own keys (xkey_seal_store_key,
+         * xkey_password_encryption_key, the CA keys) and framework keys are
+         * listed as system keys. A delete of one is refused
+         * ([InternalKeyException]) with nothing deleted (#255 review).
+         */
+        fun isProtectedAlias(alias: String): Boolean {
+            val userKey = when {
+                alias.startsWith(KEY_ALIAS_PREFIX) -> alias.removePrefix(KEY_ALIAS_PREFIX)
+                alias.startsWith(KEY_ALIAS_PREFIX_GENERAL) -> alias.removePrefix(KEY_ALIAS_PREFIX_GENERAL)
+                else -> return true
+            }
+            return alias !in com.automatethethings.xkey.crypto.KeystoreManager.userKeyAliases(userKey) ||
+                SYSTEM_KEY_PREFIXES.any { alias.startsWith(it) }
+        }
     }
 
     /**
@@ -117,7 +139,10 @@ class KeyStoreSyncManager(
                 continue
             }
 
-            keyDao.insert(mapCredentialToKeyEntity(cred))
+            if (!track(mapCredentialToKeyEntity(cred))) {
+                skipped++
+                continue
+            }
             synced++
             Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
         }
@@ -126,6 +151,18 @@ class KeyStoreSyncManager(
                 "$skipped skipped with no Keystore key")
         return synced
     }
+
+    /**
+     * The sync's one key row insert (#193 r9, r10, r11): a key id whose row
+     * was deleted while its material delete is still owed (a tombstone) is
+     * never listed again, from a credential or from the Keystore, with
+     * default metadata; the replay deletes its material. The tombstone
+     * check and the insert are one step under the key's material lock
+     * ([KeyPolicyStore.insertDiscovered]), so a delete running meanwhile
+     * is never undone. Returns whether [entity] was inserted.
+     */
+    private suspend fun track(entity: KeyEntity): Boolean =
+        keyPolicyStore.insertDiscovered(entity.keyId) { keyDao.insert(entity) }
 
     /**
      * Discovers keys in Android Keystore that are not tracked in the keys table.
@@ -161,10 +198,14 @@ class KeyStoreSyncManager(
 
             if (!keyDao.exists(keyId)) {
                 val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
-                if (entity != null) {
-                    keyDao.insert(entity)
+                if (entity != null && track(entity)) {
                     discovered++
                     Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
+                }
+            } else if (isProtectedAlias(alias)) {
+                // A row an earlier sync listed as a deletable user key.
+                keyDao.getByKeyId(keyId)?.takeIf { !it.isSystemKey }?.let {
+                    keyDao.update(it.copy(isSystemKey = true))
                 }
             }
         }
@@ -266,10 +307,7 @@ class KeyStoreSyncManager(
                 else -> "signing"
             }
 
-            // Detect system/framework keys by alias pattern
-            val isSystemKey = isCA || SYSTEM_KEY_PREFIXES.any { prefix ->
-                alias.startsWith(prefix)
-            }
+            val isSystemKey = isCA || isProtectedAlias(alias)
 
             // Generate a user-friendly label
             val label = when {

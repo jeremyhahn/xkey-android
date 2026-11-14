@@ -106,6 +106,7 @@ class HmacEcdhAuditTest {
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
+
         // Stored key types: ECDH runs on an EC key stored as signing, and the
         // Keystore HMAC key is stored as "secret"; neither matches the
         // operation, so a hardcoded keyType shows up as a mismatch.
@@ -118,6 +119,11 @@ class HmacEcdhAuditTest {
             KeyEntity(keyId = "hw-hmac", keyType = "secret", algorithm = "HMAC-SHA512", label = "hmac", keySizeBits = 256, source = "local")
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No key here is deleted or carries a stored policy (#193 store).
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            coEvery { deletion(any()) } returns null
+            coEvery { policyRow(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -422,7 +428,7 @@ class HmacEcdhAuditTest {
         entry.details?.let { JSONObject(it).optString("algorithm", "").ifEmpty { null } }
 
     private suspend fun <T> servedBy(peer: String, block: suspend () -> T): T =
-        withContext(RequestHandler.servedConnection(binding, peer, "test:connection")) { block() }
+        withContext(RequestHandler.servedConnection(binding, peer, "served:$peer")) { block() }
 
     private fun device(name: String): PairedDeviceData = mockk(relaxed = true) {
         every { deviceName } returns name

@@ -146,6 +146,29 @@ class KeySharingPolicyDaoTest {
     }
 
     // -------------------------------------------------------------------------
+    // isPeerGranted: the explicit grant row alone (#174)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun isPeerGranted_ignoresAnAllPeersStoredPolicy() = runBlocking {
+        insertKey("k-all", SharingPolicyType.ALL_PEERS)
+        dao.setPolicy(KeySharingPolicy("k-all", peer, allowed = true))
+
+        // A Selected Peers change not yet stored must not let every peer in.
+        assertTrue(dao.isPeerGranted("k-all", peer))
+        assertFalse(dao.isPeerGranted("k-all", otherPeer))
+    }
+
+    @Test
+    fun isPeerGranted_honoursARevokedRowAndAMissingKey() = runBlocking {
+        insertKey("k-selected", SharingPolicyType.SELECTED_PEERS)
+        dao.setPolicy(KeySharingPolicy("k-selected", peer, allowed = false))
+
+        assertFalse(dao.isPeerGranted("k-selected", peer))
+        assertFalse(dao.isPeerGranted("k-missing", peer))
+    }
+
+    // -------------------------------------------------------------------------
     // Shareable key listings
     // -------------------------------------------------------------------------
 
@@ -361,5 +384,18 @@ class KeySharingPolicyDaoTest {
 
         assertTrue(dao.getPoliciesForKeySync("k-1").isEmpty())
         assertNull(dao.getPolicy("k-1", peer))
+    }
+
+    @Test
+    fun keyInstance_changesWhenAKeyIsGeneratedAgainUnderItsId() = runBlocking {
+        insertKey("k-1", SharingPolicyType.PRIVATE)
+        val first = dao.keyInstance("k-1")
+
+        keyDao.deleteByKeyId("k-1")
+        assertNull(dao.keyInstance("k-1"))
+        insertKey("k-1", SharingPolicyType.PRIVATE)
+        val second = dao.keyInstance("k-1")
+
+        assertTrue(first != null && second != null && first != second)
     }
 }

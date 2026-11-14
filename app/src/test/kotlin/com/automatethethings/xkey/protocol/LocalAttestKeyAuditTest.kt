@@ -87,6 +87,8 @@ class LocalAttestKeyAuditTest {
         coEvery { keyDao.getByKeyId(any()) } returns null
         coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity()
         val database = mockk<XKeyDatabase>(relaxed = true)
+        // No key has a pending deletion.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) { io.mockk.coEvery { deletion(any()) } returns null }
         every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
