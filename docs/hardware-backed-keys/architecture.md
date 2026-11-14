@@ -418,7 +418,7 @@ com.automatethethings.xkey
   /remote         RemoteKeyClient, BidirectionalMessageRouter, RemoteKeySyncManager
   /settings       BiometricSettings, BootstrapSettings, MediaSigningSettings, ...
   /storage        XKeyDatabase, KeyEntity, ContactEntity, CredentialMetadataEntity, ...
-  /truststore     TrustStoreRepository, CABundleFetcher, IDevIDVerifier
+  /truststore     TrustStoreRepository, CABundleFetcher
   /ui             All Activity classes, PremiumCardFactory, UIHelpers
   /usb            UsbAccessoryServer, TcpHsmServer, UsbHsmSettings
   /util           JsonExtensions
