@@ -1119,6 +1119,8 @@
     <string name="audit_log_op_piv_cert_imported">PIV Cert Imported</string>
     <string name="audit_log_op_piv_sign_request">PIV Sign Request</string>
     <string name="audit_log_op_piv_key_deleted">PIV Key Deleted</string>
+    <string name="audit_log_op_password_created">Password Added</string>
+    <string name="audit_log_op_password_deleted">Password Deleted</string>
     <string name="audit_log_op_backup_created">Backup Stored</string>
     <string name="audit_log_op_backup_restored">Backup Restored</string>
 

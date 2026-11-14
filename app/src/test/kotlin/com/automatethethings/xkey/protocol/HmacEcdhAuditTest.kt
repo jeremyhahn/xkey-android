@@ -30,6 +30,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.settings.PairedDeviceData
+import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -173,9 +174,9 @@ class HmacEcdhAuditTest {
 
         // Two paired desktops; neither requires attestation for key use.
         val pairedDevices = mockk<PairedDeviceRepository>()
-        every { pairedDevices.getDevice(any()) } returns null
-        every { pairedDevices.getDevice(PEER_A) } returns device("Desktop A")
-        every { pairedDevices.getDevice(PEER_B) } returns device("Desktop B")
+        every { pairedDevices.lookupDevice(any()) } returns DeviceLookup.NotPaired
+        every { pairedDevices.lookupDevice(PEER_A) } returns DeviceLookup.Paired(device("Desktop A"))
+        every { pairedDevices.lookupDevice(PEER_B) } returns DeviceLookup.Paired(device("Desktop B"))
 
         keystore = mockk(relaxed = true)
         coEvery { keystore.computeHMAC("hw-hmac", any()) } returns keystoreMac
