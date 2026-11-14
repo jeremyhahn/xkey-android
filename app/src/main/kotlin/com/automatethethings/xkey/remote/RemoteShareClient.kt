@@ -15,6 +15,9 @@
 package com.automatethethings.xkey.remote
 
 import android.util.Log
+import com.automatethethings.xkey.ca.DeviceIdentity
+import com.automatethethings.xkey.crypto.FileEncryptor
+import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
@@ -270,7 +273,9 @@ enum class DesktopShareDecision {
  *  1. a confirmed peer identity is required;
  *  2. the key's recorded policy must admit that peer, as [SharePermission]
  *     decides it (the same decision the inbound handlers take, a pending
- *     grant revocation included); a key with no record is unshareable;
+ *     grant revocation included); a key with no record, and the phone's
+ *     identity and ephemeral keys ([isIdentityKey], [isEphemeralKey]), are
+ *     unshareable;
  *  3. a hardware key shares its public half only;
  *  4. software material only when both stores mark it exportable and shareable.
  *
@@ -287,6 +292,37 @@ object DesktopShareGate {
      */
     const val SYMMETRIC_WRAP_PATH_MATCHES = false
 
+    /**
+     * The SELECTED_PEERS grant check an outbound share passes to [decide]
+     * and [DesktopKeyShare.send], built from the grant rows
+     * ([isKeySharedWithPeer]) and the pairing record ([isRevocationPending]).
+     * As in protocol/Handler.kt's canShareKeyWithPeer, a peer whose unpair
+     * revocation is pending (#174) has no grant: it may have been re-paired
+     * under the same key before its old rows were deleted.
+     */
+    fun peerGrant(
+        isKeySharedWithPeer: suspend (keyId: String, peerPublicKeyHex: String) -> Boolean,
+        isRevocationPending: (peerPublicKeyHex: String) -> Boolean
+    ): suspend (keyId: String, peerPublicKeyHex: String) -> Boolean = { keyId, peer ->
+        !isRevocationPending(peer) && isKeySharedWithPeer(keyId, peer)
+    }
+
+    /**
+     * The phone's own identity keys: DeviceIdentity's enrollment keys and the
+     * user-verification key. Their writers replace them outside
+     * [SharePermissionLedger], so a share could not tell a retired key from
+     * the current one; they are never shared.
+     */
+    fun isIdentityKey(keyId: String): Boolean =
+        keyId.startsWith(DeviceIdentity.ALIAS_PREFIX) || keyId == KeystoreUserVerificationKey.ALIAS
+
+    /**
+     * FileEncryptor's ephemeral agreement keys, deleted when their one
+     * encryption ends. Discovery no longer gives them rows; a row an earlier
+     * build gave one is still never shared.
+     */
+    fun isEphemeralKey(keyId: String): Boolean = keyId.startsWith(FileEncryptor.EPHEMERAL_KEY_PREFIX)
+
     suspend fun decide(
         entity: KeyEntity?,
         software: SoftwareKey?,
@@ -295,7 +331,9 @@ object DesktopShareGate {
         permission: SharePermission
     ): DesktopShareDecision {
         if (peerPublicKeyHex.isNullOrEmpty()) return DesktopShareDecision.NO_PEER
-        if (entity == null) return DesktopShareDecision.POLICY_DENIED
+        if (entity == null || isIdentityKey(entity.keyId) || isEphemeralKey(entity.keyId)) {
+            return DesktopShareDecision.POLICY_DENIED
+        }
         if (!permission.canShare(entity, peerPublicKeyHex)) return DesktopShareDecision.POLICY_DENIED
         if (software != null) {
             val exportable = entity.exportable && entity.shareable && software.exportable && software.shareable
@@ -346,15 +384,28 @@ class ShareSession private constructor(
      * ([MessageSender.sendEncryptedMessageOn]): the transport refuses it at
      * encryption admission if another connection, even another peer, has
      * replaced that one since the check.
+     *
+     * [authorize] applies to every send of the client (`sharePublicKey`,
+     * `shareSymmetric`, `importSharedKey`). It runs before the send enters the
+     * transport and may suspend (it re-reads the store), and throws to stop
+     * the send. It returns the admission check the transport runs inside its
+     * admission critical section, after every wait and immediately before the
+     * nonce is consumed ([MessageSender.sendEncryptedMessageOn]); that check
+     * is what makes a revoke committed while the send waited win.
      */
-    internal fun client(requestTimeoutMs: Long): RemoteShareClient =
-        RemoteShareClient(GuardedSender(), router, requestTimeoutMs)
+    internal fun client(
+        requestTimeoutMs: Long,
+        authorize: suspend () -> (() -> Unit) = { {} }
+    ): RemoteShareClient = RemoteShareClient(GuardedSender(authorize), router, requestTimeoutMs)
 
-    private inner class GuardedSender : MessageSender {
+    private inner class GuardedSender(private val authorize: suspend () -> (() -> Unit)) : MessageSender {
         override suspend fun sendEncryptedMessage(data: ByteArray) {
             val on = confirmed ?: throw SessionChangedException()
             if (!isCurrent()) throw SessionChangedException()
-            sender.sendEncryptedMessageOn(on, data)
+            val admit = authorize()
+            // The re-read suspends: the session may have changed meanwhile.
+            if (!isCurrent()) throw SessionChangedException()
+            sender.sendEncryptedMessageOn(on, data, admit)
         }
     }
 
@@ -378,11 +429,127 @@ class ShareSession private constructor(
 /** The session a share was authorized on was replaced before the send. */
 internal class SessionChangedException : ConnectionChangedException("the desktop session changed before the send")
 
+/** The key's sharing permission no longer admits the peer: it was revoked before the send was admitted. */
+internal class SharePermissionRevokedException(keyId: String) :
+    SecurityException("the sharing permission for key $keyId was revoked before the send")
+
+/**
+ * Orders every revoke of a key's sharing permission with the transport
+ * admission of a pending share of that key.
+ *
+ * The store cannot be read at admission: the transport admits a send under
+ * its own lock, where nothing may suspend. So a share reads the store before
+ * it enters the transport, after taking a [revision] of the key, and the
+ * transport's admission calls [requireUnchanged] with that revision. Every
+ * writer that narrows what a key may be shared with (its policy, a peer
+ * grant, the key itself) commits through [revoking], which marks the key
+ * under this ledger's lock before the write and moves its revision after it.
+ * Admission and the revoke writers meet on that one lock:
+ * - a revoke that started before admission refuses the send, whether its
+ *   write has committed yet or not;
+ * - a revoke that starts after admission is ordered after the send, whose
+ *   nonce is already consumed.
+ *
+ * The ledger keeps state only for keys with an outstanding [Baseline] (and a
+ * revoke in flight). A revoke of any other key, such as a delete of an ID that
+ * names nothing, only moves one global floor, the revision of every key the
+ * ledger holds no entry for. Closing a key's last baseline reclaims its entry
+ * and raises the floor to the entry's revision, so revisions only grow: no
+ * reclaim makes a baseline taken before a revoke valid again.
+ */
+internal object SharePermissionLedger {
+
+    private class Entry(var revision: Long, var baselines: Int)
+
+    private val lock = Any()
+    private val entries = HashMap<String, Entry>()
+    private val inFlight = HashMap<String, Int>()
+
+    /** The last revision handed out; every revision in the ledger is at most this. */
+    private var epoch = 0L
+
+    /** The revision of every key without an entry. */
+    private var floor = 0L
+
+    /** The key's revision now; take it before reading the key's permission from the store. */
+    fun revision(keyId: String): Long = synchronized(lock) { entries[keyId]?.revision ?: floor }
+
+    /**
+     * A key's revision taken before any of its share inputs (record, public
+     * half, software material) were read. A share carries it to admission and
+     * [close]s it once done; the ledger tracks the key until its last
+     * baseline is closed.
+     */
+    class Baseline internal constructor(val keyId: String, val revision: Long) : AutoCloseable {
+        private var closed = false
+
+        override fun close() = synchronized(lock) {
+            if (closed) return@synchronized
+            closed = true
+            val entry = entries[keyId] ?: return@synchronized
+            entry.baselines--
+            if (entry.baselines == 0) {
+                entries.remove(keyId)
+                floor = maxOf(floor, entry.revision)
+            }
+        }
+    }
+
+    /** Takes [keyId]'s [Baseline]; call before loading anything a share of it sends. */
+    fun baseline(keyId: String): Baseline = synchronized(lock) {
+        val entry = entries.getOrPut(keyId) { Entry(floor, 0) }
+        entry.baselines++
+        Baseline(keyId, entry.revision)
+    }
+
+    /** Key IDs the ledger holds state for. */
+    internal fun retainedKeyCount(): Int = synchronized(lock) { entries.size + inFlight.size }
+
+    /**
+     * Admission check: no revoke of [keyId] is in flight and none has
+     * committed since [revision] was taken. Synchronous, for the transport's
+     * admission critical section.
+     *
+     * @throws SharePermissionRevokedException otherwise
+     */
+    fun requireUnchanged(keyId: String, revision: Long) = synchronized(lock) {
+        if ((inFlight[keyId] ?: 0) > 0 || (entries[keyId]?.revision ?: floor) != revision) {
+            throw SharePermissionRevokedException(keyId)
+        }
+    }
+
+    /** Runs [write], a change that narrows or removes [keyId]'s sharing permission, as a revoke. */
+    suspend fun <T> revoking(keyId: String, write: suspend () -> T): T {
+        synchronized(lock) { inFlight[keyId] = (inFlight[keyId] ?: 0) + 1 }
+        try {
+            return write()
+        } finally {
+            synchronized(lock) {
+                epoch++
+                val entry = entries[keyId]
+                if (entry != null) entry.revision = epoch else floor = epoch
+                val left = (inFlight[keyId] ?: 1) - 1
+                if (left == 0) inFlight.remove(keyId) else inFlight[keyId] = left
+            }
+        }
+    }
+}
+
 /**
  * Sends one of the phone's keys to the paired desktop on [session], after
  * [DesktopShareGate] has checked it against the peer confirmed on that
  * session. Nothing reaches the wire unless the gate answers
  * [DesktopShareDecision.PUBLIC_KEY] and the session is still current.
+ *
+ * The gate runs twice: once on the caller's snapshot, and again just before
+ * the share enters the transport, on the key as the store holds it then
+ * ([currentEntity][send]) and the peer grants as they stand then. The
+ * transport's admission then checks [SharePermissionLedger] for a revoke
+ * since the [SharePermissionLedger.Baseline] the caller took before it
+ * loaded any of the key's inputs. A permission revoked, or the key deleted
+ * or replaced, after that baseline, including while the share waited inside
+ * the transport, refuses it with [DesktopShareDecision.POLICY_DENIED] and
+ * nothing is sent.
  */
 class DesktopKeyShare(
     private val session: ShareSession,
@@ -401,13 +568,23 @@ class DesktopKeyShare(
         data object SessionChanged : Outcome()
     }
 
-    /** [software]'s material is zeroed before this returns, whatever the outcome. */
-    suspend fun send(
+    /**
+     * [baseline] is the key's [SharePermissionLedger.Baseline], taken before
+     * any of [entity], [software], [publicKeyPem] and [certificatePem] was
+     * loaded; the transport admits the send only while it holds, and a
+     * baseline for another key refuses the send.
+     * [software]'s material is zeroed, and [baseline] closed, before this
+     * returns, whatever the outcome.
+     * [currentEntity] reads the key's record from the store, not a snapshot.
+     */
+    internal suspend fun send(
+        baseline: SharePermissionLedger.Baseline,
         entity: KeyEntity?,
         software: SoftwareKey?,
         publicKeyPem: String?,
         certificatePem: String?,
-        permission: SharePermission
+        permission: SharePermission,
+        currentEntity: suspend (keyId: String) -> KeyEntity?
     ): Outcome {
         try {
             val decision = DesktopShareGate.decide(
@@ -417,23 +594,73 @@ class DesktopKeyShare(
             if (decision != DesktopShareDecision.PUBLIC_KEY || entity == null || publicKeyPem == null) {
                 return Outcome.Refused(decision)
             }
+            if (baseline.keyId != entity.keyId) return Outcome.Refused(DesktopShareDecision.POLICY_DENIED)
+            val peer = session.peerPublicKeyHex
             val result = try {
-                session.client(requestTimeoutMs).sharePublicKey(
+                session.client(requestTimeoutMs) {
+                    val now = DesktopShareGate.decide(
+                        currentEntity(entity.keyId), null, publicKeyPem, peer, permission
+                    )
+                    if (now != DesktopShareDecision.PUBLIC_KEY) throw SharePermissionRevokedException(entity.keyId)
+                    // The baseline predates the inputs: a revoke, delete or
+                    // replacement committed since they were loaded is caught here.
+                    return@client { SharePermissionLedger.requireUnchanged(baseline.keyId, baseline.revision) }
+                }.sharePublicKey(
                     RemoteShareClient.PublicKeyShare(
                         keyId = entity.keyId,
                         publicKeyPem = publicKeyPem,
                         certificatePem = certificatePem,
-                        algorithm = entity.algorithm,
+                        algorithm = shareAlgorithm(publicKeyPem, entity.algorithm),
                         label = entity.label,
                         backend = null
                     )
                 )
             } catch (e: ConnectionChangedException) {
                 return Outcome.SessionChanged
+            } catch (e: SharePermissionRevokedException) {
+                return Outcome.Refused(DesktopShareDecision.POLICY_DENIED)
             }
             return if (result.accepted) Outcome.Sent(result) else Outcome.Declined(result)
         } finally {
             software?.material.let { it?.fill(0) }
+            baseline.close()
+        }
+    }
+
+    /**
+     * The algorithm of the key [publicKeyPem] holds. The keys row's
+     * [recorded] algorithm can be stale: a PIV slot replaced with a key of
+     * another algorithm updates only its slot record. An EC key is named by
+     * its curve; an RSA key keeps a recorded RSA algorithm; a PEM neither
+     * parses as keeps [recorded].
+     */
+    private fun shareAlgorithm(publicKeyPem: String, recorded: String): String {
+        val der = try {
+            java.util.Base64.getMimeDecoder().decode(
+                publicKeyPem.lineSequence().filterNot { it.startsWith("-----") }.joinToString("")
+            )
+        } catch (e: IllegalArgumentException) {
+            return recorded
+        }
+        val key = listOf("EC", "RSA").firstNotNullOfOrNull { type ->
+            try {
+                java.security.KeyFactory.getInstance(type)
+                    .generatePublic(java.security.spec.X509EncodedKeySpec(der))
+            } catch (e: java.security.GeneralSecurityException) {
+                null
+            }
+        }
+        return when (key) {
+            is java.security.interfaces.ECPublicKey -> {
+                val bits = key.params.order.bitLength()
+                when {
+                    bits <= 256 -> "ES256"
+                    bits <= 384 -> "ES384"
+                    else -> "ES512"
+                }
+            }
+            is java.security.interfaces.RSAPublicKey -> if (recorded.startsWith("RS")) recorded else "RS256"
+            else -> recorded
         }
     }
 }

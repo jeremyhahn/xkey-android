@@ -372,8 +372,12 @@ class UsbAccessoryServerSlotTest {
     fun `the slot's states follow each new server, not the first one observed`() {
         // Ready while the slot's current server is in its handshake: the key
         // load these sessions wait in.
-        val tracker = DesktopSessionTracker.ofTransport {
-            slot.current()?.takeIf { it.first.state.value is UsbAccessoryState.Handshaking }
+        val tracker = DesktopSessionTracker.ofDesktop {
+            slot.current()?.takeIf { it.first.state.value is UsbAccessoryState.Handshaking }?.let { (_, router) ->
+                com.automatethethings.xkey.remote.ConnectedDesktop(
+                    "00", io.mockk.mockk<com.automatethethings.xkey.remote.SessionSender>(relaxed = true), router
+                )
+            }
         }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {

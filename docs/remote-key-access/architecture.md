@@ -1,6 +1,6 @@
 # Remote key access architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
+> **Status: REFERENCE** · Last verified: 2026-11-13
 > As-built description of how xKey forwards `remote.*` requests to the desktop.
 
 ## Message Types
@@ -19,6 +19,8 @@ Messages prefixed with `remote.*` are forwarded through the
 | `remote.sharePublicKey` | Send a phone key's public half (and certificate) for the desktop to import |
 | `remote.shareSymmetric` | Send symmetric key material for the desktop to import (client only; see [key sharing](../key-sharing/architecture.md#sending-keys-to-the-paired-desktop)) |
 | `remote.importSharedKey` | Ask the desktop to export one of its keys to the phone |
+| `remote.oathAdd` | Store a phone OATH credential on the desktop (`RemoteOathClient.oathAdd`) |
+| `remote.oathGenerate` | Get the current code and expiry of a desktop-stored OATH credential (`RemoteOathClient.oathGenerate`) |
 | `remote.pivListSlots` | List the desktop's PIV slots (`backend` optional) |
 | `remote.pivGetCert` | Get the DER certificate in one desktop PIV slot |
 | `remote.pivSign` | Sign base64 `data` with one desktop PIV slot key |
@@ -28,6 +30,63 @@ params and results as go-xkms `pkg/pairingproto` `RemoteSharePublicKey*`,
 `RemoteShareSymmetric*` and `RemoteImportSharedKey*` (xkey/v0.64.2-alpha).
 `[]byte` fields, the PEM fields included, travel as base64 strings. A reply
 with a missing field or a wrong type is rejected.
+
+### OATH methods
+
+`RemoteOathClient` sends both methods to the desktop it was built from (see
+[Session binding](#session-binding)). Shapes follow go-xkms `pkg/pairing/protocol_oath.go` at `xkey/v0.64.2-alpha`:
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `remote.oathAdd` | `{"credential": {name, issuer?, account_name?, secret (Base32), type ("totp"/"hotp"), algorithm?, digits?, period?, counter?}}` | `{success, credential_id, message?}` |
+| `remote.oathGenerate` | `{"credential_id"}` | `{code, expires_in?}` (seconds, TOTP only) |
+
+- Request IDs come from one counter shared by all `RemoteOathClient`
+  instances, starting above 5,000,000 (key 1M, sync 2M, enrollment 3M,
+  backup 4M).
+- The oathAdd body is built by hand so the secret never becomes a String;
+  the caller's secret chars are zeroed once encoded and the body as soon as
+  it is sent, before the reply is awaited.
+- Replies are type checked: `success` must be a boolean, `credential_id` a
+  non-empty string, `code` a digit string and `expires_in` a non-negative
+  integer. `success: false` or anything off-shape throws `ProtocolException`.
+- The OATH screen offers "Copy to desktop" and, once a credential has a
+  desktop copy, "Show desktop code". The phone keeps only the oathId to
+  `credential_id` link (SharedPreferences `oath_desktop_links`). With no
+  desktop connected neither entry shows and nothing is sent.
+
+### Session binding
+
+Every outbound `remote.*` client (`RemoteKeyClient`, `RemoteSyncClient`,
+`RemoteBackupClient`, `RemoteOathClient`) is built from a `ConnectedDesktop`,
+never from a transport. `XKeyGattService.connectedDesktop()` is the only
+source; it asks BLE, then TCP, then USB.
+
+| Transport | Hands out a desktop when | The desktop's sender |
+|-----------|--------------------------|----------------------|
+| BLE (`GattServer`) | the Noise session is established and current | encrypts on that session for that device; fails with `IOException` once the session or device is replaced or ended |
+| TCP (`TcpHsmServer`) | `TcpHsmState.Connected` | writes on that `StreamPairingSession` connection; fails once it ends or another connection is installed |
+| USB (`UsbAccessoryServer`) | `UsbAccessoryState.Connected` | as TCP |
+
+- `peerKeyHex` is the static key the handshake authenticated; OATH desktop
+  links are keyed by it.
+- A sender never re-resolves the transport's current session at send time,
+  so a request built for desktop A never reaches desktop B, even when B
+  replaces A between the lookup and the send.
+- Clients take only a `ConnectedDesktop`, whose sender is a `SessionSender`
+  that only the transports make; `ConnectedDesktopBindingTest` fails if a
+  client or the service takes or hands out any other sender.
+- `XKeyGattService.remoteKeyClient()`, `desktopSession()` and device
+  attestation go through `DesktopSessions`, whose transports are the
+  `connectedDesktop()` of each server: one `RemoteKeyClient` per router, and
+  once the peer is confirmed, bound to the `ConfirmedConnection` it was
+  confirmed on.
+- A bound sender also carries the scoped send: `confirmedConnection()`
+  answers only its own connection's confirmed peer, and
+  `sendEncryptedMessageOn(c)` refuses with `ConnectionChangedException`
+  unless `c` is that connection and it is still current and confirmed for
+  the same peer, checked again at the admission that consumes the nonce.
+  `RemoteShareClient` (key sharing) sends only that way.
 
 ## Desktop keys screen
 

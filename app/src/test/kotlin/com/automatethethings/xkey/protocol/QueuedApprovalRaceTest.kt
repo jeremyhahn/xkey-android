@@ -144,6 +144,8 @@ class QueuedApprovalRaceTest {
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
         context = mockk(relaxed = true)
+        // local.generateKey also refuses an ID the software store holds.
+        every { context.filesDir } returns kotlin.io.path.createTempDirectory("xkey-files").toFile()
         val keyguard = mockk<KeyguardManager>(relaxed = true)
         every { keyguard.isKeyguardLocked } returns false
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns keyguard
@@ -286,7 +288,8 @@ class QueuedApprovalRaceTest {
 
         approveEveryPrompt(request)
 
-        assertEquals(ErrorCodes.KEY_EXISTS, request.await().error?.code)
+        val refused = request.await().error
+        assertEquals("${refused?.message}", ErrorCodes.KEY_EXISTS, refused?.code)
         coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) }
         assertEquals(0, replaced)
     }

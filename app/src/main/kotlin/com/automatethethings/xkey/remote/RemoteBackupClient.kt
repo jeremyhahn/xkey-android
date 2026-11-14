@@ -56,10 +56,12 @@ import java.util.concurrent.atomic.AtomicLong
  * are the live transport's, the same send path [RemoteSyncClient] uses.
  */
 class RemoteBackupClient(
-    private val messageSender: MessageSender,
-    private val messageRouter: BidirectionalMessageRouter,
+    desktop: ConnectedDesktop,
     private val requestTimeoutMs: Long = 60_000L
 ) {
+    /** Bound to [desktop]'s connection: a reply-awaiting call never reaches another desktop. */
+    private val messageSender: MessageSender = desktop.sender
+    private val messageRouter: BidirectionalMessageRouter = desktop.router
 
     /** Which stores a backup carries. At least one must be true. */
     data class Include(

@@ -20,16 +20,26 @@ import android.app.NotificationManager
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.os.ParcelFileDescriptor
 import androidx.fragment.app.FragmentActivity
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.transport.StreamMessageFraming
 import com.automatethethings.xkey.usb.UsbAccessoryServer
+import com.automatethethings.xkey.usb.UsbAccessoryState
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.lang.ref.WeakReference
+import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -49,10 +59,11 @@ import org.junit.runner.RunWith
  *
  * Three things live here and nowhere else:
  *
- *  - **transport selection.** `activeTransport()` is the single source every
- *    outbound `remote.*` client goes through. Picking the wrong one, or picking
+ *  - **transport selection.** `connectedDesktop()` is the single source every
+ *    outbound `remote.*` client is built from. Picking the wrong one, or picking
  *    a transport whose router is missing, sends a request into a channel with
- *    nothing to correlate the reply — which surfaces as a sync that hangs.
+ *    nothing to correlate the reply — which surfaces as a sync that hangs. A
+ *    transport counts only for a session it has established.
  *  - **the state the UI reads.** `ConnectionState` and `AdvertisingState`
  *    arrive from two independent flows and are folded into one `ServiceState`.
  *    The folding rules are asymmetric on purpose: advertising must never demote
@@ -76,11 +87,13 @@ class XKeyGattServiceTest {
     private companion object {
         const val DEVICE_ADDRESS = "AA:BB:CC:DD:EE:F5"
         const val NOTIFICATION_ID = 1001
+        const val USB_HANDSHAKE_TIMEOUT_MS = 10_000L
     }
 
     private lateinit var context: Context
     private lateinit var probe: XKeyGattServiceProbe
     private var gattProbe: GattServerProbe? = null
+    private val usbSessions = mutableListOf<UsbSession>()
 
     /** Audit rows the service wrote for the test device; purged in teardown. */
     private var auditedDevice: String? = null
@@ -95,6 +108,7 @@ class XKeyGattServiceTest {
     fun tearDown() {
         probe.stopTcpHsmServer()
         probe.releaseWakeLock()
+        closeUsbSessions()
         gattProbe?.close()
         gattProbe = null
         auditedDevice?.let { purgeAuditRowsFor(it) }
@@ -251,20 +265,21 @@ class XKeyGattServiceTest {
 
     @Test
     fun noTransportIsActiveOnAServiceWithNothingConnected() {
-        assertNull(probe.activeTransport())
+        assertNull(probe.connectedDesktop())
     }
 
     /** BLE is the primary transport whenever its session is up. */
     @Test
     fun aLiveBleSessionIsTheActiveTransport(): Unit = runBlocking {
-        val gatt = bleServerWithSession()
+        val gatt = gattProbe()
+        val desktop = gatt.establishSession(remoteDevice())
         probe.gattServer = gatt.server
         probe.bleMessageRouter = gatt.messageRouter
 
-        val (sender, router) = probe.activeTransport()!!
+        val connected = probe.connectedDesktop()!!
 
-        assertSame(gatt.server, sender)
-        assertSame(gatt.messageRouter, router)
+        assertEquals(desktop.getLocalStaticPublicKey().toHex(), connected.peerKeyHex)
+        assertSame(gatt.messageRouter, connected.router)
     }
 
     /**
@@ -277,7 +292,7 @@ class XKeyGattServiceTest {
         probe.gattServer = gatt.server
         probe.bleMessageRouter = null
 
-        assertNull(probe.activeTransport())
+        assertNull(probe.connectedDesktop())
     }
 
     /** A GATT server with no established session is not a transport. */
@@ -287,32 +302,53 @@ class XKeyGattServiceTest {
         probe.gattServer = gatt.server
         probe.bleMessageRouter = gatt.messageRouter
 
-        assertNull(probe.activeTransport())
+        assertNull(probe.connectedDesktop())
     }
 
+    /** USB answers only for a session it has established, with that session's key. */
     @Test
-    fun usbIsUsedWhenBleIsIdle() {
+    fun usbIsUsedWhenBleIsIdle(): Unit = runBlocking {
         val gatt = gattProbe()
         val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
-        val usbServer = UsbAccessoryServer(gatt.requestHandler, usbRouter)
-        probe.installUsbServer(usbServer, usbRouter)
+        val usb = usbServerWithSession(usbRouter)
+        probe.gattServer = gatt.server
+        probe.bleMessageRouter = gatt.messageRouter
+        probe.installUsbServer(usb.server, usbRouter)
 
-        val (sender, router) = probe.activeTransport()!!
+        val connected = probe.connectedDesktop()!!
 
-        assertSame(usbServer, sender)
-        assertSame(usbRouter, router)
+        assertEquals(usb.peerKeyHex, connected.peerKeyHex)
+        assertSame(usbRouter, connected.router)
+    }
+
+    /** A USB server whose session has not been established, or has ended, is no desktop. */
+    @Test
+    fun aDisconnectedUsbServerIsNotOffered(): Unit = runBlocking {
+        val gatt = gattProbe()
+        val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
+        probe.installUsbServer(UsbAccessoryServer(gatt.requestHandler, usbRouter), usbRouter)
+        assertNull("a server that never connected", probe.connectedDesktop())
+
+        val usb = usbServerWithSession(usbRouter)
+        probe.installUsbServer(usb.server, usbRouter)
+        assertNotNull(probe.connectedDesktop())
+
+        usb.server.disconnect()
+
+        assertNull("a server whose session ended", probe.connectedDesktop())
     }
 
     /** The order is BLE, then TCP, then USB; a live BLE session always wins. */
     @Test
     fun bleWinsOverUsb(): Unit = runBlocking {
-        val gatt = bleServerWithSession()
+        val gatt = gattProbe()
+        val desktop = gatt.establishSession(remoteDevice())
         val usbRouter = BidirectionalMessageRouter(gatt.requestHandler)
         probe.gattServer = gatt.server
         probe.bleMessageRouter = gatt.messageRouter
-        probe.installUsbServer(UsbAccessoryServer(gatt.requestHandler, usbRouter), usbRouter)
+        probe.installUsbServer(usbServerWithSession(usbRouter).server, usbRouter)
 
-        assertSame(gatt.server, probe.activeTransport()!!.first)
+        assertEquals(desktop.getLocalStaticPublicKey().toHex(), probe.connectedDesktop()!!.peerKeyHex)
     }
 
     /** Sync has to fail fast and say why, not hang on a transport that is not there. */
@@ -441,7 +477,7 @@ class XKeyGattServiceTest {
         probe.service.onUsbAccessoryDetached()
 
         assertNull(probe.usbServerSlot.current())
-        assertNull(probe.activeTransport())
+        assertNull(probe.connectedDesktop())
     }
 
     // -----------------------------------------------------------------
@@ -533,6 +569,52 @@ class XKeyGattServiceTest {
         val device = remoteDevice()
         return gattProbe().also { it.establishSession(device) }
     }
+
+    /** A USB server with an established session from a paired desktop. */
+    private class UsbSession(val server: UsbAccessoryServer, val peerKeyHex: String, val desktopEnd: ParcelFileDescriptor)
+
+    /**
+     * A USB server whose session a paired desktop has established over one
+     * end of a socket pair: the identity exchange and the Noise XX handshake
+     * as go-xkms runs them on the accessory.
+     */
+    private suspend fun usbServerWithSession(router: BidirectionalMessageRouter): UsbSession {
+        val gatt = gattProbe()
+        val repository = gatt.pairedDeviceRepository!!
+        val server = UsbAccessoryServer(gatt.requestHandler, router, pairedDeviceRepository = repository)
+        val (phoneEnd, desktopEnd) = ParcelFileDescriptor.createSocketPair()
+        val noise = NoiseInitiatorSession(ByteArray(32).also { SecureRandom().nextBytes(it) })
+        val identity = noise.createIdentityMessage()
+        val peerKeyHex = identity.copyOfRange(1, identity.size).toHex()
+        repository.addDevice(peerKeyHex, "USB desktop")
+        val session = UsbSession(server, peerKeyHex, desktopEnd)
+        usbSessions += session
+        server.open(context, phoneEnd, "test accessory")
+
+        withContext(Dispatchers.IO) {
+            val input = FileInputStream(desktopEnd.fileDescriptor)
+            val output = FileOutputStream(desktopEnd.fileDescriptor)
+            StreamMessageFraming.writeMessage(output, identity)
+            noise.processIdentityAck(StreamMessageFraming.readMessage(input))
+            StreamMessageFraming.writeMessage(output, noise.createHandshakeMessage1())
+            noise.processHandshakeMessage2(StreamMessageFraming.readMessage(input))
+            StreamMessageFraming.writeMessage(output, noise.createHandshakeMessage3())
+            noise.finalizeHandshake()
+        }
+        withTimeout(USB_HANDSHAKE_TIMEOUT_MS) { server.state.first { it is UsbAccessoryState.Connected } }
+        return session
+    }
+
+    private fun closeUsbSessions() {
+        usbSessions.forEach {
+            it.server.disconnect()
+            it.desktopEnd.close()
+            gattProbe?.pairedDeviceRepository?.removeDevice(it.peerKeyHex)
+        }
+        usbSessions.clear()
+    }
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
     private fun remoteDevice(): BluetoothDevice {
         val device = GattServerProbe.remoteDevice(context, DEVICE_ADDRESS)

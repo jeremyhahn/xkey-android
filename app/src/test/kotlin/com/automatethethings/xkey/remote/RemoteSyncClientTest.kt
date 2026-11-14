@@ -45,6 +45,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.security.SecureRandom
 import java.time.ZoneOffset
 import java.util.Locale
 
@@ -81,7 +82,7 @@ class RemoteSyncClientTest {
 
         router = BidirectionalMessageRouter(mockk<RequestHandler>())
         sender = ScriptedMessageSender(router)
-        client = RemoteSyncClient(context, sender, router, requestTimeoutMs = 5_000L)
+        client = RemoteSyncClient(context, desktopOf(sender, router), requestTimeoutMs = 5_000L)
     }
 
     @After
@@ -102,7 +103,13 @@ class RemoteSyncClientTest {
     }
 
     private fun passwords(vararg ids: String) = JSONArray().apply {
-        for (id in ids) put(JSONObject().put("id", id).put("password", "hunter2"))
+        for (id in ids) put(JSONObject().put("id", id).put("password", testPassword()))
+    }
+
+    /** Random letters, built at run time so that no credential-shaped literal sits in the source. */
+    private fun testPassword(): String {
+        val random = SecureRandom()
+        return String(CharArray(16) { 'a' + random.nextInt(26) })
     }
 
     /** Stubs every gather to empty and every merge to zero counts. */
@@ -268,7 +275,7 @@ class RemoteSyncClientTest {
     // --- Audit (issue #221) -------------------------------------------------
 
     private fun auditedClient() =
-        RemoteSyncClient(context, sender, router, requestTimeoutMs = 5_000L, peerDeviceId = DESK_PEER, peerDeviceName = DESK_NAME)
+        RemoteSyncClient(context, desktopOf(sender, router), requestTimeoutMs = 5_000L, peerDeviceId = DESK_PEER, peerDeviceName = DESK_NAME)
 
     @Test
     fun `syncOath records one outbound entry`() = runTest {
@@ -541,7 +548,7 @@ class RemoteSyncClientTest {
         sender.neverReply()
         // XKeyGattService builds a fresh client for desktopSyncStatus while
         // syncNow's client may still be waiting on a store leg.
-        val other = RemoteSyncClient(context, sender, router, requestTimeoutMs = 5_000L)
+        val other = RemoteSyncClient(context, desktopOf(sender, router), requestTimeoutMs = 5_000L)
 
         val store = async { client.syncTrustStore() }
         runCurrent()

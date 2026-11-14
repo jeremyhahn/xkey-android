@@ -28,6 +28,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -196,7 +197,7 @@ class GattServerDrainingTest {
                 // On the server's dispatcher, so the next wait covers the
                 // send reaching the lock.
                 val send = async(signals) {
-                    runCatching { server.sendEncryptedMessage(request(9, "remote.sign")) }
+                    runCatching { server.sendOnBoundSession(request(9, "remote.sign")) }
                 }
                 withTimeout(TIMEOUT_MS) { atAdmission.await() }
                 // The send waits on the Noise lock behind the consumer.
@@ -242,7 +243,7 @@ class GattServerDrainingTest {
             onThread { disconnect() }
         }
 
-        val failed = runCatching { server.sendEncryptedMessage(request(9, "remote.sign")) }.exceptionOrNull()
+        val failed = runCatching { server.sendOnBoundSession(request(9, "remote.sign")) }.exceptionOrNull()
         server.afterAdmissionForTest = null
         try {
             assertTrue("the undelivered frame fails its send: $failed", failed is IOException)
