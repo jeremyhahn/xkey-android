@@ -142,7 +142,7 @@ class AutoSignHashTest {
     }
 
     @Test
-    fun `media above the embed bound is signed with a sidecar and the file left as it was`() {
+    fun `unsigned media above the embed bound is hashed streaming and signed in XMP, not a sidecar`() {
         val mime = "video/mp4"
         val original = XmpFixtures.mp4()
         val bound = XmpMetadataHelper.maxEmbedBytes
@@ -155,12 +155,12 @@ class AutoSignHashTest {
             assertEquals(MediaHasher.hashBytes(original), hash)
             XmpMetadataHelper.writeSignature(file.path, signatureOver(hash))
 
-            assertArrayEquals("the media is not rewritten", original, file.readBytes())
-            val sidecar = File(XmpMetadataHelper.getSidecarPath(file.path))
-            assertTrue("the signature persists in a sidecar", sidecar.exists())
+            assertFalse("no sidecar", File(XmpMetadataHelper.getSidecarPath(file.path)).exists())
+            val signedBytes = file.readBytes()
+            assertArrayEquals(original, XmpContainers.strip(signedBytes, XmpContainers.Format.ISO_BMFF))
             val read = XmpMetadataHelper.readSignature(file.path)!!
             assertTrue(
-                MediaHasher.contentHashMatches(read.contentHash, file.readBytes(), mime, MediaHasher.SignatureSource.SIDECAR)
+                MediaHasher.contentHashMatches(read.contentHash, signedBytes, mime, MediaHasher.SignatureSource.IN_BAND)
             )
 
             // Oversized media already carrying an embedded signature keeps it:

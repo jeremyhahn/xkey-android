@@ -623,7 +623,7 @@ class XmpMetadataHelperSidecarBranchTest {
     }
 
     @Test
-    fun `re-signing media above the embed bound refuses a carried signature and otherwise embeds nothing`() {
+    fun `re-signing media above the embed bound refuses a carried signature and embeds an unsigned one`() {
         val saved = XmpMetadataHelper.maxEmbedBytes
         try {
             for ((name, mime) in embeddedNames) {
@@ -635,8 +635,11 @@ class XmpMetadataHelperSidecarBranchTest {
                 XmpMetadataHelper.maxEmbedBytes = 8
 
                 assertThrows(name, IOException::class.java) { replace(signedPath, mime, secondSigner("a".repeat(64)), work) }
-                assertFalse(name, replace(unsignedPath, mime, secondSigner("a".repeat(64)), work))
-                assertArrayEquals(name, unsigned, File(unsignedPath).readBytes())
+                assertTrue(name, replace(unsignedPath, mime, secondSigner("a".repeat(64)), work))
+                assertEquals(name, secondSigner("a".repeat(64)), XmpMetadataHelper.readSignature(unsignedPath))
+                val format = XmpContainers.formatOf(mime)!!
+                assertArrayEquals(name, unsigned, XmpContainers.strip(File(unsignedPath).readBytes(), format))
+                assertFalse(name, sidecarOf(unsignedPath).exists())
                 assertTrue(name, work.listFiles()!!.isEmpty())
                 XmpMetadataHelper.maxEmbedBytes = saved
             }

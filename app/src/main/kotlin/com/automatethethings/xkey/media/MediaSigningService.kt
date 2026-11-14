@@ -95,9 +95,10 @@ internal object AutoSignHash {
      * import, or a capture notified again after a restart), which the
      * canonical hash leaves out and [XmpMetadataHelper.writeSignature]
      * replaces. Up to [embedLimit] bytes it is read into memory and hashed
-     * canonically. A larger one gets a sidecar, never an embedded packet, so
-     * it is hashed whole while streaming; if it already carries an embedded
-     * signature, which would shadow that sidecar, it is refused with
+     * canonically. A larger one is hashed whole while streaming: unsigned,
+     * its canonical hash is its plain hash, and the writer embeds it
+     * streaming ([XmpContainers.embedFile]); if it already carries an embedded
+     * signature, which only an in-memory rewrite replaces, it is refused with
      * [TooLargeException] and the existing signature is kept.
      *
      * Any other media goes to a sidecar and is hashed whole by streaming

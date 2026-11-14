@@ -15,7 +15,10 @@
 package com.automatethethings.xkey.media
 
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
+import java.io.OutputStream
+import java.io.RandomAccessFile
 import java.util.zip.CRC32
 
 /**
@@ -65,6 +68,9 @@ object XmpContainers {
      * some thousands.
      */
     private const val MAX_PARTS = 1 shl 16
+
+    /** The bytes of a `VP8 `/`VP8L` bitstream [canvasOf] and the alpha bit read. */
+    private const val VP8_HEADER_BYTES = 10
 
     private const val WEBP_XMP_FLAG = 0x04
     private const val WEBP_ALPHA_FLAG = 0x10
@@ -203,6 +209,213 @@ object XmpContainers {
                 base.copyOfRange(0, iend.start) + chunk + base.copyOfRange(iend.start, base.size)
             }
             Format.WEBP -> embedWebp(base, baseParts, packet)
+        }
+    }
+
+    /** What [embedFile] did. */
+    enum class FileEmbed {
+        /** The signed file went to the output. */
+        WRITTEN,
+
+        /** Nothing was written: the file carries no XMP packet and cannot carry ours ([embed] returns null). */
+        REFUSED,
+
+        /** Nothing was written: the file already holds an XMP packet, ours or not, which only [embed] replaces. */
+        CARRIES_XMP
+    }
+
+    /**
+     * [embed] over a file that holds no XMP packet, streamed: only box and
+     * chunk headers are read into memory, so media of any size embeds. What
+     * goes to [output] is byte for byte what [embed] returns for the file's
+     * bytes, so [strip] of it is the file and the canonical hash is the
+     * file's plain hash. Every check runs before the first byte is written.
+     */
+    fun embedFile(file: File, output: OutputStream, format: Format, json: String): FileEmbed {
+        RandomAccessFile(file, "r").use { raf ->
+            val n = raf.length()
+            val parts = when (format) {
+                Format.ISO_BMFF -> walkBmff(raf, n)
+                Format.PNG -> walkPng(raf, n)
+                Format.WEBP -> walkWebp(raf, n)
+            } ?: return FileEmbed.REFUSED
+            if (parts.any { it.xmp }) return FileEmbed.CARRIES_XMP
+            if (parts.size >= MAX_PARTS) return FileEmbed.REFUSED
+            val packet = packet(json)
+            val readerPayload = when (format) {
+                Format.ISO_BMFF, Format.WEBP -> packet.size
+                Format.PNG -> PNG_XMP_KEYWORD.length + 5 + packet.size
+            }
+            if (readerPayload > MAX_PACKET) return FileEmbed.REFUSED
+            when (format) {
+                Format.ISO_BMFF -> {
+                    if (parts.any { it.openEnded }) return FileEmbed.REFUSED
+                    copyRange(raf, output, 0, n)
+                    output.write(box("uuid", XMP_UUID + packet))
+                }
+                Format.PNG -> {
+                    val keyword = PNG_XMP_KEYWORD.toByteArray(Charsets.ISO_8859_1)
+                    val chunk = pngChunk("iTXt", keyword + byteArrayOf(0, 0, 0, 0, 0) + packet)
+                    val iend = parts.last().start
+                    copyRange(raf, output, 0, iend)
+                    output.write(chunk)
+                    copyRange(raf, output, iend, n)
+                }
+                Format.WEBP -> if (!embedWebpFile(raf, parts, packet, output)) return FileEmbed.REFUSED
+            }
+            output.flush()
+            return FileEmbed.WRITTEN
+        }
+    }
+
+    /** [embedWebp] over a file [parts] describes; false, with nothing written, where it returns null. */
+    private fun embedWebpFile(raf: RandomAccessFile, parts: List<FilePart>, packet: ByteArray, output: OutputStream): Boolean {
+        val xmpChunk = riffChunk("XMP ", packet)
+        val vp8x = parts.firstOrNull { it.type == "VP8X" }
+        if (vp8x != null) {
+            val length = vp8x.payloadEnd - vp8x.payloadStart
+            if (length < 10) return false
+            val flag = ((readAt(raf, vp8x.payloadStart, 1)[0].toInt() and 0xFF) or WEBP_XMP_FLAG).toByte()
+            // strip would take it for the VP8X embed adds and drop the one the file came with.
+            if (parts.size == 2 && parts[0] === vp8x && length == 10L) {
+                val header = readAt(raf, vp8x.payloadStart, 10).also { it[0] = flag }
+                if (header.contentEquals(addedVp8xPayload(imagePrefix(raf, parts[1]), parts[1].type))) return false
+            }
+            val chunks = parts.sumOf { it.end - it.start } + xmpChunk.size
+            if (4L + chunks > 0xFFFFFFFFL) return false
+            writeRiffHeader(output, chunks)
+            for (part in parts) {
+                if (part === vp8x) {
+                    copyRange(raf, output, part.start, part.payloadStart)
+                    output.write(flag.toInt())
+                    copyRange(raf, output, part.payloadStart + 1, part.end)
+                } else {
+                    copyRange(raf, output, part.start, part.end)
+                }
+            }
+        } else {
+            // strip leaves out an added VP8X only beside a lone image chunk.
+            if (parts.size != 1) return false
+            val image = parts[0]
+            val header = addedVp8xPayload(imagePrefix(raf, image), image.type) ?: return false
+            val vp8xChunk = riffChunk("VP8X", header)
+            val chunks = vp8xChunk.size + (image.end - image.start) + xmpChunk.size
+            if (4L + chunks > 0xFFFFFFFFL) return false
+            writeRiffHeader(output, chunks)
+            output.write(vp8xChunk)
+            copyRange(raf, output, image.start, image.end)
+        }
+        output.write(xmpChunk)
+        return true
+    }
+
+    private fun writeRiffHeader(output: OutputStream, chunks: Long) {
+        output.write("RIFF".toByteArray(Charsets.US_ASCII))
+        output.write(le32(4L + chunks))
+        output.write("WEBP".toByteArray(Charsets.US_ASCII))
+    }
+
+    private fun imagePrefix(raf: RandomAccessFile, image: FilePart): ByteArray =
+        readAt(raf, image.payloadStart, minOf(VP8_HEADER_BYTES.toLong(), image.payloadEnd - image.payloadStart).toInt())
+
+    /** [Part] of a file walked by headers; [xmp] when it holds an XMP packet, as [packetOf] tells. */
+    private class FilePart(
+        val start: Long,
+        val end: Long,
+        val type: String,
+        val payloadStart: Long,
+        val payloadEnd: Long,
+        val xmp: Boolean,
+        val openEnded: Boolean = false
+    )
+
+    /** [parseBmff] by headers. */
+    private fun walkBmff(raf: RandomAccessFile, n: Long): List<FilePart>? {
+        val parts = mutableListOf<FilePart>()
+        var i = 0L
+        while (i < n) {
+            if (n - i < 8) return null
+            val h = readAt(raf, i, minOf(16L, n - i).toInt())
+            val size32 = u32be(h, 0)
+            var header = 8
+            val size = when (size32) {
+                0L -> n - i
+                1L -> {
+                    if (n - i < 16) return null
+                    header = 16
+                    u64be(h, 8)
+                }
+                else -> size32
+            }
+            if (size < header || size > n - i) return null
+            if (parts.size == MAX_PARTS) return null
+            val type = fourcc(h, 4)
+            val xmp = type == "uuid" && size - header >= 16 && readAt(raf, i + header, 16).contentEquals(XMP_UUID)
+            parts += FilePart(i, i + size, type, i + header, i + size, xmp, openEnded = size32 == 0L)
+            i += size
+        }
+        return parts.takeIf { it.isNotEmpty() && it[0].type == "ftyp" }
+    }
+
+    /** [parsePng] by headers. */
+    private fun walkPng(raf: RandomAccessFile, n: Long): List<FilePart>? {
+        if (n < 8 || !readAt(raf, 0, 8).contentEquals(PNG_SIGNATURE)) return null
+        val keyword = PNG_XMP_KEYWORD.toByteArray(Charsets.ISO_8859_1) + byteArrayOf(0)
+        val parts = mutableListOf<FilePart>()
+        var i = 8L
+        while (n - i >= 12) {
+            val h = readAt(raf, i, 8)
+            val length = u32be(h, 0)
+            if (length > n - i - 12) return null
+            if (parts.size == MAX_PARTS) return null
+            val type = fourcc(h, 4)
+            val xmp = type == "iTXt" && length >= keyword.size + 4 &&
+                readAt(raf, i + 8, keyword.size).contentEquals(keyword)
+            parts += FilePart(i, i + 12 + length, type, i + 8, i + 8 + length, xmp)
+            i += 12 + length
+            if (type == "IEND") return parts.takeIf { i == n }
+        }
+        return null
+    }
+
+    /** [parseWebp] by headers. */
+    private fun walkWebp(raf: RandomAccessFile, n: Long): List<FilePart>? {
+        if (n < 12) return null
+        val h = readAt(raf, 0, 12)
+        if (fourcc(h, 0) != "RIFF" || fourcc(h, 8) != "WEBP") return null
+        if (u32le(h, 4) != n - 8) return null
+        val parts = mutableListOf<FilePart>()
+        var i = 12L
+        while (i < n) {
+            if (n - i < 8) return null
+            val c = readAt(raf, i, 8)
+            val size = u32le(c, 4)
+            val padded = size + (size and 1)
+            if (padded > n - i - 8) return null
+            if (parts.size == MAX_PARTS) return null
+            val type = fourcc(c, 0)
+            parts += FilePart(i, i + 8 + padded, type, i + 8, i + 8 + size, type == "XMP ")
+            i += 8 + padded
+        }
+        return parts.takeIf { it.isNotEmpty() }
+    }
+
+    private fun readAt(raf: RandomAccessFile, position: Long, count: Int): ByteArray {
+        val bytes = ByteArray(count)
+        raf.seek(position)
+        raf.readFully(bytes)
+        return bytes
+    }
+
+    private fun copyRange(raf: RandomAccessFile, output: OutputStream, start: Long, end: Long) {
+        val buffer = ByteArray(64 * 1024)
+        raf.seek(start)
+        var left = end - start
+        while (left > 0) {
+            val n = raf.read(buffer, 0, minOf(buffer.size.toLong(), left).toInt())
+            if (n < 0) throw java.io.EOFException("file shrank while it was copied")
+            output.write(buffer, 0, n)
+            left -= n
         }
     }
 
@@ -374,10 +587,13 @@ object XmpContainers {
      * declares alpha, and the canvas from the bitstream header. Null when
      * the bitstream header does not parse.
      */
-    private fun addedVp8xPayload(data: ByteArray, image: Part): ByteArray? {
-        val payload = data.copyOfRange(image.payloadStart, image.payloadEnd)
-        val (width, height) = canvasOf(payload, image.type) ?: return null
-        val alpha = image.type == "VP8L" && ((u32le(payload, 1) shr 28) and 1L) == 1L
+    private fun addedVp8xPayload(data: ByteArray, image: Part): ByteArray? =
+        addedVp8xPayload(data.copyOfRange(image.payloadStart, image.payloadEnd), image.type)
+
+    /** [addedVp8xPayload] from the bitstream's first bytes ([VP8_HEADER_BYTES] suffice). */
+    private fun addedVp8xPayload(payload: ByteArray, type: String): ByteArray? {
+        val (width, height) = canvasOf(payload, type) ?: return null
+        val alpha = type == "VP8L" && ((u32le(payload, 1) shr 28) and 1L) == 1L
         val flags = WEBP_XMP_FLAG or (if (alpha) WEBP_ALPHA_FLAG else 0)
         return byteArrayOf(flags.toByte(), 0, 0, 0) + le24(width - 1) + le24(height - 1)
     }
@@ -388,9 +604,11 @@ object XmpContainers {
      * Only such a VP8X is left out of the canonical bytes, so an edited
      * canvas or flag stays in the hash.
      */
-    private fun isAddedVp8x(header: ByteArray, data: ByteArray, parts: List<Part>): Boolean =
-        parts.size == 2 && parts[0].type == "VP8X" &&
-            header.contentEquals(addedVp8xPayload(data, parts[1]) ?: return false)
+    private fun isAddedVp8x(header: ByteArray, data: ByteArray, parts: List<Part>): Boolean {
+        if (parts.size != 2 || parts[0].type != "VP8X") return false
+        val added = addedVp8xPayload(data, parts[1]) ?: return false
+        return header.contentEquals(added)
+    }
 
     /** Width and height from a simple file's `VP8 ` or `VP8L` bitstream header. */
     private fun canvasOf(payload: ByteArray, type: String): Pair<Int, Int>? = when (type) {

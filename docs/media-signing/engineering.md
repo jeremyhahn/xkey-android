@@ -162,12 +162,15 @@ import, or a capture notified again after a restart) verifies once
 
 ### Large media
 
-Embedding holds the file in memory about three times over, so it is bounded by
-`XmpMetadataHelper.maxEmbedBytes` (128 MiB, or a sixth of the heap when that is
-less). A larger MP4/MOV, PNG or WebP is hashed whole by streaming and signed
-with a sidecar; the file is never read whole. One that already carries an
-embedded signature is refused instead, keeping that signature, since a
-sidecar would be shadowed by it.
+An MP4/MOV, PNG or WebP with no XMP packet is embedded streaming
+(`XmpContainers.embedFile`): only box and chunk headers are read into memory,
+and the output is byte for byte what the in-memory `XmpContainers.embed`
+returns, so a camera video of any size carries its signature in XMP, never a
+sidecar. It is hashed whole by streaming; unsigned, its canonical hash is its
+plain hash. Replacing a packet a file already carries is done in memory, about
+three times over, so it is bounded by `XmpMetadataHelper.maxEmbedBytes` (128 MiB,
+or a sixth of the heap when that is less); a larger file that already carries
+an embedded signature is refused, keeping that signature.
 
 ### Sidecar fallback
 

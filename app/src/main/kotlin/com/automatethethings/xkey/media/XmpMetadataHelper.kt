@@ -28,9 +28,10 @@ import java.io.OutputStream
  * - JPEG: EXIF `UserComment`.
  * - MP4/MOV, PNG and WebP: an XMP box or chunk ([XmpContainers]), so the
  *   signature travels with the file.
+ *   An unsigned file of any size is embedded streaming.
  * - Anything else (HEIC, MKV, unknown), and an MP4/MOV, PNG or WebP that
- *   [XmpContainers.embed] refuses or that is larger than [maxEmbedBytes]: a
- *   `<name>.xkeysig` sidecar.
+ *   cannot carry the packet (malformed, or foreign XMP): a `<name>.xkeysig`
+ *   sidecar.
  *
  * Readers try the embedded form first and fall back to a sidecar, so a file
  * signed before embedding existed still reads. Writes to one path are
@@ -41,10 +42,11 @@ object XmpMetadataHelper {
     private const val XKEY_SIGNATURE_PREFIX = "XKEY_SIG:"
 
     /**
-     * Largest MP4/MOV, PNG or WebP the writer embeds into: 128 MiB, or a
-     * sixth of the heap when that is less. Embedding holds the file in memory
-     * about three times over (the read, the stripped copy and the output), so
-     * a larger file keeps a sidecar, which needs no read of the file at all.
+     * Largest MP4/MOV, PNG or WebP whose existing XMP packet the writer
+     * replaces: 128 MiB, or a sixth of the heap when that is less. Replacing
+     * holds the file in memory about three times over (the read, the
+     * stripped copy and the output). A file with no packet yet is embedded
+     * streaming at any size ([XmpContainers.embedFile]).
      * Settable so tests can exercise the bound without a large fixture.
      */
     @Volatile
@@ -163,7 +165,7 @@ object XmpMetadataHelper {
     /**
      * Writes a signed copy of MP4/MOV, PNG or WebP the caller can only
      * stream, such as a shared content URI: [open] is copied into a working
-     * file under [workDir] (at most [maxEmbedBytes]), [data] is embedded
+     * file under [workDir] (any size; see [writeEmbeddedSignature]), [data] is embedded
      * there, replacing any earlier signature, and only the complete result
      * is copied to [openOutput], which should not be [open]'s own document.
      * Replacements naming one [destination] (a URI or a canonical path) are
@@ -186,14 +188,7 @@ object XmpMetadataHelper {
         val work = File.createTempFile(".xkey-sign.", ".xkeytmp", workDir)
         var keep = false
         try {
-            val whole = open().use { input -> work.outputStream().use { copyAtMost(input, it, maxEmbedBytes.toLong()) } }
-            if (!whole) {
-                val carried = open().use { XmpContainers.read(it.buffered(), format) }
-                if (carried != null) {
-                    throw IOException("media is larger than $maxEmbedBytes bytes and carries an embedded signature")
-                }
-                return false
-            }
+            open().use { input -> work.outputStream().use { input.copyTo(it) } }
             // The working file is this call's own: no other write shares its lock.
             if (!writeEmbeddedSignature(work.path, format, data)) return false
             try {
@@ -205,19 +200,6 @@ object XmpMetadataHelper {
             true
         } finally {
             if (!keep) work.delete()
-        }
-    }
-
-    /** Copies [input] to [output]; false as soon as it passes [limit] bytes. */
-    private fun copyAtMost(input: InputStream, output: OutputStream, limit: Long): Boolean {
-        val buffer = ByteArray(8192)
-        var total = 0L
-        while (true) {
-            val n = input.read(buffer)
-            if (n < 0) return true
-            total += n
-            if (total > limit) return false
-            output.write(buffer, 0, n)
         }
     }
 
@@ -252,11 +234,13 @@ object XmpMetadataHelper {
     }
 
     /**
-     * Embeds [data] in the file as XMP. False when the file cannot carry it
-     * (see [XmpContainers.embed]) or is larger than [maxEmbedBytes], so the
-     * caller writes a sidecar instead. A file that already carries an
-     * embedded signature it cannot rewrite throws: a sidecar would be
-     * shadowed by the stale embedded one.
+     * Embeds [data] in the file as XMP: the one embed path for MP4/MOV, PNG
+     * and WebP. A file with no XMP packet is embedded streaming, whatever
+     * its size ([XmpContainers.embedFile]); one that already carries a
+     * packet is rewritten in memory up to [maxEmbedBytes]. False when the
+     * file cannot carry it, so the caller writes a sidecar instead. A file
+     * that already carries an embedded signature it cannot rewrite throws:
+     * a sidecar would be shadowed by the stale embedded one.
      *
      * The new bytes go to a staging file beside the media, created
      * exclusively under a unique name for this write, and replace it by
@@ -269,28 +253,44 @@ object XmpMetadataHelper {
         data: ContentAuthenticityData
     ): Boolean {
         val file = File(filePath)
-        // A failed read propagates (no catch): it has not shown the file
-        // unsigned, and a sidecar beside a signed file would be shadowed.
-        if (file.length() > maxEmbedBytes) {
-            val carried = file.inputStream().use { XmpContainers.read(it.buffered(), format) }
-            if (carried != null) {
-                throw IOException("$filePath is larger than $maxEmbedBytes bytes and carries an embedded signature")
-            }
-            return false
-        }
-        val bytes = file.readBytes()
-        val embedded = XmpContainers.embed(bytes, format, data.toJsonString())
-        if (embedded == null) {
-            // The readers' view: a file embed refuses, such as one with too
-            // many boxes to parse, may still read as signed.
-            if (XmpContainers.read(bytes.inputStream(), format) != null) {
-                throw IOException("$filePath carries an embedded signature that cannot be rewritten")
-            }
-            return false
-        }
+        val json = data.toJsonString()
         val temp = File.createTempFile(".${file.name}.", ".xkeytmp", file.absoluteFile.parentFile)
         try {
-            temp.writeBytes(embedded)
+            // Media with no XMP packet, the common case, is embedded streaming
+            // at any size: a camera video never falls back to a sidecar.
+            val streamed = temp.outputStream().buffered().use { XmpContainers.embedFile(file, it, format, json) }
+            val embedded: ByteArray? = when (streamed) {
+                XmpContainers.FileEmbed.WRITTEN -> null
+                XmpContainers.FileEmbed.REFUSED -> {
+                    // The readers' view: a file the walk refuses, such as one with
+                    // too many boxes to parse, may still read as signed.
+                    if (file.inputStream().use { XmpContainers.read(it.buffered(), format) } != null) {
+                        throw IOException("$filePath carries an embedded signature that cannot be rewritten")
+                    }
+                    return false
+                }
+                XmpContainers.FileEmbed.CARRIES_XMP -> {
+                    // A failed read propagates (no catch): it has not shown the file
+                    // unsigned, and a sidecar beside a signed file would be shadowed.
+                    if (file.length() > maxEmbedBytes) {
+                        val carried = file.inputStream().use { XmpContainers.read(it.buffered(), format) }
+                        if (carried != null) {
+                            throw IOException("$filePath is larger than $maxEmbedBytes bytes and carries an embedded signature")
+                        }
+                        return false
+                    }
+                    val bytes = file.readBytes()
+                    XmpContainers.embed(bytes, format, json) ?: run {
+                        // The readers' view: a file embed refuses, such as one with too
+                        // many boxes to parse, may still read as signed.
+                        if (XmpContainers.read(bytes.inputStream(), format) != null) {
+                            throw IOException("$filePath carries an embedded signature that cannot be rewritten")
+                        }
+                        return false
+                    }
+                }
+            }
+            if (embedded != null) temp.writeBytes(embedded)
             if (!temp.renameTo(file)) throw IOException("cannot replace $filePath")
         } finally {
             temp.delete()
@@ -351,6 +351,23 @@ object XmpMetadataHelper {
             lower.endsWith(".mkv") -> "video/x-matroska"
             lower.endsWith(".mov") -> "video/quicktime"
             else -> "application/octet-stream"
+        }
+    }
+
+    /**
+     * The file suffix a working copy of content typed [mimeType] needs, so
+     * the path-based readers and writers ([readSignature], [appendSignature])
+     * pick the same EXIF or XMP container [readSignatureFromUri] read: the
+     * inverse of the suffix-to-type map they use.
+     */
+    fun stagingSuffix(mimeType: String?): String {
+        val type = mimeType.orEmpty().substringBefore(';').trim().lowercase()
+        if (type.startsWith("image/jpeg") || type.startsWith("image/jpg")) return ".jpg"
+        return when (XmpContainers.formatOf(type)) {
+            XmpContainers.Format.PNG -> ".png"
+            XmpContainers.Format.WEBP -> ".webp"
+            XmpContainers.Format.ISO_BMFF -> if (type == "video/quicktime") ".mov" else ".mp4"
+            null -> if (type == "video/x-matroska") ".mkv" else ".bin"
         }
     }
 }

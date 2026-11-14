@@ -772,7 +772,10 @@ class CoSignActivity : AppCompatActivity() {
      * deleted. A duplicate leaves the media untouched.
      */
     private fun appendToMedia(uri: Uri, entry: SignatureEntry): CoSignAppendResult {
-        val temp = File.createTempFile("cosign-", ".jpg", cacheDir)
+        // Typed like the media, so the copy is read and written in the same
+        // container (EXIF or XMP) loadSignatures read it from.
+        val suffix = XmpMetadataHelper.stagingSuffix(contentResolver.getType(uri))
+        val temp = File.createTempFile("cosign-", suffix, cacheDir)
         try {
             val input = contentResolver.openInputStream(uri)
                 ?: throw IOException("cannot read the selected media")
