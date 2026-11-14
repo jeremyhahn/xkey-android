@@ -84,6 +84,12 @@ class FileOperationActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "FileOperationActivity"
 
+        // Saved state: output waiting for a save picker
+        private const val STATE_SIGNATURE_JSON = "pending_signature_json"
+        private const val STATE_SIGNED_COPY_SOURCE = "pending_signed_copy_source"
+        private const val STATE_SIGNED_COPY_FORMAT = "pending_signed_copy_format"
+        private const val STATE_SIGNED_COPY_SIGNATURE = "pending_signed_copy_signature"
+
         // UI colors
 
         /** Operation indices matching RadioGroup child order. */
@@ -124,24 +130,20 @@ class FileOperationActivity : AppCompatActivity() {
     private lateinit var resultText: TextView
     private lateinit var resultCard: MaterialCardView
 
-    // Activity result launchers
+    // Activity result launchers. Every save picker's result goes through
+    // onSavePicked, so a cancel always drops its pending output and frees
+    // the screen.
     private val createSignatureFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        if (uri != null) {
-            saveSignatureToUri(uri)
-        } else {
-            pendingSignatureJson = null
-        }
-    }
+    ) { uri -> onSavePicked(uri, { pendingSignatureJson = null }, ::saveSignatureToUri) }
 
     private val createEncryptedFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri -> pendingEncryptedSave.onResult(uri, ::saveEncryptedToUri) }
+    ) { uri -> onSavePicked(uri, pendingEncryptedSave::cancel, ::saveEncryptedToUri) }
 
     private val createDecryptedFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("*/*")
-    ) { uri -> pendingDecryptedSave.onResult(uri, ::saveDecryptedToUri) }
+    ) { uri -> onSavePicked(uri, pendingDecryptedSave::cancel, ::saveDecryptedToUri) }
 
     private val pickSidecarLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -149,7 +151,21 @@ class FileOperationActivity : AppCompatActivity() {
 
     private val createSignedCopyLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("*/*")
-    ) { uri -> uri?.let { saveSignedCopyToUri(it) } }
+    ) { uri -> onSavePicked(uri, { pendingSignedCopy = null }, ::saveSignedCopyToUri) }
+
+    /**
+     * A save picker's result: a destination goes to [save]; null is a cancel,
+     * which runs [clear] to drop the output waiting for it and ends the
+     * operation, so the screen is not left busy.
+     */
+    private fun onSavePicked(uri: Uri?, clear: () -> Unit, save: (Uri) -> Unit) {
+        if (uri != null) {
+            save(uri)
+        } else {
+            clear()
+            showProgress(false)
+        }
+    }
 
     /** A signed copy of [source] waiting for the document the user picks. */
     private class PendingSignedCopy(
@@ -181,6 +197,9 @@ class FileOperationActivity : AppCompatActivity() {
         contactDao = db.contactDao()
         keystoreManager = KeystoreManager(this)
 
+        // A save picker may outlive this instance: its pending output comes back
+        restorePendingSaves(savedInstanceState)
+
         // Extract file URIs from intent
         fileUris = extractFileUris(intent)
         if (fileUris.isEmpty()) {
@@ -201,6 +220,41 @@ class FileOperationActivity : AppCompatActivity() {
 
         // Load keys and contacts
         loadKeysAndContacts()
+    }
+
+    /**
+     * Keep what an open save picker writes when it returns: the sidecar JSON
+     * and the signed copy (its source, container and signature), so a
+     * configuration change or process death while the picker is open does
+     * not lose the signature. Staged files are this instance's and are
+     * dropped with it (onDestroy).
+     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        pendingSignatureJson?.let { outState.putString(STATE_SIGNATURE_JSON, it) }
+        pendingSignedCopy?.let {
+            outState.putString(STATE_SIGNED_COPY_SOURCE, it.source.toString())
+            outState.putString(STATE_SIGNED_COPY_FORMAT, it.format.name)
+            outState.putString(STATE_SIGNED_COPY_SIGNATURE, it.data.toJsonString())
+        }
+    }
+
+    private fun restorePendingSaves(state: Bundle?) {
+        if (state == null) return
+        pendingSignatureJson = state.getString(STATE_SIGNATURE_JSON)
+        val source = state.getString(STATE_SIGNED_COPY_SOURCE) ?: return
+        val format = state.getString(STATE_SIGNED_COPY_FORMAT) ?: return
+        val signature = state.getString(STATE_SIGNED_COPY_SIGNATURE) ?: return
+        pendingSignedCopy = try {
+            PendingSignedCopy(
+                Uri.parse(source),
+                XmpContainers.Format.valueOf(format),
+                ContentAuthenticityData.fromJsonString(signature)
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Dropping an unreadable pending signed copy", e)
+            null
+        }
     }
 
     override fun onDestroy() {
