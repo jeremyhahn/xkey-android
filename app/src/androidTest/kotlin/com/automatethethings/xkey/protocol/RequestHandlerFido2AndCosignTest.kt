@@ -529,6 +529,7 @@ class RequestHandlerFido2AndCosignTest {
     fun cosignRequestRefusesASessionWithNoConfirmedPeer() {
         val keyId = generateSigningKey("cosign-anon-$runId")
         handler.setConnectedDevicePublicKeyHex(null)
+        servedPeer = null
 
         assertEquals(
             ErrorCodes.OPERATION_DENIED,
