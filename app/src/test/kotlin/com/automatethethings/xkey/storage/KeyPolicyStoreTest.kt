@@ -614,6 +614,30 @@ class KeyPolicyStoreTest {
     }
 
     /**
+     * A credential and a general key share an id, one key row (#255 review):
+     * deleting the key that has no row keeps the row, and a failed delete of
+     * its material is replayed, not dropped as a key generated again.
+     */
+    @Test
+    fun aDeleteBesideTheOtherKeysRowKeepsItAndStaysOwed() = runBlocking {
+        val key = tables.addKey("k", SELECTED_PEERS)
+        val store = store()
+        assertFalse("a delete beside a row it did not find ran", store.deleteMaterial("k", materialDelete { true }))
+        assertFalse(store.deleteMaterial("k", materialDelete { true }, besideRow = key + 1))
+
+        assertTrue(store.deleteMaterial("k", materialDelete { false }, besideRow = key))
+        assertEquals("the other key's row was deleted", key, store.instance("k"))
+        store.replayDeletions(materialDelete { false })
+        assertTrue("a delete beside a row was dropped unreplayed", store.isDeletionPending("k"))
+
+        var replayed = 0
+        assertEquals(0, store.replayDeletions(materialDelete { replayed++; true }))
+        assertEquals(1, replayed)
+        assertEquals(key, store.instance("k"))
+        store.requireUsable("k")
+    }
+
+    /**
      * Round 11 (2): a write under an id whose earlier delete is owed settles
      * it first; one whose owed material cannot be deleted is refused, so no
      * write ever lands under a tombstone that a replay would act on.

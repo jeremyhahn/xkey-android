@@ -1714,7 +1714,13 @@ class KeystoreManager(private val context: Context) {
                 entry.startsWith(ED25519_ENTRY) -> {
                     val alias = entry.removePrefix(ED25519_ENTRY)
                     val stored = prefs?.getString(alias, null)
-                    if (alias in namespace && stored != null && digestHex(stored.toByteArray()) == tag) {
+                    // Absent from the cache is not absent from disk: a remove
+                    // whose commit() failed already left the cache without it.
+                    // So an absent entry is removed again, and only a commit()
+                    // that returns true counts (a commit after a failed one
+                    // writes the file again); replaced material is left.
+                    val ours = stored == null || digestHex(stored.toByteArray()) == tag
+                    if (alias in namespace && prefs != null && ours) {
                         if (!prefs.edit().remove(alias).commit()) uncommitted[entry] = tag
                     }
                 }
@@ -2115,6 +2121,57 @@ class KeystoreManager(private val context: Context) {
         fun userKeyAliases(keyId: String): List<String> =
             listOf(KEY_ALIAS_PREFIX + keyId, KEY_ALIAS_PREFIX_GENERAL + keyId)
 
+        /** The one alias of [keyId]'s user key of [kind]. */
+        fun userKeyAlias(keyId: String, kind: UserKeyKind): String = when (kind) {
+            UserKeyKind.CREDENTIAL -> KEY_ALIAS_PREFIX + keyId
+            UserKeyKind.GENERAL -> KEY_ALIAS_PREFIX_GENERAL + keyId
+        }
+
+        /**
+         * Whether the [userKeyGeneration] entry [entry] is material of
+         * [keyId]'s user key of [kind]: a credential and a general key can
+         * share an id, and a delete of one never reaches the other's.
+         */
+        fun isEntryOf(entry: String, keyId: String, kind: UserKeyKind): Boolean {
+            val alias = when {
+                entry.startsWith(KEYSTORE_ENTRY) -> entry.removePrefix(KEYSTORE_ENTRY)
+                entry.startsWith(ED25519_ENTRY) -> entry.removePrefix(ED25519_ENTRY)
+                else -> return false
+            }
+            return alias == userKeyAlias(keyId, kind)
+        }
+
+        /** The kind of user key a key row of [keyType] describes. */
+        fun userKeyKindOf(keyType: String): UserKeyKind =
+            if (keyType == "fido2") UserKeyKind.CREDENTIAL else UserKeyKind.GENERAL
+
+        /**
+         * Which of the keys under [keyId] an RPC delete removes (#255
+         * review), given the id's key row type ([rowKeyType], null with no
+         * row) and its material [generation] entries. With one key under the
+         * id, that key (its row, if any, is its own). With a credential and
+         * a general key sharing the id, the legacy `deleteKey` names the
+         * credential and `local.deleteKey` the row's key, or with no row the
+         * general key. Null with no material under the id: every alias.
+         */
+        fun deleteTarget(keyId: String, rowKeyType: String?, generation: Set<String>, legacy: Boolean): UserKeyKind? {
+            val credential = holdsKind(keyId, generation, UserKeyKind.CREDENTIAL)
+            val general = holdsKind(keyId, generation, UserKeyKind.GENERAL)
+            return when {
+                credential && !general -> UserKeyKind.CREDENTIAL
+                general && !credential -> UserKeyKind.GENERAL
+                !credential -> null
+                legacy -> UserKeyKind.CREDENTIAL
+                rowKeyType != null -> userKeyKindOf(rowKeyType)
+                else -> UserKeyKind.GENERAL
+            }
+        }
+
+        /** Whether [generation] holds material of [keyId]'s [kind] key; a software key is a general key. */
+        fun holdsKind(keyId: String, generation: Set<String>, kind: UserKeyKind): Boolean = generation.any {
+            isEntryOf(it, keyId, kind) || kind == UserKeyKind.GENERAL && it == com.automatethethings.xkey.storage.SOFTWARE_ENTRY
+        }
+
         /** EncryptedSharedPreferences file for Ed25519 software-backed keys. */
         private const val ED25519_PREFS_NAME = "xkey_ed25519_keys"
 
@@ -2285,3 +2342,10 @@ class KeystoreManager(private val context: Context) {
         }
     }
 }
+
+/**
+ * Which of the two user keys that can share an id a delete is for
+ * (#255 review): a FIDO2 credential (`xkey_credential_<id>`) or a general
+ * key (`xkey_key_<id>`, with its Ed25519 and software key store material).
+ */
+enum class UserKeyKind { CREDENTIAL, GENERAL }

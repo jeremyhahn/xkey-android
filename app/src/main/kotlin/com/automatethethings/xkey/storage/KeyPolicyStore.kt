@@ -416,17 +416,29 @@ class KeyPolicyStore(
      * A tombstone is written first, so a failed delete is replayed. Returns
      * whether [material] was attempted.
      */
-    suspend fun deleteMaterial(keyId: String, material: KeyMaterial): Boolean =
+    suspend fun deleteMaterial(keyId: String, material: KeyMaterial, besideRow: Long? = null): Boolean =
         lockKeyMaterial(keyId) { held ->
-            if (dao.keyInstance(keyId) != null) return@lockKeyMaterial false
+            // [besideRow]: the id's key row is another key's (a credential
+            // and a general key share the id) and stays, with its policy and
+            // grants; [material] names only the deleted key's (#255 review).
+            if (dao.keyInstance(keyId) != besideRow) return@lockKeyMaterial false
+            if (besideRow != null) {
+                // An earlier delete beside the row is settled first, so this
+                // narrowed generation never replaces material still owed.
+                settleDeletion(held, material)
+                if (dao.deletion(keyId) != null) return@lockKeyMaterial false
+            }
             // The generation read now holds whatever an earlier tombstone
             // under the id still owes (that material is unchanged, as no
             // write lands under a tombstone), so replacing it drops nothing.
             val source = dao.deletion(keyId)?.source
             val generation = material.generation(held, source)
-            val tombstone = KeyDeletionEntity(keyId, NO_ROW, source, generation)
+            // A delete beside a row records that row's instance: the one
+            // tombstone whose row is still there, which [settleDeletion]
+            // replays instead of dropping.
+            val tombstone = KeyDeletionEntity(keyId, besideRow ?: NO_ROW, source, generation)
             val absent = transactor.run {
-                if (dao.keyInstance(keyId) != null) return@run false
+                if (dao.keyInstance(keyId) != besideRow) return@run false
                 dao.putDeletion(tombstone)
                 true
             }
@@ -533,7 +545,11 @@ class KeyPolicyStore(
     @PublishedApi
     internal suspend fun settleDeletion(held: KeyMaterialHeld, deleter: KeyMaterial) {
         val tombstone = dao.deletion(held.keyId) ?: return
-        if (dao.keyInstance(held.keyId) == null) {
+        val row = dao.keyInstance(held.keyId)
+        // A row under the tombstone's own instance is the other key of a
+        // shared id (a delete beside it, [deleteMaterial]): a row delete
+        // drops its row in the tombstone's transaction, so no other does.
+        if (row == null || (tombstone.keyInstance != NO_ROW && row == tombstone.keyInstance)) {
             deleteMaterialOf(held, tombstone, deleter)
         } else {
             dao.dropDeletion(held.keyId, tombstone.keyInstance)

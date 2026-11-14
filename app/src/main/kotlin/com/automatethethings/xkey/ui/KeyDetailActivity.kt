@@ -2078,7 +2078,8 @@ class KeyDetailActivity : AppCompatActivity() {
             // the material only once the rows of this key row are deleted,
             // in the store's serialisation of its material (#193 r8).
             val outcome = deleteUserKey(key, keyPolicyStore,
-                com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyDetailActivity))
+                com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyDetailActivity,
+                    kind = com.automatethethings.xkey.crypto.KeystoreManager.userKeyKindOf(key.keyType)))
             if (outcome == UserKeyDelete.PROTECTED) {
                 Snackbar.make(coordinatorLayout, getString(R.string.key_system_explanation), Snackbar.LENGTH_LONG).show()
                 return@launch

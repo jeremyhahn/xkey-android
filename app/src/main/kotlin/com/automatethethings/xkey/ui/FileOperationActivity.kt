@@ -913,12 +913,14 @@ class FileOperationActivity : AppCompatActivity() {
                 val hashHex = MediaHasher.hashCanonicalUri(contentResolver, uri)
                 val hashBytes = hexToBytes(hashHex)
 
-                // Sign the hash
-                val signatureBytes = keystoreManager.signWithAlgorithm(
+                // Sign the hash, under the material-use lock and its
+                // deleted-key recheck (#255 review).
+                val store = com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity))
+                val signatureBytes = store.withUsableKey(key.keyId) { keystoreManager.signWithAlgorithm(
                     key.keyId,
                     hashBytes,
                     key.algorithm
-                )
+                ) }
 
                 val signatureBase64 = android.util.Base64.encodeToString(
                     signatureBytes, android.util.Base64.NO_WRAP

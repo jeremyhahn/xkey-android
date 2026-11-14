@@ -18,6 +18,7 @@ import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -65,11 +66,12 @@ fun readKeyMaterialGeneration(
     context: Context,
     held: KeyPolicyStore.KeyMaterialHeld,
     source: String?,
-    keystore: KeystoreManager = KeystoreManager(context)
+    keystore: KeystoreManager = KeystoreManager(context),
+    kind: UserKeyKind? = null
 ): String {
     if (source == "xkmsd") return encodeGeneration(emptyMap())
     if (isInternalKey(held.keyId, keystore)) throw InternalKeyException(held.keyId)
-    return encodeGeneration(keyMaterialGeneration(context, held.keyId, keystore))
+    return encodeGeneration(keyMaterialGeneration(context, held.keyId, keystore, kind))
 }
 
 private fun encodeGeneration(generation: Map<String, String>): String =
@@ -88,11 +90,19 @@ private fun decodeGeneration(encoded: String): Map<String, String> {
  * [SOFTWARE_ENTRY]). Each entry's tag changes when its material is
  * replaced, so a delete of this generation never reaches material written
  * under the id since. Empty when nothing is held; throws if a backend
- * cannot be read.
+ * cannot be read. With [kind], only that user key's material: a
+ * credential and a general key can share an id, and the delete of one
+ * records (in its tombstone) and deletes none of the other's (#255 review).
  */
-fun keyMaterialGeneration(context: Context, keyId: String, keystore: KeystoreManager): Map<String, String> {
-    val generation = LinkedHashMap(keystore.userKeyGeneration(keyId))
-    SoftwareKeyStore(context).generation(keyId)?.let { generation[SOFTWARE_ENTRY] = it }
+fun keyMaterialGeneration(
+    context: Context,
+    keyId: String,
+    keystore: KeystoreManager,
+    kind: UserKeyKind? = null
+): Map<String, String> {
+    val all = keystore.userKeyGeneration(keyId)
+    val generation = LinkedHashMap(if (kind == null) all else all.filterKeys { KeystoreManager.isEntryOf(it, keyId, kind) })
+    if (kind != UserKeyKind.CREDENTIAL) SoftwareKeyStore(context).generation(keyId)?.let { generation[SOFTWARE_ENTRY] = it }
     return generation
 }
 
@@ -147,11 +157,13 @@ fun isInternalKey(keyId: String, keystore: KeystoreManager): Boolean {
  * refused with nothing deleted and dropped: no user material is owed
  * (#193 r11).
  */
-fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null): KeyMaterial {
+fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null, kind: UserKeyKind? = null): KeyMaterial {
     val manager by lazy { keystore ?: KeystoreManager(context) }
     return object : KeyMaterial {
+        // A user delete names its [kind]; replays and settles delete what
+        // the tombstone recorded, so they need none.
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String =
-            readKeyMaterialGeneration(context, held, source, manager)
+            readKeyMaterialGeneration(context, held, source, manager, kind)
 
         override fun isEmpty(generation: String): Boolean = decodeGeneration(generation).isEmpty()
 

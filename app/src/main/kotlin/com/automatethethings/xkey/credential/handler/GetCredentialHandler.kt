@@ -340,13 +340,21 @@ class GetCredentialHandler(
                         )
                     }
                     signOnNextCount { data ->
-                        keystoreManager.sign(
-                            credentialId, data, helper,
-                            title = "Sign In",
-                            subtitle = "Authenticate to $rpId"
-                        )
+                        // The material-use lock and its deleted-key recheck
+                        // (#255 review): a delete acknowledged while the
+                        // prompt waited signs nothing; one that comes later
+                        // waits for this signature.
+                        keyPolicyStore.withUsableKey(credentialId) {
+                            keystoreManager.sign(
+                                credentialId, data, helper,
+                                title = "Sign In",
+                                subtitle = "Authenticate to $rpId"
+                            )
+                        }
                     }
                 }
+            } catch (e: KeyPolicyStore.KeyDeletedException) {
+                throw NoCredentialsFoundException(credentialId)
             } catch (bioEx: Exception) {
                 Log.e(TAG, "Verified signing failed", bioEx)
                 throw CredentialAssertionException("Biometric signing failed", bioEx)
@@ -354,7 +362,11 @@ class GetCredentialHandler(
         } else {
             try {
                 Log.d(TAG, "Signing without verification, credentialId=$credentialId")
-                signOnNextCount { data -> keystoreManager.signWithoutBiometric(credentialId, data) }
+                signOnNextCount { data ->
+                    keyPolicyStore.withUsableKey(credentialId) { keystoreManager.signWithoutBiometric(credentialId, data) }
+                }
+            } catch (e: KeyPolicyStore.KeyDeletedException) {
+                throw NoCredentialsFoundException(credentialId)
             } catch (e: BiometricRequiredException) {
                 // The key turned out to be auth-bound after all. Rather than
                 // sign with UV=0 baked into authData while actually verifying,

@@ -21,6 +21,7 @@ import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
 import io.mockk.every
 import io.mockk.mockk
@@ -205,6 +206,104 @@ class KeyDeletionMaterialTypesTest {
         val refused = runCatching { readKeyMaterialGeneration(context, held("k"), "android", keystore) }
         assertTrue("an unreadable Ed25519 store was read as empty", refused.isFailure)
         assertEquals(setOf("xkey_key_k"), ed25519.keys)
+    }
+
+    /** A delete of [id]'s [kind] key, as the store records and runs it. */
+    private fun delete(id: String, kind: UserKeyKind): Boolean {
+        val generation = readKeyMaterialGeneration(context, held(id), "android", keystore, kind)
+        return deleteKeyMaterial(context, held(id), KeyDeletionEntity(id, 1L, "android", generation), keystore)
+    }
+
+    /**
+     * A credential and a general key sharing an id (#255 review): deleting
+     * the credential leaves the general key's Keystore, Ed25519 and software
+     * material, and the generation it records names none of them.
+     */
+    @Test
+    fun aCredentialDeleteLeavesTheGeneralKeyUnderItsId() {
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        ed25519["xkey_key_k"] = "c2VjcmV0"
+        softwareKey("k")
+        val recorded = readKeyMaterialGeneration(context, held("k"), "android", keystore, UserKeyKind.CREDENTIAL)!!
+        assertTrue("the credential's generation names another key: $recorded", "xkey_credential_k" in recorded)
+        assertFalse("xkey_key_k" in recorded || "software" in recorded)
+
+        assertTrue(delete("k", UserKeyKind.CREDENTIAL))
+        assertEquals(setOf("xkey_key_k"), entries.keys)
+        assertEquals(setOf("xkey_key_k"), ed25519.keys)
+        assertTrue(SoftwareKeyStore(context).contains("k"))
+    }
+
+    /** The other direction: deleting the general key leaves the credential. */
+    @Test
+    fun aGeneralKeyDeleteLeavesTheCredentialUnderItsId() {
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        ed25519["xkey_credential_k"] = "c2VjcmV0"
+        softwareKey("k")
+        assertTrue(delete("k", UserKeyKind.GENERAL))
+        assertEquals(setOf("xkey_credential_k"), entries.keys)
+        assertEquals(setOf("xkey_credential_k"), ed25519.keys)
+        assertFalse(SoftwareKeyStore(context).contains("k"))
+    }
+
+    /** Which key an RPC delete of a shared id names. */
+    @Test
+    fun anRpcDeleteNamesOneKeyOfASharedId() {
+        val both = setOf("keystore:xkey_credential_k", "keystore:xkey_key_k")
+        val general = setOf("software")
+        // Legacy deleteKey names a credential.
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "ec", both, legacy = true))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "ec", general, legacy = true))
+        // local.deleteKey names the row's key, else a general key.
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "ec", both, legacy = false))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "fido2", both, legacy = false))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", null, general, legacy = false))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", null, setOf("ed25519:xkey_credential_k"), legacy = false))
+        // One key under the id is the target whatever its row's type says.
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "ec", setOf("keystore:xkey_credential_k"), legacy = false))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "fido2", general, legacy = true))
+        // No material: every alias, as before the row split.
+        assertEquals(null, KeystoreManager.deleteTarget("k", "ec", emptySet(), legacy = false))
+    }
+
+    /**
+     * A failed Ed25519 commit stays owed across replays and a restart
+     * (#255 review): SharedPreferences' remove() empties the in-memory
+     * cache at once, so a replay that read the cache as the truth would
+     * skip the commit and drop the tombstone with the key still on disk.
+     */
+    @Test
+    fun aFailedEd25519CommitStaysOwedUntilACommitSucceeds() {
+        val disk = HashMap(mapOf("xkey_key_k" to "c2VjcmV0"))
+        val cache = HashMap(disk)
+        var writable = false
+        val prefs = mockk<SharedPreferences>()
+        every { prefs.getString(any(), any()) } answers { cache[firstArg()] ?: secondArg() }
+        every { prefs.contains(any()) } answers { firstArg<String>() in cache }
+        every { prefs.edit() } answers {
+            val editor = mockk<SharedPreferences.Editor>()
+            every { editor.remove(any()) } answers { cache.remove(firstArg<String>()); editor }
+            every { editor.commit() } answers {
+                if (writable) { disk.clear(); disk.putAll(cache) }
+                writable
+            }
+            editor
+        }
+        every { keystore.ed25519Prefs() } returns prefs
+        val tombstone = KeyDeletionEntity("k", 1L, "android", readKeyMaterialGeneration(context, held("k"), "android", keystore))
+
+        repeat(3) { assertFalse("replay ${it + 1} dropped an uncommitted delete", deleteKeyMaterial(context, held("k"), tombstone, keystore)) }
+        assertEquals(setOf("xkey_key_k"), disk.keys)
+
+        // A restart reloads the cache from disk; the disk still refuses.
+        cache.clear(); cache.putAll(disk)
+        assertFalse(deleteKeyMaterial(context, held("k"), tombstone, keystore))
+
+        writable = true
+        assertTrue(deleteKeyMaterial(context, held("k"), tombstone, keystore))
+        assertTrue("the Ed25519 key is still on disk", disk.isEmpty())
     }
 
     /** An internal key named like the user key's id stays. */

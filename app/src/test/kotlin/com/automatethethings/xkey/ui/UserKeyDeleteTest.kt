@@ -101,4 +101,33 @@ class UserKeyDeleteTest {
             .substringAfter("internal suspend fun deleteUserKey(")
         assertTrue("forgetKey(" in helper.substringBefore("\n}"))
     }
+
+    /**
+     * Bypass guard (#255 review): every user key delete names which key of
+     * its id it deletes, so a credential and a general key sharing an id
+     * never lose each other's material. A deleter built for a delete with
+     * no kind would delete both.
+     */
+    @Test
+    fun everyUserKeyDeleteNamesTheKeyItDeletes() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val missing = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" }
+            .flatMap { file ->
+                val lines = file.readLines()
+                lines.mapIndexedNotNull { i, line ->
+                    val code = line.substringBefore("//")
+                    // A delete's deleter: on a deleteUserKey( line or the next.
+                    val deleting = "deleteUserKey(" in code || i > 0 && "deleteUserKey(" in lines[i - 1] ||
+                        i > 0 && "deleteMaterial(" in lines[i - 1]
+                    if (deleting && "keyMaterialDeleter(" in code && "kind" !in code + lines.getOrElse(i + 1) { "" }) "${file.name}:${i + 1}" else null
+                }
+            }
+            .toList()
+        assertEquals("a user key delete that does not name its key", emptyList<String>(), missing)
+        val handler = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
+            .substringAfter("private suspend fun deleteUserKey(").substringBefore("\n    }\n")
+        assertTrue("the RPC delete builds its deleter without a kind", "keyMaterialDeleter(context, keystoreManager, kind = kind)" in handler)
+        assertTrue("deleteMaterial(keyId, material, besideRow = entity?.id.takeIf { besideRow })" in handler)
+    }
 }

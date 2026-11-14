@@ -1251,7 +1251,7 @@ class RequestHandler(
 
         // The same delete as local.deleteKey: through the store, with its
         // tombstone, generation and audit event (#193 r12).
-        return deleteUserKey(request, deleteParams.credentialId)
+        return deleteUserKey(request, deleteParams.credentialId, legacy = true)
     }
 
     /**
@@ -2254,7 +2254,7 @@ class RequestHandler(
      * The one RPC key delete, of local.deleteKey and the legacy deleteKey.
      * The store records its audit event once the delete commits (#193 r12).
      */
-    private suspend fun deleteUserKey(request: Request, keyId: String): Response {
+    private suspend fun deleteUserKey(request: Request, keyId: String, legacy: Boolean = false): Response {
         // Delete from unified key store with its policy row and grant rows,
         // in one transaction, under the sharing edits' order (#193), only if
         // the key row is still the one this request found: a delete queued
@@ -2271,11 +2271,16 @@ class RequestHandler(
             return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "Key $keyId is not a user key; not deleted")
         }
         val entity = keyDao.getByKeyId(keyId)
-        val material = com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)
-        if (entity == null) {
-            // No key row: the material alone, in the store's serialisation,
-            // and only if no key was generated under the id meanwhile (#193 r8).
-            if (!keyPolicyStore.deleteMaterial(keyId, material)) {
+        // A credential and a general key may share an id: the delete names
+        // one of them, and its material and tombstone hold only that key's
+        // alias, so the other key, its row and its metadata stay (#255 review).
+        val (kind, besideRow) = deleteTarget(keyId, entity, legacy)
+        val material = com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager, kind = kind)
+        if (entity == null || besideRow) {
+            // No key row, or the row is the other key's: the material alone,
+            // in the store's serialisation, and only if the id's row is still
+            // what this request found (#193 r8).
+            if (!keyPolicyStore.deleteMaterial(keyId, material, besideRow = entity?.id.takeIf { besideRow })) {
                 return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
             }
         } else if (!KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = material)) {
@@ -2284,6 +2289,26 @@ class RequestHandler(
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
+    }
+
+    /**
+     * The key under [keyId] a delete removes ([KeystoreManager.deleteTarget]),
+     * and whether the id's row is the other key's: a credential and a general
+     * key both hold material under the id and the row is not the target's.
+     */
+    private fun deleteTarget(keyId: String, entity: KeyEntity?, legacy: Boolean): Pair<com.automatethethings.xkey.crypto.UserKeyKind?, Boolean> {
+        // An unreadable store picks by the row alone; the delete then reads
+        // the generation again under the lock and refuses.
+        val generation = try {
+            com.automatethethings.xkey.storage.keyMaterialGeneration(context, keyId, keystoreManager).keys
+        } catch (e: Exception) {
+            emptySet()
+        }
+        val kind = KeystoreManager.deleteTarget(keyId, entity?.keyType, generation, legacy)
+        val other = com.automatethethings.xkey.crypto.UserKeyKind.entries.firstOrNull { it != kind }
+        val besideRow = entity != null && kind != null && other != null &&
+            KeystoreManager.userKeyKindOf(entity.keyType) != kind && KeystoreManager.holdsKind(keyId, generation, other)
+        return kind to besideRow
     }
 
     /**

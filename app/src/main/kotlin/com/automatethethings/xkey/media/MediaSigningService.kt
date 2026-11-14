@@ -264,7 +264,9 @@ class MediaSigningService : Service() {
                 val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
                 // Sign with the configured key
-                val signature = keystoreManager.signWithAlgorithm(keyId, hashBytes, keyEntity.algorithm)
+                // Under the material-use lock and its deleted-key recheck (#255 review).
+                val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db)
+                    .withUsableKey(keyId) { keystoreManager.signWithAlgorithm(keyId, hashBytes, keyEntity.algorithm) }
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
                 // Compute key fingerprint
