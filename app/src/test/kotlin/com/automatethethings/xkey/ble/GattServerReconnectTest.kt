@@ -457,6 +457,38 @@ class GattServerReconnectTest {
         assertRevokedAtAdmission { it.removeGrant() }
     }
 
+    /**
+     * The service builds a share session from a fresh desktop lookup each
+     * time and re-reads it on every [ShareSession.isCurrent]: lookups on one
+     * live session share one sender, so the session stays current until
+     * another session replaces it.
+     */
+    @Test
+    fun repeatedLookupsOnOneLiveSessionGiveOneShareSession() = runBlocking<Unit> {
+        val desktop = NoiseInitiatorSession(randomKey())
+        val keyHex = desktop.getLocalStaticPublicKey().hex()
+        repo.addDevice(keyHex, "desktop")
+        reconnect(desktop, claimedPeerKeyHex = keyHex)
+
+        assertTrue("one session, one sender", server.boundSender()!!.second === server.boundSender()!!.second)
+        val first = shareSessionAsTheServiceReadsIt()!!
+        assertEquals(keyHex, first.peerPublicKeyHex)
+        assertTrue("a second lookup is the same session", first.sameAs(shareSessionAsTheServiceReadsIt()))
+        assertTrue("the session stays current on an unchanged session", first.isCurrent())
+
+        val other = NoiseInitiatorSession(randomKey())
+        val otherHex = other.getLocalStaticPublicKey().hex()
+        repo.addDevice(otherHex, "other desktop")
+        reconnect(other, claimedPeerKeyHex = otherHex)
+        assertFalse("another session is another share session", first.isCurrent())
+    }
+
+    /** As XKeyGattService.shareSession: a fresh lookup, re-read on every check. */
+    private fun shareSessionAsTheServiceReadsIt(): ShareSession? =
+        server.connectedDesktop(router)?.let { d ->
+            ShareSession.of(listOf(ShareSession.Transport(d.sender, d.router))) { it.sameAs(shareSessionAsTheServiceReadsIt()) }
+        }
+
     private suspend fun assertRevokedAtAdmission(revoke: suspend (SharedKeyStore) -> Unit) = coroutineScope {
         val desktop = NoiseInitiatorSession(randomKey())
         val keyHex = desktop.getLocalStaticPublicKey().hex()

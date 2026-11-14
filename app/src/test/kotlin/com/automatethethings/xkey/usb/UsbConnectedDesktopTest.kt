@@ -21,6 +21,7 @@ import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.SessionSender
+import com.automatethethings.xkey.remote.ShareSession
 import com.automatethethings.xkey.remote.stubAndroidLog
 import com.automatethethings.xkey.transport.StreamSessionHarness
 import com.automatethethings.xkey.ui.DesktopOathLinks
@@ -173,6 +174,31 @@ class UsbConnectedDesktopTest {
                 // A's connection is no longer the session's.
             }
             b.assertNoFrame()
+        }
+    }
+
+    /**
+     * The service builds a share session from a fresh desktop lookup each
+     * time and re-reads it on every [ShareSession.isCurrent]: lookups on one
+     * live connection share one sender, so the session stays current until
+     * another connection replaces it.
+     */
+    @Test
+    fun `repeated lookups on one live connection give one share session`() = runBlocking {
+        StreamSessionHarness().use { harness ->
+            fun desktop() = server.connectedDesktop(UsbAccessoryState.Connected("acc"), harness.pairing.boundSender(), router)
+            fun shareSession(): ShareSession? = desktop()?.let { d ->
+                ShareSession.of(listOf(ShareSession.Transport(d.sender, d.router))) { it.sameAs(shareSession()) }
+            }
+            harness.connectPaired()
+
+            assertTrue("one connection, one sender", desktop()!!.sender === desktop()!!.sender)
+            val first = shareSession()!!
+            assertTrue("a second lookup is the same session", first.sameAs(shareSession()))
+            assertTrue("the session stays current on an unchanged connection", first.isCurrent())
+
+            harness.connectPaired()
+            assertFalse("another connection is another session", first.isCurrent())
         }
     }
 
