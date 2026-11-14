@@ -84,26 +84,85 @@ internal class StreamByteSource(private val input: InputStream, override val len
 /**
  * One piece of the bytes a canonical hash covers: a range of the media or
  * bytes the canonical form puts in its place. A plan lists them in file
- * order, so it is applied in one forward pass.
+ * order, so it is applied in one forward pass. Pieces are made only by
+ * [MediaPlan.Builder].
  */
 internal sealed interface Piece {
     class Range(val start: Long, val end: Long) : Piece
     class Literal(val bytes: ByteArray) : Piece
 }
 
+/**
+ * Media that would need more than [MediaPlan.MAX_PIECES] pieces to hash
+ * canonically: a crafted file (a JPEG of millions of tiny markers, say) that
+ * is refused rather than planned into millions of objects. An
+ * [java.io.IOException], so every caller that reports a failed read reports
+ * it too.
+ */
+class MediaTooFragmentedException(val maxPieces: Int) :
+    java.io.IOException("the media is split into more than $maxPieces pieces and cannot be hashed")
+
+/**
+ * The pieces of a media file its canonical hash covers, in file order.
+ * Only [Builder] makes one, and every media format parser plans through it,
+ * so every plan is coalesced and bounded.
+ */
+internal class MediaPlan private constructor(val pieces: List<Piece>) {
+
+    /**
+     * Adds pieces in file order. A range that starts where the last one ended
+     * extends it, so a run of adjacent segments is one piece; past
+     * [maxPieces] pieces it throws [MediaTooFragmentedException].
+     */
+    class Builder(private val maxPieces: Int = MAX_PIECES) {
+        private val pieces = ArrayList<Piece>()
+        private var end = 0L
+
+        fun range(start: Long, end: Long): Builder {
+            require(start in this.end..end) { "a plan is built forward only" }
+            if (start == end) return this
+            val last = pieces.lastOrNull()
+            if (last is Piece.Range && last.end == start) {
+                pieces[pieces.size - 1] = Piece.Range(last.start, end)
+            } else {
+                add(Piece.Range(start, end))
+            }
+            this.end = end
+            return this
+        }
+
+        fun literal(bytes: ByteArray): Builder {
+            if (bytes.isNotEmpty()) add(Piece.Literal(bytes))
+            return this
+        }
+
+        private fun add(piece: Piece) {
+            if (pieces.size >= maxPieces) throw MediaTooFragmentedException(maxPieces)
+            pieces += piece
+        }
+
+        fun build(): MediaPlan = MediaPlan(pieces.toList())
+    }
+
+    companion object {
+        /** Far above any real media: coalesced, a JPEG, PNG, WebP or MP4 plans in a handful of pieces. */
+        const val MAX_PIECES = 1 shl 16
+    }
+}
+
 internal object Pieces {
     /** [plan] applied to [data]. */
-    fun bytes(plan: List<Piece>, data: ByteArray): ByteArray {
+    fun bytes(plan: MediaPlan, data: ByteArray): ByteArray {
         val out = java.io.ByteArrayOutputStream(data.size)
         write(plan, data.inputStream(), out)
         return out.toByteArray()
     }
 
     /** [plan] applied to [input], read once from its start, written to [output]. */
-    fun write(plan: List<Piece>, input: InputStream, output: OutputStream) {
+    fun write(plan: MediaPlan, input: InputStream, output: OutputStream) {
         val buffer = ByteArray(64 * 1024)
         var position = 0L
-        for (piece in plan) {
+        for (piece in plan.pieces) {
             when (piece) {
                 is Piece.Literal -> output.write(piece.bytes)
                 is Piece.Range -> {

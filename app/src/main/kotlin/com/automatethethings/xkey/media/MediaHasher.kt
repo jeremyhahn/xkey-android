@@ -83,9 +83,11 @@ object MediaHasher {
     /**
      * The one place the canonical domain is decided, for bytes in memory and
      * streamed media alike: the pieces of [source] the canonical hash covers,
-     * or null when it covers the media whole.
+     * or null when it covers the media whole. Every format plans through
+     * [MediaPlan.Builder], so media that would need more than
+     * [MediaPlan.MAX_PIECES] pieces throws [MediaTooFragmentedException].
      */
-    private fun canonicalPlan(source: ByteSource, mimeType: String?): List<Piece>? {
+    private fun canonicalPlan(source: ByteSource, mimeType: String?): MediaPlan? {
         if (isCanonicalisedJpeg(mimeType)) return jpegPlan(source)
         val format = XmpContainers.formatOf(mimeType) ?: return null
         return XmpContainers.stripPlan(source, format)
@@ -211,13 +213,17 @@ object MediaHasher {
      * skip, a fill byte also reads as a marker with a bogus length and the whole
      * file falls back to being hashed raw. A file without fill bytes gives the
      * same output as before.
+     *
+     * Adjacent kept segments coalesce into one piece, so a run of standalone
+     * markers costs nothing; a file whose kept segments are split apart more
+     * than [MediaPlan.MAX_PIECES] times throws [MediaTooFragmentedException].
      */
-    private fun jpegPlan(source: ByteSource): List<Piece>? {
+    private fun jpegPlan(source: ByteSource): MediaPlan? {
         val n = source.length
         fun byteAt(index: Long): Int = source.readAt(index, 1)[0].toInt() and 0xFF
         if (n < 4 || byteAt(0) != 0xFF || byteAt(1) != 0xD8) return null
 
-        val plan = mutableListOf<Piece>(Piece.Range(0, 2)) // SOI
+        val plan = MediaPlan.Builder().range(0, 2) // SOI
         var i = 2L
 
         while (i + 1 < n) {
@@ -229,13 +235,12 @@ object MediaHasher {
 
             // Standalone markers carry no length field.
             if (marker == 0xD8 || marker in 0xD0..0xD7 || marker == 0x01) {
-                plan += Piece.Range(i, i + 2)
+                plan.range(i, i + 2)
                 i += 2
                 continue
             }
             if (marker == 0xD9) { // EOI
-                plan += Piece.Range(i, i + 2)
-                return plan
+                return plan.range(i, i + 2).build()
             }
             if (i + 3 >= n) return null
 
@@ -245,16 +250,15 @@ object MediaHasher {
             if (segmentEnd > n) return null
 
             val isMetadata = marker in 0xE0..0xEF || marker == 0xFE
-            if (!isMetadata) plan += Piece.Range(i, segmentEnd)
+            if (!isMetadata) plan.range(i, segmentEnd)
 
             i = segmentEnd
 
             if (marker == 0xDA) {
                 // Entropy-coded data runs from here to the end, EOI included.
-                plan += Piece.Range(i, n)
-                return plan
+                return plan.range(i, n).build()
             }
         }
-        return plan
+        return plan.build()
     }
 }

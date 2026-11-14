@@ -290,36 +290,38 @@ object XmpContainers {
      * the one place the canonical form of MP4/MOV, PNG and WebP is decided,
      * for bytes in memory and streamed media alike.
      */
-    internal fun stripPlan(source: ByteSource, format: Format): List<Piece>? {
+    internal fun stripPlan(source: ByteSource, format: Format): MediaPlan? {
         val parts = walk(source, format) ?: return null
         val first = parts.indexOfFirst { it.ours }
         if (first < 0) return null
         // MP4/MOV: only a trailing run of our boxes is left out.
         if (format == Format.ISO_BMFF && parts.drop(first).any { !it.ours }) return null
         val kept = parts.filter { !it.ours }
-        return when (format) {
-            Format.ISO_BMFF -> kept.map { Piece.Range(it.start, it.end) }
-            Format.PNG -> listOf<Piece>(Piece.Range(0, PNG_SIGNATURE.size.toLong())) +
-                kept.map { Piece.Range(it.start, it.end) }
+        val plan = MediaPlan.Builder()
+        when (format) {
+            Format.ISO_BMFF -> kept.forEach { plan.range(it.start, it.end) }
+            Format.PNG -> {
+                plan.range(0, PNG_SIGNATURE.size.toLong())
+                kept.forEach { plan.range(it.start, it.end) }
+            }
             Format.WEBP -> {
-                val body = mutableListOf<Piece>()
-                var chunks = 0L
-                for (part in kept) {
+                // The VP8X embed added to a simple file is left out.
+                val body = kept.filterNot { it.type == "VP8X" && it.payloadEnd > it.payloadStart && isAddedVp8x(it, kept) }
+                plan.literal(riffHeader(body.sumOf { it.end - it.start }))
+                for (part in body) {
                     if (part.type == "VP8X" && part.payloadEnd > part.payloadStart) {
-                        if (isAddedVp8x(part, kept)) continue // the VP8X embed added to a simple file
                         // Any other VP8X stays, so an edited header is hashed.
                         val flags = (part.head[0].toInt() and 0xFF) and WEBP_XMP_FLAG.inv()
-                        body += Piece.Range(part.start, part.payloadStart)
-                        body += Piece.Literal(byteArrayOf(flags.toByte()))
-                        body += Piece.Range(part.payloadStart + 1, part.end)
+                        plan.range(part.start, part.payloadStart)
+                        plan.literal(byteArrayOf(flags.toByte()))
+                        plan.range(part.payloadStart + 1, part.end)
                     } else {
-                        body += Piece.Range(part.start, part.end)
+                        plan.range(part.start, part.end)
                     }
-                    chunks += part.end - part.start
                 }
-                listOf<Piece>(Piece.Literal(riffHeader(chunks))) + body
             }
         }
+        return plan.build()
     }
 
     /** [isAddedVp8x] for a walked [vp8x] among the [kept] parts. */
