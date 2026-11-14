@@ -42,6 +42,15 @@ interface MessageSender {
     fun confirmedConnection(): ConfirmedConnection? = null
 
     /**
+     * What this sender sends on, compared with `==`: two senders with equal
+     * bindings reach the same connection, so a session is identified by its
+     * binding, never by the sender object (a transport may hand out a fresh
+     * sender on every lookup). A sender that is not bound to one connection
+     * is its own binding.
+     */
+    val binding: Any get() = this
+
+    /**
      * Sends [data] encrypted on [connection] alone. The transport checks, at
      * the admission that consumes the nonce, that [connection] is still its
      * current connection, confirmed for the same peer; otherwise it encrypts

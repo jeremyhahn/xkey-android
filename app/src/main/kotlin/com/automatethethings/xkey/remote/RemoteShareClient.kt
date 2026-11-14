@@ -371,9 +371,14 @@ class ShareSession private constructor(
      */
     fun isCurrent(): Boolean = sameConnection(sender.confirmedConnection()) && stillCurrent(this)
 
-    /** Same transport, same router and the same connection confirmed for the same peer. */
+    /**
+     * Same transport connection ([MessageSender.binding], never the sender
+     * object, which a lookup may build afresh), same router and the same
+     * connection confirmed for the same peer.
+     */
     fun sameAs(other: ShareSession?): Boolean =
-        other != null && other.sender === sender && other.router === router && sameConnection(other.confirmed)
+        other != null && other.sender.binding == sender.binding && other.router === router &&
+            sameConnection(other.confirmed)
 
     private fun sameConnection(other: ConfirmedConnection?): Boolean =
         if (confirmed == null) other == null else confirmed.sameAs(other)

@@ -926,6 +926,8 @@ class StreamPairingSession(
 
     private fun newBoundSender(connection: Connection): SessionSender =
         object : SessionSender {
+            override val binding: Any get() = connection
+
             override suspend fun sendEncryptedMessage(data: ByteArray) {
                 send(connection, data, phoneInitiated = true)
             }

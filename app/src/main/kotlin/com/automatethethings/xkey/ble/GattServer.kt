@@ -2866,8 +2866,13 @@ class GattServer(
 
     private class BoundSenderEntry(val session: NoiseSession, val device: BluetoothDevice, val sender: SessionSender)
 
+    /** One session on one device: the session by identity, the device by address. */
+    private data class SessionBinding(val session: NoiseSession, val device: BluetoothDevice)
+
     private fun newBoundSender(session: NoiseSession, device: BluetoothDevice): SessionSender =
         object : SessionSender {
+            override val binding: Any = SessionBinding(session, device)
+
             override suspend fun sendEncryptedMessage(data: ByteArray) {
                 // sendOnSession refuses a session that is no longer current,
                 // under the lock that installs a replacing one.
