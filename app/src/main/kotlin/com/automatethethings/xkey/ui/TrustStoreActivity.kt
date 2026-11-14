@@ -64,6 +64,8 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.truststore.CABundleFetchException
 import com.automatethethings.xkey.truststore.TrustStoreRepository
 import com.automatethethings.xkey.truststore.TrustedCA
+import com.automatethethings.xkey.truststore.clearTrustStore
+import com.automatethethings.xkey.truststore.removeTrustedCertificate
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
@@ -1748,18 +1750,28 @@ class TrustStoreActivity : AppCompatActivity() {
             .setMessage(getString(R.string.trust_store_delete_message, displayName))
             .setPositiveButton(R.string.trust_store_delete) { _, _ ->
                 lifecycleScope.launch {
-                    val deleted = trustStoreRepository.deleteCertificate(cert.fingerprint)
-                    if (deleted) {
-                        XKeyDatabase.getInstance(this@TrustStoreActivity)
-                            .certificateDao()
-                            .deleteByFingerprint(cert.fingerprint)
-                        Snackbar.make(
-                            rootLayout,
-                            R.string.trust_store_deleted,
-                            Snackbar.LENGTH_SHORT
-                        ).show()
-                        loadCertificates()
-                    }
+                    deleteFromTrustStoreScreen(
+                        trustStoreRepository,
+                        cert.fingerprint,
+                        deleteRow = {
+                            XKeyDatabase.getInstance(this@TrustStoreActivity)
+                                .certificateDao()
+                                .deleteByFingerprint(cert.fingerprint)
+                        },
+                        showResult = { removed ->
+                            if (removed) {
+                                Snackbar.make(rootLayout, R.string.trust_store_deleted, Snackbar.LENGTH_SHORT)
+                                    .show()
+                            } else {
+                                Snackbar.make(
+                                    rootLayout,
+                                    "Certificate could not be removed; it is still trusted",
+                                    Snackbar.LENGTH_LONG
+                                ).show()
+                            }
+                        },
+                        refresh = { loadCertificates() }
+                    )
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -1776,16 +1788,22 @@ class TrustStoreActivity : AppCompatActivity() {
             .setPositiveButton(R.string.trust_store_clear_all) { _, _ ->
                 lifecycleScope.launch {
                     val certDao = XKeyDatabase.getInstance(this@TrustStoreActivity).certificateDao()
-                    val allCerts = trustStoreRepository.getAllCertificates()
-                    for (cert in allCerts) {
-                        certDao.deleteByFingerprint(cert.fingerprint)
+                    // Rows go only for the certificates the trust store removed.
+                    val result = clearTrustStore(trustStoreRepository) { certDao.deleteByFingerprint(it) }
+                    if (result.complete) {
+                        Snackbar.make(
+                            rootLayout,
+                            R.string.trust_store_cleared,
+                            Snackbar.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        Snackbar.make(
+                            rootLayout,
+                            "Trust store only partly cleared: ${result.failed.size} " +
+                                "certificate(s) could not be removed and are still trusted",
+                            Snackbar.LENGTH_LONG
+                        ).show()
                     }
-                    trustStoreRepository.clearAll()
-                    Snackbar.make(
-                        rootLayout,
-                        R.string.trust_store_cleared,
-                        Snackbar.LENGTH_SHORT
-                    ).show()
                     loadCertificates()
                 }
             }
@@ -2059,4 +2077,26 @@ private class TrustedCertificateAdapter(
             return oldItem == newItem
         }
     }
+}
+
+/**
+ * Deletes one certificate for the trust-store screen's confirmation, shows
+ * whether it was removed, and refreshes the list either way.
+ *
+ * @param deleteRow deletes the certificate's database row
+ * @param showResult shows whether the certificate was removed
+ * @param refresh reloads the displayed list
+ */
+internal suspend fun deleteFromTrustStoreScreen(
+    repository: TrustStoreRepository,
+    fingerprint: String,
+    deleteRow: suspend () -> Unit,
+    showResult: (removed: Boolean) -> Unit,
+    refresh: () -> Unit
+) {
+    // The row goes only once the trust store has removed the certificate;
+    // one that stays trusted stays listed, and the list shows either state.
+    val removed = removeTrustedCertificate(repository, fingerprint, deleteRow)
+    showResult(removed)
+    refresh()
 }

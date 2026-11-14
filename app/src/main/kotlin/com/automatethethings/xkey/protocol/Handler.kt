@@ -54,6 +54,7 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricAuthMode
 import com.automatethethings.xkey.settings.BiometricSettingsData
+import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -61,6 +62,7 @@ import com.automatethethings.xkey.settings.UserVerificationPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
@@ -1213,11 +1215,21 @@ class RequestHandler(
      * is one, see [attestingPeerPublicKeyHex].
      *
      * @param forKeyUse True if checking for key use, false for key attestation.
-     * @return True if attestation is current or not required, false if attestation is required but expired.
+     * A paired-device store that cannot be read fails closed: the peer's
+     * settings may require an attestation the phone cannot check.
+     *
+     * @return True if attestation is current or not required, false if attestation is required but expired
+     *   or the peer's record cannot be read.
      */
     private suspend fun isDeviceAttestationCurrent(forKeyUse: Boolean): Boolean {
         val publicKeyHex = attestingPeerPublicKeyHex() ?: return true  // Unknown device, allow
-        val device = pairedDeviceRepository?.getDevice(publicKeyHex) ?: return true  // Not in repo, allow
+        val repo = pairedDeviceRepository ?: return true
+        val found = repo.lookupDevice(publicKeyHex)
+        if (found is DeviceLookup.Unreadable) {
+            Log.w(TAG, "Paired-device store unreadable; refusing until attestation can be checked", found.cause)
+            return false
+        }
+        val device = (found as? DeviceLookup.Paired)?.device ?: return true  // Not in repo, no device policy
 
         val requiresAttestation = if (forKeyUse) {
             device.requireAttestationForKeyUse
@@ -2115,7 +2127,7 @@ class RequestHandler(
      */
     private suspend fun auditCaller(): AuditCaller {
         val peer = attestingPeerPublicKeyHex()
-        return AuditCaller(peer, peer?.let { pairedDeviceRepository?.getDevice(it) }?.deviceName)
+        return AuditCaller(peer, auditPeerName(peer))
     }
 
     /**
@@ -3844,7 +3856,7 @@ class RequestHandler(
             Pair<com.automatethethings.xkey.sync.SyncEngine.ItemCounts, org.json.JSONArray>
     ): Response {
         val peerId = currentPeerPublicKeyHex()
-        val peerName = syncPeerName(peerId)
+        val peerName = auditPeerName(peerId)
         fun failed(why: String) =
             record(peerId, peerName, 0, AuditLogger.SYNC_INBOUND, 0, 0, 0, false, why)
         return try {
@@ -3872,12 +3884,25 @@ class RequestHandler(
         }
     }
 
-    /** [peerId]'s paired name, or null when it has none or the store cannot be read. */
-    private fun syncPeerName(peerId: String?): String? = peerId?.let {
+    /**
+     * [peerId]'s paired name for an audit record, or null when it has none or
+     * the store cannot be read. Every audit record names its peer through
+     * here, and it is the one paired-device read that is best-effort: it
+     * never throws, so a store that cannot be read (encrypted prefs without
+     * their keystore) never suppresses the record.
+     */
+    private fun auditPeerName(peerId: String?): String? = peerId?.let {
         try {
-            pairedDeviceRepository?.getDevice(it)?.deviceName
+            when (val found = pairedDeviceRepository?.lookupDevice(it)) {
+                is DeviceLookup.Paired -> found.device.deviceName
+                is DeviceLookup.Unreadable -> {
+                    Log.w(TAG, "paired device name unavailable for the audit: ${found.cause.javaClass.simpleName}")
+                    null
+                }
+                else -> null
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "paired device name unavailable for the sync audit: ${e.javaClass.simpleName}")
+            Log.w(TAG, "paired device name unavailable for the audit: ${e.javaClass.simpleName}")
             null
         }
     }
@@ -3957,7 +3982,7 @@ class RequestHandler(
         } catch (_: ProtocolException) {
             null
         } ?: return null
-        return BackupAuditPeer(key, pairedDeviceRepository?.getDevice(key)?.deviceName)
+        return BackupAuditPeer(key, auditPeerName(key))
     }
 
     /**
@@ -4019,11 +4044,13 @@ class RequestHandler(
     // -------------------------------------------------------------------------
 
     /**
-     * Returns the confirmed peer identity for the current session.
+     * Returns the confirmed peer identity of the connection this request
+     * arrived on, from [currentPeerPublicKeyHex]: the peer every sharing
+     * decision and every audit record of a transfer names.
      *
      * @throws ProtocolException with [ErrorCodes.OPERATION_DENIED] when the
-     * session has no confirmed peer, since no sharing decision can be made
-     * about an anonymous peer.
+     * request's connection has no confirmed peer, since no sharing decision
+     * can be made about an anonymous peer.
      */
     private suspend fun requireConfirmedPeer(operation: String): String {
         return currentPeerPublicKeyHex() ?: throw ProtocolException(
@@ -4063,6 +4090,33 @@ class RequestHandler(
     }
 
     /**
+     * Runs a share's write and the audit record that names it as one step
+     * that cancellation cannot split.
+     *
+     * A transport cancels a request's scope when its connection drops. A
+     * suspending write (a Room insert) can complete and then resume into that
+     * cancellation, which would skip the record and leave stored material no
+     * audit entry names. Under [NonCancellable] the record always follows a
+     * write that ran; cancellation before the write stores and records
+     * nothing, and the caller still sees the cancellation once this returns.
+     * A request already cancelled when it arrives here is refused before the
+     * write: entering [NonCancellable] checks nothing, so without that check a
+     * cancelled request with no suspension point since its cancellation would
+     * still store. Every path that writes and records something, the share
+     * paths and the sharing-policy change, goes through here.
+     *
+     * @param write stores the shared material and returns its result
+     * @param record writes the audit entry for what [write] stored
+     * @return the result of [write]
+     */
+    private suspend fun <T> persistAudited(write: suspend () -> T, record: (T) -> Unit): T {
+        currentCoroutineContext().ensureActive()
+        return withContext(NonCancellable) {
+            write().also(record)
+        }
+    }
+
+    /**
      * Imports a public key shared by the desktop, stored as a contact entry.
      */
     private suspend fun handleSharePublicKey(request: Request): Response {
@@ -4072,7 +4126,7 @@ class RequestHandler(
         if (pem.isEmpty()) {
             return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing public_key_pem")
         }
-        requireConfirmedPeer("sharePublicKey")
+        val peerPublicKeyHex = requireConfirmedPeer("sharePublicKey")
         return try {
             val der = com.automatethethings.xkey.crypto.SyncCodec.pemToDer(pem)
                 ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid public_key_pem")
@@ -4081,21 +4135,36 @@ class RequestHandler(
             val label = params.optString("label", "").ifBlank { keyId.ifBlank { "shared-key" } }
             val dao = XKeyDatabase.getInstance(context).contactDao()
             if (dao.getByFingerprint(fingerprint) == null) {
-                dao.insert(
-                    com.automatethethings.xkey.storage.entity.ContactEntity(
-                        name = label,
-                        publicKeyDer = der,
-                        publicKeyFingerprint = fingerprint,
-                        algorithm = params.optString("algorithm", "").ifBlank { "unknown" },
-                        source = "shared",
-                        notes = params.optString("backend", "").ifBlank { null }
-                    )
+                persistAudited(
+                    write = {
+                        dao.insert(
+                            com.automatethethings.xkey.storage.entity.ContactEntity(
+                                name = label,
+                                publicKeyDer = der,
+                                publicKeyFingerprint = fingerprint,
+                                algorithm = params.optString("algorithm", "").ifBlank { "unknown" },
+                                source = "shared",
+                                notes = params.optString("backend", "").ifBlank { null }
+                            )
+                        )
+                    },
+                    record = {
+                        AuditLogger.logContactImported(
+                            name = label,
+                            fingerprint = fingerprint,
+                            source = "shared",
+                            deviceId = peerPublicKeyHex,
+                            deviceName = auditPeerName(peerPublicKeyHex)
+                        )
+                    }
                 )
             }
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
                 put("import_id", keyId.ifBlank { fingerprint })
             })
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "sharePublicKey failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "sharePublicKey failed: ${e.message}")
@@ -4119,35 +4188,54 @@ class RequestHandler(
         if (wrappedB64.isEmpty()) {
             return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing wrapped_key")
         }
-        requireConfirmedPeer("shareSymmetric")
+        val peerPublicKeyHex = requireConfirmedPeer("shareSymmetric")
         return try {
             val material = decodeBase64Strict("wrapped_key", wrappedB64)
             val keyId = params.optString("label", "").ifBlank {
                 params.optString("key_id", "").ifBlank { "shared-sym-${System.currentTimeMillis()}" }
             }
             val softwareStore = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
+            val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
             // The check and the write in the store's one serialisation of
-            // this id's key material (#193 r8).
+            // this id's key material (#193 r8); the write and its audit are
+            // one step (#234).
             keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) {
                 if (softwareStore.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
                     return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
                 }
-                softwareStore.put(
-                    com.automatethethings.xkey.crypto.SoftwareKey(
-                        keyId = keyId,
-                        algorithm = params.optString("algorithm", "").ifBlank { "AES" },
-                        keyType = "symmetric",
-                        keySize = params.optInt("key_size", material.size * 8),
-                        exportable = false,
-                        shareable = false,
-                        material = material
-                    )
+                persistAudited(
+                    write = {
+                        softwareStore.put(
+                            com.automatethethings.xkey.crypto.SoftwareKey(
+                                keyId = keyId,
+                                algorithm = algorithm,
+                                keyType = "symmetric",
+                                keySize = params.optInt("key_size", material.size * 8),
+                                exportable = false,
+                                shareable = false,
+                                material = material
+                            )
+                        )
+                    },
+                    record = {
+                        AuditLogger.logKeyCreated(
+                            keyId = keyId,
+                            keyLabel = keyId,
+                            keyType = "symmetric",
+                            algorithm = algorithm,
+                            source = "shared",
+                            deviceId = peerPublicKeyHex,
+                            deviceName = auditPeerName(peerPublicKeyHex)
+                        )
+                    }
                 )
             }
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
                 put("import_id", keyId)
             })
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "shareSymmetric failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "shareSymmetric failed: ${e.message}")
@@ -4177,20 +4265,36 @@ class RequestHandler(
                 return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key not found: $keyId")
             }
 
+            val peerName = auditPeerName(peerPublicKeyHex)
+            // The key's stored type, read apart from the authorization result,
+            // so a refused export is filed under the same key type as a
+            // granted one (the audit screen filters by it).
+            val keyType = auditKeyType(keyId, software)
             val entity = authorizeShare(keyId, peerPublicKeyHex)
-                ?: return Response.error(
-                    request.id,
-                    ErrorCodes.OPERATION_DENIED,
-                    "Key is not shareable with this peer: $keyId"
+            if (entity == null) {
+                val message = "Key is not shareable with this peer: $keyId"
+                AuditLogger.logKeyExported(
+                    keyId = keyId,
+                    keyLabel = keyId,
+                    keyType = keyType,
+                    format = if (software != null) "raw" else "public",
+                    deviceId = peerPublicKeyHex,
+                    deviceName = peerName,
+                    success = false,
+                    errorMessage = message
                 )
+                return Response.error(request.id, ErrorCodes.OPERATION_DENIED, message)
+            }
 
             val result = JSONObject()
+            val format: String
             if (software != null) {
                 // Software-backed key: may export raw material per policy.
                 result.put("algorithm", software.algorithm)
                 result.put("key_type", software.keyType)
                 val exportMaterial = entity.exportable && entity.shareable &&
                     software.exportable && software.shareable
+                format = if (exportMaterial) "raw" else "metadata"
                 if (exportMaterial) {
                     result.put("wrapped_key", android.util.Base64.encodeToString(software.material, android.util.Base64.NO_WRAP))
                     result.put("key_size", software.keySize)
@@ -4205,7 +4309,16 @@ class RequestHandler(
                 result.put("key_type", "public")
                 result.put("exportable", false)
                 result.put("algorithm", entity.algorithm)
+                format = "public"
             }
+            AuditLogger.logKeyExported(
+                keyId = keyId,
+                keyLabel = entity.label,
+                keyType = keyType,
+                format = format,
+                deviceId = peerPublicKeyHex,
+                deviceName = peerName
+            )
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "importSharedKey failed", e)

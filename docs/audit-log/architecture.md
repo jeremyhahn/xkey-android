@@ -61,6 +61,26 @@ second desktop confirming over another transport overwrites it while the
 first request is still running. The same scan test fails on a call that
 passes its own device or captures the caller late.
 
+### Key-sharing transfers
+
+Each transfer between the phone and a paired desktop records one entry with
+`device_id` (the peer's static key, hex) and `device_name` (its pairing name).
+No entry carries key material.
+
+| Method | Operation type | Details |
+|--------|----------------|---------|
+| `local.importSharedKey` (a key leaves the phone) | `KEY_EXPORTED` | `format`: `raw` (software material), `metadata` (software key, no material), `public` (hardware key, public key only). A sharing-policy refusal records `success = false`. Granted or refused, `keyType` is the key's stored type (`RequestHandler.auditKeyType`), never the format. An unknown key records nothing. |
+| `local.shareSymmetric` (material arrives) | `KEY_CREATED` | `algorithm`, `strongBox = false`, `source = shared`. A refused duplicate id records nothing. |
+| `local.sharePublicKey` (a public key arrives) | `CONTACT_IMPORTED` | `name`, `fingerprint`, `source = shared`. A key already in contacts records nothing. |
+
+An arriving key's write and its entry run together, outside cancellation
+(`persistAudited` in `RequestHandler`). If the connection drops mid-write,
+the stored key still gets its entry. A request cancelled before the write,
+or already cancelled when it reaches it, stores and records nothing. The
+device name comes from `auditPeerName`, which every audit record uses: when
+the paired-device store cannot be read the entry still lands, with a null
+`device_name`.
+
 ### Sync events
 
 Operation types are stored by name (the type converter in `XKeyDatabase.kt`),
@@ -80,6 +100,8 @@ the desktop. Both inbound handlers audit through one path
 connection, never the phone's last served desktop, so two desktops syncing at
 once each get their own entry; and `device_name` is null when the paired-device store cannot be read, so the
 sync still runs and is audited. See [store-sync](../store-sync/architecture.md#audit).
+
+Trust store events: `TrustStoreRepository` records `TRUST_STORE_IMPORT` (subject, fingerprint, source: `manual`, `url:<url>`, `internal-ca`, ...) for each stored certificate and `TRUST_STORE_DELETE` (subject, fingerprint) for each removed one, `clearAll` included; duplicates and refused certificates record nothing.
 
 ## Index Strategy
 

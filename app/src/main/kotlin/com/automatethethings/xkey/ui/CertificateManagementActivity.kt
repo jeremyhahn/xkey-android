@@ -60,6 +60,7 @@ import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.truststore.TrustStoreRepository
+import com.automatethethings.xkey.truststore.removeTrustedCertificate
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
@@ -992,11 +993,19 @@ class CertificateManagementActivity : AppCompatActivity() {
     private fun deleteCertificate(cert: CertificateEntity) {
         lifecycleScope.launch {
             try {
-                certificateDao.deleteBySerial(cert.serialNumber)
-                TrustStoreRepository(this@CertificateManagementActivity).deleteCertificate(cert.fingerprint)
+                // The row goes only once the trust store has removed the
+                // certificate; one that stays trusted stays listed.
+                val removed = removeTrustedCertificate(
+                    TrustStoreRepository(this@CertificateManagementActivity),
+                    cert.fingerprint
+                ) { certificateDao.deleteBySerial(cert.serialNumber) }
                 Snackbar.make(
                     rootLayout,
-                    getString(R.string.cert_delete_success),
+                    if (removed) {
+                        getString(R.string.cert_delete_success)
+                    } else {
+                        "Certificate could not be removed; it is still trusted"
+                    },
                     Snackbar.LENGTH_SHORT
                 ).show()
             } catch (e: Exception) {

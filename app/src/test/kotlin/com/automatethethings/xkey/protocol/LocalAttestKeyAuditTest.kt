@@ -27,6 +27,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.PairedDeviceData
+import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -107,7 +108,7 @@ class LocalAttestKeyAuditTest {
 
         pairedDevices = mockk(relaxed = true)
         every { pairedDevices.isDeviceKnown(any()) } returns true
-        every { pairedDevices.getDevice(any()) } returns null
+        every { pairedDevices.lookupDevice(any()) } returns DeviceLookup.NotPaired
 
         keystoreManager = mockk(relaxed = true)
         every { keystoreManager.isStrongBoxAvailable() } returns true
@@ -277,7 +278,7 @@ class LocalAttestKeyAuditTest {
         val device = mockk<PairedDeviceData>(relaxed = true)
         every { device.requireAttestationForKeyAttestation } returns true
         every { device.lastAttestationTime } returns null
-        every { pairedDevices.getDevice(PEER) } returns device
+        every { pairedDevices.lookupDevice(PEER) } returns DeviceLookup.Paired(device)
 
         val response = Response.fromJson(attest(attestKeyRequest()))
 
