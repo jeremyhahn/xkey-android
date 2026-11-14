@@ -73,6 +73,21 @@ enum class KeySecurityLevel(val wire: String) {
 class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
     KeyStoreException("Cannot read the KeyInfo of $alias", cause)
 
+/**
+ * What a key-presence probe of one namespace found (#255 review r5): the key
+ * is there, is not there, or the store holding it cannot be read. An
+ * unreadable store is never absent.
+ */
+enum class KeyPresence { PRESENT, ABSENT, UNREADABLE }
+
+/**
+ * The store that would hold [alias] cannot be read, so whether a key is there
+ * is unknown. A resolution that meets it refuses: it never falls back to
+ * another namespace, and nothing is used or exported through it.
+ */
+class KeyPresenceUnreadableException(val alias: String, cause: Throwable?) :
+    KeyStoreException("Cannot read whether a key is stored under $alias", cause)
+
 /** A MAC and the algorithm that computed it ("HMAC-SHA256" or "HMAC-SHA512"). */
 class HmacResult(val mac: ByteArray, val algorithm: String)
 
@@ -1632,7 +1647,13 @@ class KeystoreManager(private val context: Context) {
      * A caller that does not know which namespace holds an id asks
      * [soleKind] first, which names none when both do.
      *
+     * A namespace whose store cannot be read is never taken for an empty one
+     * (#255 review r5): its probe throws [KeyPresenceUnreadableException], so
+     * [soleKind], [exportKind] and [userKeyIdInUse] refuse rather than fall
+     * back to the other namespace.
+     *
      * @return The resolved alias, or null if that key does not exist.
+     * @throws KeyPresenceUnreadableException if the namespace's store cannot be read.
      */
     fun resolveKey(keyId: String, kind: UserKeyKind): ResolvedKey? {
         val own = userKeyAlias(keyId, kind)
@@ -1680,10 +1701,13 @@ class KeystoreManager(private val context: Context) {
     /**
      * Whether [keyId] is in use in either user-key namespace: a key is
      * created under an id only when this is false (#255 review r3), so a
-     * credential and a general key never come to share an id.
+     * credential and a general key never come to share an id. Every
+     * namespace is probed, so one that cannot be read refuses
+     * ([KeyPresenceUnreadableException]) even when another holds the id
+     * (#255 review r5).
      */
     fun userKeyIdInUse(keyId: String): Boolean =
-        UserKeyKind.entries.any { resolveKey(keyId, it) != null }
+        UserKeyKind.entries.map { resolveKey(keyId, it) != null }.any { it }
 
     /**
      * The alias a raw [keyId] names outside the user-key namespaces: the
@@ -1709,12 +1733,30 @@ class KeystoreManager(private val context: Context) {
      */
     fun holdsInternalKey(keyId: String): Boolean = !userKeyIdInUse(keyId) && rawAlias(keyId) != null
 
-    /** True if an Ed25519 software key is stored under [alias] (API 33+ only). */
+    /**
+     * Whether an Ed25519 software key is stored under [alias] (API 33+ only),
+     * three-way (#255 review r5): a store that cannot be read is
+     * [KeyPresence.UNREADABLE], never [KeyPresence.ABSENT].
+     */
+    internal fun ed25519Presence(alias: String): KeyPresence =
+        try {
+            if (hasSoftwareEd25519Key(alias)) KeyPresence.PRESENT else KeyPresence.ABSENT
+        } catch (e: KeyPresenceUnreadableException) {
+            KeyPresence.UNREADABLE
+        }
+
+    /**
+     * True if an Ed25519 software key is stored under [alias] (API 33+ only).
+     * A store that cannot be read throws [KeyPresenceUnreadableException],
+     * never reads as absent, so no resolver path (an id's namespace, its
+     * export kind, whether it is in use) falls through to another namespace
+     * on a read failure (#255 review r5).
+     */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
         try {
             ed25519Prefs()?.contains(alias) == true
         } catch (e: Exception) {
-            false
+            throw KeyPresenceUnreadableException(alias, e)
         }
 
     /**

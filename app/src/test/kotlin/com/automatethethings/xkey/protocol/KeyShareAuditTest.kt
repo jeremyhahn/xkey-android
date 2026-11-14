@@ -1144,6 +1144,54 @@ class KeyShareAuditTest {
     }
 
     /**
+     * #255 review r5: with the Ed25519 store unreadable, whether a legacy
+     * general Ed25519 key holds the id is unknown, so a credential of that
+     * id is never exported in its place: local.getPublicKey and
+     * local.importSharedKey refuse and export nothing, never fall back to
+     * the credential namespace. The same id exports once the store reads.
+     */
+    @Test
+    fun anUnreadableEd25519StoreExportsNeitherNamespace() = runTest {
+        val credential = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        val keystore = io.mockk.spyk(KeystoreManager(context))
+        every { keystore.ed25519Prefs() } throws java.security.GeneralSecurityException("master key unavailable")
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val getPublicKey = Request(
+            id = 8,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+        val encoded = Base64.getEncoder().encodeToString(credential.public.encoded)
+
+        for ((name, request) in listOf("getPublicKey" to getPublicKey, "importSharedKey" to importSharedKey())) {
+            val bytes = served(request)
+            val response = Response.fromJson(bytes)
+            assertNull("$name exported with an unreadable store: ${response.result}", response.result)
+            assertTrue("$name answered no error", response.error != null)
+            assertFalse("$name sent the credential's key", encoded in String(bytes))
+        }
+        verify(exactly = 0) { keystore.getPublicKeyPEM(any(), any()) }
+        verify(exactly = 0) { keystore.getPublicKeyDER(any(), any()) }
+        assertTrue(
+            "a refused export was recorded as a success",
+            entries.none { it.operationType == AuditOperationType.KEY_EXPORTED && it.success }
+        )
+
+        // The store reads again: the credential-only id exports its own key.
+        every { keystore.ed25519Prefs() } returns null
+        assertEquals(encoded, success(served(getPublicKey)).getString("publicKey"))
+    }
+
+    /**
      * #255 review r4: generateKey and local.generateKey of one id at once,
      * the first holding its creation open, make exactly one key: the second
      * is refused, never run beside the first (the two RPC families reserve
