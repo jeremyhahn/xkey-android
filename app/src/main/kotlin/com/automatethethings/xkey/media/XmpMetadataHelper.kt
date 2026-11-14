@@ -355,6 +355,16 @@ object XmpMetadataHelper {
     }
 
     /**
+     * The media types whose signature lives inside the file: JPEG in EXIF,
+     * MP4/MOV, PNG and WebP in XMP. Co-signing writes the co-signature back
+     * into the file it picked, so its picker offers exactly these; every one
+     * maps to its own container through [stagingSuffix].
+     */
+    val EMBEDDED_MIME_TYPES: List<String> = listOf(
+        "image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime"
+    )
+
+    /**
      * The file suffix a working copy of content typed [mimeType] needs, so
      * the path-based readers and writers ([readSignature], [appendSignature])
      * pick the same EXIF or XMP container [readSignatureFromUri] read: the

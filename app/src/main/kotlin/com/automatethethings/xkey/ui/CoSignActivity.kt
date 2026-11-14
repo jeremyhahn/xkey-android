@@ -248,7 +248,7 @@ class CoSignActivity : AppCompatActivity() {
         }
         selectMediaButton = Button(this).apply {
             text = getString(R.string.cosign_select_media)
-            setOnClickListener { mediaPicker.launch(arrayOf("image/jpeg")) }
+            setOnClickListener { mediaPicker.launch(XmpMetadataHelper.EMBEDDED_MIME_TYPES.toTypedArray()) }
         }
         contentPadding.addView(selectMediaButton)
         contentPadding.addView(selectedFileText)
