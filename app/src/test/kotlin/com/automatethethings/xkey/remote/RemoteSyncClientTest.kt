@@ -45,6 +45,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.security.SecureRandom
 import java.time.ZoneOffset
 import java.util.Locale
 
@@ -102,7 +103,13 @@ class RemoteSyncClientTest {
     }
 
     private fun passwords(vararg ids: String) = JSONArray().apply {
-        for (id in ids) put(JSONObject().put("id", id).put("password", "hunter2"))
+        for (id in ids) put(JSONObject().put("id", id).put("password", testPassword()))
+    }
+
+    /** Random letters, built at run time so that no credential-shaped literal sits in the source. */
+    private fun testPassword(): String {
+        val random = SecureRandom()
+        return String(CharArray(16) { 'a' + random.nextInt(26) })
     }
 
     /** Stubs every gather to empty and every merge to zero counts. */
