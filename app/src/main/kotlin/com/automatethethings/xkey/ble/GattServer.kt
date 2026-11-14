@@ -2845,15 +2845,29 @@ class GattServer(
      * session. The sender encrypts only on that session and fails with
      * [java.io.IOException] once it is revoked, ends, or another session or
      * device replaces it.
+     *
+     * Repeated calls on one session and device return the same sender, so
+     * snapshots taken on an unchanged connection compare equal
+     * ([com.automatethethings.xkey.remote.ShareSession.sameAs]).
      */
-    internal fun boundSender(): Pair<String, SessionSender>? {
-        val (session, device, peerKeyHex) = synchronized(revocationLock) {
-            val session = establishedSession?.takeIf { isCurrent(it) && it.isHandshakeComplete() } ?: return null
-            val device = connectedDevice ?: return null
-            val peerKeyHex = session.getRemoteStaticKey()?.toHexString() ?: return null
-            Triple(session, device, peerKeyHex)
+    internal fun boundSender(): Pair<String, SessionSender>? = synchronized(revocationLock) {
+        val session = establishedSession?.takeIf { isCurrent(it) && it.isHandshakeComplete() } ?: return null
+        val device = connectedDevice ?: return null
+        val peerKeyHex = session.getRemoteStaticKey()?.toHexString() ?: return null
+        val cached = lastBoundSender?.takeIf { it.session === session && it.device == device }
+        val sender = cached?.sender ?: newBoundSender(session, device).also {
+            lastBoundSender = BoundSenderEntry(session, device, it)
         }
-        return peerKeyHex to object : SessionSender {
+        peerKeyHex to sender
+    }
+
+    /** The sender [boundSender] last handed out and the session and device it is bound to. Guarded by [revocationLock]. */
+    private var lastBoundSender: BoundSenderEntry? = null
+
+    private class BoundSenderEntry(val session: NoiseSession, val device: BluetoothDevice, val sender: SessionSender)
+
+    private fun newBoundSender(session: NoiseSession, device: BluetoothDevice): SessionSender =
+        object : SessionSender {
             override suspend fun sendEncryptedMessage(data: ByteArray) {
                 // sendOnSession refuses a session that is no longer current,
                 // under the lock that installs a replacing one.
@@ -2873,7 +2887,6 @@ class GattServer(
                 this@GattServer.sendEncryptedMessageOn(confirmed, data, admit)
             }
         }
-    }
 }
 
 /**

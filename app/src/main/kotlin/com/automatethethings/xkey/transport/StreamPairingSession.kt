@@ -904,11 +904,28 @@ class StreamPairingSession(
      * to that one connection, read together, or null with no established,
      * live connection. The sender writes only to that connection and fails
      * with [IOException] once it ends or another connection replaces it.
+     *
+     * Repeated calls on one connection return the same sender, so snapshots
+     * taken on an unchanged connection compare equal
+     * ([com.automatethethings.xkey.remote.ShareSession.sameAs]).
      */
     fun boundSender(): Pair<String, SessionSender>? {
         val connection = activeConnection?.takeIf { it.established && it.isLive } ?: return null
         val peerKeyHex = connection.peerKeyHex ?: return null
-        return peerKeyHex to object : SessionSender {
+        val sender = synchronized(boundSenderLock) {
+            lastBoundSender?.takeIf { it.first === connection }?.second
+                ?: newBoundSender(connection).also { lastBoundSender = connection to it }
+        }
+        return peerKeyHex to sender
+    }
+
+    private val boundSenderLock = Any()
+
+    /** The sender [boundSender] last handed out and the connection it is bound to. Guarded by [boundSenderLock]. */
+    private var lastBoundSender: Pair<Connection, SessionSender>? = null
+
+    private fun newBoundSender(connection: Connection): SessionSender =
+        object : SessionSender {
             override suspend fun sendEncryptedMessage(data: ByteArray) {
                 send(connection, data, phoneInitiated = true)
             }
@@ -926,7 +943,6 @@ class StreamPairingSession(
                 this@StreamPairingSession.sendEncryptedMessageOn(confirmed, data, admit)
             }
         }
-    }
 
     /**
      * A send scoped to one connection, reached only through a [boundSender]:
