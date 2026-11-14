@@ -45,6 +45,7 @@ import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkAll
 import io.mockk.verify
+import java.io.IOException
 import java.lang.reflect.InvocationTargetException
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
@@ -61,6 +62,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -481,6 +483,36 @@ class GattServerReconnectTest {
         repo.addDevice(otherHex, "other desktop")
         reconnect(other, claimedPeerKeyHex = otherHex)
         assertFalse("another session is another share session", first.isCurrent())
+    }
+
+    /**
+     * An ordinary disconnect, no revocation: the sender cached for the
+     * session is dropped, so nothing keeps the ended session reachable, and
+     * the session's traffic keys are zeroed.
+     */
+    @Test
+    fun anOrdinaryDisconnectDropsTheCachedSenderAndZeroesTheSessionKeys() = runBlocking<Unit> {
+        val desktop = NoiseInitiatorSession(randomKey())
+        val keyHex = desktop.getLocalStaticPublicKey().hex()
+        repo.addDevice(keyHex, "desktop")
+        val session = reconnect(desktop, claimedPeerKeyHex = keyHex)
+        val secrets = session.secretArraysForTest().filterKeys { it == "sendKey" || it == "recvKey" }
+        assertEquals("the session has its traffic keys", 2, secrets.size)
+        val sender = server.boundSender()!!.second
+        assertTrue("the session's sender is cached", server.holdsSenderForTest(session))
+
+        call("handleDeviceDisconnected", device)
+
+        assertFalse("the ended session's sender is dropped", server.holdsSenderForTest(session))
+        assertTrue("no sender is cached", server.sendersEmptyForTest)
+        assertNull("a lookup after the end finds nothing", server.boundSender())
+        eventually("the session keys are zeroed") { secrets.values.all { k -> k.all { it == 0.toByte() } } }
+        try {
+            sender.sendEncryptedMessage("""{"jsonrpc":"2.0","id":3,"method":"remote.ping"}""".toByteArray())
+            fail("a send on the ended session must be refused")
+        } catch (e: IOException) {
+            // The session ended.
+        }
     }
 
     /** As XKeyGattService.shareSession: a fresh lookup, re-read on every check. */

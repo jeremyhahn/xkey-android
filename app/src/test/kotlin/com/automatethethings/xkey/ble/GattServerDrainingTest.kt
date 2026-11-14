@@ -55,7 +55,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeout
 import org.junit.After
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -183,6 +182,7 @@ class GattServerDrainingTest {
     @Test
     fun aSendWhileTheConnectionDrainsIsRefusedAndTheQueuedReplyDelivered() = runBlocking<Unit> {
         val session = install()
+        val nonceBefore = session.sendNonceForTest()
         val answered = pending(7)
         val reply = desktop.encrypt(result(7))
         val atAdmission = CompletableDeferred<Unit>()
@@ -207,6 +207,10 @@ class GattServerDrainingTest {
             val refused = withTimeout(TIMEOUT_MS) { send.await() }.exceptionOrNull()
             assertTrue("the send is refused: $refused", refused is IOException && refused !is PeerNotPairedException)
             assertTrue("it is refused as closing: ${refused?.message}", refused?.message?.contains("closing") == true)
+            // Nothing was encrypted for the refused send: no send nonce was
+            // consumed. Read while the state lock holds off the disconnect,
+            // which zeroes the session.
+            assertEquals("the refused send consumed no nonce", nonceBefore, session.sendNonceForTest())
 
             val response = withTimeout(TIMEOUT_MS) { answered.await() }
             assertNull("the reply reaches its caller: ${response.error}", response.error)
@@ -215,10 +219,6 @@ class GattServerDrainingTest {
 
         eventually("the drain finishes") { getField<NoiseSession?>("noiseSession") == null }
         assertNoNotification()
-        // Nothing was encrypted for the refused send: the session's next frame
-        // is the next one the desktop expects.
-        val probe = "probe".toByteArray()
-        assertArrayEquals(probe, desktop.decrypt(session.encrypt(probe)))
     }
 
     /**
