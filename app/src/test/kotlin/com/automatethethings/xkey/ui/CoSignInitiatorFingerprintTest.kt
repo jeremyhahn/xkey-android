@@ -23,9 +23,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * The initiator QR names its key by the key's public-key fingerprint, for
- * every key the co-sign screen offers: FIDO2 credentials live under the
- * credential alias, general keys under the general alias.
+ * The initiator QR names its key by the public-key fingerprint of the
+ * selected row's own key: a FIDO2 row reads the credential alias, every other
+ * row the general alias. A credential and a general key may share an id, each
+ * with its own public key, so neither row may borrow the other's.
  */
 class CoSignInitiatorFingerprintTest {
 
@@ -33,33 +34,40 @@ class CoSignInitiatorFingerprintTest {
     private val generalDer = ByteArray(91) { 6 }
 
     private val keystore = mockk<KeystoreManager> {
-        every { resolveKeystoreAlias(CREDENTIAL_ID) } returns "xkey_credential_$CREDENTIAL_ID"
-        every { resolveKeystoreAlias(GENERAL_ID) } returns KeystoreManager.generalKeyAlias(GENERAL_ID)
+        // Both namespaces hold a key for SHARED_ID; resolution prefers the credential.
+        every { resolveKeystoreAlias(SHARED_ID) } returns CREDENTIAL_ALIAS
         every { resolveKeystoreAlias(MISSING_ID) } returns null
-        every { publicKeyDERAt("xkey_credential_$CREDENTIAL_ID") } returns credentialDer
-        every { publicKeyDERAt(KeystoreManager.generalKeyAlias(CREDENTIAL_ID)) } returns null
-        every { publicKeyDERAt(KeystoreManager.generalKeyAlias(GENERAL_ID)) } returns generalDer
+        every { publicKeyDERAt(CREDENTIAL_ALIAS) } returns credentialDer
+        every { publicKeyDERAt(KeystoreManager.generalKeyAlias(SHARED_ID)) } returns generalDer
+        every { publicKeyDERAt("xkey_credential_$MISSING_ID") } returns null
         every { publicKeyDERAt(KeystoreManager.generalKeyAlias(MISSING_ID)) } returns null
     }
 
     @Test
-    fun `a credential-namespace key's initiator QR carries its fingerprint`() {
-        assertEquals(MediaHasher.hashBytes(credentialDer), initiatorFingerprint(keystore, CREDENTIAL_ID))
+    fun `a FIDO2 row's initiator QR carries its credential's fingerprint`() {
+        assertEquals(MediaHasher.hashBytes(credentialDer), initiatorFingerprint(keystore, SHARED_ID, "fido2"))
     }
 
     @Test
-    fun `a general key's initiator QR carries its fingerprint`() {
-        assertEquals(MediaHasher.hashBytes(generalDer), initiatorFingerprint(keystore, GENERAL_ID))
+    fun `a signing row sharing a credential's id carries its own general key's fingerprint`() {
+        assertEquals(MediaHasher.hashBytes(generalDer), initiatorFingerprint(keystore, SHARED_ID, "signing"))
+    }
+
+    @Test
+    fun `tls and ssh rows read the general alias too`() {
+        assertEquals(MediaHasher.hashBytes(generalDer), initiatorFingerprint(keystore, SHARED_ID, "tls"))
+        assertEquals(MediaHasher.hashBytes(generalDer), initiatorFingerprint(keystore, SHARED_ID, "ssh"))
     }
 
     @Test
     fun `a key with no stored public key is named by its id`() {
-        assertEquals(MISSING_ID, initiatorFingerprint(keystore, MISSING_ID))
+        assertEquals(MISSING_ID, initiatorFingerprint(keystore, MISSING_ID, "signing"))
+        assertEquals(MISSING_ID, initiatorFingerprint(keystore, MISSING_ID, "fido2"))
     }
 
     private companion object {
-        const val CREDENTIAL_ID = "passkey-1"
-        const val GENERAL_ID = "general-1"
+        const val SHARED_ID = "shared-1"
+        const val CREDENTIAL_ALIAS = "xkey_credential_$SHARED_ID"
         const val MISSING_ID = "missing-1"
     }
 }

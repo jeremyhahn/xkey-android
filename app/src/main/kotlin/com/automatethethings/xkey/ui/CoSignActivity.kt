@@ -83,6 +83,9 @@ class CoSignActivity : AppCompatActivity() {
     private lateinit var keySpinner: Spinner
     private var signingKeyIds = listOf<String>()
 
+    /** Each offered row's key type, index-aligned with [signingKeyIds]. */
+    private var signingKeyTypes = listOf<String>()
+
     private lateinit var witnessQrImage: ImageView
     private lateinit var witnessQrLabel: TextView
 
@@ -598,7 +601,7 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        val fingerprint = initiatorFingerprint(keystoreManager, keyId)
+        val fingerprint = initiatorFingerprint(keystoreManager, keyId, signingKeyTypes[selectedKeyIndex])
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
 
@@ -818,10 +821,12 @@ class CoSignActivity : AppCompatActivity() {
                     !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh")
                 }
                 val keyIds = keys.map { it.keyId }
+                val keyTypes = keys.map { it.keyType }
                 val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
 
                 withContext(Dispatchers.Main) {
                     signingKeyIds = keyIds
+                    signingKeyTypes = keyTypes
                     keySpinner.adapter = ArrayAdapter(
                         this@CoSignActivity,
                         android.R.layout.simple_spinner_dropdown_item,
@@ -865,7 +870,7 @@ class CoSignActivity : AppCompatActivity() {
  * (general alias), so the alias is resolved across both. This only names the
  * key; nothing is signed here, so it needs no approved-key lookup.
  */
-internal fun initiatorFingerprint(keystoreManager: KeystoreManager, keyId: String): String {
+internal fun initiatorFingerprint(keystoreManager: KeystoreManager, keyId: String, keyType: String): String {
     val pubKeyDer = keystoreManager.resolveKeystoreAlias(keyId)
         ?.let { keystoreManager.publicKeyDERAt(it) }
     return if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
