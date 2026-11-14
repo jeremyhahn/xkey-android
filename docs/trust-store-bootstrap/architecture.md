@@ -37,7 +37,6 @@ validation (revocation checking off) against the stored CAs. TPM enrollment in
 | `BootstrapMethod`, `BootstrapSettingsData` | `app/src/main/kotlin/com/automatethethings/xkey/settings/BootstrapSettings.kt` | Methods `DANE`, `NOISE`, `SPKI`, `DIRECT`; per-method config (`daneConfig`, `noiseConfig`, `spkiConfig`, `directConfig`), `timeoutSeconds`, `getEnabledMethods()` |
 | `CABundleFetcher`, `CABundleFetchException` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/CABundleFetcher.kt` | `fetchBundle(baseUrl)`: GET `/acme/ca-bundle` (30 s timeout); a content type other than `application/pem-certificate-chain` is only logged. Declares its own `CABundleResult` |
 | `TrustStoreRepository`, `TrustedCA`, `VerificationResult`, `ImportResult` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/TrustStoreRepository.kt` | Store: `importCertificate`, `importFromURL`, `importInternalCACertificate`, `getAllCertificates`, `getCertificateDER`, `hasCertificate`, `deleteCertificate`, `clearAll`, `getExpiringCertificates`, `getExpiredCertificates`, `refreshSystemInstallStatus`, `updateSystemInstalled`, `verifyIDevIDChain` |
-| `IDevIDVerifier`, `IDevIDVerificationResult` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/IDevIDVerifier.kt` | `verify(certificateChain)` and `isIDevIDStillValid`, built on `verifyIDevIDChain` |
 | `SettingsActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/SettingsActivity.kt` | "Fetch CA" button: derives bootstrap settings from the server URL, runs `fetchCABundle`, imports the result |
 | `TrustStoreActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/TrustStoreActivity.kt` | Trusted-CA screen: bootstrap with one chosen method, URL import, manual import, built-in xKey CAs |
 | `GattServer` | `app/src/main/kotlin/com/automatethethings/xkey/ble/GattServer.kt` | TPM enrollment: checks the EK certificate with `verifyIDevIDChain` |
@@ -138,9 +137,6 @@ warning, and refuses `SelfSigned` and `Invalid` with
 `EnrollmentRefusal.UntrustedEndorsement`. Without a trust store, the EK
 certificate is not checked.
 
-`IDevIDVerifier` (results `Trusted`, `SelfSigned`, `Untrusted(reason)`,
-`NoCertificate`, `Error(message)`) has no caller on main outside its tests.
-
 ## Tests
 
 | Test class | Covers |
@@ -151,7 +147,6 @@ certificate is not checked.
 | `BootstrapSettingsDataTest` (`app/src/test/.../settings/`) | Enabled methods and settings |
 | `CABundleFetcherTest` (`app/src/test/.../truststore/`) | `/acme/ca-bundle` fetch |
 | `TrustStoreRepositoryTest`, `TrustStorePersistenceTest` (`app/src/test/.../truststore/`) | Import, refusals, persistence, chain checks |
-| `IDevIDVerifierTest` (`app/src/test/.../truststore/`) | `IDevIDVerifier` results |
 | `SyncEngineTrustStoreTest` (`app/src/test/.../sync/`) | Certificate merge through the store |
 | `BootstrapSettingsRepositoryTest` (`app/src/androidTest/.../settings/`) | Stored bootstrap settings |
 | `TrustStoreSystemInstallTest` (`app/src/androidTest/.../truststore/`) | System-install status |
