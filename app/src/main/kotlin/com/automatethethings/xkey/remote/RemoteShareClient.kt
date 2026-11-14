@@ -500,8 +500,21 @@ internal object SharePermissionLedger {
         }
     }
 
-    /** Takes [keyId]'s [Baseline]; call before loading anything a share of it sends. */
-    fun baseline(keyId: String): Baseline = synchronized(lock) {
+    /**
+     * The one way to take a sharing baseline: runs [block] with [keyId]'s
+     * [Baseline], taken before [block] loads anything a share of the key
+     * sends, and closes it when [block] ends, whether it returns, throws
+     * (a failed load) or is cancelled. Closing is idempotent, so [block] may
+     * hand the baseline on to [DesktopKeyShare.send], which closes it too.
+     */
+    suspend fun <T> withBaseline(keyId: String, block: suspend (Baseline) -> T): T =
+        acquire(keyId).use { block(it) }
+
+    /** A baseline a test holds across steps; production code takes one only through [withBaseline]. */
+    @androidx.annotation.VisibleForTesting
+    internal fun baselineForTest(keyId: String): Baseline = acquire(keyId)
+
+    private fun acquire(keyId: String): Baseline = synchronized(lock) {
         val entry = entries.getOrPut(keyId) { Entry(floor, 0) }
         entry.baselines++
         Baseline(keyId, entry.revision)
@@ -571,6 +584,32 @@ class DesktopKeyShare(
 
         /** The session was replaced before the key was sent; nothing left the phone. */
         data object SessionChanged : Outcome()
+    }
+
+    /** A key's share inputs, as [sendLoaded]'s loader reads them from the store. */
+    class Inputs(
+        val entity: KeyEntity?,
+        val software: SoftwareKey?,
+        val publicKeyPem: String?,
+        val certificatePem: String? = null
+    )
+
+    /**
+     * Takes [keyId]'s baseline, then runs [load] and [send]s what it read.
+     * The baseline is closed whatever happens, including a [load] that throws
+     * or is cancelled, so the ledger keeps nothing for the key afterwards.
+     */
+    internal suspend fun sendLoaded(
+        keyId: String,
+        load: suspend () -> Inputs,
+        permission: SharePermission,
+        currentEntity: suspend (keyId: String) -> KeyEntity?
+    ): Outcome = SharePermissionLedger.withBaseline(keyId) { baseline ->
+        val inputs = load()
+        send(
+            baseline, inputs.entity, inputs.software, inputs.publicKeyPem, inputs.certificatePem,
+            permission, currentEntity
+        )
     }
 
     /**
