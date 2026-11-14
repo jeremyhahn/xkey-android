@@ -29,6 +29,8 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.intent.Intents
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasAction
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasExtra
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasType
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogDao
@@ -48,6 +50,7 @@ import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import kotlinx.coroutines.runBlocking
+import org.hamcrest.Matchers.allOf
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -202,19 +205,31 @@ class FileOperationFlowTest {
     // -----------------------------------------------------------------
 
     /**
-     * A JPEG can carry its signature in-band, so the sign path writes the
-     * signature into the file's EXIF and never asks for an output location.
+     * A JPEG carries its signature in-band (EXIF), but a shared one is never
+     * written over: its provider offers no atomic replace, so the sign path
+     * asks for a separate document, typed and named as the JPEG, and writes
+     * the signed copy there. The shared original is left byte for byte.
      */
     @Test
-    fun signOperation_embedsTheSignatureInASharedJpeg() {
+    fun signOperation_writesASignedCopyOfASharedJpeg() {
+        val before = jpegFile.readBytes()
+        val copy = stubSignedCopyDestination()
         val scenario = launch(jpegFile)
         selectSpinnerEntry(scenario, keyEntry)
 
         process(scenario)
 
         assertShownTextInTree(scenario, string(scenario, R.string.file_operation_sign_success))
-        val embedded = XmpMetadataHelper.readSignature(jpegFile.path)
-        assertNotNull("the signed jpeg should carry embedded signature metadata", embedded)
+        Intents.intended(
+            allOf(
+                hasAction(Intent.ACTION_CREATE_DOCUMENT),
+                hasType("image/jpeg"),
+                hasExtra(Intent.EXTRA_TITLE, "xkey-fileop-$suffix-signed.jpg")
+            )
+        )
+        assertOriginalUnchanged(before)
+        val embedded = awaitSignedCopy(copy)
+        assertNotNull("the signed copy should carry embedded signature metadata", embedded)
         val entry = embedded!!.signatures.single()
         assertEquals(signingKeyLabel, entry.signerName)
         assertEquals("ES256", entry.algorithm)
@@ -229,6 +244,30 @@ class FileOperationFlowTest {
     @Test
     fun signOperation_producesASignatureThatVerifiesAgainstThePublicKey() {
         assertSignOperationVerifies()
+    }
+
+    /**
+     * The document the signed copy of a shared JPEG is written to: the
+     * Storage Access Framework's create request is answered with a scratch
+     * file of the app's own, so the test reads back what was written.
+     */
+    private fun stubSignedCopyDestination(): File {
+        val copy = scratchFile("xkey-fileop-$suffix-signed.jpg")
+        stubDocumentPicker(Intent.ACTION_CREATE_DOCUMENT, uriFor(copy))
+        return copy
+    }
+
+    /** The signature in [copy] once its write has ended. */
+    private fun awaitSignedCopy(copy: File): ContentAuthenticityData? {
+        awaitCondition("the signed copy should have been written") {
+            copy.length() > 0 && XmpMetadataHelper.readSignature(copy.path) != null
+        }
+        return XmpMetadataHelper.readSignature(copy.path)
+    }
+
+    private fun assertOriginalUnchanged(before: ByteArray) {
+        assertTrue("the shared original must be left byte for byte", before.contentEquals(jpegFile.readBytes()))
+        assertNull("the shared original must carry no signature", XmpMetadataHelper.readSignature(jpegFile.path))
     }
 
     /**
@@ -247,8 +286,7 @@ class FileOperationFlowTest {
             )
         )
 
-        assertSignOperationVerifies()
-        JpegFillBytes.assertWellFormed(jpegFile.readBytes())
+        JpegFillBytes.assertWellFormed(assertSignOperationVerifies().readBytes())
     }
 
     /** As above, for a JPEG with no APP1: fill bytes before its first marker and before DHT. */
@@ -256,27 +294,34 @@ class FileOperationFlowTest {
     fun signOperation_onAJpegWithFillBytesBeforeFirstMarkerAndDht_verifies() {
         jpegFile.writeBytes(JpegFillBytes.fixture(jpegFile.readBytes(), null, JpegFillBytes.DHT))
 
-        assertSignOperationVerifies()
-        JpegFillBytes.assertWellFormed(jpegFile.readBytes())
+        JpegFillBytes.assertWellFormed(assertSignOperationVerifies().readBytes())
     }
 
-    /** Signs [jpegFile] through the screen and checks the result against the public key. */
-    private fun assertSignOperationVerifies() {
+    /**
+     * Signs [jpegFile] through the screen into a separate copy and checks the
+     * copy against the public key and the original's canonical hash; the
+     * original is left unchanged. The copy.
+     */
+    private fun assertSignOperationVerifies(): File {
         // Canonical, not whole-file: signing embeds the signature into the JPEG,
         // so a hash over every byte could never match afterwards. The canonical
         // form excludes the APPn/COM segments that carry the signature.
-        val originalHash = MediaHasher.hashCanonical(jpegFile.readBytes(), "image/jpeg")
+        val before = jpegFile.readBytes()
+        val originalHash = MediaHasher.hashCanonical(before, "image/jpeg")
+        val copy = stubSignedCopyDestination()
         val scenario = launch(jpegFile)
         selectSpinnerEntry(scenario, keyEntry)
 
         process(scenario)
 
         assertShownTextInTree(scenario, string(scenario, R.string.file_operation_sign_success))
-        val entry = XmpMetadataHelper.readSignature(jpegFile.path)!!.signatures.single()
+        val signed = awaitSignedCopy(copy)!!
+        assertOriginalUnchanged(before)
+        val entry = signed.signatures.single()
         assertEquals(
             "the signature must cover the hash of the file as it was shared",
             originalHash,
-            XmpMetadataHelper.readSignature(jpegFile.path)!!.contentHash
+            signed.contentHash
         )
         // #47: the file as written must still hash to what was signed, or the
         // verify screens reject their own signature. Device only: CI runs no
@@ -284,7 +329,7 @@ class FileOperationFlowTest {
         assertEquals(
             "embedding the signature must not change the canonical hash",
             originalHash,
-            MediaHasher.hashCanonical(jpegFile.readBytes(), "image/jpeg")
+            MediaHasher.hashCanonical(copy.readBytes(), "image/jpeg")
         )
         val verifier = Signature.getInstance("SHA256withECDSA").apply {
             initVerify(
@@ -296,11 +341,13 @@ class FileOperationFlowTest {
             "the embedded signature must verify against the signing key",
             verifier.verify(android.util.Base64.decode(entry.value, android.util.Base64.NO_WRAP))
         )
+        return copy
     }
 
     @Test
     fun signOperation_recordsKeyUsageAndWritesAnAuditEntry() {
         val before = runBlocking { keyDao.getByKeyId(signingKeyId)!!.useCount }
+        stubSignedCopyDestination()
         val scenario = launch(jpegFile)
         selectSpinnerEntry(scenario, keyEntry)
 
@@ -363,16 +410,16 @@ class FileOperationFlowTest {
     /** ACTION_SEND_MULTIPLE is accepted, and the operation runs on the first file. */
     @Test
     fun signOperation_operatesOnTheFirstFileOfAMultipleShare() {
+        val before = jpegFile.readBytes()
+        val copy = stubSignedCopyDestination()
         val scenario = launchMultiple(jpegFile, textFile)
         selectSpinnerEntry(scenario, keyEntry)
 
         process(scenario)
 
         assertShownTextInTree(scenario, string(scenario, R.string.file_operation_sign_success))
-        assertNotNull(
-            "the first shared file should be the one signed",
-            XmpMetadataHelper.readSignature(jpegFile.path)
-        )
+        assertNotNull("the first shared file should be the one signed", awaitSignedCopy(copy))
+        assertOriginalUnchanged(before)
     }
 
     /** Switching operations clears the previous outcome from the screen. */

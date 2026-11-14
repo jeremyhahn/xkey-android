@@ -73,8 +73,8 @@ internal fun findButton(view: View, text: String): Button? {
 }
 
 /**
- * Co-signing writes the co-signature back into the media it picked, in EXIF
- * or XMP, so its picker offers every type that carries an embedded
+ * Co-signing writes the co-signature into a copy of the media it picked, in
+ * EXIF or XMP, so its picker offers every type that carries an embedded
  * signature, not JPEG alone.
  */
 @RunWith(RobolectricTestRunner::class)
