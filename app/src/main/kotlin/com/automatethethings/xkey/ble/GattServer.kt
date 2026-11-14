@@ -20,6 +20,7 @@ import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConfirmedConnection
 import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.ConnectedDesktop
+import com.automatethethings.xkey.remote.ConnectionSenders
 import com.automatethethings.xkey.remote.SessionSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -478,8 +479,11 @@ class GattServer(
         connectedDevice?.let { device ->
             try { gattServer?.cancelConnection(device) } catch (_: Exception) {}
         }
+        val ended = noiseSession
         connectedDevice = null
         noiseSession = null
+        // Ended first, so no lookup caches a sender for it after this.
+        ended?.let { senders.retire(it, scope) }
         pairingConfirmed = false
         identityExchangeComplete = false
         remotePublicKeyHex = null
@@ -1140,7 +1144,10 @@ class GattServer(
 
             sessionQueue = currentCoroutineContext()[EventQueue]
             connectionIds[session] = "ble:${UUID.randomUUID()}"
+            val replaced = noiseSession
             noiseSession = session
+            // The same device reconnected over its old session: that one has ended.
+            replaced?.let { senders.retire(it, scope) }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create Noise session", e)
             throw e
@@ -1194,6 +1201,8 @@ class GattServer(
         // is cancelled with its prompt; it answers nothing.
         if (ended != null) {
             requestJobs.forEach { (job, owner) -> if (owner === ended) job.cancel() }
+            // The ended session's sender goes, and its keys once its send drains.
+            senders.retire(ended, scope)
         }
     }
 
@@ -2854,24 +2863,31 @@ class GattServer(
         val session = establishedSession?.takeIf { isCurrent(it) && it.isHandshakeComplete() } ?: return null
         val device = connectedDevice ?: return null
         val peerKeyHex = session.getRemoteStaticKey()?.toHexString() ?: return null
-        val cached = lastBoundSender?.takeIf { it.session === session && it.device == device }
-        val sender = cached?.sender ?: newBoundSender(session, device).also {
-            lastBoundSender = BoundSenderEntry(session, device, it)
-        }
+        val sender = senders.senderFor(session, { isCurrent(it) && connectedDevice === device }) {
+            newBoundSender(it, device)
+        } ?: return null
         peerKeyHex to sender
     }
 
-    /** The sender [boundSender] last handed out and the session and device it is bound to. Guarded by [revocationLock]. */
-    private var lastBoundSender: BoundSenderEntry? = null
+    /**
+     * The senders [boundSender] hands out, one per session. A session is
+     * made for one device's connection, so it identifies that connection;
+     * [handleDeviceDisconnected] and [stop] retire it, which zeroes its keys
+     * once the send in flight, if any, lets go of [sendMutex].
+     */
+    private val senders = ConnectionSenders<NoiseSession> { session ->
+        sendMutex.withLock { noiseMutex.withLock { zeroOnce(session) } }
+    }
 
-    private class BoundSenderEntry(val session: NoiseSession, val device: BluetoothDevice, val sender: SessionSender)
+    /** Test seam: whether [boundSender] still holds a sender for [session]. */
+    internal fun holdsSenderForTest(session: NoiseSession): Boolean = senders.holds(session)
 
-    /** One session on one device: the session by identity, the device by address. */
-    private data class SessionBinding(val session: NoiseSession, val device: BluetoothDevice)
+    /** Test seam: whether [boundSender] holds a sender for any session. */
+    internal val sendersEmptyForTest: Boolean get() = senders.isEmpty
 
     private fun newBoundSender(session: NoiseSession, device: BluetoothDevice): SessionSender =
         object : SessionSender {
-            override val binding: Any = SessionBinding(session, device)
+            override val binding: Any = session
 
             override suspend fun sendEncryptedMessage(data: ByteArray) {
                 // sendOnSession refuses a session that is no longer current,

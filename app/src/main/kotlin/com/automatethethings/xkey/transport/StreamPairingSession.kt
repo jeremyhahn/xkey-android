@@ -35,6 +35,7 @@ import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConfirmedConnection
 import com.automatethethings.xkey.remote.ConnectionChangedException
+import com.automatethethings.xkey.remote.ConnectionSenders
 import com.automatethethings.xkey.remote.SessionSender
 import com.automatethethings.xkey.settings.PairedDeviceRemovalListener
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -421,7 +422,8 @@ class StreamPairingSession(
             withContext(NonCancellable) {
                 PairedDeviceRepository.removeRemovalListener(connection)
                 connection.end()
-                connection.zeroKeys()
+                // Ended first, so no lookup caches a sender for it after this.
+                senders.retire(connection)
                 if (activeConnection === connection) {
                     activeConnection = null
                     messageRouter?.cancelAllPending()
@@ -912,17 +914,22 @@ class StreamPairingSession(
     fun boundSender(): Pair<String, SessionSender>? {
         val connection = activeConnection?.takeIf { it.established && it.isLive } ?: return null
         val peerKeyHex = connection.peerKeyHex ?: return null
-        val sender = synchronized(boundSenderLock) {
-            lastBoundSender?.takeIf { it.first === connection }?.second
-                ?: newBoundSender(connection).also { lastBoundSender = connection to it }
-        }
+        val sender = senders.senderFor(connection, { it.established && it.isLive }, ::newBoundSender) ?: return null
         return peerKeyHex to sender
     }
 
-    private val boundSenderLock = Any()
+    /**
+     * The senders [boundSender] hands out, one per connection. [serve]
+     * retires a connection when it ends, whatever ended it, which zeroes its
+     * keys once a frame mid-send has released its send lock.
+     */
+    private val senders = ConnectionSenders<Connection> { it.zeroKeys() }
 
-    /** The sender [boundSender] last handed out and the connection it is bound to. Guarded by [boundSenderLock]. */
-    private var lastBoundSender: Pair<Connection, SessionSender>? = null
+    /** Test seam: whether [boundSender] holds a sender for any connection. */
+    internal val sendersEmptyForTest: Boolean get() = senders.isEmpty
+
+    /** Test seam: the Noise session of the connection [boundSender] would bind now. */
+    internal fun activeNoiseForTest(): NoiseSession? = activeConnection?.noise
 
     private fun newBoundSender(connection: Connection): SessionSender =
         object : SessionSender {

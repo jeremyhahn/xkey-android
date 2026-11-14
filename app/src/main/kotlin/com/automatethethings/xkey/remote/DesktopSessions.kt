@@ -145,6 +145,8 @@ class DesktopSessions(
         private val sender: MessageSender,
         private val connection: ConfirmedConnection
     ) : SessionSender {
+        override val binding: Any get() = sender.binding
+
         override suspend fun sendEncryptedMessage(data: ByteArray) =
             sender.sendEncryptedMessageOn(connection, data)
     }
