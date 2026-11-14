@@ -182,6 +182,12 @@ enum class AuditOperationType {
     /** A PIV key was deleted from a slot. */
     PIV_KEY_DELETED,
 
+    // Password vault operations
+    /** A password entry was added on the phone. */
+    PASSWORD_CREATED,
+    /** A password entry was deleted on the phone. */
+    PASSWORD_DELETED,
+
     // Desktop backups (local.createBackup / local.restoreBackup)
     /** A paired desktop stored an encrypted backup on the phone. */
     BACKUP_CREATED,

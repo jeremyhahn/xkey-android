@@ -1552,6 +1552,32 @@ object AuditLogger {
     }
 
     // -------------------------------------------------------------------------
+    // Password Vault Operations
+    // -------------------------------------------------------------------------
+    // Only the entry id and its display name are recorded: never the
+    // password, username, URL or notes.
+
+    fun logPasswordCreated(passwordId: String, name: String) =
+        logPasswordEdit(AuditOperationType.PASSWORD_CREATED, passwordId, name)
+
+    fun logPasswordDeleted(passwordId: String, name: String) =
+        logPasswordEdit(AuditOperationType.PASSWORD_DELETED, passwordId, name)
+
+    private fun logPasswordEdit(type: AuditOperationType, passwordId: String, name: String) {
+        val details = JSONObject().apply { put("name", name) }
+        log(
+            AuditLogEntity(
+                operationType = type,
+                keyId = passwordId,
+                keyLabel = name,
+                keyType = "password",
+                success = true,
+                details = details.toString()
+            )
+        )
+    }
+
+    // -------------------------------------------------------------------------
     // Desktop Backups
     // -------------------------------------------------------------------------
 
