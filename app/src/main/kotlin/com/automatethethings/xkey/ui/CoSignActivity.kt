@@ -83,6 +83,9 @@ class CoSignActivity : AppCompatActivity() {
     private lateinit var keySpinner: Spinner
     private var signingKeyIds = listOf<String>()
 
+    /** Each offered row's key type, index-aligned with [signingKeyIds]. */
+    private var signingKeyTypes = listOf<String>()
+
     private lateinit var witnessQrImage: ImageView
     private lateinit var witnessQrLabel: TextView
 
@@ -598,8 +601,7 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
-        val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
+        val fingerprint = initiatorFingerprint(keystoreManager, keyId, signingKeyTypes[selectedKeyIndex])
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
 
@@ -617,11 +619,20 @@ class CoSignActivity : AppCompatActivity() {
                 val keyEntity = db.keyDao().getByKeyId(keyId)
                     ?: throw Exception("Key not found")
 
-                val signature = keystoreManager.signWithAlgorithm(keyId, request.hashBytes(), keyEntity.algorithm)
+                // The key named and the key signed with are one lookup: the
+                // public key under the alias the signature is made with.
+                val alias = KeystoreManager.generalKeyAlias(keyId)
+                val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
+                    ?: throw Exception("Key not found")
+                val signature = keystoreManager.signApproved(
+                    alias,
+                    pubKeyDer,
+                    request.hashBytes(),
+                    KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
+                )
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
-                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
-                val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
+                val fingerprint = MediaHasher.hashBytes(pubKeyDer)
 
                 val responsePayload = CoSignResponse(
                     signature = signatureBase64,
@@ -810,10 +821,12 @@ class CoSignActivity : AppCompatActivity() {
                     !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh")
                 }
                 val keyIds = keys.map { it.keyId }
+                val keyTypes = keys.map { it.keyType }
                 val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
 
                 withContext(Dispatchers.Main) {
                     signingKeyIds = keyIds
+                    signingKeyTypes = keyTypes
                     keySpinner.adapter = ArrayAdapter(
                         this@CoSignActivity,
                         android.R.layout.simple_spinner_dropdown_item,
@@ -848,3 +861,22 @@ class CoSignActivity : AppCompatActivity() {
         const val STATE_KEY_ID = "cosign_key_id"
     }
 }
+
+/**
+ * The fingerprint an initiator QR names its key by: the hash of the public key
+ * the selected row holds, or [keyId] itself when no public key is found.
+ *
+ * A FIDO2 row's key is the credential alias; every other row ([keyType]
+ * signing, tls, ssh) is the general alias. A credential and a general key may
+ * share an id, so the lookup reads exactly the row's own namespace and never
+ * the id-only resolution, which prefers the credential. This only names the
+ * key; nothing is signed here, so it needs no approved-key lookup.
+ */
+internal fun initiatorFingerprint(keystoreManager: KeystoreManager, keyId: String, keyType: String): String {
+    val alias = if (keyType == "fido2") CREDENTIAL_ALIAS_PREFIX + keyId else KeystoreManager.generalKeyAlias(keyId)
+    val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
+    return if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
+}
+
+/** The Keystore alias prefix of a FIDO2 credential (KeystoreManager's own). */
+private const val CREDENTIAL_ALIAS_PREFIX = "xkey_credential_"

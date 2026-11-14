@@ -432,24 +432,26 @@ class ApprovalPromptFlowTest {
         runCurrent()
         assertNull("the second request waits for its turn", shadowOf(app).nextStartedActivity)
 
-        // The first request's connection closes; its prompt is still up when
-        // the second request's turn comes and its start reaches that prompt.
+        // The first request's connection closes with its prompt up: that
+        // prompt is taken down before the second request's turn starts, and
+        // answers nothing, since nobody waits on it. The second request's
+        // start may still reach the finishing instance.
         first.cancel()
-        runCurrent()
+        settle()
+        assertTrue("the withdrawn prompt goes away", firstScreen.get().isFinishing)
         val secondPrompt = directStart()
         val secondId = secondPrompt.requestId()!!
         assertNotNull("the second request's notification is up", notificationFor(secondId))
         firstScreen.newIntent(secondPrompt)
         settle()
 
-        assertTrue("the withdrawn prompt goes away", firstScreen.get().isFinishing)
         val handedOn = directStart()
         assertEquals(secondId, handedOn.requestId())
         open(handedOn).approve()
         settle()
 
         assertUpdated(second.await())
-        assertEquals(listOf(firstPrompt.requestId() to false, secondId to true), results())
+        assertEquals(listOf(secondId to true), results())
         assertEquals(SharingPolicyType.ALL_PEERS, stored)
     }
 

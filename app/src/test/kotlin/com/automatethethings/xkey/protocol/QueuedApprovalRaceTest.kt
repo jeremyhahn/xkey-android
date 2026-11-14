@@ -139,7 +139,10 @@ class QueuedApprovalRaceTest {
             create(firstArg())
             ByteArray(77) { 2 }
         }
-        coEvery { keystore.signWithoutBiometric(credentialId, any()) } returns ByteArray(70) { 3 }
+        // The passkey is approved and signed with under the one alias it resolves to.
+        every { keystore.resolveKeystoreAlias(credentialId) } returns "xkey_credential_$credentialId"
+        every { keystore.publicKeyDERAt("xkey_credential_$credentialId") } returns ByteArray(91) { 4 }
+        coEvery { keystore.signApproved("xkey_credential_$credentialId", any(), any(), any()) } returns ByteArray(70) { 3 }
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 

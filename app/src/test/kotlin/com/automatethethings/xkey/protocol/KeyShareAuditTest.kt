@@ -763,7 +763,12 @@ class KeyShareAuditTest {
     fun aSigningRecordNamesTheCallerNotTheLastPairedPeer() = runTest {
         handler.setConnectedDevicePublicKeyHex(USB_PEER)
         every { keystoreManager.generalKeyExists(KEY_ID) } returns true
-        coEvery { keystoreManager.signWithAlgorithm(KEY_ID, any(), any()) } returns ByteArray(64)
+        // The key signs as the one approved: the public key under its alias,
+        // read before the approval, and the signer that refuses a swap.
+        val alias = KeystoreManager.generalKeyAlias(KEY_ID)
+        val approvedDer = ByteArray(91) { 4 }
+        every { keystoreManager.publicKeyDERAt(alias) } returns approvedDer
+        coEvery { keystoreManager.signApproved(alias, approvedDer, any(), any()) } returns ByteArray(64)
 
         success(served(keyUse(MethodNames.LOCAL_SIGN, "data", "userVerificationRequired" to false, "algorithm" to "ES256"), peer = PEER))
 

@@ -221,6 +221,13 @@ class RequestHandler(
     // BiometricNotificationHelper for lock screen notifications
     private val biometricNotificationHelper = BiometricNotificationHelper(context)
 
+    /**
+     * Co-sign approval prompts, each an entry in the one prompt queue every
+     * transport's prompts share. A handler with no biometric launcher runs in
+     * no service that can show one.
+     */
+    private val cosignApprovals: CosignApprovalPrompts? = biometricLauncher?.let(::CosignApprovalPrompts)
+
     // KeyguardManager to check if screen is locked
     private val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
 
@@ -940,6 +947,12 @@ class RequestHandler(
                     // Auth window expired - show generic biometric prompt to re-authenticate,
                     // then sign within the new auth window
                     Log.d(TAG, "Requesting generic biometric authentication for TIME_WINDOW/PER_SESSION key")
+                    // The key as approved: its alias, resolved once, and the
+                    // public key under it. Only that key signs after the prompt.
+                    val approvedAlias = keystoreManager.resolveKeystoreAlias(signParams.credentialId)
+                        ?: throw ProtocolException("Credential not found", errorCode = ErrorCodes.KEY_NOT_FOUND)
+                    val approvedDer = keystoreManager.publicKeyDERAt(approvedAlias)
+                        ?: throw ProtocolException("Credential not found", errorCode = ErrorCodes.KEY_NOT_FOUND)
                     biometricLauncher.requestAuthentication(
                         title = "xKey Authentication",
                         subtitle = "Verify your identity to sign",
@@ -952,10 +965,19 @@ class RequestHandler(
 
                     // Now sign within the fresh auth window
                     Log.d(TAG, "Biometric succeeded, signing within auth window")
-                    val signature = keystoreManager.signWithoutBiometric(
-                        credentialId = signParams.credentialId,
-                        dataHash = dataHash
-                    )
+                    val signature = try {
+                        keystoreManager.signApproved(
+                            approvedAlias,
+                            approvedDer,
+                            dataHash,
+                            KeystoreManager.PASSKEY_SIGNATURE_ALGORITHM
+                        )
+                    } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
+                        throw ProtocolException(
+                            "Credential ${signParams.credentialId} changed while its approval waited",
+                            errorCode = ErrorCodes.OPERATION_DENIED
+                        )
+                    }
 
                     val signatureBase64 = Base64.getEncoder().encodeToString(signature)
                     val result = SignResult(
@@ -1329,7 +1351,7 @@ class RequestHandler(
         // Approval prompts take turns, so another creation of this id can pass
         // this check while this one waits; the reservation refuses it until
         // this creation ends.
-        val reservation = "key:${genParams.keyId}"
+        val reservation = keyLockId(genParams.keyId)
         if (keystoreManager.generalKeyExists(genParams.keyId) || !keyIds.tryReserve(reservation)) {
             throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
         }
@@ -1685,6 +1707,13 @@ class RequestHandler(
             false
         }
 
+        // The stored key as it was before the approval, so the key signed
+        // with is the one the owner approved. A key with no row is held to
+        // the public key under its alias as it was before the approval.
+        val signingAlias = KeystoreManager.generalKeyAlias(signParams.keyId)
+        val selected = keyDao.getByKeyId(signParams.keyId)?.let { approvalSnapshot(it, signingAlias) }
+        val unlistedDer = if (selected == null) keystoreManager.publicKeyDERAt(signingAlias) else null
+        var approved = false
         if (biometricRequired && biometricLauncher != null) {
             val notice = OwnNotifications(operationType = "sign", rpName = null)
             try {
@@ -1695,24 +1724,46 @@ class RequestHandler(
                     onLaunch = notice.onLaunch
                 )
                 sessionAuthManager?.recordAuthentication(requestSessionId())
+                approved = true
             } finally {
                 notice.close()
             }
         }
-
-        // `algorithm` is an optional override; default to the key's own
-        // algorithm from the key store.
-        val signAlgorithm = signParams.algorithm.ifEmpty {
-            keyDao.getByKeyId(signParams.keyId)?.algorithm
-                ?: throw ProtocolException(
-                    "Missing 'algorithm' and key has no recorded algorithm",
-                    errorCode = ErrorCodes.INVALID_PARAMS
-                )
+        if (approved && selected == null && !keystoreManager.generalKeyExists(signParams.keyId)) {
+            throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
         }
 
-        val startTime = System.currentTimeMillis()
-        val signature = keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm)
-        val durationMs = System.currentTimeMillis() - startTime
+        // The key is rechecked and signed with under its lock.
+        val (signAlgorithm, signature, durationMs) = useApprovedKeyOrAlias(selected, signParams.keyId) { signingKey ->
+            // `algorithm` is an optional override; default to the key's own
+            // algorithm from the key store.
+            val signAlgorithm = signParams.algorithm.ifEmpty {
+                signingKey?.row?.algorithm
+                    ?: throw ProtocolException(
+                        "Missing 'algorithm' and key has no recorded algorithm",
+                        errorCode = ErrorCodes.INVALID_PARAMS
+                    )
+            }
+            val jcaAlgorithm = KeystoreManager.jcaSignatureAlgorithm(signAlgorithm)
+            val startTime = System.currentTimeMillis()
+            val signature = if (signingKey != null) {
+                signingKey.sign(data, jcaAlgorithm)
+            } else {
+                val approvedDer = unlistedDer ?: throw ProtocolException(
+                    "Key not found: ${signParams.keyId}",
+                    errorCode = ErrorCodes.KEY_NOT_FOUND
+                )
+                try {
+                    keystoreManager.signApproved(signingAlias, approvedDer, data, jcaAlgorithm)
+                } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
+                    throw ProtocolException(
+                        "Key ${signParams.keyId} changed while its approval waited",
+                        errorCode = ErrorCodes.OPERATION_DENIED
+                    )
+                }
+            }
+            Triple(signAlgorithm, signature, System.currentTimeMillis() - startTime)
+        }
 
         // Record usage
         keyDao.recordUsage(signParams.keyId)
@@ -2215,13 +2266,17 @@ class RequestHandler(
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
 
-        // Delete from Android Keystore and the software key store (only one
-        // of the two will actually hold the key).
-        keystoreManager.deleteGeneralKey(keyId)
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
+        // Under the key's lock, so an approved use already rechecking the key
+        // finishes with it before it goes.
+        keyIds.withKeyLock(keyLockId(keyId)) {
+            // Delete from Android Keystore and the software key store (only one
+            // of the two will actually hold the key).
+            keystoreManager.deleteGeneralKey(keyId)
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).delete(keyId)
 
-        // Delete from unified key store
-        keyDao.deleteByKeyId(keyId)
+            // Delete from unified key store
+            keyDao.deleteByKeyId(keyId)
+        }
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
@@ -3313,6 +3368,14 @@ class RequestHandler(
         // must report. The request asking for it is not evidence that it occurred.
         var userVerified = false
 
+        // The passkey as the owner approves it, rechecked under the lock. Its
+        // alias is resolved once, here, and signed with under the lock.
+        val passkeyAlias = keystoreManager.resolveKeystoreAlias(assertionParams.credentialId)
+            ?: throw ProtocolException(
+                "Credential key not found: ${assertionParams.credentialId}",
+                errorCode = ErrorCodes.KEY_NOT_FOUND
+            )
+        val asApproved = approvalSnapshot(entity, passkeyAlias)
         if (biometricRequired && biometricLauncher != null) {
             val notice = OwnNotifications(operationType = "sign", rpName = entity.rpName)
             try {
@@ -3348,18 +3411,10 @@ class RequestHandler(
         // waited for its approval. Reload the credential under its lock and
         // hold the lock across the counter increment, the signature and the
         // counter write, so each assertion signs a distinct, increasing count.
-        val (newSignCount, authData, signature) = keyIds.withKeyLock("key:${assertionParams.credentialId}") {
-            val current = keyDao.getByKeyId(assertionParams.credentialId)
-                ?: throw ProtocolException(
-                    "Credential not found: ${assertionParams.credentialId}",
-                    errorCode = ErrorCodes.KEY_NOT_FOUND
-                )
-            if (current.keyType != KeyTypes.FIDO2 ||
-                (current.rpId != null && current.rpId != assertionParams.rpId)
-            ) {
-                throw ProtocolException("Credential changed during approval", errorCode = ErrorCodes.INVALID_PARAMS)
-            }
-            if (!canShareKeyWithPeer(current, peerPublicKeyHex)) {
+        // Still the passkey the owner approved (its row was read by this id);
+        // its counter may have moved.
+        val (newSignCount, authData, signature) = useApprovedKey(asApproved) { current ->
+            if (!canShareKeyWithPeer(current.row, peerPublicKeyHex)) {
                 throw ProtocolException(
                     "Credential is not shareable with this peer",
                     errorCode = ErrorCodes.OPERATION_DENIED
@@ -3400,11 +3455,9 @@ class RequestHandler(
             // Hash the signed data for ECDSA (sign expects a hash)
             val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
 
-            // Sign using the credential key
-            val signature = keystoreManager.signWithoutBiometric(
-                credentialId = assertionParams.credentialId,
-                dataHash = dataHash
-            )
+            // Sign with the credential key the owner approved, under the
+            // alias its approval read.
+            val signature = current.sign(dataHash, KeystoreManager.PASSKEY_SIGNATURE_ALGORITHM)
 
             Triple(newSignCount, authData, signature)
         }
@@ -3975,6 +4028,131 @@ class RequestHandler(
     }
 
     /**
+     * The co-sign gate: the peer of the connection the request arrived on,
+     * paired with this phone.
+     *
+     * A request that carries a [CallerSession] is decided by that session's
+     * peer alone, confirmed when the paired-device store knows it; a store
+     * that cannot be read knows no device. The handler-wide
+     * [connectedDevicePublicKeyHex] is shared by BLE, TCP and USB and
+     * cleared by each one's teardown, so it neither stands in for the
+     * caller's peer nor takes a still-paired one away. Only a request that
+     * names no connection falls back to it. Sharing calls use
+     * [requireConfirmedPeer], which takes the session's peer without a store
+     * read, so an unreadable store still lets each transfer be recorded.
+     *
+     * @throws ProtocolException with [ErrorCodes.OPERATION_DENIED] when the
+     * request's connection has no paired peer.
+     */
+    private suspend fun requirePairedPeer(operation: String): String {
+        val peer = currentPeerPublicKeyHex()?.takeIf {
+            currentCoroutineContext()[CallerSession] == null ||
+                pairedDeviceRepository?.isDeviceKnown(it) == true
+        }
+        return peer ?: throw ProtocolException(
+            "$operation requires a confirmed peer identity",
+            errorCode = ErrorCodes.OPERATION_DENIED
+        )
+    }
+
+    /**
+     * The stored key [snapshot] names, as it is once the owner has approved
+     * its use. An approval can wait a minute for the owner, and the key can
+     * be deleted, re-policied or replaced under its id or keystore alias
+     * meanwhile; what the owner approved is the row and the alias's public
+     * key read before the prompt ([approvalSnapshot]), so the key is used
+     * only while it is still that key ([isSameKeyAs], same key material). Called only by
+     * [useApprovedKey], under the key's lock.
+     *
+     * @throws ProtocolException with [ErrorCodes.KEY_NOT_FOUND] when the key
+     * is gone, or [ErrorCodes.OPERATION_DENIED] when it changed.
+     */
+    private suspend fun revalidateApprovedKey(snapshot: ApprovalSnapshot): KeyEntity {
+        val approved = snapshot.row
+        val current = keyDao.getByKeyId(approved.keyId) ?: throw ProtocolException(
+            "Key ${approved.keyId} was deleted while its approval waited",
+            errorCode = ErrorCodes.KEY_NOT_FOUND
+        )
+        // The row and the key material signed with, read from the one alias
+        // the approval read and the signer signs with: a key put under that
+        // alias while the prompt waited is not the key the owner approved.
+        val material = keystoreManager.publicKeyDERAt(snapshot.alias)
+        if (!current.isSameKeyAs(approved) || !material.contentEquals(snapshot.publicKeyDer)) {
+            throw ProtocolException(
+                "Key ${approved.keyId} changed while its approval waited",
+                errorCode = ErrorCodes.OPERATION_DENIED
+            )
+        }
+        return current
+    }
+
+    /**
+     * Runs [use] with the key [snapshot] names, once the owner has approved
+     * it: the one way an approval-gated operation reaches its key. The key's
+     * lock ([keyLockId], which key creation and deletion take too) is held
+     * from the recheck ([revalidateApprovedKey]) through the end of [use], so
+     * no replacement or deletion lands between the check and the signature.
+     * [use] signs only through [ApprovedKey.sign], which signs under the
+     * snapshot's alias and refuses a key other than the approved one.
+     */
+    private suspend fun <T> useApprovedKey(snapshot: ApprovalSnapshot, use: suspend (ApprovedKey) -> T): T =
+        keyIds.withKeyLock(keyLockId(snapshot.row.keyId)) {
+            use(ApprovedKey(revalidateApprovedKey(snapshot), snapshot, keystoreManager))
+        }
+
+    /**
+     * [useApprovedKey] for a key that may have no stored row: with no
+     * [snapshot], [use] gets null and still runs holding [keyId]'s lock.
+     */
+    private suspend fun <T> useApprovedKeyOrAlias(
+        snapshot: ApprovalSnapshot?,
+        keyId: String,
+        use: suspend (ApprovedKey?) -> T
+    ): T = if (snapshot != null) {
+        useApprovedKey(snapshot) { use(it) }
+    } else {
+        keyIds.withKeyLock(keyLockId(keyId)) { use(null) }
+    }
+
+    /** The [keyIds] lock of stored key [keyId]: its creation, deletion and approved uses. */
+    private fun keyLockId(keyId: String) = "key:$keyId"
+
+    /**
+     * Whether [signature] is one the key whose X.509 [publicKeyDer] this is
+     * made over exactly [payload] with JCA [signatureAlgorithm].
+     */
+    private fun signedBy(
+        publicKeyDer: ByteArray,
+        signatureAlgorithm: String,
+        payload: ByteArray,
+        signature: ByteArray
+    ): Boolean = try {
+        val keyAlgorithm = if (signatureAlgorithm.endsWith("RSA")) "RSA" else "EC"
+        val publicKey = java.security.KeyFactory.getInstance(keyAlgorithm)
+            .generatePublic(java.security.spec.X509EncodedKeySpec(publicKeyDer))
+        java.security.Signature.getInstance(signatureAlgorithm).run {
+            initVerify(publicKey)
+            update(payload)
+            verify(signature)
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * What the owner approves the use of: the stored row and the public key
+     * under [alias], both read before the prompt goes up, and checked again by
+     * [revalidateApprovedKey] after it. [alias] is resolved once, here: it is
+     * the alias the signer ([ApprovedKey.sign]) signs with, by default the
+     * general key alias [KeystoreManager.signWithAlgorithm] uses, never a
+     * lookup that may land on another entry of the same id.
+     */
+    private fun approvalSnapshot(
+        row: KeyEntity,
+        alias: String = KeystoreManager.generalKeyAlias(row.keyId)
+    ) = ApprovalSnapshot(row, alias, keystoreManager.publicKeyDERAt(alias))
+
+    /**
      * The confirmed peer of the connection this request arrived on.
      *
      * One handler serves BLE, TCP and USB at once, and a transport's teardown
@@ -4243,45 +4421,169 @@ class RequestHandler(
     /**
      * Handles an incoming co-sign request from a paired device.
      *
-     * The request contains a content hash that the local device should sign
-     * if the user approves. The signed response is returned to the initiator.
+     * The request carries a content hash the owner is asked to vouch for. The
+     * phone signs it only when all of these hold, in this order:
+     * - the session has a confirmed peer ([ErrorCodes.OPERATION_DENIED]);
+     * - `hashAlgorithm` is SHA-256, SHA-384 or SHA-512 and `hash` decodes to
+     *   exactly its digest length ([ErrorCodes.INVALID_PARAMS]);
+     * - the key is a `signing` key: a named key of any other type, FIDO2
+     *   included, is [ErrorCodes.OPERATION_DENIED], and the fallback picks
+     *   only signing keys;
+     * - the owner approves the prompt, which names the first 8 hex characters
+     *   of the hash. No prompt available, a cancel or a failure is
+     *   [ErrorCodes.BIOMETRIC_FAILED] and nothing is signed.
      *
      * @param request The co-sign request containing hash, algorithm, and initiator info.
-     * @return Response with the signature or an error if user denies.
+     * @return Response with the signature, or an error when any check fails.
      */
     private suspend fun handleCosignRequest(request: Request): Response {
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
+        // An anonymous or unpaired session cannot ask the owner to vouch for anything.
+        requirePairedPeer("Co-signing")
+
         val contentHash = params.optString("hash", "")
         val hashAlgorithm = params.optString("hashAlgorithm", "SHA-256")
-        val initiatorFingerprint = params.optString("from", "")
         val keyId = params.optString("keyId", "")
 
         if (contentHash.isEmpty()) {
             return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing content hash")
         }
 
-        // Find signing key - use specified key or first available signing key
-        val db = XKeyDatabase.getInstance(context)
-        val signingKey: KeyEntity? = if (keyId.isNotEmpty()) {
-            db.keyDao().getByKeyId(keyId)
-        } else {
-            db.keyDao().getAll().firstOrNull { it.keyType == "signing" || it.keyType == "fido2" }
-        }
-
-        if (signingKey == null) {
-            return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
-        }
-
-        // Sign the content hash
-        return try {
-            val hashBytes = hexToBytes(contentHash)
-            val signatureBytes = keystoreManager.signWithAlgorithm(
-                signingKey.keyId, hashBytes, signingKey.algorithm
+        // The hash must be one whole digest of the named algorithm: a truncated
+        // or padded value would be signed as whatever it decodes to.
+        val digestLength = when (hashAlgorithm.uppercase()) {
+            "SHA-256" -> 32
+            "SHA-384" -> 48
+            "SHA-512" -> 64
+            else -> return Response.error(
+                request.id,
+                ErrorCodes.INVALID_PARAMS,
+                "Unsupported hash algorithm: $hashAlgorithm"
             )
-            val publicKeyDer = keystoreManager.getPublicKeyDER(signingKey.keyId)
-                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
+        }
+        val hashBytes = hexToBytes(contentHash)
+        if (hashBytes.size != digestLength) {
+            return Response.error(
+                request.id,
+                ErrorCodes.INVALID_PARAMS,
+                "A $hashAlgorithm hash is $digestLength bytes, got ${hashBytes.size}"
+            )
+        }
+
+        // Only a signing key co-signs: a FIDO2 credential is bound to its
+        // relying party and must never sign an arbitrary hash.
+        val db = XKeyDatabase.getInstance(context)
+        val signingKey: KeyEntity = if (keyId.isNotEmpty()) {
+            val named = db.keyDao().getByKeyId(keyId)
+                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
+            if (named.keyType != KeyTypes.SIGNING) {
+                return Response.error(
+                    request.id,
+                    ErrorCodes.OPERATION_DENIED,
+                    "Key $keyId is not a signing key"
+                )
+            }
+            named
+        } else {
+            db.keyDao().getAll().firstOrNull { it.keyType == KeyTypes.SIGNING }
+                ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
+        }
+
+        // The owner approves every co-signature on the phone. The prompt
+        // takes its turn in the one prompt queue and is settled only by its
+        // own answer; a locked phone's notification opens that same prompt.
+        val approvals = cosignApprovals
+            ?: return Response.error(
+                request.id,
+                ErrorCodes.BIOMETRIC_FAILED,
+                "Co-signing needs the owner's approval and no prompt is available"
+            )
+        val notice = OwnNotifications(operationType = "sign", rpName = null)
+        val asApproved = approvalSnapshot(signingKey)
+        val publicKeyDer = asApproved.publicKeyDer
+            ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
+        val title = "Co-sign request"
+        val subtitle = "Approve co-signing hash ${contentHash.take(8)}"
+        // A key that needs the owner for every use signs in the prompt itself:
+        // the owner's authentication unlocks a CryptoObject that signs exactly
+        // this hash, so the approval cannot be spent on another payload.
+        val perOperation = signingKey.authDurationSeconds == 0
+        val jcaAlgorithm = runCatching { KeystoreManager.jcaSignatureAlgorithm(signingKey.algorithm) }.getOrNull()
+        if (perOperation && jcaAlgorithm == null) {
+            return Response.error(
+                request.id,
+                ErrorCodes.SIGNING_FAILED,
+                "Co-sign failed: unsupported algorithm ${signingKey.algorithm}"
+            )
+        }
+        val promptSignature: ByteArray? = try {
+            if (perOperation) {
+                approvals.sign(
+                    CosignOperation(
+                        keyId = signingKey.keyId,
+                        keyAlias = asApproved.alias,
+                        digest = hashBytes,
+                        signatureAlgorithm = jcaAlgorithm!!
+                    ),
+                    title = title,
+                    subtitle = subtitle,
+                    locked = keyguardManager.isKeyguardLocked,
+                    onLaunch = notice.onLaunch
+                )
+            } else {
+                approvals.approve(
+                    title = title,
+                    subtitle = subtitle,
+                    locked = keyguardManager.isKeyguardLocked,
+                    onLaunch = notice.onLaunch
+                )
+                null
+            }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Co-sign not approved: ${e.message}")
+            return Response.error(
+                request.id,
+                ErrorCodes.BIOMETRIC_FAILED,
+                "Co-sign not approved: ${e.message}"
+            )
+        } finally {
+            notice.close()
+        }
+
+        // The owner approved the key as it was when the prompt went up; it is
+        // rechecked and used under its lock, so nothing replaces it meanwhile.
+        return useApprovedKey(asApproved) { approvedKey ->
+            val signatureBytes = if (promptSignature != null) {
+                // The prompt signed with whatever key its alias held by then:
+                // only the approved key's signature over this hash is answered.
+                if (!signedBy(publicKeyDer, jcaAlgorithm!!, hashBytes, promptSignature)) {
+                    throw ProtocolException(
+                        "The co-signature is not the approved key's signature over this hash",
+                        errorCode = ErrorCodes.OPERATION_DENIED
+                    )
+                }
+                promptSignature
+            } else {
+                try {
+                    approvedKey.sign(hashBytes, KeystoreManager.jcaSignatureAlgorithm(approvedKey.row.algorithm))
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (e: ProtocolException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Co-sign failed", e)
+                    return@useApprovedKey Response.error(
+                        request.id,
+                        ErrorCodes.SIGNING_FAILED,
+                        "Co-sign failed: ${e.message}"
+                    )
+                }
+            }
+            // The fingerprint answered is of the key approved and rechecked.
             val fingerprint = computeFingerprint(publicKeyDer)
 
             AuditLogger.logCoSignReceived(
@@ -4292,13 +4594,10 @@ class RequestHandler(
             val result = JSONObject().apply {
                 put("signature", Base64.getEncoder().encodeToString(signatureBytes))
                 put("keyFingerprint", fingerprint)
-                put("algorithm", signingKey.algorithm)
-                put("signerName", signingKey.label.ifEmpty { signingKey.keyId })
+                put("algorithm", approvedKey.row.algorithm)
+                put("signerName", approvedKey.row.label.ifEmpty { approvedKey.row.keyId })
             }
             Response.success(request.id, result)
-        } catch (e: Exception) {
-            Log.e(TAG, "Co-sign failed", e)
-            Response.error(request.id, ErrorCodes.SIGNING_FAILED, "Co-sign failed: ${e.message}")
         }
     }
 
@@ -4687,3 +4986,64 @@ class RequestHandler(
         return digest.digest(publicKeyDer).joinToString("") { "%02x".format(it) }
     }
 }
+
+/**
+ * A key as approved: its row, the one keystore [alias] its signer signs with,
+ * and the public key read from exactly that alias.
+ */
+private class ApprovalSnapshot(val row: KeyEntity, val alias: String, val publicKeyDer: ByteArray?)
+
+/**
+ * A key the owner approved, rechecked under its lock: [row] is its current
+ * row, and [sign] signs only with the key under the snapshot's alias, and only
+ * while that key's public key is still the approved one. The key approved and
+ * the key signed with are the one lookup, never two.
+ */
+private class ApprovedKey(
+    val row: KeyEntity,
+    private val snapshot: ApprovalSnapshot,
+    private val keystore: KeystoreManager
+) {
+    /** The keystore alias the approval read and every signature uses. */
+    val alias: String get() = snapshot.alias
+
+    /**
+     * Signs [data] with JCA [jcaAlgorithm] under [alias].
+     *
+     * @throws ProtocolException with [ErrorCodes.KEY_NOT_FOUND] when the
+     *   approval saw no key, or [ErrorCodes.OPERATION_DENIED] when the key under
+     *   [alias] is not the approved key.
+     */
+    suspend fun sign(data: ByteArray, jcaAlgorithm: String): ByteArray {
+        val approvedDer = snapshot.publicKeyDer ?: throw ProtocolException(
+            "Key ${row.keyId} had no public key when it was approved",
+            errorCode = ErrorCodes.KEY_NOT_FOUND
+        )
+        return try {
+            keystore.signApproved(snapshot.alias, approvedDer, data, jcaAlgorithm)
+        } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
+            throw ProtocolException(
+                "Key ${row.keyId} is not the key that was approved",
+                errorCode = ErrorCodes.OPERATION_DENIED
+            )
+        }
+    }
+}
+
+/**
+ * Whether this row is still the key [other] was: the same row, type,
+ * algorithm, key material, relying party, origin and sharing policy
+ * revision. Use counters and the label may move on.
+ */
+private fun KeyEntity.isSameKeyAs(other: KeyEntity): Boolean =
+    id == other.id &&
+        keyId == other.keyId &&
+        keyType == other.keyType &&
+        algorithm == other.algorithm &&
+        source == other.source &&
+        rpId == other.rpId &&
+        sharingPolicy == other.sharingPolicy &&
+        policyRevision == other.policyRevision &&
+        biometricRequired == other.biometricRequired &&
+        publicKeyDer.contentEquals(other.publicKeyDer) &&
+        publicKeyCose.contentEquals(other.publicKeyCose)
