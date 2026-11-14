@@ -28,6 +28,7 @@ import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.google.android.material.button.MaterialButton
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -42,6 +43,9 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.OutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * A save picker FileOperationActivity opens outlives the screen that opened
@@ -195,5 +199,88 @@ class FileOperationSavePickerTest {
 
             assertTrue("$launcher: the process button is enabled again", processButton(activity).isEnabled)
         }
+    }
+
+    /** An output stream whose first write blocks until [release]. */
+    private class HeldOutput : OutputStream() {
+        val writing = CountDownLatch(1)
+        private val released = CountDownLatch(1)
+        val bytes = java.io.ByteArrayOutputStream()
+
+        fun release() = released.countDown()
+
+        override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            writing.countDown()
+            check(released.await(10, TimeUnit.SECONDS)) { "never released" }
+            bytes.write(b, off, len)
+        }
+    }
+
+    private fun tap(view: View) {
+        val now = android.os.SystemClock.uptimeMillis()
+        for (action in listOf(android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.ACTION_UP)) {
+            val event = android.view.MotionEvent.obtain(now, now, action, 1f, 1f, 0)
+            view.dispatchTouchEvent(event)
+            event.recycle()
+        }
+    }
+
+    @Test
+    fun `a save restored after recreation keeps the screen busy until its write ends`() {
+        val controller = launch()
+        val json = XmpFixtures.json("e".repeat(64))
+        field("pendingSignatureJson").set(controller.get(), json)
+        busy(controller.get())
+        val requestCode = openPicker(controller.get(), "createSignatureFileLauncher")
+
+        controller.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+        val activity = controller.get()
+        assertFalse("a restored save keeps Process disabled", processButton(activity).isEnabled)
+
+        // The restored writer is held open mid-write.
+        val output = Uri.parse("content://xkey.test/clip.png.xkeysig")
+        val held = HeldOutput()
+        shadowOf(activity.contentResolver).registerOutputStream(output, held)
+        activity.activityResultRegistry.dispatchResult(requestCode, Activity.RESULT_OK, Intent().setData(output))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("the restored write started", held.writing.await(10, TimeUnit.SECONDS))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // A second operation is attempted while it writes: a tap on Process.
+        // Were it enabled, the sign it starts (no keys here) would report and
+        // free the screen mid-write.
+        val process = processButton(activity)
+        assertFalse("Process is disabled while the restored save writes", process.isEnabled)
+        tap(process)
+        shadowOf(Looper.getMainLooper()).idle()
+        val resultCard = field("resultCard").get(activity) as View
+        assertEquals("no second operation ran", View.GONE, resultCard.visibility)
+        assertFalse(processButton(activity).isEnabled)
+        assertEquals(View.VISIBLE, (field("progressIndicator").get(activity) as View).visibility)
+
+        held.release()
+        idleUntil { resultCard.visibility == View.VISIBLE && field("pendingSignatureJson").get(activity) == null }
+        assertEquals(json, held.bytes.toString(Charsets.UTF_8.name()))
+        assertTrue("Process is enabled once the write ends", processButton(activity).isEnabled)
+    }
+
+    @Test
+    fun `a restored signed copy keeps the screen busy until its picker returns`() {
+        val controller = launch()
+        pendSignedCopy(controller.get(), signature("f".repeat(64)))
+        busy(controller.get())
+        val requestCode = openPicker(controller.get(), "createSignedCopyLauncher")
+
+        controller.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+        val activity = controller.get()
+        assertFalse(processButton(activity).isEnabled)
+
+        activity.activityResultRegistry.dispatchResult(requestCode, Activity.RESULT_CANCELED, null)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("a cancel frees the restored screen", processButton(activity).isEnabled)
     }
 }

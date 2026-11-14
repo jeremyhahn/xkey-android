@@ -215,6 +215,11 @@ class FileOperationActivity : AppCompatActivity() {
         // Build and set the programmatic UI
         setContentView(buildUI())
 
+        // A restored save is still this screen's operation: Process stays
+        // disabled until its picker returns and its write ends (showResult)
+        // or the picker is cancelled (onSavePicked)
+        if (pendingSignatureJson != null || pendingSignedCopy != null) showProgress(true)
+
         // Populate file info
         populateFileInfo()
 
@@ -1104,7 +1109,7 @@ class FileOperationActivity : AppCompatActivity() {
      * stays in the cache directory and the error names it.
      */
     private fun saveSignedCopyToUri(outputUri: Uri) {
-        val pending = pendingSignedCopy ?: return
+        val pending = pendingSignedCopy ?: return showProgress(false)
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val written = XmpMetadataHelper.replaceEmbeddedSignature(
@@ -1131,7 +1136,7 @@ class FileOperationActivity : AppCompatActivity() {
      * Save the pending signature JSON to the user-selected URI.
      */
     private fun saveSignatureToUri(outputUri: Uri) {
-        val json = pendingSignatureJson ?: return
+        val json = pendingSignatureJson ?: return showProgress(false)
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 contentResolver.openOutputStream(outputUri)?.use { output ->
