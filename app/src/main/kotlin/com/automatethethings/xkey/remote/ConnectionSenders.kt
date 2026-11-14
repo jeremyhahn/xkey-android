@@ -17,7 +17,6 @@ package com.automatethethings.xkey.remote
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -68,12 +67,13 @@ class ConnectionSenders<C : Any>(private val zeroKeys: suspend (C) -> Unit) {
 
     /**
      * [connection] has ended: its entry is dropped now, and its keys are
-     * zeroed in [scope] once its pending sends drain, even if [scope]'s caller
-     * is cancelled meanwhile. Returns the zeroing job.
+     * zeroed in [scope] once its pending sends drain, through [launchCleanup],
+     * so they are zeroed even if [scope] is cancelled before the job runs.
+     * Returns the zeroing job.
      */
     fun retire(connection: C, scope: CoroutineScope): Job {
         drop(connection)
-        return scope.launch { withContext(NonCancellable) { zeroKeys(connection) } }
+        return scope.launchCleanup { zeroKeys(connection) }
     }
 
     /** [connection] has ended: drops its entry, then zeroes its keys once its pending sends drain. */

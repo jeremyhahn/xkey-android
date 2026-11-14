@@ -21,6 +21,7 @@ import com.automatethethings.xkey.remote.ConfirmedConnection
 import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.remote.ConnectionSenders
+import com.automatethethings.xkey.remote.launchCleanup
 import com.automatethethings.xkey.remote.SessionSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -1227,7 +1228,7 @@ class GattServer(
         }
         Log.i(TAG, "Paired device removed; revoking its live session")
         requestJobs.forEach { (job, owner) -> if (owner === session) job.cancel() }
-        scope.launch { tearDown(session) }
+        scope.launchCleanup { tearDown(session) }
     }
 
     /**
@@ -2604,7 +2605,7 @@ class GattServer(
             endedSession = session
         }
         requestJobs.forEach { (job, owner) -> if (owner === session) job.cancel() }
-        scope.launch { tearDown(session) }
+        scope.launchCleanup { tearDown(session) }
     }
 
     /**
