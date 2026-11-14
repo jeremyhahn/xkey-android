@@ -67,11 +67,12 @@ fun readKeyMaterialGeneration(
     held: KeyPolicyStore.KeyMaterialHeld,
     source: String?,
     keystore: KeystoreManager = KeystoreManager(context),
-    kind: UserKeyKind? = null
+    kind: UserKeyKind? = null,
+    retry: Boolean = false
 ): String {
     if (source == "xkmsd") return encodeGeneration(emptyMap())
     if (isInternalKey(held.keyId, keystore)) throw InternalKeyException(held.keyId)
-    return encodeGeneration(keyMaterialGeneration(context, held.keyId, keystore, kind))
+    return encodeGeneration(keyMaterialGeneration(context, held.keyId, keystore, kind, retry))
 }
 
 private fun encodeGeneration(generation: Map<String, String>): String =
@@ -93,19 +94,25 @@ private fun decodeGeneration(encoded: String): Map<String, String> {
  * cannot be read. With [kind], only that user key's material: a
  * credential and a general key can share an id, and the delete of one
  * records (in its tombstone) and deletes none of the other's (#255 review).
+ *
+ * The one place a delete's namespace is chosen (#255 verify): [kind], or
+ * the other kind when only that one holds material under the id
+ * ([KeystoreManager.presentKind]), as for a fido2 row's general-alias key.
+ * A [retry], whose earlier delete of the id was just settled, never
+ * switches: what is left under the id is the other key, which that delete
+ * left on purpose.
  */
 fun keyMaterialGeneration(
     context: Context,
     keyId: String,
     keystore: KeystoreManager,
-    kind: UserKeyKind? = null
+    kind: UserKeyKind? = null,
+    retry: Boolean = false
 ): Map<String, String> {
     val all = keystore.userKeyGeneration(keyId)
     val software = SoftwareKeyStore(context).generation(keyId)
     val present = if (software != null) all.keys + SOFTWARE_ENTRY else all.keys
-    // The kind whose material is there, not only the one the row's type
-    // names (#255 verify): the one place a user delete's kind is resolved.
-    val target = kind?.let { KeystoreManager.presentKind(keyId, present, it) }
+    val target = kind?.let { if (retry) it else KeystoreManager.presentKind(keyId, present, it) }
     val generation = LinkedHashMap(if (target == null) all else all.filterKeys { KeystoreManager.isEntryOf(it, keyId, target) })
     if (target != UserKeyKind.CREDENTIAL && software != null) generation[SOFTWARE_ENTRY] = software
     return generation
@@ -169,6 +176,9 @@ fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null, kind
         // the tombstone recorded, so they need none.
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String =
             readKeyMaterialGeneration(context, held, source, manager, kind)
+
+        override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?, retry: Boolean): String =
+            readKeyMaterialGeneration(context, held, source, manager, kind, retry)
 
         override fun isEmpty(generation: String): Boolean = decodeGeneration(generation).isEmpty()
 

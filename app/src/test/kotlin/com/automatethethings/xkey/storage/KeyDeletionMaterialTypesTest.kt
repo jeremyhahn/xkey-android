@@ -56,6 +56,9 @@ class KeyDeletionMaterialTypesTest {
     /** The Ed25519 preferences. */
     private val ed25519 = HashMap<String, String>()
 
+    /** Keystore aliases whose delete fails. */
+    private val stuck = HashSet<String>()
+
     private lateinit var files: File
     private lateinit var context: Context
     private lateinit var keystore: KeystoreManager
@@ -74,7 +77,10 @@ class KeyDeletionMaterialTypesTest {
         every { platform.getCertificate(any()) } answers {
             entries[firstArg()]?.second?.let { bytes -> mockk<Certificate> { every { encoded } returns bytes } }
         }
-        every { platform.deleteEntry(any()) } answers { entries.remove(firstArg<String>()); Unit }
+        every { platform.deleteEntry(any()) } answers {
+            if (firstArg<String>() in stuck) throw java.security.KeyStoreException("stuck")
+            entries.remove(firstArg<String>()); Unit
+        }
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance(any<String>()) } returns platform
 
@@ -287,6 +293,33 @@ class KeyDeletionMaterialTypesTest {
         keystoreKey("xkey_key_k", certificate = true)
         assertTrue(delete("k", UserKeyKind.CREDENTIAL))
         assertEquals(setOf("xkey_key_k"), entries.keys)
+    }
+
+    /**
+     * #255 verify: a credential and a general key share an id, the row is
+     * the general key's. The credential's delete beside that row fails and
+     * stays owed; its retry settles it first, and then only the general
+     * key is under the id. The retry deletes the credential it names, never
+     * the general key the first delete left.
+     */
+    @Test
+    fun aCredentialDeleteRetryLeavesTheGeneralKeyBesideItsRow() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val row = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        val credential = keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL)
+
+        stuck += "xkey_credential_k"
+        assertTrue(store.deleteMaterial("k", credential, besideRow = row))
+        assertTrue("the failed delete is not owed", store.isDeletionPending("k"))
+
+        stuck.clear()
+        assertTrue(store.deleteMaterial("k", credential, besideRow = row))
+        assertFalse("the credential was left", "xkey_credential_k" in entries)
+        assertEquals("the retry deleted the general key beside its row", setOf("xkey_key_k"), entries.keys)
+        assertFalse(store.isDeletionPending("k"))
     }
 
     /**

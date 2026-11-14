@@ -51,6 +51,15 @@ interface KeyMaterial {
     suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String
 
     /**
+     * [generation] for a delete that follows an earlier delete of the id
+     * just settled ([retry]): a retry deletes only the key its delete
+     * names, never the other key of a shared id that the earlier delete
+     * left (#255 verify).
+     */
+    suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?, retry: Boolean): String =
+        generation(held, source)
+
+    /**
      * Deletes what is left of [tombstone]'s generation and returns true
      * only once no backend holds any of it; material of another
      * generation is left. The store drops the tombstone on true alone.
@@ -397,11 +406,11 @@ class KeyPolicyStore(
             if (dao.keyInstance(keyId) != instance) return@lockKeyMaterial false
             // An earlier delete beside this row still owing material is
             // settled first: this tombstone never replaces it (#255 verify).
-            if (!noTombstoneOwed(held, material)) return@lockKeyMaterial false
+            val retry = noTombstoneOwed(held, material) ?: return@lockKeyMaterial false
             val source = dao.keySource(keyId)
             // Under the lock every write of the id's material takes, so this
             // is the generation of the row being deleted (#193 r12).
-            val generation = material.generation(held, source)
+            val generation = material.generation(held, source, retry)
             val tombstone = KeyDeletionEntity(keyId, instance, source, generation)
             val deleted = transactor.run {
                 if (dao.keyInstance(keyId) != instance) return@run false
@@ -434,8 +443,8 @@ class KeyPolicyStore(
             val source = dao.deletion(keyId)?.source
             // A delete names one key's material, so its generation need not
             // hold what an earlier tombstone owes: that one is settled first.
-            if (!noTombstoneOwed(held, material)) return@lockKeyMaterial false
-            val generation = material.generation(held, source)
+            val retry = noTombstoneOwed(held, material) ?: return@lockKeyMaterial false
+            val generation = material.generation(held, source, retry)
             // A delete beside a row records that row's instance: the one
             // tombstone whose row is still there, which [settleDeletion]
             // replays instead of dropping.
@@ -459,12 +468,16 @@ class KeyPolicyStore(
      * ([settleDeletion]), and while it still owes material no other replaces
      * it. A delete naming one key of a shared id, or a rowless second
      * delete, reads a generation that need not hold what the earlier one
-     * owes. False, with nothing written, if a tombstone is still owed.
+     * owes. Null, with nothing written, if a tombstone is still owed; else
+     * whether one was just settled: the new delete is then a retry, which
+     * reads its generation with `retry` ([KeyMaterial.generation]) and so
+     * never reaches the other key of a shared id that the settled delete
+     * left beside its row.
      */
-    private suspend fun noTombstoneOwed(held: KeyMaterialHeld, material: KeyMaterial): Boolean {
-        if (dao.deletion(held.keyId) == null) return true
+    private suspend fun noTombstoneOwed(held: KeyMaterialHeld, material: KeyMaterial): Boolean? {
+        if (dao.deletion(held.keyId) == null) return false
         settleDeletion(held, material)
-        return dao.deletion(held.keyId) == null
+        return if (dao.deletion(held.keyId) == null) true else null
     }
 
     /**

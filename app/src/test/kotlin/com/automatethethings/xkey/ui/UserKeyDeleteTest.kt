@@ -59,6 +59,7 @@ class UserKeyDeleteTest {
     /** Refuses as the app's deleter does for a key whose material is internal. */
     private val internal = mockk<KeyMaterial>(relaxed = true) {
         coEvery { generation(any(), any()) } answers { throw InternalKeyException(firstArg<KeyPolicyStore.KeyMaterialHeld>().keyId) }
+        coEvery { generation(any(), any(), any()) } answers { throw InternalKeyException(firstArg<KeyPolicyStore.KeyMaterialHeld>().keyId) }
     }
 
     @Test
@@ -74,6 +75,7 @@ class UserKeyDeleteTest {
     fun aSystemKeyIsRefusedBeforeTheStore() = runTest {
         assertEquals(UserKeyDelete.PROTECTED, deleteUserKey(key("xkey_password_encryption_key", system = true), store, internal))
         coVerify(exactly = 0) { internal.generation(any(), any()) }
+        coVerify(exactly = 0) { internal.generation(any(), any(), any()) }
         coVerify(exactly = 0) { dao.keyInstance(any()) }
     }
 
