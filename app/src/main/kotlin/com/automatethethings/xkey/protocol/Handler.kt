@@ -156,9 +156,31 @@ class RequestHandler(
 
         /**
          * One lock per credential alias, shared by every handler, so deletes of
-         * one credential run one at a time at [deleteCredentialKey].
+         * one credential run one at a time at [deleteCredentialKey]. An entry
+         * lives only while a delete holds or waits for it, so the map is empty
+         * when no delete runs. Guarded by itself.
          */
-        private val credentialDeleteLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+        private val credentialDeleteLocks = HashMap<String, CredentialDeleteLock>()
+
+        /** A credential alias's delete lock and the deletes holding or awaiting it. */
+        private class CredentialDeleteLock {
+            val mutex = Mutex()
+            var holders = 0
+        }
+
+        /** Runs [block] under the delete lock of [alias], dropping the lock when its last holder leaves. */
+        private suspend fun <T> withCredentialDeleteLock(alias: String, block: suspend () -> T): T {
+            val lock = synchronized(credentialDeleteLocks) {
+                credentialDeleteLocks.getOrPut(alias) { CredentialDeleteLock() }.also { it.holders++ }
+            }
+            try {
+                return lock.mutex.withLock { block() }
+            } finally {
+                synchronized(credentialDeleteLocks) {
+                    if (--lock.holders == 0) credentialDeleteLocks.remove(alias)
+                }
+            }
+        }
 
         // Protocol version
         private const val PROTOCOL_VERSION = "1.0.0"
@@ -2415,15 +2437,20 @@ class RequestHandler(
      *
      * The metadata row is taken out first, because a removed Keystore entry
      * cannot be put back. If the material is not removed the row is written
-     * back, but only the row this delete removed and only while the key is
-     * still there, so a passkey is never offered for a key that is gone. A
+     * back, but only the row this delete removed and only unless the key is
+     * confirmed gone, so a passkey is never offered for a key that is gone;
+     * a key whose state cannot be read counts as kept, and the delete fails. A
      * delete that cannot remove the metadata is refused (INTERNAL_ERROR) and
      * keeps both.
      */
     private suspend fun deleteCredentialKey(credentialId: String): Boolean {
         val alias = KeystoreManager.credentialAlias(credentialId)
-        val lock = credentialDeleteLocks.computeIfAbsent(alias) { Mutex() }
-        return lock.withLock {
+        // No entry, nothing to remove and no lock to take, so deletes of
+        // nonexistent IDs leave nothing behind. An alias listing that fails
+        // goes on to the locked delete, which settles it.
+        val keyListed = runCatching { alias in keystoreManager.listAllKeystoreAliases() }.getOrDefault(true)
+        if (!keyListed) return false
+        return withCredentialDeleteLock(alias) {
             // KeystoreManager.deleteCredentialKey writes the delete's audit
             // record; persistAudited makes the whole delete non-cancellable.
             persistAudited(write = {
@@ -2437,10 +2464,18 @@ class RequestHandler(
                         errorCode = ErrorCodes.INTERNAL_ERROR
                     )
                 }
-                suspend fun restoreIfKeyKept() {
-                    val keyKept = runCatching { alias in keystoreManager.listAllKeystoreAliases() }
-                        .getOrDefault(false)
-                    if (removedPasskey != null && keyKept) credentialMetadataDao.insert(removedPasskey)
+                // Writes back the row this delete removed unless the key's
+                // removal is confirmed. A key whose state cannot be read
+                // counts as kept: true when that is so, and the delete fails.
+                suspend fun restoreIfKeyKept(): Boolean {
+                    val keyGone = try {
+                        alias !in keystoreManager.listAllKeystoreAliases()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Cannot tell whether credential $credentialId's key is gone; metadata kept", e)
+                        null
+                    }
+                    if (removedPasskey != null && keyGone != true) credentialMetadataDao.insert(removedPasskey)
+                    return keyGone == null
                 }
                 val removed = try {
                     keystoreManager.deleteCredentialKey(credentialId)
@@ -2448,7 +2483,12 @@ class RequestHandler(
                     restoreIfKeyKept()
                     throw e
                 }
-                if (!removed) restoreIfKeyKept()
+                if (!removed && restoreIfKeyKept()) {
+                    throw ProtocolException(
+                        "Failed to delete credential: its key state cannot be read",
+                        errorCode = ErrorCodes.INTERNAL_ERROR
+                    )
+                }
                 removed
             }, record = {})
         }
