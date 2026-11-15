@@ -48,6 +48,7 @@ import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -703,6 +704,7 @@ class StreamPairingSessionRevocationTest {
         var deletedKeyId: String? = null
         assertRevokedAtAdmission { store ->
             deletedKeyId = store.keyId
+            keyRow(keyDao, store.keyId)
             val request = JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "deleteKey")
                 .put("params", JSONObject().put("credentialId", store.keyId))
             val response = JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
@@ -711,7 +713,7 @@ class StreamPairingSessionRevocationTest {
                 response.optJSONObject("result")?.optBoolean("deleted") == true
             )
         }
-        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+        assertNull("the key's metadata row must be gone", tables.key(deletedKeyId!!))
     }
 
     /**
@@ -793,6 +795,7 @@ class StreamPairingSessionRevocationTest {
         var deletedKeyId: String? = null
         assertRevokedAtAdmissionDuring { store, resumeShare ->
             deletedKeyId = store.keyId
+            keyRow(keyDao, store.keyId)
             val request = JSONObject().put("jsonrpc", "2.0").put("id", 3).put("method", "local.deleteKey")
                 .put("params", JSONObject().put("keyId", store.keyId))
             val deleting = scope.async(Dispatchers.IO) {
@@ -810,7 +813,7 @@ class StreamPairingSessionRevocationTest {
             "the delete must succeed, got $response",
             response?.optJSONObject("result")?.optBoolean("deleted") == true
         )
-        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+        assertNull("the key's metadata row must be gone", tables.key(deletedKeyId!!))
     }
 
     /**
@@ -1087,7 +1090,7 @@ class StreamPairingSessionRevocationTest {
      * as a key the handler deletes has.
      */
     private fun keyRow(keyDao: KeyDao, keyId: String) {
-        tables.addKey(keyId, com.automatethethings.xkey.storage.entity.SharingPolicyType.ALL_PEERS)
+        tables.addKey(keyId, SharingPolicyType.ALL_PEERS)
         coEvery { keyDao.getByKeyId(keyId) } returns tables.key(keyId)
     }
 
