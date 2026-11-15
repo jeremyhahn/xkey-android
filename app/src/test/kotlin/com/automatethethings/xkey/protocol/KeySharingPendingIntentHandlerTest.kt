@@ -456,9 +456,9 @@ class KeySharingPendingIntentHandlerTest {
     @Test
     fun aDelayedDeleteNeverRemovesAKeyGeneratedAgainUnderItsId() = runTest {
         val key = "k-delete-reuse"
-        // The software key store's cipher opens the platform keystore.
-        mockkStatic(java.security.KeyStore::class)
-        every { java.security.KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
+        // A readable software key store: a delete whose material cannot be
+        // read is refused at once (#270 round 4), not queued.
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
         val first = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
         val gate = CompletableDeferred<Unit>()
         tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
@@ -750,7 +750,7 @@ class KeySharingPendingIntentHandlerTest {
 
     /** The app's deleter, recording the generation, whose delete does not confirm: the tombstone is owed. */
     private fun owedDelete(): com.automatethethings.xkey.storage.KeyMaterial =
-        object : com.automatethethings.xkey.storage.KeyMaterial by com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystore) {
+        object : com.automatethethings.xkey.storage.KeyMaterial by com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystore, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
             override suspend fun delete(
                 held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld,
                 tombstone: com.automatethethings.xkey.storage.entity.KeyDeletionEntity

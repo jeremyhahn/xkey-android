@@ -2394,7 +2394,10 @@ class RequestHandler(
         // A credential and a general key may share an id: the delete names
         // one of them, and its material and tombstone hold only that key's
         // alias, so the other key, its row and its metadata stay (#255 review).
+        // A probe that cannot read the material is never read as "nothing
+        // held": the delete is refused with nothing removed (#270 round 4).
         val (kind, besideRow) = deleteTarget(keyId, entity, legacy)
+            ?: return Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Key material of $keyId could not be read; not deleted")
         val material = com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager, kind = kind)
         if (entity == null || besideRow) {
             // No key row, or the row is the other key's: the material alone,
@@ -2415,18 +2418,18 @@ class RequestHandler(
      * The key under [keyId] a delete removes ([KeystoreManager.deleteTarget]),
      * and whether the id's row is the other key's: a credential and a general
      * key both hold material under the id and the row is not the target's.
+     * Null when the material cannot be read: the delete is refused.
      */
-    private fun deleteTarget(keyId: String, entity: KeyEntity?, legacy: Boolean): Pair<com.automatethethings.xkey.crypto.UserKeyKind?, Boolean> {
-        // An unreadable store picks by the row alone; the delete then reads
-        // the generation again under the lock and refuses.
+    private fun deleteTarget(keyId: String, entity: KeyEntity?, legacy: Boolean): Pair<com.automatethethings.xkey.crypto.UserKeyKind, Boolean>? {
         val generation = try {
             com.automatethethings.xkey.storage.keyMaterialGeneration(context, keyId, keystoreManager).keys
         } catch (e: Exception) {
-            emptySet()
+            Log.w(TAG, "Key material of $keyId could not be read; delete refused", e)
+            return null
         }
         val kind = KeystoreManager.deleteTarget(keyId, entity?.keyType, generation, legacy)
         val other = com.automatethethings.xkey.crypto.UserKeyKind.entries.firstOrNull { it != kind }
-        val besideRow = entity != null && kind != null && other != null &&
+        val besideRow = entity != null && other != null &&
             KeystoreManager.userKeyKindOf(entity.keyType) != kind && KeystoreManager.holdsKind(keyId, generation, other)
         return kind to besideRow
     }

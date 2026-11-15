@@ -189,12 +189,18 @@ fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null, kind
     val manager by lazy { keystore ?: KeystoreManager(context) }
     return object : KeyMaterial {
         // A user delete names its [kind]; replays and settles delete what
-        // the tombstone recorded, so they need none.
+        // the tombstone recorded, so they need none. A deleter with no kind
+        // would select both namespaces under the id, so it records no
+        // delete: refused here, the one place a delete's generation is
+        // read, before any tombstone or row is touched (#270 round 4).
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String =
-            readKeyMaterialGeneration(context, held, source, manager, kind)
+            readKeyMaterialGeneration(context, held, source, manager, deleteKind(held))
 
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?, retry: Boolean): String =
-            readKeyMaterialGeneration(context, held, source, manager, kind, retry)
+            readKeyMaterialGeneration(context, held, source, manager, deleteKind(held), retry)
+
+        private fun deleteKind(held: KeyPolicyStore.KeyMaterialHeld): UserKeyKind =
+            checkNotNull(kind) { "A delete of ${held.keyId} names no key kind; refused" }
 
         override fun isEmpty(generation: String): Boolean = decodeGeneration(generation).isEmpty()
 

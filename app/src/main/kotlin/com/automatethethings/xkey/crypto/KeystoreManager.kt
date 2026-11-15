@@ -2381,15 +2381,18 @@ class KeystoreManager(private val context: Context) {
          * id, that key (its row, if any, is its own). With a credential and
          * a general key sharing the id, the legacy `deleteKey` names the
          * credential and `local.deleteKey` the row's key, or with no row the
-         * general key. Null with no material under the id: every alias.
+         * general key. With no material under the id, still one kind (the
+         * row's, else the one the method names), never every alias: a key
+         * written under the id meanwhile in the other namespace stays
+         * (#270 round 4).
          */
-        fun deleteTarget(keyId: String, rowKeyType: String?, generation: Set<String>, legacy: Boolean): UserKeyKind? {
+        fun deleteTarget(keyId: String, rowKeyType: String?, generation: Set<String>, legacy: Boolean): UserKeyKind {
             val credential = holdsKind(keyId, generation, UserKeyKind.CREDENTIAL)
             val general = holdsKind(keyId, generation, UserKeyKind.GENERAL)
             return when {
                 credential && !general -> UserKeyKind.CREDENTIAL
                 general && !credential -> UserKeyKind.GENERAL
-                !credential -> null
+                !credential -> rowKeyType?.let { userKeyKindOf(it) } ?: if (legacy) UserKeyKind.CREDENTIAL else UserKeyKind.GENERAL
                 legacy -> UserKeyKind.CREDENTIAL
                 rowKeyType != null -> userKeyKindOf(rowKeyType)
                 else -> UserKeyKind.GENERAL
