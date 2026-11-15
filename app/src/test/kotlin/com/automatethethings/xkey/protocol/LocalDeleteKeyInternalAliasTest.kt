@@ -180,19 +180,20 @@ class LocalDeleteKeyInternalAliasTest {
     @Test
     fun handlerDeletesKeystoreEntriesOnlyThroughTheRefusal() {
         val code = File("src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt").readText()
-        val start = code.indexOf("private fun deleteKeystoreAlias(")
+        val start = code.indexOf("private suspend fun deleteKeystoreAlias(")
         assertTrue("deleteKeystoreAlias must exist", start >= 0)
         val body = code.substring(start, code.indexOf("\n    }\n", start).let { if (it < 0) code.length else it })
         val refusal = body.indexOf("refuseInternalAlias(")
         assertTrue("deleteKeystoreAlias must refuse internal aliases first", refusal >= 0)
-        for (call in listOf("deleteByAlias(", "deleteGeneralKey(")) {
+        for (call in listOf("deleteCredentialKey(", "deleteGeneralKey(")) {
             assertTrue("$call must follow the refusal", body.indexOf(call) > refusal)
         }
-        // A raw alias is deleted nowhere else; deleteGeneralKey elsewhere only
-        // discards a key local.generateKey has just made.
+        // Every removal is audited: no raw-alias delete is left in Handler;
+        // deleteGeneralKey elsewhere only discards a key local.generateKey has
+        // just made.
         assertEquals(
-            "Handler may delete a raw alias only in deleteKeystoreAlias",
-            1,
+            "Handler may not delete a raw alias",
+            0,
             Regex(Regex.escape(".deleteByAlias(")).findAll(code).count()
         )
     }

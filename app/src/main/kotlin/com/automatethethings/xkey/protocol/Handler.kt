@@ -205,6 +205,9 @@ class RequestHandler(
     // Unified key storage DAO
     private val keyDao: KeyDao = XKeyDatabase.getInstance(context).keyDao()
 
+    // A passkey's Credential Provider metadata, removed with its key
+    private val credentialMetadataDao = XKeyDatabase.getInstance(context).credentialMetadataDao()
+
     // The one signature counter a passkey has, shared with the credential provider
     private val passkeySignCounter = PasskeySignCounter(
         XKeyDatabase.getInstance(context).credentialMetadataDao(),
@@ -1255,7 +1258,12 @@ class RequestHandler(
         // revoked too when it differs.
         val deleted = SharePermissionLedger.revoking(keyId) {
             SharePermissionLedger.revoking(deleteParams.credentialId) {
-                keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
+                // A Keystore entry goes through the one delete choke point (internal
+                // aliases refused, credential metadata removed, audited); a
+                // software key keeps its audited delete.
+                val alias = keystoreManager.resolveKeystoreAlias(deleteParams.credentialId)
+                val inKeystore = alias != null && alias in keystoreManager.listAllKeystoreAliases()
+                (if (inKeystore) deleteKeystoreAlias(keyId, alias!!) else keystoreManager.deleteKey(deleteParams.credentialId)).also { removed ->
                     if (removed) keyDao.deleteByKeyId(keyId)
                 }
             }
@@ -2375,13 +2383,49 @@ class RequestHandler(
      * desktop deletes only user keys: [refuseInternalAlias] refuses any
      * entry xKey keeps for itself before anything is removed.
      */
-    private fun deleteKeystoreAlias(keyId: String, alias: String): Boolean {
+    private suspend fun deleteKeystoreAlias(@Suppress("UNUSED_PARAMETER") keyId: String, alias: String): Boolean {
         refuseInternalAlias(alias)
-        return if (alias == KeystoreManager.generalKeyAlias(keyId)) {
-            keystoreManager.deleteGeneralKey(keyId)
-        } else {
-            keystoreManager.deleteByAlias(alias)
+        return when {
+            alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX) ->
+                deleteCredentialKey(alias.removePrefix(KeystoreManager.KEY_ALIAS_PREFIX))
+            alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL) ->
+                keystoreManager.deleteGeneralKey(alias.removePrefix(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL))
+            // [refuseInternalAlias] lets an unprefixed alias through only
+            // when no such entry exists: nothing to remove.
+            else -> false
         }
+    }
+
+    /**
+     * Deletes FIDO2 credential [credentialId] for [deleteKeystoreAlias]: its
+     * Keystore entry through the audited [KeystoreManager.deleteCredentialKey]
+     * and its Credential Provider metadata, both or neither. The metadata row
+     * is taken out first and put back if the material is not removed, so a
+     * delete that cannot remove the metadata (refused, INTERNAL_ERROR) or the
+     * material keeps both, and a passkey is never offered for a key that is
+     * gone.
+     */
+    private suspend fun deleteCredentialKey(credentialId: String): Boolean {
+        val passkey = credentialMetadataDao.getByCredentialId(credentialId)
+        if (passkey != null) {
+            try {
+                credentialMetadataDao.deleteByCredentialId(credentialId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Cannot remove passkey metadata of $credentialId; key kept", e)
+                throw ProtocolException(
+                    "Failed to delete credential: its passkey metadata cannot be removed",
+                    errorCode = ErrorCodes.INTERNAL_ERROR
+                )
+            }
+        }
+        val removed = try {
+            keystoreManager.deleteCredentialKey(credentialId)
+        } catch (e: Exception) {
+            passkey?.let { credentialMetadataDao.insert(it) }
+            throw e
+        }
+        if (!removed) passkey?.let { credentialMetadataDao.insert(it) }
+        return removed
     }
 
     /**
@@ -2398,6 +2442,7 @@ class RequestHandler(
             alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL)) &&
             !alias.startsWith(KeystoreManager.generalKeyAlias(com.automatethethings.xkey.crypto.FileEncryptor.EPHEMERAL_KEY_PREFIX))
         if (userKey || alias !in keystoreManager.listAllKeystoreAliases()) return
+        AuditLogger.logPolicyDenied(keyId = alias, keyLabel = alias, reason = "delete of an internal key refused")
         throw ProtocolException(
             "Key $alias is internal to xKey and cannot be deleted",
             errorCode = ErrorCodes.OPERATION_DENIED

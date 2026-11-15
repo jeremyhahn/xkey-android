@@ -152,6 +152,7 @@ class LocalDeleteKeyExactIdTest {
             listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
         }
         every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
+        every { keystore.deleteCredentialKey(any()) } answers { aliases.remove("xkey_credential_${firstArg<String>()}") }
         every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
         every { keystore.deleteKey(any()) } answers {
             keystore.resolveKeystoreAlias(firstArg())?.let { aliases.remove(it) } ?: false
@@ -199,6 +200,7 @@ class LocalDeleteKeyExactIdTest {
             listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
         }
         every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
+        every { keystore.deleteCredentialKey(any()) } answers { aliases.remove("xkey_credential_${firstArg<String>()}") }
         every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false

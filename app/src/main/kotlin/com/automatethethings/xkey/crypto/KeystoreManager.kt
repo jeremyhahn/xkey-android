@@ -1831,6 +1831,30 @@ class KeystoreManager(private val context: Context) {
         return true
     }
 
+    /**
+     * Delete exactly FIDO2 credential [credentialId]'s Keystore entry
+     * (`xkey_credential_<id>`), never the general key of the same ID, and
+     * audit the deletion as [deleteKey] does.
+     *
+     * @param credentialId Credential identifier.
+     * @return true if the entry was deleted, false if it did not exist.
+     */
+    fun deleteCredentialKey(credentialId: String): Boolean {
+        val alias = credentialAlias(credentialId)
+        if (!keyStore.containsAlias(alias)) {
+            return false
+        }
+        withAliasGate(alias) { keyStore.deleteEntry(alias) }
+
+        AuditLogger.logKeyDeleted(
+            keyId = credentialId,
+            keyLabel = credentialId,
+            keyType = FIDO2_KEY_TYPE
+        )
+
+        return true
+    }
+
     // -------------------------------------------------------------------------
     // Private Helpers - Key Generation
     // -------------------------------------------------------------------------

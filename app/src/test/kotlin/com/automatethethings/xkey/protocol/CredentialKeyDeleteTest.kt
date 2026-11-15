@@ -108,7 +108,7 @@ class CredentialKeyDeleteTest {
             keystore.resolveKeystoreAlias(firstArg())?.let { aliases.remove(it) } ?: false
         }
         // The audited delete of exactly one credential's Keystore entry.
-        every { keystore["deleteCredentialKey"](any<String>()) } answers {
+        every { keystore.deleteCredentialKey(any<String>()) } answers {
             aliases.remove("xkey_credential_${firstArg<String>()}")
         }
         mockkConstructor(SoftwareKeyStore::class)
@@ -135,7 +135,7 @@ class CredentialKeyDeleteTest {
             assertFalse("the credential's key must be gone, left $aliases", credentialAlias in aliases)
             assertFalse("the passkey's metadata must be gone", "c" in metadata)
         }
-        verify(exactly = 4) { keystore["deleteCredentialKey"]("c") }
+        verify(exactly = 4) { keystore.deleteCredentialKey("c") }
         verify(exactly = 0) { keystore.deleteByAlias(credentialAlias) }
         verify(exactly = 0) { keystore.deleteKey(any()) }
     }
@@ -154,7 +154,7 @@ class CredentialKeyDeleteTest {
 
     @Test
     fun aFailedMaterialRemovalKeepsTheMetadata() = runBlocking<Unit> {
-        every { keystore["deleteCredentialKey"](any<String>()) } throws IllegalStateException("keystore busy")
+        every { keystore.deleteCredentialKey(any<String>()) } throws IllegalStateException("keystore busy")
         for ((n, request) in listOf(localDelete("c"), legacyDelete("c")).withIndex()) {
             val response = send(realHandler(), n, request)
 
