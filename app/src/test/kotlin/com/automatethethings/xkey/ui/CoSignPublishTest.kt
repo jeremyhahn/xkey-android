@@ -25,9 +25,15 @@ import android.net.Uri
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import androidx.lifecycle.lifecycleScope
+import com.automatethethings.xkey.R
 import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaPublisher
+import com.automatethethings.xkey.media.MediaSaveRuns
 import com.automatethethings.xkey.media.XmpFixtures
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import org.junit.After
@@ -56,6 +62,8 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.cancel
 
 /**
  * The media a provider holds that cannot be replaced atomically: readable,
@@ -127,6 +135,8 @@ class CoSignPublishTest {
 
     private companion object {
         const val COPIES = "xkey.test.copies"
+        /** The content hash the original's signature data carries. */
+        val ORIGINAL_HASH = "e".repeat(64)
     }
 
     @Before
@@ -179,9 +189,40 @@ class CoSignPublishTest {
     }
 
     private fun scanWitness(activity: CoSignActivity, fingerprint: String = "SHA256:witness") {
+        answerScanner(activity, openResponseScanner(activity), fingerprint)
+    }
+
+    private fun findButton(view: View, text: String): Button? = when (view) {
+        is Button -> view.takeIf { it.text == text }
+        is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { findButton(view.getChildAt(it), text) }
+        else -> null
+    }
+
+    /**
+     * Taps "scan the witness's response" for the selected media, as shown
+     * (its signatures read, with the original's hash unless a test set
+     * others), and returns the request code of the scanner it opened.
+     */
+    private fun openResponseScanner(activity: CoSignActivity): Int {
+        if (field("currentSignatureData").get(activity) == null) {
+            field("currentSignatureData").set(activity, ContentAuthenticityData.fromJsonString(XmpFixtures.json(ORIGINAL_HASH)))
+        }
+        val button = findButton(activity.window.decorView, activity.getString(R.string.cosign_scan_response))
+        assertNotNull("the scan button", button)
+        button!!.performClick()
+        val started = shadowOf(activity).nextStartedActivityForResult
+        assertEquals(QrScannerActivity::class.java.name, started.intent.component?.className)
+        return started.requestCode
+    }
+
+    /** The scanner opened with [requestCode] returns the witness's response. */
+    private fun answerScanner(activity: CoSignActivity, requestCode: Int, fingerprint: String = "SHA256:witness") {
         val response = CoSignResponse("AAAA", fingerprint, "Witness", "ES256").toJsonString()
-        CoSignActivity::class.java.getDeclaredMethod("onResponseScanned", String::class.java)
-            .apply { isAccessible = true }.invoke(activity, response)
+        activity.activityResultRegistry.dispatchResult(
+            requestCode,
+            Activity.RESULT_OK,
+            Intent().putExtra(QrScannerActivity.EXTRA_SCANNED_URI, response)
+        )
     }
 
     /** The save picker [activity] opens next, once it opens one: its intent and request code. */
@@ -497,5 +538,108 @@ class CoSignPublishTest {
         ReadOnlyMediaProvider.typeQueriesLeft = null
         scanWitness(activity, "SHA256:second")
         awaitPicker(activity)
+    }
+
+    private fun boundHash(response: Any?): Any? =
+        response!!.javaClass.getDeclaredField("contentHash").apply { isAccessible = true }.get(response)
+
+    @Test
+    fun `a recreation while the response scanner is open appends with the hash the witness was shown`() {
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        shadowOf(Looper.getMainLooper()).idle()
+        field("selectedUri").set(controller.get(), original)
+        val requestCode = openResponseScanner(controller.get())
+
+        // The scanner covers the screen, which is recreated; its reload of the
+        // media's signatures has not ended when the scan comes back.
+        val gate = CountDownLatch(1)
+        ReadOnlyMediaProvider.readGate = gate
+        controller.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+        val activity = controller.get()
+        assertNull(field("currentSignatureData").get(activity))
+        answerScanner(activity, requestCode)
+
+        assertEquals("bound to the hash shown when the scan began", ORIGINAL_HASH, boundHash(queued(activity).single()))
+        ReadOnlyMediaProvider.readGate = null
+        gate.countDown()
+        awaitPicker(activity)
+        assertEquals(1, recoveryFiles(activity).size)
+    }
+
+    @Test
+    fun `a recreation while the response scanner is open refuses media whose content changed meanwhile`() {
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        shadowOf(Looper.getMainLooper()).idle()
+        field("selectedUri").set(controller.get(), original)
+        val requestCode = openResponseScanner(controller.get())
+
+        // While the scanner is open the media is replaced by other content,
+        // which the recreated screen reads back before the scan returns.
+        val changed = File(folder.root, "clip.png").apply { writeBytes(XmpFixtures.png()) }
+        XmpMetadataHelper.writeSignature(changed.path, ContentAuthenticityData.fromJsonString(XmpFixtures.json("d".repeat(64))))
+        controller.recreate()
+        val activity = controller.get()
+        idleUntil { field("currentSignatureData").get(activity) != null }
+        answerScanner(activity, requestCode)
+        settle()
+
+        assertNull("nothing is co-signed", shadowOf(activity).nextStartedActivityForResult)
+        assertEquals(0, queued(activity).size)
+        assertEquals("the staged copy is gone", emptyList<File>(), recoveryFiles(activity))
+    }
+
+    @Test
+    fun `a response with no hash the witness was shown is refused, never appended unchecked`() {
+        val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
+        shadowOf(Looper.getMainLooper()).idle()
+        field("selectedUri").set(activity, original)
+        // A scan result with no scan begun for it, as after process death
+        // dropped the scanner's request: no hash to check the media against.
+        val response = CoSignResponse("AAAA", "SHA256:witness", "Witness", "ES256").toJsonString()
+        CoSignActivity::class.java.getDeclaredMethod("onResponseScanned", String::class.java)
+            .apply { isAccessible = true }.invoke(activity, response)
+        settle()
+
+        assertNull("nothing is co-signed", shadowOf(activity).nextStartedActivityForResult)
+        assertEquals(0, queued(activity).size)
+        assertEquals("the staged copy is gone", emptyList<File>(), recoveryFiles(activity))
+    }
+
+    @Test
+    fun `a waiter cancelled after its append ended leaves the result for the recreated screen`() {
+        val gate = CountDownLatch(1)
+        ReadOnlyMediaProvider.readGate = gate
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        shadowOf(Looper.getMainLooper()).idle()
+        val first = controller.get()
+        field("selectedUri").set(first, original)
+        scanWitness(first)
+        idleUntil { ReadOnlyMediaProvider.readsStarted.get() >= 1 }
+        val id = field("runningAppend").get(first) as String
+
+        // The append ends (it needs a copy) before the screen's waiter runs,
+        // and the waiter is cancelled, as when the screen goes away then.
+        ReadOnlyMediaProvider.readGate = null
+        gate.countDown()
+        @Suppress("UNCHECKED_CAST")
+        val runs = MediaSaveRuns::class.java.getDeclaredField("runs").apply { isAccessible = true }
+            .get(null) as Map<String, Deferred<*>>
+        val deadline = System.currentTimeMillis() + 10_000
+        while (runs[id]?.isCompleted != true) {
+            assertTrue("the append never ended", System.currentTimeMillis() < deadline)
+            Thread.sleep(10)
+        }
+        first.lifecycleScope.cancel()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        controller.recreate()
+        val activity = controller.get()
+        val (picker, _) = awaitPicker(activity)
+        assertEquals("clip-cosigned.png", picker.getStringExtra(Intent.EXTRA_TITLE))
+        settle()
+        assertNull("the picker opens once", shadowOf(activity).nextStartedActivityForResult)
+        assertEquals("the one staged co-signature waits for it", 1, recoveryFiles(activity).size)
+        assertNotNull(field("pendingCopy").get(activity))
     }
 }

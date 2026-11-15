@@ -66,6 +66,38 @@ class CoSignAppendChokePointTest {
         // Scanned (bound to the selection), or restored with its saved binding.
         assertEquals(2, count("queuedResponses.add("))
         assertEquals(1, count("queuedResponses.add(", body("restoreExchange")))
-        assertEquals(1, count("queuedResponses.add(QueuedResponse(raw, media, currentSignatureData?.contentHash))", body("onResponseScanned")))
+        assertEquals(1, count("queuedResponses.add(QueuedResponse(raw, scanFor?.media, scanFor?.contentHash))", body("onResponseScanned")))
+        // Bound to what the scan began for (kept across a recreation), never to what shows when it returns.
+        assertEquals(1, count("responseScanFor = ScanTarget(", body("startResponseScan")))
+        assertEquals(1, count("responseScanner.launch("))
+        assertEquals(1, count("responseScanner.launch(", body("startResponseScan")))
+    }
+
+    @Test
+    fun `an append is refused, not unchecked, when the hash it was scanned for is missing`() {
+        assertEquals(1, count("private fun appendToMedia(context: Context, uri: Uri, entry: SignatureEntry, expectedHash: String)"))
+        assertEquals(0, count("expectedHash != null"))
+    }
+
+    /**
+     * A screen reads a save run only through MediaSaveRuns.outcome, which tells
+     * the screen's own cancellation from the run's end: reading the run's
+     * Deferred directly can take the cancellation for the run's failure and
+     * drop a finished run's result.
+     */
+    @Test
+    fun `a save run is read only through MediaSaveRuns outcome`() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val users = root.walkTopDown().filter { it.isFile && it.extension == "kt" }
+            .map { it to it.readText() }.filter { (_, text) -> "MediaSaveRuns.attach(" in text }.toList()
+        assertTrue("CoSignActivity starts runs", users.any { it.first.name == "CoSignActivity.kt" })
+        for ((file, text) in users) {
+            val names = Regex("""val (\w+) = MediaSaveRuns\.attach\(""").findAll(text).map { it.groupValues[1] }.toList()
+            assertEquals("${file.name}: every run is named", count("MediaSaveRuns.attach(", text), names.size)
+            for (name in names) {
+                assertEquals("${file.name}: $name read directly", 0, count("$name.await(", text) + count("$name.join(", text) + count("$name.isCompleted", text))
+                assertTrue("${file.name}: $name read through outcome", count("MediaSaveRuns.outcome($name)", text) >= 1)
+            }
+        }
     }
 }
