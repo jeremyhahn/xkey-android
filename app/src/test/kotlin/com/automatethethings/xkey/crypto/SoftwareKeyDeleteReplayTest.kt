@@ -155,7 +155,7 @@ class SoftwareKeyDeleteReplayTest {
         }
 
         val outcome = com.automatethethings.xkey.ui.deleteUserKey(
-            key, policies, com.automatethethings.xkey.storage.keyMaterialDeleter(mockk(relaxed = true), keystore)
+            key, policies, com.automatethethings.xkey.storage.keyMaterialDeleter(mockk<Context>(relaxed = true) { every { filesDir } returns this@SoftwareKeyDeleteReplayTest.filesDir }, keystore)
         )
 
         assertTrue("the delete was not refused: $outcome", outcome is com.automatethethings.xkey.ui.UserKeyDelete.Refused)

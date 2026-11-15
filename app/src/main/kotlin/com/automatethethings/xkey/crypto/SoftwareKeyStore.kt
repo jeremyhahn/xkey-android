@@ -129,7 +129,7 @@ class SoftwareKeyStore(
                 if (filePresence(metaFile) != KeyPresence.PRESENT) throw KeyPresenceUnreadableException(keyId, null)
             }
         }
-        val meta = JSONObject(metaFile.readText())
+        val meta = readMetadata(metaFile, keyId)
         return SoftwareKey(
             keyId = keyId,
             algorithm = meta.optString("algorithm", ""),
@@ -137,7 +137,7 @@ class SoftwareKeyStore(
             keySize = meta.optInt("keySize", 0),
             exportable = meta.optBoolean("exportable", false),
             shareable = meta.optBoolean("shareable", false),
-            material = cipher.decrypt(keyFile.readBytes())
+            material = cipher.decrypt(readRecordFile(keyFile, keyId))
         )
     }
 
@@ -185,8 +185,9 @@ class SoftwareKeyStore(
     /**
      * What an older build's records left under their old names (their
      * migration found the digest name taken, or could not rename) hold of
-     * [keyId]. A record whose file cannot be read is taken as [keyId]'s, so
-     * an unreadable record never reads as absent. A record whose metadata
+     * [keyId]. A record whose metadata cannot be read could be any id's: it
+     * is [KeyPresence.UNREADABLE] (#255 verify r2z), never absent and never
+     * [keyId]'s key, so no other key under [keyId] is read as a user key. A record whose metadata
      * cannot be parsed while its material is there (or cannot be probed)
      * could be any id's: it is [KeyPresence.UNREADABLE], never a record of
      * another id, so a caller refuses rather than fall back to another
@@ -211,10 +212,14 @@ class SoftwareKeyStore(
                 continue
             }
             if (!file.name.endsWith(".meta")) continue
+            // Metadata that is listed but cannot be read could be any id's
+            // (#255 verify r2z): it is unreadable for [keyId], never read
+            // as its key, so no other key (an internal one under a raw
+            // alias) is taken for a user key of [keyId].
             val text = try {
-                file.readText()
-            } catch (e: java.io.IOException) {
-                return KeyPresence.PRESENT
+                readMetadataText(file, keyId)
+            } catch (e: KeyPresenceUnreadableException) {
+                return KeyPresence.UNREADABLE
             }
             // A record of another id, migrated (under its id's digest) or
             // not, is that id's.
@@ -257,8 +262,8 @@ class SoftwareKeyStore(
             meta == KeyPresence.ABSENT -> KeyPresence.PRESENT
             else -> {
                 val text = try {
-                    metaFile.readText()
-                } catch (e: java.io.IOException) {
+                    readMetadataText(metaFile, keyId)
+                } catch (e: KeyPresenceUnreadableException) {
                     return KeyPresence.UNREADABLE
                 }
                 if (recordId(text) == keyId) KeyPresence.PRESENT else KeyPresence.UNREADABLE
@@ -285,6 +290,38 @@ class SoftwareKeyStore(
             JSONObject(text).opt("keyId") as? String
         } catch (e: org.json.JSONException) {
             null
+        }
+
+    /**
+     * The one read of a record's file, material or metadata (#255 verify
+     * r2z, ruling 554): a read that fails (an I/O error, a file that can be
+     * stat'ed but not read, a denied read) is [KeyPresenceUnreadableException]
+     * for [keyId], never a key that is there or not, and never an
+     * IOException out of a caller. Every read of a record file in this
+     * store goes through here (SoftwareKeyStoreReadBypassTest).
+     */
+    private fun readRecordFile(file: File, keyId: String): ByteArray =
+        try {
+            file.readBytes()
+        } catch (e: java.io.IOException) {
+            throw KeyPresenceUnreadableException(keyId, e)
+        } catch (e: SecurityException) {
+            throw KeyPresenceUnreadableException(keyId, e)
+        }
+
+    /** A record's metadata [file] as text, read by [readRecordFile]. */
+    private fun readMetadataText(file: File, keyId: String): String =
+        readRecordFile(file, keyId).toString(Charsets.UTF_8)
+
+    /**
+     * A record's metadata [file] as JSON, read by [readRecordFile]: metadata
+     * that cannot be parsed is [KeyPresenceUnreadableException] too.
+     */
+    private fun readMetadata(file: File, keyId: String): JSONObject =
+        try {
+            JSONObject(readMetadataText(file, keyId))
+        } catch (e: org.json.JSONException) {
+            throw KeyPresenceUnreadableException(keyId, e)
         }
 
     /** Throws [IllegalArgumentException] for an id [isValidKeyId] rejects. */
@@ -319,8 +356,10 @@ class SoftwareKeyStore(
         val files = listOf(filePresence(keyFile), filePresence(metaFile))
         if (KeyPresence.UNREADABLE in files) throw KeyPresenceUnreadableException(keyId, null)
         return when {
-            files[0] == KeyPresence.PRESENT -> SyncCodec.sha256Hex(keyFile.readBytes())
-            files[1] == KeyPresence.PRESENT -> METADATA_ONLY + SyncCodec.sha256Hex(metaFile.readBytes())
+            // A file that stats but cannot be read is unreadable, never an
+            // IOException out of a delete (#255 verify r2z).
+            files[0] == KeyPresence.PRESENT -> SyncCodec.sha256Hex(readRecordFile(keyFile, keyId))
+            files[1] == KeyPresence.PRESENT -> METADATA_ONLY + SyncCodec.sha256Hex(readRecordFile(metaFile, keyId))
             else -> null
         }
     }
@@ -361,7 +400,7 @@ class SoftwareKeyStore(
             // digest is the record's name once migrated), never by the
             // name's shape: an older build kept a 64-hex id as its name
             // (#255 verify r5).
-            val keyId = runCatching { recordId(meta.readText()) }.getOrNull() ?: continue
+            val keyId = runCatching { recordId(readMetadataText(meta, stem)) }.getOrNull() ?: continue
             val target = fileId(keyId)
             // Never let an old record overwrite one already written under the
             // digest name — that record is the newer of the two.
