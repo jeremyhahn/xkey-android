@@ -204,6 +204,34 @@ class KeyPolicyStoreTest {
         assertEquals("a grant from before the Private survived its owed clear", emptySet<String>(), tables.grantsOf("k"))
     }
 
+    /**
+     * Every policy-store write of a key's sharing is a share-ledger revoke
+     * of the key: a share baseline taken before a policy change, a grant
+     * withdrawal or the key's delete is refused at admission after it.
+     */
+    @Test
+    fun aPolicyStoreWriteIsAShareLedgerRevoke() = runBlocking {
+        val keyId = "ledger-revoke-${System.nanoTime()}"
+        val instance = tables.addKey(keyId, SELECTED_PEERS)
+        tables.grant(keyId, PEER)
+        val writes = listOf<Pair<String, suspend () -> Unit>>(
+            "a policy change" to { store().setPolicy(keyId, instance, ALL_PEERS) },
+            "a grant withdrawal" to { store().withdraw(keyId, instance, PEER) },
+            "the key's delete" to { store().deleteKey(keyId, instance, materialDelete { true }) },
+        )
+        for ((name, write) in writes) {
+            com.automatethethings.xkey.remote.SharePermissionLedger.baselineForTest(keyId).use { baseline ->
+                com.automatethethings.xkey.remote.SharePermissionLedger.requireUnchanged(keyId, baseline.revision)
+                write()
+                try {
+                    com.automatethethings.xkey.remote.SharePermissionLedger.requireUnchanged(keyId, baseline.revision)
+                    fail("$name must revoke a share baseline taken before it")
+                } catch (expected: com.automatethethings.xkey.remote.SharePermissionRevokedException) {
+                }
+            }
+        }
+    }
+
     /** A withdrawal whose grant delete failed leaves the grant clear it owes in the policy row, after a restart too. */
     @Test
     fun aFailedWithdrawalOwesTheGrantClearDurably() = runBlocking {
