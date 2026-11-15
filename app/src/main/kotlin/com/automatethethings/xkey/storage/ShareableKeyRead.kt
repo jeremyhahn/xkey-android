@@ -14,6 +14,8 @@
  */
 package com.automatethethings.xkey.storage
 
+import androidx.annotation.StringRes
+import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeyPresenceUnreadableException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
@@ -51,36 +53,45 @@ inline fun <T : Any> readRefusingUnreadable(read: () -> T?): KeyRead<T> =
     }
 
 /**
+ * The one choke point between a key read and a screen (#255 verify r3,
+ * ruling 554): the read's value, or null after [refuse] is handed the
+ * message the screen shows. An unreadable store is always refused
+ * ([R.string.key_store_unreadable]); a read with no value is refused with
+ * [unavailable], or skipped quietly when that is null (a key with no public
+ * half, say). A caller never puts a stand-in (a key id, an empty key) in
+ * place of a value it could not read.
+ */
+inline fun <T : Any> KeyRead<T>.orRefuse(@StringRes unavailable: Int?, refuse: (Int) -> Unit): T? =
+    when (this) {
+        is KeyRead.Value -> value
+        KeyRead.Unavailable -> {
+            unavailable?.let(refuse)
+            null
+        }
+        KeyRead.Unreadable -> {
+            refuse(R.string.key_store_unreadable)
+            null
+        }
+    }
+
+/**
  * A key's public key, DER-encoded, read by a screen ([readRefusingUnreadable]):
- * the co-sign screen's initiator QR names its key by this key's fingerprint.
+ * the co-sign screen's QRs name their key by this key's fingerprint.
  */
 fun KeystoreManager.readOwnPublicKeyDer(keyId: String, kind: UserKeyKind): KeyRead<ByteArray> =
     readRefusingUnreadable { getPublicKeyDER(keyId, kind) }
 
 /**
- * What a screen's export of a key's own public key read (#255 review r6):
- * the PEM, no public key (none in one namespace, or an id both hold), or a
- * refusal because a store the key could live in cannot be read.
- */
-sealed interface OwnPublicKeyRead {
-    class Pem(val pem: String) : OwnPublicKeyRead
-    object Unavailable : OwnPublicKeyRead
-    object Unreadable : OwnPublicKeyRead
-}
-
-/**
  * The one read of a key's public key by a screen (the key detail screen's
  * copy and the contacts screen's QR export): the key's one namespace
  * ([KeystoreManager.soleKind]) and its PEM, through [readRefusingUnreadable].
- * An unreadable store is a refusal the screen shows, never an exception out
- * of its button or coroutine, and never a fallback to another namespace.
+ * Unavailable is no public key (none in one namespace, or an id both hold);
+ * Unreadable is a store the key could live in that cannot be read. The
+ * screen takes it through [orRefuse], never an exception out of its button
+ * or coroutine, and never a fallback to another namespace.
  */
-fun KeystoreManager.readOwnPublicKey(keyId: String): OwnPublicKeyRead =
-    when (val read = readRefusingUnreadable { soleKind(keyId)?.let { getPublicKeyPEM(keyId, it) } }) {
-        is KeyRead.Value -> OwnPublicKeyRead.Pem(read.value)
-        KeyRead.Unavailable -> OwnPublicKeyRead.Unavailable
-        KeyRead.Unreadable -> OwnPublicKeyRead.Unreadable
-    }
+fun KeystoreManager.readOwnPublicKey(keyId: String): KeyRead<String> =
+    readRefusingUnreadable { soleKind(keyId)?.let { getPublicKeyPEM(keyId, it) } }
 
 /**
  * What a key share may send for a key: its software material, or the public

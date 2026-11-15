@@ -54,7 +54,7 @@ import com.google.android.material.snackbar.Snackbar
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.KeyPolicyStore
-import com.automatethethings.xkey.storage.OwnPublicKeyRead
+import com.automatethethings.xkey.storage.orRefuse
 import com.automatethethings.xkey.storage.readOwnPublicKey
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
@@ -2063,15 +2063,12 @@ class KeyDetailActivity : AppCompatActivity() {
         // The key's one namespace (#255 review r3); an id held in both shows
         // none, and a store that cannot be read is refused on screen, never
         // thrown out of this button (#255 review r6).
-        when (val read = keystoreManager.readOwnPublicKey(key.keyId)) {
-            is OwnPublicKeyRead.Pem -> {
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("Public Key", read.pem))
-                Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_copied), Snackbar.LENGTH_SHORT).show()
-            }
-            OwnPublicKeyRead.Unavailable, OwnPublicKeyRead.Unreadable ->
-                Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_unavailable), Snackbar.LENGTH_SHORT).show()
-        }
+        val pem = keystoreManager.readOwnPublicKey(key.keyId).orRefuse(R.string.key_public_key_unavailable) { refusal ->
+            Snackbar.make(coordinatorLayout, getString(refusal), Snackbar.LENGTH_SHORT).show()
+        } ?: return
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Public Key", pem))
+        Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_copied), Snackbar.LENGTH_SHORT).show()
     }
 
     /**
@@ -2085,8 +2082,8 @@ class KeyDetailActivity : AppCompatActivity() {
             val outcome = deleteUserKey(key, keyPolicyStore,
                 com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyDetailActivity,
                     kind = com.automatethethings.xkey.crypto.KeystoreManager.userKeyKindOf(key.keyType)))
-            if (outcome == UserKeyDelete.PROTECTED) {
-                Snackbar.make(coordinatorLayout, getString(R.string.key_system_explanation), Snackbar.LENGTH_LONG).show()
+            outcome.refusal?.let { refusal ->
+                Snackbar.make(coordinatorLayout, getString(refusal), Snackbar.LENGTH_LONG).show()
                 return@launch
             }
             finish()

@@ -51,8 +51,8 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.ContactKeyParser
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.qr.QrCodeScannerHelper
-import com.automatethethings.xkey.storage.OwnPublicKeyRead
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.orRefuse
 import com.automatethethings.xkey.storage.readOwnPublicKey
 import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -1021,18 +1021,14 @@ class ContactManagementActivity : AppCompatActivity() {
         val keys = keyDao.getAll().mapNotNull { key ->
             // A key whose store cannot be read is refused, never thrown out
             // of this coroutine nor read from another namespace (#255 review r6).
-            when (val read = keystoreManager.readOwnPublicKey(key.keyId)) {
-                is OwnPublicKeyRead.Pem -> OwnPublicKey(
+            // A key with no public half is skipped quietly (no message).
+            keystoreManager.readOwnPublicKey(key.keyId).orRefuse(null) { refused = true }?.let { pem ->
+                OwnPublicKey(
                     keyId = key.keyId,
                     label = key.label,
                     algorithm = key.algorithm,
-                    publicKeyPem = read.pem
+                    publicKeyPem = pem
                 )
-                OwnPublicKeyRead.Unreadable -> {
-                    refused = true
-                    null
-                }
-                OwnPublicKeyRead.Unavailable -> null
             }
         }
         return OwnPublicKeys(keys, refused)

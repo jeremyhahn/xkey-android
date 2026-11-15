@@ -84,6 +84,42 @@ class KeyPresenceRefusalBypassTest {
         )
     }
 
+    /**
+     * #255 verify r3 (ruling 554): every screen takes a refusing read's
+     * result through the one choke point, `orRefuse`, which shows the
+     * refusal and gives no value: no screen matches on the read's outcomes
+     * itself (where a branch could put a stand-in, the key id, in place of
+     * a value it could not read, as the co-sign QR did).
+     */
+    @Test
+    fun everyScreenTakesARefusingReadThroughTheChokePoint() {
+        val outcomes = Regex("""\bKeyRead\.(Value|Unavailable|Unreadable)\b|\bOwnPublicKeyRead\b""")
+        val reads = Regex("""\b(readRefusingUnreadable\s*\{|readOwnPublicKey(Der)?\()""")
+        val found = mutableListOf<String>()
+        val bypassing = mutableListOf<String>()
+        for (file in ENTRY_DIRS.flatMap { sources(it) }) {
+            val text = stripComments(file.readText())
+            outcomes.findAll(text).forEach { bypassing += "${file.name}: ${it.value}" }
+            for (read in reads.findAll(text)) {
+                found += file.name
+                val end = closing(text, read.range.last)
+                if (!text.substring(end + 1).trimStart().startsWith(".orRefuse(")) bypassing += "${file.name}: ${read.value}"
+            }
+        }
+        assertTrue("the scan finds the screens' refusing reads: $found", found.size >= 5)
+        assertTrue("a screen takes a refusing read around orRefuse: $bypassing", bypassing.isEmpty())
+    }
+
+    @Test
+    fun theChokePointScannerFlagsAMatchOnTheReadsOutcome() {
+        val text = "val k = when (val r = keystoreManager.readOwnPublicKeyDer(id, kind)) { is KeyRead.Value -> r.value; else -> id }"
+        val end = closing(text, text.indexOf("readOwnPublicKeyDer(") + "readOwnPublicKeyDer(".length - 1)
+        assertTrue(!text.substring(end + 1).trimStart().startsWith(".orRefuse("))
+        val ok = "val k = keystoreManager.readOwnPublicKeyDer(id, f(kind))\n    .orRefuse(R.string.x) { show(it) } ?: return"
+        val okEnd = closing(ok, ok.indexOf("readOwnPublicKeyDer(") + "readOwnPublicKeyDer(".length - 1)
+        assertTrue(ok.substring(okEnd + 1).trimStart().startsWith(".orRefuse("))
+    }
+
     @Test
     fun theRequestHandlerRefusesAnUnreadableKeyStoreAtItsDispatch() {
         val handler = File(main, "com/automatethethings/xkey/protocol/Handler.kt").readText()
@@ -126,7 +162,7 @@ class KeyPresenceRefusalBypassTest {
             """\b\w*[Kk]ey[Ss]tore\w*\??\.(sign|signWithAlgorithm|signWithoutBiometric|getPublicKeyDER|getPublicKeyPEM|""" +
                 """getPublicKeySSH|getPublicKey|getCOSEPublicKey|getAttestationChain|keyExists|resolveKey|resolveKeystoreAlias|""" +
                 """holdsUserKey|soleKind|exportKind|userKeyIdInUse|holdsAnyKey|holdsInternalKey|userKeyGeneration|""" +
-                """userKeyPresence)\(|\b(withUsableKey|requireUsable|readShareable)\(|""" +
+                """userKeyPresence)\(|\b(withUsableKey|requireUsable|readShareable)\(|(?<!fun )\bforgetKey\(|""" +
                 // The credential provider's handlers, checked at the screens and service that call them.
                 """\b(createHandler|getHandler)\.handle\w*\("""
         )
@@ -187,6 +223,18 @@ class KeyPresenceRefusalBypassTest {
                 i--
             }
             return null
+        }
+
+        /** The index of the `)` or `}` closing the `(` or `{` at [open]. */
+        fun closing(text: String, open: Int): Int {
+            var depth = 0
+            for (i in open until text.length) {
+                when (text[i]) {
+                    '(', '{' -> depth++
+                    ')', '}' -> if (--depth == 0) return i
+                }
+            }
+            return text.length - 1
         }
 
         /** The index of the `}` closing the `{` at [open]. */

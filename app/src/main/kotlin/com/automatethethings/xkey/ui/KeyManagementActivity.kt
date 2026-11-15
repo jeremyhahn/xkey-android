@@ -58,6 +58,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.orRefuse
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.google.android.material.card.MaterialCardView
@@ -1299,7 +1300,7 @@ class KeyManagementActivity : AppCompatActivity() {
             val outcome = deleteUserKey(key, keyPolicyStore,
                 com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyManagementActivity,
                     kind = com.automatethethings.xkey.crypto.KeystoreManager.userKeyKindOf(key.keyType)))
-            val shown = if (outcome == UserKeyDelete.PROTECTED) R.string.key_system_explanation else R.string.key_deleted
+            val shown = outcome.refusal ?: R.string.key_deleted
             Snackbar.make(rootLayout, getString(shown), Snackbar.LENGTH_SHORT).show()
         }
     }
@@ -1802,8 +1803,17 @@ class KeyManagementActivity : AppCompatActivity() {
     }
 }
 
-/** What a key delete the user asked for did. */
-internal enum class UserKeyDelete { DELETED, GONE, PROTECTED }
+/**
+ * What a key delete the user asked for did. [Refused]: the delete could not
+ * run (an unreadable key store, a failed key-store read), nothing deleted,
+ * and the screen shows [Refused.message] (#255 verify r3).
+ */
+internal sealed interface UserKeyDelete {
+    object DELETED : UserKeyDelete
+    object GONE : UserKeyDelete
+    object PROTECTED : UserKeyDelete
+    class Refused(@androidx.annotation.StringRes val message: Int) : UserKeyDelete
+}
 
 /**
  * The UI's one key delete (#255 review): every delete screen goes through
@@ -1811,7 +1821,11 @@ internal enum class UserKeyDelete { DELETED, GONE, PROTECTED }
  * ([com.automatethethings.xkey.storage.InternalKeyException]), is refused
  * with nothing deleted and reported as [UserKeyDelete.PROTECTED], never a
  * crash. [UserKeyDelete.GONE]: the key was deleted or generated again
- * meanwhile, nothing deleted.
+ * meanwhile, nothing deleted. A delete that cannot read the key store runs
+ * through the screens' one refusal choke point
+ * ([com.automatethethings.xkey.storage.readRefusingUnreadable] and
+ * [com.automatethethings.xkey.storage.orRefuse]) and is
+ * [UserKeyDelete.Refused], never an exception out of the screen's coroutine.
  */
 internal suspend fun deleteUserKey(
     key: KeyEntity,
@@ -1819,10 +1833,29 @@ internal suspend fun deleteUserKey(
     material: com.automatethethings.xkey.storage.KeyMaterial
 ): UserKeyDelete {
     if (key.isSystemKey) return UserKeyDelete.PROTECTED
-    return try {
-        if (KeySharingPeers.forgetKey(key.keyId, key.id, store, material)) UserKeyDelete.DELETED
-        else UserKeyDelete.GONE
+    var refusal = R.string.key_delete_failed
+    val deleted = try {
+        com.automatethethings.xkey.storage.readRefusingUnreadable {
+            KeySharingPeers.forgetKey(key.keyId, key.id, store, material)
+        }.orRefuse(R.string.key_delete_failed) { refusal = it }
     } catch (e: com.automatethethings.xkey.storage.InternalKeyException) {
-        UserKeyDelete.PROTECTED
+        return UserKeyDelete.PROTECTED
+    }
+    return when (deleted) {
+        true -> UserKeyDelete.DELETED
+        false -> UserKeyDelete.GONE
+        null -> UserKeyDelete.Refused(refusal)
     }
 }
+
+/**
+ * The message a delete screen shows for a delete that deleted nothing
+ * because it was refused; null when the key was deleted or already gone.
+ */
+@get:androidx.annotation.StringRes
+internal val UserKeyDelete.refusal: Int?
+    get() = when (this) {
+        UserKeyDelete.PROTECTED -> R.string.key_system_explanation
+        is UserKeyDelete.Refused -> message
+        UserKeyDelete.DELETED, UserKeyDelete.GONE -> null
+    }

@@ -71,6 +71,30 @@ class UserKeyDeleteTest {
         coVerify(exactly = 0) { dao.deleteKey(any()) }
     }
 
+    /**
+     * #255 verify r3: a key store that cannot be read, or fails, refuses the
+     * delete with the screen's message, nothing deleted, never an exception
+     * out of the screen's coroutine.
+     */
+    @Test
+    fun aDeleteThatCannotReadTheKeyStoreIsRefused() = runTest {
+        coEvery { dao.keyInstance(any()) } returns 1L
+        for ((failure, message) in listOf(
+            com.automatethethings.xkey.crypto.KeyPresenceUnreadableException("k", null) to com.automatethethings.xkey.R.string.key_store_unreadable,
+            java.security.KeyStoreException("keystore") to com.automatethethings.xkey.R.string.key_delete_failed
+        )) {
+            val failing = mockk<KeyMaterial>(relaxed = true) {
+                coEvery { generation(any(), any()) } throws failure
+                coEvery { generation(any(), any(), any()) } throws failure
+            }
+            val outcome = deleteUserKey(key("k"), store, failing)
+            assertTrue("$failure: $outcome", outcome is UserKeyDelete.Refused && outcome.message == message)
+            assertEquals(message, outcome.refusal)
+        }
+        coVerify(exactly = 0) { dao.putDeletion(any<KeyDeletionEntity>()) }
+        coVerify(exactly = 0) { dao.deleteKey(any()) }
+    }
+
     @Test
     fun aSystemKeyIsRefusedBeforeTheStore() = runTest {
         assertEquals(UserKeyDelete.PROTECTED, deleteUserKey(key("xkey_password_encryption_key", system = true), store, internal))
@@ -105,6 +129,12 @@ class UserKeyDeleteTest {
         val helper = File(root, "com/automatethethings/xkey/ui/KeyManagementActivity.kt").readText()
             .substringAfter("internal suspend fun deleteUserKey(")
         assertTrue("forgetKey(" in helper.substringBefore("\n}"))
+        // Both delete screens show the helper's refusal (#255 verify r3).
+        for (screen in listOf("KeyManagementActivity.kt", "KeyDetailActivity.kt")) {
+            val body = File(root, "com/automatethethings/xkey/ui/$screen").readText()
+                .substringAfter("private fun deleteKey(key: KeyEntity)").substringBefore("\n    }\n")
+            assertTrue("$screen shows a refused delete", "outcome.refusal" in body)
+        }
     }
 
     /**

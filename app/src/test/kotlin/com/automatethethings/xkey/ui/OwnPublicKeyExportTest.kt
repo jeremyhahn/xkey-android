@@ -19,7 +19,7 @@ import com.automatethethings.xkey.crypto.KeyPresence
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.crypto.UserKeyKind
-import com.automatethethings.xkey.storage.OwnPublicKeyRead
+import com.automatethethings.xkey.storage.KeyRead
 import com.automatethethings.xkey.storage.readOwnPublicKey
 import io.mockk.every
 import io.mockk.mockk
@@ -77,26 +77,26 @@ class OwnPublicKeyExportTest {
     @Test
     fun anUnreadableEd25519StoreIsARefusalNotACrash() {
         every { keystore.ed25519Prefs() } throws java.security.GeneralSecurityException("master key unavailable")
-        assertTrue(keystore.readOwnPublicKey(ID) is OwnPublicKeyRead.Unreadable)
+        assertTrue(keystore.readOwnPublicKey(ID) == KeyRead.Unreadable)
     }
 
     @Test
     fun anUnreadableSoftwareStoreIsARefusalNotACrash() {
         every { software.presence(any()) } returns KeyPresence.UNREADABLE
-        assertTrue(keystore.readOwnPublicKey(ID) is OwnPublicKeyRead.Unreadable)
+        assertTrue(keystore.readOwnPublicKey(ID) == KeyRead.Unreadable)
     }
 
     @Test
     fun aSoftwareKeyBesideACredentialExportsNoPublicKey() {
         every { software.presence(ID) } returns KeyPresence.PRESENT
-        assertTrue(keystore.readOwnPublicKey(ID) is OwnPublicKeyRead.Unavailable)
+        assertTrue(keystore.readOwnPublicKey(ID) == KeyRead.Unavailable)
     }
 
     @Test
     fun aReadableStoreExportsTheCredentialsPublicKey() {
         every { keystore.getPublicKeyPEM(ID, UserKeyKind.CREDENTIAL) } returns "credential pem"
         val read = keystore.readOwnPublicKey(ID)
-        assertTrue("$read", read is OwnPublicKeyRead.Pem && read.pem == "credential pem")
+        assertTrue("$read", read is KeyRead.Value && read.value == "credential pem")
     }
 
     /**
@@ -118,7 +118,7 @@ class OwnPublicKeyExportTest {
             assertTrue("$file has $start", at >= 0)
             val body = source.substring(at, source.indexOf("\n    }\n", at))
             assertTrue("$file reads through readOwnPublicKey", "readOwnPublicKey(" in body)
-            assertTrue("$file handles the refusal", "OwnPublicKeyRead.Unreadable" in body)
+            assertTrue("$file handles the refusal", "readOwnPublicKey(key.keyId).orRefuse(" in body)
         }
         val resolvers = Regex("""\.(soleKind|exportKind|resolveKey|resolveKeystoreAlias|holdsUserKey|userKeyPresence|userKeyIdInUse)\(""")
         for (file in ui.walk().filter { it.extension == "kt" }) {

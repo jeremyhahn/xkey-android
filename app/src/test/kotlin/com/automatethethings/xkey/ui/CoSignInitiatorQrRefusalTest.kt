@@ -30,6 +30,7 @@ import io.mockk.mockkStatic
 import io.mockk.spyk
 import io.mockk.unmockkAll
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
@@ -89,6 +90,78 @@ class CoSignInitiatorQrRefusalTest {
 
         val qr = get(activity, "qrImageView") as ImageView
         assertNotEquals("no QR is drawn for a key whose store cannot be read", View.VISIBLE, qr.visibility)
+    }
+
+    /**
+     * #255 verify r3: a certificate read that fails (a key-store error, or
+     * no public key) refuses the QR. The QR used to name the key id as its
+     * owner in place of the key's fingerprint.
+     */
+    @Test
+    fun aFailedCertificateReadRefusesTheQr() {
+        for (failure in listOf<() -> ByteArray?>({ throw java.security.KeyStoreException("certificate") }, { null })) {
+            val activity = initiator { keystore ->
+                every { keystore.getPublicKeyDER(KEY_ID, any()) } answers { failure() }
+            }
+            val generate = CoSignActivity::class.java.getDeclaredMethod("generateInitiatorQR").apply { isAccessible = true }
+            val thrown = runCatching { generate.invoke(activity) }.exceptionOrNull()
+            assertNull("Generate QR threw on a failed certificate read: ${thrown?.cause ?: thrown}", thrown)
+
+            val qr = get(activity, "qrImageView") as ImageView
+            assertNotEquals("a QR was drawn without the owner's public key", View.VISIBLE, qr.visibility)
+        }
+    }
+
+    /** A readable key's QR names the key's fingerprint as its owner, never its id. */
+    @Test
+    fun aReadableKeysQrNamesItsFingerprint() {
+        val der = byteArrayOf(1, 2, 3)
+        val payloads = mutableListOf<String>()
+        io.mockk.mockkObject(com.automatethethings.xkey.qr.QrCodeGenerator)
+        every { com.automatethethings.xkey.qr.QrCodeGenerator.generate(any(), any()) } answers {
+            payloads += firstArg<String>()
+            android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        val activity = initiator { keystore -> every { keystore.getPublicKeyDER(KEY_ID, any()) } returns der }
+        CoSignActivity::class.java.getDeclaredMethod("generateInitiatorQR").apply { isAccessible = true }.invoke(activity)
+
+        assertEquals(1, payloads.size)
+        val fingerprint = com.automatethethings.xkey.media.MediaHasher.hashBytes(der)
+        org.junit.Assert.assertTrue("the QR does not name the key's fingerprint", fingerprint in payloads[0])
+        org.junit.Assert.assertFalse("the QR names the key id as its owner", KEY_ID in payloads[0])
+    }
+
+    /**
+     * Bypass guard: every key read on the co-sign screen goes through the
+     * screens' refusal choke point, and no co-sign QR falls back to the key
+     * id for its owner.
+     */
+    @Test
+    fun theCoSignScreenNeverNamesItsOwnerByKeyId() {
+        val root = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
+        val source = java.io.File(root, "com/automatethethings/xkey/ui/CoSignActivity.kt").readText()
+        org.junit.Assert.assertFalse("a co-sign QR names its owner by key id", Regex("""else\s+keyId\b""").containsMatchIn(source))
+        org.junit.Assert.assertFalse("the co-sign screen reads a public key around the choke point", "getPublicKeyDER(" in source)
+        assertEquals(2, Regex("""readOwnPublicKeyDer\([^)]*\)\s*\.orRefuse\(""").findAll(source).count())
+    }
+
+    private fun initiator(stub: (KeystoreManager) -> Unit): CoSignActivity {
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        shadowOf(Looper.getMainLooper()).idle()
+        val activity = controller.get()
+        val keystore = spyk(KeystoreManager(activity))
+        every { keystore.ed25519Prefs() } returns null
+        val software = mockk<SoftwareKeyStore>()
+        every { software.presence(any()) } returns KeyPresence.ABSENT
+        every { keystore.softwareKeys() } returns software
+        stub(keystore)
+        set(activity, "keystoreManager", keystore)
+        set(activity, "currentSignatureData", ContentAuthenticityData(contentHash = "00", signatures = emptyList()))
+        set(activity, "signingKeyIds", listOf(KEY_ID))
+        val spinner = get(activity, "keySpinner") as Spinner
+        spinner.adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_item, listOf(KEY_ID))
+        spinner.setSelection(0)
+        return activity
     }
 
     private fun field(name: String) =

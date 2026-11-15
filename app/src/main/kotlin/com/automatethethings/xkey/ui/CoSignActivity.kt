@@ -55,6 +55,7 @@ import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.qr.QrCodeGenerator
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.orRefuse
 import com.automatethethings.xkey.storage.readOwnPublicKeyDer
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -599,20 +600,17 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        // Through the screen's refusing read (#255 review r7): a key store
-        // that cannot be read is a refusal shown here, never an exception out
-        // of the Generate QR listener.
-        val pubKeyDer = when (
-            val read = keystoreManager.readOwnPublicKeyDer(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
-        ) {
-            is com.automatethethings.xkey.storage.KeyRead.Value -> read.value
-            com.automatethethings.xkey.storage.KeyRead.Unavailable -> null
-            com.automatethethings.xkey.storage.KeyRead.Unreadable -> {
-                Snackbar.make(rootLayout, getString(R.string.key_public_key_unavailable), Snackbar.LENGTH_SHORT).show()
-                return
-            }
-        }
-        val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
+        // Through the screens' refusal choke point (#255 review r7, verify
+        // r3): a key store that cannot be read, or a public key that cannot
+        // be read, is a refusal shown here and no QR, never an exception out
+        // of the Generate QR listener and never the key id in the owner's
+        // place.
+        val pubKeyDer = keystoreManager
+            .readOwnPublicKeyDer(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+            .orRefuse(R.string.cosign_owner_key_unavailable) { refusal ->
+                Snackbar.make(rootLayout, getString(refusal), Snackbar.LENGTH_SHORT).show()
+            } ?: return
+        val fingerprint = MediaHasher.hashBytes(pubKeyDer)
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
 
@@ -630,13 +628,25 @@ class CoSignActivity : AppCompatActivity() {
                 val keyEntity = db.keyDao().getByKeyId(keyId)
                     ?: throw Exception("Key not found")
 
+                // The witness's owner identity, read before signing through the
+                // screens' refusal choke point (#255 verify r3): no response
+                // is made without it, and the key id never stands in for it.
+                var refusal = R.string.cosign_owner_key_unavailable
+                val pubKeyDer = keystoreManager
+                    .readOwnPublicKeyDer(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+                    .orRefuse(R.string.cosign_owner_key_unavailable) { refusal = it }
+                if (pubKeyDer == null) {
+                    withContext(Dispatchers.Main) {
+                        Snackbar.make(rootLayout, getString(refusal), Snackbar.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+                val fingerprint = MediaHasher.hashBytes(pubKeyDer)
+
                 // Under the material-use lock and its deleted-key recheck (#255 review).
                 val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
                     .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(keyId, request.hashBytes(), keyEntity.algorithm) }
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
-
-                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
-                val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 
                 val responsePayload = CoSignResponse(
                     signature = signatureBase64,
