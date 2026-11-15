@@ -702,6 +702,8 @@ class CoSignPublishTest {
         select(activity, Uri.parse("content://${ReadOnlyMediaProvider.AUTHORITY}/big.jpg"))
         field("currentSignatureData").set(activity, ContentAuthenticityData.fromJsonString(XmpFixtures.json(signedHash)))
         scanWitness(activity)
+        // 33 MiB is copied and hashed: wait for the append's end, not a fixed time.
+        idleUntil { queued(activity).isEmpty() }
         settle()
         val started = shadowOf(activity).nextStartedActivityForResult ?: return false
         return started.intent.action == Intent.ACTION_CREATE_DOCUMENT
