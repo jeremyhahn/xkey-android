@@ -67,6 +67,35 @@ object SignatureVerifier {
     }
 
     /**
+     * Whether [carried], the signature data a document embeds, holds a genuine
+     * signature by [fingerprint] over the content [expectedContentHash] names.
+     *
+     * The canonical hash leaves signature metadata out, so a matching payload
+     * says nothing about the entry beside it: the recorded hash must be the
+     * payload's ([payloadHash]) and the expected one, [publicKeyDer] must be the
+     * key [fingerprint] names, and an entry by it must verify over that hash
+     * ([verifyEntry]). No key known for the signer accepts nothing.
+     */
+    fun verifyCarried(
+        carried: ContentAuthenticityData?,
+        payloadHash: String,
+        expectedContentHash: String,
+        fingerprint: String,
+        publicKeyDer: ByteArray?
+    ): Boolean {
+        if (carried == null || publicKeyDer == null) return false
+        if (MediaHasher.hashBytes(publicKeyDer) != fingerprint) return false
+        if (!payloadHash.equals(expectedContentHash, ignoreCase = true) ||
+            !carried.contentHash.equals(payloadHash, ignoreCase = true)
+        ) {
+            return false
+        }
+        return carried.signatures.any {
+            it.keyFingerprint == fingerprint && verifyEntry(publicKeyDer, it, carried.contentHash)
+        }
+    }
+
+    /**
      * Verifies a signature over [data].
      *
      * Supports the EC (ES256/384/512) and RSA (RS256/384/512) algorithms xKey

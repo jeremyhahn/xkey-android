@@ -57,6 +57,7 @@ import com.automatethethings.xkey.media.MediaPublishException
 import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.MediaSaveRuns
 import com.automatethethings.xkey.media.SignatureEntry
+import com.automatethethings.xkey.media.SignatureVerifier
 import com.automatethethings.xkey.media.SignedCopyDocument
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.qr.QrCodeGenerator
@@ -113,22 +114,47 @@ internal data class PendingCoSignedCopy(
 internal data class RunningCoSignedCopy(val id: String, val target: Uri, val copy: PendingCoSignedCopy)
 
 /**
- * Whether the document at [target] holds [copy]: its embedded signature
- * names the co-signer and its payload hashes, as the signer hashes it, to
- * the co-signed content. A copy whose staged bytes are gone counts as
- * written only then, so a lost copy is never reported as placed.
+ * Whether the document at [target] holds [copy]: its payload hashes, as
+ * the signer hashes it, to the co-signed content, its recorded hash is that
+ * hash, and its entry by the co-signer verifies with the key
+ * [publicKeyFor] knows for the co-signer's fingerprint
+ * ([SignatureVerifier.verifyCarried]). A copy whose staged bytes are gone
+ * counts as written only then, so a lost or altered copy is never reported
+ * as placed, and an unknown co-signer's never is.
  */
-internal fun copyInPlace(resolver: ContentResolver, target: Uri, copy: PendingCoSignedCopy): Boolean = try {
+internal fun copyInPlace(
+    resolver: ContentResolver,
+    target: Uri,
+    copy: PendingCoSignedCopy,
+    publicKeyFor: (fingerprint: String) -> ByteArray?
+): Boolean = try {
     val mimeType = resolver.getType(target)
     val carried = XmpMetadataHelper.readSignatureFromUri(resolver, target, mimeType)
     carried != null &&
-        carried.signatures.any { it.keyFingerprint == copy.fingerprint } &&
-        MediaHasher.hashStreamed(
-            { resolver.openInputStream(target) ?: throw IOException("cannot read $target") },
-            mimeType
-        ).canonical.equals(copy.data.contentHash, ignoreCase = true)
+        SignatureVerifier.verifyCarried(
+            carried,
+            MediaHasher.hashStreamed(
+                { resolver.openInputStream(target) ?: throw IOException("cannot read $target") },
+                mimeType
+            ).canonical,
+            copy.data.contentHash,
+            copy.fingerprint,
+            publicKeyFor(copy.fingerprint)
+        )
 } catch (e: Exception) {
     false
+}
+
+/**
+ * The public key xKey holds for [fingerprint]: a contact's, else a local
+ * key's whose own hash is [fingerprint]. Blocks: call it off the main thread.
+ */
+internal fun knownPublicKey(context: Context, fingerprint: String): ByteArray? = kotlinx.coroutines.runBlocking {
+    val db = XKeyDatabase.getInstance(context)
+    db.contactDao().getByFingerprint(fingerprint)?.publicKeyDer
+        ?: db.keyDao().getAll().firstNotNullOfOrNull { key ->
+            key.publicKeyDer?.takeIf { MediaHasher.hashBytes(it) == fingerprint }
+        }
 }
 
 /**
@@ -1235,6 +1261,7 @@ class CoSignActivity : AppCompatActivity() {
      */
     private fun runCopy(run: RunningCoSignedCopy) {
         val resolver = applicationContext.contentResolver
+        val app = applicationContext
         val copy = run.copy
         val lost = getString(R.string.cosign_copy_lost)
         val write = MediaSaveRuns.attach(run.id) {
@@ -1242,7 +1269,7 @@ class CoSignActivity : AppCompatActivity() {
             // swept with the process that staged it: the copy counts as
             // written only when the document holds it.
             if (!copy.staged.exists()) {
-                if (copyInPlace(resolver, run.target, copy)) return@attach
+                if (copyInPlace(resolver, run.target, copy) { knownPublicKey(app, it) }) return@attach
                 throw IOException(lost)
             }
             MediaPublisher.writeCopy(copy.staged) { MediaPublisher.openCreated(resolver, run.target) }
