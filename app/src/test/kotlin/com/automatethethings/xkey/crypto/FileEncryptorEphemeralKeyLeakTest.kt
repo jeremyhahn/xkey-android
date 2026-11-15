@@ -24,6 +24,7 @@ import io.mockk.spyk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -43,6 +44,11 @@ import java.security.spec.ECGenParameterSpec
  * key store cannot be read, so it threw before the Keystore entry was
  * deleted and every failed attempt left an ephemeral private key behind.
  * The cleanup now deletes the exact alias generated in its own backend.
+ *
+ * #255 review r8: the delete's result was ignored, so an encryption whose
+ * ephemeral private key could not be deleted returned as a success. The
+ * delete reports deleted, absent or failed; a failure fails the encryption,
+ * and on an encryption already failing it rides along as a suppressed cause.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class, sdk = [34])
@@ -126,6 +132,74 @@ class FileEncryptorEphemeralKeyLeakTest {
         assertTrue("the encryption failed", failure != null)
         assertTrue("an ephemeral key was generated", generated > 0)
         assertTrue("ephemeral keys left in the Keystore: $entries", entries.isEmpty())
+    }
+
+    /** How the platform's deleteEntry behaves: deletes, throws, or leaves the entry. */
+    private var deleteFails: String? = null
+
+    /** An encryption that runs to its end: the ECDH succeeds. */
+    private suspend fun encrypt(): Result<ByteArray> {
+        io.mockk.coEvery { keystore.performECDH(any(), any()) } returns ByteArray(32) { 7 }
+        val platform = KeyStore.getInstance("AndroidKeyStore")
+        every { platform.deleteEntry(any()) } answers {
+            when (deleteFails) {
+                "throws" -> throw java.security.KeyStoreException("entry is busy")
+                "leaves" -> Unit
+                else -> { entries.remove(firstArg<String>()); Unit }
+            }
+        }
+        val out = ByteArrayOutputStream()
+        return runCatching {
+            FileEncryptor(keystore, FakeKeyPolicyTables().store())
+                .encryptForRecipient(ByteArray(8), ByteArrayInputStream(ByteArray(4)), out)
+            out.toByteArray()
+        }
+    }
+
+    @Test
+    fun anEncryptionWhoseEphemeralKeyIsDeletedSucceeds() = runTest {
+        val result = encrypt()
+        assertTrue("the encryption succeeded: ${result.exceptionOrNull()}", result.isSuccess)
+        assertTrue("an ephemeral key was generated", generated > 0)
+        assertTrue("ephemeral keys left in the Keystore: $entries", entries.isEmpty())
+        assertEquals(GeneratedKeyDiscard.ABSENT, keystore.discardGeneratedKey("xkey_key_gone"))
+    }
+
+    @Test
+    fun anEncryptionWhoseEphemeralDeleteThrowsFails() = runTest {
+        deleteFails = "throws"
+        assertEphemeralDeleteFailureFails()
+    }
+
+    @Test
+    fun anEncryptionWhoseEphemeralKeyOutlivesItsDeleteFails() = runTest {
+        deleteFails = "leaves"
+        assertEphemeralDeleteFailureFails()
+    }
+
+    private suspend fun assertEphemeralDeleteFailureFails() {
+        val failure = encrypt().exceptionOrNull()
+        assertTrue("an encryption leaving its ephemeral key behind succeeded", failure is EncryptionException)
+        assertTrue("the failure names the undeleted ephemeral key: $failure", "not deleted" in failure!!.message.orEmpty())
+        val left = entries.single()
+        assertEquals("the discard reports the key left", GeneratedKeyDiscard.FAILED, keystore.discardGeneratedKey(left))
+    }
+
+    @Test
+    fun aFailedEncryptionKeepsItsCauseAndCarriesAFailedDelete() = runTest {
+        deleteFails = "throws"
+        io.mockk.coEvery { keystore.performECDH(any(), any()) } throws java.security.InvalidKeyException("bad peer key")
+        val platform = KeyStore.getInstance("AndroidKeyStore")
+        every { platform.deleteEntry(any()) } throws java.security.KeyStoreException("entry is busy")
+        val failure = runCatching {
+            FileEncryptor(keystore, FakeKeyPolicyTables().store())
+                .encryptForRecipient(ByteArray(8), ByteArrayInputStream(ByteArray(4)), ByteArrayOutputStream())
+        }.exceptionOrNull()
+        assertTrue("the encryption's own failure is kept: $failure", failure is java.security.InvalidKeyException)
+        assertTrue(
+            "the failed delete rides along: ${failure!!.suppressed.toList()}",
+            failure.suppressed.any { it is EncryptionException && "not deleted" in it.message.orEmpty() }
+        )
     }
 
 }

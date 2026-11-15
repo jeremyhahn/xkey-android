@@ -81,6 +81,13 @@ class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
 enum class KeyPresence { PRESENT, ABSENT, UNREADABLE }
 
 /**
+ * What [KeystoreManager.discardGeneratedKey] did with a generated key (#255
+ * review r8): deleted it, found it already absent, or failed, leaving it
+ * possibly still held.
+ */
+enum class GeneratedKeyDiscard { DELETED, ABSENT, FAILED }
+
+/**
  * A store a user key's material can live in (#255 review r6): the Android
  * Keystore, the Ed25519 preferences (legacy general Ed25519 keys) and the
  * [SoftwareKeyStore] (exportable general keys). A credential lives only in
@@ -636,7 +643,8 @@ class KeystoreManager(private val context: Context) {
         // this deletes, so it reads that alias alone and never the
         // cross-backend presence guard (#255 review r7): an unreadable
         // Ed25519 or software store never stops the delete of a Keystore key.
-        if (!discardGeneratedKey(userKeyAlias(credentialId, kind))) return false
+        // True only for a key now gone: a failed delete is not a deleted key.
+        if (discardGeneratedKey(userKeyAlias(credentialId, kind)) != GeneratedKeyDiscard.DELETED) return false
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
@@ -1981,20 +1989,25 @@ class KeystoreManager(private val context: Context) {
      * cross-backend presence guard ([holdsUserKey]), so an unreadable Ed25519
      * or software key store cannot leave a generated private key behind (an
      * ephemeral ECDH key, or a key whose generation failed half-way). PIV
-     * slot aliases are never touched. A failed delete is reported as false,
-     * never thrown, so a cleanup in a finally block never replaces
-     * the failure that brought it there.
+     * slot aliases are never touched. A failed delete is reported, never
+     * thrown, so a cleanup in a finally block never replaces the failure
+     * that brought it there; it is never reported as an absent key (#255
+     * review r8), so a caller cannot take a key left behind for one deleted.
      *
-     * @return true if [alias] was held and is now deleted.
+     * @return [GeneratedKeyDiscard.DELETED] if [alias] was held and is now
+     *   gone, [GeneratedKeyDiscard.ABSENT] if it was not held, and
+     *   [GeneratedKeyDiscard.FAILED] if it may still be held: the delete
+     *   failed, the alias is still there after it, or a PIV alias was named.
      */
-    fun discardGeneratedKey(alias: String): Boolean {
-        if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
+    fun discardGeneratedKey(alias: String): GeneratedKeyDiscard {
+        if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return GeneratedKeyDiscard.FAILED
         return try {
-            val held = runCatching { keyStore.containsAlias(alias) }.getOrDefault(true)
-            if (held) keyStore.deleteEntry(alias)
-            held
+            // A presence read that fails is taken as held: the delete is tried.
+            if (!runCatching { keyStore.containsAlias(alias) }.getOrDefault(true)) return GeneratedKeyDiscard.ABSENT
+            keyStore.deleteEntry(alias)
+            if (keyStore.containsAlias(alias)) GeneratedKeyDiscard.FAILED else GeneratedKeyDiscard.DELETED
         } catch (e: Exception) {
-            false
+            GeneratedKeyDiscard.FAILED
         }
     }
 

@@ -1626,7 +1626,7 @@ class RequestHandler(
     private fun generatedKeyLevel(
         keyId: String,
         read: () -> KeySecurityLevel?,
-        discard: () -> Unit
+        discard: () -> com.automatethethings.xkey.crypto.GeneratedKeyDiscard
     ): KeySecurityLevel {
         val failure = try {
             read()?.let { return it }
@@ -1634,7 +1634,11 @@ class RequestHandler(
         } catch (e: KeyInfoUnavailableException) {
             e
         }
-        runCatching { discard() }
+        // The request fails either way; a key the discard could not delete
+        // is logged, never taken for one deleted (#255 review r8).
+        if (runCatching { discard() }.getOrNull().let { it == null || it == com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED }) {
+            Log.e(TAG, "Generated key $keyId could not be discarded")
+        }
         Log.e(TAG, "Cannot read the security level of generated key $keyId", failure)
         throw ProtocolException(
             "Cannot read the security level of generated key $keyId",

@@ -137,12 +137,22 @@ class FileEncryptor(
                     cos.write(buffer, 0, bytesRead)
                 }
             }
-        } finally {
-            // Always delete the ephemeral key: the exact alias generated, in
-            // the Keystore, its own backend, with no presence guard that an
-            // unreadable Ed25519 or software store could make throw before
-            // the delete (#255 review r7).
-            keystoreManager.discardGeneratedKey(ephemeralAlias)
+        } catch (e: Throwable) {
+            // The encryption failed: the ephemeral key is still deleted, and
+            // a failed delete rides along with the failure, never replacing it.
+            if (keystoreManager.discardGeneratedKey(ephemeralAlias) == GeneratedKeyDiscard.FAILED) {
+                e.addSuppressed(EncryptionException("Ephemeral key $ephemeralAlias was not deleted", null))
+            }
+            throw e
+        }
+        // Always delete the ephemeral key: the exact alias generated, in the
+        // Keystore, its own backend, with no presence guard that an
+        // unreadable Ed25519 or software store could make throw before the
+        // delete (#255 review r7). An encryption whose ephemeral private key
+        // could not be deleted is never handed off as a success (#255 review
+        // r8): it fails, and its output is not to be used.
+        if (keystoreManager.discardGeneratedKey(ephemeralAlias) == GeneratedKeyDiscard.FAILED) {
+            throw EncryptionException("Ephemeral key $ephemeralAlias was not deleted", null)
         }
     }
 
