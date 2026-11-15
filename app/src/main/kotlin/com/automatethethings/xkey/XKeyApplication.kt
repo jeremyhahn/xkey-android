@@ -39,7 +39,10 @@ class XKeyApplication : Application() {
     private fun replayOwedKeyDeletions() {
         val app = this
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            com.automatethethings.xkey.storage.replayKeyDeletions(app, KeyPolicyStore.of(XKeyDatabase.getInstance(app), com.automatethethings.xkey.crypto.KeystoreManager(app)))
+            replayOwedKeyDeletionsAtStartup(
+                openStore = { KeyPolicyStore.of(XKeyDatabase.getInstance(app), com.automatethethings.xkey.crypto.KeystoreManager(app)) },
+                replay = { store -> com.automatethethings.xkey.storage.replayKeyDeletions(app, store) }
+            )
         }
     }
 
@@ -116,4 +119,29 @@ class XKeyApplication : Application() {
         /** High-priority channel for biometric authentication requests. */
         const val BIOMETRIC_CHANNEL_ID = "xkey_biometric"
     }
+}
+
+/**
+ * The start-up replay of owed key deletes (#193 r9), safe to run on a bare
+ * coroutine: opening the store ([openStore]: the database and the Keystore)
+ * may throw, and such a failure is logged, never thrown, so it cannot crash
+ * the process. Nothing is replayed then, and the owed deletes stay recorded
+ * for the next start (Codex round 3 on #270).
+ *
+ * @return Whether the store opened and [replay] ran.
+ */
+internal suspend fun replayOwedKeyDeletionsAtStartup(
+    openStore: () -> KeyPolicyStore,
+    replay: suspend (KeyPolicyStore) -> Unit
+): Boolean {
+    val store = try {
+        openStore()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        android.util.Log.e("XKeyApplication", "Opening the key store for the delete replay failed; replayed next start", e)
+        return false
+    }
+    replay(store)
+    return true
 }
