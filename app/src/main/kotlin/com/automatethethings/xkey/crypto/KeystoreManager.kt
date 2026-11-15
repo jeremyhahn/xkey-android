@@ -81,6 +81,15 @@ class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
 enum class KeyPresence { PRESENT, ABSENT, UNREADABLE }
 
 /**
+ * A store a user key's material can live in (#255 review r6): the Android
+ * Keystore, the Ed25519 preferences (legacy general Ed25519 keys) and the
+ * [SoftwareKeyStore] (exportable general keys). A credential lives only in
+ * the Keystore; a general key in any of the three
+ * ([KeystoreManager.backendsOf]).
+ */
+enum class KeyBackend { KEYSTORE, ED25519, SOFTWARE }
+
+/**
  * The store that would hold [alias] cannot be read, so whether a key is there
  * is unknown. A resolution that meets it refuses: it never falls back to
  * another namespace, and nothing is used or exported through it.
@@ -1652,15 +1661,82 @@ class KeystoreManager(private val context: Context) {
      * [soleKind], [exportKind] and [userKeyIdInUse] refuse rather than fall
      * back to the other namespace.
      *
-     * @return The resolved alias, or null if that key does not exist.
-     * @throws KeyPresenceUnreadableException if the namespace's store cannot be read.
+     * Presence is decided by [holdsUserKey] alone, over every backend of
+     * [kind] (#255 review r6): a general key kept in the [SoftwareKeyStore]
+     * holds its id like any other, and resolves to no Keystore alias, so a
+     * Keystore read of it finds nothing rather than another key.
+     *
+     * @return The resolved alias, or null if no Keystore or Ed25519 key of [kind] holds the id.
+     * @throws KeyPresenceUnreadableException if a backend of the namespace cannot be read.
      */
     fun resolveKey(keyId: String, kind: UserKeyKind): ResolvedKey? {
+        if (!holdsUserKey(keyId, kind)) return null
         val own = userKeyAlias(keyId, kind)
-        if (keyStore.containsAlias(own)) return ResolvedKey(own, kind)
-        if (kind == UserKeyKind.GENERAL && hasSoftwareEd25519Key(own)) return ResolvedKey(own, kind)
-        return null
+        return when {
+            presenceIn(KeyBackend.KEYSTORE, keyId, kind) == KeyPresence.PRESENT -> ResolvedKey(own, kind)
+            kind == UserKeyKind.GENERAL && presenceIn(KeyBackend.ED25519, keyId, kind) == KeyPresence.PRESENT ->
+                ResolvedKey(own, kind)
+            else -> null
+        }
     }
+
+    /** The backends a user key of [kind] can live in: a credential only in the Keystore, a general key in any. */
+    fun backendsOf(kind: UserKeyKind): List<KeyBackend> = when (kind) {
+        UserKeyKind.CREDENTIAL -> listOf(KeyBackend.KEYSTORE)
+        UserKeyKind.GENERAL -> KeyBackend.entries
+    }
+
+    /**
+     * The one presence probe of a user-key namespace (#255 review r6):
+     * whether [keyId] holds a key of [kind] in any of its backends
+     * ([backendsOf]). [KeyPresence.UNREADABLE] when any backend cannot be
+     * read, even if another holds the key, since which key the id names is
+     * then unknown; [KeyPresence.PRESENT] when one holds it; otherwise
+     * [KeyPresence.ABSENT]. Every resolver path ([resolveKey], [soleKind],
+     * [exportKind], [userKeyIdInUse] and both generators' checks through it)
+     * asks this, so none skips a backend.
+     */
+    fun userKeyPresence(keyId: String, kind: UserKeyKind): KeyPresence {
+        val found = backendsOf(kind).map { presenceIn(it, keyId, kind) }
+        return when {
+            KeyPresence.UNREADABLE in found -> KeyPresence.UNREADABLE
+            KeyPresence.PRESENT in found -> KeyPresence.PRESENT
+            else -> KeyPresence.ABSENT
+        }
+    }
+
+    /**
+     * Whether [keyId] holds a key of [kind] ([userKeyPresence]).
+     *
+     * @throws KeyPresenceUnreadableException if a backend of the namespace cannot be read.
+     */
+    fun holdsUserKey(keyId: String, kind: UserKeyKind): Boolean = when (userKeyPresence(keyId, kind)) {
+        KeyPresence.PRESENT -> true
+        KeyPresence.ABSENT -> false
+        KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(userKeyAlias(keyId, kind), null)
+    }
+
+    /** What [backend] holds for [keyId]'s user key of [kind]; a store that cannot be read is UNREADABLE. */
+    internal fun presenceIn(backend: KeyBackend, keyId: String, kind: UserKeyKind): KeyPresence = when (backend) {
+        KeyBackend.KEYSTORE -> try {
+            if (keyStore.containsAlias(userKeyAlias(keyId, kind))) KeyPresence.PRESENT else KeyPresence.ABSENT
+        } catch (e: Exception) {
+            KeyPresence.UNREADABLE
+        }
+        KeyBackend.ED25519 -> ed25519Presence(userKeyAlias(keyId, kind))
+        KeyBackend.SOFTWARE -> softwareKeyPresence(keyId)
+    }
+
+    /** What the [SoftwareKeyStore] holds for [keyId]; a store that cannot be read is UNREADABLE. */
+    internal fun softwareKeyPresence(keyId: String): KeyPresence =
+        try {
+            softwareKeys().presence(keyId)
+        } catch (e: Exception) {
+            KeyPresence.UNREADABLE
+        }
+
+    /** The store of exportable general keys, read by [softwareKeyPresence]. */
+    internal fun softwareKeys(): SoftwareKeyStore = SoftwareKeyStore(context)
 
     /**
      * The one user-key namespace holding [keyId] (#255 review r3): the
@@ -1671,8 +1747,8 @@ class KeystoreManager(private val context: Context) {
      * id held in both namespaces is refused, never read as either.
      */
     fun soleKind(keyId: String): UserKeyKind? {
-        val credential = resolveKey(keyId, UserKeyKind.CREDENTIAL) != null
-        val general = resolveKey(keyId, UserKeyKind.GENERAL) != null
+        val credential = holdsUserKey(keyId, UserKeyKind.CREDENTIAL)
+        val general = holdsUserKey(keyId, UserKeyKind.GENERAL)
         return when {
             credential && !general -> UserKeyKind.CREDENTIAL
             general && !credential -> UserKeyKind.GENERAL
@@ -1689,10 +1765,13 @@ class KeystoreManager(private val context: Context) {
      * namespace, where the general key, a software key or no key is found.
      * A general key beside a credential of its id exports its own key, never
      * the credential's (#255 review r2). A caller resolves this once, then
-     * gates and reads with the same kind.
+     * gates and reads with the same kind. The general namespace counts every
+     * backend ([userKeyPresence]): a software key beside a credential of its
+     * id exports as the general key it is, never as the credential (#255
+     * review r6).
      */
     fun exportKind(keyId: String): UserKeyKind =
-        if (resolveKey(keyId, UserKeyKind.GENERAL) == null && resolveKey(keyId, UserKeyKind.CREDENTIAL) != null) {
+        if (!holdsUserKey(keyId, UserKeyKind.GENERAL) && holdsUserKey(keyId, UserKeyKind.CREDENTIAL)) {
             UserKeyKind.CREDENTIAL
         } else {
             UserKeyKind.GENERAL
@@ -1707,7 +1786,7 @@ class KeystoreManager(private val context: Context) {
      * (#255 review r5).
      */
     fun userKeyIdInUse(keyId: String): Boolean =
-        UserKeyKind.entries.map { resolveKey(keyId, it) != null }.any { it }
+        UserKeyKind.entries.map { holdsUserKey(keyId, it) }.any { it }
 
     /**
      * The alias a raw [keyId] names outside the user-key namespaces: the

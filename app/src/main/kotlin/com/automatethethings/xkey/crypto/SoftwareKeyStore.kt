@@ -121,11 +121,69 @@ class SoftwareKeyStore(
         )
     }
 
-    /** Whether a software key with [keyId] exists. */
-    fun contains(keyId: String): Boolean {
-        migrateLegacyRecords()
-        return File(dir, "${fileId(keyId)}.key").exists()
+    /**
+     * Whether a software key with [keyId] exists.
+     *
+     * @throws KeyPresenceUnreadableException if the store cannot be read: never read as absent.
+     */
+    fun contains(keyId: String): Boolean = when (presence(keyId)) {
+        KeyPresence.PRESENT -> true
+        KeyPresence.ABSENT -> false
+        KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(keyId, null)
     }
+
+    /**
+     * What this store holds for [keyId], three-way (#255 review r6): either
+     * file of the key, or an older build's record of it that could not be
+     * migrated, is [KeyPresence.PRESENT]; a store directory that exists but
+     * cannot be listed, or a file whose existence cannot be read, is
+     * [KeyPresence.UNREADABLE], never [KeyPresence.ABSENT]. A store
+     * directory that was never created holds no key.
+     */
+    fun presence(keyId: String): KeyPresence =
+        try {
+            when {
+                !dir.exists() -> KeyPresence.ABSENT
+                !dir.isDirectory || dir.listFiles() == null -> KeyPresence.UNREADABLE
+                else -> {
+                    migrateLegacyRecords()
+                    val id = fileId(keyId)
+                    if (File(dir, "$id.key").exists() || File(dir, "$id.meta").exists() || legacyRecordOf(keyId)) {
+                        KeyPresence.PRESENT
+                    } else {
+                        KeyPresence.ABSENT
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            KeyPresence.UNREADABLE
+        }
+
+    /**
+     * Whether an older build's record of [keyId] is left under its old
+     * name (its migration found the digest name taken, or could not
+     * rename). A record whose file cannot be read is taken as [keyId]'s, so
+     * an unreadable record never reads as absent; one whose metadata names
+     * no id is attributable to none, as the migration finds.
+     */
+    private fun legacyRecordOf(keyId: String): Boolean =
+        (dir.listFiles() ?: throw KeyPresenceUnreadableException(keyId, null)).any { meta ->
+            if (!meta.name.endsWith(".meta") || DIGEST_NAME.matches(meta.name.removeSuffix(".meta"))) {
+                false
+            } else {
+                val text = try {
+                    meta.readText()
+                } catch (e: java.io.IOException) {
+                    return@any true
+                }
+                val id = try {
+                    JSONObject(text).optString("keyId", "")
+                } catch (e: org.json.JSONException) {
+                    ""
+                }
+                id == keyId
+            }
+        }
 
     /** Delete a software key by id. */
     fun delete(keyId: String) {

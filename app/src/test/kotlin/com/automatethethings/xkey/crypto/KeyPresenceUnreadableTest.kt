@@ -57,13 +57,18 @@ class KeyPresenceUnreadableTest {
 
     private lateinit var keystore: KeystoreManager
 
+    /** The platform Keystore. */
+    private lateinit var platform: KeyStore
+
     @Before
     fun setUp() {
         mockkStatic(android.util.Log::class)
         every { android.util.Log.d(any(), any<String>()) } returns 0
         every { android.util.Log.w(any(), any<String>()) } returns 0
         every { android.util.Log.w(any(), any<String>(), any()) } returns 0
-        val platform = mockk<KeyStore>(relaxed = true)
+        readable = true
+        softwareReadable = true
+        platform = mockk<KeyStore>(relaxed = true)
         every { platform.containsAlias(any()) } answers { firstArg<String>() in entries }
         every { platform.getCertificate(any()) } answers {
             if (firstArg<String>() in entries) mockk<Certificate>(relaxed = true) else null
@@ -79,7 +84,22 @@ class KeyPresenceUnreadableTest {
             if (!readable) throw java.security.GeneralSecurityException("master key unavailable")
             prefs
         }
+        val software = mockk<SoftwareKeyStore>()
+        every { software.presence(any()) } answers {
+            when {
+                !softwareReadable -> KeyPresence.UNREADABLE
+                firstArg<String>() in softwareKeys -> KeyPresence.PRESENT
+                else -> KeyPresence.ABSENT
+            }
+        }
+        every { keystore.softwareKeys() } returns software
     }
+
+    /** Ids the software key store holds. */
+    private val softwareKeys = HashSet<String>()
+
+    /** Whether the software key store can be read. */
+    private var softwareReadable = true
 
     @After
     fun tearDown() {
@@ -166,7 +186,7 @@ class KeyPresenceUnreadableTest {
     fun noPresenceProbeCatchesAFailureAsAbsent() {
         val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
         val source = File(root, "com/automatethethings/xkey/crypto/KeystoreManager.kt").readText()
-        val probe = Regex("""fun (has\w*|holds\w*|\w*Exists|\w*Presence|resolveKey\w*|soleKind|exportKind|userKeyIdInUse|rawAlias)\(""")
+        val probe = Regex("""fun (has\w*|holds\w*|\w*Exists|\w*Presence|resolveKey\w*|soleKind|exportKind|userKeyIdInUse|rawAlias|presenceIn)\(""")
         val probes = probe.findAll(source).map { it.groupValues[1] to body(source, it.range.first) }.toList()
         assertTrue("the probes were found: ${probes.map { it.first }}", probes.size >= 10)
         for ((name, text) in probes) {
@@ -183,6 +203,92 @@ class KeyPresenceUnreadableTest {
             "the Ed25519 probe refuses an unreadable store",
             "throw KeyPresenceUnreadableException" in probes.single { it.first == "hasSoftwareEd25519Key" }.second
         )
+    }
+
+    /** Puts a general key of [id] in [backend] alone. */
+    private fun generalKeyIn(backend: KeyBackend, id: String) {
+        when (backend) {
+            KeyBackend.KEYSTORE -> entries += "xkey_key_$id"
+            KeyBackend.ED25519 -> ed25519["xkey_key_$id"] = "ed25519"
+            KeyBackend.SOFTWARE -> softwareKeys += id
+        }
+    }
+
+    /** Makes [backend] unreadable. */
+    private fun unreadable(backend: KeyBackend) {
+        when (backend) {
+            KeyBackend.KEYSTORE -> every { platform.containsAlias(any()) } throws
+                java.security.KeyStoreException("keystore unavailable")
+            KeyBackend.ED25519 -> readable = false
+            KeyBackend.SOFTWARE -> softwareReadable = false
+        }
+    }
+
+    /**
+     * #255 review r6, the bypass test over backends: a general key in any
+     * one backend alone holds its id, so a credential of that id is never
+     * exported or created in its place; and any one backend unreadable
+     * refuses every resolver path. No presence check skips a backend.
+     */
+    @Test
+    fun everyGeneralBackendHoldsItsIdAndNoneIsSkipped() {
+        assertEquals(KeyBackend.entries, keystore.backendsOf(UserKeyKind.GENERAL))
+        for (backend in KeyBackend.entries) {
+            entries.clear(); ed25519.clear(); softwareKeys.clear()
+            generalKeyIn(backend, GENERAL_AND_CREDENTIAL)
+            entries += "xkey_credential_$GENERAL_AND_CREDENTIAL"
+            assertTrue("$backend", keystore.holdsUserKey(GENERAL_AND_CREDENTIAL, UserKeyKind.GENERAL))
+            assertEquals("$backend export kind", UserKeyKind.GENERAL, keystore.exportKind(GENERAL_AND_CREDENTIAL))
+            assertEquals("$backend sole kind", null, keystore.soleKind(GENERAL_AND_CREDENTIAL))
+            assertTrue("$backend in use", keystore.userKeyIdInUse(GENERAL_AND_CREDENTIAL))
+            assertTrue("$backend held", keystore.holdsAnyKey(GENERAL_AND_CREDENTIAL))
+            assertFalse("$backend internal", keystore.holdsInternalKey(GENERAL_AND_CREDENTIAL))
+        }
+    }
+
+    @Test
+    fun anyUnreadableGeneralBackendRefusesEveryResolverPath() {
+        for (backend in KeyBackend.entries) {
+            entries.clear(); ed25519.clear(); softwareKeys.clear()
+            setUp()
+            givenKeys()
+            softwareKeys += GENERAL_AND_CREDENTIAL
+            unreadable(backend)
+            assertEquals("$backend", KeyPresence.UNREADABLE, keystore.userKeyPresence(CREDENTIAL_ONLY, UserKeyKind.GENERAL))
+            for (id in listOf(GENERAL_AND_CREDENTIAL, CREDENTIAL_ONLY)) {
+                val paths: List<Pair<String, () -> Any?>> = listOf(
+                    "resolveKey(GENERAL)" to { keystore.resolveKey(id, UserKeyKind.GENERAL) },
+                    "holdsUserKey(GENERAL)" to { keystore.holdsUserKey(id, UserKeyKind.GENERAL) },
+                    "exportKind" to { keystore.exportKind(id) },
+                    "soleKind" to { keystore.soleKind(id) },
+                    "userKeyIdInUse" to { keystore.userKeyIdInUse(id) },
+                    "holdsAnyKey" to { keystore.holdsAnyKey(id) },
+                    "getPublicKeyPEM(GENERAL)" to { keystore.getPublicKeyPEM(id, UserKeyKind.GENERAL) }
+                )
+                for ((name, path) in paths) assertRefuses("$backend: $name of $id", path)
+            }
+            unmockkAll()
+        }
+    }
+
+    /**
+     * The source half of the backend bypass test: the resolver paths decide
+     * presence through [KeystoreManager.holdsUserKey] alone; none probes a
+     * backend itself, and only [KeystoreManager.presenceIn] reads each one.
+     */
+    @Test
+    fun theResolverPathsProbeNoBackendThemselves() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val source = File(root, "com/automatethethings/xkey/crypto/KeystoreManager.kt").readText()
+        for (name in listOf("soleKind", "exportKind", "userKeyIdInUse", "resolveKey")) {
+            val text = body(source, source.indexOf("fun $name("))
+            assertTrue("$name decides presence through holdsUserKey", "holdsUserKey(" in text)
+            for (probe in listOf("containsAlias(", "hasSoftwareEd25519Key(", "ed25519Prefs(", "softwareKeys(", "SoftwareKeyStore(")) {
+                assertFalse("$name probes a backend itself: $probe", probe in text)
+            }
+        }
+        val presence = body(source, source.indexOf("fun presenceIn("))
+        for (backend in KeyBackend.entries) assertTrue("presenceIn reads $backend", "KeyBackend.$backend ->" in presence)
     }
 
     /** The text of the function starting at [start]: to its closing brace, or its expression's end. */

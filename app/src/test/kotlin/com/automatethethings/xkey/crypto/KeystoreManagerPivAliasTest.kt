@@ -55,6 +55,9 @@ class KeystoreManagerPivAliasTest {
     private lateinit var keystoreManager: KeystoreManager
     private var generalPresent = true
 
+    @get:org.junit.Rule
+    val tmp = org.junit.rules.TemporaryFolder()
+
     @Before
     fun setUp() {
         mockkStatic(Log::class)
@@ -69,7 +72,11 @@ class KeystoreManagerPivAliasTest {
         every { fake.keyStore.containsAlias(generalAlias) } answers { generalPresent }
         every { fake.keyStore.deleteEntry(generalAlias) } answers { generalPresent = false }
         fake.install()
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true))
+        // A real files directory: the general namespace's presence reads the
+        // software key store there (#255 review r6).
+        val context = mockk<Context>(relaxed = true)
+        every { context.filesDir } returns tmp.root
+        keystoreManager = KeystoreManager(context)
     }
 
     @After

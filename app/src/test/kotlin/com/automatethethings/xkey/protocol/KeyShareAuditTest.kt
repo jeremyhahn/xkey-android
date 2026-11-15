@@ -1191,6 +1191,97 @@ class KeyShareAuditTest {
         assertEquals(encoded, success(served(getPublicKey)).getString("publicKey"))
     }
 
+    /** A handler over a spied real [KeystoreManager] on the platform keystore, the Ed25519 store empty. */
+    private fun realKeystoreHandler(): KeystoreManager {
+        val keystore = io.mockk.spyk(KeystoreManager(context))
+        every { keystore.ed25519Prefs() } returns null
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        return keystore
+    }
+
+    /**
+     * #255 review r6: a software key (SoftwareKeyStore) and a credential
+     * under one id. The general namespace counts the software store, so the
+     * id exports as its general key: local.importSharedKey shares the
+     * software key's material, local.getPublicKey (no Keystore public key in
+     * the general namespace) refuses, and neither ever sends the
+     * credential's public key under the software key's row.
+     */
+    @Test
+    fun aSoftwareKeyBesideACredentialNeverExportsTheCredential() = runTest {
+        val credential = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential))
+        givenSoftwareKey(exportable = true, shareable = true)
+        every { anyConstructed<SoftwareKeyStore>().presence(KEY_ID) } returns
+            com.automatethethings.xkey.crypto.KeyPresence.PRESENT
+        val keystore = realKeystoreHandler()
+        val encoded = Base64.getEncoder().encodeToString(credential.public.encoded)
+
+        assertEquals(com.automatethethings.xkey.crypto.UserKeyKind.GENERAL, keystore.exportKind(KEY_ID))
+        assertNull("an id two keys hold has no sole kind", keystore.soleKind(KEY_ID))
+
+        val getPublicKey = Request(
+            id = 11,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+        val refused = served(getPublicKey)
+        val response = Response.fromJson(refused)
+        assertNull("getPublicKey exported a key: ${response.result}", response.result)
+        assertEquals(ErrorCodes.EXPORT_FAILED, response.error?.code)
+        assertFalse("getPublicKey sent the credential's key", encoded in String(refused))
+
+        val shared = served(importSharedKey())
+        val result = success(shared)
+        assertEquals(Base64.getEncoder().encodeToString(MATERIAL), result.getString("wrapped_key"))
+        assertFalse("importSharedKey sent the credential's key", encoded in String(shared))
+
+        val credentialKind = com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        verify(exactly = 0) { keystore.getPublicKeyPEM(KEY_ID, credentialKind) }
+        verify(exactly = 0) { keystore.getPublicKeyDER(KEY_ID, credentialKind) }
+    }
+
+    /**
+     * #255 review r6: both generators refuse an id a software key holds,
+     * before any key is made, so no credential or Keystore general key is
+     * ever created beside it.
+     */
+    @Test
+    fun noGeneratorCreatesAKeyUnderAnIdASoftwareKeyHolds() = runTest {
+        platformKeystore(emptyMap())
+        every { anyConstructed<SoftwareKeyStore>().presence(KEY_ID) } returns
+            com.automatethethings.xkey.crypto.KeyPresence.PRESENT
+        val keystore = realKeystoreHandler()
+        val legacy = Request(
+            id = 12,
+            method = MethodNames.GENERATE_KEY,
+            params = JSONObject().put("credentialId", KEY_ID).put("algorithm", -7).put("requireUserVerification", false)
+        ).toJson()
+        val local = Request(
+            id = 13,
+            method = MethodNames.LOCAL_GENERATE_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("keyType", "signing").put("algorithm", "ES256")
+                .put("requireUserVerification", false)
+        ).toJson()
+
+        val legacyResponse = Response.fromJson(served(legacy))
+        val localResponse = Response.fromJson(served(local))
+
+        assertEquals("legacy generateKey: $legacyResponse", ErrorCodes.INVALID_PARAMS, legacyResponse.error?.code)
+        assertEquals("local.generateKey: $localResponse", ErrorCodes.KEY_EXISTS, localResponse.error?.code)
+        io.mockk.coVerify(exactly = 0) { keystore.generateKey(any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyWithAuthDuration(any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) }
+        verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().put(any()) }
+    }
+
     /**
      * #255 review r4: generateKey and local.generateKey of one id at once,
      * the first holding its creation open, make exactly one key: the second
@@ -1298,7 +1389,12 @@ class KeyShareAuditTest {
             "resolveKeystoreAlias is the resolver's alias",
             "fun resolveKeystoreAlias(keyId: String, kind: UserKeyKind): String? = resolveKey(keyId, kind)?.alias" in manager
         )
-        assertTrue("resolveKey names its namespace", "fun resolveKey(keyId: String, kind: UserKeyKind): ResolvedKey? {\n        val own = userKeyAlias(keyId, kind)" in manager)
+        assertTrue(
+            "resolveKey names its namespace, its presence from every backend of it (#255 review r6)",
+            "fun resolveKey(keyId: String, kind: UserKeyKind): ResolvedKey? {\n" +
+                "        if (!holdsUserKey(keyId, kind)) return null\n" +
+                "        val own = userKeyAlias(keyId, kind)" in manager
+        )
         assertEquals("one resolveKey", 1, Regex("fun resolveKey\\(").findAll(manager).count())
         assertEquals("one resolveKeystoreAlias", 1, Regex("fun resolveKeystoreAlias\\(").findAll(manager).count())
         for (fn in listOf(
