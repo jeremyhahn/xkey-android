@@ -26,7 +26,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.settings.PairedDeviceRepository
-import java.io.IOException
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.After
@@ -36,7 +35,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Rule
@@ -288,7 +286,8 @@ class GattServerRadioTest {
         adoptPairing()
 
         val message = """{"id":1,"method":"remote.ping"}""".toByteArray()
-        probe.server.sendEncryptedMessage(message)
+        checkNotNull(probe.server.boundSender()) { "the established session has a sender" }
+            .second.sendEncryptedMessage(message)
 
         assertArrayEquals(
             "the stack must have taken the encrypted frame",
@@ -311,12 +310,7 @@ class GattServerRadioTest {
         probe.establishSession(device)
         outbound.connectedDevice = null
 
-        try {
-            probe.server.sendEncryptedMessage("{}".toByteArray())
-            fail("sending with no connected device must fail")
-        } catch (expected: IOException) {
-            // expected
-        }
+        assertNull("with no connected device there is no sender", probe.server.boundSender())
     }
 
     /**

@@ -42,11 +42,27 @@ interface MessageSender {
     fun confirmedConnection(): ConfirmedConnection? = null
 
     /**
+     * What this sender sends on, compared with `==`: two senders with equal
+     * bindings reach the same connection, so a session is identified by its
+     * binding, never by the sender object (a transport may hand out a fresh
+     * sender on every lookup). A sender that is not bound to one connection
+     * is its own binding.
+     */
+    val binding: Any get() = this
+
+    /**
      * Sends [data] encrypted on [connection] alone. The transport checks, at
      * the admission that consumes the nonce, that [connection] is still its
      * current connection, confirmed for the same peer; otherwise it encrypts
      * and writes nothing and throws [ConnectionChangedException]. It never
      * falls back to whatever connection is current at send time.
+     *
+     * [admit] is the caller's own authorization (for a share, the key's
+     * sharing permission). The transport runs it inside that same admission
+     * critical section, after every wait (notification channel, send lock,
+     * dispatcher) and immediately before the nonce is consumed; whatever it
+     * throws refuses the send, with nothing encrypted or written. It runs
+     * under the transport's lock, so it must not suspend or block.
      *
      * A transport that cannot scope a send to one connection keeps this
      * default, which fails closed.
@@ -54,8 +70,11 @@ interface MessageSender {
      * @throws ConnectionChangedException if [connection] is no longer current
      * @throws java.io.IOException if the message could not be sent
      */
-    suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray): Unit =
-        throw ConnectionChangedException()
+    suspend fun sendEncryptedMessageOn(
+        connection: ConfirmedConnection,
+        data: ByteArray,
+        admit: () -> Unit = {}
+    ): Unit = throw ConnectionChangedException()
 }
 
 /**

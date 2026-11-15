@@ -48,8 +48,8 @@ class RemoteKeyClientRequestIdTest {
 
     @Test
     fun `two clients on one router never reuse a request id`() = runTest {
-        val first = RemoteKeyClient(sender, router)
-        val second = RemoteKeyClient(sender, router)
+        val first = RemoteKeyClient(desktopOf(sender, router))
+        val second = RemoteKeyClient(desktopOf(sender, router))
 
         first.pivListSlots()
         second.pivListSlots()
@@ -62,7 +62,7 @@ class RemoteKeyClientRequestIdTest {
 
     @Test
     fun `a fresh router starts its ids at the base value`() = runTest {
-        RemoteKeyClient(sender, router).pivListSlots()
+        RemoteKeyClient(desktopOf(sender, router)).pivListSlots()
 
         assertEquals(1_000_000L, sender.lastRequest.id)
     }

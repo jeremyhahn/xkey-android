@@ -26,6 +26,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -227,7 +228,7 @@ class StreamResponseDrainTest {
     private suspend fun phoneRequest(peer: Peer, id: Long): CompletableDeferred<Response> {
         val answer = CompletableDeferred<Response>()
         router.registerPendingResponse(id, answer)
-        pairing.sendEncryptedMessage(request(id = id, method = "remote.backup.restore"))
+        pairing.sendOnBoundSession(request(id = id, method = "remote.backup.restore"))
         assertEquals(id, peer.desktop.readEncrypted().getLong("id"))
         return answer
     }

@@ -686,8 +686,11 @@ class KeyShareAuditTest {
             nonCancellableIn.sorted()
         )
         assertTrue(
-            "the sharing-policy change records through persistAudited",
-            Regex("persistAudited\\(\\s*write = \\{\\s*keyDao\\.compareAndSetSharingPolicy\\(").containsMatchIn(source)
+            "the sharing-policy change records through persistAudited, as a ledger revoke",
+            Regex(
+                "persistAudited\\(\\s*write = \\{(\\s*//[^\\n]*)*\\s*" +
+                    "SharePermissionLedger\\.revoking\\(entity\\.keyId\\) \\{\\s*keyDao\\.compareAndSetSharingPolicy\\("
+            ).containsMatchIn(source)
         )
         for ((fn, write, record) in listOf(
             Triple("handleSharePublicKey", "dao.insert(", "AuditLogger.logContactImported("),
