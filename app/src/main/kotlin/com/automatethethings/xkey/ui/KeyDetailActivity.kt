@@ -46,7 +46,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
-import com.automatethethings.xkey.storage.deleteKeyRow
 import com.google.android.material.appbar.AppBarLayout
 import com.google.android.material.appbar.CollapsingToolbarLayout
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -2074,8 +2073,13 @@ class KeyDetailActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyDetailActivity))
-            finish()
+            val outcome = keyDao.deleteKeyForScreen(key, keystoreManager, SoftwareKeyStore(this@KeyDetailActivity))
+            if (outcome == R.string.key_deleted) {
+                finish()
+            } else {
+                // Refused: the key stays, so the screen stays and says why.
+                android.widget.Toast.makeText(this@KeyDetailActivity, outcome, android.widget.Toast.LENGTH_LONG).show()
+            }
         }
     }
 

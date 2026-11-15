@@ -59,6 +59,7 @@ import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.storage.deleteKeyRow
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.google.android.material.card.MaterialCardView
@@ -1259,8 +1260,8 @@ class KeyManagementActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyManagementActivity))
-            Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
+            val outcome = keyDao.deleteKeyForScreen(key, keystoreManager, SoftwareKeyStore(this@KeyManagementActivity))
+            Snackbar.make(rootLayout, getString(outcome), Snackbar.LENGTH_SHORT).show()
         }
     }
 
@@ -1760,4 +1761,20 @@ class KeyManagementActivity : AppCompatActivity() {
             return oldItem == newItem
         }
     }
+}
+
+/**
+ * Deletes [key] for a key screen and returns the message to show: a delete
+ * the choke point refuses (material still stands, or an internal key) keeps
+ * the row, so the key stays listed and the screen says so.
+ */
+@androidx.annotation.StringRes
+internal suspend fun KeyDao.deleteKeyForScreen(
+    key: KeyEntity,
+    keystoreManager: KeystoreManager,
+    softwareKeys: SoftwareKeyStore
+): Int {
+    val removed =
+        deleteKeyRow(key, keystoreManager, softwareKeys)
+    return if (removed > 0) R.string.key_deleted else R.string.key_delete_refused
 }
