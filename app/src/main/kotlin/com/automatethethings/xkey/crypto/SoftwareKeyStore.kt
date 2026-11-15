@@ -90,6 +90,7 @@ class SoftwareKeyStore(
 
     /** Store (or replace) a software key, encrypting its material at rest. */
     fun put(key: SoftwareKey) {
+        requireValidKeyId(key.keyId)
         migrateLegacyRecords()
         val id = fileId(key.keyId)
         File(dir, "$id.key").writeBytes(cipher.encrypt(key.material))
@@ -217,9 +218,15 @@ class SoftwareKeyStore(
             }
             // A record of another id, migrated (under its id's digest) or
             // not, is that id's.
-            when (recordId(text)) {
-                keyId -> return KeyPresence.PRESENT
-                null -> if (filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT) unreadable = true
+            // A record under the digest of the string its metadata names is
+            // that string's, even one no write takes now (an empty id an
+            // older build wrote): it is never an unknown id's (#255 verify
+            // r6), so it leaves every other id as it was.
+            val named = namedId(text)
+            when {
+                named != null && isValidKeyId(named) -> if (named == keyId) return KeyPresence.PRESENT
+                named != null && stem == fileId(named) -> {}
+                filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT -> unreadable = true
             }
         }
         return if (unreadable) KeyPresence.UNREADABLE else KeyPresence.ABSENT
@@ -265,12 +272,24 @@ class SoftwareKeyStore(
      * or one of another type). The one reading of a record's id, for the
      * presence probe, the key read and the migration alike.
      */
-    private fun recordId(text: String): String? =
+    private fun recordId(text: String): String? = namedId(text)?.takeIf(::isValidKeyId)
+
+    /**
+     * The string a record's metadata [text] names as its keyId, valid or
+     * not, else null: read only by [recordId] and by [legacyRecordOf], which
+     * attributes a record under the digest of that string to it (#255
+     * verify r6).
+     */
+    private fun namedId(text: String): String? =
         try {
-            (JSONObject(text).opt("keyId") as? String)?.takeIf { it.isNotEmpty() }
+            JSONObject(text).opt("keyId") as? String
         } catch (e: org.json.JSONException) {
             null
         }
+
+    /** Throws [IllegalArgumentException] for an id [isValidKeyId] rejects. */
+    private fun requireValidKeyId(keyId: String) =
+        require(isValidKeyId(keyId)) { "Invalid key id: a software key's id must be non-empty" }
 
     /** Delete a software key by id. */
     fun delete(keyId: String) {
@@ -375,6 +394,14 @@ class SoftwareKeyStore(
 
         /** The shape of a digest name, read only by [migratable]. */
         private val HEX_64 = Regex("[0-9a-f]{64}")
+
+        /**
+         * Whether [keyId] is an id a software key may have: non-empty. The
+         * one key-id check (#255 verify r6), for the record reader
+         * ([recordId]) and every write ([put], local.generateKey's parse)
+         * alike, so no write takes an id the reader rejects.
+         */
+        fun isValidKeyId(keyId: String): Boolean = keyId.isNotEmpty()
 
         /** Prefix of a metadata-only record's [generation]. */
         const val METADATA_ONLY = "meta-only:"

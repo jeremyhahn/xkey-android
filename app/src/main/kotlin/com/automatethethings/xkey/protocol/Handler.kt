@@ -1391,6 +1391,12 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val genParams = LocalGenerateKeyParams.fromJson(params)
+        // The store's one key-id check, on the parsed id before anything
+        // else reads it (#255 verify r6): an id the record reader rejects is
+        // never generated, so no key is written under it.
+        if (!com.automatethethings.xkey.crypto.SoftwareKeyStore.isValidKeyId(genParams.keyId)) {
+            throw ProtocolException("Invalid 'keyId' parameter: must be non-empty", errorCode = ErrorCodes.INVALID_PARAMS)
+        }
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
         // Approval prompts take turns, so another creation of this id can pass
