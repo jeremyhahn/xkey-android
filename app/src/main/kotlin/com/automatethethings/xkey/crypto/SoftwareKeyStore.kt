@@ -121,7 +121,12 @@ class SoftwareKeyStore(
             // name) is never read as no key.
             KeyPresence.ABSENT -> if (legacyRecordOf(keyId) == KeyPresence.ABSENT) return null else
                 throw KeyPresenceUnreadableException(keyId, null)
-            KeyPresence.PRESENT -> if (filePresence(keyFile) != KeyPresence.PRESENT) return null
+            KeyPresence.PRESENT -> {
+                if (filePresence(keyFile) != KeyPresence.PRESENT) return null
+                // Material whose metadata is gone (a put or an older build's
+                // delete stopped short) is this id's, but cannot be read.
+                if (filePresence(metaFile) != KeyPresence.PRESENT) throw KeyPresenceUnreadableException(keyId, null)
+            }
         }
         val meta = JSONObject(metaFile.readText())
         return SoftwareKey(
@@ -222,11 +227,13 @@ class SoftwareKeyStore(
 
     /**
      * What the record under [keyId]'s own file name holds of it (#255 verify
-     * r4): nothing, a metadata-only record (a delete stopped between its
-     * unlinks) or material whose metadata names [keyId]. Material with
-     * metadata that is missing, unreadable or names any other id (or none)
-     * is [KeyPresence.UNREADABLE]: it cannot be vouched for as [keyId]'s,
-     * and is never read as absent.
+     * r4, r5): nothing, a metadata-only record (an older build's delete
+     * stopped between its unlinks), material alone (a put stopped between
+     * its writes, or an older build's delete), or material whose metadata
+     * names [keyId]; each but nothing is [KeyPresence.PRESENT]. Material
+     * with metadata that is unreadable or names any other id (or none) is
+     * [KeyPresence.UNREADABLE]: it cannot be vouched for as [keyId]'s, and
+     * is never read as absent.
      */
     private fun recordOf(keyId: String): KeyPresence {
         val id = fileId(keyId)
@@ -236,7 +243,11 @@ class SoftwareKeyStore(
         return when {
             KeyPresence.UNREADABLE == material || KeyPresence.UNREADABLE == meta -> KeyPresence.UNREADABLE
             material == KeyPresence.ABSENT -> meta
-            meta == KeyPresence.ABSENT -> KeyPresence.UNREADABLE
+            // Material alone under this id's digest name: only this id's
+            // put or an older build's delete leaves it. It holds the id, so
+            // no other key stands in, and its delete's replay can finish it
+            // (#255 verify r5); [get] refuses to read it.
+            meta == KeyPresence.ABSENT -> KeyPresence.PRESENT
             else -> {
                 val text = try {
                     metaFile.readText()
@@ -265,8 +276,11 @@ class SoftwareKeyStore(
     fun delete(keyId: String) {
         migrateLegacyRecords()
         val id = fileId(keyId)
-        unlink(File(dir, "$id.key"))
-        unlink(File(dir, "$id.meta"))
+        // The material first, and the metadata only once it is gone (#255
+        // verify r5): a failed material unlink leaves the record whole, so
+        // the delete's replay reads it as this id's key and retries.
+        val material = File(dir, "$id.key")
+        if (unlink(material) || filePresence(material) == KeyPresence.ABSENT) unlink(File(dir, "$id.meta"))
     }
 
     /**
