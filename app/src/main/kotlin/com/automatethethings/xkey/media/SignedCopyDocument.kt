@@ -191,10 +191,22 @@ object MediaSaveRuns {
      * the runs that made them died with it and no screen of this process
      * owns them. This process's own stay; they are released by their run
      * or screen (a placed or dropped copy, [abandon]).
+     *
+     * [keep] names earlier files a screen restored from saved state still
+     * holds (a copy whose picker was open when the process died): they are
+     * adopted by this process, so neither this sweep nor a later one deletes
+     * them; their screen releases them when its exchange ends.
      */
-    fun sweep(directory: File) {
+    fun sweep(directory: File, keep: Collection<File> = emptyList()) {
+        keep.forEach { adopted.add(it.absolutePath) }
         directory.listFiles()?.forEach { file ->
-            if (file.name.startsWith(STAGED_PREFIX) && !file.name.startsWith("$STAGED_PREFIX$session-")) file.delete()
+            if (file.name.startsWith(STAGED_PREFIX) &&
+                !file.name.startsWith("$STAGED_PREFIX$session-") &&
+                file.absolutePath !in adopted
+            ) file.delete()
         }
     }
+
+    /** Earlier processes' staging files a restored screen of this one holds. */
+    private val adopted: MutableSet<String> = ConcurrentHashMap.newKeySet()
 }

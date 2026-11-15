@@ -369,14 +369,19 @@ class CoSignActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Staged copies an earlier process left: their runs died with it.
-        MediaSaveRuns.sweep(MediaPublisher.recoveryDirectory(applicationContext))
         keystoreManager = KeystoreManager(this)
         // Restored before buildUI loads the keys, and before onStart delivers a
         // scan result that was pending when the previous instance went away.
         pendingKeyId = savedInstanceState?.getString(STATE_KEY_ID)
         buildUI()
         savedInstanceState?.let { restoreExchange(it) }
+        // Staged copies an earlier process left: their runs died with it. One
+        // the restored exchange still names (its picker was open when the
+        // process died) stays until that exchange ends.
+        MediaSaveRuns.sweep(
+            MediaPublisher.recoveryDirectory(applicationContext),
+            keep = listOfNotNull(exchange.pendingCopy?.staged, exchange.runningCopy?.copy?.staged)
+        )
         exchange.runningCopy?.let { runCopy(it) }
         appendQueuedResponse()
     }
