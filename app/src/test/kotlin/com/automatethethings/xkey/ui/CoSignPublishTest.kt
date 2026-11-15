@@ -681,14 +681,26 @@ class CoSignPublishTest {
     /**
      * A signed JPEG over the automatic capture signer's 32 MiB limit, built
      * segment by segment: SOI, DQT, the scan header, [scanBytes] of
-     * entropy-coded data and EOI, signed in its EXIF with [hash].
+     * entropy-coded data and EOI, signed in its EXIF with [hash]. Written to
+     * disk a chunk at a time and hashed streamed, never held in the heap: a
+     * test JVM's heap is smaller than the media.
      */
     private fun signedLargeJpeg(name: String, scanBytes: Int, fill: Byte, hash: String?): Pair<File, String> {
         fun bytes(vararg values: Int) = ByteArray(values.size) { values[it].toByte() }
-        val jpeg = bytes(0xFF, 0xD8) + bytes(0xFF, 0xDB, 0x00, 0x04, 0x01, 0x02) +
-            bytes(0xFF, 0xDA, 0x00, 0x04, 0x03, 0x04) + ByteArray(scanBytes) { fill } + bytes(0xFF, 0xD9)
-        val own = MediaHasher.hashCanonical(jpeg, "image/jpeg")
-        val file = File(folder.root, name).apply { writeBytes(jpeg) }
+        val file = File(folder.root, name)
+        file.outputStream().buffered().use { out ->
+            out.write(bytes(0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x04, 0x01, 0x02, 0xFF, 0xDA, 0x00, 0x04, 0x03, 0x04))
+            val chunk = ByteArray(64 * 1024) { fill }
+            var left = scanBytes
+            while (left > 0) {
+                val n = minOf(left, chunk.size)
+                out.write(chunk, 0, n)
+                left -= n
+            }
+            out.write(bytes(0xFF, 0xD9))
+        }
+        // The canonical hash leaves the EXIF out, so it is the same before and after signing.
+        val own = MediaHasher.hashStreamed({ file.inputStream() }, "image/jpeg").canonical
         XmpMetadataHelper.writeSignature(file.path, ContentAuthenticityData.fromJsonString(XmpFixtures.json(hash ?: own)))
         return file to own
     }
