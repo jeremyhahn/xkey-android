@@ -18,5 +18,6 @@
     <string name="cosign_error_signature">the signature is not base64</string>
     <string name="cosign_duplicate_signer">Key %1$s has already signed this media; nothing was added</string>
     <string name="cosign_appended">Co-signature from %1$s added</string>
+    <string name="cosign_error_media_changed">it was scanned for other media</string>
     <string name="cosign_append_failed">Could not write the co-signature: %1$s</string>
 </resources>

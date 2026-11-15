@@ -101,14 +101,23 @@ data class SignedCopyDocument(val name: String, val mimeType: String) {
  */
 object MediaSaveRuns {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val runs = ConcurrentHashMap<String, Deferred<Unit>>()
+    private val runs = ConcurrentHashMap<String, Deferred<*>>()
+    private val ended: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** The write of [id], started with [write] unless it already runs. */
-    fun attach(id: String, write: () -> Unit): Deferred<Unit> =
-        runs.computeIfAbsent(id) { scope.async { write() } }
+    /** The run of [id], started with [write] unless it already runs; its result is [write]'s. */
+    @Suppress("UNCHECKED_CAST")
+    fun <T> attach(id: String, write: () -> T): Deferred<T> =
+        runs.computeIfAbsent(id) { scope.async { write() } } as Deferred<T>
 
     /** Forget [id] once the instance showing it has seen it end. */
     fun finished(id: String) {
+        ended.add(id)
         runs.remove(id)
     }
+
+    /**
+     * [id] ended and its end was shown: a saved state that still names it
+     * was saved before that, and must not run it again.
+     */
+    fun hasFinished(id: String): Boolean = id in ended
 }

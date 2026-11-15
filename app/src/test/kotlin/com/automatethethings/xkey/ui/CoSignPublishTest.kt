@@ -55,6 +55,7 @@ import java.io.OutputStream
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The media a provider holds that cannot be replaced atomically: readable,
@@ -70,10 +71,19 @@ class ReadOnlyMediaProvider : ContentProvider() {
         val writeOpens: MutableList<String> = Collections.synchronizedList(mutableListOf())
         /** While set, every read waits for it, as a slow provider's does. */
         @Volatile var readGate: CountDownLatch? = null
+        /** Reads opened so far, counted before [readGate] holds them. */
+        val readsStarted = AtomicInteger()
+        /** While set, the type queries it still allows; past them, a query is refused. */
+        @Volatile var typeQueriesLeft: AtomicInteger? = null
     }
 
     override fun onCreate() = true
-    override fun getType(uri: Uri): String? = types[uri.lastPathSegment] ?: when (uri.lastPathSegment?.substringAfterLast('.')) {
+    override fun getType(uri: Uri): String? {
+        typeQueriesLeft?.let { if (it.decrementAndGet() < 0) throw SecurityException("type refused") }
+        return typeOf(uri)
+    }
+
+    private fun typeOf(uri: Uri): String? = types[uri.lastPathSegment] ?: when (uri.lastPathSegment?.substringAfterLast('.')) {
         "png" -> "image/png"
         "mp4" -> "video/mp4"
         else -> null
@@ -85,6 +95,7 @@ class ReadOnlyMediaProvider : ContentProvider() {
             throw FileNotFoundException("the original is never opened for writing")
         }
         val file = files[uri.lastPathSegment] ?: throw FileNotFoundException(uri.toString())
+        readsStarted.incrementAndGet()
         readGate?.let { check(it.await(10, TimeUnit.SECONDS)) { "read never released" } }
         return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
     }
@@ -130,6 +141,8 @@ class CoSignPublishTest {
         ReadOnlyMediaProvider.files["clip.png"] = file
         ReadOnlyMediaProvider.writeOpens.clear()
         ReadOnlyMediaProvider.readGate = null
+        ReadOnlyMediaProvider.readsStarted.set(0)
+        ReadOnlyMediaProvider.typeQueriesLeft = null
         Robolectric.setupContentProvider(ReadOnlyMediaProvider::class.java, ReadOnlyMediaProvider.AUTHORITY)
         // Where the copies go: typed by name too, so a copy can be co-signed again.
         Robolectric.setupContentProvider(ReadOnlyMediaProvider::class.java, COPIES)
@@ -385,5 +398,104 @@ class CoSignPublishTest {
         val (picker, _) = awaitPicker(activity)
         assertEquals("123-cosigned.png", picker.getStringExtra(Intent.EXTRA_TITLE))
         assertEquals("image/png", picker.type)
+    }
+
+    /** Lets the screen's IO work settle, then runs what it posted. */
+    private fun settle() {
+        repeat(5) {
+            Thread.sleep(60)
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+    }
+
+    private fun queued(activity: CoSignActivity) = field("queuedResponses").get(activity) as List<*>
+
+    @Test
+    fun `a response scanned for one media is never appended to another`() {
+        val other = File(folder.root, "other.png").apply { writeBytes(originalBytes) }
+        ReadOnlyMediaProvider.files["other.png"] = other
+        val otherUri = Uri.parse("content://${ReadOnlyMediaProvider.AUTHORITY}/other.png")
+        val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
+        shadowOf(Looper.getMainLooper()).idle()
+        field("selectedUri").set(activity, original)
+        scanWitness(activity)
+        val (_, requestCode) = awaitPicker(activity)
+        // Scanned for the original while its copy's picker is open: it waits.
+        scanWitness(activity, "SHA256:second")
+        settle()
+        assertEquals(1, queued(activity).size)
+
+        // The selection changes without going through the media picker, and
+        // the waiting response reaches the head of the queue.
+        field("selectedUri").set(activity, otherUri)
+        activity.activityResultRegistry.dispatchResult(requestCode, Activity.RESULT_CANCELED, null)
+        settle()
+
+        assertNull("nothing is co-signed for the other media", shadowOf(activity).nextStartedActivityForResult)
+        assertEquals("the response is refused, not kept", 0, queued(activity).size)
+        assertEquals(emptyList<File>(), recoveryFiles(activity))
+    }
+
+    @Test
+    fun `a response is refused when the media no longer has the content it was scanned for`() {
+        val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
+        shadowOf(Looper.getMainLooper()).idle()
+        field("selectedUri").set(activity, original)
+        // The media showed another content hash when the witness signed it.
+        field("currentSignatureData").set(activity, ContentAuthenticityData.fromJsonString(XmpFixtures.json("d".repeat(64))))
+        scanWitness(activity)
+        settle()
+
+        assertNull("nothing is co-signed", shadowOf(activity).nextStartedActivityForResult)
+        assertEquals(0, queued(activity).size)
+        assertEquals("the staged copy is gone", emptyList<File>(), recoveryFiles(activity))
+    }
+
+    @Test
+    fun `a recreation during a running append waits on it and appends exactly once`() {
+        val gate = CountDownLatch(1)
+        ReadOnlyMediaProvider.readGate = gate
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        shadowOf(Looper.getMainLooper()).idle()
+        field("selectedUri").set(controller.get(), original)
+        scanWitness(controller.get())
+        idleUntil { ReadOnlyMediaProvider.readsStarted.get() >= 1 }
+
+        // The append holds in its read of the original; the screen is recreated.
+        controller.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+        val activity = controller.get()
+        ReadOnlyMediaProvider.readGate = null
+        gate.countDown()
+
+        val (picker, _) = awaitPicker(activity)
+        assertEquals("clip-cosigned.png", picker.getStringExtra(Intent.EXTRA_TITLE))
+        settle()
+        assertNull("one append, so one picker", shadowOf(activity).nextStartedActivityForResult)
+        assertEquals("one append, so one staged copy", 1, recoveryFiles(activity).size)
+        assertEquals(0, queued(activity).size)
+        assertNull(field("runningAppend").get(activity))
+    }
+
+    @Test
+    fun `a copy picker that cannot open fails the append and leaves nothing pending`() {
+        val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
+        shadowOf(Looper.getMainLooper()).idle()
+        field("selectedUri").set(activity, original)
+        // The append types the media; building the picker's input types it again, and is refused.
+        ReadOnlyMediaProvider.typeQueriesLeft = AtomicInteger(1)
+        scanWitness(activity)
+        settle()
+
+        assertNull("no picker opens", shadowOf(activity).nextStartedActivityForResult)
+        assertNull("nothing is left to place", field("pendingCopy").get(activity))
+        assertEquals(false, field("appending").get(activity))
+        assertEquals(0, queued(activity).size)
+        assertEquals("the staged copy is gone", emptyList<File>(), recoveryFiles(activity))
+
+        // The next response is not blocked by the failure.
+        ReadOnlyMediaProvider.typeQueriesLeft = null
+        scanWitness(activity, "SHA256:second")
+        awaitPicker(activity)
     }
 }
