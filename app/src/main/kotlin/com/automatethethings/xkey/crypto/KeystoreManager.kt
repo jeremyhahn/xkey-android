@@ -1745,8 +1745,15 @@ class KeystoreManager(private val context: Context) {
             KeyPresence.UNREADABLE
         }
 
+    /**
+     * The store of exportable general keys, read by [softwareKeyPresence]:
+     * one store, so its migration and its kept metadata scan serve every
+     * resolver call (#255).
+     */
+    private val softwareKeyStore: SoftwareKeyStore by lazy { SoftwareKeyStore(context) }
+
     /** The store of exportable general keys, read by [softwareKeyPresence]. */
-    internal fun softwareKeys(): SoftwareKeyStore = SoftwareKeyStore(context)
+    internal fun softwareKeys(): SoftwareKeyStore = softwareKeyStore
 
     /**
      * The one user-key namespace holding [keyId] (#255 review r3): the

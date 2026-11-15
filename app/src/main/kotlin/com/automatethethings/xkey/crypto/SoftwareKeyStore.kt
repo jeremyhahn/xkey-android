@@ -94,13 +94,34 @@ class SoftwareKeyStore(
 
     private var migrated = false
 
+    /** Writes and deletes of [dir] in this process, by every instance over it. */
+    private val writes: java.util.concurrent.atomic.AtomicLong =
+        WRITES.computeIfAbsent(dir.absolutePath) { java.util.concurrent.atomic.AtomicLong() }
+
+    /** The kept metadata scan of [legacyIndex], valid while [writes] is at its version. */
+    @Volatile
+    private var index: LegacyIndex? = null
+
+    /**
+     * Every record's metadata as one scan read it: the stems whose metadata
+     * cannot be read, the stems that hold material naming no id, and the
+     * stems of each id a record's metadata names.
+     */
+    private class LegacyIndex(
+        val version: Long,
+        val unreadableMetadata: Set<String>,
+        val unattributed: Set<String>,
+        val named: Map<String, Set<String>>
+    )
+
     /** Store (or replace) a software key, encrypting its material at rest. */
     fun put(key: SoftwareKey) {
         requireValidKeyId(key.keyId)
         migrateLegacyRecords()
         val id = fileId(key.keyId)
-        File(dir, "$id.key").writeBytes(cipher.encrypt(key.material))
-        File(dir, "$id.meta").writeText(
+        try {
+            File(dir, "$id.key").writeBytes(cipher.encrypt(key.material))
+            File(dir, "$id.meta").writeText(
             JSONObject().apply {
                 put("keyId", key.keyId)
                 put("algorithm", key.algorithm)
@@ -109,7 +130,10 @@ class SoftwareKeyStore(
                 put("exportable", key.exportable)
                 put("shareable", key.shareable)
             }.toString()
-        )
+            )
+        } finally {
+            wrote()
+        }
     }
 
     /** Retrieve a software key by id (material decrypted), or null. */
@@ -188,59 +212,70 @@ class SoftwareKeyStore(
             KeyPresence.UNREADABLE
         }
 
-    /**
-     * What an older build's records left under their old names (their
-     * migration found the digest name taken, or could not rename) hold of
-     * [keyId]. A record whose metadata cannot be read could be any id's: it
-     * is [KeyPresence.UNREADABLE] (#255 verify r2z), never absent and never
-     * [keyId]'s key, so no other key under [keyId] is read as a user key. A record whose metadata
-     * cannot be parsed while its material is there (or cannot be probed)
-     * could be any id's: it is [KeyPresence.UNREADABLE], never a record of
-     * another id, so a caller refuses rather than fall back to another
-     * credential under [keyId] (#255 verify r2y). So is one whose metadata
-     * is missing or names no id ([recordId]: no keyId, an empty one or one
-     * that is not a string) beside material (#255 verify r4). One that
-     * holds no material is attributable to none, as the migration finds.
-     */
     private fun legacyRecordOf(keyId: String): KeyPresence {
-        var unreadable = false
+        val index = legacyIndex(keyId)
+        // [keyId]'s own record is read by [recordOf].
         val own = fileId(keyId)
-        for (file in dir.listFiles() ?: throw KeyPresenceUnreadableException(keyId, null)) {
-            val stem = file.name.substringBeforeLast('.')
-            // [keyId]'s own record is read by [recordOf]. Every other record
-            // is told by the id its metadata names, never by its name's
-            // shape (#255 verify r5): an older build kept a 64-hex id as
-            // its file name, which looks like a digest.
-            if (stem == own) continue
-            if (file.name.endsWith(".key")) {
-                // Material with no metadata beside it names no id.
-                if (filePresence(File(dir, "$stem.meta")) != KeyPresence.PRESENT) unreadable = true
-                continue
-            }
-            if (!file.name.endsWith(".meta")) continue
+        return when {
             // Metadata that is listed but cannot be read could be any id's
             // (#255 verify r2z): it is unreadable for [keyId], never read
             // as its key, so no other key (an internal one under a raw
             // alias) is taken for a user key of [keyId].
-            val text = try {
-                readMetadataText(file, keyId)
-            } catch (e: KeyPresenceUnreadableException) {
-                return KeyPresence.UNREADABLE
+            index.unreadableMetadata.any { it != own } -> KeyPresence.UNREADABLE
+            index.named[keyId].orEmpty().any { it != own } -> KeyPresence.PRESENT
+            index.unattributed.any { it != own } -> KeyPresence.UNREADABLE
+            else -> KeyPresence.ABSENT
+        }
+    }
+
+    /**
+     * The one scan of every record's metadata, read by [legacyRecordOf]:
+     * kept until a write or delete of this store's directory, through any
+     * instance ([writes]), so repeated presence checks read the metadata
+     * once (#255). A scan that a write overlaps carries the count from
+     * before it, so the next check scans again.
+     */
+    private fun legacyIndex(keyId: String): LegacyIndex {
+        val version = writes.get()
+        index?.takeIf { it.version == version }?.let { return it }
+        val unreadable = HashSet<String>()
+        val unattributed = HashSet<String>()
+        val named = HashMap<String, MutableSet<String>>()
+        for (file in dir.listFiles() ?: throw KeyPresenceUnreadableException(keyId, null)) {
+            val stem = file.name.substringBeforeLast('.')
+            if (file.name.endsWith(".key")) {
+                // Material with no metadata beside it names no id.
+                if (filePresence(File(dir, "$stem.meta")) != KeyPresence.PRESENT) unattributed += stem
+                continue
             }
-            // A record of another id, migrated (under its id's digest) or
-            // not, is that id's.
-            // A record under the digest of the string its metadata names is
+            if (!file.name.endsWith(".meta")) continue
+            val text = try {
+                readMetadataText(file, stem)
+            } catch (e: KeyPresenceUnreadableException) {
+                unreadable += stem
+                continue
+            }
+            // Every record is told by the id its metadata names, never by
+            // its name's shape (#255 verify r5): an older build kept a
+            // 64-hex id as its file name, which looks like a digest. A
+            // record under the digest of the string its metadata names is
             // that string's, even one no write takes now (an empty id an
             // older build wrote): it is never an unknown id's (#255 verify
-            // r6), so it leaves every other id as it was.
-            val named = namedId(text)
+            // r6). One whose metadata names no id beside material could be
+            // any id's (#255 verify r2y, r4).
+            val id = namedId(text)
             when {
-                named != null && isValidKeyId(named) -> if (named == keyId) return KeyPresence.PRESENT
-                named != null && stem == fileId(named) -> {}
-                filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT -> unreadable = true
+                id != null && isValidKeyId(id) -> named.getOrPut(id) { HashSet() } += stem
+                id != null && stem == fileId(id) -> {}
+                filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT -> unattributed += stem
             }
         }
-        return if (unreadable) KeyPresence.UNREADABLE else KeyPresence.ABSENT
+        return LegacyIndex(version, unreadable, unattributed, named).also { index = it }
+    }
+
+    /** Counts a write or delete of this store's directory, invalidating every instance's [index]. */
+    private fun wrote() {
+        writes.incrementAndGet()
     }
 
     /**
@@ -342,7 +377,11 @@ class SoftwareKeyStore(
         // verify r5): a failed material unlink leaves the record whole, so
         // the delete's replay reads it as this id's key and retries.
         val material = File(dir, "$id.key")
-        if (unlink(material) || filePresence(material) == KeyPresence.ABSENT) unlink(File(dir, "$id.meta"))
+        try {
+            if (unlink(material) || filePresence(material) == KeyPresence.ABSENT) unlink(File(dir, "$id.meta"))
+        } finally {
+            wrote()
+        }
     }
 
     /**
@@ -415,9 +454,12 @@ class SoftwareKeyStore(
             // The metadata moves only once the material has: a record is
             // never split between two names.
             val material = File(dir, "$stem.key")
+            // A move is a write of the store: every instance's scan is redone.
+            wrote()
             if (material.renameTo(File(dir, "$target.key")) || filePresence(material) == KeyPresence.ABSENT) {
                 meta.renameTo(File(dir, "$target.meta"))
             }
+            wrote()
         }
     }
 
@@ -436,6 +478,9 @@ class SoftwareKeyStore(
 
     companion object {
         private const val KEY_ALIAS = "xkey_software_key_store"
+
+        /** Each store directory's write count, shared by every instance over it. */
+        private val WRITES = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
 
         /** The shape of a digest name, read only by [migratable]. */
         private val HEX_64 = Regex("[0-9a-f]{64}")
