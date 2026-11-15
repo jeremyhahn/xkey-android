@@ -90,12 +90,14 @@ class FileEncryptor(
         output: OutputStream
     ) {
         val ephemeralKeyId = "ephemeral_${UUID.randomUUID()}"
+        val ephemeralAlias = ephemeralAlias(ephemeralKeyId)
         try {
-            // Generate ephemeral EC key in Keystore with PURPOSE_AGREE_KEY
-            generateEphemeralKey(ephemeralKeyId)
-
-            // Get ephemeral public key DER
-            val ephemeralPubKeyDer = keystoreManager.getPublicKeyDER(ephemeralKeyId, UserKeyKind.GENERAL)
+            // Generate ephemeral EC key in Keystore with PURPOSE_AGREE_KEY.
+            // Its public key is the one just generated, read from the pair
+            // itself, never through the user-key resolver, which probes
+            // every key store and refuses when one cannot be read (#255
+            // review r7).
+            val ephemeralPubKeyDer = generateEphemeralKey(ephemeralAlias)
                 ?: throw EncryptionException("Failed to get ephemeral public key", null)
 
             // Perform ECDH in hardware
@@ -136,8 +138,11 @@ class FileEncryptor(
                 }
             }
         } finally {
-            // Always delete ephemeral key
-            keystoreManager.deleteKey(ephemeralKeyId, UserKeyKind.GENERAL)
+            // Always delete the ephemeral key: the exact alias generated, in
+            // the Keystore, its own backend, with no presence guard that an
+            // unreadable Ed25519 or software store could make throw before
+            // the delete (#255 review r7).
+            keystoreManager.discardGeneratedKey(ephemeralAlias)
         }
     }
 
@@ -214,10 +219,10 @@ class FileEncryptor(
      * The key is created on the secp256r1 (P-256) curve without user authentication
      * requirements, as it is used only for a single ECDH operation and then deleted.
      *
-     * @param keyId Unique identifier for the ephemeral key.
+     * @param alias The ephemeral key's Keystore alias ([ephemeralAlias]).
+     * @return The generated key's public key, DER-encoded.
      */
-    private fun generateEphemeralKey(keyId: String) {
-        val alias = "xkey_key_$keyId"
+    private fun generateEphemeralKey(alias: String): ByteArray? {
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
 
         if (keyStore.containsAlias(alias)) {
@@ -236,8 +241,12 @@ class FileEncryptor(
             KEYSTORE_PROVIDER
         )
         keyPairGenerator.initialize(specBuilder.build())
-        keyPairGenerator.generateKeyPair()
+        return keyPairGenerator.generateKeyPair()?.public?.encoded
     }
+
+    /** The Keystore alias of the ephemeral key [keyId]: the general alias [KeystoreManager.performECDH] reads. */
+    internal fun ephemeralAlias(keyId: String): String =
+        KeystoreManager.userKeyAlias(keyId, UserKeyKind.GENERAL)
 
     /**
      * Derive a key using HKDF-SHA256.

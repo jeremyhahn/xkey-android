@@ -676,6 +676,12 @@ class RequestHandler(
             // why it was chosen are documented at UserVerificationWireError.
             Log.e(TAG, "User verification required: ${e.message}")
             UserVerificationWireError.response(request.id, e)
+        } catch (e: com.automatethethings.xkey.crypto.KeyPresenceUnreadableException) {
+            // A key store that cannot be read is a refusal of this request
+            // (#255 review r7), never a key read as absent, and never an
+            // internal error: no handler resolves a key past it.
+            Log.w(TAG, "Key store unreadable: ${e.message}")
+            Response.error(request.id, ErrorCodes.OPERATION_DENIED, "Key store unavailable: cannot read whether the key exists")
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected handler error", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}")
@@ -807,7 +813,7 @@ class RequestHandler(
         val level = generatedKeyLevel(
             generateParams.credentialId,
             read = { keystoreManager.credentialSecurityLevel(generateParams.credentialId) },
-            discard = { keystoreManager.deleteKey(generateParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+            discard = { keystoreManager.discardGeneratedKey(com.automatethethings.xkey.crypto.KeystoreManager.userKeyAlias(generateParams.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)) }
         )
 
         // The leaf of the Keystore chain is the key attestation certificate; the
@@ -1491,7 +1497,7 @@ class RequestHandler(
             val level = generatedKeyLevel(
                 genParams.keyId,
                 read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
-                discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
+                discard = { keystoreManager.discardGeneratedKey(com.automatethethings.xkey.crypto.KeystoreManager.userKeyAlias(genParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)) }
             )
 
             // Store in unified key store
@@ -1540,7 +1546,7 @@ class RequestHandler(
         val level = generatedKeyLevel(
             genParams.keyId,
             read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
-            discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
+            discard = { keystoreManager.discardGeneratedKey(com.automatethethings.xkey.crypto.KeystoreManager.userKeyAlias(genParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)) }
         )
         val isStrongBoxBacked = level == KeySecurityLevel.STRONGBOX
 

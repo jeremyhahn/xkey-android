@@ -632,9 +632,11 @@ class KeystoreManager(private val context: Context) {
      */
     fun deleteKey(credentialId: String, kind: UserKeyKind): Boolean {
         // The key of [kind] only: a delete of one key never removes the
-        // other key sharing its id.
-        val alias = resolveKeystoreAlias(credentialId, kind) ?: return false
-        keyStore.deleteEntry(alias)
+        // other key sharing its id. The Keystore entry is the only backend
+        // this deletes, so it reads that alias alone and never the
+        // cross-backend presence guard (#255 review r7): an unreadable
+        // Ed25519 or software store never stops the delete of a Keystore key.
+        if (!discardGeneratedKey(userKeyAlias(credentialId, kind))) return false
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
@@ -1970,6 +1972,30 @@ class KeystoreManager(private val context: Context) {
         if (!keyStore.containsAlias(alias)) return false
         keyStore.deleteEntry(alias)
         return true
+    }
+
+    /**
+     * The one cleanup of a Keystore key this code just generated (#255
+     * review r7): deletes exactly [alias] from the Android Keystore, its own
+     * backend, and consults no other. It never goes through the
+     * cross-backend presence guard ([holdsUserKey]), so an unreadable Ed25519
+     * or software key store cannot leave a generated private key behind (an
+     * ephemeral ECDH key, or a key whose generation failed half-way). PIV
+     * slot aliases are never touched. A failed delete is reported as false,
+     * never thrown, so a cleanup in a finally block never replaces
+     * the failure that brought it there.
+     *
+     * @return true if [alias] was held and is now deleted.
+     */
+    fun discardGeneratedKey(alias: String): Boolean {
+        if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
+        return try {
+            val held = runCatching { keyStore.containsAlias(alias) }.getOrDefault(true)
+            if (held) keyStore.deleteEntry(alias)
+            held
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /**

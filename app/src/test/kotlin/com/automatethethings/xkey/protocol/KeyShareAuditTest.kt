@@ -1191,6 +1191,32 @@ class KeyShareAuditTest {
         assertEquals(encoded, success(served(getPublicKey)).getString("publicKey"))
     }
 
+    /**
+     * #255 review r7, the handler side of the bypass check: a request whose
+     * key read meets an unreadable key store (here the software key store)
+     * is answered with a refusal, operation denied, never an internal error
+     * and never an exception out of the handler.
+     */
+    @Test
+    fun anUnreadableKeyStoreIsARefusedRequest() = runTest {
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to ecKeyPair()))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        val keystore = realKeystoreHandler()
+        val software = io.mockk.mockk<com.automatethethings.xkey.crypto.SoftwareKeyStore>()
+        every { software.presence(any()) } returns com.automatethethings.xkey.crypto.KeyPresence.UNREADABLE
+        every { keystore.softwareKeys() } returns software
+        val getPublicKey = Request(
+            id = 11,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+
+        val response = Response.fromJson(served(getPublicKey))
+
+        assertNull("a key was read from an unreadable store: ${response.result}", response.result)
+        assertEquals("the request is refused: ${response.error}", ErrorCodes.OPERATION_DENIED, response.error?.code)
+    }
+
     /** A handler over a spied real [KeystoreManager] on the platform keystore, the Ed25519 store empty. */
     private fun realKeystoreHandler(): KeystoreManager {
         val keystore = io.mockk.spyk(KeystoreManager(context))
@@ -1368,7 +1394,8 @@ class KeyShareAuditTest {
         val source = handlerSource()
         val lookups = Regex("keystoreManager\\.(getPublicKeyDER|getPublicKeyPEM|getPublicKeySSH|getCOSEPublicKey|getPublicKey|getAttestationChain|keySecurityLevel|resolveKeystoreAlias|resolveKey|keyExists|deleteKey|isKeyStrongBoxBacked)\\(([^)]*)\\)")
             .findAll(source).toList()
-        assertTrue("lookups found: ${lookups.size}", lookups.size >= 9)
+        // A generated key's discard deletes its own alias (#255 review r7), no lookup.
+        assertTrue("lookups found: ${lookups.size}", lookups.size >= 8)
         for (lookup in lookups) {
             assertTrue(
                 "a lookup names the user key it reads: ${lookup.value}",
@@ -1407,7 +1434,9 @@ class KeyShareAuditTest {
             val header = manager.substring(start, manager.indexOf(")", manager.indexOf("kind", start)) + 1)
             assertTrue("$fn takes a non-null kind: $header", Regex("\\bkind: UserKeyKind[,)\\s]").containsMatchIn(header + " "))
             val body = manager.substring(start, manager.indexOf("\n\n", start).let { if (it < 0) manager.length else it })
-            assertTrue("$fn resolves with its kind", Regex("(resolveKeystoreAlias|keySecurityLevel)\\(\\w+, kind\\)").containsMatchIn(body))
+            // A delete deletes the alias of its kind directly, past no cross-backend presence guard (#255 review r7).
+            val resolves = if (fn == "deleteKey") "userKeyAlias\\(\\w+, kind\\)" else "(resolveKeystoreAlias|keySecurityLevel)\\(\\w+, kind\\)"
+            assertTrue("$fn resolves with its kind", Regex(resolves).containsMatchIn(body))
         }
         val pem = manager.substring(manager.indexOf("fun getPublicKeyPEM("))
         assertTrue("getPublicKeyPEM reads the DER of its kind", Regex("getPublicKeyDER\\(\\w+, kind\\)").containsMatchIn(pem.substring(0, pem.indexOf("\n    }\n"))))
