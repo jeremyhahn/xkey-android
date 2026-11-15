@@ -639,6 +639,32 @@ class KeySharingPendingIntentHandlerTest {
     }
 
     /**
+     * #270 round 4: a credential and a general key share an id. The
+     * delete's target probe fails once and the next read succeeds: the
+     * failure is never read as "no material". The delete is refused, and
+     * both keys, the row and its metadata stay.
+     */
+    @Test
+    fun aDeleteWhoseTargetProbeFailsIsRefusedAndKeepsBothKeys() = runTest {
+        val id = "k-probe"
+        val both = mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
+        var probes = 0
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers {
+            if (probes++ == 0) throw java.security.KeyStoreException("keystore busy") else both
+        }
+        every { keystore.deleteUserKeyGeneration(id, any()) } returns emptyMap()
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE)
+
+        assertNotNull("a failed probe let the delete through", rpcDeleteKey(id).error)
+
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        assertNotNull("the key row was deleted", tables.key(id))
+        assertFalse(store.isDeletionPending(id))
+    }
+
+    /**
      * Round 12 (4): every key delete records one key-deletion audit event:
      * local.deleteKey of a key row, of material with no row, and the legacy
      * deleteKey.

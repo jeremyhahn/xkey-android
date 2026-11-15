@@ -272,8 +272,12 @@ class KeyDeletionMaterialTypesTest {
         // One key under the id is the target whatever its row's type says.
         assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "ec", setOf("keystore:xkey_credential_k"), legacy = false))
         assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "fido2", general, legacy = true))
-        // No material: every alias, as before the row split.
-        assertEquals(null, KeystoreManager.deleteTarget("k", "ec", emptySet(), legacy = false))
+        // No material: still one kind, never every alias (#270 round 4):
+        // the row's, else the one the method names.
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "ec", emptySet(), legacy = false))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "fido2", emptySet(), legacy = false))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", null, emptySet(), legacy = false))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", null, emptySet(), legacy = true))
     }
 
     /**
@@ -322,6 +326,37 @@ class KeyDeletionMaterialTypesTest {
         assertFalse("the credential was left", "xkey_credential_k" in entries)
         assertEquals("the retry deleted the general key beside its row", setOf("xkey_key_k"), entries.keys)
         assertFalse(store.isDeletionPending("k"))
+    }
+
+    /**
+     * #270 round 4: a delete names the one key it removes. A deleter with
+     * no kind would select both namespaces, so it records no delete:
+     * refused with nothing removed. A credential-only and a general-only
+     * delete each remove only their own key.
+     */
+    @Test
+    fun aDeleterWithoutAKindIsRefusedAndNamedDeletesTakeOnlyTheirKey() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val row = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        val kindless = keyMaterialDeleter(context, keystore)
+
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { store.deleteMaterial("k", kindless, besideRow = row) }
+        }
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            kotlinx.coroutines.runBlocking { store.deleteKey("k", row, kindless) }
+        }
+        assertEquals(setOf("xkey_credential_k", "xkey_key_k"), entries.keys)
+        org.junit.Assert.assertNotNull("the row went", tables.key("k"))
+        assertFalse(store.isDeletionPending("k"))
+
+        assertTrue(store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
+        assertEquals("the credential delete took the general key", setOf("xkey_key_k"), entries.keys)
+        assertTrue(store.deleteKey("k", row, keyMaterialDeleter(context, keystore, UserKeyKind.GENERAL)))
+        assertTrue("the general delete left its key", entries.isEmpty())
     }
 
     /**
