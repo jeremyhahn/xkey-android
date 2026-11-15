@@ -41,7 +41,16 @@ import java.nio.file.Files
 import java.security.KeyStore
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -201,6 +210,79 @@ class CredentialKeyDeleteTest {
             Regex(Regex.escape("keystoreManager.deleteCredentialKey(")).findAll(code).count()
         )
         assertEquals("no unaudited raw-alias delete in Handler", 0, Regex(Regex.escape(".deleteByAlias(")).findAll(code).count())
+    }
+
+    @Test
+    fun aDeleteCancelledMidwayKeepsBothOrNeither() = runBlocking<Unit> {
+        for ((n, request) in listOf(localDelete("c"), legacyDelete("c")).withIndex()) {
+            // Room has already removed the row when the cancelled caller resumes.
+            val metadataRemoved = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            coEvery { credentialDao.deleteByCredentialId(any()) } coAnswers {
+                val removed = if (metadata.remove(firstArg<String>()) != null) 1 else 0
+                metadataRemoved.complete(Unit)
+                release.await()
+                removed
+            }
+            aliases.add(credentialAlias)
+            metadata["c"] = passkey("c")
+            val handler = realHandler()
+
+            val job = launch(Dispatchers.Default) { send(handler, n, request) }
+            withTimeout(10_000) { metadataRemoved.await() }
+            job.cancel()
+            release.complete(Unit)
+            withTimeout(10_000) { job.join() }
+
+            assertEquals(
+                "a cancelled delete must keep both or neither: key ${credentialAlias in aliases}, metadata ${"c" in metadata}",
+                credentialAlias in aliases,
+                "c" in metadata
+            )
+        }
+    }
+
+    @Test
+    fun twoConcurrentDeletesOfOneCredentialLeaveNoMetadataAndOneAuditRecord() = runBlocking<Unit> {
+        val removals = AtomicInteger()
+        every { keystore.deleteCredentialKey(any<String>()) } answers {
+            aliases.remove("xkey_credential_${firstArg<String>()}").also { if (it) removals.incrementAndGet() }
+        }
+        // Let both deletes read the passkey before either removes it, if they may.
+        val readers = AtomicInteger()
+        coEvery { credentialDao.getByCredentialId(any()) } coAnswers {
+            readers.incrementAndGet()
+            withTimeoutOrNull(500) { while (readers.get() < 2) delay(5) }
+            metadata[firstArg()]
+        }
+        val handler = realHandler()
+
+        listOf(localDelete("c"), legacyDelete("c")).mapIndexed { n, request ->
+            async(Dispatchers.Default) { send(handler, n, request) }
+        }.awaitAll()
+
+        assertFalse("the credential's key must be gone, left $aliases", credentialAlias in aliases)
+        assertFalse("no metadata may be written back for a deleted key", "c" in metadata)
+        assertEquals("one delete removes the key and writes its audit record", 1, removals.get())
+    }
+
+    @Test
+    fun noOtherMainSourceRemovesCredentialMetadataOrMaterial() {
+        val sources = File("src/main/kotlin").walkTopDown().filter { it.isFile && it.extension == "kt" }
+        for (file in sources) {
+            val code = file.readText()
+            val expected = if (file.name == "Handler.kt" && file.parentFile.name == "protocol") 1 else 0
+            assertEquals(
+                "${file.path} may remove a passkey's metadata only at Handler's choke point",
+                expected,
+                Regex(Regex.escape(".deleteByCredentialId(")).findAll(code).count()
+            )
+            assertEquals(
+                "${file.path} may remove a credential's material only at Handler's choke point",
+                expected,
+                Regex(Regex.escape("keystoreManager.deleteCredentialKey(")).findAll(code).count()
+            )
+        }
     }
 
     private fun passkey(id: String) = CredentialMetadataEntity(
