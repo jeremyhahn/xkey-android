@@ -4241,6 +4241,9 @@ class RequestHandler(
             })
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             throw e
+        } catch (e: com.automatethethings.xkey.crypto.KeyPresenceUnreadableException) {
+            // The dispatcher's one mapping: a refusal, never an internal error (#255 verify r2y).
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "sharePublicKey failed", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "sharePublicKey failed: ${e.message}")
@@ -4312,6 +4315,9 @@ class RequestHandler(
                 put("import_id", keyId)
             })
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: com.automatethethings.xkey.crypto.KeyPresenceUnreadableException) {
+            // The dispatcher's one mapping: a refusal, never an internal error (#255 verify r2y).
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "shareSymmetric failed", e)
@@ -4403,6 +4409,9 @@ class RequestHandler(
             )
             Response.success(request.id, result)
         } catch (e: KeyPolicyStore.KeyDeletedException) {
+            throw e
+        } catch (e: com.automatethethings.xkey.crypto.KeyPresenceUnreadableException) {
+            // The dispatcher's one mapping: a refusal, never an internal error (#255 verify r2y).
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "importSharedKey failed", e)

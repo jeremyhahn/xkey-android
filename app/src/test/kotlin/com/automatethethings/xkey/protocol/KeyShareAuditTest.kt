@@ -1217,6 +1217,40 @@ class KeyShareAuditTest {
         assertEquals("the request is refused: ${response.error}", ErrorCodes.OPERATION_DENIED, response.error?.code)
     }
 
+    /**
+     * #255 verify r2y: an older build's software key record whose metadata
+     * cannot be parsed while its material is there could be this id's, so
+     * the store is unreadable for it: local.importSharedKey refuses and never
+     * falls back to the credential under the id.
+     */
+    @Test
+    fun aMalformedLegacySoftwareRecordRefusesTheShareOfACredential() = runTest {
+        val credential = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        val keystore = realKeystoreHandler()
+        val filesDir = java.nio.file.Files.createTempDirectory("software-keys").toFile()
+        try {
+            val dir = java.io.File(filesDir, "software_keys").apply { mkdirs() }
+            java.io.File(dir, "legacy.meta").writeText("{not json")
+            java.io.File(dir, "legacy.key").writeBytes(ByteArray(4))
+            val storeContext = io.mockk.mockk<android.content.Context>()
+            every { storeContext.filesDir } returns filesDir
+            val software = com.automatethethings.xkey.crypto.SoftwareKeyStore(storeContext, io.mockk.mockk(relaxed = true))
+            every { keystore.softwareKeys() } returns software
+
+            val bytes = served(importSharedKey())
+            val response = Response.fromJson(bytes)
+
+            assertNull("importSharedKey shared past a malformed record: ${response.result}", response.result)
+            assertEquals("the request is refused: ${response.error}", ErrorCodes.OPERATION_DENIED, response.error?.code)
+            val encoded = Base64.getEncoder().encodeToString(credential.public.encoded)
+            assertFalse("importSharedKey sent the credential's key", encoded in String(bytes))
+        } finally {
+            filesDir.deleteRecursively()
+        }
+    }
+
     /** A handler over a spied real [KeystoreManager] on the platform keystore, the Ed25519 store empty. */
     private fun realKeystoreHandler(): KeystoreManager {
         val keystore = io.mockk.spyk(KeystoreManager(context))

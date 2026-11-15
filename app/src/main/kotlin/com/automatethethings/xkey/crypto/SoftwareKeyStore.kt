@@ -162,8 +162,7 @@ class SoftwareKeyStore(
                     when {
                         KeyPresence.PRESENT in files -> KeyPresence.PRESENT
                         KeyPresence.UNREADABLE in files -> KeyPresence.UNREADABLE
-                        legacyRecordOf(keyId) -> KeyPresence.PRESENT
-                        else -> KeyPresence.ABSENT
+                        else -> legacyRecordOf(keyId)
                     }
                 }
             }
@@ -172,30 +171,38 @@ class SoftwareKeyStore(
         }
 
     /**
-     * Whether an older build's record of [keyId] is left under its old
-     * name (its migration found the digest name taken, or could not
-     * rename). A record whose file cannot be read is taken as [keyId]'s, so
-     * an unreadable record never reads as absent; one whose metadata names
-     * no id is attributable to none, as the migration finds.
+     * What an older build's records left under their old names (their
+     * migration found the digest name taken, or could not rename) hold of
+     * [keyId]. A record whose file cannot be read is taken as [keyId]'s, so
+     * an unreadable record never reads as absent. A record whose metadata
+     * cannot be parsed while its material is there (or cannot be probed)
+     * could be any id's: it is [KeyPresence.UNREADABLE], never a record of
+     * another id, so a caller refuses rather than fall back to another
+     * credential under [keyId] (#255 verify r2y). One whose metadata parses
+     * but names no id, or which holds no material, is attributable to none,
+     * as the migration finds.
      */
-    private fun legacyRecordOf(keyId: String): Boolean =
-        (dir.listFiles() ?: throw KeyPresenceUnreadableException(keyId, null)).any { meta ->
-            if (!meta.name.endsWith(".meta") || DIGEST_NAME.matches(meta.name.removeSuffix(".meta"))) {
-                false
-            } else {
-                val text = try {
-                    meta.readText()
-                } catch (e: java.io.IOException) {
-                    return@any true
-                }
-                val id = try {
-                    JSONObject(text).optString("keyId", "")
-                } catch (e: org.json.JSONException) {
-                    ""
-                }
-                id == keyId
+    private fun legacyRecordOf(keyId: String): KeyPresence {
+        var unreadable = false
+        for (meta in dir.listFiles() ?: throw KeyPresenceUnreadableException(keyId, null)) {
+            if (!meta.name.endsWith(".meta")) continue
+            val stem = meta.name.removeSuffix(".meta")
+            if (DIGEST_NAME.matches(stem)) continue
+            val text = try {
+                meta.readText()
+            } catch (e: java.io.IOException) {
+                return KeyPresence.PRESENT
             }
+            val id = try {
+                JSONObject(text).optString("keyId", "")
+            } catch (e: org.json.JSONException) {
+                if (filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT) unreadable = true
+                continue
+            }
+            if (id == keyId) return KeyPresence.PRESENT
         }
+        return if (unreadable) KeyPresence.UNREADABLE else KeyPresence.ABSENT
+    }
 
     /** Delete a software key by id. */
     fun delete(keyId: String) {
@@ -208,27 +215,40 @@ class SoftwareKeyStore(
     /**
      * The generation of the software key [keyId]: a digest of its encrypted
      * material, which [put] rewrites under a fresh IV, so a key stored again
-     * under the same id has another generation. Null if none is stored.
+     * under the same id has another generation. A metadata-only record (a
+     * [delete] stopped between its two unlinks; [put] writes the material
+     * first, so nothing else leaves one) has a [METADATA_ONLY] generation,
+     * so a delete tracks it as well as the material (#255 verify r2y). Null
+     * if neither file is stored.
      */
     fun generation(keyId: String): String? {
         migrateLegacyRecords()
-        val keyFile = File(dir, "${fileId(keyId)}.key")
-        when (filePresence(keyFile)) {
-            KeyPresence.ABSENT -> return null
-            KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(keyId, null)
-            KeyPresence.PRESENT -> Unit
+        val id = fileId(keyId)
+        val keyFile = File(dir, "$id.key")
+        val metaFile = File(dir, "$id.meta")
+        val files = listOf(filePresence(keyFile), filePresence(metaFile))
+        if (KeyPresence.UNREADABLE in files) throw KeyPresenceUnreadableException(keyId, null)
+        return when {
+            files[0] == KeyPresence.PRESENT -> SyncCodec.sha256Hex(keyFile.readBytes())
+            files[1] == KeyPresence.PRESENT -> METADATA_ONLY + SyncCodec.sha256Hex(metaFile.readBytes())
+            else -> null
         }
-        return SyncCodec.sha256Hex(keyFile.readBytes())
     }
 
     /**
      * Delete the software key [keyId] only if it is still at [generation];
-     * a key stored again since is left. Returns true when no material of
-     * [generation] remains.
+     * a key stored again since is left. A metadata-only record holds no
+     * material and is what an interrupted delete of some generation left, so
+     * it is retired whatever [generation] names: the replay of a delete that
+     * stopped between its unlinks completes it, never reserving the id for
+     * good. Returns true when no material of [generation] and no
+     * metadata-only record remains.
      */
     fun deleteGeneration(keyId: String, generation: String): Boolean {
-        if (generation(keyId) == generation) delete(keyId)
-        return generation(keyId) != generation
+        val current = generation(keyId)
+        if (current == generation || current?.startsWith(METADATA_ONLY) == true) delete(keyId)
+        val left = generation(keyId)
+        return left != generation && left?.startsWith(METADATA_ONLY) != true
     }
 
     /** Filename stem for [keyId]: a digest, so distinct ids stay distinct. */
@@ -266,5 +286,8 @@ class SoftwareKeyStore(
 
         /** A filename stem already produced by [fileId]. */
         private val DIGEST_NAME = Regex("[0-9a-f]{64}")
+
+        /** Prefix of a metadata-only record's [generation]. */
+        const val METADATA_ONLY = "meta-only:"
     }
 }
