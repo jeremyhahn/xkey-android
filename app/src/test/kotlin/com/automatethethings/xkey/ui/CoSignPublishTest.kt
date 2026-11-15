@@ -41,6 +41,7 @@ import com.automatethethings.xkey.media.XmpMetadataHelper
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -534,6 +535,39 @@ class CoSignPublishTest {
         assertEquals("one append, so one staged copy", 1, recoveryFiles(activity).size)
         assertEquals(0, queued(activity).size)
         assertNull(runningAppend(activity))
+    }
+
+    @Test
+    fun `finishing the screen during an append leaves no run and no staged copy behind`() {
+        val gate = CountDownLatch(1)
+        ReadOnlyMediaProvider.readGate = gate
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        shadowOf(Looper.getMainLooper()).idle()
+        val activity = controller.get()
+        select(activity, original)
+        scanWitness(activity)
+        idleUntil { ReadOnlyMediaProvider.readsStarted.get() >= 1 }
+        val id = runningAppend(activity) as String
+
+        // Back while the append holds in its read: the screen is gone for good.
+        activity.finish()
+        controller.pause().stop().destroy()
+        ReadOnlyMediaProvider.readGate = null
+        gate.countDown()
+
+        idleUntil { !com.automatethethings.xkey.media.MediaSaveRuns.isLive(id) }
+        idleUntil { recoveryFiles(activity).isEmpty() }
+        assertTrue("the original is untouched", originalBytes.contentEquals(ReadOnlyMediaProvider.files["clip.png"]!!.readBytes()))
+    }
+
+    @Test
+    fun `a co-sign screen start sweeps staged copies an earlier process left`() {
+        val dir = MediaPublisher.recoveryDirectory(androidx.test.core.app.ApplicationProvider.getApplicationContext())
+        val earlier = File(dir, "cosign-1234567890.png").apply { writeBytes(originalBytes) }
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse("no screen owns it", earlier.exists())
+        assertTrue(recoveryFiles(controller.get()).isEmpty())
     }
 
     @Test
