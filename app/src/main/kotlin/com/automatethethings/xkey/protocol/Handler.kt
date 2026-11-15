@@ -65,6 +65,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -151,6 +153,12 @@ class RequestHandler(
 
         /** keyType of a key-use audit entry whose key has no stored metadata. */
         const val AUDIT_KEY_TYPE_UNKNOWN = "unknown"
+
+        /**
+         * One lock per credential alias, shared by every handler, so deletes of
+         * one credential run one at a time at [deleteCredentialKey].
+         */
+        private val credentialDeleteLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
 
         // Protocol version
         private const val PROTOCOL_VERSION = "1.0.0"
@@ -2399,33 +2407,51 @@ class RequestHandler(
     /**
      * Deletes FIDO2 credential [credentialId] for [deleteKeystoreAlias]: its
      * Keystore entry through the audited [KeystoreManager.deleteCredentialKey]
-     * and its Credential Provider metadata, both or neither. The metadata row
-     * is taken out first and put back if the material is not removed, so a
-     * delete that cannot remove the metadata (refused, INTERNAL_ERROR) or the
-     * material keeps both, and a passkey is never offered for a key that is
-     * gone.
+     * and its Credential Provider metadata, both or neither.
+     *
+     * Deletes of one credential run one at a time under its alias lock, and
+     * once begun a delete runs to the end even if its caller is cancelled, so
+     * a cancel never leaves metadata removed with the key kept.
+     *
+     * The metadata row is taken out first, because a removed Keystore entry
+     * cannot be put back. If the material is not removed the row is written
+     * back, but only the row this delete removed and only while the key is
+     * still there, so a passkey is never offered for a key that is gone. A
+     * delete that cannot remove the metadata is refused (INTERNAL_ERROR) and
+     * keeps both.
      */
     private suspend fun deleteCredentialKey(credentialId: String): Boolean {
-        val passkey = credentialMetadataDao.getByCredentialId(credentialId)
-        if (passkey != null) {
-            try {
-                credentialMetadataDao.deleteByCredentialId(credentialId)
-            } catch (e: Exception) {
-                Log.e(TAG, "Cannot remove passkey metadata of $credentialId; key kept", e)
-                throw ProtocolException(
-                    "Failed to delete credential: its passkey metadata cannot be removed",
-                    errorCode = ErrorCodes.INTERNAL_ERROR
-                )
-            }
+        val alias = KeystoreManager.credentialAlias(credentialId)
+        val lock = credentialDeleteLocks.computeIfAbsent(alias) { Mutex() }
+        return lock.withLock {
+            // KeystoreManager.deleteCredentialKey writes the delete's audit
+            // record; persistAudited makes the whole delete non-cancellable.
+            persistAudited(write = {
+                val passkey = credentialMetadataDao.getByCredentialId(credentialId)
+                val removedPasskey = if (passkey == null) null else try {
+                    passkey.takeIf { credentialMetadataDao.deleteByCredentialId(credentialId) > 0 }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Cannot remove passkey metadata of $credentialId; key kept", e)
+                    throw ProtocolException(
+                        "Failed to delete credential: its passkey metadata cannot be removed",
+                        errorCode = ErrorCodes.INTERNAL_ERROR
+                    )
+                }
+                suspend fun restoreIfKeyKept() {
+                    val keyKept = runCatching { alias in keystoreManager.listAllKeystoreAliases() }
+                        .getOrDefault(false)
+                    if (removedPasskey != null && keyKept) credentialMetadataDao.insert(removedPasskey)
+                }
+                val removed = try {
+                    keystoreManager.deleteCredentialKey(credentialId)
+                } catch (e: Exception) {
+                    restoreIfKeyKept()
+                    throw e
+                }
+                if (!removed) restoreIfKeyKept()
+                removed
+            }, record = {})
         }
-        val removed = try {
-            keystoreManager.deleteCredentialKey(credentialId)
-        } catch (e: Exception) {
-            passkey?.let { credentialMetadataDao.insert(it) }
-            throw e
-        }
-        if (!removed) passkey?.let { credentialMetadataDao.insert(it) }
-        return removed
     }
 
     /**
@@ -4369,7 +4395,8 @@ class RequestHandler(
      * write: entering [NonCancellable] checks nothing, so without that check a
      * cancelled request with no suspension point since its cancellation would
      * still store. Every path that writes and records something, the share
-     * paths and the sharing-policy change, goes through here.
+     * paths, the sharing-policy change and a credential key delete, goes
+     * through here.
      *
      * @param write stores the shared material and returns its result
      * @param record writes the audit entry for what [write] stored
