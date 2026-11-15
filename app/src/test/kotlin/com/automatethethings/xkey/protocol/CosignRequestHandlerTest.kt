@@ -500,6 +500,69 @@ class CosignRequestHandlerTest {
         assertNothingSigned()
     }
 
+    /** Every `hashAlgorithm` the RPC accepts, with its digest length in bytes. */
+    private val digestLengths = listOf("SHA-256" to 32, "SHA-384" to 48, "SHA-512" to 64)
+
+    /** A [length]-byte digest as the hex the request carries, distinct per length. */
+    private fun digestHex(length: Int): String = (0 until length).joinToString("") { "%02x".format((it * 7 + length) and 0xff) }
+
+    @Test
+    fun `a valid digest of each algorithm signs exactly that digest, only after the owner approves`() = runTest {
+        // Each signature records how many prompts the owner had answered by then.
+        val signed = mutableListOf<Pair<ByteArray, Int>>()
+        coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } answers {
+            signed += thirdArg<ByteArray>() to screen.launched.size
+            signature
+        }
+
+        digestLengths.forEachIndexed { index, (algorithm, length) ->
+            val hex = digestHex(length)
+            val response = handler().handleRequest(request(hash = hex, hashAlgorithm = algorithm, id = 300L + index))
+
+            assertNull("$algorithm: ${response.error?.message}", response.error)
+            assertEquals("$algorithm: one prompt per request", index + 1, screen.launched.size)
+            assertTrue("$algorithm: the prompt names the digest", screen.subtitles.last().contains(hex.take(8)))
+            val (data, promptsAnswered) = signed.single { it.first.size == length }
+            assertTrue("$algorithm: the exact digest is signed", data.contentEquals(hexBytes(hex)))
+            assertEquals("$algorithm: signed only after its prompt", index + 1, promptsAnswered)
+        }
+        assertEquals("one signature per approved request", digestLengths.size, signed.size)
+    }
+
+    @Test
+    fun `a valid digest of each algorithm signs nothing when the owner refuses`() = runTest {
+        screen.autoAnswer = false
+        digestLengths.forEachIndexed { index, (algorithm, length) ->
+            assertError(
+                ErrorCodes.BIOMETRIC_FAILED,
+                handler().handleRequest(request(hash = digestHex(length), hashAlgorithm = algorithm, id = 400L + index))
+            )
+        }
+        assertNothingSigned()
+    }
+
+    @Test
+    fun `a truncated or padded digest of each algorithm neither prompts nor signs`() = runTest {
+        var id = 500L
+        for ((algorithm, length) in digestLengths) {
+            for (wrong in listOf(length - 1, length + 1, 0)) {
+                assertError(
+                    ErrorCodes.INVALID_PARAMS,
+                    handler().handleRequest(request(hash = digestHex(wrong), hashAlgorithm = algorithm, id = id++))
+                )
+            }
+            // Another algorithm's valid length is still the wrong length.
+            for ((_, otherLength) in digestLengths.filter { it.second != length }) {
+                assertError(
+                    ErrorCodes.INVALID_PARAMS,
+                    handler().handleRequest(request(hash = digestHex(otherLength), hashAlgorithm = algorithm, id = id++))
+                )
+            }
+        }
+        assertNothingSigned()
+        assertTrue("no prompt for a malformed digest", screen.launched.isEmpty())
+    }
+
     private val blePeerHex = "b1".repeat(32)
     private val usbPeerHex = "cc".repeat(32)
     private val strangerHex = "dd".repeat(32)
