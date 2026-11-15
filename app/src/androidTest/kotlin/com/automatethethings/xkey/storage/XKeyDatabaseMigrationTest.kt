@@ -105,6 +105,9 @@ class XKeyDatabaseMigrationTest {
     @Test
     fun migratesFromVersion11() = assertMigratesAndPreservesData(11)
 
+    @Test
+    fun migratesFromVersion13() = assertMigratesAndPreservesData(13)
+
     /**
      * Guards the fixture itself: if a new schema is exported without a matching
      * test above, the coverage claim made by this suite quietly stops being
@@ -371,7 +374,8 @@ class XKeyDatabaseMigrationTest {
                 XKeyDatabase.MIGRATION_9_10,
                 XKeyDatabase.MIGRATION_10_11,
                 XKeyDatabase.MIGRATION_11_12,
-                XKeyDatabase.MIGRATION_12_13
+                XKeyDatabase.MIGRATION_12_13,
+                XKeyDatabase.MIGRATION_13_14
             )
             .build()
         try {

@@ -343,7 +343,13 @@ class KeyStoreSyncManager(
                 biometricRequired = true, // Default assumption
                 source = "local",
                 createdAt = System.currentTimeMillis(), // Actual creation time not available from Keystore
-                isSystemKey = isSystemKey
+                isSystemKey = isSystemKey,
+                // The alias found is where the material is stored.
+                materialNamespace = if (alias == credentialAliasOf(keyId)) {
+                    KeyNamespace.CREDENTIAL.stored
+                } else {
+                    KeyNamespace.GENERAL.stored
+                }
             )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to read keystore entry: $alias", e)
@@ -372,31 +378,56 @@ class KeyStoreSyncManager(
             userName = cred.userName,
             userDisplayName = cred.userDisplayName,
             isDiscoverable = cred.isDiscoverable,
-            signCount = cred.signCount
+            signCount = cred.signCount,
+            materialNamespace = KeyNamespace.CREDENTIAL.stored
         )
     }
 }
 
 /**
- * The namespace a key row's material lives in, named by the row itself: a
- * FIDO2 row's credential is `xkey_credential_<id>` with its metadata, any
- * other row's material is general (`xkey_key_<id>`, a software key or a raw
- * alias). One ID can name a key in each; a delete reaches only the row's.
+ * The namespace a key row's material lives in: a credential is
+ * `xkey_credential_<id>` with its metadata, a general key is
+ * `xkey_key_<id>`, a software key or a raw alias. One ID can name a key in
+ * each; a delete reaches only the row's. The key type does not say which:
+ * local.generateKey stores a FIDO2-type key as a general key.
+ *
+ * @property stored the value recorded in [KeyEntity.materialNamespace].
  */
-enum class KeyNamespace {
-    CREDENTIAL, GENERAL;
+enum class KeyNamespace(val stored: String) {
+    CREDENTIAL("credential"), GENERAL("general");
 
     companion object {
-        fun of(key: KeyEntity): KeyNamespace = if (key.keyType == "fido2") CREDENTIAL else GENERAL
+        /** The namespace recorded as [value]; null for any other value. */
+        fun ofStored(value: String?): KeyNamespace? = entries.firstOrNull { it.stored == value }
+
+        /**
+         * Where [key]'s material is stored: the namespace recorded on the row
+         * when it was written; for a row written before that was recorded,
+         * the one namespace holding material of its ID. Null when it cannot
+         * be told: an unknown recorded value, or an unrecorded row whose ID
+         * names material in both namespaces.
+         */
+        fun of(key: KeyEntity, keystoreManager: KeystoreManager, softwareKeys: SoftwareKeyStore): KeyNamespace? {
+            key.materialNamespace?.let { return ofStored(it) }
+            val credential = KeyStoreSyncManager.credentialAliasOf(key.keyId) in
+                keystoreManager.listAllKeystoreAliases()
+            val general = keystoreManager.generalKeyExists(key.keyId) || softwareKeys.contains(key.keyId)
+            return when {
+                credential && general -> null
+                credential -> CREDENTIAL
+                else -> GENERAL
+            }
+        }
     }
 }
 
 /**
  * The one delete of a key row and its material, for every key screen: the
- * namespace comes from the row ([KeyNamespace.of]) and the other namespace
- * is never touched, so deleting credential `k` leaves general key `k` and
- * the reverse. A credential row's delete needs [credentials] to remove its
- * metadata; without it the delete is refused.
+ * namespace is where the row's material is stored ([KeyNamespace.of]) and
+ * the other namespace is never touched, so deleting credential `k` leaves
+ * general key `k` and the reverse. A row whose namespace cannot be told is
+ * refused with nothing removed. A credential row's delete needs
+ * [credentials] to remove its metadata; without it the delete is refused.
  *
  * @return the rows deleted; 0 when the delete was refused.
  */
@@ -408,7 +439,10 @@ suspend fun KeyDao.deleteKeyRow(
 ): Int = try {
     deleteKeyAndMaterial(key.keyId) {
         if (key.source == "xkmsd") return@deleteKeyAndMaterial
-        when (KeyNamespace.of(key)) {
+        val namespace = checkNotNull(KeyNamespace.of(key, keystoreManager, softwareKeys)) {
+            "the namespace of ${key.keyId} cannot be told; nothing is deleted"
+        }
+        when (namespace) {
             KeyNamespace.CREDENTIAL -> {
                 checkNotNull(credentials) { "credential ${key.keyId} is deleted only with its metadata" }
                 removeCredentialMaterial(key.keyId, keystoreManager, credentials)

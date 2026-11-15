@@ -17,6 +17,7 @@ package com.automatethethings.xkey.ui
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.storage.KeyNamespace
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -62,10 +63,12 @@ class KeyNamespaceDeleteTest {
         every { it.contains(any()) } returns false
     }
     private val credential = KeyEntity(
-        keyId = "k", keyType = "fido2", algorithm = "ES256", label = "rp", keySizeBits = 256, source = "local"
+        keyId = "k", keyType = "fido2", algorithm = "ES256", label = "rp", keySizeBits = 256, source = "local",
+        materialNamespace = KeyNamespace.CREDENTIAL.stored
     )
     private val general = KeyEntity(
-        keyId = "k", keyType = "signing", algorithm = "ES256", label = "k", keySizeBits = 256, source = "local"
+        keyId = "k", keyType = "signing", algorithm = "ES256", label = "k", keySizeBits = 256, source = "local",
+        materialNamespace = KeyNamespace.GENERAL.stored
     )
 
     @Test

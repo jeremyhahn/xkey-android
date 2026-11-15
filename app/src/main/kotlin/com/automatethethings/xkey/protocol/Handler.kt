@@ -48,6 +48,7 @@ import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
 import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.storage.KeyNamespace
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
@@ -1507,7 +1508,9 @@ class RequestHandler(
                     } else {
                         SharingPolicyType.PRIVATE
                     },
-                    source = "remote_ble"
+                    source = "remote_ble",
+                    // Stored as the general key xkey_key_<id> whatever its key type.
+                    materialNamespace = KeyNamespace.GENERAL.stored
                 )
             )
 
@@ -1567,6 +1570,9 @@ class RequestHandler(
                     SharingPolicyType.PRIVATE
                 },
                 source = "remote_ble",
+                // Stored as the general key xkey_key_<id>, a FIDO2 key type too:
+                // its delete must never be routed to the credential namespace.
+                materialNamespace = KeyNamespace.GENERAL.stored,
                 rpId = genParams.rpId,
                 rpName = genParams.rpName,
                 userId = genParams.userId,
