@@ -115,12 +115,9 @@ object XmpMetadataHelper {
             return null
         }
         val format = XmpContainers.formatOf(type) ?: return null
-        try {
-            contentResolver.openInputStream(uri)?.use { inputStream ->
-                return readEmbeddedSignatureFromStream(inputStream, format)
-            }
-        } catch (_: Exception) { }
-        return null
+        // A failed open or read propagates: unreadable media is not unsigned media.
+        val input = contentResolver.openInputStream(uri) ?: throw IOException("cannot open $uri")
+        return input.use { readEmbeddedSignatureFromStream(it, format) }
     }
 
     /**
@@ -346,20 +343,26 @@ object XmpMetadataHelper {
         }
     }
 
-    private fun readEmbeddedSignature(filePath: String, format: XmpContainers.Format): ContentAuthenticityData? {
-        return try {
-            File(filePath).inputStream().use { readEmbeddedSignatureFromStream(it, format) }
-        } catch (_: Exception) {
-            null
-        }
-    }
+    /**
+     * The embedded signature, or null when none is embedded or there is no
+     * media file at [filePath]; an [IOException] reading media that is there
+     * propagates.
+     */
+    private fun readEmbeddedSignature(filePath: String, format: XmpContainers.Format): ContentAuthenticityData? =
+        if (File(filePath).exists()) probeEmbeddedSignature(filePath, format) else null
 
+    /**
+     * The signature embedded in [inputStream], or null when none is (or its
+     * packet is not signature data). An [IOException] reading the container
+     * propagates: media that cannot be read is not unsigned media.
+     */
     private fun readEmbeddedSignatureFromStream(
         inputStream: InputStream,
         format: XmpContainers.Format
     ): ContentAuthenticityData? {
+        val json = XmpContainers.read(inputStream.buffered(), format) ?: return null
         return try {
-            XmpContainers.read(inputStream.buffered(), format)?.let(ContentAuthenticityData::fromJsonString)
+            ContentAuthenticityData.fromJsonString(json)
         } catch (_: Exception) {
             null
         }

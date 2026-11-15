@@ -14,8 +14,20 @@
  */
 package com.automatethethings.xkey.media
 
+import android.content.ContentResolver
+import android.net.Uri
+import io.mockk.every
+import io.mockk.mockk
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileNotFoundException
+import java.io.IOException
+import java.io.InputStream
+import java.io.SequenceInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -88,5 +100,78 @@ class XmpMetadataHelperTest {
         assertEquals("hash2", result!!.contentHash)
         assertEquals(1, result.signatures.size)
         assertEquals("fp2", result.signatures[0].keyFingerprint)
+    }
+
+    // -------------------------------------------------------------------------
+    // Read failures surface through the public readers
+    // -------------------------------------------------------------------------
+
+    private val containerMimes = listOf("image/png" to "png", "image/webp" to "webp", "video/mp4" to "mp4")
+
+    private fun staleSidecarData() = ContentAuthenticityData(
+        contentHash = "f".repeat(64),
+        signatures = listOf(
+            SignatureEntry(
+                keyFingerprint = "SHA256:stale",
+                signerName = "Stale",
+                algorithm = "ES256",
+                value = "sig",
+                timestamp = "2025-01-01T00:00:00Z"
+            )
+        )
+    )
+
+    @Test
+    fun `readSignature throws when the embedded container cannot be read, ignoring a stale sidecar`() {
+        for ((_, ext) in containerMimes) {
+            // A directory at the media path: it exists, but opening it for
+            // reading fails, as an unreadable file does.
+            val media = tempFolder.newFolder("unreadable.$ext")
+            File(media.absolutePath + ".xkeysig").writeText(staleSidecarData().toJsonString())
+
+            assertThrows(ext, IOException::class.java) { XmpMetadataHelper.readSignature(media.absolutePath) }
+        }
+    }
+
+    @Test
+    fun `readSignatureFromUri throws when the stream fails mid-read`() {
+        for ((mime, _) in containerMimes) {
+            val file = XmpFixtures.all.getValue(mime)
+            val broken = object : InputStream() {
+                override fun read(): Int = throw IOException("device gone")
+            }
+            val resolver = mockk<ContentResolver>()
+            val uri = mockk<Uri>(relaxed = true)
+            every { resolver.openInputStream(uri) } returns
+                SequenceInputStream(ByteArrayInputStream(file.copyOfRange(0, 12)), broken)
+
+            assertThrows(mime, IOException::class.java) {
+                XmpMetadataHelper.readSignatureFromUri(resolver, uri, mime)
+            }
+        }
+    }
+
+    @Test
+    fun `readSignatureFromUri throws when the content cannot be opened`() {
+        for ((mime, _) in containerMimes) {
+            val resolver = mockk<ContentResolver>()
+            val uri = mockk<Uri>(relaxed = true)
+            every { resolver.openInputStream(uri) } throws FileNotFoundException("gone")
+
+            assertThrows(mime, IOException::class.java) {
+                XmpMetadataHelper.readSignatureFromUri(resolver, uri, mime)
+            }
+        }
+    }
+
+    @Test
+    fun `readSignatureFromUri reads unsigned media as null`() {
+        for ((mime, _) in containerMimes) {
+            val resolver = mockk<ContentResolver>()
+            val uri = mockk<Uri>(relaxed = true)
+            every { resolver.openInputStream(uri) } returns ByteArrayInputStream(XmpFixtures.all.getValue(mime))
+
+            assertNull(mime, XmpMetadataHelper.readSignatureFromUri(resolver, uri, mime))
+        }
     }
 }
