@@ -189,9 +189,14 @@ class SoftwareKeyStore(
      */
     private fun legacyRecordOf(keyId: String): KeyPresence {
         var unreadable = false
+        val own = fileId(keyId)
         for (file in dir.listFiles() ?: throw KeyPresenceUnreadableException(keyId, null)) {
             val stem = file.name.substringBeforeLast('.')
-            if (DIGEST_NAME.matches(stem)) continue
+            // [keyId]'s own record is read by [recordOf]. Every other record
+            // is told by the id its metadata names, never by its name's
+            // shape (#255 verify r5): an older build kept a 64-hex id as
+            // its file name, which looks like a digest.
+            if (stem == own) continue
             if (file.name.endsWith(".key")) {
                 // Material with no metadata beside it names no id.
                 if (filePresence(File(dir, "$stem.meta")) != KeyPresence.PRESENT) unreadable = true
@@ -203,6 +208,8 @@ class SoftwareKeyStore(
             } catch (e: java.io.IOException) {
                 return KeyPresence.PRESENT
             }
+            // A record of another id, migrated (under its id's digest) or
+            // not, is that id's.
             when (recordId(text)) {
                 keyId -> return KeyPresence.PRESENT
                 null -> if (filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT) unreadable = true
@@ -315,23 +322,43 @@ class SoftwareKeyStore(
         for (meta in files) {
             if (!meta.name.endsWith(".meta")) continue
             val stem = meta.name.removeSuffix(".meta")
-            if (DIGEST_NAME.matches(stem)) continue
+            // Migrated or not is told by the id the metadata names (its
+            // digest is the record's name once migrated), never by the
+            // name's shape: an older build kept a 64-hex id as its name
+            // (#255 verify r5).
             val keyId = runCatching { recordId(meta.readText()) }.getOrNull() ?: continue
             val target = fileId(keyId)
             // Never let an old record overwrite one already written under the
             // digest name — that record is the newer of the two.
             // A digest name whose lookup fails is taken as held, never free.
-            if (target == stem || filePresence(File(dir, "$target.key")) != KeyPresence.ABSENT) continue
-            File(dir, "$stem.key").renameTo(File(dir, "$target.key"))
-            meta.renameTo(File(dir, "$target.meta"))
+            if (!migratable(stem, keyId) || filePresence(File(dir, "$target.key")) != KeyPresence.ABSENT) continue
+            // The metadata moves only once the material has: a record is
+            // never split between two names.
+            val material = File(dir, "$stem.key")
+            if (material.renameTo(File(dir, "$target.key")) || filePresence(material) == KeyPresence.ABSENT) {
+                meta.renameTo(File(dir, "$target.meta"))
+            }
         }
     }
+
+    /**
+     * Whether the record named [stem] whose metadata names [id] is an older
+     * build's record of [id], to move onto [id]'s digest name (#255 verify
+     * r5). One already under that name is migrated. An older build named a
+     * record by its sanitised id, which is 64 lowercase hex only when the id
+     * is itself that hex (kept as is): a hex name that is neither [id] nor
+     * its digest was written under another id's digest, so its metadata
+     * contradicts its name. It stays where it is, unreadable for that id
+     * ([recordOf]) and unread for [id], never moved out of the way.
+     */
+    private fun migratable(stem: String, id: String): Boolean =
+        stem != fileId(id) && (stem == id || !HEX_64.matches(stem))
 
     companion object {
         private const val KEY_ALIAS = "xkey_software_key_store"
 
-        /** A filename stem already produced by [fileId]. */
-        private val DIGEST_NAME = Regex("[0-9a-f]{64}")
+        /** The shape of a digest name, read only by [migratable]. */
+        private val HEX_64 = Regex("[0-9a-f]{64}")
 
         /** Prefix of a metadata-only record's [generation]. */
         const val METADATA_ONLY = "meta-only:"
