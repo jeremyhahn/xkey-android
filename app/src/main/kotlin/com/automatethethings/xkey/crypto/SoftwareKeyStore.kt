@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import com.automatethethings.xkey.storage.filePresence
 import org.json.JSONObject
 import java.io.File
 
@@ -108,7 +109,11 @@ class SoftwareKeyStore(
         val id = fileId(keyId)
         val keyFile = File(dir, "$id.key")
         val metaFile = File(dir, "$id.meta")
-        if (!keyFile.exists() || !metaFile.exists()) return null
+        // The one presence probe (#255 review r8): a file whose lookup fails
+        // is unreadable, never a key that is not there.
+        val files = listOf(filePresence(keyFile), filePresence(metaFile))
+        if (KeyPresence.UNREADABLE in files) throw KeyPresenceUnreadableException(keyId, null)
+        if (KeyPresence.ABSENT in files) return null
         val meta = JSONObject(metaFile.readText())
         return SoftwareKey(
             keyId = meta.optString("keyId", keyId),
@@ -138,20 +143,27 @@ class SoftwareKeyStore(
      * migrated, is [KeyPresence.PRESENT]; a store directory that exists but
      * cannot be listed, or a file whose existence cannot be read, is
      * [KeyPresence.UNREADABLE], never [KeyPresence.ABSENT]. A store
-     * directory that was never created holds no key.
+     * directory that was never created holds no key. Every file is probed
+     * with [filePresence] (#255 review r8), never File.exists(), which
+     * answers false when a lookup fails: a directory that can be listed but
+     * not searched is unreadable, not empty.
      */
     fun presence(keyId: String): KeyPresence =
         try {
-            when {
-                !dir.exists() -> KeyPresence.ABSENT
-                !dir.isDirectory || dir.listFiles() == null -> KeyPresence.UNREADABLE
-                else -> {
+            when (filePresence(dir)) {
+                KeyPresence.ABSENT -> KeyPresence.ABSENT
+                KeyPresence.UNREADABLE -> KeyPresence.UNREADABLE
+                KeyPresence.PRESENT -> if (!dir.isDirectory || dir.listFiles() == null) {
+                    KeyPresence.UNREADABLE
+                } else {
                     migrateLegacyRecords()
                     val id = fileId(keyId)
-                    if (File(dir, "$id.key").exists() || File(dir, "$id.meta").exists() || legacyRecordOf(keyId)) {
-                        KeyPresence.PRESENT
-                    } else {
-                        KeyPresence.ABSENT
+                    val files = listOf(filePresence(File(dir, "$id.key")), filePresence(File(dir, "$id.meta")))
+                    when {
+                        KeyPresence.PRESENT in files -> KeyPresence.PRESENT
+                        KeyPresence.UNREADABLE in files -> KeyPresence.UNREADABLE
+                        legacyRecordOf(keyId) -> KeyPresence.PRESENT
+                        else -> KeyPresence.ABSENT
                     }
                 }
             }
@@ -201,7 +213,11 @@ class SoftwareKeyStore(
     fun generation(keyId: String): String? {
         migrateLegacyRecords()
         val keyFile = File(dir, "${fileId(keyId)}.key")
-        if (!keyFile.exists()) return null
+        when (filePresence(keyFile)) {
+            KeyPresence.ABSENT -> return null
+            KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(keyId, null)
+            KeyPresence.PRESENT -> Unit
+        }
         return SyncCodec.sha256Hex(keyFile.readBytes())
     }
 
@@ -238,7 +254,8 @@ class SoftwareKeyStore(
             val target = fileId(keyId)
             // Never let an old record overwrite one already written under the
             // digest name — that record is the newer of the two.
-            if (target == stem || File(dir, "$target.key").exists()) continue
+            // A digest name whose lookup fails is taken as held, never free.
+            if (target == stem || filePresence(File(dir, "$target.key")) != KeyPresence.ABSENT) continue
             File(dir, "$stem.key").renameTo(File(dir, "$target.key"))
             meta.renameTo(File(dir, "$target.meta"))
         }
