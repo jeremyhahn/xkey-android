@@ -943,7 +943,11 @@ class CoSignPublishTest {
             assertTrue(staged.renameTo(earlier))
             // CoSignActivity's saved-state key of the exchange.
             val exchangeKey = "cosign_exchange"
-            state.putString(exchangeKey, state.getString(exchangeKey)!!.replace(staged.path, earlier.path))
+            val saved = state.getString(exchangeKey)!!
+            val renamed = saved.replace(staged.path, earlier.path)
+                .replace(staged.path.replace("/", "\\/"), earlier.path.replace("/", "\\/"))
+            assertTrue("the saved exchange names the staged copy", renamed != saved)
+            state.putString(exchangeKey, renamed)
             val orphan = File(staged.parentFile, "cosign-fedcba9876543210-orphan.png").apply { writeBytes(byteArrayOf(1)) }
 
             controller = Robolectric.buildActivity(CoSignActivity::class.java).setup(state)
