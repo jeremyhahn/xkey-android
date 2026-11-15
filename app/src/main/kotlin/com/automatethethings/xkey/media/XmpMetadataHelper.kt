@@ -174,8 +174,11 @@ object XmpMetadataHelper {
      * signature and carries none, so a detached sidecar is what verifies.
      * Throws when it carries one that cannot be replaced, or a read fails:
      * a sidecar would then be shadowed by the old embedded signer.
+     *
+     * It does not check that [open] still holds what [data] signed: a
+     * signed copy is written only through [writeSignedCopy], which does.
      */
-    fun replaceEmbeddedSignature(
+    internal fun replaceEmbeddedSignature(
         open: () -> InputStream,
         openOutput: () -> OutputStream,
         format: XmpContainers.Format,
@@ -188,6 +191,12 @@ object XmpMetadataHelper {
      * [replaceEmbeddedSignature] for any media that carries an embedded
      * signature, typed by [mimeType]: a JPEG gets its EXIF signature, MP4/MOV,
      * PNG and WebP their XMP. False, with nothing written, for any other type.
+     *
+     * The one signed-copy write. The bytes read from [open] are hashed as
+     * the signer hashes them ([MediaHasher.hashStreamed]) before anything is
+     * embedded or written: media edited or replaced since [data] was made
+     * throws [SourceChangedException], with nothing written to [openOutput],
+     * so a copy is never published under a signature that fails on it.
      */
     fun writeSignedCopy(
         open: () -> InputStream,
@@ -197,12 +206,25 @@ object XmpMetadataHelper {
         workDir: File,
         destination: String
     ): Boolean {
-        if (isJpeg(mimeType)) {
-            return signedCopy(open, openOutput, workDir, destination) { writeExifSignature(it, data); true }
+        val format = XmpContainers.formatOf(mimeType)
+        if (!isJpeg(mimeType) && format == null) return false
+        return signedCopy(open, openOutput, workDir, destination) { path ->
+            // The source is read again only now, maybe long after it was
+            // signed: publish only bytes that are still what was signed.
+            val payload = MediaHasher.hashStreamed({ File(path).inputStream() }, mimeType).canonical
+            if (!payload.equals(data.contentHash, ignoreCase = true)) throw SourceChangedException()
+            if (format == null) {
+                writeExifSignature(path, data)
+                true
+            } else {
+                writeEmbeddedSignature(path, format, data)
+            }
         }
-        val format = XmpContainers.formatOf(mimeType) ?: return false
-        return replaceEmbeddedSignature(open, openOutput, format, data, workDir, destination)
     }
+
+    /** The media changed after it was signed: its signed copy would not verify, so none is written. */
+    class SourceChangedException :
+        IOException("the media changed after it was signed; sign it again to save a signed copy")
 
     private fun isJpeg(mimeType: String): Boolean {
         val type = mimeType.lowercase()

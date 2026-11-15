@@ -89,6 +89,10 @@ class FileOperationSavePickerTest {
     private fun signature(hash: String): ContentAuthenticityData =
         ContentAuthenticityData.fromJsonString(XmpFixtures.json(hash))
 
+    /** A signature over what [source] holds now, as performSign makes it: the copy written from it verifies. */
+    private fun sourceSignature(): ContentAuthenticityData =
+        signature(com.automatethethings.xkey.media.MediaHasher.hashStreamed({ source.inputStream() }, "image/png").canonical)
+
     /** The signed copy [performSign] leaves waiting for the user's document. */
     private fun pendSignedCopy(activity: FileOperationActivity, data: ContentAuthenticityData) {
         val type = Class.forName(FileOperationActivity::class.java.name + "\$PendingSignedCopy")
@@ -133,7 +137,7 @@ class FileOperationSavePickerTest {
     @Test
     fun `a signed copy survives recreation while its picker is open`() {
         val controller = launch()
-        val data = signature("b".repeat(64))
+        val data = sourceSignature()
         pendSignedCopy(controller.get(), data)
         busy(controller.get())
         val requestCode = openPicker(controller.get(), "createSignedCopyLauncher")
@@ -340,10 +344,33 @@ class FileOperationSavePickerTest {
 
     @Test
     fun `a rotation while a signed copy writes ends with Process enabled and the copy written`() {
-        val data = signature("2".repeat(64))
+        val data = sourceSignature()
         rotateDuringWrite("createSignedCopyLauncher", { pendSignedCopy(it, data) }) { written ->
             val json = XmpContainers.read(written.inputStream(), XmpContainers.Format.PNG)
             assertEquals(data.toJsonString(), json)
         }
+    }
+
+    @Test
+    fun `media edited while the signed-copy picker is open gets an error, never a copy under the old signature`() {
+        val controller = launch()
+        pendSignedCopy(controller.get(), sourceSignature())
+        busy(controller.get())
+        val requestCode = openPicker(controller.get(), "createSignedCopyLauncher")
+
+        // Edited in another app while the picker is open.
+        source.writeBytes(XmpFixtures.png(XmpFixtures.bytes(0x78, 0x9C, 0x07, 0x07, 0x07)))
+        val activity = controller.get()
+        val output = folder.newFile("clip-signed.png")
+        activity.activityResultRegistry.dispatchResult(
+            requestCode, Activity.RESULT_OK, Intent().setData(Uri.fromFile(output))
+        )
+        val resultCard = field("resultCard").get(activity) as View
+        idleUntil { resultCard.visibility == View.VISIBLE && field("runningSave").get(activity) == null }
+
+        val shown = (field("resultText").get(activity) as android.widget.TextView).text.toString()
+        assertTrue("the error names the change: $shown", shown.contains("changed after it was signed"))
+        assertNull("no signature written", XmpMetadataHelper.readSignatureFromUri(activity.contentResolver, Uri.fromFile(output), "image/png"))
+        assertTrue("the process button is enabled again", processButton(activity).isEnabled)
     }
 }
