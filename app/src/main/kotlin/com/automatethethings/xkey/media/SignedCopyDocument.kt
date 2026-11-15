@@ -109,6 +109,24 @@ object MediaSaveRuns {
     fun <T> attach(id: String, write: () -> T): Deferred<T> =
         runs.computeIfAbsent(id) { scope.async { write() } } as Deferred<T>
 
+    /**
+     * What [run] ended with, for the screen waiting on it: its result, or the
+     * failure it ended with. The one way a screen reads a run: a waiter that
+     * is itself cancelled (its screen went away) throws, even when [run] has
+     * already ended, so the run and its result stay here for the next
+     * instance; awaiting [run] directly would take that cancellation for the
+     * run's failure. A failure is always an [Exception]; an [Error] is thrown.
+     */
+    suspend fun <T> outcome(run: Deferred<T>): Result<T> {
+        // Throws only on the waiter's own cancellation, never on the run's failure.
+        run.join()
+        return try {
+            Result.success(run.await())
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     /** Forget [id] once the instance showing it has seen it end. */
     fun finished(id: String) {
         ended.add(id)

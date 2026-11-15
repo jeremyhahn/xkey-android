@@ -1184,14 +1184,9 @@ class FileOperationActivity : AppCompatActivity() {
         val recovery = MediaPublisher.recoveryDirectory(applicationContext)
         val run = MediaSaveRuns.attach(save.id) { writeSave(resolver, recovery, save) }
         lifecycleScope.launch {
-            val failure = try {
-                run.await()
-                null
-            } catch (e: Exception) {
-                // This instance went away first: the next one waits on the write.
-                if (!run.isCompleted) throw e
-                e
-            }
+            // Throws if this instance went away first, even after the write
+            // ended: the next one waits on it and shows its end.
+            val failure = MediaSaveRuns.outcome(run).exceptionOrNull() as Exception?
             MediaSaveRuns.finished(save.id)
             runningSave = null
             if (failure == null) showResult(getString(R.string.file_operation_sign_success)) else showError(failure)
