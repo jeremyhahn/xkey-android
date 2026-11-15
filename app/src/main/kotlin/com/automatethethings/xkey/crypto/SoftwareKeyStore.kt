@@ -110,13 +110,20 @@ class SoftwareKeyStore(
         val keyFile = File(dir, "$id.key")
         val metaFile = File(dir, "$id.meta")
         // The one presence probe (#255 review r8): a file whose lookup fails
-        // is unreadable, never a key that is not there.
-        val files = listOf(filePresence(keyFile), filePresence(metaFile))
-        if (KeyPresence.UNREADABLE in files) throw KeyPresenceUnreadableException(keyId, null)
-        if (KeyPresence.ABSENT in files) return null
+        // is unreadable, never a key that is not there; and material whose
+        // metadata does not name [keyId] is unreadable (#255 verify r4).
+        when (recordOf(keyId)) {
+            KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(keyId, null)
+            // An older build's record this id could be (one that names no
+            // id beside material, or one of this id left under its old
+            // name) is never read as no key.
+            KeyPresence.ABSENT -> if (legacyRecordOf(keyId) == KeyPresence.ABSENT) return null else
+                throw KeyPresenceUnreadableException(keyId, null)
+            KeyPresence.PRESENT -> if (filePresence(keyFile) != KeyPresence.PRESENT) return null
+        }
         val meta = JSONObject(metaFile.readText())
         return SoftwareKey(
-            keyId = meta.optString("keyId", keyId),
+            keyId = keyId,
             algorithm = meta.optString("algorithm", ""),
             keyType = meta.optString("keyType", "symmetric"),
             keySize = meta.optInt("keySize", 0),
@@ -157,12 +164,9 @@ class SoftwareKeyStore(
                     KeyPresence.UNREADABLE
                 } else {
                     migrateLegacyRecords()
-                    val id = fileId(keyId)
-                    val files = listOf(filePresence(File(dir, "$id.key")), filePresence(File(dir, "$id.meta")))
-                    when {
-                        KeyPresence.PRESENT in files -> KeyPresence.PRESENT
-                        KeyPresence.UNREADABLE in files -> KeyPresence.UNREADABLE
-                        else -> legacyRecordOf(keyId)
+                    when (val own = recordOf(keyId)) {
+                        KeyPresence.ABSENT -> legacyRecordOf(keyId)
+                        else -> own
                     }
                 }
             }
@@ -178,31 +182,75 @@ class SoftwareKeyStore(
      * cannot be parsed while its material is there (or cannot be probed)
      * could be any id's: it is [KeyPresence.UNREADABLE], never a record of
      * another id, so a caller refuses rather than fall back to another
-     * credential under [keyId] (#255 verify r2y). One whose metadata parses
-     * but names no id, or which holds no material, is attributable to none,
-     * as the migration finds.
+     * credential under [keyId] (#255 verify r2y). So is one whose metadata
+     * is missing or names no id ([recordId]: no keyId, an empty one or one
+     * that is not a string) beside material (#255 verify r4). One that
+     * holds no material is attributable to none, as the migration finds.
      */
     private fun legacyRecordOf(keyId: String): KeyPresence {
         var unreadable = false
-        for (meta in dir.listFiles() ?: throw KeyPresenceUnreadableException(keyId, null)) {
-            if (!meta.name.endsWith(".meta")) continue
-            val stem = meta.name.removeSuffix(".meta")
+        for (file in dir.listFiles() ?: throw KeyPresenceUnreadableException(keyId, null)) {
+            val stem = file.name.substringBeforeLast('.')
             if (DIGEST_NAME.matches(stem)) continue
+            if (file.name.endsWith(".key")) {
+                // Material with no metadata beside it names no id.
+                if (filePresence(File(dir, "$stem.meta")) != KeyPresence.PRESENT) unreadable = true
+                continue
+            }
+            if (!file.name.endsWith(".meta")) continue
             val text = try {
-                meta.readText()
+                file.readText()
             } catch (e: java.io.IOException) {
                 return KeyPresence.PRESENT
             }
-            val id = try {
-                JSONObject(text).optString("keyId", "")
-            } catch (e: org.json.JSONException) {
-                if (filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT) unreadable = true
-                continue
+            when (recordId(text)) {
+                keyId -> return KeyPresence.PRESENT
+                null -> if (filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT) unreadable = true
             }
-            if (id == keyId) return KeyPresence.PRESENT
         }
         return if (unreadable) KeyPresence.UNREADABLE else KeyPresence.ABSENT
     }
+
+    /**
+     * What the record under [keyId]'s own file name holds of it (#255 verify
+     * r4): nothing, a metadata-only record (a delete stopped between its
+     * unlinks) or material whose metadata names [keyId]. Material with
+     * metadata that is missing, unreadable or names any other id (or none)
+     * is [KeyPresence.UNREADABLE]: it cannot be vouched for as [keyId]'s,
+     * and is never read as absent.
+     */
+    private fun recordOf(keyId: String): KeyPresence {
+        val id = fileId(keyId)
+        val metaFile = File(dir, "$id.meta")
+        val material = filePresence(File(dir, "$id.key"))
+        val meta = filePresence(metaFile)
+        return when {
+            KeyPresence.UNREADABLE == material || KeyPresence.UNREADABLE == meta -> KeyPresence.UNREADABLE
+            material == KeyPresence.ABSENT -> meta
+            meta == KeyPresence.ABSENT -> KeyPresence.UNREADABLE
+            else -> {
+                val text = try {
+                    metaFile.readText()
+                } catch (e: java.io.IOException) {
+                    return KeyPresence.UNREADABLE
+                }
+                if (recordId(text) == keyId) KeyPresence.PRESENT else KeyPresence.UNREADABLE
+            }
+        }
+    }
+
+    /**
+     * The id a record's metadata [text] names: its keyId when that is a
+     * non-empty string, else null (unparseable JSON, no keyId, an empty one,
+     * or one of another type). The one reading of a record's id, for the
+     * presence probe, the key read and the migration alike.
+     */
+    private fun recordId(text: String): String? =
+        try {
+            (JSONObject(text).opt("keyId") as? String)?.takeIf { it.isNotEmpty() }
+        } catch (e: org.json.JSONException) {
+            null
+        }
 
     /** Delete a software key by id. */
     fun delete(keyId: String) {
@@ -268,9 +316,7 @@ class SoftwareKeyStore(
             if (!meta.name.endsWith(".meta")) continue
             val stem = meta.name.removeSuffix(".meta")
             if (DIGEST_NAME.matches(stem)) continue
-            val keyId = runCatching { JSONObject(meta.readText()).optString("keyId", "") }
-                .getOrDefault("")
-            if (keyId.isEmpty()) continue
+            val keyId = runCatching { recordId(meta.readText()) }.getOrNull() ?: continue
             val target = fileId(keyId)
             // Never let an old record overwrite one already written under the
             // digest name — that record is the newer of the two.

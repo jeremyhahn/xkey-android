@@ -267,6 +267,12 @@ class CoSignActivity : AppCompatActivity() {
         contentPadding.addView(keyLabel)
 
         keySpinner = Spinner(this)
+        keySpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) =
+                clearInitiatorQR()
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = clearInitiatorQR()
+        }
         contentPadding.addView(keySpinner)
         loadSigningKeys()
 
@@ -586,7 +592,19 @@ class CoSignActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Takes down the initiator QR (#255 verify r4): before every generate
+     * attempt and on every key change, so a refused attempt, or another
+     * selected key, never leaves an earlier key's QR on screen.
+     */
+    private fun clearInitiatorQR() {
+        if (!::qrImageView.isInitialized) return
+        qrImageView.setImageDrawable(null)
+        qrImageView.visibility = View.GONE
+    }
+
     private fun generateInitiatorQR() {
+        clearInitiatorQR()
         val data = currentSignatureData
         if (data == null) {
             val message = if (selectedUri == null) R.string.cosign_select_media_first else R.string.cosign_no_signature_data
