@@ -948,7 +948,11 @@ class CoSignPublishTest {
                 .replace(staged.path.replace("/", "\\/"), earlier.path.replace("/", "\\/"))
             assertTrue("the saved exchange names the staged copy", renamed != saved)
             state.putString(exchangeKey, renamed)
-            val orphan = File(staged.parentFile, "cosign-fedcba9876543210-orphan.png").apply { writeBytes(byteArrayOf(1)) }
+            val orphan = File(staged.parentFile, "cosign-fedcba9876543210-orphan.png").apply {
+                writeBytes(byteArrayOf(1))
+                // Past the window in which any saved screen state could still name it.
+                setLastModified(System.currentTimeMillis() - MediaSaveRuns.STAGED_RETENTION_MS - 60_000)
+            }
 
             controller = Robolectric.buildActivity(CoSignActivity::class.java).setup(state)
             shadowOf(Looper.getMainLooper()).idle()

@@ -110,7 +110,7 @@ class MediaSaveRunsAbandonTest {
     @Test
     fun `the sweep removes staging files an earlier process left and keeps this process's`() {
         val dir = temp.newFolder("media-recovery")
-        val earlier = File(dir, "cosign-0123456789abcdef.png").apply { writeBytes(byteArrayOf(1)) }
+        val earlier = File(dir, "cosign-0123456789abcdef.png").apply { writeBytes(byteArrayOf(1)); age() }
         val mine = MediaSaveRuns.stage(dir, ".png")
         val kept = File(dir, ".clip.png.123.xkeytmp").apply { writeBytes(byteArrayOf(2)) }
 
@@ -126,7 +126,7 @@ class MediaSaveRunsAbandonTest {
     fun `the sweep keeps an earlier process's staging file a restored screen still names`() {
         val dir = temp.newFolder("media-recovery-kept")
         val named = File(dir, "cosign-0123456789abcdef-named.png").apply { writeBytes(byteArrayOf(1)) }
-        val orphan = File(dir, "cosign-fedcba9876543210-orphan.png").apply { writeBytes(byteArrayOf(2)) }
+        val orphan = File(dir, "cosign-fedcba9876543210-orphan.png").apply { writeBytes(byteArrayOf(2)); age() }
 
         MediaSaveRuns.sweep(dir, keep = listOf(named))
 
@@ -136,5 +136,37 @@ class MediaSaveRunsAbandonTest {
         // Another screen of this process starts before the exchange ends.
         MediaSaveRuns.sweep(dir)
         assertTrue("a later sweep in this process keeps it too", named.exists())
+    }
+
+    @Test
+    fun `a staged copy a not yet restored screen names survives another screen's start sweep`() {
+        val dir = temp.newFolder("media-recovery-unrestored")
+        // Saved by a co-sign screen of an earlier process; that screen is
+        // not restored yet, so no sweep has been told to keep it.
+        val unrestored = File(dir, "cosign-0123456789abcdef-saved.png").apply { writeBytes(byteArrayOf(1)) }
+        val stale = File(dir, "cosign-fedcba9876543210-stale.png").apply { writeBytes(byteArrayOf(2)); age() }
+
+        // Another screen (or another co-sign instance) starts first.
+        MediaSaveRuns.sweep(dir)
+
+        assertTrue("a copy saved state could still name stays", unrestored.exists())
+        assertFalse("a copy past every saved state's reach is gone", stale.exists())
+    }
+
+    @Test
+    fun `holding a staged copy restarts its window`() {
+        val dir = temp.newFolder("media-recovery-held")
+        val held = File(dir, "cosign-0123456789abcdef-held.png").apply { writeBytes(byteArrayOf(1)); age() }
+
+        // Its screen saved its state again: the copy is named anew.
+        MediaSaveRuns.hold(listOf(held))
+        MediaSaveRuns.sweep(dir)
+
+        assertTrue("a copy saved state names again stays", held.exists())
+    }
+
+    /** Dates this file past the window in which saved screen state could name it. */
+    private fun File.age() {
+        assertTrue(setLastModified(System.currentTimeMillis() - MediaSaveRuns.STAGED_RETENTION_MS - 60_000))
     }
 }
