@@ -220,6 +220,14 @@ class KeyStoreSyncManager(
                 }
             }
 
+            // A raw alias (an internal key's, a CA's or a foreign one) shares
+            // its key ID with a user key named like it: `xkey_key_<alias>` is
+            // key `<alias>` too. The row is the user key's when the Keystore
+            // holds that user alias, so the raw alias neither creates the row
+            // nor marks it protected; the internal entry itself stays
+            // protected by its alias (isProtectedAlias), never by the row.
+            if (keyId == alias && ownedByUserKey(keyStore, keyId)) continue
+
             if (!keyDao.exists(keyId)) {
                 val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
                 if (entity != null && track(entity)) {
@@ -237,6 +245,10 @@ class KeyStoreSyncManager(
         Log.d(TAG, "Discovered $discovered keys in keystore")
         return discovered
     }
+
+    /** Whether [keyStore] holds a user key's alias (credential or general) for key ID [keyId]. */
+    private fun ownedByUserKey(keyStore: KeyStore, keyId: String): Boolean =
+        keystoreAliasesOf(keyId).any { it != keyId && keyStore.containsAlias(it) }
 
     /**
      * Removes keys table entries for local keys whose Keystore entries no longer exist.
