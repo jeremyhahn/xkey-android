@@ -151,6 +151,7 @@ class LocalDeleteKeyExactIdTest {
             val id = firstArg<String>()
             listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
         }
+        every { keystore.listAllKeystoreAliases() } answers { aliases.toList() }
         every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
         every { keystore.deleteCredentialKey(any()) } answers { aliases.remove("xkey_credential_${firstArg<String>()}") }
         every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
@@ -199,6 +200,7 @@ class LocalDeleteKeyExactIdTest {
             val id = firstArg<String>()
             listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
         }
+        every { keystore.listAllKeystoreAliases() } answers { aliases.toList() }
         every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
         every { keystore.deleteCredentialKey(any()) } answers { aliases.remove("xkey_credential_${firstArg<String>()}") }
         every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
