@@ -51,7 +51,9 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.ContactKeyParser
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.qr.QrCodeScannerHelper
+import com.automatethethings.xkey.storage.OwnPublicKeyRead
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.readOwnPublicKey
 import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.card.MaterialCardView
@@ -979,12 +981,15 @@ class ContactManagementActivity : AppCompatActivity() {
      */
     private fun showExportQrDialog() {
         lifecycleScope.launch {
-            val keys = withContext(Dispatchers.IO) { loadOwnPublicKeys() }
+            val own = withContext(Dispatchers.IO) { loadOwnPublicKeys() }
+            val keys = own.keys
 
             when {
                 keys.isEmpty() -> MaterialAlertDialogBuilder(this@ContactManagementActivity)
                     .setTitle(getString(R.string.contact_export_qr))
-                    .setMessage(getString(R.string.contact_export_no_keys))
+                    .setMessage(
+                        getString(if (own.refused) R.string.key_public_key_unavailable else R.string.contact_export_no_keys)
+                    )
                     .setPositiveButton(android.R.string.ok, null)
                     .show()
 
@@ -1011,18 +1016,30 @@ class ContactManagementActivity : AppCompatActivity() {
      * which excludes symmetric keys and keys that merely reference material
      * held by a paired desktop.
      */
-    private suspend fun loadOwnPublicKeys(): List<OwnPublicKey> {
-        return keyDao.getAll().mapNotNull { key ->
-            keystoreManager.soleKind(key.keyId)?.let { keystoreManager.getPublicKeyPEM(key.keyId, it) }?.let { pem ->
-                OwnPublicKey(
+    private suspend fun loadOwnPublicKeys(): OwnPublicKeys {
+        var refused = false
+        val keys = keyDao.getAll().mapNotNull { key ->
+            // A key whose store cannot be read is refused, never thrown out
+            // of this coroutine nor read from another namespace (#255 review r6).
+            when (val read = keystoreManager.readOwnPublicKey(key.keyId)) {
+                is OwnPublicKeyRead.Pem -> OwnPublicKey(
                     keyId = key.keyId,
                     label = key.label,
                     algorithm = key.algorithm,
-                    publicKeyPem = pem
+                    publicKeyPem = read.pem
                 )
+                OwnPublicKeyRead.Unreadable -> {
+                    refused = true
+                    null
+                }
+                OwnPublicKeyRead.Unavailable -> null
             }
         }
+        return OwnPublicKeys(keys, refused)
     }
+
+    /** The keys [loadOwnPublicKeys] can present, and whether any was refused for an unreadable store. */
+    private class OwnPublicKeys(val keys: List<OwnPublicKey>, val refused: Boolean)
 
     /**
      * Renders [key] as a QR code the peer device can scan into its contacts.

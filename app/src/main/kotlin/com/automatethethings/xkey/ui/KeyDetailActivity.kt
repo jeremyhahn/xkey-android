@@ -54,6 +54,8 @@ import com.google.android.material.snackbar.Snackbar
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.KeyPolicyStore
+import com.automatethethings.xkey.storage.OwnPublicKeyRead
+import com.automatethethings.xkey.storage.readOwnPublicKey
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -2058,15 +2060,17 @@ class KeyDetailActivity : AppCompatActivity() {
      * Exports the public key in PEM format to clipboard.
      */
     private fun exportPublicKey(key: KeyEntity) {
-        // The key's one namespace (#255 review r3); an id held in both shows none.
-        val pem = keystoreManager.soleKind(key.keyId)?.let { keystoreManager.getPublicKeyPEM(key.keyId, it) }
-
-        if (pem != null) {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("Public Key", pem))
-            Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_copied), Snackbar.LENGTH_SHORT).show()
-        } else {
-            Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_unavailable), Snackbar.LENGTH_SHORT).show()
+        // The key's one namespace (#255 review r3); an id held in both shows
+        // none, and a store that cannot be read is refused on screen, never
+        // thrown out of this button (#255 review r6).
+        when (val read = keystoreManager.readOwnPublicKey(key.keyId)) {
+            is OwnPublicKeyRead.Pem -> {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Public Key", read.pem))
+                Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_copied), Snackbar.LENGTH_SHORT).show()
+            }
+            OwnPublicKeyRead.Unavailable, OwnPublicKeyRead.Unreadable ->
+                Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_unavailable), Snackbar.LENGTH_SHORT).show()
         }
     }
 
