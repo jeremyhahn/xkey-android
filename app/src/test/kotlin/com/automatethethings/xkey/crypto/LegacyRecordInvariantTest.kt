@@ -110,6 +110,7 @@ class LegacyRecordInvariantTest {
     /** What the store holds for [ID] with [shape] stored at [placement]. */
     private fun expected(shape: Shape, placement: Placement): KeyPresence = when {
         shape == Shape.VALID -> KeyPresence.PRESENT
+        shape == Shape.MISSING_FILE && placement == Placement.DIGEST -> KeyPresence.PRESENT
         shape == Shape.ANOTHER_ID && placement == Placement.LEGACY -> KeyPresence.ABSENT
         else -> KeyPresence.UNREADABLE
     }
@@ -144,6 +145,15 @@ class LegacyRecordInvariantTest {
             tables.addKey(ID, SharingPolicyType.ALL_PEERS)
             val kind = runCatching { keystore.exportKind(ID) }
             val shared = runCatching { store.readShareable(ID, keystore) { software!!.get(it) } }
+            if (shape == Shape.MISSING_FILE && placement == Placement.DIGEST) {
+                // Material alone under the id's own digest name is that id's
+                // (only its put or delete leaves it): the id holds a general
+                // key, so no credential stands in, but nothing reads it.
+                assertEquals("$case export kind", UserKeyKind.GENERAL, kind.getOrThrow())
+                assertRefused("$case share read (local.importSharedKey)", shared.exceptionOrNull())
+                assertRefused("$case software key read", runCatching { software!!.get(ID) }.exceptionOrNull())
+                continue
+            }
             when (want) {
                 KeyPresence.UNREADABLE -> {
                     assertRefused("$case exportKind", kind.exceptionOrNull())

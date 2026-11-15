@@ -80,7 +80,9 @@ data class SoftwareKey(
  */
 class SoftwareKeyStore(
     context: Context,
-    private val cipher: KeystoreAeadCipher = KeystoreAeadCipher(KEY_ALIAS)
+    private val cipher: KeystoreAeadCipher = KeystoreAeadCipher(KEY_ALIAS),
+    /** Removes a file, true when it was removed: a test fails it as an I/O error would. */
+    private val unlink: (File) -> Boolean = { it.delete() }
 ) {
     private val dir: File = File(context.filesDir, "software_keys").apply { mkdirs() }
 
@@ -263,8 +265,8 @@ class SoftwareKeyStore(
     fun delete(keyId: String) {
         migrateLegacyRecords()
         val id = fileId(keyId)
-        File(dir, "$id.key").delete()
-        File(dir, "$id.meta").delete()
+        unlink(File(dir, "$id.key"))
+        unlink(File(dir, "$id.meta"))
     }
 
     /**
