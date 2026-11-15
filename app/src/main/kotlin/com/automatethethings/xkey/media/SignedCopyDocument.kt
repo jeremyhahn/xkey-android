@@ -187,10 +187,20 @@ object MediaSaveRuns {
     }
 
     /**
-     * Delete the staging files under [directory] an earlier process left:
-     * the runs that made them died with it and no screen of this process
-     * owns them. This process's own stay; they are released by their run
-     * or screen (a placed or dropped copy, [abandon]).
+     * How long an earlier process's staging file is kept for a screen whose
+     * saved state may still name it. A screen not restored yet (its task is
+     * still in Recents) has told no sweep about its copy, so the sweep keeps
+     * every earlier file this young; each state save renews the window
+     * ([hold]). Past it, no saved state is taken to name the file.
+     */
+    const val STAGED_RETENTION_MS: Long = 7L * 24 * 60 * 60 * 1000
+
+    /**
+     * Delete the staging files under [directory] an earlier process left
+     * that no saved screen state can still name: the runs that made them
+     * died with it, and the file is older than [STAGED_RETENTION_MS] since
+     * a screen last saved state naming it. This process's own stay; they are
+     * released by their run or screen (a placed or dropped copy, [abandon]).
      *
      * [keep] names earlier files a screen restored from saved state still
      * holds (a copy whose picker was open when the process died): they are
@@ -199,12 +209,24 @@ object MediaSaveRuns {
      */
     fun sweep(directory: File, keep: Collection<File> = emptyList()) {
         keep.forEach { adopted.add(it.absolutePath) }
+        val staleBefore = System.currentTimeMillis() - STAGED_RETENTION_MS
         directory.listFiles()?.forEach { file ->
             if (file.name.startsWith(STAGED_PREFIX) &&
                 !file.name.startsWith("$STAGED_PREFIX$session-") &&
-                file.absolutePath !in adopted
+                file.absolutePath !in adopted &&
+                file.lastModified() < staleBefore
             ) file.delete()
         }
+    }
+
+    /**
+     * A screen is saving state that names [files]: restart their
+     * [STAGED_RETENTION_MS] window, so a later process's sweep keeps them
+     * until that screen is restored and adopts them.
+     */
+    fun hold(files: Collection<File>) {
+        val now = System.currentTimeMillis()
+        files.forEach { if (it.exists()) it.setLastModified(now) }
     }
 
     /** Earlier processes' staging files a restored screen of this one holds. */

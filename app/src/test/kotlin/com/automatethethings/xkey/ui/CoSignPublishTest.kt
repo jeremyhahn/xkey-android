@@ -563,7 +563,11 @@ class CoSignPublishTest {
     @Test
     fun `a co-sign screen start sweeps staged copies an earlier process left`() {
         val dir = MediaPublisher.recoveryDirectory(androidx.test.core.app.ApplicationProvider.getApplicationContext())
-        val earlier = File(dir, "cosign-1234567890.png").apply { writeBytes(originalBytes) }
+        val earlier = File(dir, "cosign-1234567890.png").apply {
+            writeBytes(originalBytes)
+            // Past the window in which any saved screen state could still name it.
+            setLastModified(System.currentTimeMillis() - MediaSaveRuns.STAGED_RETENTION_MS - 60_000)
+        }
         val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
         shadowOf(Looper.getMainLooper()).idle()
         assertFalse("no screen owns it", earlier.exists())

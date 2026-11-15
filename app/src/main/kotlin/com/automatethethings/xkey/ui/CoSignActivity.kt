@@ -377,7 +377,8 @@ class CoSignActivity : AppCompatActivity() {
         savedInstanceState?.let { restoreExchange(it) }
         // Staged copies an earlier process left: their runs died with it. One
         // the restored exchange still names (its picker was open when the
-        // process died) stays until that exchange ends.
+        // process died) stays until that exchange ends; one a screen not yet
+        // restored may name stays for MediaSaveRuns.STAGED_RETENTION_MS.
         MediaSaveRuns.sweep(
             MediaPublisher.recoveryDirectory(applicationContext),
             keep = listOfNotNull(exchange.pendingCopy?.staged, exchange.runningCopy?.copy?.staged)
@@ -420,6 +421,9 @@ class CoSignActivity : AppCompatActivity() {
         outState.putBoolean(STATE_WITNESS_MODE, witnessSection.visibility == View.VISIBLE)
         outState.putString(STATE_KEY_ID, selectedKeyId() ?: pendingKeyId)
         outState.putString(STATE_EXCHANGE, exchange.toJson())
+        // This state names these staged copies: a later process keeps them
+        // until this screen is restored and adopts them.
+        MediaSaveRuns.hold(listOfNotNull(exchange.pendingCopy?.staged, exchange.runningCopy?.copy?.staged))
     }
 
     private fun restoreExchange(state: Bundle) {
