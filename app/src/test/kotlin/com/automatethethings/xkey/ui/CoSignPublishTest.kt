@@ -966,6 +966,7 @@ class CoSignPublishTest {
             assertTrue("the copy holds the staged bytes", synchronized(held.bytes) { held.bytes.size() } > 0)
         } finally {
             held.release()
+            runCatching { controller.pause().stop().destroy() }
         }
     }
 
