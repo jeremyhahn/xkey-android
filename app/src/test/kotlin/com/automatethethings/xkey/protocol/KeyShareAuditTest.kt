@@ -1055,6 +1055,29 @@ class KeyShareAuditTest {
     }
 
     /**
+     * #255 verify r6: local.generateKey with an empty keyId wrote a software
+     * key whose record names no id, which the reader then took as any id's.
+     * The id is refused as invalid params before any key is made or written.
+     */
+    @Test
+    fun anEmptyKeyIdIsRefusedBeforeAnyKeyIsWritten() = runTest {
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val generate = Request(
+            id = 7,
+            method = MethodNames.LOCAL_GENERATE_KEY,
+            params = JSONObject().put("keyId", "").put("algorithm", "AES-256")
+                .put("exportable", true).put("requireUserVerification", false)
+        ).toJson()
+
+        val response = Response.fromJson(served(generate))
+
+        assertEquals("refused: $response", ErrorCodes.INVALID_PARAMS, response.error?.code)
+        io.mockk.verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().put(any()) }
+        io.mockk.coVerify(exactly = 0) { keystoreManager.generateKeyForAlgorithm(any(), any(), any(), any()) }
+        assertEquals("files written for an empty id", emptyList<String>(), java.io.File(tmp.root, "software_keys").list()?.toList().orEmpty())
+    }
+
+    /**
      * #255 review r3: a passkey assertion signs with the key whose COSE key
      * the passkey's creation returned. With a general key and a credential
      * both under the id the assertion is refused, never signed with the
