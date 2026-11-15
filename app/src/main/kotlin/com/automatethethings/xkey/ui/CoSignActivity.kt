@@ -55,6 +55,7 @@ import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.qr.QrCodeGenerator
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.readOwnPublicKeyDer
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
@@ -598,7 +599,19 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        val pubKeyDer = keystoreManager.getPublicKeyDER(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+        // Through the screen's refusing read (#255 review r7): a key store
+        // that cannot be read is a refusal shown here, never an exception out
+        // of the Generate QR listener.
+        val pubKeyDer = when (
+            val read = keystoreManager.readOwnPublicKeyDer(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+        ) {
+            is com.automatethethings.xkey.storage.KeyRead.Value -> read.value
+            com.automatethethings.xkey.storage.KeyRead.Unavailable -> null
+            com.automatethethings.xkey.storage.KeyRead.Unreadable -> {
+                Snackbar.make(rootLayout, getString(R.string.key_public_key_unavailable), Snackbar.LENGTH_SHORT).show()
+                return
+            }
+        }
         val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()

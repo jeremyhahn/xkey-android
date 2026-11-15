@@ -20,6 +20,44 @@ import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.UserKeyKind
 
 /**
+ * What a screen's read of a key read (#255 review r7): the value, nothing
+ * (no such key in the namespace read, an id both namespaces hold, or a
+ * read that failed), or a refusal because a store the key could live in
+ * cannot be read ([KeyPresenceUnreadableException]).
+ */
+sealed interface KeyRead<out T> {
+    class Value<T>(val value: T) : KeyRead<T>
+    object Unavailable : KeyRead<Nothing>
+    object Unreadable : KeyRead<Nothing>
+}
+
+/**
+ * The one choke point between a screen and a key read that can meet an
+ * unreadable key store (#255 review r7): [read] runs here, and a
+ * [KeyPresenceUnreadableException] out of it becomes [KeyRead.Unreadable],
+ * a refusal the screen shows, never an exception out of its button listener
+ * or coroutine, which would crash the app. Any other key-store failure is
+ * [KeyRead.Unavailable]. Every ui/ read of a key through a resolver path
+ * ([KeystoreManager.resolveKey] and every read built on it) goes through
+ * this or a try that catches the exception.
+ */
+inline fun <T : Any> readRefusingUnreadable(read: () -> T?): KeyRead<T> =
+    try {
+        read()?.let { KeyRead.Value(it) } ?: KeyRead.Unavailable
+    } catch (e: KeyPresenceUnreadableException) {
+        KeyRead.Unreadable
+    } catch (e: java.security.GeneralSecurityException) {
+        KeyRead.Unavailable
+    }
+
+/**
+ * A key's public key, DER-encoded, read by a screen ([readRefusingUnreadable]):
+ * the co-sign screen's initiator QR names its key by this key's fingerprint.
+ */
+fun KeystoreManager.readOwnPublicKeyDer(keyId: String, kind: UserKeyKind): KeyRead<ByteArray> =
+    readRefusingUnreadable { getPublicKeyDER(keyId, kind) }
+
+/**
  * What a screen's export of a key's own public key read (#255 review r6):
  * the PEM, no public key (none in one namespace, or an id both hold), or a
  * refusal because a store the key could live in cannot be read.
@@ -33,18 +71,15 @@ sealed interface OwnPublicKeyRead {
 /**
  * The one read of a key's public key by a screen (the key detail screen's
  * copy and the contacts screen's QR export): the key's one namespace
- * ([KeystoreManager.soleKind]) and its PEM. An unreadable store is a
- * refusal the screen shows, never an exception out of its button or
- * coroutine, and never a fallback to another namespace.
+ * ([KeystoreManager.soleKind]) and its PEM, through [readRefusingUnreadable].
+ * An unreadable store is a refusal the screen shows, never an exception out
+ * of its button or coroutine, and never a fallback to another namespace.
  */
 fun KeystoreManager.readOwnPublicKey(keyId: String): OwnPublicKeyRead =
-    try {
-        soleKind(keyId)?.let { getPublicKeyPEM(keyId, it) }?.let { OwnPublicKeyRead.Pem(it) }
-            ?: OwnPublicKeyRead.Unavailable
-    } catch (e: KeyPresenceUnreadableException) {
-        OwnPublicKeyRead.Unreadable
-    } catch (e: java.security.GeneralSecurityException) {
-        OwnPublicKeyRead.Unavailable
+    when (val read = readRefusingUnreadable { soleKind(keyId)?.let { getPublicKeyPEM(keyId, it) } }) {
+        is KeyRead.Value -> OwnPublicKeyRead.Pem(read.value)
+        KeyRead.Unavailable -> OwnPublicKeyRead.Unavailable
+        KeyRead.Unreadable -> OwnPublicKeyRead.Unreadable
     }
 
 /**
