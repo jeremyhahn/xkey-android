@@ -359,29 +359,44 @@ class KeyStoreSyncManager(
     }
 }
 
-/**
- * Deletes the key behind one key row [key], as the key list and the key
- * detail screen do: its material, then its row, inside one
- * [SharePermissionLedger] revoke of the row's key ID ([deleteKeyAndMaterial]).
- *
- * The row's ID names exactly one key, and only its material is removed: the
- * software key of that ID if [softwareKeys] holds one, else the Keystore
- * entry [KeyStoreSyncManager] discovers under that ID. Never
- * [KeystoreManager.resolveKeystoreAlias], which reads `xkey_key_a` as the
- * alias of hardware key `a`: software key `xkey_key_a` and hardware key `a`
- * can both exist, and deleting the first must leave the second.
- *
- * @return Number of rows deleted.
- */
 suspend fun KeyDao.deleteKeyRow(
     key: KeyEntity,
     keystoreManager: KeystoreManager,
     softwareKeys: SoftwareKeyStore
-): Int = deleteKeyAndMaterial(key.keyId) {
-    if (key.source == "xkmsd") return@deleteKeyAndMaterial
-    if (softwareKeys.contains(key.keyId)) {
-        softwareKeys.delete(key.keyId)
-    } else {
-        KeyStoreSyncManager.keystoreAliasesOf(key.keyId).firstOrNull { keystoreManager.deleteByAlias(it) }
+): Int = try {
+    deleteKeyAndMaterial(key.keyId) {
+        if (key.source == "xkmsd") return@deleteKeyAndMaterial
+        removeAllKeyMaterial(key.keyId, keystoreManager, softwareKeys)
     }
+} catch (e: IllegalStateException) {
+    // Material under the ID still stands: the row stays, so the key stays listed.
+    0
+}
+
+/**
+ * The one delete of the material under key ID [keyId], for `local.deleteKey`
+ * and [deleteKeyRow]: the software key of that ID and the hardware general
+ * key of that ID (`xkey_key_<keyId>`) both go, since an install upgraded from
+ * a generator that checked only one namespace can hold both. When neither
+ * exists, the Keystore entry [KeyStoreSyncManager] discovers under that ID
+ * goes instead. Never [KeystoreManager.resolveKeystoreAlias]: software key
+ * `xkey_key_a` and hardware key `a` are distinct keys.
+ *
+ * @return whether any material was removed.
+ * @throws IllegalStateException when a software or hardware key of [keyId]
+ *   still exists afterwards; the caller keeps the row and reports no delete.
+ */
+fun removeAllKeyMaterial(keyId: String, keystoreManager: KeystoreManager, softwareKeys: SoftwareKeyStore): Boolean {
+    val hadSoftware = softwareKeys.contains(keyId)
+    if (hadSoftware) softwareKeys.delete(keyId)
+    val hadGeneral = keystoreManager.generalKeyExists(keyId)
+    if (hadGeneral) keystoreManager.deleteGeneralKey(keyId)
+    val removedOther = !hadSoftware && !hadGeneral &&
+        KeyStoreSyncManager.keystoreAliasesOf(keyId)
+            .filter { it != "xkey_key_$keyId" }
+            .any { keystoreManager.deleteByAlias(it) }
+    check(!softwareKeys.contains(keyId) && !keystoreManager.generalKeyExists(keyId)) {
+        "key material of $keyId survived its delete"
+    }
+    return hadSoftware || hadGeneral || removedOther
 }

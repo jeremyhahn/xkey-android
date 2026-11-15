@@ -90,8 +90,9 @@ class LocalDeleteKeyExactIdTest {
             }
         }
         mockkConstructor(SoftwareKeyStore::class)
-        every { anyConstructed<SoftwareKeyStore>().contains(any()) } answers { firstArg<String>() == software }
-        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
+        var softwareLeft = true
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } answers { softwareLeft && firstArg<String>() == software }
+        every { anyConstructed<SoftwareKeyStore>().delete(any()) } answers { if (firstArg<String>() == software) softwareLeft = false }
 
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", MethodNames.LOCAL_DELETE_KEY)
             .put("params", JSONObject().put("keyId", software))
@@ -200,6 +201,7 @@ class LocalDeleteKeyExactIdTest {
         }
         every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
         every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
+        every { keystore.generalKeyExists(any()) } answers { "xkey_key_${firstArg<String>()}" in aliases }
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
         every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs

@@ -2303,19 +2303,21 @@ class RequestHandler(
         val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
         val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
         var materialRemoved = false
-        val rowsDeleted = keyDao.deleteKeyAndMaterial(canonicalId) {
-            materialRemoved = when {
-                canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
-                softwareKeys.contains(canonicalId) -> {
-                    softwareKeys.delete(canonicalId)
-                    true
+        val rowsDeleted = try {
+            keyDao.deleteKeyAndMaterial(canonicalId) {
+                materialRemoved = if (canonicalId != keyId) {
+                    deleteKeystoreAlias(canonicalId, keyId)
+                } else {
+                    // Every material under the ID goes (software and hardware
+                    // general key alike), or none is reported deleted.
+                    com.automatethethings.xkey.storage.removeAllKeyMaterial(
+                        canonicalId, keystoreManager, softwareKeys
+                    )
                 }
-                // A canonical ID names its general key `xkey_key_k` first, as
-                // this method always did; another alias only when it has none.
-                else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
-                    .sortedByDescending { it == "xkey_key_$canonicalId" }
-                    .any { deleteKeystoreAlias(canonicalId, it) }
             }
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "Delete of $keyId refused: ${e.message}")
+            throw ProtocolException("Key material of $keyId could not be removed", errorCode = ErrorCodes.INTERNAL_ERROR)
         }
 
         // Deleted only when the key's material or its row was removed.
