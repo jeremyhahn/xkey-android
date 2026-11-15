@@ -45,13 +45,13 @@ class RemoteKeyClientRequestIdsTest {
 
     @Test
     fun `a replacement client on the same router never takes a cancelled request's reply`() = runTest {
-        val cancelled = launch { RemoteKeyClient(sender, router).listBackends() }
+        val cancelled = launch { RemoteKeyClient(desktopOf(sender, router)).listBackends() }
         runCurrent()
         cancelled.cancel()
         runCurrent()
 
         // The first client is gone; a new one is built on the same live router.
-        val second = async { RemoteKeyClient(sender, router).listBackends() }
+        val second = async { RemoteKeyClient(desktopOf(sender, router)).listBackends() }
         runCurrent()
 
         val (lateRequest, ownRequest) = sender.sent

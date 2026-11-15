@@ -64,7 +64,7 @@ class RemoteKeyClientPivTest {
         stubAndroidLog()
         router = BidirectionalMessageRouter(mockk<RequestHandler>())
         sender = ScriptedMessageSender(router)
-        client = RemoteKeyClient(sender, router, requestTimeoutMs = 5_000L)
+        client = RemoteKeyClient(desktopOf(sender, router), requestTimeoutMs = 5_000L)
     }
 
     @After

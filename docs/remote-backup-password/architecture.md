@@ -68,7 +68,7 @@ sequenceDiagram
     User->>Dlg: Create backup (password twice, stores)
     Dlg->>Dlg: DesktopBackupForm.checkCreate
     Dlg->>Svc: createDesktopBackup(password, include)
-    Svc->>Svc: activeTransport()
+    Svc->>Svc: connectedDesktop()
     Svc->>RBC: createBackup(password, include, "phone-<millis>")
     RBC->>RBC: encodeRequest (password into owned buffer)
     RBC->>Desk: remote.createBackup {include_*, label, password}

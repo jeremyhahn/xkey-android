@@ -28,7 +28,7 @@ The DTO field names follow the go-xkms pairing contract
 | `PasswordSync` | `app/src/main/kotlin/com/automatethethings/xkey/sync/PasswordSync.kt` | Password gather and merge, behind the password vault's lock (see [password-vault](../password-vault/architecture.md)) |
 | `RemoteSyncClient` | `app/src/main/kotlin/com/automatethethings/xkey/remote/RemoteSyncClient.kt` | Phone-initiated sync: `syncAll`, `syncTrustStore`, `syncOath`, `syncPasswords`; the desktop's status: `syncStatus` (`DesktopSyncStatus`) |
 | `RequestHandler` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | Inbound handlers `handleSyncTrustStore`, `handleSyncOATH`, `handleSyncPasswords`, `handleSyncStatus` |
-| `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | `syncNow()` picks the active transport (`activeTransport()`: BLE, then TCP, then USB) and runs `RemoteSyncClient.syncAll()`; `desktopSyncStatus()` runs `RemoteSyncClient.syncStatus()` |
+| `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | `syncNow()` builds the client from `connectedDesktop()` (BLE, then TCP, then USB; the sender is bound to that desktop's session) and runs `RemoteSyncClient.syncAll()`; `desktopSyncStatus()` runs `RemoteSyncClient.syncStatus()` |
 | `MainActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/MainActivity.kt` | Calls `syncNow()`, then `desktopSyncStatus()`, from the Sync with Desktop card |
 | `SyncStatusText` | `app/src/main/kotlin/com/automatethethings/xkey/ui/SyncStatusText.kt` | The result line about the desktop's status: its last sync time in the phone's zone, never synced, or unavailable |
 | `SyncCodec` | `app/src/main/kotlin/com/automatethethings/xkey/crypto/SyncCodec.kt` | PEM/DER conversion, RFC 3339 times, store checksums |
@@ -93,7 +93,7 @@ sequenceDiagram
 
     User->>UI: Sync now
     UI->>Svc: syncNow()
-    Svc->>Svc: activeTransport()
+    Svc->>Svc: connectedDesktop()
     Svc->>RSC: syncAll()
     RSC->>Eng: gatherCertificates()
     RSC->>Desk: remote.syncTrustStore {certificates}

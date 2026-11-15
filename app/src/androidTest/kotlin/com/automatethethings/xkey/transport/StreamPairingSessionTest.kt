@@ -95,6 +95,7 @@ class StreamPairingSessionTest {
     private lateinit var context: Context
     private lateinit var pairedDevices: PairedDeviceRepository
     private lateinit var server: TcpHsmServer
+    private lateinit var router: BidirectionalMessageRouter
 
     /** Set when the app would have prompted the user to approve a peer. */
     private val promptShown = AtomicBoolean(false)
@@ -114,7 +115,7 @@ class StreamPairingSessionTest {
         val handler = headlessHandler(pairedDevices)
         server = TcpHsmServer(
             requestHandler = handler,
-            messageRouter = BidirectionalMessageRouter(handler),
+            messageRouter = BidirectionalMessageRouter(handler).also { router = it },
             pairingCallback = object : PairingConfirmationCallback {
                 override suspend fun onPairingConfirmationRequired(
                     deviceName: String,
@@ -404,7 +405,8 @@ class StreamPairingSessionTest {
                 .put("method", "remote.listBackends")
                 .put("params", JSONObject())
             runBlocking {
-                server.sendEncryptedMessage(outbound.toString().toByteArray(Charsets.UTF_8))
+                val desktop = checkNotNull(server.connectedDesktop(router)) { "the confirmed desktop is connected" }
+                desktop.sender.sendEncryptedMessage(outbound.toString().toByteArray(Charsets.UTF_8))
             }
 
             val received = peer.readFrame()

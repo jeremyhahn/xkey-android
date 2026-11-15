@@ -26,10 +26,8 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
-import java.io.IOException
 import java.security.SecureRandom
 import java.util.UUID
-import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -38,7 +36,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Rule
@@ -125,15 +122,10 @@ class GattServerCallbackTest {
         assertArrayEquals(byteArrayOf(0x02), probe.statusValue())
     }
 
-    /** Outbound requests need a live session; without one they fail loudly. */
+    /** Outbound requests go only through a session's bound sender; without a session there is none. */
     @Test
-    fun sendingAnEncryptedMessageWithoutASessionFails(): Unit = runBlocking {
-        try {
-            probe.server.sendEncryptedMessage("{}".toByteArray())
-            fail("expected sending without a Noise session to fail")
-        } catch (expected: IOException) {
-            // expected
-        }
+    fun withoutASessionThereIsNothingToSendOn() {
+        assertNull("expected no bound sender without a Noise session", probe.server.boundSender())
     }
 
     // -----------------------------------------------------------------

@@ -21,6 +21,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -181,7 +182,7 @@ class UsbAccessoryServerTest {
     @Test
     fun `a fresh server has nothing to send on`() = runTest {
         val error = try {
-            server.sendEncryptedMessage(byteArrayOf(1, 2, 3))
+            server.sendOnBoundSession(byteArrayOf(1, 2, 3))
             null
         } catch (e: IOException) {
             e

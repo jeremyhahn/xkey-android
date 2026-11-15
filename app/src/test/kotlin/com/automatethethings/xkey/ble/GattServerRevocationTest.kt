@@ -22,6 +22,7 @@ import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -135,7 +136,7 @@ class GattServerRevocationTest {
         eventually("the session keys are zeroed") { secrets.values.all { it.isAllZero() } }
         assertEquals(ConnectionState.Disconnected, server.connectionState.value)
         try {
-            server.sendEncryptedMessage(REQUEST)
+            server.sendOnBoundSession(REQUEST)
             fail("a send after the teardown must be refused")
         } catch (e: IOException) {
             // No session left to send on.
@@ -152,7 +153,7 @@ class GattServerRevocationTest {
         val nonce = session.sendNonceForTest()
 
         try {
-            server.sendEncryptedMessage(REQUEST)
+            server.sendOnBoundSession(REQUEST)
             fail("the send must be refused")
         } catch (e: PeerNotPairedException) {
             assertEquals(desktop.getLocalStaticPublicKey().hex(), e.publicKeyHex)
@@ -162,7 +163,7 @@ class GattServerRevocationTest {
         assertNoNotification()
 
         repo.addDevice(desktop.getLocalStaticPublicKey().hex(), "desktop")
-        server.sendEncryptedMessage(REQUEST)
+        server.sendOnBoundSession(REQUEST)
         assertEquals(nonce + 1, session.sendNonceForTest())
         verify(atLeast = 1) { gatt.notifyCharacteristicChanged(device, any(), false) }
     }
@@ -178,7 +179,7 @@ class GattServerRevocationTest {
         val session = connectPaired(desktop)
         notificationReady()[ADDRESS] = CompletableDeferred()
         val secrets = session.secretArraysForTest() - "staticPrivateKey"
-        val send = async(Dispatchers.IO) { runCatching { server.sendEncryptedMessage(REQUEST) } }
+        val send = async(Dispatchers.IO) { runCatching { server.sendOnBoundSession(REQUEST) } }
         // The window is the check: a send parked on the readiness shows no
         // signal, so it is still waiting after 200 ms.
         delay(200)
@@ -211,7 +212,7 @@ class GattServerRevocationTest {
             paused.complete(Unit)
             release.await()
         }
-        val send = async(Dispatchers.IO) { runCatching { server.sendEncryptedMessage(REQUEST) } }
+        val send = async(Dispatchers.IO) { runCatching { server.sendOnBoundSession(REQUEST) } }
         withTimeout(TIMEOUT_MS) { paused.await() }
 
         repo.removeDevice(keyHex)
@@ -249,7 +250,7 @@ class GattServerRevocationTest {
             }
             true
         }
-        val send = async(Dispatchers.IO) { runCatching { server.sendEncryptedMessage(largeRequest()) } }
+        val send = async(Dispatchers.IO) { runCatching { server.sendOnBoundSession(largeRequest()) } }
         assertTrue("the first fragment reached the stack", blocked.await(TIMEOUT_MS, TimeUnit.MILLISECONDS))
 
         repo.removeDevice(desktop.getLocalStaticPublicKey().hex())
@@ -280,14 +281,14 @@ class GattServerRevocationTest {
             admitted.complete(Unit)
             release.await()
         }
-        val sender = launch(Dispatchers.IO) { server.sendEncryptedMessage(REQUEST) }
+        val sender = launch(Dispatchers.IO) { server.sendOnBoundSession(REQUEST) }
         withTimeout(TIMEOUT_MS) { admitted.await() }
 
         sender.cancel()
         release.complete(Unit)
         sender.join()
         server.afterAdmissionForTest = null
-        server.sendEncryptedMessage(REQUEST)
+        server.sendOnBoundSession(REQUEST)
 
         assertEquals(2L, session.sendNonceForTest())
         val messages = reassemble(fragments)
@@ -325,7 +326,7 @@ class GattServerRevocationTest {
         eventually("the first session is gone") { server.connectionState.value == ConnectionState.Disconnected }
 
         val session = connectPaired(NoiseInitiatorSession(key))
-        server.sendEncryptedMessage(REQUEST)
+        server.sendOnBoundSession(REQUEST)
         assertEquals(1L, session.sendNonceForTest())
         verify(atLeast = 1) { gatt.notifyCharacteristicChanged(device, any(), false) }
 
@@ -354,6 +355,8 @@ class GattServerRevocationTest {
     private fun install(session: NoiseSession, authenticatedPeerKeyHex: String?, claimedPeerKeyHex: String) {
         setField("connectedDevice", device)
         setField("noiseSession", session)
+        // The handshake completing records the session a bound sender sends on.
+        setField("establishedSession", session)
         setField("remotePublicKeyHex", claimedPeerKeyHex)
         setField("authenticatedPeerKeyHex", authenticatedPeerKeyHex)
         setField("identityExchangeComplete", true)

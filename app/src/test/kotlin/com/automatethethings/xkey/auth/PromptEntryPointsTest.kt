@@ -216,11 +216,11 @@ class PromptEntryPointsTest {
         val delete = code.substringAfter("fun handleLocalDeleteKey(", "").substringBefore("\n    }")
         assertTrue(
             "local.deleteKey deletes outside the key's lock",
-            delete.indexOf("withKeyLock(keyLockId(") in 0 until delete.indexOf("deleteGeneralKey(")
+            delete.indexOf("withKeyLock(keyLockId(") in 0 until delete.indexOf("deleteKeyAndMaterial(")
         )
         assertTrue(
             "local.generateKey does not reserve the key's lock",
-            "val reservation = keyLockId(genParams.keyId)" in code
+            "val reservation = keyLockId(keyId)" in code
         )
 
         // A per-operation key co-signs only in a crypto-bound prompt, and only

@@ -19,7 +19,10 @@ import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConfirmedConnection
 import com.automatethethings.xkey.remote.ConnectionChangedException
-import com.automatethethings.xkey.remote.MessageSender
+import com.automatethethings.xkey.remote.ConnectedDesktop
+import com.automatethethings.xkey.remote.ConnectionSenders
+import com.automatethethings.xkey.remote.launchCleanup
+import com.automatethethings.xkey.remote.SessionSender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -124,7 +127,7 @@ class GattServer(
     private val trustStoreRepository: TrustStoreRepository? = null,
     /** How long a send waits for the peer to write the CCCD before giving up. */
     private val notificationReadyTimeoutMs: Long = NOTIFICATION_READY_TIMEOUT_MS
-) : MessageSender {
+) {
     // Extension function for hex encoding
     private fun ByteArray.toHexString(): String = joinToString("") { "%02x".format(it) }
 
@@ -477,8 +480,11 @@ class GattServer(
         connectedDevice?.let { device ->
             try { gattServer?.cancelConnection(device) } catch (_: Exception) {}
         }
+        val ended = noiseSession
         connectedDevice = null
         noiseSession = null
+        // Ended first, so no lookup caches a sender for it after this.
+        ended?.let { senders.retire(it, scope) }
         pairingConfirmed = false
         identityExchangeComplete = false
         remotePublicKeyHex = null
@@ -1139,7 +1145,10 @@ class GattServer(
 
             sessionQueue = currentCoroutineContext()[EventQueue]
             connectionIds[session] = "ble:${UUID.randomUUID()}"
+            val replaced = noiseSession
             noiseSession = session
+            // The same device reconnected over its old session: that one has ended.
+            replaced?.let { senders.retire(it, scope) }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create Noise session", e)
             throw e
@@ -1193,6 +1202,8 @@ class GattServer(
         // is cancelled with its prompt; it answers nothing.
         if (ended != null) {
             requestJobs.forEach { (job, owner) -> if (owner === ended) job.cancel() }
+            // The ended session's sender goes, and its keys once its send drains.
+            senders.retire(ended, scope)
         }
     }
 
@@ -1217,7 +1228,7 @@ class GattServer(
         }
         Log.i(TAG, "Paired device removed; revoking its live session")
         requestJobs.forEach { (job, owner) -> if (owner === session) job.cancel() }
-        scope.launch { tearDown(session) }
+        scope.launchCleanup { tearDown(session) }
     }
 
     /**
@@ -2472,33 +2483,12 @@ class GattServer(
      * confirmation at once, before the deferred teardown clears the handler's
      * peer key, so this answers null from the moment of the revocation.
      */
-    override fun confirmedConnection(): ConfirmedConnection? {
+    fun confirmedConnection(): ConfirmedConnection? {
         val session = establishedSession ?: return null
         val peer = authenticatedPeerKeyHex
         if (!pairingConfirmed || peer.isNullOrEmpty()) return null
         if (!isCurrent(session) || !session.isHandshakeComplete()) return null
         return ConfirmedConnection(peer, session)
-    }
-
-    /**
-     * Sends an encrypted message to the connected device.
-     *
-     * Used by [RemoteKeyClient] for outbound remote.* requests. The peer is
-     * revalidated against the paired-device store before the frame is
-     * encrypted, so a desktop unpaired since the handshake receives nothing.
-     *
-     * @param data The plaintext message bytes to encrypt and send.
-     * @throws PeerNotPairedException if the desktop is no longer paired.
-     * @throws java.io.IOException if no active session or device is connected,
-     *   or the connection's disconnect was seen and it is draining; nothing
-     *   is encrypted then.
-     */
-    override suspend fun sendEncryptedMessage(data: ByteArray) {
-        val session = noiseSession
-            ?: throw java.io.IOException("No active Noise session")
-        val device = connectedDevice
-            ?: throw java.io.IOException("No connected device")
-        sendOnSession(session, device, data, revalidatePeer = true)
     }
 
     /**
@@ -2510,12 +2500,16 @@ class GattServer(
      * @throws ConnectionChangedException if [connection] is not current;
      *   nothing is encrypted.
      */
-    override suspend fun sendEncryptedMessageOn(connection: ConfirmedConnection, data: ByteArray) {
+    private suspend fun sendEncryptedMessageOn(
+        connection: ConfirmedConnection,
+        data: ByteArray,
+        admit: () -> Unit
+    ) {
         val session = connection.connection as? NoiseSession ?: throw ConnectionChangedException()
         if (!connection.sameAs(confirmedConnection())) throw ConnectionChangedException()
         val device = connectedDevice
             ?: throw java.io.IOException("No connected device")
-        sendOnSession(session, device, data, revalidatePeer = true, expected = connection)
+        sendOnSession(session, device, data, revalidatePeer = true, expected = connection, check = admit)
     }
 
     /**
@@ -2529,7 +2523,10 @@ class GattServer(
      * refused send writes nothing and consumes no nonce, and once a nonce is
      * consumed the frame is delivered or the session is torn down.
      * A send scoped to [expected] is admitted only while [session] is still
-     * that confirmed connection.
+     * that confirmed connection. [check], the caller's own authorization,
+     * runs last in admission, under [revocationLock] after the notification
+     * channel and [sendMutex] waits, just before the nonce is consumed;
+     * whatever it throws refuses the send.
      *
      * @throws PeerNotPairedException if the session was revoked or its peer is no longer paired
      * @throws java.io.IOException if the session is gone, its connection is
@@ -2540,7 +2537,8 @@ class GattServer(
         device: BluetoothDevice,
         plaintext: ByteArray,
         revalidatePeer: Boolean,
-        expected: ConfirmedConnection? = null
+        expected: ConfirmedConnection? = null,
+        check: () -> Unit = {}
     ) {
         val channel = openChannel(device)
             ?: throw java.io.IOException("No notification channel to ${device.address}")
@@ -2574,6 +2572,7 @@ class GattServer(
                             // session: its reply would be refused as unpaired.
                             if (pairingEnforced && !pairingConfirmed) throw PeerNotPairedException(peerKeyHex)
                         }
+                        check()
                         session.encrypt(plaintext)
                     }
                 }
@@ -2606,7 +2605,7 @@ class GattServer(
             endedSession = session
         }
         requestJobs.forEach { (job, owner) -> if (owner === session) job.cancel() }
-        scope.launch { tearDown(session) }
+        scope.launchCleanup { tearDown(session) }
     }
 
     /**
@@ -2841,6 +2840,75 @@ class GattServer(
      */
     fun confirmedPeerKeyHex(): String? =
         authenticatedPeerKeyHex?.takeIf { pairingConfirmed && isSessionEstablished() }
+
+    /**
+     * The desktop on this server for outbound `remote.*` clients, or null
+     * unless [isSessionEstablished]: its key is the one the Noise handshake
+     * authenticated.
+     */
+    fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
+        ConnectedDesktop.ifEstablished(isSessionEstablished(), boundSender(), router)
+
+    /**
+     * The established session's authenticated peer key and a sender bound to
+     * that session and its device, read together, or null with no established
+     * session. The sender encrypts only on that session and fails with
+     * [java.io.IOException] once it is revoked, ends, or another session or
+     * device replaces it.
+     *
+     * Repeated calls on one session and device return the same sender, so
+     * snapshots taken on an unchanged connection compare equal
+     * ([com.automatethethings.xkey.remote.ShareSession.sameAs]).
+     */
+    internal fun boundSender(): Pair<String, SessionSender>? = synchronized(revocationLock) {
+        val session = establishedSession?.takeIf { isCurrent(it) && it.isHandshakeComplete() } ?: return null
+        val device = connectedDevice ?: return null
+        val peerKeyHex = session.getRemoteStaticKey()?.toHexString() ?: return null
+        val sender = senders.senderFor(session, { isCurrent(it) && connectedDevice === device }) {
+            newBoundSender(it, device)
+        } ?: return null
+        peerKeyHex to sender
+    }
+
+    /**
+     * The senders [boundSender] hands out, one per session. A session is
+     * made for one device's connection, so it identifies that connection;
+     * [handleDeviceDisconnected] and [stop] retire it, which zeroes its keys
+     * once the send in flight, if any, lets go of [sendMutex].
+     */
+    private val senders = ConnectionSenders<NoiseSession> { session ->
+        sendMutex.withLock { noiseMutex.withLock { zeroOnce(session) } }
+    }
+
+    /** Test seam: whether [boundSender] still holds a sender for [session]. */
+    internal fun holdsSenderForTest(session: NoiseSession): Boolean = senders.holds(session)
+
+    /** Test seam: whether [boundSender] holds a sender for any session. */
+    internal val sendersEmptyForTest: Boolean get() = senders.isEmpty
+
+    private fun newBoundSender(session: NoiseSession, device: BluetoothDevice): SessionSender =
+        object : SessionSender {
+            override val binding: Any = session
+
+            override suspend fun sendEncryptedMessage(data: ByteArray) {
+                // sendOnSession refuses a session that is no longer current,
+                // under the lock that installs a replacing one.
+                sendOnSession(session, device, data, revalidatePeer = true)
+            }
+
+            // The bound session's own peer, and only while it is current.
+            override fun confirmedConnection(): ConfirmedConnection? =
+                this@GattServer.confirmedConnection()?.takeIf { it.connection === session }
+
+            override suspend fun sendEncryptedMessageOn(
+                confirmed: ConfirmedConnection,
+                data: ByteArray,
+                admit: () -> Unit
+            ) {
+                if (confirmed.connection !== session) throw ConnectionChangedException()
+                this@GattServer.sendEncryptedMessageOn(confirmed, data, admit)
+            }
+        }
 }
 
 /**
