@@ -267,6 +267,62 @@ class CredentialKeyDeleteTest {
     }
 
     @Test
+    fun deletesOfNonexistentCredentialsLeaveNoLockBehind() = runBlocking<Unit> {
+        val handler = realHandler()
+        for (n in 0 until 200) {
+            val id = "xkey_credential_missing$n"
+            val response = send(handler, n, if (n % 2 == 0) localDelete(id) else legacyDelete(id))
+            assertFalse("nothing to delete, got $response", response.optJSONObject("result")?.optBoolean("deleted") == true)
+        }
+        assertTrue("no delete runs, so no lock may be kept, left ${credentialDeleteLocks()}", credentialDeleteLocks().isEmpty())
+
+        // Deletes of one existing alias still run one at a time, and leave no lock.
+        val inside = AtomicInteger()
+        val overlapped = AtomicInteger()
+        every { keystore.deleteCredentialKey(any<String>()) } answers {
+            if (inside.incrementAndGet() > 1) overlapped.incrementAndGet()
+            Thread.sleep(50)
+            inside.decrementAndGet()
+            aliases.remove("xkey_credential_${firstArg<String>()}")
+        }
+        // Keep the alias listed so every delete reaches the Keystore removal.
+        every { keystore.listAllKeystoreAliases() } answers { (aliases + credentialAlias).toList() }
+        (0 until 4).map { n ->
+            async(Dispatchers.Default) { send(handler, n, if (n % 2 == 0) localDelete("c") else legacyDelete("c")) }
+        }.awaitAll()
+
+        assertEquals("deletes of one credential must not overlap", 0, overlapped.get())
+        assertTrue("no delete runs, so no lock may be kept, left ${credentialDeleteLocks()}", credentialDeleteLocks().isEmpty())
+    }
+
+    @Test
+    fun aFailedRemovalWithAnUnknownKeyStateKeepsTheMetadataAndFails() = runBlocking<Unit> {
+        for ((n, request) in listOf(localDelete("c"), legacyDelete("c")).withIndex()) {
+            metadata["c"] = passkey("c")
+            val removalTried = java.util.concurrent.atomic.AtomicBoolean(false)
+            every { keystore.listAllKeystoreAliases() } answers {
+                if (removalTried.get()) throw IllegalStateException("keystore unavailable")
+                aliases.toList()
+            }
+            every { keystore.deleteCredentialKey(any<String>()) } answers {
+                removalTried.set(true)
+                throw IllegalStateException("keystore busy")
+            }
+
+            val response = send(realHandler(), n, request)
+
+            assertNotNull("the delete must fail, got $response", response.optJSONObject("error"))
+            assertEquals("the metadata must be kept", passkey("c").rpId, metadata["c"]?.rpId)
+        }
+    }
+
+    /** The handler's process-wide credential delete locks, by alias. */
+    private fun credentialDeleteLocks(): Map<*, *> =
+        RequestHandler::class.java.getDeclaredField("credentialDeleteLocks")
+            .apply { isAccessible = true }
+            .get(null) as Map<*, *>
+
+    @Test
     fun noOtherMainSourceRemovesCredentialMetadataOrMaterial() {
         val sources = File("src/main/kotlin").walkTopDown().filter { it.isFile && it.extension == "kt" }
         for (file in sources) {
