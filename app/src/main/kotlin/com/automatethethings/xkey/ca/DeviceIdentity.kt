@@ -373,6 +373,9 @@ class DeviceIdentity(private val context: Context) {
         /**
          * Prefix of every device identity key. Each enrollment appends its
          * generation number, and a preference says which generation is live.
+         *
+         * The writers here replace these keys outside SharePermissionLedger,
+         * so DesktopShareGate.isIdentityKey keeps them out of outbound shares.
          */
         const val ALIAS_PREFIX = "xkey_device_identity_"
 

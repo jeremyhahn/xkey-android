@@ -230,6 +230,10 @@ class KeystoreUserVerificationKey(
         /**
          * The one alias. Deliberately outside the `xkey_credential_` namespace,
          * so credential sync and cleanup never see it.
+         *
+         * regenerate and the repairs replace this key outside
+         * SharePermissionLedger, so DesktopShareGate.isIdentityKey keeps it
+         * out of outbound shares.
          */
         const val ALIAS = "xkey_user_verification_key"
 

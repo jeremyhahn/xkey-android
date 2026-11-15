@@ -28,6 +28,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -54,7 +55,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeout
 import org.junit.After
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -182,6 +182,7 @@ class GattServerDrainingTest {
     @Test
     fun aSendWhileTheConnectionDrainsIsRefusedAndTheQueuedReplyDelivered() = runBlocking<Unit> {
         val session = install()
+        val nonceBefore = session.sendNonceForTest()
         val answered = pending(7)
         val reply = desktop.encrypt(result(7))
         val atAdmission = CompletableDeferred<Unit>()
@@ -196,7 +197,7 @@ class GattServerDrainingTest {
                 // On the server's dispatcher, so the next wait covers the
                 // send reaching the lock.
                 val send = async(signals) {
-                    runCatching { server.sendEncryptedMessage(request(9, "remote.sign")) }
+                    runCatching { server.sendOnBoundSession(request(9, "remote.sign")) }
                 }
                 withTimeout(TIMEOUT_MS) { atAdmission.await() }
                 // The send waits on the Noise lock behind the consumer.
@@ -206,6 +207,10 @@ class GattServerDrainingTest {
             val refused = withTimeout(TIMEOUT_MS) { send.await() }.exceptionOrNull()
             assertTrue("the send is refused: $refused", refused is IOException && refused !is PeerNotPairedException)
             assertTrue("it is refused as closing: ${refused?.message}", refused?.message?.contains("closing") == true)
+            // Nothing was encrypted for the refused send: no send nonce was
+            // consumed. Read while the state lock holds off the disconnect,
+            // which zeroes the session.
+            assertEquals("the refused send consumed no nonce", nonceBefore, session.sendNonceForTest())
 
             val response = withTimeout(TIMEOUT_MS) { answered.await() }
             assertNull("the reply reaches its caller: ${response.error}", response.error)
@@ -214,10 +219,6 @@ class GattServerDrainingTest {
 
         eventually("the drain finishes") { getField<NoiseSession?>("noiseSession") == null }
         assertNoNotification()
-        // Nothing was encrypted for the refused send: the session's next frame
-        // is the next one the desktop expects.
-        val probe = "probe".toByteArray()
-        assertArrayEquals(probe, desktop.decrypt(session.encrypt(probe)))
     }
 
     /**
@@ -242,7 +243,7 @@ class GattServerDrainingTest {
             onThread { disconnect() }
         }
 
-        val failed = runCatching { server.sendEncryptedMessage(request(9, "remote.sign")) }.exceptionOrNull()
+        val failed = runCatching { server.sendOnBoundSession(request(9, "remote.sign")) }.exceptionOrNull()
         server.afterAdmissionForTest = null
         try {
             assertTrue("the undelivered frame fails its send: $failed", failed is IOException)

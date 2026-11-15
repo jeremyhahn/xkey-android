@@ -79,8 +79,14 @@ data class SoftwareKey(
  */
 class SoftwareKeyStore(
     context: Context,
-    private val cipher: KeystoreAeadCipher = KeystoreAeadCipher(KEY_ALIAS)
+    cipher: KeystoreAeadCipher? = null
 ) {
+    /**
+     * Opened on the first read or write of material: [contains] and [delete]
+     * touch only files, so an existence check needs no Keystore.
+     */
+    private val cipher: KeystoreAeadCipher by lazy { cipher ?: KeystoreAeadCipher(KEY_ALIAS) }
+
     private val dir: File = File(context.filesDir, "software_keys").apply { mkdirs() }
 
     private var migrated = false
