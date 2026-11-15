@@ -18,12 +18,10 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
-import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
-import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import java.security.KeyStore
@@ -394,32 +392,5 @@ class KeyStoreSyncManager(
             isDiscoverable = cred.isDiscoverable,
             signCount = cred.signCount
         )
-    }
-}
-
-/**
- * Deletes the key behind one key row [key], as the key list and the key
- * detail screen do: its material, then its row, inside one
- * [SharePermissionLedger] revoke of the row's key ID ([deleteKeyAndMaterial]).
- *
- * The row's ID names exactly one key, and only its material is removed: the
- * software key of that ID if [softwareKeys] holds one, else the Keystore
- * entry [KeyStoreSyncManager] discovers under that ID. Never
- * [KeystoreManager.resolveKeystoreAlias], which reads `xkey_key_a` as the
- * alias of hardware key `a`: software key `xkey_key_a` and hardware key `a`
- * can both exist, and deleting the first must leave the second.
- *
- * @return Number of rows deleted.
- */
-suspend fun KeyDao.deleteKeyRow(
-    key: KeyEntity,
-    keystoreManager: KeystoreManager,
-    softwareKeys: SoftwareKeyStore
-): Int = deleteKeyAndMaterial(key.keyId) {
-    if (key.source == "xkmsd") return@deleteKeyAndMaterial
-    if (softwareKeys.contains(key.keyId)) {
-        softwareKeys.delete(key.keyId)
-    } else {
-        KeyStoreSyncManager.keystoreAliasesOf(key.keyId).firstOrNull { keystoreManager.deleteByAlias(it) }
     }
 }
