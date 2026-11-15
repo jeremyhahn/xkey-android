@@ -155,6 +155,64 @@ class KeyDeleteAllMaterialTest {
         assertTrue("the hardware key is still there", "xkey_key_k" in aliases)
     }
 
+    /**
+     * xKey's own encryption keys live at raw Keystore aliases and are
+     * discovered as key rows. The raw-alias fallback of every delete refuses
+     * them: their loss would make stored passwords, OATH secrets, sealed
+     * data or software keys unreadable.
+     */
+    @Test
+    fun deleteKeyRowRefusesAnInternalEncryptionKeyAndStillDeletesAUserKey() = runBlocking<Unit> {
+        software.clear()
+        aliases.clear()
+        aliases += listOf(INTERNAL, "imported_user_key")
+        rows.clear()
+        rows += listOf(INTERNAL, "imported_user_key")
+
+        assertEquals("an internal key's row is not deleted", 0, keyDao.deleteKeyRow(row(INTERNAL), keystore, softwareStore()))
+        assertTrue("the internal key stays", INTERNAL in aliases)
+        assertTrue("its row stays", INTERNAL in rows)
+
+        assertEquals(1, keyDao.deleteKeyRow(row("imported_user_key"), keystore, softwareStore()))
+        assertFalse("a user key at a raw alias still goes", "imported_user_key" in aliases)
+    }
+
+    @Test
+    fun localDeleteKeyRefusesAnInternalEncryptionKey() = runBlocking<Unit> {
+        software.clear()
+        aliases.clear()
+        aliases += INTERNAL
+        rows.clear()
+        rows += INTERNAL
+        constructSoftwareStore()
+
+        val response = call(realHandler(), MethodNames.LOCAL_DELETE_KEY, JSONObject().put("keyId", INTERNAL))
+
+        assertNotNull("deleting an internal key is refused, got $response", response.optJSONObject("error"))
+        assertTrue("the internal key stays", INTERNAL in aliases)
+        assertTrue("its row stays", INTERNAL in rows)
+    }
+
+    /** The legacy deleteKey RPC resolves raw aliases too: it is no way around the refusal. */
+    @Test
+    fun theLegacyDeleteKeyRefusesAnInternalEncryptionKey() = runBlocking<Unit> {
+        aliases.clear()
+        aliases += INTERNAL
+        every { keystore.keyExists(any()) } answers { firstArg<String>() in aliases }
+        every { keystore.deleteKey(any()) } answers { aliases.remove(firstArg<String>()) }
+        constructSoftwareStore()
+
+        val response = call(realHandler(), MethodNames.DELETE_KEY, JSONObject().put("credentialId", INTERNAL))
+
+        assertNotNull("deleting an internal key is refused, got $response", response.optJSONObject("error"))
+        assertTrue("the internal key stays", INTERNAL in aliases)
+    }
+
+    private companion object {
+        /** PasswordRepository's encryption key, at its raw Keystore alias. */
+        const val INTERNAL = "xkey_password_encryption_key"
+    }
+
     private fun row(id: String) = KeyEntity(
         keyId = id, keyType = "signing", algorithm = "ES256", label = id, keySizeBits = 256, source = "local"
     )
