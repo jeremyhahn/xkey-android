@@ -109,20 +109,38 @@ internal object AutoSignHash {
         uri: Uri,
         limit: Int = MAX_CANONICAL_JPEG_BYTES,
         embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
+    ): String = contentHashOf(contentResolver.getType(uri), limit, embedLimit) {
+        contentResolver.openInputStream(uri) ?: throw IllegalArgumentException("Cannot open URI: $uri")
+    }
+
+    /**
+     * [contentHashUri] over [file], typed [mimeType]: the hash the signer
+     * computes, for media already copied out of its provider. Co-signing
+     * checks a staged copy's payload with it, so the hash the witness signed
+     * is the payload's own and never only what its signature data says.
+     */
+    fun contentHashFile(
+        file: java.io.File,
+        mimeType: String?,
+        limit: Int = MAX_CANONICAL_JPEG_BYTES,
+        embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
+    ): String = contentHashOf(mimeType, limit, embedLimit) { file.inputStream() }
+
+    /** The one place the signer's content hash is computed, over the media [open] streams from its start. */
+    private fun contentHashOf(
+        mimeType: String?,
+        limit: Int,
+        embedLimit: Int,
+        open: () -> java.io.InputStream
     ): String {
-        val mimeType = contentResolver.getType(uri)
         if (MediaHasher.isCanonicalisedJpeg(mimeType)) {
-            val bytes = contentResolver.openInputStream(uri)?.use { readAtMost(it, limit) }
-                ?: throw IllegalArgumentException("Cannot open URI: $uri")
-            return contentHash(bytes, mimeType)
+            return contentHash(open().use { readAtMost(it, limit) }, mimeType)
         }
-        val format = XmpContainers.formatOf(mimeType) ?: return MediaHasher.hashUri(contentResolver, uri)
+        val format = XmpContainers.formatOf(mimeType) ?: return open().use { MediaHasher.hashStream(it) }
         val digest = java.security.MessageDigest.getInstance("SHA-256")
-        val input = contentResolver.openInputStream(uri)
-            ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        val bytes = input.use { readOrDigest(it, embedLimit, digest) }
+        val bytes = open().use { readOrDigest(it, embedLimit, digest) }
         if (bytes != null) return contentHash(bytes, mimeType)
-        val carried = contentResolver.openInputStream(uri)?.use { XmpContainers.read(it.buffered(), format) }
+        val carried = open().use { XmpContainers.read(it.buffered(), format) }
         if (carried != null) {
             throw TooLargeException(
                 embedLimit,

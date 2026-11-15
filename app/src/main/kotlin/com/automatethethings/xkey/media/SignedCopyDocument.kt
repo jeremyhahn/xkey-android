@@ -20,6 +20,8 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.result.contract.ActivityResultContract
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.withResumed
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -102,7 +104,6 @@ data class SignedCopyDocument(val name: String, val mimeType: String) {
 object MediaSaveRuns {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val runs = ConcurrentHashMap<String, Deferred<*>>()
-    private val ended: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /** The run of [id], started with [write] unless it already runs; its result is [write]'s. */
     @Suppress("UNCHECKED_CAST")
@@ -110,32 +111,39 @@ object MediaSaveRuns {
         runs.computeIfAbsent(id) { scope.async { write() } } as Deferred<T>
 
     /**
-     * What [run] ended with, for the screen waiting on it: its result, or the
-     * failure it ended with. The one way a screen reads a run: a waiter that
-     * is itself cancelled (its screen went away) throws, even when [run] has
-     * already ended, so the run and its result stay here for the next
-     * instance; awaiting [run] directly would take that cancellation for the
-     * run's failure. A failure is always an [Exception]; an [Error] is thrown.
+     * Hands what [run] ended with (its result, or the failure it ended with)
+     * to [use], once [screen] is resumed, and returns what [use] returns. The
+     * one way a screen reads a run:
+     *
+     * - A waiter that is itself cancelled (its screen went away) throws, even
+     *   when [run] has already ended, so the run and its result stay here for
+     *   the next instance; awaiting [run] directly would take that
+     *   cancellation for the run's failure.
+     * - [use] runs only while [screen] is resumed, so never after its state
+     *   was saved: an outcome taken then would be missing from that state,
+     *   and the instance restored from it would lose it. A screen that goes
+     *   away first leaves the outcome to the next instance; one that comes
+     *   back takes it then.
+     *
+     * A failure is always an [Exception]; an [Error] is thrown.
      */
-    suspend fun <T> outcome(run: Deferred<T>): Result<T> {
+    suspend fun <T, R> outcome(run: Deferred<T>, screen: Lifecycle, use: (Result<T>) -> R): R {
         // Throws only on the waiter's own cancellation, never on the run's failure.
         run.join()
-        return try {
+        val result = try {
             Result.success(run.await())
         } catch (e: Exception) {
             Result.failure(e)
         }
-    }
-
-    /** Forget [id] once the instance showing it has seen it end. */
-    fun finished(id: String) {
-        ended.add(id)
-        runs.remove(id)
+        return screen.withResumed { use(result) }
     }
 
     /**
-     * [id] ended and its end was shown: a saved state that still names it
-     * was saved before that, and must not run it again.
+     * Forget [id] once the instance showing it has taken its outcome. A saved
+     * state still naming [id] can only be older than a process death, which
+     * took the run with it: such a state runs it again.
      */
-    fun hasFinished(id: String): Boolean = id in ended
+    fun finished(id: String) {
+        runs.remove(id)
+    }
 }

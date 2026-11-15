@@ -179,12 +179,13 @@ class CoSignPublishTest {
         CoSignActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
 
     // The exchange state the screen keeps, read and set only here.
-    private fun selected(activity: CoSignActivity): Any? = field("selectedUri").get(activity)
-    private fun select(activity: CoSignActivity, uri: Uri) = field("selectedUri").set(activity, uri)
-    private fun pending(activity: CoSignActivity): Any? = field("pendingCopy").get(activity)
-    private fun running(activity: CoSignActivity): Any? = field("runningCopy").get(activity)
-    private fun runningAppend(activity: CoSignActivity): Any? = field("runningAppend").get(activity)
-    private fun queued(activity: CoSignActivity) = field("queuedResponses").get(activity) as List<*>
+    private fun exchange(activity: CoSignActivity) = field("exchange").get(activity) as CoSignExchange
+    private fun selected(activity: CoSignActivity): Any? = exchange(activity).media
+    private fun select(activity: CoSignActivity, uri: Uri) = field("exchange").set(activity, exchange(activity).copy(media = uri))
+    private fun pending(activity: CoSignActivity): Any? = exchange(activity).pendingCopy
+    private fun running(activity: CoSignActivity): Any? = exchange(activity).runningCopy
+    private fun runningAppend(activity: CoSignActivity): Any? = exchange(activity).runningAppend
+    private fun queued(activity: CoSignActivity) = exchange(activity).queued
 
     private fun idleUntil(condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + 10_000

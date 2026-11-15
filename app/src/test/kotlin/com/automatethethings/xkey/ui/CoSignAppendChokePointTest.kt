@@ -63,12 +63,13 @@ class CoSignAppendChokePointTest {
 
     @Test
     fun `a response is queued only with its media binding`() {
-        // Scanned (bound to the selection), or restored with its saved binding.
-        assertEquals(2, count("queuedResponses.add("))
-        assertEquals(1, count("queuedResponses.add(", body("restoreExchange")))
-        assertEquals(1, count("queuedResponses.add(QueuedResponse(raw, scanFor?.media, scanFor?.contentHash))", body("onResponseScanned")))
+        // Queued only by the exchange: bound to what the scan began for, or restored with its saved binding.
+        assertEquals("the declaration and two constructions", 3, Regex("""\bQueuedResponse\(""").findAll(source).count())
+        assertEquals(1, count("QueuedResponse(event.raw, scan?.media, scan?.contentHash)"))
+        assertEquals(1, count("QueuedResponse(q.getString(\"raw\"), q.uri(\"media\")"))
         // Bound to what the scan began for (kept across a recreation), never to what shows when it returns.
-        assertEquals(1, count("responseScanFor = ScanTarget(", body("startResponseScan")))
+        assertEquals(1, count("CoSignExchange.Event.ScanStarted("))
+        assertEquals(1, count("CoSignExchange.Event.ScanStarted(", body("startResponseScan")))
         assertEquals(1, count("responseScanner.launch("))
         assertEquals(1, count("responseScanner.launch(", body("startResponseScan")))
     }
@@ -88,7 +89,8 @@ class CoSignAppendChokePointTest {
     @Test
     fun `the exchange is written only in transition`() {
         for (name in listOf("selectedUri", "responseScanFor", "queuedResponses", "runningAppend", "pendingCopy", "runningCopy")) {
-            assertEquals("$name is kept apart from the exchange", 0, Regex("""\b(var|val) $name\b""").findAll(source).count())
+            val screen = source.substring(source.indexOf("class CoSignActivity "))
+            assertEquals("$name is kept apart from the exchange", 0, Regex("""\b(var|val) $name\b""").findAll(screen).count())
         }
         val writes = Regex("""\bexchange = """).findAll(source).count()
         assertEquals("declared, then replaced in one place", 2, writes)
@@ -132,7 +134,7 @@ class CoSignAppendChokePointTest {
             assertEquals("${file.name}: every run is named", count("MediaSaveRuns.attach(", text), names.size)
             for (name in names) {
                 assertEquals("${file.name}: $name read directly", 0, count("$name.await(", text) + count("$name.join(", text) + count("$name.isCompleted", text))
-                assertTrue("${file.name}: $name read through outcome", count("MediaSaveRuns.outcome($name)", text) >= 1)
+                assertTrue("${file.name}: $name read through outcome", count("MediaSaveRuns.outcome($name, lifecycle)", text) >= 1)
             }
         }
     }

@@ -1185,11 +1185,14 @@ class FileOperationActivity : AppCompatActivity() {
         val run = MediaSaveRuns.attach(save.id) { writeSave(resolver, recovery, save) }
         lifecycleScope.launch {
             // Throws if this instance went away first, even after the write
-            // ended: the next one waits on it and shows its end.
-            val failure = MediaSaveRuns.outcome(run).exceptionOrNull() as Exception?
-            MediaSaveRuns.finished(save.id)
-            runningSave = null
-            if (failure == null) showResult(getString(R.string.file_operation_sign_success)) else showError(failure)
+            // ended, and waits while it is not resumed: the next instance, or
+            // this one once it is back, waits on the write and shows its end.
+            MediaSaveRuns.outcome(run, lifecycle) { outcome ->
+                val failure = outcome.exceptionOrNull() as Exception?
+                MediaSaveRuns.finished(save.id)
+                runningSave = null
+                if (failure == null) showResult(getString(R.string.file_operation_sign_success)) else showError(failure)
+            }
         }
     }
 
