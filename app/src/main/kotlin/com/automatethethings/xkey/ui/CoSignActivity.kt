@@ -43,7 +43,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogger
-import com.automatethethings.xkey.media.AutoSignHash
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.CoSignAppendResult
 import com.automatethethings.xkey.media.CoSignParseResult
@@ -1096,8 +1095,9 @@ class CoSignActivity : AppCompatActivity() {
      *
      * Media whose payload is not what the witness signed is refused before
      * anything is written: its own content hash, computed as the signer
-     * computes it ([AutoSignHash.contentHashFile], signature metadata left
-     * out), must be [expectedHash], and so must the hash its signature data
+     * computes it (streamed, as [MediaHasher.hashCanonicalUri] does, so no
+     * size cap applies that signing does not; signature metadata left out),
+     * must be [expectedHash], and so must the hash its signature data
      * names. Signature data can be kept on other content, so it alone proves
      * nothing. It runs
      * in [MediaSaveRuns], so it holds only the application [context].
@@ -1117,7 +1117,7 @@ class CoSignActivity : AppCompatActivity() {
 
             val existing = XmpMetadataHelper.readSignature(staged.absolutePath)
                 ?: throw IllegalStateException(context.getString(R.string.cosign_no_signature_data))
-            val payloadHash = AutoSignHash.contentHashFile(staged, mimeType)
+            val payloadHash = MediaHasher.hashStreamed({ staged.inputStream() }, mimeType).canonical
             if (!payloadHash.equals(expectedHash, ignoreCase = true) ||
                 !existing.contentHash.equals(expectedHash, ignoreCase = true)
             ) {
