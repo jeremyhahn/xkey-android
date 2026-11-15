@@ -120,6 +120,10 @@ class LegacyRecordInvariantTest {
         val stem = if (placement == Placement.DIGEST) digest(ID) else "legacy_$ID"
         File(dir, "$stem.key").writeBytes(ByteArray(32) { 7 })
         shape.meta?.let { File(dir, "$stem.meta").writeText(it) }
+        return storeIn(filesDir)
+    }
+
+    private fun storeIn(filesDir: File): SoftwareKeyStore {
         val context = mockk<Context>()
         every { context.filesDir } returns filesDir
         val cipher = mockk<KeystoreAeadCipher>()
@@ -159,6 +163,52 @@ class LegacyRecordInvariantTest {
                 }
             }
         }
+    }
+
+    /**
+     * #255 verify r5: an older build's record whose id is itself 64
+     * lowercase hex kept that id as its file name, which looks like a
+     * digest name. A record is told migrated or not by the id its metadata
+     * names (its file name is the digest of that id), never by the name's
+     * shape: the record is migrated, present and readable, and a credential
+     * of its id is never exported in its place.
+     */
+    @Test
+    fun aLegacyRecordNamedLikeADigestIsMigratedAndRead() = runTest {
+        val hexId = "ab".repeat(32)
+        entries += "xkey_credential_$hexId"
+        val filesDir = tmp.newFolder()
+        val dir = File(filesDir, "software_keys").apply { mkdirs() }
+        File(dir, "$hexId.key").writeBytes(ByteArray(32) { 7 })
+        File(dir, "$hexId.meta").writeText("""{"keyId":"$hexId","algorithm":"AES","keyType":"symmetric","keySize":256,"exportable":true,"shareable":true}""")
+        software = storeIn(filesDir)
+
+        assertEquals(KeyPresence.PRESENT, software!!.presence(hexId))
+        assertEquals(hexId, software!!.get(hexId)?.keyId)
+        assertEquals(UserKeyKind.GENERAL, keystore.exportKind(hexId))
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store(KeyPolicyStore.KeyResolver { id, kind -> keystore.resolveKey(id, kind) })
+        tables.addKey(hexId, SharingPolicyType.ALL_PEERS)
+        val shared = store.readShareable(hexId, keystore) { software!!.get(it) }
+        assertEquals("the legacy key is shared", hexId, shared.software?.keyId)
+        assertNull("the same-id credential was shared under the key's grants", shared.publicKeyPem)
+        assertTrue("the record moved to its digest name", File(dir, "${digest(hexId)}.key").isFile)
+    }
+
+    /**
+     * The bypass guard of the store's one record-id read: no code but
+     * [SoftwareKeyStore]'s recordId reads a record's id, and nothing outside
+     * the store reads its files.
+     */
+    @Test
+    fun aRecordsIdIsReadOnlyThroughTheStoresOneRead() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val source = File(root, "com/automatethethings/xkey/crypto/SoftwareKeyStore.kt").readText()
+        assertEquals("reads of a record's id", 1, Regex("""\.opt\w*\("keyId"""").findAll(source).count())
+        assertTrue("the store classifies by file-name shape", "DIGEST_NAME" !in source)
+        val outside = root.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") && it.name != "SoftwareKeyStore.kt" }
+            .filter { "\"software_keys\"" in it.readText() }.map { it.name }.toList()
+        assertEquals("files outside the store read its records", emptyList<String>(), outside)
     }
 
     private fun assertRefused(what: String, failure: Throwable?) {
