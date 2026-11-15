@@ -813,6 +813,7 @@ class StreamPairingSessionRevocationTest {
             "the delete must succeed, got $response",
             response?.optJSONObject("result")?.optBoolean("deleted") == true
         )
+        assertTrue("the delete never reached the Keystore entry", removed.isCompleted)
         assertNull("the key's metadata row must be gone", tables.key(deletedKeyId!!))
     }
 
@@ -1106,7 +1107,7 @@ class StreamPairingSessionRevocationTest {
             every { it.userKeyIdInUse(any()) } returns true
             every { it.holdsAnyKey(any()) } returns true
             every { it.holdsInternalKey(any()) } returns false
-            every { it.userKeyGeneration(any()) } answers { mapOf("xkey_key_${firstArg<String>()}" to "1") }
+            every { it.userKeyGeneration(any()) } answers { mapOf("keystore:xkey_key_${firstArg<String>()}" to "1") }
             every { it.deleteUserKeyGeneration(any(), any()) } answers {
                 onDelete()
                 emptyMap()
