@@ -61,6 +61,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -144,6 +145,17 @@ class CoSignActivity : AppCompatActivity() {
      */
     private var copyShown: Job? = null
 
+    /**
+     * Witness responses scanned and not yet appended, oldest first. They are
+     * kept in the saved state and each leaves only once its append has an
+     * outcome, so a response scanned while a copy writes, or while one is
+     * placed, survives a recreation and is appended to that copy.
+     */
+    private val queuedResponses = ArrayList<String>()
+
+    /** An append of [queuedResponses]' head is running in this instance. */
+    private var appending = false
+
     /** The signing keys, once loaded; the request prompt waits for them after a recreation. */
     private val signingKeysLoaded = CompletableDeferred<Unit>()
 
@@ -174,6 +186,7 @@ class CoSignActivity : AppCompatActivity() {
         buildUI()
         savedInstanceState?.let { restoreExchange(it) }
         runningCopy?.let { runCopy(it) }
+        appendQueuedResponse()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -187,6 +200,7 @@ class CoSignActivity : AppCompatActivity() {
             outState.putString(STATE_RUNNING_TARGET, it.target.toString())
             saveCopy(outState, STATE_RUNNING_PREFIX, it.copy)
         }
+        outState.putStringArrayList(STATE_QUEUED_RESPONSES, queuedResponses)
     }
 
     private fun saveCopy(state: Bundle, prefix: String, copy: PendingCoSignedCopy) {
@@ -210,6 +224,7 @@ class CoSignActivity : AppCompatActivity() {
 
     private fun restoreExchange(state: Bundle) {
         pendingCopy = restoreCopy(state, STATE_COPY_PREFIX)
+        state.getStringArrayList(STATE_QUEUED_RESPONSES)?.let { queuedResponses.addAll(it) }
         val runningId = state.getString(STATE_RUNNING_ID)
         val runningTarget = state.getString(STATE_RUNNING_TARGET)
         val running = restoreCopy(state, STATE_RUNNING_PREFIX)
@@ -779,66 +794,82 @@ class CoSignActivity : AppCompatActivity() {
 
     /**
      * Owner side: a scanned response QR becomes an ATTESTOR entry appended to
-     * the selected media, unless its key has already signed.
+     * the selected media, unless its key has already signed. It is queued
+     * ([queuedResponses]) and appended in turn.
      */
     private fun onResponseScanned(raw: String) {
-        // A co-signed copy still writing becomes the selected media when it
-        // ends; this response is appended to it, keeping its co-signature.
-        copyShown?.takeIf { it.isActive }?.let { shown ->
-            lifecycleScope.launch {
-                shown.join()
-                onResponseScanned(raw)
-            }
-            return
-        }
+        queuedResponses.add(raw)
+        appendQueuedResponse()
+    }
+
+    /**
+     * Appends the oldest queued response, once nothing else is: a co-signed
+     * copy still to be placed or still writing becomes the selected media when
+     * it ends, so the response waits and is appended to it, keeping its
+     * co-signature. The response leaves the queue only with its outcome.
+     */
+    private fun appendQueuedResponse() {
+        if (appending || pendingCopy != null || runningCopy != null) return
+        val raw = queuedResponses.firstOrNull() ?: return
         // Only the Uri: after a recreation the signature data is still reloading,
         // and the append reads the file's own data anyway.
         val uri = selectedUri
         if (uri == null) {
+            queuedResponses.removeAt(0)
             Snackbar.make(rootLayout, getString(R.string.cosign_select_media_first), Snackbar.LENGTH_SHORT).show()
+            appendQueuedResponse()
             return
         }
         val response = when (val parsed = CoSignPayload.parseResponse(raw)) {
             is CoSignParseResult.Ok -> parsed.value
             is CoSignParseResult.Failed -> {
+                queuedResponses.removeAt(0)
                 Snackbar.make(
                     rootLayout,
                     getString(R.string.cosign_response_refused, payloadErrorText(parsed.error)),
                     Snackbar.LENGTH_LONG
                 ).show()
+                appendQueuedResponse()
                 return
             }
         }
         val entry = response.toAttestorEntry(Clock.systemUTC())
         val pendingLoad = mediaLoad
+        appending = true
 
         lifecycleScope.launch(Dispatchers.IO) {
-            try {
+            val result = try {
                 // A reload that finished after the append would show the old signatures.
                 pendingLoad?.join()
-                val result = appendToMedia(uri, entry)
-                withContext(Dispatchers.Main) {
-                    when (result) {
-                        is CoSignOutcome.Replaced -> showAppended(result.data, response.signerName)
-                        is CoSignOutcome.NeedsCopy -> {
-                            pendingCopy = PendingCoSignedCopy(result.staged, response.signerName, entry.keyFingerprint, result.data)
-                            coSignedCopyLauncher.launch(SignedCopyDocument.of(contentResolver, uri, "cosigned"))
-                        }
-                        is CoSignOutcome.Duplicate -> {
-                            Snackbar.make(
-                                rootLayout,
-                                getString(R.string.cosign_duplicate_signer, result.fingerprint.take(16)),
-                                Snackbar.LENGTH_LONG
-                            ).show()
-                        }
-                    }
-                }
-                // A copy is audited once it is written (onCoSignedCopyPicked).
-                if (result is CoSignOutcome.Replaced) {
-                    AuditLogger.logCoSignReceived(result.data.contentHash, entry.keyFingerprint)
-                }
+                appendToMedia(uri, entry)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { showAppendFailed(e) }
+                e
+            }
+            // A copy is audited once it is written (runCopy).
+            if (result is CoSignOutcome.Replaced) {
+                AuditLogger.logCoSignReceived(result.data.contentHash, entry.keyFingerprint)
+            }
+            withContext(Dispatchers.Main) {
+                appending = false
+                queuedResponses.removeAt(0)
+                when (result) {
+                    is CoSignOutcome.Replaced -> showAppended(result.data, response.signerName)
+                    is CoSignOutcome.NeedsCopy -> {
+                        pendingCopy = PendingCoSignedCopy(result.staged, response.signerName, entry.keyFingerprint, result.data)
+                        coSignedCopyLauncher.launch(SignedCopyDocument.of(contentResolver, uri, "cosigned"))
+                    }
+                    is CoSignOutcome.Duplicate -> {
+                        Snackbar.make(
+                            rootLayout,
+                            getString(R.string.cosign_duplicate_signer, result.fingerprint.take(16)),
+                            Snackbar.LENGTH_LONG
+                        ).show()
+                    }
+                    is Exception -> showAppendFailed(result)
+                }
+                appendQueuedResponse()
             }
         }
     }
@@ -914,6 +945,7 @@ class CoSignActivity : AppCompatActivity() {
         pendingCopy = null
         if (target == null) {
             pending.staged.delete()
+            appendQueuedResponse()
             return
         }
         runCopy(RunningCoSignedCopy(UUID.randomUUID().toString(), target, pending))
@@ -944,17 +976,20 @@ class CoSignActivity : AppCompatActivity() {
                 if (!write.isCompleted) throw e
                 e
             }
+            // A read of the original that ended later would show its old
+            // signatures. Until the copy is installed it stays the running
+            // copy, so a recreation meanwhile still selects it.
+            if (failure == null) mediaLoad?.join()
             MediaSaveRuns.finished(run.id)
             runningCopy = null
             if (failure == null) {
-                // A read of the original that ended later would show its old signatures.
-                mediaLoad?.join()
                 selectedUri = run.target
                 selectedFileText.text = run.target.lastPathSegment ?: run.target.toString()
                 showAppended(copy.data, copy.signerName)
             } else {
                 showAppendFailed(failure)
             }
+            appendQueuedResponse()
         }
     }
 
@@ -1017,6 +1052,7 @@ class CoSignActivity : AppCompatActivity() {
         const val STATE_COPY_SIGNER = "cosign_copy_signer"
         const val STATE_COPY_DATA = "cosign_copy_data"
         const val STATE_COPY_FINGERPRINT = "cosign_copy_fingerprint"
+        const val STATE_QUEUED_RESPONSES = "cosign_queued_responses"
         const val STATE_WITNESS_MODE = "cosign_witness_mode"
         const val STATE_KEY_ID = "cosign_key_id"
     }

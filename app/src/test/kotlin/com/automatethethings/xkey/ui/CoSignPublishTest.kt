@@ -68,6 +68,8 @@ class ReadOnlyMediaProvider : ContentProvider() {
         val names = mutableMapOf<String, String>()
         val types = mutableMapOf<String, String>()
         val writeOpens: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        /** While set, every read waits for it, as a slow provider's does. */
+        @Volatile var readGate: CountDownLatch? = null
     }
 
     override fun onCreate() = true
@@ -83,6 +85,7 @@ class ReadOnlyMediaProvider : ContentProvider() {
             throw FileNotFoundException("the original is never opened for writing")
         }
         val file = files[uri.lastPathSegment] ?: throw FileNotFoundException(uri.toString())
+        readGate?.let { check(it.await(10, TimeUnit.SECONDS)) { "read never released" } }
         return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
     }
 
@@ -126,6 +129,7 @@ class CoSignPublishTest {
         ReadOnlyMediaProvider.types.clear()
         ReadOnlyMediaProvider.files["clip.png"] = file
         ReadOnlyMediaProvider.writeOpens.clear()
+        ReadOnlyMediaProvider.readGate = null
         Robolectric.setupContentProvider(ReadOnlyMediaProvider::class.java, ReadOnlyMediaProvider.AUTHORITY)
         // Where the copies go: typed by name too, so a copy can be co-signed again.
         Robolectric.setupContentProvider(ReadOnlyMediaProvider::class.java, COPIES)
@@ -133,6 +137,8 @@ class CoSignPublishTest {
 
     @After
     fun tearDown() {
+        ReadOnlyMediaProvider.readGate?.countDown()
+        ReadOnlyMediaProvider.readGate = null
         db.close()
     }
 
@@ -262,14 +268,29 @@ class CoSignPublishTest {
         assertNotNull("the write is restored as running", field("runningCopy").get(activity))
         // The copy reads back as what was written to it.
         val readBack = { ByteArrayInputStream(synchronized(held.bytes) { held.bytes.toByteArray() }) }
-        shadowOf(activity.contentResolver).registerInputStreamSupplier(copy, readBack)
-        shadowOf(activity.applicationContext.contentResolver).registerInputStreamSupplier(copy, readBack)
 
-        // A second witness scanned during the write waits for it, then co-signs the copy.
+        // A second witness scanned during the write waits for it, then co-signs
+        // the copy, even across another rotation before the write ends.
         scanWitness(activity, "SHA256:second")
         shadowOf(Looper.getMainLooper()).idle()
         assertNull("nothing is staged from the original meanwhile", shadowOf(activity).nextStartedActivityForResult)
 
+        controller.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+        val rotated = controller.get()
+        assertEquals("the queued response is restored", 1, (field("queuedResponses").get(rotated) as List<*>).size)
+        verifyCopiedAfterRelease(rotated, copy, held, readBack)
+    }
+
+    /** The copy's read-back for [activity], then the release, then the second witness's picker over the copy. */
+    private fun verifyCopiedAfterRelease(
+        activity: CoSignActivity,
+        copy: Uri,
+        held: HeldOutput,
+        readBack: () -> ByteArrayInputStream
+    ) {
+        shadowOf(activity.contentResolver).registerInputStreamSupplier(copy, readBack)
+        shadowOf(activity.applicationContext.contentResolver).registerInputStreamSupplier(copy, readBack)
         held.release()
         val (picker, _) = awaitPicker(activity)
         assertEquals("the copy is selected once written", copy, field("selectedUri").get(activity))
@@ -285,6 +306,50 @@ class CoSignPublishTest {
         )
         assertEquals(emptyList<String>(), ReadOnlyMediaProvider.writeOpens)
         assertArrayEquals(originalBytes, ReadOnlyMediaProvider.files["clip.png"]!!.readBytes())
+    }
+
+    @Test
+    fun `a recreation after the copy is written but before the original reloads keeps the copy selected`() {
+        val copy = Uri.parse("content://$COPIES/clip-cosigned.png")
+        val held = HeldOutput()
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        coSignInto(copy, held, controller)
+        assertTrue("the copy's write started", held.writing.await(10, TimeUnit.SECONDS))
+
+        // The recreated instance reloads the original, slowly.
+        val gate = CountDownLatch(1)
+        ReadOnlyMediaProvider.readGate = gate
+        controller.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+        held.release()
+        // The write ends; the screen still waits on the original's reload.
+        idleUntil { synchronized(held.bytes) { held.bytes.size() } > 0 }
+        Thread.sleep(200)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertNotNull("the copy runs until it is installed", field("runningCopy").get(controller.get()))
+
+        controller.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+        val activity = controller.get()
+        assertNotNull("the recreation keeps the copy to install", field("runningCopy").get(activity))
+        ReadOnlyMediaProvider.readGate = null
+        gate.countDown()
+        idleUntil { field("selectedUri").get(activity) == copy }
+
+        val readBack = { ByteArrayInputStream(synchronized(held.bytes) { held.bytes.toByteArray() }) }
+        shadowOf(activity.contentResolver).registerInputStreamSupplier(copy, readBack)
+        shadowOf(activity.applicationContext.contentResolver).registerInputStreamSupplier(copy, readBack)
+        scanWitness(activity, "SHA256:second")
+        val (picker, _) = awaitPicker(activity)
+        assertEquals("clip-cosigned-cosigned.png", picker.getStringExtra(Intent.EXTRA_TITLE))
+        val staged = field("pendingCopy").get(activity)!!.let { pending ->
+            pending.javaClass.getDeclaredField("staged").apply { isAccessible = true }.get(pending) as File
+        }
+        assertEquals(
+            "the next co-signature is added to the copy's",
+            listOf("SHA256:testfp", "SHA256:witness", "SHA256:second"),
+            XmpMetadataHelper.readSignature(staged.path)!!.signatures.map { it.keyFingerprint }
+        )
     }
 
     @Test
