@@ -33,6 +33,7 @@ import com.automatethethings.xkey.R
 import com.automatethethings.xkey.media.AutoSignHash
 import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.ContentAuthenticityData
+import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.MediaSaveRuns
 import com.automatethethings.xkey.media.XmpFixtures
@@ -675,6 +676,46 @@ class CoSignPublishTest {
         assertNull("nothing is co-signed", shadowOf(activity).nextStartedActivityForResult)
         assertEquals(0, queued(activity).size)
         assertEquals("the staged copy is gone", emptyList<File>(), recoveryFiles(activity))
+    }
+
+    /**
+     * A signed JPEG over the automatic capture signer's 32 MiB limit, built
+     * segment by segment: SOI, DQT, the scan header, [scanBytes] of
+     * entropy-coded data and EOI, signed in its EXIF with [hash].
+     */
+    private fun signedLargeJpeg(name: String, scanBytes: Int, fill: Byte, hash: String?): Pair<File, String> {
+        fun bytes(vararg values: Int) = ByteArray(values.size) { values[it].toByte() }
+        val jpeg = bytes(0xFF, 0xD8) + bytes(0xFF, 0xDB, 0x00, 0x04, 0x01, 0x02) +
+            bytes(0xFF, 0xDA, 0x00, 0x04, 0x03, 0x04) + ByteArray(scanBytes) { fill } + bytes(0xFF, 0xD9)
+        val own = MediaHasher.hashCanonical(jpeg, "image/jpeg")
+        val file = File(folder.root, name).apply { writeBytes(jpeg) }
+        XmpMetadataHelper.writeSignature(file.path, ContentAuthenticityData.fromJsonString(XmpFixtures.json(hash ?: own)))
+        return file to own
+    }
+
+    /** Co-signs content://.../big.jpg, signed for [signedHash], and returns whether the copy picker opened. */
+    private fun coSignLargeJpeg(file: File, signedHash: String): Boolean {
+        ReadOnlyMediaProvider.files["big.jpg"] = file
+        ReadOnlyMediaProvider.types["big.jpg"] = "image/jpeg"
+        val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
+        shadowOf(Looper.getMainLooper()).idle()
+        select(activity, Uri.parse("content://${ReadOnlyMediaProvider.AUTHORITY}/big.jpg"))
+        field("currentSignatureData").set(activity, ContentAuthenticityData.fromJsonString(XmpFixtures.json(signedHash)))
+        scanWitness(activity)
+        settle()
+        val started = shadowOf(activity).nextStartedActivityForResult ?: return false
+        return started.intent.action == Intent.ACTION_CREATE_DOCUMENT
+    }
+
+    @Test
+    fun `a signed JPEG over 32 MiB is co-signed, and altered payload bytes in one are still refused`() {
+        val size = AutoSignHash.MAX_CANONICAL_JPEG_BYTES + 1024 * 1024
+        val (large, hash) = signedLargeJpeg("big.jpg", size, 0x11, hash = null)
+        assertTrue("a valid signed JPEG over 32 MiB reaches the copy picker", coSignLargeJpeg(large, hash))
+
+        // The same signature data, naming the same hash, over other scan bytes.
+        val (altered, _) = signedLargeJpeg("altered.jpg", size, 0x12, hash = hash)
+        assertTrue("altered payload bytes are refused", !coSignLargeJpeg(altered, hash))
     }
 
     /** How the screen goes away after a step of [exchangeScenario], and comes back. */
