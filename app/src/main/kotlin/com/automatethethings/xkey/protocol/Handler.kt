@@ -1223,6 +1223,15 @@ class RequestHandler(
             )
         }
 
+        // A raw alias of xKey's own keys (an encryption key of the vault, the
+        // seal store, ...) is never deleted, as by every other key delete.
+        val alias = keystoreManager.resolveKeystoreAlias(deleteParams.credentialId)
+        if (alias != null &&
+            com.automatethethings.xkey.storage.KeyStoreSyncManager.isInternalAlias(alias)
+        ) {
+            throw ProtocolException("Internal key is not deletable", errorCode = ErrorCodes.OPERATION_DENIED)
+        }
+
         // The key the ID names: an alias form (xkey_key_<id>) removes <id>'s
         // Keystore entry, so it is <id> that is revoked and whose row goes.
         val keyId = canonicalKeyId(deleteParams.credentialId)

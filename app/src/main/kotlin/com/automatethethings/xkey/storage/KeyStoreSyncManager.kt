@@ -84,6 +84,21 @@ class KeyStoreSyncManager(
             return listOfNotNull(KEY_ALIAS_PREFIX + keyId, KEY_ALIAS_PREFIX_GENERAL + keyId, keyId.takeIf { raw })
         }
 
+        /**
+         * Whether Keystore alias [alias] is a key of xKey itself or of the
+         * platform (an encryption key of the password vault, OATH secrets,
+         * seal store or software key store, the device identity, attestation
+         * or user verification key, a PIV slot key): no key delete removes it.
+         * xKey names user keys only `xkey_credential_*` and `xkey_key_*`, so
+         * any other `xkey_` alias but a CA's is its own.
+         */
+        fun isInternalAlias(alias: String): Boolean =
+            alias !in CA_ALIASES && (
+                SYSTEM_KEY_PREFIXES.any { alias.startsWith(it) } ||
+                    alias.startsWith("xkey_") &&
+                    !alias.startsWith(KEY_ALIAS_PREFIX) && !alias.startsWith(KEY_ALIAS_PREFIX_GENERAL)
+                )
+
         /** Alias prefixes used by Android framework libraries (must not be deleted). */
         private val SYSTEM_KEY_PREFIXES = listOf(
             "_androidx_",       // AndroidX Security Crypto (master key for EncryptedSharedPreferences)
@@ -391,10 +406,12 @@ fun removeAllKeyMaterial(keyId: String, keystoreManager: KeystoreManager, softwa
     if (hadSoftware) softwareKeys.delete(keyId)
     // False when there is no general key of [keyId].
     val hadGeneral = keystoreManager.deleteGeneralKey(keyId)
-    val removedOther = !hadSoftware && !hadGeneral &&
-        KeyStoreSyncManager.keystoreAliasesOf(keyId)
-            .filter { it != "xkey_key_$keyId" }
-            .any { keystoreManager.deleteByAlias(it) }
+    val others = KeyStoreSyncManager.keystoreAliasesOf(keyId).filter { it != "xkey_key_$keyId" }
+    // The raw-alias fallback never reaches xKey's own keys: refused, not deleted.
+    check(hadSoftware || hadGeneral || others.none { KeyStoreSyncManager.isInternalAlias(it) }) {
+        "$keyId is an internal key; it is never deleted"
+    }
+    val removedOther = !hadSoftware && !hadGeneral && others.any { keystoreManager.deleteByAlias(it) }
     check(!softwareKeys.contains(keyId) && !keystoreManager.generalKeyExists(keyId)) {
         "key material of $keyId survived its delete"
     }
