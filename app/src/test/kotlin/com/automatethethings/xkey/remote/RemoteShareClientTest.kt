@@ -338,8 +338,13 @@ class RemoteShareClientTest {
         val keyDao = mockk<KeyDao>(relaxed = true)
         coEvery { keyDao.exists(any()) } returns false
         val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.resolveKeystoreAlias(any()) } returns null
-        every { keystore.keyExists(any()) } returns false
+        every { keystore.resolveKeystoreAlias(any(), any()) } returns null
+        every { keystore.keyExists(any(), any()) } returns false
+        // No key under any of the ids: no row, no material.
+        coEvery { keyDao.getByKeyId(any()) } returns null
+        every { keystore.holdsAnyKey(any()) } returns false
+        every { keystore.userKeyIdInUse(any()) } returns false
+        every { keystore.userKeyGeneration(any()) } returns emptyMap()
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
         val handler = realHandler(keyDao, keystore)
@@ -385,7 +390,7 @@ class RemoteShareClientTest {
     /** Each encryption revokes a fresh ephemeral key ID; none of them is retained. */
     @Test
     fun `repeated encryptions retain no ledger entries`() = runBlocking<Unit> {
-        val encryptor = FileEncryptor(mockk(relaxed = true)) { throw IllegalStateException("no keystore") }
+        val encryptor = FileEncryptor(mockk(relaxed = true), com.automatethethings.xkey.storage.FakeKeyPolicyTables().store()) { throw IllegalStateException("no keystore") }
         val before = SharePermissionLedger.retainedKeyCount()
 
         repeat(1_000) {
@@ -406,6 +411,10 @@ class RemoteShareClientTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No earlier delete is owed under any id.
+        val policyDao = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true)
+        coEvery { policyDao.deletion(any()) } returns null
+        every { database.keyPolicyDao() } returns policyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)

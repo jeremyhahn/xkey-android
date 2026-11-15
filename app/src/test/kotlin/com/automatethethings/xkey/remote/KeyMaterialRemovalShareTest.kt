@@ -17,6 +17,7 @@ package com.automatethethings.xkey.remote
 import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.deleteKeyRow
@@ -109,9 +110,12 @@ class KeyMaterialRemovalShareTest {
         val hardware = row("a")
         val keystoreAliases = mutableSetOf("xkey_key_a")
         val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.resolveKeystoreAlias(any()) } answers {
+        // This branch's alias rule (#255): an id's general alias is
+        // `xkey_key_<id>`, so only `a` resolves to `xkey_key_a`; the id
+        // `xkey_key_a` is never read as hardware key a's raw alias.
+        every { keystore.resolveKeystoreAlias(any(), any()) } answers {
             when (firstArg<String>()) {
-                "a", "xkey_key_a" -> "xkey_key_a".takeIf { it in keystoreAliases }
+                "a" -> "xkey_key_a".takeIf { secondArg<UserKeyKind>() == UserKeyKind.GENERAL && it in keystoreAliases }
                 else -> null
             }
         }
@@ -162,7 +166,7 @@ class KeyMaterialRemovalShareTest {
     @Test
     fun `a discovered ephemeral key whose share waits while file encryption completes sends nothing`() = runTest {
         val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.getPublicKeyDER(any()) } returns ByteArray(91) { 1 }
+        every { keystore.getPublicKeyDER(any(), any()) } returns ByteArray(91) { 1 }
         coEvery { keystore.performECDH(any(), any()) } returns ByteArray(32) { 2 }
         val generated = CompletableFuture<String>()
         val release = CountDownLatch(1)
@@ -173,7 +177,7 @@ class KeyMaterialRemovalShareTest {
                 return -1
             }
         }
-        val encryptor = FileEncryptor(keystore) { alias -> generated.complete(alias) }
+        val encryptor = FileEncryptor(keystore, com.automatethethings.xkey.storage.FakeKeyPolicyTables().store()) { alias -> generated.complete(alias); ByteArray(91) { 1 } }
         val encryption = thread {
             runBlocking { encryptor.encryptForRecipient(ByteArray(91) { 3 }, plaintext, ByteArrayOutputStream()) }
         }
@@ -199,7 +203,7 @@ class KeyMaterialRemovalShareTest {
             encryption.join(5_000)
         }
 
-        verify { keystore.deleteKey(keyId) }
+        verify { keystore.discardGeneratedKey("xkey_key_$keyId") }
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
         assertTrue("the deleted ephemeral key's public half never reaches the wire", s.sent.isEmpty())
     }
