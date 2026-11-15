@@ -904,6 +904,67 @@ class CoSignPublishTest {
         }
     }
 
+    /**
+     * The process dies while the copy picker is open: the restored exchange
+     * names a staged copy an earlier process made. The start-up sweep keeps
+     * it, so the copy is still saved, and drops an earlier process's staged
+     * copy that nothing names.
+     */
+    @Test
+    fun `after a process death with the copy picker open the restored exchange still saves its staged copy`() {
+        ReadOnlyMediaProvider.readGate = null
+        val copy = Uri.parse("content://$COPIES/clip-cosigned.png")
+        val held = HeldOutput()
+        val readBack = { ByteArrayInputStream(synchronized(held.bytes) { held.bytes.toByteArray() }) }
+        var controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        recoveryFiles(controller.get()).forEach { it.delete() }
+        register(controller.get(), copy, held)
+        try {
+            select(controller.get(), original)
+            answerScanner(controller.get(), openResponseScanner(controller.get()))
+            settle()
+            var picker: Pair<Intent, Int>? = null
+            idleUntil {
+                while (picker == null) {
+                    val started = shadowOf(controller.get()).nextStartedActivityForResult ?: break
+                    if (started.intent.action == Intent.ACTION_CREATE_DOCUMENT) picker = started.intent to started.requestCode
+                }
+                picker != null
+            }
+            val state = android.os.Bundle()
+            controller.pause().stop().saveInstanceState(state)
+            controller.destroy()
+
+            // The new process: the staged copy carries an earlier session's name.
+            val staged = pending(controller.get())!!.let { p ->
+                p.javaClass.getDeclaredField("staged").apply { isAccessible = true }.get(p) as File
+            }
+            val earlier = File(staged.parentFile, "cosign-0123456789abcdef-restored.png")
+            assertTrue(staged.renameTo(earlier))
+            // CoSignActivity's saved-state key of the exchange.
+            val exchangeKey = "cosign_exchange"
+            state.putString(exchangeKey, state.getString(exchangeKey)!!.replace(staged.path, earlier.path))
+            val orphan = File(staged.parentFile, "cosign-fedcba9876543210-orphan.png").apply { writeBytes(byteArrayOf(1)) }
+
+            controller = Robolectric.buildActivity(CoSignActivity::class.java).setup(state)
+            shadowOf(Looper.getMainLooper()).idle()
+            register(controller.get(), copy, held)
+            shadowOf(controller.get().contentResolver).registerInputStreamSupplier(copy, readBack)
+            shadowOf(controller.get().applicationContext.contentResolver).registerInputStreamSupplier(copy, readBack)
+
+            assertTrue("the restored exchange's staged copy stays", earlier.exists())
+            assertFalse("an earlier process's unnamed staged copy is swept", orphan.exists())
+
+            controller.get().activityResultRegistry.dispatchResult(picker!!.second, Activity.RESULT_OK, Intent().setData(copy))
+            assertTrue("the copy's write started", held.writing.await(10, TimeUnit.SECONDS))
+            held.release()
+            idleUntil { selected(controller.get()) == copy }
+            assertTrue("the copy holds the staged bytes", synchronized(held.bytes) { held.bytes.size() } > 0)
+        } finally {
+            held.release()
+        }
+    }
+
     @Test
     fun `a save and recreation at any step of the exchange appends each response once and loses nothing`() {
         exchangeScenario(-1, null)

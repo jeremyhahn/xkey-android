@@ -121,4 +121,20 @@ class MediaSaveRunsAbandonTest {
         assertTrue("other recovery files are not the sweep's", kept.exists())
         assertTrue(mine.name.startsWith("cosign-"))
     }
+
+    @Test
+    fun `the sweep keeps an earlier process's staging file a restored screen still names`() {
+        val dir = temp.newFolder("media-recovery-kept")
+        val named = File(dir, "cosign-0123456789abcdef-named.png").apply { writeBytes(byteArrayOf(1)) }
+        val orphan = File(dir, "cosign-fedcba9876543210-orphan.png").apply { writeBytes(byteArrayOf(2)) }
+
+        MediaSaveRuns.sweep(dir, keep = listOf(named))
+
+        assertTrue("a staged copy a restored exchange names stays", named.exists())
+        assertFalse("one nothing names is gone", orphan.exists())
+
+        // Another screen of this process starts before the exchange ends.
+        MediaSaveRuns.sweep(dir)
+        assertTrue("a later sweep in this process keeps it too", named.exists())
+    }
 }
