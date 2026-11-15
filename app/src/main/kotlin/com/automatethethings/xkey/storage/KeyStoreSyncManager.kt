@@ -389,8 +389,8 @@ suspend fun KeyDao.deleteKeyRow(
 fun removeAllKeyMaterial(keyId: String, keystoreManager: KeystoreManager, softwareKeys: SoftwareKeyStore): Boolean {
     val hadSoftware = softwareKeys.contains(keyId)
     if (hadSoftware) softwareKeys.delete(keyId)
-    val hadGeneral = keystoreManager.generalKeyExists(keyId)
-    if (hadGeneral) keystoreManager.deleteGeneralKey(keyId)
+    // False when there is no general key of [keyId].
+    val hadGeneral = keystoreManager.deleteGeneralKey(keyId)
     val removedOther = !hadSoftware && !hadGeneral &&
         KeyStoreSyncManager.keystoreAliasesOf(keyId)
             .filter { it != "xkey_key_$keyId" }
