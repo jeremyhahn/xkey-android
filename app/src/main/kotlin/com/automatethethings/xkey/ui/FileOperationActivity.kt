@@ -341,6 +341,10 @@ class FileOperationActivity : AppCompatActivity() {
         pendingEncryptedSave.take()
         pendingDecryptedSave.take()
         staging.shutdown()
+        // Gone for good, not recreated: no instance takes the save's outcome,
+        // so it is forgotten once its write ends (which keeps its own bytes
+        // on a failure, MediaPublisher).
+        if (isFinishing && !isChangingConfigurations) runningSave?.let { MediaSaveRuns.abandon<Unit>(it.id) }
         super.onDestroy()
     }
 

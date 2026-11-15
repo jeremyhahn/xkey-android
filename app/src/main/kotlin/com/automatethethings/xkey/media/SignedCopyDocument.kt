@@ -25,8 +25,11 @@ import androidx.lifecycle.withResumed
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import java.io.File
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -145,5 +148,53 @@ object MediaSaveRuns {
      */
     fun finished(id: String) {
         runs.remove(id)
+    }
+
+    /** Whether [id] is still kept here, running or with an outcome no screen has taken. */
+    fun isLive(id: String): Boolean = runs.containsKey(id)
+
+    /**
+     * The screen showing [id] is gone for good (it finished; a recreation
+     * is not this): no instance will take its outcome. [id] is forgotten
+     * once it ends, at once if it already has, and [release] gets what it
+     * ended with, to drop what nothing else will (a staged copy no picker
+     * will place). Nothing happens when [id] is not kept here.
+     */
+    @Suppress("UNCHECKED_CAST")
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun <T> abandon(id: String, release: (Result<T>) -> Unit = {}) {
+        val run = runs[id] as Deferred<T>? ?: return
+        run.invokeOnCompletion { cause ->
+            runs.remove(id, run)
+            val result: Result<T> =
+                if (cause == null) Result.success(run.getCompleted()) else Result.failure(cause)
+            // A completion handler must not throw; a release that fails leaves
+            // its file to the next process's sweep.
+            runCatching { release(result) }
+        }
+    }
+
+    /** Names staging files of this process: anything else under [STAGED_PREFIX] an earlier process left. */
+    private val session: String = UUID.randomUUID().toString().replace("-", "").take(16)
+
+    /** Every co-sign staging file's name starts with it. */
+    const val STAGED_PREFIX = "cosign-"
+
+    /** A new staging file in [directory], named for this process's [sweep], ending in [suffix]. */
+    fun stage(directory: File, suffix: String?): File {
+        directory.mkdirs()
+        return File.createTempFile("$STAGED_PREFIX$session-", suffix, directory)
+    }
+
+    /**
+     * Delete the staging files under [directory] an earlier process left:
+     * the runs that made them died with it and no screen of this process
+     * owns them. This process's own stay; they are released by their run
+     * or screen (a placed or dropped copy, [abandon]).
+     */
+    fun sweep(directory: File) {
+        directory.listFiles()?.forEach { file ->
+            if (file.name.startsWith(STAGED_PREFIX) && !file.name.startsWith("$STAGED_PREFIX$session-")) file.delete()
+        }
     }
 }

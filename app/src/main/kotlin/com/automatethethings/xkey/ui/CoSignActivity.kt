@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.ui
 
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -52,6 +53,7 @@ import com.automatethethings.xkey.media.CoSignRequest
 import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
+import com.automatethethings.xkey.media.MediaPublishException
 import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.MediaSaveRuns
 import com.automatethethings.xkey.media.SignatureEntry
@@ -109,6 +111,25 @@ internal data class PendingCoSignedCopy(
  * runs again while [PendingCoSignedCopy.staged] remains).
  */
 internal data class RunningCoSignedCopy(val id: String, val target: Uri, val copy: PendingCoSignedCopy)
+
+/**
+ * Whether the document at [target] holds [copy]: its embedded signature
+ * names the co-signer and its payload hashes, as the signer hashes it, to
+ * the co-signed content. A copy whose staged bytes are gone counts as
+ * written only then, so a lost copy is never reported as placed.
+ */
+internal fun copyInPlace(resolver: ContentResolver, target: Uri, copy: PendingCoSignedCopy): Boolean = try {
+    val mimeType = resolver.getType(target)
+    val carried = XmpMetadataHelper.readSignatureFromUri(resolver, target, mimeType)
+    carried != null &&
+        carried.signatures.any { it.keyFingerprint == copy.fingerprint } &&
+        MediaHasher.hashStreamed(
+            { resolver.openInputStream(target) ?: throw IOException("cannot read $target") },
+            mimeType
+        ).canonical.equals(copy.data.contentHash, ignoreCase = true)
+} catch (e: Exception) {
+    false
+}
 
 /**
  * Everything a co-sign exchange holds that must outlive the screen showing
@@ -348,6 +369,8 @@ class CoSignActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Staged copies an earlier process left: their runs died with it.
+        MediaSaveRuns.sweep(MediaPublisher.recoveryDirectory(applicationContext))
         keystoreManager = KeystoreManager(this)
         // Restored before buildUI loads the keys, and before onStart delivers a
         // scan result that was pending when the previous instance went away.
@@ -356,6 +379,35 @@ class CoSignActivity : AppCompatActivity() {
         savedInstanceState?.let { restoreExchange(it) }
         exchange.runningCopy?.let { runCopy(it) }
         appendQueuedResponse()
+    }
+
+    override fun onDestroy() {
+        // Gone for good (Back, finish), not recreated: no instance takes its runs.
+        if (isFinishing && !isChangingConfigurations) abandonRuns()
+        super.onDestroy()
+    }
+
+    /**
+     * Hand this exchange's runs to [MediaSaveRuns.abandon] and drop what
+     * no screen will place: a co-signed copy an append stages after this
+     * screen went, one staged for a picker that will not return, and the
+     * bytes a failed copy kept. A copy writing to the document the user
+     * picked finishes its write.
+     */
+    private fun abandonRuns() {
+        val state = exchange
+        state.runningAppend?.let { id ->
+            MediaSaveRuns.abandon<Any?>(id) { result ->
+                (result.getOrNull() as? CoSignOutcome.NeedsCopy)?.staged?.delete()
+                (result.exceptionOrNull() as? MediaPublishException)?.kept?.delete()
+            }
+        }
+        state.pendingCopy?.staged?.delete()
+        state.runningCopy?.let { run ->
+            MediaSaveRuns.abandon<Unit>(run.id) { result ->
+                if (result.isFailure) run.copy.staged.delete()
+            }
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1108,7 +1160,8 @@ class CoSignActivity : AppCompatActivity() {
         // container (EXIF or XMP) loadSignatures read it from.
         val mimeType = contentResolver.getType(uri)
         val suffix = XmpMetadataHelper.stagingSuffix(mimeType)
-        val staged = File.createTempFile("cosign-", suffix, MediaPublisher.recoveryDirectory(context))
+        // Named for this process: a later one sweeps it if no screen took it.
+        val staged = MediaSaveRuns.stage(MediaPublisher.recoveryDirectory(context), suffix)
         var handed = false
         try {
             val input = contentResolver.openInputStream(uri)
@@ -1174,9 +1227,15 @@ class CoSignActivity : AppCompatActivity() {
     private fun runCopy(run: RunningCoSignedCopy) {
         val resolver = applicationContext.contentResolver
         val copy = run.copy
+        val lost = getString(R.string.cosign_copy_lost)
         val write = MediaSaveRuns.attach(run.id) {
-            // Gone only once written and closed: a write before process death.
-            if (!copy.staged.exists()) return@attach
+            // Gone once written and closed (a write before process death), or
+            // swept with the process that staged it: the copy counts as
+            // written only when the document holds it.
+            if (!copy.staged.exists()) {
+                if (copyInPlace(resolver, run.target, copy)) return@attach
+                throw IOException(lost)
+            }
             MediaPublisher.writeCopy(copy.staged) { MediaPublisher.openCreated(resolver, run.target) }
             AuditLogger.logCoSignReceived(copy.data.contentHash, copy.fingerprint)
         }

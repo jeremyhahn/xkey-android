@@ -571,6 +571,29 @@ class CoSignPublishTest {
     }
 
     @Test
+    fun `a copy whose staged bytes are gone counts as placed only when its document holds it`() {
+        val resolver = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().contentResolver
+        val held = signedPng("held.png")
+        val carried = XmpMetadataHelper.readSignature(held.path)!!
+        val payload = com.automatethethings.xkey.media.MediaHasher.hashStreamed({ held.inputStream() }, "image/png").canonical
+        val gone = File(held.parentFile, "cosign-gone.png")
+        val copy = PendingCoSignedCopy(gone, "Witness", carried.signatures.first().keyFingerprint, carried.copy(contentHash = payload), original)
+
+        // Documents of the copies' provider, typed as a picker's are.
+        fun document(file: File): Uri {
+            ReadOnlyMediaProvider.files[file.name] = file
+            return Uri.parse("content://${ReadOnlyMediaProvider.AUTHORITY}/${file.name}")
+        }
+
+        assertTrue("the document holds the co-signed payload", copyInPlace(resolver, document(held), copy))
+        val empty = File(held.parentFile, "empty.png").apply { writeBytes(ByteArray(0)) }
+        assertFalse("an empty document is not the copy", copyInPlace(resolver, document(empty), copy))
+        assertFalse("another signer's copy is not this one", copyInPlace(resolver, document(held), copy.copy(fingerprint = "SHA256:other")))
+        val edited = signedPng("edited.png", XmpFixtures.bytes(0x78, 0x9C, 0x05, 0x05, 0x05))
+        assertFalse("other content is not the copy", copyInPlace(resolver, document(edited), copy))
+    }
+
+    @Test
     fun `a copy picker that cannot open fails the append and leaves nothing pending`() {
         val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
         shadowOf(Looper.getMainLooper()).idle()
