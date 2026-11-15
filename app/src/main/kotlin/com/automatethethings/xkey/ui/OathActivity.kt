@@ -15,9 +15,12 @@
 package com.automatethethings.xkey.ui
 
 import android.content.ClipData
+import android.content.ComponentName
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
+import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -25,6 +28,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.IBinder
 import android.view.Gravity
 import android.view.MenuItem
 import android.view.View
@@ -44,9 +48,13 @@ import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.ble.XKeyGattService
+import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathCredentialWithCode
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
+import com.automatethethings.xkey.remote.ConnectedDesktop
+import com.automatethethings.xkey.remote.RemoteOathClient
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -94,6 +102,23 @@ class OathActivity : AppCompatActivity() {
 
     private var isFabVisible = true
 
+    // Desktop OATH (remote.oathAdd / remote.oathGenerate). The service is
+    // bound without BIND_AUTO_CREATE: with no desktop connected the screen
+    // behaves exactly as before.
+    private var gattService: XKeyGattService? = null
+    private var serviceBindRequested = false
+    private lateinit var desktopActions: OathDesktopActions
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            gattService = (binder as? XKeyGattService.LocalBinder)?.getService()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            gattService = null
+        }
+    }
+
     private val qrScanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -115,6 +140,18 @@ class OathActivity : AppCompatActivity() {
 
         val db = XKeyDatabase.getInstance(this)
         repository = OathRepository(db.oathCredentialDao(), OathSecretManager())
+        desktopActions = OathDesktopActions(
+            desktop = { gattService?.connectedDesktop() },
+            links = PrefsDesktopOathLinks(
+                getSharedPreferences(PrefsDesktopOathLinks.PREFS_NAME, Context.MODE_PRIVATE)
+            ),
+            secretOf = { entity -> OathSecretManager().decryptSecret(entity.secretEncrypted) }
+        )
+        serviceBindRequested = bindService(
+            Intent(this, XKeyGattService::class.java),
+            serviceConnection,
+            0
+        )
 
         buildUI()
         setContentView(rootLayout)
@@ -631,26 +668,123 @@ class OathActivity : AppCompatActivity() {
         ).show()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        if (serviceBindRequested) {
+            unbindService(serviceConnection)
+            serviceBindRequested = false
+        }
+    }
+
     private fun showContextMenu(item: OathCredentialWithCode) {
         val displayName = buildString {
             item.credential.issuer?.let { append("$it: ") }
             append(item.credential.accountName)
         }
+        // Bound to the desktop connected as the menu opens, not to whichever
+        // is connected when an entry is picked.
+        val desktopMenu = desktopActions.openMenu(item.credential)
+        val desktopEntries = desktopMenu.entries
+        val labels = mutableListOf(
+            getString(R.string.oath_context_view_details),
+            getString(R.string.oath_context_delete)
+        )
+        desktopEntries.forEach { entry ->
+            labels += when (entry) {
+                OathDesktopActions.Entry.COPY -> getString(R.string.oath_context_copy_to_desktop)
+                OathDesktopActions.Entry.DESKTOP_CODE -> getString(R.string.oath_context_desktop_code)
+            }
+        }
 
         MaterialAlertDialogBuilder(this)
             .setTitle(displayName)
-            .setItems(
-                arrayOf(
-                    getString(R.string.oath_context_view_details),
-                    getString(R.string.oath_context_delete)
-                )
-            ) { _, which ->
+            .setItems(labels.toTypedArray()) { _, which ->
                 when (which) {
                     0 -> showCredentialDetails(item)
                     1 -> showDeleteConfirmation(item)
+                    else -> when (desktopEntries.getOrNull(which - 2)) {
+                        OathDesktopActions.Entry.COPY -> copyToDesktop(desktopMenu)
+                        OathDesktopActions.Entry.DESKTOP_CODE -> showDesktopCode(desktopMenu)
+                        null -> Unit
+                    }
                 }
             }
             .show()
+    }
+
+    private fun copyToDesktop(menu: OathDesktopActions.Menu) {
+        lifecycleScope.launch {
+            showDesktopOutcome(menu.copyToDesktop())
+        }
+    }
+
+    private fun showDesktopCode(menu: OathDesktopActions.Menu) {
+        lifecycleScope.launch {
+            showDesktopOutcome(menu.desktopCode())
+        }
+    }
+
+    private fun showDesktopOutcome(outcome: OathDesktopActions.Outcome) {
+        when (outcome) {
+            is OathDesktopActions.Outcome.Code -> showDesktopCodeDialog(outcome.deadline)
+            is OathDesktopActions.Outcome.Copied ->
+                Snackbar.make(rootLayout, R.string.oath_desktop_copied, Snackbar.LENGTH_SHORT).show()
+            OathDesktopActions.Outcome.NotConnected ->
+                Snackbar.make(rootLayout, R.string.oath_desktop_not_connected, Snackbar.LENGTH_SHORT).show()
+            OathDesktopActions.Outcome.NotOnDesktop ->
+                Snackbar.make(rootLayout, R.string.oath_desktop_not_linked, Snackbar.LENGTH_SHORT).show()
+            is OathDesktopActions.Outcome.Failed ->
+                Snackbar.make(
+                    rootLayout,
+                    getString(R.string.oath_desktop_failed, outcome.message),
+                    Snackbar.LENGTH_LONG
+                ).show()
+        }
+    }
+
+    /**
+     * Shows a desktop code until its deadline: the remaining seconds count
+     * down while the dialog is open, and at zero the code is replaced by
+     * the expired notice.
+     */
+    private fun showDesktopCodeDialog(deadline: DesktopCodeDeadline) {
+        fun render(): String = when (val view = deadline.view()) {
+            is DesktopCodeDeadline.View.Live ->
+                "${view.code}\n\n${getString(R.string.oath_desktop_code_expires, view.remainingSeconds)}"
+            is DesktopCodeDeadline.View.NoExpiry ->
+                "${view.code}\n\n${getString(R.string.oath_desktop_code_no_expiry)}"
+            DesktopCodeDeadline.View.Expired -> getString(R.string.oath_desktop_code_expired)
+        }
+
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.oath_desktop_code_title)
+            .setMessage(render())
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+        val ticker = lifecycleScope.launch {
+            while (true) {
+                val wait = deadline.millisUntilChange() ?: break
+                kotlinx.coroutines.delay(wait)
+                dialog.setMessage(render())
+            }
+            dialog.setMessage(render())
+        }
+        val refresh = { dialog.setMessage(render()) }
+        desktopCodeRefresh = refresh
+        dialog.setOnDismissListener {
+            ticker.cancel()
+            if (desktopCodeRefresh === refresh) desktopCodeRefresh = null
+        }
+    }
+
+    /** The open desktop code dialog's re-render, run on resume. */
+    private var desktopCodeRefresh: (() -> Unit)? = null
+
+    override fun onResume() {
+        super.onResume()
+        // The ticker's delay runs on uptime, which stops in deep sleep: show
+        // the code's state on the sleep-inclusive deadline at once.
+        desktopCodeRefresh?.invoke()
     }
 
     private fun showCredentialDetails(item: OathCredentialWithCode) {
@@ -826,6 +960,148 @@ class OathActivity : AppCompatActivity() {
                     showError(e)
                 }
             }
+        }
+    }
+}
+
+/**
+ * (desktop, phone oathId) -> desktop credential_id, learned from
+ * remote.oathAdd replies. A desktop is named by its Noise-authenticated static
+ * key ([ConnectedDesktop.peerKeyHex]): a credential ID means nothing on any
+ * other desktop.
+ */
+interface DesktopOathLinks {
+    fun get(peerKeyHex: String, oathId: String): String?
+    fun put(peerKeyHex: String, oathId: String, desktopId: String)
+}
+
+/** [DesktopOathLinks] in private SharedPreferences (IDs only, no secrets). */
+class PrefsDesktopOathLinks(private val prefs: SharedPreferences) : DesktopOathLinks {
+    override fun get(peerKeyHex: String, oathId: String): String? =
+        prefs.getString(key(peerKeyHex, oathId), null)
+
+    override fun put(peerKeyHex: String, oathId: String, desktopId: String) {
+        prefs.edit().putString(key(peerKeyHex, oathId), desktopId).apply()
+    }
+
+    /** Hex has no '/', so the first one ends the peer key. */
+    private fun key(peerKeyHex: String, oathId: String) = "${peerKeyHex.lowercase()}/$oathId"
+
+    companion object {
+        const val PREFS_NAME = "oath_desktop_links"
+    }
+}
+
+/**
+ * The OATH screen's desktop actions, kept free of Android types so they unit
+ * test on the JVM. [desktop] is null whenever no desktop has an established
+ * session; then no entry is offered and nothing is sent. Links are read and
+ * written for the desktop [desktop] returns at the time of each call, and
+ * each call's request goes out on that desktop's own connection: a peer that
+ * replaces it mid-call receives nothing, and no link is written.
+ */
+class OathDesktopActions(
+    private val desktop: () -> ConnectedDesktop?,
+    private val links: DesktopOathLinks,
+    private val secretOf: suspend (OathCredentialEntity) -> ByteArray,
+    private val clock: MonotonicClock = MonotonicClock.SYSTEM
+) {
+    enum class Entry { COPY, DESKTOP_CODE }
+
+    sealed interface Outcome {
+        data class Copied(val desktopId: String) : Outcome
+        /** A desktop code, readable only through [deadline] (ruling 554). */
+        class Code(val deadline: DesktopCodeDeadline) : Outcome {
+            override fun toString(): String = "Code($deadline)"
+        }
+        data object NotConnected : Outcome
+        data object NotOnDesktop : Outcome
+        data class Failed(val message: String) : Outcome
+    }
+
+    fun isConnected(): Boolean = desktop() != null
+
+    /** Desktop entries for [credential]'s context menu; empty with no desktop. */
+    fun menuEntries(credential: OathCredentialEntity): List<Entry> = entriesFor(desktop(), credential)
+
+    /**
+     * Opens [credential]'s context menu on the desktop connected now. Its
+     * actions go to that desktop's own connection whenever they fire: a
+     * desktop that replaces it while the menu is open receives nothing and
+     * inherits no link, and a menu opened with no desktop sends nothing.
+     */
+    fun openMenu(credential: OathCredentialEntity): Menu {
+        val peer = desktop()
+        return Menu(peer, credential, entriesFor(peer, credential))
+    }
+
+    /** A context menu bound to the desktop present when it opened. */
+    inner class Menu internal constructor(
+        private val peer: ConnectedDesktop?,
+        private val credential: OathCredentialEntity,
+        val entries: List<Entry>
+    ) {
+        suspend fun copyToDesktop(): Outcome = copyTo(peer, credential)
+        suspend fun desktopCode(): Outcome = codeFrom(peer, credential)
+    }
+
+    private fun entriesFor(peer: ConnectedDesktop?, credential: OathCredentialEntity): List<Entry> {
+        peer ?: return emptyList()
+        return if (links.get(peer.peerKeyHex, credential.oathId) != null) {
+            listOf(Entry.COPY, Entry.DESKTOP_CODE)
+        } else {
+            listOf(Entry.COPY)
+        }
+    }
+
+    /** Sends remote.oathAdd for [credential] and remembers the desktop ID. */
+    suspend fun copyToDesktop(credential: OathCredentialEntity): Outcome = copyTo(desktop(), credential)
+
+    /** Sends remote.oathGenerate for the desktop copy of [credential]. */
+    suspend fun desktopCode(credential: OathCredentialEntity): Outcome = codeFrom(desktop(), credential)
+
+    private suspend fun copyTo(peer: ConnectedDesktop?, credential: OathCredentialEntity): Outcome {
+        peer ?: return Outcome.NotConnected
+        val remote = RemoteOathClient(peer)
+        return try {
+            val raw = secretOf(credential)
+            val secret = try {
+                RemoteOathClient.base32Chars(raw)
+            } finally {
+                raw.fill(0)
+            }
+            val result = remote.oathAdd(
+                RemoteOathClient.Credential(
+                    name = credential.oathId,
+                    issuer = credential.issuer,
+                    accountName = credential.accountName,
+                    secret = secret,
+                    type = credential.oathType.lowercase(),
+                    algorithm = credential.algorithm.uppercase(),
+                    digits = credential.digits,
+                    period = credential.periodSeconds,
+                    counter = credential.counter
+                )
+            )
+            links.put(peer.peerKeyHex, credential.oathId, result.credentialId)
+            Outcome.Copied(result.credentialId)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Outcome.Failed(e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    private suspend fun codeFrom(peer: ConnectedDesktop?, credential: OathCredentialEntity): Outcome {
+        peer ?: return Outcome.NotConnected
+        val desktopId = links.get(peer.peerKeyHex, credential.oathId) ?: return Outcome.NotOnDesktop
+        return try {
+            val result = RemoteOathClient(peer).oathGenerate(desktopId)
+            Outcome.Code(DesktopCodeDeadline(result.code, result.expiresIn, clock))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Outcome.Failed(e.message ?: e.javaClass.simpleName)
         }
     }
 }

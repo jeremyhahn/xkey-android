@@ -42,18 +42,20 @@ import java.util.concurrent.atomic.AtomicLong
  * phone's items and pulls the desktop's in one round trip.
  *
  * Requires an active paired connection: [messageSender] and [messageRouter]
- * come from the live transport (BLE / USB-AOA / TCP) for the connected desktop.
+ * come from the [ConnectedDesktop] (BLE / USB-AOA / TCP), bound to its connection.
  * [peerDeviceId] and [peerDeviceName] name that desktop in the audit entry
  * each OATH and password sync records.
  */
 class RemoteSyncClient(
     context: Context,
-    private val messageSender: MessageSender,
-    private val messageRouter: BidirectionalMessageRouter,
+    desktop: ConnectedDesktop,
     private val requestTimeoutMs: Long = 30_000L,
     private val peerDeviceId: String? = null,
     private val peerDeviceName: String? = null
 ) {
+    /** Bound to [desktop]'s connection: a reply-awaiting call never reaches another desktop. */
+    private val messageSender: MessageSender = desktop.sender
+    private val messageRouter: BidirectionalMessageRouter = desktop.router
     private val engine = SyncEngine(context.applicationContext)
 
     /** Aggregate result of a sync run (items pushed to / pulled from the laptop). */

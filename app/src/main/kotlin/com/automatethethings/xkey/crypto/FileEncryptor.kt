@@ -16,6 +16,7 @@ package com.automatethethings.xkey.crypto
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import org.bouncycastle.crypto.digests.SHA256Digest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
 import org.bouncycastle.crypto.params.HKDFParameters
@@ -55,14 +56,20 @@ import javax.crypto.spec.SecretKeySpec
  *
  * @param keystoreManager The [KeystoreManager] instance used for ECDH and key operations.
  * @param keyPolicyStore The store whose use gate every ECDH passes.
+ * @param generateEphemeralKey Generates the ephemeral agreement key at the given
+ *   Keystore alias and returns its DER public key; the Android Keystore unless
+ *   a test supplies another.
  */
 class FileEncryptor(
     private val keystoreManager: KeystoreManager,
-    private val keyPolicyStore: com.automatethethings.xkey.storage.KeyPolicyStore
+    private val keyPolicyStore: com.automatethethings.xkey.storage.KeyPolicyStore,
+    private val generateEphemeralKey: (alias: String) -> ByteArray? = ::generateKeystoreAgreementKey
 ) {
 
     companion object {
-        private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+        /** Key ID prefix of the ephemeral agreement key (Keystore alias `xkey_key_ephemeral_<UUID>`). */
+        const val EPHEMERAL_KEY_PREFIX = "ephemeral_"
+
         private const val VERSION: Byte = 0x01
         private const val SALT_SIZE = 32
         private const val IV_SIZE = 12
@@ -89,7 +96,7 @@ class FileEncryptor(
         plaintext: InputStream,
         output: OutputStream
     ) {
-        val ephemeralKeyId = "ephemeral_${UUID.randomUUID()}"
+        val ephemeralKeyId = "$EPHEMERAL_KEY_PREFIX${UUID.randomUUID()}"
         val ephemeralAlias = ephemeralAlias(ephemeralKeyId)
         try {
             // Generate ephemeral EC key in Keystore with PURPOSE_AGREE_KEY.
@@ -140,7 +147,7 @@ class FileEncryptor(
         } catch (e: Throwable) {
             // The encryption failed: the ephemeral key is still deleted, and
             // a failed delete rides along with the failure, never replacing it.
-            if (keystoreManager.discardGeneratedKey(ephemeralAlias) == GeneratedKeyDiscard.FAILED) {
+            if (discardEphemeralKey(ephemeralKeyId, ephemeralAlias) == GeneratedKeyDiscard.FAILED) {
                 e.addSuppressed(EncryptionException("Ephemeral key $ephemeralAlias was not deleted", null))
             }
             throw e
@@ -151,7 +158,7 @@ class FileEncryptor(
         // delete (#255 review r7). An encryption whose ephemeral private key
         // could not be deleted is never handed off as a success (#255 review
         // r8): it fails, and its output is not to be used.
-        if (keystoreManager.discardGeneratedKey(ephemeralAlias) == GeneratedKeyDiscard.FAILED) {
+        if (discardEphemeralKey(ephemeralKeyId, ephemeralAlias) == GeneratedKeyDiscard.FAILED) {
             throw EncryptionException("Ephemeral key $ephemeralAlias was not deleted", null)
         }
     }
@@ -224,35 +231,11 @@ class FileEncryptor(
     }
 
     /**
-     * Generate an ephemeral EC key in Android Keystore with [KeyProperties.PURPOSE_AGREE_KEY].
-     *
-     * The key is created on the secp256r1 (P-256) curve without user authentication
-     * requirements, as it is used only for a single ECDH operation and then deleted.
-     *
-     * @param alias The ephemeral key's Keystore alias ([ephemeralAlias]).
-     * @return The generated key's public key, DER-encoded.
+     * Delete the ephemeral key [keyId] at [alias] as a revoke of its ID: a
+     * share of it, however it got a row, is refused from here on.
      */
-    private fun generateEphemeralKey(alias: String): ByteArray? {
-        val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-
-        if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
-        }
-
-        val specBuilder = KeyGenParameterSpec.Builder(
-            alias,
-            KeyProperties.PURPOSE_AGREE_KEY
-        )
-            .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-            .setUserAuthenticationRequired(false)
-
-        val keyPairGenerator = KeyPairGenerator.getInstance(
-            KeyProperties.KEY_ALGORITHM_EC,
-            KEYSTORE_PROVIDER
-        )
-        keyPairGenerator.initialize(specBuilder.build())
-        return keyPairGenerator.generateKeyPair()?.public?.encoded
-    }
+    private suspend fun discardEphemeralKey(keyId: String, alias: String): GeneratedKeyDiscard =
+        SharePermissionLedger.revoking(keyId) { keystoreManager.discardGeneratedKey(alias) }
 
     /** The Keystore alias of the ephemeral key [keyId]: the general alias [KeystoreManager.performECDH] reads. */
     internal fun ephemeralAlias(keyId: String): String =
@@ -289,4 +272,35 @@ class FileEncryptor(
             offset += bytesRead
         }
     }
+}
+
+/**
+ * Generate an ephemeral EC key in Android Keystore with [KeyProperties.PURPOSE_AGREE_KEY].
+ *
+ * The key is created on the secp256r1 (P-256) curve without user authentication
+ * requirements, as it is used only for a single ECDH operation and then deleted.
+ *
+ * @param alias Keystore alias of the ephemeral key ([FileEncryptor.ephemeralAlias]).
+ * @return The generated key's public key, DER-encoded.
+ */
+private fun generateKeystoreAgreementKey(alias: String): ByteArray? {
+    val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+
+    if (keyStore.containsAlias(alias)) {
+        keyStore.deleteEntry(alias)
+    }
+
+    val specBuilder = KeyGenParameterSpec.Builder(
+        alias,
+        KeyProperties.PURPOSE_AGREE_KEY
+    )
+        .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+        .setUserAuthenticationRequired(false)
+
+    val keyPairGenerator = KeyPairGenerator.getInstance(
+        KeyProperties.KEY_ALGORITHM_EC,
+        "AndroidKeyStore"
+    )
+    keyPairGenerator.initialize(specBuilder.build())
+    return keyPairGenerator.generateKeyPair()?.public?.encoded
 }

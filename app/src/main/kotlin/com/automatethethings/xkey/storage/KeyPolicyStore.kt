@@ -107,6 +107,12 @@ interface KeyMaterial {
  * written, the obligation is held in the process with its clear
  * ([unrecorded], by key id): every peer is denied, every grant refused, and
  * the next policy write for the key row deletes its grants first.
+ *
+ * Every write here that inserts, deletes or changes the sharing of a key
+ * ([setPolicy], [withdraw], [insertKey], [deleteKey], [deleteMaterial]) runs
+ * as a [com.automatethethings.xkey.remote.SharePermissionLedger] revoke of the
+ * key, as [com.automatethethings.xkey.storage.dao.KeyDao]'s row writes do: a
+ * desktop share of the key waiting at a transport's admission is refused.
  */
 class KeyPolicyStore(
     private val dao: KeyPolicyDao,
@@ -241,7 +247,7 @@ class KeyPolicyStore(
         instance: Long,
         policy: SharingPolicyType,
         decision: RemoteDecision? = null
-    ): Boolean =
+    ): Boolean = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(keyId) {
         try {
             var replaced: SharingPolicyType? = null
             transactor.run {
@@ -283,6 +289,7 @@ class KeyPolicyStore(
             if (policy != SharingPolicyType.ALL_PEERS) owe(keyId, instance, policy, e)
             throw e
         }
+    }
 
     /** How a [withdraw] ended. Only [REMOVED] and [OWED] may be reported done: both are durable. */
     enum class Withdrawal {
@@ -310,7 +317,7 @@ class KeyPolicyStore(
      * withdrawal done only on a durable result (#193 r6, ruling 554). Never
      * throws but for cancellation.
      */
-    suspend fun withdraw(keyId: String, instance: Long, peerPublicKeyHex: String): Withdrawal =
+    suspend fun withdraw(keyId: String, instance: Long, peerPublicKeyHex: String): Withdrawal = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(keyId) {
         try {
             transactor.run {
                 if (dao.keyInstance(keyId) != instance) throw KeyChangedException(keyId)
@@ -324,6 +331,7 @@ class KeyPolicyStore(
         } catch (e: Exception) {
             if (owe(keyId, instance, null, e)) Withdrawal.OWED else Withdrawal.HELD
         }
+    }
 
     /**
      * The choke point (#193, ruling 554): records the obligation of a failed
@@ -404,12 +412,13 @@ class KeyPolicyStore(
      * Inserts [key], replacing a key row under its id, with its policy row,
      * in one transaction. Returns the new row's instance.
      */
-    suspend fun insertKey(key: KeyEntity): Long =
+    suspend fun insertKey(key: KeyEntity): Long = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(key.keyId) {
         transactor.run {
             val instance = dao.insertKey(key)
             dao.putPolicyRow(KeyPolicyEntity(key.keyId, instance, key.sharingPolicy))
             instance
         }
+    }
 
     /**
      * Deletes [keyId]'s grant rows, policy row and key row in one
@@ -423,7 +432,7 @@ class KeyPolicyStore(
      * serialisation every generation takes: material is deleted only for
      * the key row [instance] whose rows were just deleted (#193 r8).
      */
-    suspend fun deleteKey(keyId: String, instance: Long, material: KeyMaterial = KeyMaterial.NONE): Boolean =
+    suspend fun deleteKey(keyId: String, instance: Long, material: KeyMaterial = KeyMaterial.NONE): Boolean = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(keyId) {
         lockKeyMaterial(keyId) { held ->
             if (dao.keyInstance(keyId) != instance) return@lockKeyMaterial false
             // An earlier delete beside this row still owing material is
@@ -448,6 +457,7 @@ class KeyPolicyStore(
             }
             deleted
         }
+    }
 
     /**
      * Deletes the material of [keyId] when it has no key row ([material]),
@@ -456,7 +466,7 @@ class KeyPolicyStore(
      * A tombstone is written first, so a failed delete is replayed. Returns
      * whether [material] was attempted.
      */
-    suspend fun deleteMaterial(keyId: String, material: KeyMaterial, besideRow: Long? = null): Boolean =
+    suspend fun deleteMaterial(keyId: String, material: KeyMaterial, besideRow: Long? = null): Boolean = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(keyId) {
         lockKeyMaterial(keyId) { held ->
             // [besideRow]: the id's key row is another key's (a credential
             // and a general key share the id) and stays, with its policy and
@@ -483,6 +493,7 @@ class KeyPolicyStore(
             }
             absent
         }
+    }
 
     /**
      * The one guard before a delete writes its tombstone (#255 verify): the

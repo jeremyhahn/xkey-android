@@ -48,6 +48,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -800,12 +801,17 @@ class RequestHandler(
         authDurationSeconds: Int,
         held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld
     ): Response {
-        // Generate the key with appropriate authentication duration
-        val cosePublicKey = keystoreManager.generateKeyWithAuthDuration(
-            credentialId = generateParams.credentialId,
-            authDurationSeconds = authDurationSeconds,
-            requireStrongBox = false // Don't require, just prefer
-        )
+        // Generated inside a revoke of the ID: a share of the ID waiting at
+        // admission is refused from the revoke's start (this path writes no
+        // key row, so the ledger is the only record of the change).
+        val cosePublicKey = SharePermissionLedger.revoking(generateParams.credentialId) {
+            // Generate the key with appropriate authentication duration
+            keystoreManager.generateKeyWithAuthDuration(
+                credentialId = generateParams.credentialId,
+                authDurationSeconds = authDurationSeconds,
+                requireStrongBox = false // Don't require, just prefer
+            )
+        }
 
         val publicKeyBase64 = Base64.getEncoder().encodeToString(cosePublicKey)
         // The credential just generated, read by its exact alias; a KeyInfo
@@ -1399,14 +1405,19 @@ class RequestHandler(
         }
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
+        // Every id is the key it names: the resolver never reads an id as a
+        // raw Keystore alias, so `xkey_key_a` is key `xkey_key_a`, never key
+        // `a` (#255 review r6).
+        val keyId = genParams.keyId
         // Approval prompts take turns, so another creation of this id can pass
         // this check while this one waits; the reservation refuses it until
         // this creation ends. An id a credential holds is refused too (#255
         // review r3): a general key beside it would share its id, and a
         // passkey use would sign with a key other than the one returned here.
-        val reservation = generatorReservation(genParams.keyId)
-        if (keystoreManager.userKeyIdInUse(genParams.keyId) || !keyIds.tryReserve(reservation)) {
-            throw ProtocolException("Key already exists: ${genParams.keyId}", errorCode = ErrorCodes.KEY_EXISTS)
+        val reservation = generatorReservation(keyId)
+        refuseExistingKey(keyId)
+        if (keystoreManager.userKeyIdInUse(keyId) || !keyIds.tryReserve(reservation)) {
+            throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
         }
         try {
             val authDurationSeconds = calculateAuthDuration(currentSettings)
@@ -1419,15 +1430,20 @@ class RequestHandler(
                 // takes (#193 r8): a delete of an earlier key under this id
                 // never deletes the material generated here. The existence
                 // check runs inside it (#255 review r4), in the one lock both
-                // generators of this id take.
-                keyPolicyStore.withKeyMaterial(genParams.keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) { held ->
-                    if (keystoreManager.userKeyIdInUse(genParams.keyId)) {
-                        throw ProtocolException(
-                            "Key already exists: ${genParams.keyId}",
-                            errorCode = ErrorCodes.KEY_EXISTS
-                        )
+                // generators of this id take, and inside a revoke of the ID,
+                // opened before any key material is touched: a share of the
+                // ID waiting at admission is refused from the revoke's start.
+                keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager)) { held ->
+                    SharePermissionLedger.revoking(keyId) {
+                        if (keystoreManager.userKeyIdInUse(keyId)) {
+                            throw ProtocolException(
+                                "Key already exists: $keyId",
+                                errorCode = ErrorCodes.KEY_EXISTS
+                            )
+                        }
+                        refuseExistingKey(keyId)
+                        createLocalKey(request, genParams, algorithmName, authDurationSeconds, held)
                     }
-                    createLocalKey(request, genParams, algorithmName, authDurationSeconds, held)
                 }
             }
         } finally {
@@ -1464,6 +1480,20 @@ class RequestHandler(
                     subtitle = "Verify your identity to create a new key"
                 )
             }
+        }
+    }
+
+    /**
+     * Refuses an ID that exists in any key store: the general and credential
+     * Keystore namespaces, the software store, and the metadata table.
+     */
+    private suspend fun refuseExistingKey(keyId: String) {
+        if (keystoreManager.generalKeyExists(keyId) ||
+            keystoreManager.keyExists(keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) ||
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).contains(keyId) ||
+            keyDao.exists(keyId)
+        ) {
+            throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
         }
     }
 
@@ -2336,7 +2366,15 @@ class RequestHandler(
      * The one RPC key delete, of local.deleteKey and the legacy deleteKey.
      * The store records its audit event once the delete commits (#193 r12).
      */
-    private suspend fun deleteUserKey(request: Request, keyId: String, legacy: Boolean = false): Response {
+    private suspend fun deleteUserKey(request: Request, keyId: String, legacy: Boolean = false): Response =
+        // One revoke of the key the ID names, opened before any row or
+        // material is touched, like every other key delete: a share of the
+        // key pending at a transport is refused at admission. The id is the
+        // key it names, never read as another key's raw alias.
+        SharePermissionLedger.revoking(keyId) { deleteUserKeyRevoked(request, keyId, legacy) }
+
+    /** [deleteUserKey] inside its revokes. */
+    private suspend fun deleteUserKeyRevoked(request: Request, keyId: String, legacy: Boolean): Response {
         // Delete from unified key store with its policy row and grant rows,
         // in one transaction, under the sharing edits' order (#193), only if
         // the key row is still the one this request found: a delete queued

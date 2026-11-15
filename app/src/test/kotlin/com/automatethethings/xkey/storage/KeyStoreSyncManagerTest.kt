@@ -28,6 +28,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -199,5 +200,47 @@ class KeyStoreSyncManagerTest {
         ).first { it.isFile }.readText()
         assertEquals(1, Regex("""keyDao\.(insert|insertAll|upsert)\(""").findAll(source).count())
         assertTrue("keyPolicyStore.insertDiscovered(entity.keyId) { keyDao.insert(entity) }" in source)
+    }
+
+    /**
+     * FileEncryptor's ephemeral agreement key (`xkey_key_ephemeral_<UUID>`)
+     * exists only during one encryption; discovery meanwhile gives it no row,
+     * so it never has sharing controls.
+     */
+    @Test
+    fun discoveryGivesAnEphemeralFileEncryptionKeyNoRow() = runBlocking<Unit> {
+        val keyStore = mockk<KeyStore>(relaxed = true)
+        every { keyStore.aliases() } returns Collections.enumeration(listOf("xkey_key_ephemeral_1234"))
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.exists(any()) } returns false
+
+        val discovered = KeyStoreSyncManager(mockk<KeystoreManager>(), mockk(relaxed = true), keyDao, tables.store())
+            .discoverKeystoreEntries()
+
+        assertEquals(0, discovered)
+        coVerify(exactly = 0) { keyDao.insert(any()) }
+    }
+
+    /**
+     * A row's key ID maps to the aliases discovery gives that ID, never to
+     * another key's: `xkey_key_a` is hardware key `a`'s alias, not one of
+     * software key `xkey_key_a`'s.
+     */
+    @Test
+    fun aKeyIdMapsOnlyToTheAliasesDiscoveredUnderIt() {
+        assertEquals(
+            listOf("xkey_credential_xkey_key_a", "xkey_key_xkey_key_a"),
+            KeyStoreSyncManager.keystoreAliasesOf("xkey_key_a")
+        )
+        assertEquals(
+            listOf("xkey_credential_a", "xkey_key_a", "a"),
+            KeyStoreSyncManager.keystoreAliasesOf("a")
+        )
+        assertEquals(
+            listOf("xkey_credential_xkey_root_ca", "xkey_key_xkey_root_ca", "xkey_root_ca"),
+            KeyStoreSyncManager.keystoreAliasesOf("xkey_root_ca")
+        )
     }
 }

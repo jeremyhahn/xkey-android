@@ -23,7 +23,8 @@ import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
-import com.automatethethings.xkey.remote.MessageSender
+import com.automatethethings.xkey.remote.ConnectedDesktop
+import com.automatethethings.xkey.remote.SessionSender
 import com.automatethethings.xkey.transport.StreamPairingSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,7 +88,7 @@ class UsbAccessoryServer(
     storeMethods: List<TransportMethods> = emptyList(),
     private val detachWatcher: AccessoryDetachWatcher = BroadcastAccessoryDetachWatcher(),
     private val onClosed: () -> Unit = {},
-) : MessageSender {
+) {
     companion object {
         private const val TAG = "UsbAccessoryServer"
     }
@@ -193,23 +194,7 @@ class UsbAccessoryServer(
                     false
                 }
                 else -> {
-                    fileDescriptor = fd
-                    // Each connection is its own session, so a PER_SESSION
-                    // approval given before a detach does not carry over to
-                    // the next attach (#134). The id rides with every request
-                    // on this connection; nothing handler-wide is set.
-                    val connectionId = "usb:${UUID.randomUUID()}"
-                    lastConnectionId = connectionId
-                    inputStream = FileInputStream(fd.fileDescriptor)
-                    outputStream = FileOutputStream(fd.fileDescriptor)
-
-                    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-                    serverScope = scope
-                    _state.value = UsbAccessoryState.Handshaking
-                    connectionJob = scope.launch {
-                        handleConnection(context, accessory.toString(), connectionId, scope)
-                    }
-                    lastSessionJob = connectionJob
+                    open(context, fd, accessory.toString())
                     true
                 }
             }
@@ -219,6 +204,32 @@ class UsbAccessoryServer(
             Log.i(TAG, "USB accessory opened: ${accessory.manufacturer} ${accessory.model}")
         } else {
             onClosed()
+        }
+    }
+
+    /**
+     * Starts the session over an opened accessory [fd]. Instrumented tests
+     * hand in one end of a socket pair in place of a USB accessory.
+     */
+    internal fun open(context: Context, fd: ParcelFileDescriptor, accessoryInfo: String) {
+        synchronized(lock) {
+            fileDescriptor = fd
+            // Each connection is its own session, so a PER_SESSION
+            // approval given before a detach does not carry over to
+            // the next attach (#134). The id rides with every request
+            // on this connection; nothing handler-wide is set.
+            val connectionId = "usb:${UUID.randomUUID()}"
+            lastConnectionId = connectionId
+            inputStream = FileInputStream(fd.fileDescriptor)
+            outputStream = FileOutputStream(fd.fileDescriptor)
+
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            serverScope = scope
+            _state.value = UsbAccessoryState.Handshaking
+            connectionJob = scope.launch {
+                handleConnection(context, accessoryInfo, connectionId, scope)
+            }
+            lastSessionJob = connectionJob
         }
     }
 
@@ -338,23 +349,24 @@ class UsbAccessoryServer(
         pairingSession.interceptOrRoute(plaintext)
 
     /**
-     * Sends an encrypted message to the connected USB host (outbound remote.*).
+     * The desktop on this accessory for outbound `remote.*` clients, or null
+     * unless the session is [UsbAccessoryState.Connected]. The server object
+     * outlives the handshake, a refused open and the end of a session, so its
+     * existence alone says nothing.
      */
-    override suspend fun sendEncryptedMessage(data: ByteArray) {
-        pairingSession.sendEncryptedMessage(data)
-    }
+    fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
+        connectedDesktop(state.value, pairingSession.boundSender(), router)
 
     /**
-     * Sends on [connection] alone, refused unless it is still the current USB
-     * connection (see [StreamPairingSession.sendEncryptedMessageOn]).
+     * [connectedDesktop] for a given [state] and [session]: the authenticated
+     * peer key and a sender bound to its connection.
      */
-    override suspend fun sendEncryptedMessageOn(
-        connection: com.automatethethings.xkey.remote.ConfirmedConnection,
-        data: ByteArray
-    ) = pairingSession.sendEncryptedMessageOn(connection, data)
-
-    /** The USB connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
-    override fun confirmedConnection() = pairingSession.confirmedConnection()
+    internal fun connectedDesktop(
+        state: UsbAccessoryState,
+        session: Pair<String, SessionSender>?,
+        router: BidirectionalMessageRouter?
+    ): ConnectedDesktop? =
+        ConnectedDesktop.ifEstablished(state is UsbAccessoryState.Connected, session, router)
 
     /** Closes [fd], which no stream wraps yet. */
     private fun closeQuietly(fd: ParcelFileDescriptor?) {

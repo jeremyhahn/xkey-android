@@ -51,6 +51,7 @@ import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.remote.DesktopKeyShare
 import com.automatethethings.xkey.remote.DesktopSectionRefresh
 import com.automatethethings.xkey.remote.DesktopShareDecision
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.remote.DesktopShareGate
 import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.remote.loadZeroedOnCancel
@@ -811,9 +812,18 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         desktopStatusText.text = getString(R.string.sharing_desktop_sending)
         lifecycleScope.launch {
             val message: String? = try {
-                val inputs = loadShareInputs()
-                when (val out = DesktopKeyShare(session).send(
-                    inputs.entity, inputs.software, inputs.publicKeyPem, null, sharePermission
+                // The baseline is taken before any input is read, so a delete,
+                // replacement or revoke of the key after it refuses the send at
+                // admission; it is released however the load or send ends. The
+                // permission is read again from the store just before the send,
+                // so a revoke made while the share was pending wins.
+                when (val out = DesktopKeyShare(session).sendLoaded(
+                    keyId,
+                    load = {
+                        loadShareInputs().let { DesktopKeyShare.Inputs(it.entity, it.software, it.publicKeyPem) }
+                    },
+                    permission = sharePermission,
+                    currentEntity = { id -> keyDao.getByKeyId(id) }
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->
                         getString(R.string.sharing_desktop_sent, out.result.importId)
@@ -965,8 +975,10 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         val key = keyEntity ?: return
 
         // In the order of the user's actions, after every grant tapped before
-        // it (#174, #193), bound to the key row this sheet loaded.
-        if (!sharingPeers.setKeyPolicy(policy, key.id)) {
+        // it (#174, #193), bound to the key row this sheet loaded. A revoke
+        // for any pending desktop share of the key: it is refused at the
+        // transport's admission unless admitted before this started.
+        if (!SharePermissionLedger.revoking(keyId) { sharingPeers.setKeyPolicy(policy, key.id) }) {
             context?.let {
                 Toast.makeText(it, R.string.key_sharing_policy_not_saved, Toast.LENGTH_LONG).show()
             }
@@ -974,20 +986,29 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         refreshDesktopSection()
     }
 
+    /**
+     * Updates the sharing policy for a specific peer. A withdrawal is a
+     * revoke for any pending desktop share of the key: it is refused at the
+     * transport's admission unless admitted before this started. A grant
+     * goes through the pairing check unwrapped.
+     */
     private suspend fun updatePeerPolicy(peerPublicKeyHex: String, allowed: Boolean, pairing: Long?) {
-        sharingPeers.setAllowedOrRedraw(
-            peerPublicKeyHex,
-            allowed,
-            pairing,
-            attached = { isAdded && view != null },
-            redraw = { populatePeerList(peersFlow.value) },
-            unsaved = {
-                context?.let {
-                    Toast.makeText(it, R.string.key_sharing_withdrawal_not_saved, Toast.LENGTH_LONG).show()
-                }
-            },
-            stale = { showStaleAndDismiss() }
-        )
+        val update: suspend () -> Unit = {
+            sharingPeers.setAllowedOrRedraw(
+                peerPublicKeyHex,
+                allowed,
+                pairing,
+                attached = { isAdded && view != null },
+                redraw = { populatePeerList(peersFlow.value) },
+                unsaved = {
+                    context?.let {
+                        Toast.makeText(it, R.string.key_sharing_withdrawal_not_saved, Toast.LENGTH_LONG).show()
+                    }
+                },
+                stale = { showStaleAndDismiss() }
+            )
+        }
+        if (allowed) update() else SharePermissionLedger.revoking(keyId) { update() }
         refreshDesktopSection()
     }
 

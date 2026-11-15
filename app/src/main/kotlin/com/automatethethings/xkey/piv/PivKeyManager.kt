@@ -18,11 +18,13 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.Signature
@@ -123,8 +125,14 @@ const val PIV_KEYSTORE_ALIAS_PREFIX = "xkey_piv_"
  * are logged via [AuditLogger] for security auditing.
  *
  * @param pivSlotDao The Room DAO for persisting PIV slot metadata.
+ * @param generateKeyPair Generates the slot's key pair under its Keystore
+ *   alias, replacing any key there; the Android Keystore unless a test
+ *   substitutes it.
  */
-class PivKeyManager(private val pivSlotDao: PivSlotDao) {
+class PivKeyManager(
+    private val pivSlotDao: PivSlotDao,
+    private val generateKeyPair: (alias: String, algorithm: PivAlgorithm) -> KeyPair = ::generateInAndroidKeystore
+) {
 
     // Opened on first use, so constructing a manager does not need the
     // AndroidKeyStore provider (JVM unit tests substitute it).
@@ -158,62 +166,37 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
     private suspend fun generateKeyLocked(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
         val alias = slot.keystoreAlias
 
-        // Build key generation parameters based on the algorithm
-        val paramSpec = when (algorithm.keyAlgorithm) {
-            "EC" -> {
-                KeyGenParameterSpec.Builder(
-                    alias,
-                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-                )
-                    .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384)
-                    .setKeySize(algorithm.keySizeBits)
-                    .build()
-            }
-            "RSA" -> {
-                KeyGenParameterSpec.Builder(
-                    alias,
-                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-                )
-                    .setDigests(KeyProperties.DIGEST_SHA256)
-                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
-                    .setKeySize(algorithm.keySizeBits)
-                    .build()
-            }
-            else -> throw IllegalArgumentException("Unsupported key algorithm: ${algorithm.keyAlgorithm}")
-        }
+        // The slot's alias is the key ID KeyStoreSyncManager discovers it by, so
+        // a share of it may be waiting: replacing the key is a revoke of that ID.
+        val (publicKeyDer, now) = SharePermissionLedger.revoking(alias) {
+            // This replaces any key the slot held: from here the row must be made
+            // to describe the new key, or the slot must be emptied.
+            val keyPair = generateKeyPair(alias, algorithm)
 
-        // Generate the key pair in Android Keystore
-        val keyPairGenerator = KeyPairGenerator.getInstance(
-            algorithm.keyAlgorithm,
-            "AndroidKeyStore"
-        )
-        keyPairGenerator.initialize(paramSpec)
-        // This replaces any key the slot held: from here the row must be made
-        // to describe the new key, or the slot must be emptied.
-        val keyPair = keyPairGenerator.generateKeyPair()
+            val publicKeyDer = keyPair.public.encoded
+            val now = System.currentTimeMillis()
 
-        val publicKeyDer = keyPair.public.encoded
-        val now = System.currentTimeMillis()
-
-        // Persist metadata in Room
-        val entity = PivSlotEntity(
-            slotId = slot.hexId,
-            algorithm = algorithm.name,
-            publicKeyDer = publicKeyDer,
-            hasKey = true,
-            createdAt = now,
-            lastUsedAt = null,
-            useCount = 0
-        )
-        // A cancelled caller must not stop the upsert half way: the row would
-        // keep the replaced key's public key and algorithm.
-        withContext(NonCancellable) {
-            try {
-                pivSlotDao.upsert(entity)
-            } catch (e: Exception) {
-                discardUnrecordedKey(slot)
-                throw e
+            // Persist metadata in Room
+            val entity = PivSlotEntity(
+                slotId = slot.hexId,
+                algorithm = algorithm.name,
+                publicKeyDer = publicKeyDer,
+                hasKey = true,
+                createdAt = now,
+                lastUsedAt = null,
+                useCount = 0
+            )
+            // A cancelled caller must not stop the upsert half way: the row would
+            // keep the replaced key's public key and algorithm.
+            withContext(NonCancellable) {
+                try {
+                    pivSlotDao.upsert(entity)
+                } catch (e: Exception) {
+                    discardUnrecordedKey(slot)
+                    throw e
+                }
             }
+            publicKeyDer to now
         }
 
         // Log to audit system
@@ -477,13 +460,17 @@ class PivKeyManager(private val pivSlotDao: PivSlotDao) {
     private suspend fun deleteKeyLocked(slot: PivSlot) {
         val alias = slot.keystoreAlias
 
-        // Remove from Android Keystore
-        if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
-        }
+        // The slot's alias is the key ID KeyStoreSyncManager discovers it by, so
+        // a share of it may be waiting: removing the key is a revoke of that ID.
+        SharePermissionLedger.revoking(alias) {
+            // Remove from Android Keystore
+            if (keyStore.containsAlias(alias)) {
+                keyStore.deleteEntry(alias)
+            }
 
-        // Remove metadata from Room
-        pivSlotDao.deleteBySlotId(slot.hexId)
+            // Remove metadata from Room
+            pivSlotDao.deleteBySlotId(slot.hexId)
+        }
 
         // Log to audit system
         AuditLogger.logKeyDeleted(
@@ -540,3 +527,47 @@ class PivCertificateKeyMismatchException(slot: PivSlot) :
     PivCertificateRejectedException(
         "Certificate public key does not match the key in PIV slot ${slot.hexId} (${slot.label})"
     )
+
+/**
+ * Generates a key pair in Android Keystore under [alias], overwriting any key
+ * there.
+ *
+ * The key is configured with:
+ * - Purpose: SIGN and VERIFY
+ * - Digest: SHA-256 (EC) or SHA-256 (RSA)
+ * - For EC keys: no padding required
+ * - For RSA keys: PKCS1 padding
+ */
+private fun generateInAndroidKeystore(alias: String, algorithm: PivAlgorithm): KeyPair {
+    // Build key generation parameters based on the algorithm
+    val paramSpec = when (algorithm.keyAlgorithm) {
+        "EC" -> {
+            KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+            )
+                .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384)
+                .setKeySize(algorithm.keySizeBits)
+                .build()
+        }
+        "RSA" -> {
+            KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+            )
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+                .setKeySize(algorithm.keySizeBits)
+                .build()
+        }
+        else -> throw IllegalArgumentException("Unsupported key algorithm: ${algorithm.keyAlgorithm}")
+    }
+
+    // Generate the key pair in Android Keystore
+    val keyPairGenerator = KeyPairGenerator.getInstance(
+        algorithm.keyAlgorithm,
+        "AndroidKeyStore"
+    )
+    keyPairGenerator.initialize(paramSpec)
+    return keyPairGenerator.generateKeyPair()
+}

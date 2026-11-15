@@ -19,6 +19,7 @@ import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.remote.sendOnBoundSession
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
@@ -134,7 +135,7 @@ class TcpHsmServerRevocationTest {
         desktop.assertClosedByPhone()
         withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Listening } }
         try {
-            server.sendEncryptedMessage(REQUEST)
+            server.sendOnBoundSession(REQUEST)
             fail("a send after the teardown must be refused")
         } catch (e: IOException) {
             // No session left to send on.
@@ -152,7 +153,7 @@ class TcpHsmServerRevocationTest {
         prefs.edit().clear().apply()
 
         try {
-            server.sendEncryptedMessage(REQUEST)
+            server.sendOnBoundSession(REQUEST)
             fail("the send must be refused")
         } catch (e: PeerNotPairedException) {
             assertEquals(desktop.publicKeyHex, e.publicKeyHex)
@@ -160,7 +161,7 @@ class TcpHsmServerRevocationTest {
         desktop.assertNoFrame()
 
         repo.addDevice(desktop.publicKeyHex, "desktop")
-        server.sendEncryptedMessage(REQUEST)
+        server.sendOnBoundSession(REQUEST)
         assertEquals("remote.sync", desktop.readEncrypted().getString("method"))
         server.closeAndAwaitListening(desktop)
     }
@@ -339,7 +340,7 @@ class TcpHsmServerRevocationTest {
         val sender = CoroutineScope(Dispatchers.IO).launch {
             try {
                 while (true) {
-                    server.sendEncryptedMessage(large)
+                    server.sendOnBoundSession(large)
                     // The first frame goes out; the next write blocks.
                     if (sent.incrementAndGet() == 1) held.holdWrites()
                 }
@@ -381,7 +382,7 @@ class TcpHsmServerRevocationTest {
 
         val second = connectPaired(key)
         assertTrue(second.request("system.ping").getJSONObject("result").getBoolean("ok"))
-        server.sendEncryptedMessage(REQUEST)
+        server.sendOnBoundSession(REQUEST)
         assertEquals("remote.sync", second.readEncrypted().getString("method"))
         server.closeAndAwaitListening(second)
     }

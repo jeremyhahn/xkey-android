@@ -22,7 +22,7 @@ import android.content.ContextWrapper
 import android.os.PowerManager
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
-import com.automatethethings.xkey.remote.MessageSender
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.usb.UsbAccessoryServer
@@ -147,9 +147,8 @@ class XKeyGattServiceProbe(context: Context) {
         invoke(handleAdvertisingMethod, state)
     }
 
-    @Suppress("UNCHECKED_CAST")
-    fun activeTransport(): Pair<MessageSender, BidirectionalMessageRouter>? =
-        invoke(activeTransportMethod) as Pair<MessageSender, BidirectionalMessageRouter>?
+    /** The desktop every outbound `remote.*` client is built from. */
+    fun connectedDesktop(): ConnectedDesktop? = service.connectedDesktop()
 
     fun startTcpHsmServer() {
         invoke(startTcpMethod)
@@ -207,7 +206,6 @@ class XKeyGattServiceProbe(context: Context) {
             declaredMethod("handleConnectionStateChange", ConnectionState::class.java)
         private val handleAdvertisingMethod =
             declaredMethod("handleAdvertisingStateChange", AdvertisingState::class.java)
-        private val activeTransportMethod = declaredMethod("activeTransport")
         private val startTcpMethod = declaredMethod("startTcpHsmServer")
         private val stopTcpMethod = declaredMethod("stopTcpHsmServer")
         private val createNotificationMethod = declaredMethod("createNotification")

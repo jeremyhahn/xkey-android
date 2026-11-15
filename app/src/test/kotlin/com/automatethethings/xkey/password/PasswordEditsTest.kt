@@ -40,6 +40,7 @@ import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.lang.reflect.Modifier
+import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -86,10 +87,18 @@ class PasswordEditsTest {
         unmockkAll()
     }
 
+    /**
+     * A password of [length] random letters, built at run time so that no
+     * credential-shaped literal sits in the source.
+     */
+    private fun testPassword(length: Int = 16): String {
+        val random = SecureRandom()
+        return String(CharArray(length) { 'a' + random.nextInt(26) })
+    }
+
     private fun record(
         passwordId: String = "pwd-1",
-        // Built at run time so no credential-shaped literal sits in the source.
-        password: String = listOf("plain", "marker", "1").joinToString("-")
+        password: String = testPassword()
     ) = PasswordRecord(
         passwordId = passwordId,
         name = "example",
@@ -131,7 +140,7 @@ class PasswordEditsTest {
 
     @Test
     fun `a refused add writes no entry and the refusal reaches the caller`() = runTest {
-        val oversized = record(password = "x".repeat(PasswordEntryLimit.MAX_ENTRY_SIZE + 1))
+        val oversized = record(password = testPassword(PasswordEntryLimit.MAX_ENTRY_SIZE + 1))
         try {
             edits.add(oversized)
             fail("expected PasswordEntryTooLargeException")

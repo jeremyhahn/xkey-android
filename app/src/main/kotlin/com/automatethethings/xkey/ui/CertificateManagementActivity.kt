@@ -57,6 +57,7 @@ import com.automatethethings.xkey.ca.CertificateEntity
 import com.automatethethings.xkey.ca.CertificateProfile
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.KeyPolicyStore
+import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.truststore.TrustStoreRepository
@@ -1310,8 +1311,7 @@ class CertificateManagementActivity : AppCompatActivity() {
         try {
             keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(this@CertificateManagementActivity, keystoreManager)) {
                 withContext(Dispatchers.IO) {
-                    keyDao.deleteByKeyId(keyId)
-                    keystoreManager.deleteByAlias(keystoreAlias)
+                    keyDao.deleteKeyAndMaterial(keyId) { keystoreManager.deleteByAlias(keystoreAlias) }
                 }
             }
         } catch (e: Exception) {
