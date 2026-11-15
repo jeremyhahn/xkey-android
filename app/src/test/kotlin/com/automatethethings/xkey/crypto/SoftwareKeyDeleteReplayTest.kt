@@ -129,6 +129,65 @@ class SoftwareKeyDeleteReplayTest {
         assertGone()
     }
 
+    /**
+     * #255 verify r2z (2): a metadata-only record whose stat succeeds but
+     * whose read fails threw an IOException out of the delete's generation
+     * read, past the screens' refusal, and crashed the app. The delete is
+     * now refused as a store that cannot be read, nothing deleted.
+     */
+    @Test
+    fun aDeleteOverAnUnreadableMetadataOnlyRecordIsRefusedNotACrash() = kotlinx.coroutines.test.runTest {
+        dir.mkdirs()
+        // Listed and stat'ed, but every read of it fails.
+        assertTrue(file(".meta").mkdirs())
+        assertThrowsUnreadable { store.generation(ID) }
+        val dao = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            io.mockk.coEvery { deletion(any()) } returns null
+            io.mockk.coEvery { keyInstance(any()) } returns 1L
+        }
+        val policies = com.automatethethings.xkey.storage.KeyPolicyStore(dao, object : com.automatethethings.xkey.storage.KeyPolicyStore.Transactor {
+            override suspend fun <T> run(block: suspend () -> T): T = block()
+        })
+        val key = mockk<com.automatethethings.xkey.storage.entity.KeyEntity> {
+            every { keyId } returns ID
+            every { id } returns 1L
+            every { isSystemKey } returns false
+        }
+
+        val outcome = com.automatethethings.xkey.ui.deleteUserKey(
+            key, policies, com.automatethethings.xkey.storage.keyMaterialDeleter(mockk(relaxed = true), keystore)
+        )
+
+        assertTrue("the delete was not refused: $outcome", outcome is com.automatethethings.xkey.ui.UserKeyDelete.Refused)
+        io.mockk.coVerify(exactly = 0) { dao.putDeletion(any<com.automatethethings.xkey.storage.entity.KeyDeletionEntity>()) }
+        assertTrue("the record was deleted", file(".meta").isDirectory)
+    }
+
+    /**
+     * #255 verify r2z (1): an older build's record whose metadata is listed
+     * but cannot be read could be any id's: it is unreadable for every id,
+     * never read as an id's key, so no internal key reads as a user key.
+     */
+    @Test
+    fun anUnreadableLegacyRecordIsUnreadableNeverAnIdsKey() {
+        dir.mkdirs()
+        assertTrue(File(dir, "legacy_record.meta").mkdirs())
+        assertEquals(KeyPresence.UNREADABLE, store.presence("xkey_seal_store_key"))
+        assertEquals(KeyPresence.UNREADABLE, store.presence(ID))
+        assertThrowsUnreadable { keystore.userKeyIdInUse("xkey_seal_store_key") }
+        assertThrowsUnreadable { keystore.holdsInternalKey("xkey_seal_store_key") }
+        assertThrowsUnreadable { store.get(ID) }
+    }
+
+    private inline fun assertThrowsUnreadable(read: () -> Any?) {
+        try {
+            read()
+        } catch (e: KeyPresenceUnreadableException) {
+            return
+        }
+        throw AssertionError("read as readable")
+    }
+
     /** The replay's checks of the id read the leftover as the id's key, never a refusal. */
     private fun assertReplayable() {
         assertEquals(KeyPresence.PRESENT, store.presence(ID))

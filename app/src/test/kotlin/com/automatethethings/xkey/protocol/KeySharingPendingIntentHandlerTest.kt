@@ -537,6 +537,64 @@ class KeySharingPendingIntentHandlerTest {
     }
 
     /**
+     * #255 verify r2z (1): an older build's record whose metadata can be
+     * listed but not read was taken as every requested id's, so the
+     * internal seal store key read as a user key and local.deleteKey of it
+     * deleted its rows with a success. The unreadable record is now
+     * unreadable: the delete is refused, its rows and material kept.
+     */
+    @Test
+    fun aDeleteOfAnInternalKeyBesideAnUnreadableLegacyRecordIsRefused() = runTest {
+        val internal = "xkey_seal_store_key"
+        val files = java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() }
+        // A legacy record's metadata the store lists but cannot read.
+        assertTrue(java.io.File(files, "software_keys/legacy_record.meta").mkdirs())
+        val real = realKeystore(files, internal)
+        every { keystore.holdsAnyKey(internal) } returns true
+        every { keystore.holdsInternalKey(internal) } answers { real.holdsInternalKey(internal) }
+        every { keystore.userKeyIdInUse(internal) } answers { real.userKeyIdInUse(internal) }
+        every { keystore.userKeyGeneration(internal) } answers { real.userKeyGeneration(internal) }
+        every { keystore.deleteByAlias(any()) } returns true
+        tables.addKey(internal, SharingPolicyType.PRIVATE)
+
+        // The handler's own delete; the dispatch answers what it throws with an error.
+        val refused = try {
+            rpcDeleteKey(internal).error != null
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            assertTrue("${e.cause}", e.cause is com.automatethethings.xkey.crypto.KeyPresenceUnreadableException)
+            true
+        }
+
+        assertTrue("the delete of an internal key succeeded", refused)
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(internal) }
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        assertNotNull("the internal key's row was deleted", tables.key(internal))
+        assertFalse("a tombstone for an internal key", store.isDeletionPending(internal))
+    }
+
+    /**
+     * A KeystoreManager over a real software key store under [files]: the
+     * platform keystore holds [aliases] only, and no Ed25519 key is stored.
+     */
+    private fun realKeystore(files: java.io.File, vararg aliases: String): com.automatethethings.xkey.crypto.KeystoreManager {
+        val platform = mockk<java.security.KeyStore>(relaxed = true)
+        every { platform.containsAlias(any()) } answers { firstArg<String>() in aliases }
+        mockkStatic(java.security.KeyStore::class)
+        every { java.security.KeyStore.getInstance(any<String>()) } returns platform
+        val prefs = mockk<android.content.SharedPreferences>()
+        every { prefs.contains(any()) } returns false
+        every { prefs.getString(any(), any()) } answers { secondArg() }
+        val storeContext = mockk<Context>()
+        every { storeContext.filesDir } returns files
+        val cipher = mockk<com.automatethethings.xkey.crypto.KeystoreAeadCipher>(relaxed = true)
+        val software = com.automatethethings.xkey.crypto.SoftwareKeyStore(storeContext, cipher)
+        val real = io.mockk.spyk(com.automatethethings.xkey.crypto.KeystoreManager(mockk<Context>(relaxed = true)))
+        every { real.ed25519Prefs() } returns prefs
+        every { real.softwareKeys() } returns software
+        return real
+    }
+
+    /**
      * Round 11 (1): a tombstone for an internal key (left by an older
      * build) is replayed without deleting the key, and is dropped.
      */
