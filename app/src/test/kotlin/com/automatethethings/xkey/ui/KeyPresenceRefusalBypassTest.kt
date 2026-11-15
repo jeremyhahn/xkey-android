@@ -153,7 +153,13 @@ class KeyPresenceRefusalBypassTest {
             assertTrue("a discard deletes its own alias: $block", "discardGeneratedKey(" in block)
         }
         val encryptor = stripComments(File(main, "com/automatethethings/xkey/crypto/FileEncryptor.kt").readText())
-        assertTrue("the ephemeral key's cleanup deletes its own alias", "discardGeneratedKey(ephemeralAlias)" in encryptor)
+        // The cleanup is one revoke of the ephemeral ID that discards its own alias.
+        val discard = encryptor.substringAfter("fun discardEphemeralKey(").substringBefore("\n\n")
+        assertTrue("the ephemeral key's cleanup deletes its own alias", "discardGeneratedKey(alias)" in discard)
+        assertTrue(
+            "the ephemeral key's cleanup is called with its own alias",
+            "discardEphemeralKey(ephemeralKeyId, ephemeralAlias)" in encryptor
+        )
     }
 
     private companion object {
