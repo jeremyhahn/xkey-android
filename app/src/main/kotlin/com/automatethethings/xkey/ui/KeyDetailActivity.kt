@@ -2073,7 +2073,12 @@ class KeyDetailActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            val outcome = keyDao.deleteKeyForScreen(key, keystoreManager, SoftwareKeyStore(this@KeyDetailActivity))
+            val outcome = keyDao.deleteKeyForScreen(
+                key,
+                keystoreManager,
+                SoftwareKeyStore(this@KeyDetailActivity),
+                XKeyDatabase.getInstance(this@KeyDetailActivity).credentialMetadataDao()
+            )
             if (outcome == R.string.key_deleted) {
                 finish()
             } else {

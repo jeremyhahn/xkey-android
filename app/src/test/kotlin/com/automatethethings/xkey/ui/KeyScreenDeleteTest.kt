@@ -56,7 +56,7 @@ class KeyScreenDeleteTest {
 
     @Test
     fun aDeletedKeyIsReportedDeleted() = runBlocking {
-        assertEquals(R.string.key_deleted, keyDao.deleteKeyForScreen(key, keystore, software))
+        assertEquals(R.string.key_deleted, keyDao.deleteKeyForScreen(key, keystore, software, mockk(relaxed = true)))
         assertTrue("k" !in rows)
     }
 
@@ -65,7 +65,7 @@ class KeyScreenDeleteTest {
         // The Keystore refuses to remove the entry.
         every { keystore.deleteGeneralKey(any()) } returns false
 
-        assertEquals(R.string.key_delete_refused, keyDao.deleteKeyForScreen(key, keystore, software))
+        assertEquals(R.string.key_delete_refused, keyDao.deleteKeyForScreen(key, keystore, software, mockk(relaxed = true)))
         assertTrue("the row stays, so the key stays listed", "k" in rows)
     }
 

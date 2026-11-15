@@ -1260,7 +1260,7 @@ class KeyManagementActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            val outcome = keyDao.deleteKeyForScreen(key, keystoreManager, SoftwareKeyStore(this@KeyManagementActivity))
+            val outcome = keyDao.deleteKeyForScreen(key, keystoreManager, SoftwareKeyStore(this@KeyManagementActivity), credentialDao)
             Snackbar.make(rootLayout, getString(outcome), Snackbar.LENGTH_SHORT).show()
         }
     }
@@ -1766,15 +1766,19 @@ class KeyManagementActivity : AppCompatActivity() {
 /**
  * Deletes [key] for a key screen and returns the message to show: a delete
  * the choke point refuses (material still stands, or an internal key) keeps
- * the row, so the key stays listed and the screen says so.
+ * the row, so the key stays listed and the screen says so. Only the
+ * namespace of the row picked is deleted (a FIDO2 row's credential and its
+ * metadata in [credentials], else the general key), never the other key of
+ * the same ID.
  */
 @androidx.annotation.StringRes
 internal suspend fun KeyDao.deleteKeyForScreen(
     key: KeyEntity,
     keystoreManager: KeystoreManager,
-    softwareKeys: SoftwareKeyStore
+    softwareKeys: SoftwareKeyStore,
+    credentials: com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 ): Int {
     val removed =
-        deleteKeyRow(key, keystoreManager, softwareKeys)
+        deleteKeyRow(key, keystoreManager, softwareKeys, credentials)
     return if (removed > 0) R.string.key_deleted else R.string.key_delete_refused
 }

@@ -71,6 +71,9 @@ class KeyStoreSyncManager(
          */
         private const val EPHEMERAL_ALIAS_PREFIX = KEY_ALIAS_PREFIX_GENERAL + FileEncryptor.EPHEMERAL_KEY_PREFIX
 
+        /** The Keystore alias of FIDO2 credential [credentialId]. */
+        fun credentialAliasOf(credentialId: String): String = KEY_ALIAS_PREFIX + credentialId
+
         /**
          * The Keystore aliases [discoverKeystoreEntries] maps to key ID
          * [keyId], in [KeystoreManager.resolveKeystoreAlias]'s order. The ID
@@ -374,14 +377,44 @@ class KeyStoreSyncManager(
     }
 }
 
+/**
+ * The namespace a key row's material lives in, named by the row itself: a
+ * FIDO2 row's credential is `xkey_credential_<id>` with its metadata, any
+ * other row's material is general (`xkey_key_<id>`, a software key or a raw
+ * alias). One ID can name a key in each; a delete reaches only the row's.
+ */
+enum class KeyNamespace {
+    CREDENTIAL, GENERAL;
+
+    companion object {
+        fun of(key: KeyEntity): KeyNamespace = if (key.keyType == "fido2") CREDENTIAL else GENERAL
+    }
+}
+
+/**
+ * The one delete of a key row and its material, for every key screen: the
+ * namespace comes from the row ([KeyNamespace.of]) and the other namespace
+ * is never touched, so deleting credential `k` leaves general key `k` and
+ * the reverse. A credential row's delete needs [credentials] to remove its
+ * metadata; without it the delete is refused.
+ *
+ * @return the rows deleted; 0 when the delete was refused.
+ */
 suspend fun KeyDao.deleteKeyRow(
     key: KeyEntity,
     keystoreManager: KeystoreManager,
-    softwareKeys: SoftwareKeyStore
+    softwareKeys: SoftwareKeyStore,
+    credentials: CredentialMetadataDao? = null
 ): Int = try {
     deleteKeyAndMaterial(key.keyId) {
         if (key.source == "xkmsd") return@deleteKeyAndMaterial
-        removeAllKeyMaterial(key.keyId, keystoreManager, softwareKeys)
+        when (KeyNamespace.of(key)) {
+            KeyNamespace.CREDENTIAL -> {
+                checkNotNull(credentials) { "credential ${key.keyId} is deleted only with its metadata" }
+                removeCredentialMaterial(key.keyId, keystoreManager, credentials)
+            }
+            KeyNamespace.GENERAL -> removeAllKeyMaterial(key.keyId, keystoreManager, softwareKeys)
+        }
     }
 } catch (e: IllegalStateException) {
     // Material under the ID still stands: the row stays, so the key stays listed.
@@ -406,7 +439,9 @@ fun removeAllKeyMaterial(keyId: String, keystoreManager: KeystoreManager, softwa
     if (hadSoftware) softwareKeys.delete(keyId)
     // False when there is no general key of [keyId].
     val hadGeneral = keystoreManager.deleteGeneralKey(keyId)
-    val others = KeyStoreSyncManager.keystoreAliasesOf(keyId).filter { it != "xkey_key_$keyId" }
+    // Never the credential of the same ID: that is the other namespace's key.
+    val others = KeyStoreSyncManager.keystoreAliasesOf(keyId)
+        .filter { it != "xkey_key_$keyId" && it != KeyStoreSyncManager.credentialAliasOf(keyId) }
     // The raw-alias fallback never reaches xKey's own keys: refused, not deleted.
     check(hadSoftware || hadGeneral || others.none { KeyStoreSyncManager.isInternalAlias(it) }) {
         "$keyId is an internal key; it is never deleted"
@@ -416,4 +451,22 @@ fun removeAllKeyMaterial(keyId: String, keystoreManager: KeystoreManager, softwa
         "key material of $keyId survived its delete"
     }
     return hadSoftware || hadGeneral || removedOther
+}
+
+/**
+ * The delete of FIDO2 credential [credentialId] for [deleteKeyRow]: only its
+ * alias ([KeyStoreSyncManager.credentialAliasOf]) and its metadata go. Never
+ * [KeystoreManager.deleteKey], which resolves the ID and can reach the
+ * general key `xkey_key_<id>` of the same ID.
+ *
+ * @return whether the credential's key was removed.
+ */
+suspend fun removeCredentialMaterial(
+    credentialId: String,
+    keystoreManager: KeystoreManager,
+    credentials: CredentialMetadataDao
+): Boolean {
+    val removed = keystoreManager.deleteByAlias(KeyStoreSyncManager.credentialAliasOf(credentialId))
+    credentials.deleteByCredentialId(credentialId)
+    return removed
 }
