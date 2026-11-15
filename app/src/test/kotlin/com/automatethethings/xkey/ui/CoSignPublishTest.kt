@@ -30,6 +30,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import androidx.lifecycle.lifecycleScope
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.media.AutoSignHash
 import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaPublisher
@@ -135,15 +136,24 @@ class CoSignPublishTest {
 
     private companion object {
         const val COPIES = "xkey.test.copies"
-        /** The content hash the original's signature data carries. */
-        val ORIGINAL_HASH = "e".repeat(64)
+        /**
+         * The content hash the original's signature data carries: its payload's
+         * own, as the signer hashes it, so the append's payload check passes.
+         */
+        val ORIGINAL_HASH: String = AutoSignHash.contentHash(XmpFixtures.png(), "image/png")
     }
+
+    /** The original's signature data, kept on [pixels] as the payload. */
+    private fun signedPng(name: String, pixels: ByteArray? = null, hash: String = ORIGINAL_HASH): File =
+        File(folder.root, name).apply {
+            writeBytes(if (pixels == null) XmpFixtures.png() else XmpFixtures.png(pixels))
+            XmpMetadataHelper.writeSignature(path, ContentAuthenticityData.fromJsonString(XmpFixtures.json(hash)))
+        }
 
     @Before
     fun setUp() {
         db = TestDatabase()
-        val file = File(folder.root, "clip.png").apply { writeBytes(XmpFixtures.png()) }
-        XmpMetadataHelper.writeSignature(file.path, ContentAuthenticityData.fromJsonString(XmpFixtures.json("e".repeat(64))))
+        val file = signedPng("clip.png")
         originalBytes = file.readBytes()
         ReadOnlyMediaProvider.files.clear()
         ReadOnlyMediaProvider.names.clear()
@@ -167,6 +177,14 @@ class CoSignPublishTest {
 
     private fun field(name: String) =
         CoSignActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
+
+    // The exchange state the screen keeps, read and set only here.
+    private fun selected(activity: CoSignActivity): Any? = field("selectedUri").get(activity)
+    private fun select(activity: CoSignActivity, uri: Uri) = field("selectedUri").set(activity, uri)
+    private fun pending(activity: CoSignActivity): Any? = field("pendingCopy").get(activity)
+    private fun running(activity: CoSignActivity): Any? = field("runningCopy").get(activity)
+    private fun runningAppend(activity: CoSignActivity): Any? = field("runningAppend").get(activity)
+    private fun queued(activity: CoSignActivity) = field("queuedResponses").get(activity) as List<*>
 
     private fun idleUntil(condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + 10_000
@@ -245,7 +263,7 @@ class CoSignPublishTest {
         val activity = controller.get()
         shadowOf(Looper.getMainLooper()).idle()
         register(activity, copy, output)
-        field("selectedUri").set(activity, original)
+        select(activity, original)
         scanWitness(activity)
 
         val (picker, requestCode) = awaitPicker(activity)
@@ -262,7 +280,7 @@ class CoSignPublishTest {
     @Test
     fun `a co-signed copy whose write fails leaves the original whole and keeps the co-signed bytes`() {
         val activity = coSignInto(Uri.parse("content://$COPIES/clip-cosigned.png"), FailingOutput())
-        idleUntil { field("pendingCopy").get(activity) == null && recoveryFiles(activity).isNotEmpty() }
+        idleUntil { pending(activity) == null && recoveryFiles(activity).isNotEmpty() }
         // The failed write runs on IO; give it time to settle before checking what it kept.
         Thread.sleep(200)
         shadowOf(Looper.getMainLooper()).idle()
@@ -281,7 +299,7 @@ class CoSignPublishTest {
         val copy = Uri.parse("content://$COPIES/clip-cosigned.png")
         val written = ByteArrayOutputStream()
         val activity = coSignInto(copy, written)
-        idleUntil { field("selectedUri").get(activity) == copy }
+        idleUntil { selected(activity) == copy }
 
         assertEquals(emptyList<String>(), ReadOnlyMediaProvider.writeOpens)
         assertArrayEquals(originalBytes, ReadOnlyMediaProvider.files["clip.png"]!!.readBytes())
@@ -319,7 +337,7 @@ class CoSignPublishTest {
         controller.recreate()
         shadowOf(Looper.getMainLooper()).idle()
         val activity = controller.get()
-        assertNotNull("the write is restored as running", field("runningCopy").get(activity))
+        assertNotNull("the write is restored as running", running(activity))
         // The copy reads back as what was written to it.
         val readBack = { ByteArrayInputStream(synchronized(held.bytes) { held.bytes.toByteArray() }) }
 
@@ -332,7 +350,7 @@ class CoSignPublishTest {
         controller.recreate()
         shadowOf(Looper.getMainLooper()).idle()
         val rotated = controller.get()
-        assertEquals("the queued response is restored", 1, (field("queuedResponses").get(rotated) as List<*>).size)
+        assertEquals("the queued response is restored", 1, queued(rotated).size)
         verifyCopiedAfterRelease(rotated, copy, held, readBack)
     }
 
@@ -347,10 +365,10 @@ class CoSignPublishTest {
         shadowOf(activity.applicationContext.contentResolver).registerInputStreamSupplier(copy, readBack)
         held.release()
         val (picker, _) = awaitPicker(activity)
-        assertEquals("the copy is selected once written", copy, field("selectedUri").get(activity))
+        assertEquals("the copy is selected once written", copy, selected(activity))
         assertEquals("clip-cosigned-cosigned.png", picker.getStringExtra(Intent.EXTRA_TITLE))
 
-        val staged = field("pendingCopy").get(activity)!!.let { pending ->
+        val staged = pending(activity)!!.let { pending ->
             pending.javaClass.getDeclaredField("staged").apply { isAccessible = true }.get(pending) as File
         }
         assertEquals(
@@ -380,15 +398,15 @@ class CoSignPublishTest {
         idleUntil { synchronized(held.bytes) { held.bytes.size() } > 0 }
         Thread.sleep(200)
         shadowOf(Looper.getMainLooper()).idle()
-        assertNotNull("the copy runs until it is installed", field("runningCopy").get(controller.get()))
+        assertNotNull("the copy runs until it is installed", running(controller.get()))
 
         controller.recreate()
         shadowOf(Looper.getMainLooper()).idle()
         val activity = controller.get()
-        assertNotNull("the recreation keeps the copy to install", field("runningCopy").get(activity))
+        assertNotNull("the recreation keeps the copy to install", running(activity))
         ReadOnlyMediaProvider.readGate = null
         gate.countDown()
-        idleUntil { field("selectedUri").get(activity) == copy }
+        idleUntil { selected(activity) == copy }
 
         val readBack = { ByteArrayInputStream(synchronized(held.bytes) { held.bytes.toByteArray() }) }
         shadowOf(activity.contentResolver).registerInputStreamSupplier(copy, readBack)
@@ -396,7 +414,7 @@ class CoSignPublishTest {
         scanWitness(activity, "SHA256:second")
         val (picker, _) = awaitPicker(activity)
         assertEquals("clip-cosigned-cosigned.png", picker.getStringExtra(Intent.EXTRA_TITLE))
-        val staged = field("pendingCopy").get(activity)!!.let { pending ->
+        val staged = pending(activity)!!.let { pending ->
             pending.javaClass.getDeclaredField("staged").apply { isAccessible = true }.get(pending) as File
         }
         assertEquals(
@@ -416,7 +434,7 @@ class CoSignPublishTest {
 
         val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(activity, original)
+        select(activity, original)
         scanWitness(activity)
 
         val (picker, _) = awaitPicker(activity)
@@ -433,7 +451,7 @@ class CoSignPublishTest {
 
         val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(activity, original)
+        select(activity, original)
         scanWitness(activity)
 
         val (picker, _) = awaitPicker(activity)
@@ -449,8 +467,6 @@ class CoSignPublishTest {
         }
     }
 
-    private fun queued(activity: CoSignActivity) = field("queuedResponses").get(activity) as List<*>
-
     @Test
     fun `a response scanned for one media is never appended to another`() {
         val other = File(folder.root, "other.png").apply { writeBytes(originalBytes) }
@@ -458,7 +474,7 @@ class CoSignPublishTest {
         val otherUri = Uri.parse("content://${ReadOnlyMediaProvider.AUTHORITY}/other.png")
         val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(activity, original)
+        select(activity, original)
         scanWitness(activity)
         val (_, requestCode) = awaitPicker(activity)
         // Scanned for the original while its copy's picker is open: it waits.
@@ -468,7 +484,7 @@ class CoSignPublishTest {
 
         // The selection changes without going through the media picker, and
         // the waiting response reaches the head of the queue.
-        field("selectedUri").set(activity, otherUri)
+        select(activity, otherUri)
         activity.activityResultRegistry.dispatchResult(requestCode, Activity.RESULT_CANCELED, null)
         settle()
 
@@ -481,7 +497,7 @@ class CoSignPublishTest {
     fun `a response is refused when the media no longer has the content it was scanned for`() {
         val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(activity, original)
+        select(activity, original)
         // The media showed another content hash when the witness signed it.
         field("currentSignatureData").set(activity, ContentAuthenticityData.fromJsonString(XmpFixtures.json("d".repeat(64))))
         scanWitness(activity)
@@ -498,7 +514,7 @@ class CoSignPublishTest {
         ReadOnlyMediaProvider.readGate = gate
         val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(controller.get(), original)
+        select(controller.get(), original)
         scanWitness(controller.get())
         idleUntil { ReadOnlyMediaProvider.readsStarted.get() >= 1 }
 
@@ -515,21 +531,21 @@ class CoSignPublishTest {
         assertNull("one append, so one picker", shadowOf(activity).nextStartedActivityForResult)
         assertEquals("one append, so one staged copy", 1, recoveryFiles(activity).size)
         assertEquals(0, queued(activity).size)
-        assertNull(field("runningAppend").get(activity))
+        assertNull(runningAppend(activity))
     }
 
     @Test
     fun `a copy picker that cannot open fails the append and leaves nothing pending`() {
         val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(activity, original)
+        select(activity, original)
         // The append types the media; building the picker's input types it again, and is refused.
         ReadOnlyMediaProvider.typeQueriesLeft = AtomicInteger(1)
         scanWitness(activity)
         settle()
 
         assertNull("no picker opens", shadowOf(activity).nextStartedActivityForResult)
-        assertNull("nothing is left to place", field("pendingCopy").get(activity))
+        assertNull("nothing is left to place", pending(activity))
         assertEquals(false, field("appending").get(activity))
         assertEquals(0, queued(activity).size)
         assertEquals("the staged copy is gone", emptyList<File>(), recoveryFiles(activity))
@@ -547,7 +563,7 @@ class CoSignPublishTest {
     fun `a recreation while the response scanner is open appends with the hash the witness was shown`() {
         val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(controller.get(), original)
+        select(controller.get(), original)
         val requestCode = openResponseScanner(controller.get())
 
         // The scanner covers the screen, which is recreated; its reload of the
@@ -571,7 +587,7 @@ class CoSignPublishTest {
     fun `a recreation while the response scanner is open refuses media whose content changed meanwhile`() {
         val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(controller.get(), original)
+        select(controller.get(), original)
         val requestCode = openResponseScanner(controller.get())
 
         // While the scanner is open the media is replaced by other content,
@@ -593,7 +609,7 @@ class CoSignPublishTest {
     fun `a response with no hash the witness was shown is refused, never appended unchecked`() {
         val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
         shadowOf(Looper.getMainLooper()).idle()
-        field("selectedUri").set(activity, original)
+        select(activity, original)
         // A scan result with no scan begun for it, as after process death
         // dropped the scanner's request: no hash to check the media against.
         val response = CoSignResponse("AAAA", "SHA256:witness", "Witness", "ES256").toJsonString()
@@ -613,10 +629,10 @@ class CoSignPublishTest {
         val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
         shadowOf(Looper.getMainLooper()).idle()
         val first = controller.get()
-        field("selectedUri").set(first, original)
+        select(first, original)
         scanWitness(first)
         idleUntil { ReadOnlyMediaProvider.readsStarted.get() >= 1 }
-        val id = field("runningAppend").get(first) as String
+        val id = runningAppend(first) as String
 
         // The append ends (it needs a copy) before the screen's waiter runs,
         // and the waiter is cancelled, as when the screen goes away then.
@@ -640,6 +656,147 @@ class CoSignPublishTest {
         settle()
         assertNull("the picker opens once", shadowOf(activity).nextStartedActivityForResult)
         assertEquals("the one staged co-signature waits for it", 1, recoveryFiles(activity).size)
-        assertNotNull(field("pendingCopy").get(activity))
+        assertNotNull(pending(activity))
+    }
+
+    @Test
+    fun `changed media content that kept its old signature data is refused before anything is appended`() {
+        // Other pixels under the original's signature data, which still names
+        // the hash the witness was shown: only the payload itself tells.
+        ReadOnlyMediaProvider.files["clip.png"] =
+            signedPng("changed.png", pixels = byteArrayOf(0x78, 0x9C.toByte(), 0x09, 0x09, 0x09))
+        val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
+        shadowOf(Looper.getMainLooper()).idle()
+        select(activity, original)
+        scanWitness(activity)
+        settle()
+
+        assertNull("nothing is co-signed", shadowOf(activity).nextStartedActivityForResult)
+        assertEquals(0, queued(activity).size)
+        assertEquals("the staged copy is gone", emptyList<File>(), recoveryFiles(activity))
+    }
+
+    /** How the screen goes away after a step of [exchangeScenario], and comes back. */
+    private enum class Away {
+        /** Recreated, as on a rotation. */
+        RECREATE,
+
+        /**
+         * Its state is saved, then the next step's work ends while it is
+         * stopped, and only then is it destroyed and restored from that state.
+         */
+        SAVED_BEFORE_NEXT_STEP
+    }
+
+    /**
+     * One witness co-signs the original into a copy the user picks; a second
+     * witness's scan opens while the copy writes and returns once it is
+     * written. After step [awayAt] the screen goes away as [away] says. It
+     * ends with each response appended exactly once: two pickers, the second
+     * over the copy, holding both co-signatures.
+     */
+    private fun exchangeScenario(awayAt: Int, away: Away?) {
+        val case = "away after step $awayAt: $away"
+        ReadOnlyMediaProvider.readGate = null
+        ReadOnlyMediaProvider.readsStarted.set(0)
+        val copy = Uri.parse("content://$COPIES/clip-cosigned.png")
+        val held = HeldOutput()
+        val gate = CountDownLatch(1)
+        val readBack = { ByteArrayInputStream(synchronized(held.bytes) { held.bytes.toByteArray() }) }
+        var controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        val instances = mutableListOf(controller.get())
+        recoveryFiles(controller.get()).forEach { it.delete() }
+        fun wire(activity: CoSignActivity) {
+            register(activity, copy, held)
+            shadowOf(activity.contentResolver).registerInputStreamSupplier(copy, readBack)
+            shadowOf(activity.applicationContext.contentResolver).registerInputStreamSupplier(copy, readBack)
+        }
+        // Every copy picker any instance opened, in order.
+        val pickers = mutableListOf<Pair<Intent, Int>>()
+        fun drainPickers() = instances.forEach { activity ->
+            while (true) {
+                val started = shadowOf(activity).nextStartedActivityForResult ?: break
+                if (started.intent.action == Intent.ACTION_CREATE_DOCUMENT) pickers.add(started.intent to started.requestCode)
+            }
+        }
+        fun awaitPickers(n: Int) = idleUntil { drainPickers(); pickers.size >= n }
+        var scanA = 0
+        var scanB = 0
+        // Each step, and whether it is work that ends on its own (it can end while the screen is away).
+        val steps: List<Pair<Boolean, () -> Unit>> = listOf(
+            false to { select(controller.get(), original); scanA = openResponseScanner(controller.get()) },
+            false to {
+                ReadOnlyMediaProvider.readGate = gate
+                val before = ReadOnlyMediaProvider.readsStarted.get()
+                answerScanner(controller.get(), scanA)
+                idleUntil { ReadOnlyMediaProvider.readsStarted.get() > before }
+            },
+            // The append ends: the original needs a copy.
+            true to { ReadOnlyMediaProvider.readGate = null; gate.countDown(); settle() },
+            false to {
+                awaitPickers(1)
+                controller.get().activityResultRegistry.dispatchResult(pickers[0].second, Activity.RESULT_OK, Intent().setData(copy))
+                assertTrue("$case: the copy's write started", held.writing.await(10, TimeUnit.SECONDS))
+            },
+            false to { scanB = openResponseScanner(controller.get()) },
+            // The copy is written while the second scan is open.
+            true to { held.release(); settle() },
+            false to {
+                idleUntil { selected(controller.get()) == copy }
+                answerScanner(controller.get(), scanB, "SHA256:second")
+            }
+        )
+        try {
+            wire(controller.get())
+            steps.forEachIndexed { index, (_, step) ->
+                step()
+                if (index != awayAt || away == null) return@forEachIndexed
+                when (away) {
+                    Away.RECREATE -> controller.recreate()
+                    Away.SAVED_BEFORE_NEXT_STEP -> {
+                        val state = android.os.Bundle()
+                        controller.pause().stop().saveInstanceState(state)
+                        steps.getOrNull(index + 1)?.takeIf { it.first }?.second?.invoke()
+                        settle()
+                        drainPickers()
+                        controller.destroy()
+                        controller = Robolectric.buildActivity(CoSignActivity::class.java).setup(state)
+                    }
+                }
+                shadowOf(Looper.getMainLooper()).idle()
+                instances.add(controller.get())
+                wire(controller.get())
+            }
+            awaitPickers(2)
+            settle()
+            drainPickers()
+            val activity = controller.get()
+            assertEquals("$case: one picker per response", 2, pickers.size)
+            assertEquals("$case: the second goes to the copy", "clip-cosigned-cosigned.png", pickers[1].first.getStringExtra(Intent.EXTRA_TITLE))
+            val staged = pending(activity)!!.let { p ->
+                p.javaClass.getDeclaredField("staged").apply { isAccessible = true }.get(p) as File
+            }
+            assertEquals(
+                "$case: each co-signature appended once, the second to the first",
+                listOf("SHA256:testfp", "SHA256:witness", "SHA256:second"),
+                XmpMetadataHelper.readSignature(staged.path)!!.signatures.map { it.keyFingerprint }
+            )
+            assertEquals("$case: no response left", 0, queued(activity).size)
+            assertEquals("$case: one staged copy", 1, recoveryFiles(activity).size)
+            assertArrayEquals("$case: the original is whole", originalBytes, ReadOnlyMediaProvider.files["clip.png"]!!.readBytes())
+        } finally {
+            held.release()
+            gate.countDown()
+            ReadOnlyMediaProvider.readGate = null
+        }
+    }
+
+    @Test
+    fun `a save and recreation at any step of the exchange appends each response once and loses nothing`() {
+        exchangeScenario(-1, null)
+        for (step in 0..5) exchangeScenario(step, Away.RECREATE)
+        // The append, then the copy's write, ending after the state was saved.
+        exchangeScenario(1, Away.SAVED_BEFORE_NEXT_STEP)
+        exchangeScenario(4, Away.SAVED_BEFORE_NEXT_STEP)
     }
 }

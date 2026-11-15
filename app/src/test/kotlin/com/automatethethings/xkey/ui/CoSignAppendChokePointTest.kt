@@ -80,6 +80,42 @@ class CoSignAppendChokePointTest {
     }
 
     /**
+     * The exchange (selected media, open scan, queued responses, running
+     * append, copy to place, copy writing) is one immutable record, saved and
+     * restored whole, and replaced only in transition: a field kept apart, or
+     * written anywhere else, is restored out of step with the rest.
+     */
+    @Test
+    fun `the exchange is written only in transition`() {
+        for (name in listOf("selectedUri", "responseScanFor", "queuedResponses", "runningAppend", "pendingCopy", "runningCopy")) {
+            assertEquals("$name is kept apart from the exchange", 0, Regex("""\b(var|val) $name\b""").findAll(source).count())
+        }
+        val writes = Regex("""\bexchange = """).findAll(source).count()
+        assertEquals("declared, then replaced in one place", 2, writes)
+        assertEquals(1, Regex("""\bexchange = """).findAll(body("transition")).count())
+        assertEquals(1, count("private var exchange = CoSignExchange()"))
+        val start = source.indexOf("internal data class CoSignExchange(")
+        assertTrue("the exchange record is declared", start >= 0)
+        val record = source.substring(start, source.indexOf("\n}\n", start))
+        for (mutable in listOf("var ", "Mutable", "ArrayList")) {
+            assertEquals("the exchange record holds no '$mutable'", 0, count(mutable, record))
+        }
+        assertEquals("saved whole, under one key", 1, count("putString(STATE_EXCHANGE"))
+    }
+
+    /**
+     * The changed-content guard hashes the staged payload with the signer's
+     * own function: the hash its signature data names can be kept on other
+     * content, so it alone proves nothing.
+     */
+    @Test
+    fun `the append checks the payload's own hash, as the signer computes it`() {
+        val guard = body("appendToMedia")
+        assertEquals(1, count("AutoSignHash.contentHashFile(", guard))
+        assertTrue("checked before anything is appended", guard.indexOf("AutoSignHash.contentHashFile(") < guard.indexOf("appendSignature("))
+    }
+
+    /**
      * A screen reads a save run only through MediaSaveRuns.outcome, which tells
      * the screen's own cancellation from the run's end: reading the run's
      * Deferred directly can take the cancellation for the run's failure and
