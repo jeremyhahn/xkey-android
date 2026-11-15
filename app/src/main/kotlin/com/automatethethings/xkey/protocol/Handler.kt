@@ -2370,13 +2370,39 @@ class RequestHandler(
      * Deletes Keystore entry [alias] of key [keyId] for [handleLocalDeleteKey];
      * the general alias goes through [KeystoreManager.deleteGeneralKey], which
      * audits the deletion. False when no such entry exists.
+     *
+     * Every Keystore removal of a `local.deleteKey` comes here, and a paired
+     * desktop deletes only user keys: [refuseInternalAlias] refuses any
+     * entry xKey keeps for itself before anything is removed.
      */
-    private fun deleteKeystoreAlias(keyId: String, alias: String): Boolean =
-        if (alias == KeystoreManager.generalKeyAlias(keyId)) {
+    private fun deleteKeystoreAlias(keyId: String, alias: String): Boolean {
+        refuseInternalAlias(alias)
+        return if (alias == KeystoreManager.generalKeyAlias(keyId)) {
             keystoreManager.deleteGeneralKey(keyId)
         } else {
             keystoreManager.deleteByAlias(alias)
         }
+    }
+
+    /**
+     * Refuses (OPERATION_DENIED) a delete of Keystore entry [alias] unless it
+     * is a user key: a credential `xkey_credential_<id>` or a general key
+     * `xkey_key_<id>` other than an ephemeral agreement key. Every other
+     * entry in xKey's Keystore is its own (store-protection keys, device
+     * identity and attestation keys, the CA, PIV slot keys, library master
+     * keys). An alias with no entry is not refused, so a missing key still
+     * answers `deleted: false`.
+     */
+    private fun refuseInternalAlias(alias: String) {
+        val userKey = (alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX) ||
+            alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL)) &&
+            !alias.startsWith(KeystoreManager.generalKeyAlias(com.automatethethings.xkey.crypto.FileEncryptor.EPHEMERAL_KEY_PREFIX))
+        if (userKey || alias !in keystoreManager.listAllKeystoreAliases()) return
+        throw ProtocolException(
+            "Key $alias is internal to xKey and cannot be deleted",
+            errorCode = ErrorCodes.OPERATION_DENIED
+        )
+    }
 
     /**
      * Handles local.setKeyPolicy - update key sharing policy.
