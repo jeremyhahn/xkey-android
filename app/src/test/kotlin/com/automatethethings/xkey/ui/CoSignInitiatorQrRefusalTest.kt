@@ -145,7 +145,52 @@ class CoSignInitiatorQrRefusalTest {
         assertEquals(2, Regex("""readOwnPublicKeyDer\([^)]*\)\s*\.orRefuse\(""").findAll(source).count())
     }
 
-    private fun initiator(stub: (KeystoreManager) -> Unit): CoSignActivity {
+    /**
+     * #255 verify r4: a QR drawn for one key stayed on screen when the
+     * selected key changed, or when a later Generate QR was refused, so the
+     * earlier key's QR showed under the newly selected key. The QR is now
+     * cleared on every key change and before every generate attempt.
+     */
+    @Test
+    fun aRefusalAfterASuccessLeavesNoQrVisible() {
+        val der = byteArrayOf(1, 2, 3)
+        io.mockk.mockkObject(com.automatethethings.xkey.qr.QrCodeGenerator)
+        every { com.automatethethings.xkey.qr.QrCodeGenerator.generate(any(), any()) } answers {
+            android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        var readable = true
+        val activity = initiator(listOf(KEY_ID, OTHER_KEY_ID)) { keystore ->
+            every { keystore.getPublicKeyDER(KEY_ID, any()) } answers { if (readable) der else null }
+            every { keystore.getPublicKeyDER(OTHER_KEY_ID, any()) } throws java.security.KeyStoreException("certificate")
+        }
+        val generate = CoSignActivity::class.java.getDeclaredMethod("generateInitiatorQR").apply { isAccessible = true }
+        val qr = get(activity, "qrImageView") as ImageView
+        val spinner = get(activity, "keySpinner") as Spinner
+
+        generate.invoke(activity)
+        assertEquals("the readable key's QR is drawn", View.VISIBLE, qr.visibility)
+
+        // A refused regenerate of the same key leaves no earlier QR behind.
+        readable = false
+        generate.invoke(activity)
+        assertNotEquals("a refused QR left the earlier QR visible", View.VISIBLE, qr.visibility)
+        assertNull("a refused QR left the earlier QR's image", qr.drawable)
+
+        // A key change clears the QR before any generate.
+        readable = true
+        generate.invoke(activity)
+        assertEquals(View.VISIBLE, qr.visibility)
+        spinner.setSelection(1)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertNotEquals("the earlier key's QR shows under the newly selected key", View.VISIBLE, qr.visibility)
+
+        // And the new key's refusal draws nothing.
+        generate.invoke(activity)
+        assertNotEquals("a refused QR is visible", View.VISIBLE, qr.visibility)
+        assertNull(qr.drawable)
+    }
+
+    private fun initiator(ids: List<String> = listOf(KEY_ID), stub: (KeystoreManager) -> Unit): CoSignActivity {
         val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
         shadowOf(Looper.getMainLooper()).idle()
         val activity = controller.get()
@@ -157,10 +202,11 @@ class CoSignInitiatorQrRefusalTest {
         stub(keystore)
         set(activity, "keystoreManager", keystore)
         set(activity, "currentSignatureData", ContentAuthenticityData(contentHash = "00", signatures = emptyList()))
-        set(activity, "signingKeyIds", listOf(KEY_ID))
+        set(activity, "signingKeyIds", ids)
         val spinner = get(activity, "keySpinner") as Spinner
-        spinner.adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_item, listOf(KEY_ID))
+        spinner.adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_item, ids)
         spinner.setSelection(0)
+        shadowOf(Looper.getMainLooper()).idle()
         return activity
     }
 
@@ -173,5 +219,6 @@ class CoSignInitiatorQrRefusalTest {
 
     private companion object {
         const val KEY_ID = "cosign-key"
+        const val OTHER_KEY_ID = "cosign-other-key"
     }
 }
