@@ -574,14 +574,48 @@ class CoSignPublishTest {
         assertTrue(recoveryFiles(controller.get()).isEmpty())
     }
 
+    /** A PNG whose embedded entry by [key] is [value] over [recordedHash] ([signed] is what [value] signs). */
+    private fun cosignedPng(
+        name: String,
+        key: java.security.KeyPair,
+        recordedHash: (payload: String) -> String = { it },
+        signed: (recorded: String) -> String = { it },
+        pixels: ByteArray? = null
+    ): Pair<File, String> {
+        val file = File(folder.root, name).apply { writeBytes(if (pixels == null) XmpFixtures.png() else XmpFixtures.png(pixels)) }
+        // The canonical hash leaves signature metadata out, so it is the same after the write.
+        val payload = MediaHasher.hashStreamed({ file.inputStream() }, "image/png").canonical
+        val recorded = recordedHash(payload)
+        val value = java.security.Signature.getInstance("SHA256withECDSA").run {
+            initSign(key.private)
+            update(com.automatethethings.xkey.media.SignatureVerifier.hexToBytes(signed(recorded)))
+            android.util.Base64.encodeToString(sign(), android.util.Base64.NO_WRAP)
+        }
+        val entry = com.automatethethings.xkey.media.SignatureEntry(
+            keyFingerprint = MediaHasher.hashBytes(key.public.encoded),
+            signerName = "Witness",
+            algorithm = "ES256",
+            value = value,
+            timestamp = "2026-11-15T00:00:00Z",
+            role = com.automatethethings.xkey.media.SignerRole.ATTESTOR
+        )
+        XmpMetadataHelper.writeSignature(file.path, ContentAuthenticityData(contentHash = recorded, signatures = listOf(entry)))
+        return file to payload
+    }
+
+    private fun ecKey(): java.security.KeyPair =
+        java.security.KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+
     @Test
-    fun `a copy whose staged bytes are gone counts as placed only when its document holds it`() {
+    fun `a copy whose staged bytes are gone counts as placed only when its document holds its verified signature`() {
         val resolver = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().contentResolver
-        val held = signedPng("held.png")
-        val carried = XmpMetadataHelper.readSignature(held.path)!!
-        val payload = com.automatethethings.xkey.media.MediaHasher.hashStreamed({ held.inputStream() }, "image/png").canonical
+        val witness = ecKey()
+        val fingerprint = MediaHasher.hashBytes(witness.public.encoded)
+        val known: (String) -> ByteArray? = { if (it == fingerprint) witness.public.encoded else null }
+        val (held, payload) = cosignedPng("held.png", witness)
         val gone = File(held.parentFile, "cosign-gone.png")
-        val copy = PendingCoSignedCopy(gone, "Witness", carried.signatures.first().keyFingerprint, carried.copy(contentHash = payload), original)
+        val copy = PendingCoSignedCopy(gone, "Witness", fingerprint, XmpMetadataHelper.readSignature(held.path)!!, original)
+        assertEquals(payload, copy.data.contentHash)
 
         // Documents of the copies' provider, typed as a picker's are.
         fun document(file: File): Uri {
@@ -589,12 +623,35 @@ class CoSignPublishTest {
             return Uri.parse("content://${ReadOnlyMediaProvider.AUTHORITY}/${file.name}")
         }
 
-        assertTrue("the document holds the co-signed payload", copyInPlace(resolver, document(held), copy))
+        // (c) the copy as written, its signature verified with the witness's key.
+        assertTrue("the document holds the co-signed copy", copyInPlace(resolver, document(held), copy, known))
+
+        // (a) the same payload and fingerprint, but a signature value over other bytes.
+        val (altered, _) = cosignedPng("altered.png", witness, signed = { "b".repeat(64) })
+        assertFalse("an altered signature value is refused", copyInPlace(resolver, document(altered), copy, known))
+        // A value signed by another key under the witness's fingerprint.
+        val forger = ecKey()
+        val (forged, _) = cosignedPng("forged.png", forger)
+        val forgedData = XmpMetadataHelper.readSignature(forged.path)!!
+        XmpMetadataHelper.writeSignature(
+            forged.path,
+            forgedData.copy(signatures = forgedData.signatures.map { it.copy(keyFingerprint = fingerprint) })
+        )
+        assertFalse("another key's signature is refused", copyInPlace(resolver, document(forged), copy, known))
+
+        // (b) a validly signed recorded hash that is not the payload's.
+        val (misrecorded, _) = cosignedPng("misrecorded.png", witness, recordedHash = { "a".repeat(64) })
+        assertFalse("a recorded hash other than the payload's is refused", copyInPlace(resolver, document(misrecorded), copy, known))
+
+        // (d) no accept without the verify: no known key, or a key that is not the signer's.
+        assertFalse("an unknown signer key accepts nothing", copyInPlace(resolver, document(held), copy) { null })
+        assertFalse("a key not the signer's accepts nothing", copyInPlace(resolver, document(held), copy) { forger.public.encoded })
+
         val empty = File(held.parentFile, "empty.png").apply { writeBytes(ByteArray(0)) }
-        assertFalse("an empty document is not the copy", copyInPlace(resolver, document(empty), copy))
-        assertFalse("another signer's copy is not this one", copyInPlace(resolver, document(held), copy.copy(fingerprint = "SHA256:other")))
-        val edited = signedPng("edited.png", XmpFixtures.bytes(0x78, 0x9C, 0x05, 0x05, 0x05))
-        assertFalse("other content is not the copy", copyInPlace(resolver, document(edited), copy))
+        assertFalse("an empty document is not the copy", copyInPlace(resolver, document(empty), copy, known))
+        assertFalse("another signer's copy is not this one", copyInPlace(resolver, document(held), copy.copy(fingerprint = "SHA256:other"), known))
+        val (edited, _) = cosignedPng("edited.png", witness, pixels = XmpFixtures.bytes(0x78, 0x9C, 0x05, 0x05, 0x05))
+        assertFalse("other content is not the copy", copyInPlace(resolver, document(edited), copy, known))
     }
 
     @Test
