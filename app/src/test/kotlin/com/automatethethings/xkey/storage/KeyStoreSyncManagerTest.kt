@@ -243,4 +243,53 @@ class KeyStoreSyncManagerTest {
             KeyStoreSyncManager.keystoreAliasesOf("xkey_root_ca")
         )
     }
+
+    /**
+     * Codex round 3 (#270): a user key whose ID equals an internal alias
+     * (`xkey_key_xkey_seal_store_key`, key `xkey_seal_store_key`) is the
+     * key the row names, so the internal alias of the same name never marks
+     * that row protected, whichever alias the Keystore lists first.
+     */
+    @Test
+    fun aUserKeyNamedLikeAnInternalAliasStaysAUserKey() = runBlocking<Unit> {
+        val internal = "xkey_seal_store_key"
+        val user = "xkey_key_$internal"
+        every { keyStore.containsAlias(any()) } answers { firstArg<String>() in setOf(internal, user) }
+        val userRow = KeyEntity(keyId = internal, keyType = "signing", algorithm = "ES256", label = internal, keySizeBits = 256, source = "local")
+        coEvery { keyDao.getByKeyId(internal) } returns userRow
+        val inserted = mutableListOf<KeyEntity>()
+        coEvery { keyDao.insert(capture(inserted)) } returns 1L
+
+        for (order in listOf(listOf(internal, user), listOf(user, internal))) {
+            every { keyStore.aliases() } answers { Collections.enumeration(order) }
+            // The row is new: discovery inserts it from whichever alias it meets.
+            coEvery { keyDao.exists(internal) } returns false
+            KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).discoverKeystoreEntries()
+            // The row exists: the internal alias must not flip it to a system key.
+            coEvery { keyDao.exists(internal) } returns true
+            KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).discoverKeystoreEntries()
+        }
+
+        assertTrue("the user key was never discovered", inserted.any { it.keyId == internal })
+        assertFalse("the user key was listed as a system key", inserted.any { it.keyId == internal && it.isSystemKey })
+        coVerify(exactly = 0) { keyDao.update(match { it.keyId == internal && it.isSystemKey }) }
+        // The internal alias itself stays protected from a user delete.
+        assertTrue(KeyStoreSyncManager.isProtectedAlias(internal))
+        assertFalse(KeyStoreSyncManager.isProtectedAlias(user))
+    }
+
+    /** The internal key alone keeps the protection an earlier sync failed to give its row. */
+    @Test
+    fun anInternalKeyRowIsStillMarkedProtected() = runBlocking<Unit> {
+        val internal = "xkey_seal_store_key"
+        every { keyStore.aliases() } answers { Collections.enumeration(listOf(internal)) }
+        every { keyStore.containsAlias(any()) } answers { firstArg<String>() == internal }
+        coEvery { keyDao.exists(internal) } returns true
+        coEvery { keyDao.getByKeyId(internal) } returns
+            KeyEntity(keyId = internal, keyType = "signing", algorithm = "ES256", label = internal, keySizeBits = 256, source = "local")
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).discoverKeystoreEntries()
+
+        coVerify(exactly = 1) { keyDao.update(match { it.keyId == internal && it.isSystemKey }) }
+    }
 }
