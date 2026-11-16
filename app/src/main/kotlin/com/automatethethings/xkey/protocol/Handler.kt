@@ -49,6 +49,7 @@ import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.KeyNamespace
+import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.deleteKeyAliasRow
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -2333,11 +2334,29 @@ class RequestHandler(
                 rows
             } else {
                 keyDao.deleteKeyAndMaterial(canonicalId) {
-                    // Every material under the ID goes (software and hardware
-                    // general key alike), or none is reported deleted.
-                    materialRemoved = com.automatethethings.xkey.storage.removeAllKeyMaterial(
-                        canonicalId, keystoreManager, softwareKeys
-                    )
+                    // The row's namespace, read inside the revoke: a credential
+                    // row loses its private key and metadata together; any
+                    // other ID loses every general material under it (software
+                    // and hardware alike), or none is reported deleted. An
+                    // unrecorded row with material in both namespaces names its
+                    // general key, as local.deleteKey always did.
+                    val namespace = keyDao.getByKeyId(canonicalId)
+                        ?.let { KeyNamespace.of(it, keystoreManager, softwareKeys) }
+                    materialRemoved = if (namespace == KeyNamespace.CREDENTIAL) {
+                        com.automatethethings.xkey.storage.removeCredentialMaterial(
+                            canonicalId, keystoreManager, XKeyDatabase.getInstance(context).credentialMetadataDao()
+                        ).also {
+                            // A credential that survives keeps its row: refused, not deleted.
+                            check(
+                                KeyStoreSyncManager.credentialAliasOf(canonicalId) !in
+                                    keystoreManager.listAllKeystoreAliases()
+                            ) { "credential $canonicalId survived its delete" }
+                        }
+                    } else {
+                        com.automatethethings.xkey.storage.removeAllKeyMaterial(
+                            canonicalId, keystoreManager, softwareKeys
+                        )
+                    }
                 }
             }
         } catch (e: IllegalStateException) {
