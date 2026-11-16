@@ -133,12 +133,19 @@ class SoftwareKeyStore(
         return File(dir, "${fileId(keyId)}.key").exists()
     }
 
-    /** Delete a software key by id. */
+    /**
+     * Delete a software key by id. Its removal records a KEY_DELETED event
+     * here, the one place software key material is removed, as the Keystore
+     * deletes do; deleting an id with no key records nothing.
+     */
     fun delete(keyId: String) {
         migrateLegacyRecords()
         val id = fileId(keyId)
-        File(dir, "$id.key").delete()
+        val removed = File(dir, "$id.key").delete()
         File(dir, "$id.meta").delete()
+        if (removed) {
+            com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(keyId = keyId, keyLabel = keyId, keyType = "software")
+        }
     }
 
     /** Filename stem for [keyId]: a digest, so distinct ids stay distinct. */

@@ -1712,17 +1712,23 @@ class KeystoreManager(private val context: Context) {
         return keyStore.aliases().toList()
     }
 
-    /**
-     * Delete a key by its raw Keystore alias.
-     *
-     * @param alias The Keystore alias to delete.
-     * @return true if the key was deleted, false if it didn't exist.
-     */
     fun deleteByAlias(alias: String): Boolean {
         // PIV slot keys are deleted through PivKeyManager with their row.
         if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
         if (!keyStore.containsAlias(alias)) return false
         keyStore.deleteEntry(alias)
+
+        // Audited here, where the entry's removal succeeds, as deleteKey and
+        // deleteGeneralKey are: a caller's later cleanup (a credential's
+        // metadata) failing or being cancelled never drops the record.
+        val credential = alias.startsWith(KEY_ALIAS_PREFIX)
+        val keyId = if (credential) alias.removePrefix(KEY_ALIAS_PREFIX) else alias
+        AuditLogger.logKeyDeleted(
+            keyId = keyId,
+            keyLabel = keyId,
+            keyType = if (credential) "fido2" else "keystore"
+        )
+
         return true
     }
 

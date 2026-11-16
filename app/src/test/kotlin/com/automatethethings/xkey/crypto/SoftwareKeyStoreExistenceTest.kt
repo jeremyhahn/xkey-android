@@ -15,10 +15,13 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import com.automatethethings.xkey.audit.AuditLogger
 import io.mockk.every
 import io.mockk.mockk
+import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -34,6 +37,18 @@ class SoftwareKeyStoreExistenceTest {
 
     @get:Rule
     val tmp = TemporaryFolder()
+
+    // A delete records its audit event; on the JVM the logger is observed, not run.
+    @Before
+    fun setUp() {
+        io.mockk.mockkObject(AuditLogger)
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
+    }
+
+    @After
+    fun tearDown() {
+        io.mockk.unmockkObject(AuditLogger)
+    }
 
     private fun context(): Context {
         val files = tmp.newFolder("files")
@@ -64,17 +79,11 @@ class SoftwareKeyStoreExistenceTest {
         val stem = SyncCodec.sha256Hex("k".toByteArray(Charsets.UTF_8))
         File(dir, "$stem.key").writeBytes(byteArrayOf(1))
         File(dir, "$stem.meta").writeText("""{"keyId":"k"}""")
-        io.mockk.mockkObject(com.automatethethings.xkey.audit.AuditLogger)
-        try {
-            every { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
 
-            SoftwareKeyStore(context).delete("k")
-            SoftwareKeyStore(context).delete("absent")
+        SoftwareKeyStore(context).delete("k")
+        SoftwareKeyStore(context).delete("absent")
 
-            io.mockk.verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted("k", any(), "software") }
-            io.mockk.verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(any(), any(), any()) }
-        } finally {
-            io.mockk.unmockkObject(com.automatethethings.xkey.audit.AuditLogger)
-        }
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k", any(), "software") }
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted(any(), any(), any()) }
     }
 }
