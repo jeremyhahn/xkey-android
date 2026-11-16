@@ -153,13 +153,14 @@ class KeyStoreSyncManager(
         for (cred in credentials) {
             if (keyDao.exists(cred.credentialId)) continue
 
-            if (keystoreManager.resolveKeystoreAlias(cred.credentialId) == null) {
+            val alias = keystoreManager.resolveKeystoreAlias(cred.credentialId)
+            if (alias == null) {
                 skipped++
                 Log.d(TAG, "Skipped credential with no Keystore key: ${cred.credentialId}")
                 continue
             }
 
-            keyDao.insert(mapCredentialToKeyEntity(cred))
+            keyDao.insert(mapCredentialToKeyEntity(cred, alias))
             synced++
             Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
         }
@@ -358,9 +359,12 @@ class KeyStoreSyncManager(
     }
 
     /**
-     * Maps a CredentialMetadataEntity to a KeyEntity.
+     * Maps a CredentialMetadataEntity to a KeyEntity. The credential
+     * namespace is recorded only when [alias], the Keystore entry its ID
+     * resolves to, is the credential's own alias; otherwise none is recorded
+     * and a delete reads where the material is ([KeyNamespace.of]).
      */
-    private fun mapCredentialToKeyEntity(cred: CredentialMetadataEntity): KeyEntity {
+    private fun mapCredentialToKeyEntity(cred: CredentialMetadataEntity, alias: String): KeyEntity {
         return KeyEntity(
             keyId = cred.credentialId,
             keyType = "fido2",
@@ -379,7 +383,7 @@ class KeyStoreSyncManager(
             userDisplayName = cred.userDisplayName,
             isDiscoverable = cred.isDiscoverable,
             signCount = cred.signCount,
-            materialNamespace = KeyNamespace.CREDENTIAL.stored
+            materialNamespace = KeyNamespace.CREDENTIAL.stored.takeIf { alias == credentialAliasOf(cred.credentialId) }
         )
     }
 }
