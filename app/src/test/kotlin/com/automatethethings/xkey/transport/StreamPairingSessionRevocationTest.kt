@@ -781,6 +781,8 @@ class StreamPairingSessionRevocationTest {
     @Test
     fun aShareResumedAfterLocalDeleteKeyRemovedTheKeystoreEntryWritesNothing() = runBlocking<Unit> {
         val keyDao = mockk<KeyDao>(relaxed = true)
+        // No row: the namespace is read from the material present.
+        coEvery { keyDao.getByKeyId(any()) } returns null
         val removed = CompletableDeferred<Unit>()
         val finish = CountDownLatch(1)
         val keystore = mockk<KeystoreManager>(relaxed = true)

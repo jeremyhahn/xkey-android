@@ -81,6 +81,13 @@ class LocalDeleteKeyExactIdTest {
         val keyDao = mockk<KeyDao>(relaxed = true)
         coEvery { keyDao.exists(software) } returns true
         coEvery { keyDao.exists(hardware) } returns true
+        // Rows written before a namespace was recorded.
+        coEvery { keyDao.getByKeyId(any()) } answers {
+            com.automatethethings.xkey.storage.entity.KeyEntity(
+                keyId = firstArg(), keyType = "signing", algorithm = "ES256", label = firstArg(), keySizeBits = 256,
+                source = "local"
+            )
+        }
         val keystore = mockk<KeystoreManager>(relaxed = true)
         // Hardware key `a` lives at Keystore alias `xkey_key_a`.
         every { keystore.resolveKeystoreAlias(any()) } answers {

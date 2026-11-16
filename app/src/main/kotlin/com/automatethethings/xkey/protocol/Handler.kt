@@ -2338,17 +2338,23 @@ class RequestHandler(
                     // The row's namespace, read inside the revoke: a credential
                     // row loses its private key and metadata together; any
                     // other ID loses every general material under it (software
-                    // and hardware alike), or none is reported deleted. An
-                    // unrecorded row with material in both namespaces names its
-                    // general key, as local.deleteKey always did. An ID with no
-                    // row (the base generateKey path creates a credential
-                    // without one) is read from the material present.
+                    // and hardware alike), or none is reported deleted. An ID
+                    // with no row (the base generateKey path creates a
+                    // credential without one) is read from the material
+                    // present. A namespace that cannot be told (an unknown
+                    // recorded value, or an unrecorded ID holding both a
+                    // credential and a general key) is refused with nothing
+                    // removed, as the key screens refuse it: never taken as
+                    // general.
                     val row = keyDao.getByKeyId(canonicalId)
                     val namespace = if (row != null) {
                         KeyNamespace.of(row, keystoreManager, softwareKeys)
                     } else {
                         KeyNamespace.ofMaterial(canonicalId, keystoreManager, softwareKeys)
-                    }
+                    } ?: throw ProtocolException(
+                        "Key $keyId names more than one key or an unknown kind; nothing is deleted",
+                        errorCode = ErrorCodes.INVALID_PARAMS
+                    )
                     materialRemoved = if (namespace == KeyNamespace.CREDENTIAL) {
                         com.automatethethings.xkey.storage.removeCredentialMaterial(
                             canonicalId, keystoreManager, XKeyDatabase.getInstance(context).credentialMetadataDao()
