@@ -622,22 +622,47 @@ class XmpMetadataHelperSidecarBranchTest {
         }
     }
 
+    /**
+     * Media above the in-memory bound that the automatic signer embedded,
+     * streaming, always takes a co-sign (append) and a re-sign (a signed
+     * copy): a later write streams as the first embed did, never refusing
+     * the size the first embed accepted. Unsigned media still embeds too.
+     */
     @Test
-    fun `re-signing media above the embed bound refuses a carried signature and embeds an unsigned one`() {
+    fun `media above the embed bound that carries a signature takes a co-sign and a re-sign`() {
         val saved = XmpMetadataHelper.maxEmbedBytes
         try {
             for ((name, mime) in embeddedNames) {
+                val format = XmpContainers.formatOf(mime)!!
                 val signedPath = fixtureFile("big-signed-$name", mime)
-                XmpMetadataHelper.writeSignature(signedPath, sampleData())
+                val original = File(signedPath).readBytes()
                 val unsignedPath = fixtureFile("big-unsigned-$name", mime)
                 val unsigned = File(unsignedPath).readBytes()
                 val work = tempFolder.newFolder("big-work-$name")
                 XmpMetadataHelper.maxEmbedBytes = 8
 
-                assertThrows(name, IOException::class.java) { replace(signedPath, mime, secondSigner("a".repeat(64)), work) }
-                assertTrue(name, replace(unsignedPath, mime, secondSigner("a".repeat(64)), work))
-                assertEquals(name, secondSigner("a".repeat(64)), XmpMetadataHelper.readSignature(unsignedPath))
-                val format = XmpContainers.formatOf(mime)!!
+                // The automatic signer's embed, streamed above the bound.
+                XmpMetadataHelper.writeSignature(signedPath, sampleData())
+                assertTrue(name, File(signedPath).length() > XmpMetadataHelper.maxEmbedBytes)
+
+                // Co-sign: the witness is appended to the embedded signature.
+                val witness = SignatureEntry("fp-w", "Bob", "ES256", "sig-w", "2026-01-02T00:00:00Z", SignerRole.WITNESS)
+                XmpMetadataHelper.appendSignature(signedPath, witness)
+                val cosigned = XmpMetadataHelper.readSignature(signedPath)!!
+                assertEquals(name, sampleData().signatures + witness, cosigned.signatures)
+                assertFalse(name, sidecarOf(signedPath).exists())
+                assertArrayEquals(name, original, XmpContainers.strip(File(signedPath).readBytes(), format))
+
+                // Re-sign: a signed copy replaces the embedded signer.
+                val second = secondSigner("a".repeat(64))
+                assertTrue(name, replace(signedPath, mime, second, work))
+                assertEquals(name, second, XmpMetadataHelper.readSignature(signedPath))
+                assertArrayEquals(name, original, XmpContainers.strip(File(signedPath).readBytes(), format))
+                assertFalse(name, sidecarOf(signedPath).exists())
+                assertTrue(name, work.listFiles()!!.isEmpty())
+
+                assertTrue(name, replace(unsignedPath, mime, second, work))
+                assertEquals(name, second, XmpMetadataHelper.readSignature(unsignedPath))
                 assertArrayEquals(name, unsigned, XmpContainers.strip(File(unsignedPath).readBytes(), format))
                 assertFalse(name, sidecarOf(unsignedPath).exists())
                 assertTrue(name, work.listFiles()!!.isEmpty())
