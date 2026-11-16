@@ -114,13 +114,14 @@ internal data class PendingCoSignedCopy(
 internal data class RunningCoSignedCopy(val id: String, val target: Uri, val copy: PendingCoSignedCopy)
 
 /**
- * Whether the document at [target] holds [copy]: its payload hashes, as
- * the signer hashes it, to the co-signed content, its recorded hash is that
- * hash, and its entry by the co-signer verifies with the key
- * [publicKeyFor] knows for the co-signer's fingerprint
- * ([SignatureVerifier.verifyCarried]). A copy whose staged bytes are gone
- * counts as written only then, so a lost or altered copy is never reported
- * as placed, and an unknown co-signer's never is.
+ * Whether the document at [target] holds [copy]: every entry of [copy]'s
+ * signatures is there unchanged, its payload hashes, as the signer hashes
+ * it, to the co-signed content, its recorded hash is that hash, and its
+ * entry by the co-signer verifies with the key [publicKeyFor] knows for the
+ * co-signer's fingerprint ([SignatureVerifier.verifyCarried]). A copy whose
+ * staged bytes are gone counts as written only then, so a lost or altered
+ * copy, or one that lost an earlier signer's entry, is never reported as
+ * placed, and an unknown co-signer's never is.
  */
 internal fun copyInPlace(
     resolver: ContentResolver,
@@ -131,6 +132,9 @@ internal fun copyInPlace(
     val mimeType = resolver.getType(target)
     val carried = XmpMetadataHelper.readSignatureFromUri(resolver, target, mimeType)
     carried != null &&
+        // Every entry the copy was written with is still there, unchanged:
+        // an earlier signer's dropped or altered entry is not this copy.
+        copy.data.signatures.all { it in carried.signatures } &&
         SignatureVerifier.verifyCarried(
             carried,
             MediaHasher.hashStreamed(
