@@ -68,7 +68,10 @@ class KeyDeleteAllMaterialTest {
     /** Key rows present. */
     private val rows = Collections.synchronizedSet(hashSetOf("k"))
 
-    private val keyDao = mockk<KeyDao>(relaxed = true)
+    private val keyDao = mockk<KeyDao>(relaxed = true).also { dao ->
+        // The row a test confirms is the row stored under its ID.
+        coEvery { dao.getByKeyId(any()) } answers { row(firstArg()) }
+    }
     private val keystore = mockk<KeystoreManager>(relaxed = true)
 
     @Before

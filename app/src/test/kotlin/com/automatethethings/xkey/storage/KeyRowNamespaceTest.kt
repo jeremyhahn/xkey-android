@@ -41,6 +41,8 @@ class KeyRowNamespaceTest {
     private val rows = Collections.synchronizedSet(hashSetOf("k"))
     private val keyDao = mockk<KeyDao>(relaxed = true).also { dao ->
         coEvery { dao.exists(any()) } answers { firstArg<String>() in rows }
+        // The row each test confirms is the row stored under its ID.
+        coEvery { dao.getByKeyId(any()) } answers { confirmed.takeIf { firstArg<String>() in rows } }
         coEvery { dao.deleteByKeyId(any()) } answers { if (rows.remove(firstArg<String>())) 1 else 0 }
     }
     private val credentials = mockk<CredentialMetadataDao>(relaxed = true).also { dao ->
@@ -59,6 +61,10 @@ class KeyRowNamespaceTest {
         every { it.contains(any()) } returns false
     }
 
+    /** The row the delete dialog was opened on; the DAO holds it under its ID. */
+    private var confirmed: KeyEntity? = null
+    private fun confirm(row: KeyEntity): KeyEntity = row.also { confirmed = it }
+
     /** A FIDO2-type row as local.generateKey writes it, with no namespace recorded. */
     private val fido2Row = KeyEntity(
         keyId = "k", keyType = "fido2", algorithm = "ES256", label = "k", keySizeBits = 256,
@@ -68,7 +74,7 @@ class KeyRowNamespaceTest {
     @Test
     fun aFido2TypeKeyFromGenerateKeyIsDeletedAsAGeneralKey() = runBlocking {
         aliases += "xkey_key_k"
-        assertEquals(1, keyDao.deleteKeyRow(fido2Row, keystore, software, credentials))
+        assertEquals(1, keyDao.deleteKeyRow(confirm(fido2Row), keystore, software, credentials))
         assertEquals("its general key is gone", emptySet<String>(), aliases.toSet())
         assertEquals("the row is gone", emptySet<String>(), rows.toSet())
     }
@@ -76,7 +82,7 @@ class KeyRowNamespaceTest {
     @Test
     fun aFido2CredentialIsDeletedWithItsMetadata() = runBlocking {
         aliases += "xkey_credential_k"
-        assertEquals(1, keyDao.deleteKeyRow(fido2Row, keystore, software, credentials))
+        assertEquals(1, keyDao.deleteKeyRow(confirm(fido2Row), keystore, software, credentials))
         assertEquals(emptySet<String>(), aliases.toSet())
         assertEquals("its metadata is gone", emptySet<String>(), metadata.toSet())
     }
@@ -85,7 +91,7 @@ class KeyRowNamespaceTest {
     fun aRecordedGeneralFido2KeyDeletesOnlyItsGeneralKeyBesideACredentialOfItsId() = runBlocking {
         aliases += listOf("xkey_credential_k", "xkey_key_k")
         val recorded = fido2Row.copy(materialNamespace = KeyNamespace.GENERAL.stored)
-        assertEquals(1, keyDao.deleteKeyRow(recorded, keystore, software, credentials))
+        assertEquals(1, keyDao.deleteKeyRow(confirm(recorded), keystore, software, credentials))
         assertEquals("the credential survives", setOf("xkey_credential_k"), aliases.toSet())
         assertEquals("its metadata survives", setOf("k"), metadata.toSet())
     }
@@ -94,7 +100,7 @@ class KeyRowNamespaceTest {
     fun aRecordedCredentialDeletesOnlyItsCredentialBesideAGeneralKeyOfItsId() = runBlocking {
         aliases += listOf("xkey_credential_k", "xkey_key_k")
         val recorded = fido2Row.copy(materialNamespace = KeyNamespace.CREDENTIAL.stored)
-        assertEquals(1, keyDao.deleteKeyRow(recorded, keystore, software, credentials))
+        assertEquals(1, keyDao.deleteKeyRow(confirm(recorded), keystore, software, credentials))
         assertEquals("the general key survives", setOf("xkey_key_k"), aliases.toSet())
         assertEquals("its metadata is gone", emptySet<String>(), metadata.toSet())
     }
@@ -103,7 +109,7 @@ class KeyRowNamespaceTest {
     fun anUnknownRecordedNamespaceRefusesTheDeleteAndRemovesNothing() = runBlocking {
         aliases += "xkey_key_k"
         val unknown = fido2Row.copy(materialNamespace = "elsewhere")
-        assertEquals(0, keyDao.deleteKeyRow(unknown, keystore, software, credentials))
+        assertEquals(0, keyDao.deleteKeyRow(confirm(unknown), keystore, software, credentials))
         assertEquals(setOf("xkey_key_k"), aliases.toSet())
         assertEquals(setOf("k"), rows.toSet())
     }
@@ -111,7 +117,7 @@ class KeyRowNamespaceTest {
     @Test
     fun anUndeterminableNamespaceRefusesTheDeleteAndRemovesNothing() = runBlocking {
         aliases += listOf("xkey_credential_k", "xkey_key_k")
-        assertEquals(0, keyDao.deleteKeyRow(fido2Row, keystore, software, credentials))
+        assertEquals(0, keyDao.deleteKeyRow(confirm(fido2Row), keystore, software, credentials))
         assertEquals(setOf("xkey_credential_k", "xkey_key_k"), aliases.toSet())
         assertEquals(setOf("k"), metadata.toSet())
         assertEquals(setOf("k"), rows.toSet())

@@ -46,6 +46,8 @@ class KeyNamespaceDeleteTest {
     private val rows = Collections.synchronizedSet(hashSetOf("k"))
     private val keyDao = mockk<KeyDao>(relaxed = true).also { dao ->
         coEvery { dao.exists(any()) } answers { firstArg<String>() in rows }
+        // The row each test confirms is the row stored under its ID.
+        coEvery { dao.getByKeyId(any()) } answers { confirmed.takeIf { firstArg<String>() in rows } }
         coEvery { dao.deleteByKeyId(any()) } answers { if (rows.remove(firstArg<String>())) 1 else 0 }
     }
     private val credentials = mockk<CredentialMetadataDao>(relaxed = true).also { dao ->
@@ -62,6 +64,10 @@ class KeyNamespaceDeleteTest {
     private val software = mockk<SoftwareKeyStore>(relaxed = true).also {
         every { it.contains(any()) } returns false
     }
+
+    /** The row the delete dialog was opened on; the DAO holds it under its ID. */
+    private var confirmed: KeyEntity? = null
+    private fun confirm(row: KeyEntity): KeyEntity = row.also { confirmed = it }
     private val credential = KeyEntity(
         keyId = "k", keyType = "fido2", algorithm = "ES256", label = "rp", keySizeBits = 256, source = "local",
         materialNamespace = KeyNamespace.CREDENTIAL.stored
@@ -73,7 +79,7 @@ class KeyNamespaceDeleteTest {
 
     @Test
     fun aCredentialDeleteRemovesOnlyTheCredentialAndItsMetadata() = runBlocking {
-        assertEquals(R.string.key_deleted, keyDao.deleteKeyForScreen(credential, keystore, software, credentials))
+        assertEquals(R.string.key_deleted, keyDao.deleteKeyForScreen(confirm(credential), keystore, software, credentials))
         assertEquals("the general key survives", setOf("xkey_key_k"), aliases.toSet())
         assertEquals("the credential's metadata is gone", emptySet<String>(), metadata.toSet())
         verify(exactly = 0) { keystore.deleteGeneralKey(any()) }
@@ -82,7 +88,7 @@ class KeyNamespaceDeleteTest {
 
     @Test
     fun aGeneralDeleteRemovesOnlyTheGeneralKey() = runBlocking {
-        assertEquals(R.string.key_deleted, keyDao.deleteKeyForScreen(general, keystore, software, credentials))
+        assertEquals(R.string.key_deleted, keyDao.deleteKeyForScreen(confirm(general), keystore, software, credentials))
         assertEquals("the credential survives", setOf("xkey_credential_k"), aliases.toSet())
         assertEquals("the credential's metadata survives", setOf("k"), metadata.toSet())
         coVerify(exactly = 0) { credentials.deleteByCredentialId(any()) }
@@ -91,14 +97,14 @@ class KeyNamespaceDeleteTest {
     @Test
     fun aCredentialDeleteNeverFallsBackToTheGeneralKey() = runBlocking {
         aliases.remove("xkey_credential_k")
-        keyDao.deleteKeyForScreen(credential, keystore, software, credentials)
+        keyDao.deleteKeyForScreen(confirm(credential), keystore, software, credentials)
         assertEquals("the general key is not the credential", setOf("xkey_key_k"), aliases.toSet())
     }
 
     @Test
     fun aGeneralDeleteNeverFallsBackToTheCredential() = runBlocking {
         aliases.remove("xkey_key_k")
-        keyDao.deleteKeyForScreen(general, keystore, software, credentials)
+        keyDao.deleteKeyForScreen(confirm(general), keystore, software, credentials)
         assertEquals("the credential is not the general key", setOf("xkey_credential_k"), aliases.toSet())
         assertEquals(setOf("k"), metadata.toSet())
     }

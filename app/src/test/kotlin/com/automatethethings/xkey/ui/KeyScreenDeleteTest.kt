@@ -41,6 +41,7 @@ class KeyScreenDeleteTest {
     private val rows = Collections.synchronizedSet(hashSetOf("k"))
     private val keyDao = mockk<KeyDao>(relaxed = true).also { dao ->
         coEvery { dao.exists(any()) } answers { firstArg<String>() in rows }
+        coEvery { dao.getByKeyId(any()) } answers { key.takeIf { firstArg<String>() in rows } }
         coEvery { dao.deleteByKeyId(any()) } answers { if (rows.remove(firstArg<String>())) 1 else 0 }
     }
     private val keystore = mockk<KeystoreManager>(relaxed = true).also { ks ->

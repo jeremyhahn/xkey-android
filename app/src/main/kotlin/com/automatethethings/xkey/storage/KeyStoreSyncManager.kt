@@ -436,12 +436,27 @@ enum class KeyNamespace(val stored: String) {
 }
 
 /**
+ * Whether [current], the row read now, is the row [confirmed] was captured
+ * from: the same immutable row ID, key ID and recorded namespace. A row
+ * deleted and recreated under its ID gets a new row ID, so a confirmation
+ * opened before that never reaches the new row or its material.
+ */
+internal fun isSameRow(current: KeyEntity?, confirmed: KeyEntity): Boolean =
+    current != null &&
+        current.id == confirmed.id &&
+        current.keyId == confirmed.keyId &&
+        current.materialNamespace == confirmed.materialNamespace
+
+/**
  * The one delete of a key row and its material, for every key screen: the
  * namespace is where the row's material is stored ([KeyNamespace.of]) and
  * the other namespace is never touched, so deleting credential `k` leaves
  * general key `k` and the reverse. A row whose namespace cannot be told is
  * refused with nothing removed. A credential row's delete needs
  * [credentials] to remove its metadata; without it the delete is refused.
+ * [key] is the row the user confirmed: the row is read again inside the
+ * revoke and the delete is refused unless it is still that row
+ * ([isSameRow]), so a stale confirmation removes nothing.
  *
  * @return the rows deleted; 0 when the delete was refused.
  */
@@ -452,6 +467,11 @@ suspend fun KeyDao.deleteKeyRow(
     credentials: CredentialMetadataDao? = null
 ): Int = try {
     deleteKeyAndMaterial(key.keyId) {
+        // The confirmation names the row it was opened for: if that row was
+        // replaced meanwhile (the ID deleted and recreated, its namespace
+        // changed), nothing of the replacement is touched.
+        val current = getByKeyId(key.keyId)
+        check(isSameRow(current, key)) { "the row ${key.keyId} was confirmed is gone; nothing is deleted" }
         if (key.source == "xkmsd") return@deleteKeyAndMaterial
         val namespace = checkNotNull(KeyNamespace.of(key, keystoreManager, softwareKeys)) {
             "the namespace of ${key.keyId} cannot be told; nothing is deleted"
