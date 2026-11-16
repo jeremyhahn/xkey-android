@@ -731,6 +731,35 @@ class KeySharingPendingIntentHandlerTest {
     }
 
     /**
+     * #270 verify r3 (1): an Ed25519 general key is in the Ed25519
+     * preferences, with no Keystore certificate. Beside a credential of its
+     * id, local.deleteKey reads its public half from the stored key: the
+     * Ed25519 key's material and row go, the credential stays.
+     */
+    @Test
+    fun anRpcDeleteOfAnEd25519GeneralKeyRowKeepsTheSameIdCredential() = runTest {
+        val id = "k-ed25519"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        var held = mapOf("keystore:xkey_credential_$id" to "1", "ed25519:xkey_key_$id" to "1")
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers { held }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { held = held - secondArg<Map<String, String>>().keys; emptyMap() }
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns null
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
+        every { keystore.getCOSEPublicKey(id, any()) } returns null
+        every { keystore.getEd25519PrivateKey("xkey_key_$id") } returns pair.private
+        every { keystore.getEd25519PrivateKey("xkey_credential_$id") } returns null
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "signing", publicKeyDer = pair.public.encoded)
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        assertEquals("the Ed25519 key's delete took the credential", mapOf("keystore:xkey_credential_$id" to "1"), held)
+        assertEquals("the Ed25519 key's row stayed", null, tables.key(id))
+    }
+
+    /**
      * #270 review: a fido2 row whose public key names neither key under a
      * shared id cannot be placed: the delete is refused and both keys and
      * the row stay.

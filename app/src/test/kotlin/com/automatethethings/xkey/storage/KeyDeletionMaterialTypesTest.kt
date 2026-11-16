@@ -508,6 +508,54 @@ class KeyDeletionMaterialTypesTest {
     }
 
     /**
+     * #270 verify r3 (1): an Ed25519 general key lives in the Ed25519
+     * preferences, with no Keystore certificate. Beside a credential of its
+     * id, its row's delete reads the key's public half from that backend
+     * (the real getters, no stubbed public key) and deletes the Ed25519 key;
+     * the credential stays.
+     */
+    @Test
+    fun anEd25519GeneralKeyBesideASameIdCredentialIsDeletedThroughItsRow() = kotlinx.coroutines.test.runTest {
+        mockkStatic(android.util.Base64::class)
+        every { android.util.Base64.decode(any<String>(), any()) } answers { java.util.Base64.getDecoder().decode(firstArg<String>()) }
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        keystoreKey("xkey_credential_k", certificate = true)
+        ed25519["xkey_key_k"] = java.util.Base64.getEncoder().encodeToString(pair.private.encoded)
+        val row = tables.addKey(
+            "k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE,
+            keyType = "signing", publicKeyDer = pair.public.encoded
+        )
+
+        assertTrue(store.deleteKey("k", row, keyMaterialDeleter(context, keystore, row = tables.key("k"))))
+        assertTrue("the Ed25519 key outlived its row", ed25519.isEmpty())
+        assertEquals("the Ed25519 key's delete took the credential", setOf("xkey_credential_k"), entries.keys)
+        assertEquals(null, tables.key("k"))
+    }
+
+    /**
+     * #270 verify r3 (2): a key from the KMS daemon holds no local material,
+     * so its row's delete reads none: with every local backend unreadable,
+     * the delete still goes through, and nothing local is touched.
+     */
+    @Test
+    fun aRemoteKeyRowIsDeletedWithEveryLocalBackendUnreadable() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val row = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE, keyType = "fido2")
+        tables.keys.value = tables.keys.value + ("k" to tables.key("k")!!.copy(source = "xkmsd"))
+        val unreadable = com.automatethethings.xkey.crypto.KeyPresenceUnreadableException("xkey_key_k", null)
+        every { keystore.holdsInternalKey("k") } throws unreadable
+        every { keystore.userKeyGeneration("k") } throws unreadable
+
+        assertTrue(store.deleteKey("k", row, keyMaterialDeleter(context, keystore, row = tables.key("k"))))
+        assertEquals(null, tables.key("k"))
+        assertFalse(store.isDeletionPending("k"))
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+    }
+
+    /**
      * #255 review: a credential delete still owed beside the general key's
      * surviving row refuses uses of the credential only; the general key,
      * whose material and policy the delete kept, stays usable. A whole-key
