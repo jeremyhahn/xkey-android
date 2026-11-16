@@ -226,7 +226,9 @@ class KeyStoreSyncManager(
             // holds that user alias, so the raw alias neither creates the row
             // nor marks it protected; the internal entry itself stays
             // protected by its alias (isProtectedAlias), never by the row.
-            if (keyId == alias && ownedByUserKey(keyStore, keyId)) continue
+            // The user key may hold its material in any backend, so its
+            // owners are read from every one, not the Keystore alone.
+            if (keyId == alias && ownedByUserKey(keyId)) continue
 
             if (!keyDao.exists(keyId)) {
                 val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
@@ -246,9 +248,21 @@ class KeyStoreSyncManager(
         return discovered
     }
 
-    /** Whether [keyStore] holds a user key's alias (credential or general) for key ID [keyId]. */
-    private fun ownedByUserKey(keyStore: KeyStore, keyId: String): Boolean =
-        keystoreAliasesOf(keyId).any { it != keyId && keyStore.containsAlias(it) }
+    /**
+     * Whether a user key (credential or general) owns key ID [keyId], read
+     * from its material in every backend ([KeystoreManager.userKeyOwners]):
+     * the Keystore, the Ed25519 preferences and the software key store
+     * (#270 verify). A backend that cannot be read leaves the row as it is
+     * (true): it is neither created nor flipped to a system key on a read
+     * failure, and the internal alias stays protected by its alias.
+     */
+    private fun ownedByUserKey(keyId: String): Boolean =
+        try {
+            keystoreManager.userKeyOwners(keyId).isNotEmpty()
+        } catch (e: Exception) {
+            Log.w(TAG, "Owners of $keyId could not be read; its row is left as it is", e)
+            true
+        }
 
     /**
      * Removes keys table entries for local keys whose Keystore entries no longer exist.

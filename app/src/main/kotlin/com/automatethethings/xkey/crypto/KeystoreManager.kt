@@ -1516,12 +1516,25 @@ class KeystoreManager(private val context: Context) {
      * not (`local.generateKey` makes fido2 rows under the general alias):
      * the row's public key must be exactly one of the two keys', or
      * [KeyOwnershipUnknownException] refuses the delete.
+     *
+     * The key is read from the material ([ownersOf]), never from the type
+     * alone (#270 verify): with one key under the id, the row is that key's
+     * (a fido2 row's key can be under the general alias), unless the row's
+     * public key names another key, when the row's own key is gone and the
+     * type names it. Only with no material under the id does the type say.
+     * So a retry, which never switches kind, still deletes the row's key.
      */
     fun rowKeyKind(keyId: String, keyType: String, publicKeyDer: () -> ByteArray?, generation: Set<String>): UserKeyKind {
-        if (!holdsKind(keyId, generation, UserKeyKind.CREDENTIAL) || !holdsKind(keyId, generation, UserKeyKind.GENERAL)) {
-            return userKeyKindOf(keyType)
-        }
+        val held = ownersOf(keyId, generation)
+        if (held.isEmpty()) return userKeyKindOf(keyType)
         val der = publicKeyDer()
+        held.singleOrNull()?.let { only ->
+            // A key with no readable public half (symmetric, software) is
+            // the row's: only a public key that differs names another key.
+            val own = der == null ||
+                runCatching { getPublicKeyDER(keyId, only) }.getOrNull()?.contentEquals(der) != false
+            return if (own) only else userKeyKindOf(keyType)
+        }
         val owners = if (der == null) emptyList() else UserKeyKind.entries.filter {
             getPublicKeyDER(keyId, it)?.contentEquals(der) == true
         }
@@ -1857,6 +1870,19 @@ class KeystoreManager(private val context: Context) {
      * with no user key under the id. A presence check only.
      */
     fun holdsInternalKey(keyId: String): Boolean = !userKeyIdInUse(keyId) && rawAlias(keyId) != null
+
+    /**
+     * The user keys that own [keyId] ([ownersOf]), from the material stored
+     * under it in every backend: the Keystore and Ed25519 entries of its
+     * user-key namespace ([userKeyGeneration]) and its software store record
+     * (#270 verify). Empty when no user key holds the id. A backend that
+     * cannot be read throws, never reads as "no owner".
+     */
+    fun userKeyOwners(keyId: String): Set<UserKeyKind> {
+        val material = userKeyGeneration(keyId).keys.toMutableSet()
+        if (softwareKeys().generation(keyId) != null) material += com.automatethethings.xkey.storage.SOFTWARE_ENTRY
+        return ownersOf(keyId, material)
+    }
 
     /**
      * Whether an Ed25519 software key is stored under [alias] (API 33+ only),
@@ -2418,8 +2444,9 @@ class KeystoreManager(private val context: Context) {
          * (#270 round 4).
          */
         fun deleteTarget(keyId: String, rowKind: UserKeyKind, generation: Set<String>, legacy: Boolean): UserKeyKind {
-            val credential = holdsKind(keyId, generation, UserKeyKind.CREDENTIAL)
-            val general = holdsKind(keyId, generation, UserKeyKind.GENERAL)
+            val owners = ownersOf(keyId, generation)
+            val credential = UserKeyKind.CREDENTIAL in owners
+            val general = UserKeyKind.GENERAL in owners
             return when {
                 credential && !general -> UserKeyKind.CREDENTIAL
                 general && !credential -> UserKeyKind.GENERAL
@@ -2438,8 +2465,22 @@ class KeystoreManager(private val context: Context) {
          */
         fun presentKind(keyId: String, generation: Set<String>, kind: UserKeyKind): UserKeyKind {
             val other = if (kind == UserKeyKind.CREDENTIAL) UserKeyKind.GENERAL else UserKeyKind.CREDENTIAL
-            return if (!holdsKind(keyId, generation, kind) && holdsKind(keyId, generation, other)) other else kind
+            val owners = ownersOf(keyId, generation)
+            return if (kind !in owners && other in owners) other else kind
         }
+
+        /**
+         * The one reading of which user keys own [keyId] (#270 verify): the
+         * kinds whose material [material] (entries of [userKeyGeneration],
+         * [com.automatethethings.xkey.storage.keyMaterialGeneration] or a
+         * tombstone's recorded generation) shows under the id, in every
+         * backend: Keystore and Ed25519 entries of the kind's alias, and a
+         * software store record for the general key. Every delete, replay,
+         * settle and sync decides a key's namespace here, from its stored
+         * material, never from a row's type or a presence probe's cache.
+         */
+        fun ownersOf(keyId: String, material: Set<String>): Set<UserKeyKind> =
+            UserKeyKind.entries.filterTo(LinkedHashSet()) { holdsKind(keyId, material, it) }
 
         /** Whether [generation] holds material of [keyId]'s [kind] key; a software key is a general key. */
         fun holdsKind(keyId: String, generation: Set<String>, kind: UserKeyKind): Boolean = generation.any {

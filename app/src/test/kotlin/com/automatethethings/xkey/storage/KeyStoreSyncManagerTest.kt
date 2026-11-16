@@ -77,6 +77,13 @@ class KeyStoreSyncManagerTest {
 
         keystoreManager = mockk(relaxed = true)
         every { keystoreManager.holdsAnyKey(any()) } returns true
+        // The ids' owners, from the platform Keystore this test fakes.
+        every { keystoreManager.userKeyOwners(any()) } answers {
+            val id = firstArg<String>()
+            com.automatethethings.xkey.crypto.UserKeyKind.entries.filterTo(LinkedHashSet()) {
+                keyStore.containsAlias(KeystoreManager.userKeyAlias(id, it))
+            }
+        }
         credentialDao = mockk(relaxed = true)
         coEvery { credentialDao.getAll() } returns emptyList()
         keyDao = mockk(relaxed = true)

@@ -35,10 +35,12 @@ import kotlinx.coroutines.withContext
  * under the key's [KeyPolicyStore.withKeyMaterial] lock.
  *
  * Every key delete, direct or replayed, reaches material only here, so
- * this is where an internal key is refused (#193 r11): an id that resolves
- * to an alias outside its user-key namespace ([isInternalKey]) throws
- * [InternalKeyException] with nothing deleted, and no alias outside that
- * namespace is ever deleted.
+ * this is where an internal key is refused (#193 r11): a tombstone that
+ * recorded an entry outside the id's user-key namespace
+ * ([KeystoreManager.ownersOf]) throws [InternalKeyException] with nothing
+ * deleted, and no alias outside that namespace is ever deleted. The record
+ * decides, not a probe of the id: a new delete of an internal id is refused
+ * before its tombstone is written ([readKeyMaterialGeneration]).
  */
 fun deleteKeyMaterial(
     context: Context,
@@ -47,14 +49,29 @@ fun deleteKeyMaterial(
     keystore: KeystoreManager = KeystoreManager(context)
 ): Boolean {
     if (tombstone.source == "xkmsd") return true
-    if (isInternalKey(held.keyId, keystore)) throw InternalKeyException(held.keyId)
     val generation = tombstone.generation ?: run {
         // Written before generations were recorded: it names no material,
         // and deleting whatever is under the id now could be a later key's.
         Log.w(TAG, "Deletion of ${held.keyId} recorded no material generation; nothing deleted")
         return true
     }
-    return deleteKeyMaterialGeneration(context, held.keyId, decodeGeneration(generation), keystore)
+    val entries = try {
+        decodeGeneration(generation)
+    } catch (e: org.json.JSONException) {
+        // A record that cannot be read names no material either.
+        Log.w(TAG, "Deletion of ${held.keyId} recorded an unreadable generation; nothing deleted")
+        return true
+    }
+    // Whether the delete is a user key's is read from what its tombstone
+    // recorded, never from a presence probe (#270 verify): a failed Ed25519
+    // commit already emptied the preferences' cache, so a probe would take
+    // a user key named like an internal alias for that internal key and
+    // drop the tombstone with the key still on disk. An entry outside the
+    // id's user-key namespace is never deleted: the tombstone is refused.
+    if (entries.keys.any { KeystoreManager.ownersOf(held.keyId, setOf(it)).isEmpty() }) {
+        throw InternalKeyException(held.keyId)
+    }
+    return deleteKeyMaterialGeneration(context, held.keyId, entries, keystore)
 }
 
 /**
