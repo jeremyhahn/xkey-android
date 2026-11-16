@@ -125,6 +125,10 @@ class GenerationEchoTest {
     fun `a local method echoes the generation on success`() = runTest {
         coEvery { keyDao.getByKeyId("k1") } returns mockk<KeyEntity>(relaxed = true)
         every { keystoreManager.getPublicKeyPEM("k1", any()) } returns "PEM"
+        // The export places the key through its row and material (#270 review r4).
+        mockkStatic("com.automatethethings.xkey.storage.KeyDeletionReplayKt")
+        every { com.automatethethings.xkey.storage.keyMaterialGeneration(any(), "k1", any(), any(), any()) } returns emptyMap()
+        every { keystoreManager.rowKeyKind("k1", any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
 
         val response = answer(
             """{"id":2,"generation":43,"method":"local.getPublicKey","params":{"keyId":"k1","format":"${ExportFormats.PEM}"}}"""

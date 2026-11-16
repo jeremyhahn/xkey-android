@@ -2235,12 +2235,27 @@ class RequestHandler(
         val keyEntity = keyDao.getByKeyId(pubKeyParams.keyId)
             ?: throw ProtocolException("Key not found: ${pubKeyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
-        // The namespace is resolved once (#255 review r4): a credential that
-        // lives only under its credential alias exports like a general key.
+        // The namespace is resolved once, from the key row (#270 review r4):
+        // the key its row describes ([KeystoreManager.rowKeyKind]), so a
+        // credential row beside a general key of the same id exports the
+        // credential's key under the row's algorithm, and a row that names
+        // neither key is refused. A credential that lives only under its
+        // credential alias exports like a general key.
         // The use gate and every read below name that same kind, so a key
-        // pending deletion is refused rather than exported, and an id both
-        // namespaces hold is refused, never exported as either key.
-        val exportKind = keystoreManager.exportKind(pubKeyParams.keyId)
+        // pending deletion is refused rather than exported, and an
+        // unreadable store is refused, never read as an empty one: every
+        // backend of both namespaces is probed first ([KeystoreManager.exportKind]
+        // throws [com.automatethethings.xkey.crypto.KeyPresenceUnreadableException]).
+        keystoreManager.exportKind(pubKeyParams.keyId)
+        val exportKind = try {
+            keystoreManager.rowKeyKind(
+                pubKeyParams.keyId, keyEntity.keyType,
+                { com.automatethethings.xkey.crypto.RowPublicKey(keyEntity.publicKeyDer, keyEntity.publicKeyCose) },
+                com.automatethethings.xkey.storage.keyMaterialGeneration(context, pubKeyParams.keyId, keystoreManager).keys
+            )
+        } catch (e: com.automatethethings.xkey.crypto.KeyOwnershipUnknownException) {
+            throw ProtocolException("Cannot tell which key ${pubKeyParams.keyId} names", errorCode = ErrorCodes.EXPORT_FAILED)
+        }
         val publicKey: String = keyPolicyStore.withUsableKey(pubKeyParams.keyId, exportKind) { when (pubKeyParams.format) {
             ExportFormats.DER -> {
                 val der = keystoreManager.getPublicKeyDER(pubKeyParams.keyId, exportKind)

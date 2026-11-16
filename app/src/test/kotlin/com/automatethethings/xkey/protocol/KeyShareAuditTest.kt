@@ -962,6 +962,7 @@ class KeyShareAuditTest {
             aliases[firstArg()]?.let { bytes ->
                 mockk<java.security.cert.Certificate> {
                     every { publicKey } returns mockk { every { encoded } returns bytes }
+                    every { encoded } returns bytes
                 }
             }
         }
@@ -976,7 +977,9 @@ class KeyShareAuditTest {
             KEY_ID, 7L, "keystore",
             JSONObject().put("${KeystoreManager.KEYSTORE_ENTRY}xkey_credential_$KEY_ID", "1").toString()
         )
+        // The row is the general key's: it records that key's public key (#270 review r4).
         coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+            .copy(publicKeyDer = generalKey)
         handler = RequestHandler(
             context = context,
             keystoreManager = KeystoreManager(context),
@@ -1015,7 +1018,12 @@ class KeyShareAuditTest {
         every { platform.containsAlias(any()) } answers { firstArg<String>() in keys }
         every { platform.getKey(any(), any()) } answers { keys[firstArg()]?.private }
         every { platform.getCertificate(any()) } answers {
-            keys[firstArg()]?.let { pair -> mockk<java.security.cert.Certificate> { every { publicKey } returns pair.public } }
+            keys[firstArg()]?.let { pair ->
+                mockk<java.security.cert.Certificate> {
+                    every { publicKey } returns pair.public
+                    every { encoded } returns pair.public.encoded
+                }
+            }
         }
         every { KeyStore.getInstance("AndroidKeyStore") } returns platform
     }
@@ -1339,6 +1347,7 @@ class KeyShareAuditTest {
         givenSoftwareKey(exportable = true, shareable = true)
         every { anyConstructed<SoftwareKeyStore>().presence(KEY_ID) } returns
             com.automatethethings.xkey.crypto.KeyPresence.PRESENT
+        every { anyConstructed<SoftwareKeyStore>().generation(KEY_ID) } returns "1"
         val keystore = realKeystoreHandler()
         val encoded = Base64.getEncoder().encodeToString(credential.public.encoded)
 
