@@ -20,6 +20,7 @@ import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivTestCertificates
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -140,6 +141,42 @@ class KeyStoreSyncManagerTest {
         assertEquals(0, discovered)
         coVerify(exactly = 0) { keyDao.insert(any()) }
     }
+
+    /**
+     * A credential's metadata row is listed under the credential namespace
+     * only when its exact alias `xkey_credential_<id>` holds the key: one
+     * whose ID resolves to a general key `xkey_key_<id>` records no
+     * namespace, so its delete reads where the material is instead of
+     * removing credential material that is not there.
+     */
+    @Test
+    fun aCredentialRowRecordsTheCredentialNamespaceOnlyForItsExactAlias() = runTest {
+        every { keyStore.aliases() } answers { Collections.enumeration(emptyList<String>()) }
+        coEvery { keyDao.getAll() } returns emptyList()
+        coEvery { credentialDao.getAll() } returns listOf(credential("c"), credential("g"))
+        every { keystoreManager.resolveKeystoreAlias(any()) } answers {
+            when (firstArg<String>()) {
+                "c" -> "xkey_credential_c"
+                "g" -> "xkey_key_g"
+                else -> null
+            }
+        }
+        every { keystoreManager.listAllKeystoreAliases() } returns listOf("xkey_credential_c", "xkey_key_g")
+        val inserted = Collections.synchronizedList(mutableListOf<KeyEntity>())
+        coEvery { keyDao.insert(any()) } answers { inserted += firstArg<KeyEntity>(); 1L }
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao).syncAll()
+
+        val namespaces = inserted.associate { it.keyId to it.materialNamespace }
+        assertEquals(KeyNamespace.CREDENTIAL.stored, namespaces["c"])
+        assertEquals(null, namespaces["g"])
+        assertEquals(setOf("c", "g"), namespaces.keys)
+    }
+
+    private fun credential(id: String) = CredentialMetadataEntity(
+        credentialId = id, rpId = "example.com", rpName = "Example", userId = "u",
+        userName = "user", userDisplayName = "User", publicKeyCose = byteArrayOf(1)
+    )
 
     /**
      * A row's key ID maps to the aliases discovery gives that ID, never to
