@@ -425,9 +425,12 @@ class FileOperationFlowTest {
     /** Switching operations clears the previous outcome from the screen. */
     @Test
     fun switchingOperationsHidesThePreviousResult() {
+        // Signing reports success only once the signed copy the picker names is written.
+        val copy = stubSignedCopyDestination()
         val scenario = launch(jpegFile)
         selectSpinnerEntry(scenario, keyEntry)
         process(scenario)
+        assertNotNull("the signed copy should have been saved", awaitSignedCopy(copy))
         assertShownTextInTree(scenario, string(scenario, R.string.file_operation_sign_success))
 
         clickClickableWithExactText(scenario, string(scenario, R.string.file_operation_encrypt))
