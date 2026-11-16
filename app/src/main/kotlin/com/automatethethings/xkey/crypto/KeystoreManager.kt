@@ -1538,8 +1538,18 @@ class KeystoreManager(private val context: Context) {
         if (held.isEmpty()) return userKeyKindOf(keyType)
         val row = publicKey()
         // The row's key read in each encoding it holds ([matchRowPublicKey]).
+        // Each key's public half is read from the backend that stores it: a
+        // Keystore certificate, or an Ed25519 key's preferences entry, which
+        // has no certificate (#270 verify r3).
         val rowPublicKeyMatch = { kind: UserKeyKind ->
-            matchRowPublicKey(row, { getPublicKeyDER(keyId, kind) }, { getCOSEPublicKey(keyId, kind) })
+            matchRowPublicKey(
+                row,
+                {
+                    runCatching { getPublicKeyDER(keyId, kind) }.getOrNull()
+                        ?: getEd25519PrivateKey(userKeyAlias(keyId, kind))?.let { ed25519PublicKeyDer(it) }
+                },
+                { getCOSEPublicKey(keyId, kind) }
+            )
         }
         held.singleOrNull()?.let { only ->
             // A key with no readable public half (symmetric, software) is
@@ -2510,6 +2520,18 @@ class KeystoreManager(private val context: Context) {
                 byDer == false || byCose == false -> false
                 else -> null
             }
+        }
+
+        /**
+         * The SubjectPublicKeyInfo DER of an Ed25519 [privateKey]'s public
+         * half, derived from the PKCS#8 key the Ed25519 preferences store
+         * (they keep no public key or certificate).
+         */
+        fun ed25519PublicKeyDer(privateKey: java.security.PrivateKey): ByteArray {
+            val params = org.bouncycastle.crypto.util.PrivateKeyFactory.createKey(privateKey.encoded)
+                as org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
+            return org.bouncycastle.crypto.util.SubjectPublicKeyInfoFactory
+                .createSubjectPublicKeyInfo(params.generatePublicKey()).encoded
         }
 
         /** Whether [generation] holds material of [keyId]'s [kind] key; a software key is a general key. */

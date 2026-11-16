@@ -103,6 +103,24 @@ class KeyOwnershipChokePointTest {
         }
     }
 
+    /** #270 verify r3: an Ed25519 key's public half is read from its preferences entry, which has no certificate. */
+    @Test
+    fun theRowMatchReadsEd25519KeysFromTheirBackend() {
+        val rowKeyKind = body(source("crypto/KeystoreManager.kt"), "rowKeyKind")
+        assertTrue("rowKeyKind reads no Ed25519 key", "getEd25519PrivateKey(" in rowKeyKind && "ed25519PublicKeyDer(" in rowKeyKind)
+    }
+
+    /** #270 verify r3: a remote (`xkmsd`) key's delete resolves no kind, so it probes no local backend. */
+    @Test
+    fun aRemoteKeyDeleteResolvesNoLocalKind() {
+        val replay = source("storage/KeyDeletionReplay.kt")
+        assertFalse("a delete resolves its kind before the source check", "deleteKind(held))" in replay || "deleteKind(held), " in replay)
+        val lazy = Regex("""fun readKeyMaterialGeneration\([^)]*kind: \(\) -> UserKeyKind\?""").find(replay)
+        assertTrue("readKeyMaterialGeneration takes no lazy kind", lazy != null)
+        val read = replay.substring(lazy!!.range.first)
+        assertTrue("the kind is read before the source check", read.indexOf("\"xkmsd\"") in 0 until read.indexOf("kind()"))
+    }
+
     private fun lineOf(text: String, offset: Int): Int = text.substring(0, offset).count { it == '\n' } + 1
 
     private fun stripComments(text: String): String =

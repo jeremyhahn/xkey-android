@@ -88,10 +88,25 @@ fun readKeyMaterialGeneration(
     keystore: KeystoreManager = KeystoreManager(context),
     kind: UserKeyKind? = null,
     retry: Boolean = false
+): String = readKeyMaterialGeneration(context, held, source, keystore, retry) { kind }
+
+/**
+ * [readKeyMaterialGeneration] of the user key [kind] resolves, read only
+ * for a key with local material: a KMS daemon key (`xkmsd`) holds none, so
+ * its delete probes no local backend, not even to resolve its kind (#270
+ * verify r3), and one that is unreadable never refuses it.
+ */
+internal fun readKeyMaterialGeneration(
+    context: Context,
+    held: KeyPolicyStore.KeyMaterialHeld,
+    source: String?,
+    keystore: KeystoreManager,
+    retry: Boolean,
+    kind: () -> UserKeyKind?
 ): String {
     if (source == "xkmsd") return encodeGeneration(emptyMap())
     if (isInternalKey(held.keyId, keystore)) throw InternalKeyException(held.keyId)
-    return encodeGeneration(keyMaterialGeneration(context, held.keyId, keystore, kind, retry))
+    return encodeGeneration(keyMaterialGeneration(context, held.keyId, keystore, kind(), retry))
 }
 
 private fun encodeGeneration(generation: Map<String, String>): String =
@@ -222,10 +237,10 @@ fun keyMaterialDeleter(
         // ([KeystoreManager.rowKeyKind]), so a same-id key is never taken
         // for the row's (#270 review).
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String =
-            readKeyMaterialGeneration(context, held, source, manager, deleteKind(held))
+            readKeyMaterialGeneration(context, held, source, manager, retry = false) { deleteKind(held) }
 
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?, retry: Boolean): String =
-            readKeyMaterialGeneration(context, held, source, manager, deleteKind(held), retry)
+            readKeyMaterialGeneration(context, held, source, manager, retry) { deleteKind(held) }
 
         private fun deleteKind(held: KeyPolicyStore.KeyMaterialHeld): UserKeyKind = kind
             ?: row?.let { rowKind(it) }
