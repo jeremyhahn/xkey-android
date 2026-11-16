@@ -24,6 +24,7 @@ import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
+import com.automatethethings.xkey.storage.dao.withKeyMutation
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import java.security.KeyStore
@@ -151,18 +152,22 @@ class KeyStoreSyncManager(
         var skipped = 0
 
         for (cred in credentials) {
-            if (keyDao.exists(cred.credentialId)) continue
+            // Under the key's mutation lock, so no delete of the ID runs
+            // between the existence checks and the insert.
+            withKeyMutation(cred.credentialId) {
+                if (keyDao.exists(cred.credentialId)) return@withKeyMutation
 
-            val alias = keystoreManager.resolveKeystoreAlias(cred.credentialId)
-            if (alias == null) {
-                skipped++
-                Log.d(TAG, "Skipped credential with no Keystore key: ${cred.credentialId}")
-                continue
+                val alias = keystoreManager.resolveKeystoreAlias(cred.credentialId)
+                if (alias == null) {
+                    skipped++
+                    Log.d(TAG, "Skipped credential with no Keystore key: ${cred.credentialId}")
+                    return@withKeyMutation
+                }
+
+                keyDao.insert(mapCredentialToKeyEntity(cred, alias))
+                synced++
+                Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
             }
-
-            keyDao.insert(mapCredentialToKeyEntity(cred, alias))
-            synced++
-            Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
         }
 
         Log.d(TAG, "Synced $synced credentials from credential_metadata, " +
@@ -204,12 +209,14 @@ class KeyStoreSyncManager(
                 }
             }
 
-            if (!keyDao.exists(keyId)) {
-                val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
-                if (entity != null) {
-                    keyDao.insert(entity)
-                    discovered++
-                    Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
+            withKeyMutation(keyId) {
+                if (!keyDao.exists(keyId)) {
+                    val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
+                    if (entity != null) {
+                        keyDao.insert(entity)
+                        discovered++
+                        Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
+                    }
                 }
             }
         }
@@ -235,10 +242,14 @@ class KeyStoreSyncManager(
             // Classify by the resolved alias, never the logical id: a general
             // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
             // a raw PIV slot alias row never resolves and so is removed here.
-            if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
-                SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
-                removed++
-                Log.d(TAG, "Removed stale key entry: ${key.keyId}")
+            // Checked and removed under the key's mutation lock, so a key
+            // recreated under the ID meanwhile is never taken for stale.
+            withKeyMutation(key.keyId) {
+                if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
+                    SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
+                    removed++
+                    Log.d(TAG, "Removed stale key entry: ${key.keyId}")
+                }
             }
         }
 
@@ -469,7 +480,9 @@ suspend fun KeyDao.deleteKeyRow(
     deleteKeyAndMaterial(key.keyId) {
         // The confirmation names the row it was opened for: if that row was
         // replaced meanwhile (the ID deleted and recreated, its namespace
-        // changed), nothing of the replacement is touched.
+        // changed), nothing of the replacement is touched. The read runs
+        // under the key's mutation lock (deleteKeyAndMaterial), so no
+        // replacement lands between it and the row going.
         val current = getByKeyId(key.keyId)
         check(isSameRow(current, key)) { "the row ${key.keyId} was confirmed is gone; nothing is deleted" }
         if (key.source == "xkmsd") return@deleteKeyAndMaterial
@@ -515,12 +528,15 @@ suspend fun KeyDao.deleteKeyAliasRow(
         KeyNamespace.GENERAL
     }
     var removed = false
-    val rows = SharePermissionLedger.revoking(keyId) {
-        val row = getByKeyId(keyId)
-        val rowGoes = row == null || KeyNamespace.of(row, keystoreManager, softwareKeys) == aliasNamespace
-        removed = removeAlias()
-        if (aliasNamespace == KeyNamespace.CREDENTIAL) credentials.deleteByCredentialId(keyId)
-        if (rowGoes) deleteByKeyId(keyId) else 0
+    // Under the key's mutation lock: the row read here is the row deleted.
+    val rows = withKeyMutation(keyId) {
+        SharePermissionLedger.revoking(keyId) {
+            val row = getByKeyId(keyId)
+            val rowGoes = row == null || KeyNamespace.of(row, keystoreManager, softwareKeys) == aliasNamespace
+            removed = removeAlias()
+            if (aliasNamespace == KeyNamespace.CREDENTIAL) credentials.deleteByCredentialId(keyId)
+            if (rowGoes) deleteByKeyId(keyId) else 0
+        }
     }
     return removed to rows
 }

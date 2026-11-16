@@ -20,6 +20,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import com.automatethethings.xkey.protocol.KeyIdReservations
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -441,11 +442,28 @@ interface KeyDao {
 }
 
 /**
+ * Runs [block] holding key [keyId]'s mutation lock: the per-ID locks of
+ * [KeyIdReservations.process] that local.generateKey (`key:<id>`) and the
+ * base generateKey (`credential:<id>`) hold while they create a key, taken
+ * in that order. A delete holds both, so no creation in either namespace
+ * lands between its reread of the row and the row going. Every creation of
+ * key material or a key row, and every delete, runs under it; the locks are
+ * not reentrant, so [block] never takes them again.
+ */
+suspend fun <T> withKeyMutation(keyId: String, block: suspend () -> T): T =
+    KeyIdReservations.process.withKeyLock("key:$keyId") {
+        KeyIdReservations.process.withKeyLock("credential:$keyId") { block() }
+    }
+
+/**
  * Deletes key [keyId]: its key material, through [removeMaterial], then its
  * metadata row, as one [SharePermissionLedger] revoke opened before the first
- * removal. A share of the key waiting at transport admission is refused from
- * the moment any of the key is removed, never admitted between the material
- * going and the row going. Every delete of a key's material goes through here.
+ * removal, under the key's mutation lock ([withKeyMutation]). A share of the
+ * key waiting at transport admission is refused from the moment any of the
+ * key is removed, never admitted between the material going and the row
+ * going, and no creation of [keyId] lands while the delete runs, so what
+ * [removeMaterial] reads of the row still holds when the row goes. Every
+ * delete of a key's material goes through here.
  *
  * @param keyId The unique key identifier.
  * @param removeMaterial Removes the key's material (Keystore entry, software
@@ -453,7 +471,9 @@ interface KeyDao {
  * @return Number of rows deleted.
  */
 suspend fun KeyDao.deleteKeyAndMaterial(keyId: String, removeMaterial: suspend () -> Unit): Int =
-    SharePermissionLedger.revoking(keyId) {
-        removeMaterial()
-        deleteByKeyId(keyId)
+    withKeyMutation(keyId) {
+        SharePermissionLedger.revoking(keyId) {
+            removeMaterial()
+            deleteByKeyId(keyId)
+        }
     }

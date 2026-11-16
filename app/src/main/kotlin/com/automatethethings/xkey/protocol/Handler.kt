@@ -54,6 +54,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.deleteKeyAliasRow
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
+import com.automatethethings.xkey.storage.dao.withKeyMutation
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricAuthMode
@@ -4281,36 +4282,42 @@ class RequestHandler(
                 params.optString("key_id", "").ifBlank { "shared-sym-${System.currentTimeMillis()}" }
             }
             val store = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
-            if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
+            val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
+            // Checked and stored under the key's mutation lock: no creation or
+            // delete of the ID lands between the existence check and the put.
+            val exists = withKeyMutation(keyId) {
+                if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) return@withKeyMutation true
+                persistAudited(
+                    write = {
+                        store.put(
+                            com.automatethethings.xkey.crypto.SoftwareKey(
+                                keyId = keyId,
+                                algorithm = algorithm,
+                                keyType = "symmetric",
+                                keySize = params.optInt("key_size", material.size * 8),
+                                exportable = false,
+                                shareable = false,
+                                material = material
+                            )
+                        )
+                    },
+                    record = {
+                        AuditLogger.logKeyCreated(
+                            keyId = keyId,
+                            keyLabel = keyId,
+                            keyType = "symmetric",
+                            algorithm = algorithm,
+                            source = "shared",
+                            deviceId = peerPublicKeyHex,
+                            deviceName = auditPeerName(peerPublicKeyHex)
+                        )
+                    }
+                )
+                false
+            }
+            if (exists) {
                 return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
             }
-            val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
-            persistAudited(
-                write = {
-                    store.put(
-                        com.automatethethings.xkey.crypto.SoftwareKey(
-                            keyId = keyId,
-                            algorithm = algorithm,
-                            keyType = "symmetric",
-                            keySize = params.optInt("key_size", material.size * 8),
-                            exportable = false,
-                            shareable = false,
-                            material = material
-                        )
-                    )
-                },
-                record = {
-                    AuditLogger.logKeyCreated(
-                        keyId = keyId,
-                        keyLabel = keyId,
-                        keyType = "symmetric",
-                        algorithm = algorithm,
-                        source = "shared",
-                        deviceId = peerPublicKeyHex,
-                        deviceName = auditPeerName(peerPublicKeyHex)
-                    )
-                }
-            )
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
                 put("import_id", keyId)

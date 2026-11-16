@@ -34,6 +34,7 @@ import com.automatethethings.xkey.credential.RelyingPartyOrigin
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.settings.BiometricSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.withKeyMutation
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import org.json.JSONException
@@ -287,72 +288,78 @@ class CreateCredentialHandler(
             requestedAuthDuration
         }
 
-        // Generate key in Android Keystore
-        Log.i(TAG, "Generating key: credentialId=$credentialIdBase64, authDuration=$authDurationSeconds")
-        val publicKeyCose = try {
-            keystoreManager.generateKeyWithAuthDuration(
+        // The key, its metadata and its row are created under the key's
+        // mutation lock, the one every key creation and delete holds, so no
+        // delete of the ID runs between them.
+        val publicKeyCose = withKeyMutation(credentialIdBase64) {
+            // Generate key in Android Keystore
+            Log.i(TAG, "Generating key: credentialId=$credentialIdBase64, authDuration=$authDurationSeconds")
+            val cose = try {
+                keystoreManager.generateKeyWithAuthDuration(
+                    credentialId = credentialIdBase64,
+                    authDurationSeconds = authDurationSeconds,
+                    requireStrongBox = false
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Key generation failed", e)
+                throw CredentialCreationException("Failed to generate key", e)
+            }
+            Log.i(TAG, "Key generated: COSE publicKey size=${cose.size}")
+
+            // Store credential metadata
+            val credentialMetadata = CredentialMetadataEntity(
                 credentialId = credentialIdBase64,
-                authDurationSeconds = authDurationSeconds,
-                requireStrongBox = false
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Key generation failed", e)
-            throw CredentialCreationException("Failed to generate key", e)
-        }
-        Log.i(TAG, "Key generated: COSE publicKey size=${publicKeyCose.size}")
-
-        // Store credential metadata
-        val credentialMetadata = CredentialMetadataEntity(
-            credentialId = credentialIdBase64,
-            rpId = rpId,
-            rpName = rpName,
-            userId = userId,
-            userName = userName,
-            userDisplayName = userDisplayName,
-            publicKeyCose = publicKeyCose,
-            signCount = 0,
-            isDiscoverable = isDiscoverable
-        )
-
-        try {
-            credentialDao.insert(credentialMetadata)
-        } catch (e: Exception) {
-            // Clean up the key if metadata storage fails
-            keystoreManager.deleteKey(credentialIdBase64)
-            throw CredentialCreationException("Failed to store credential metadata", e)
-        }
-
-        // Also store in unified key store for bidirectional key sharing
-        try {
-            keyDao.insert(KeyEntity(
-                keyId = credentialIdBase64,
-                keyType = "fido2",
-                algorithm = "ES256",
-                label = rpName,
-                publicKeyCose = publicKeyCose,
-                keySizeBits = 256,
-                strongBoxBacked = keystoreManager.isStrongBoxAvailable(),
-                // What the key IS, not what the ceremony asked for. Recording the
-                // request would claim an auth-bound key on a device with nothing
-                // enrolled, and the assertion path reads this flag to decide the
-                // UV bit — it would then sign UV=1 for an unverified ceremony.
-                biometricRequired = authDurationSeconds >= 0,
-                authDurationSeconds = authDurationSeconds,
-                exportable = false,
-                shareable = false,
-                source = "local",
-                createdAt = System.currentTimeMillis(),
                 rpId = rpId,
                 rpName = rpName,
                 userId = userId,
                 userName = userName,
                 userDisplayName = userDisplayName,
-                isDiscoverable = isDiscoverable,
-                signCount = 0
-            ))
-        } catch (e: Exception) {
-            // Non-fatal - credential_metadata is the primary store for CredentialProvider
-            Log.w(TAG, "Failed to sync to unified key store: ${e.message}")
+                publicKeyCose = cose,
+                signCount = 0,
+                isDiscoverable = isDiscoverable
+            )
+
+            try {
+                credentialDao.insert(credentialMetadata)
+            } catch (e: Exception) {
+                // Clean up the key if metadata storage fails
+                keystoreManager.deleteKey(credentialIdBase64)
+                throw CredentialCreationException("Failed to store credential metadata", e)
+            }
+
+            // Also store in unified key store for bidirectional key sharing
+            try {
+                keyDao.insert(KeyEntity(
+                    keyId = credentialIdBase64,
+                    keyType = "fido2",
+                    algorithm = "ES256",
+                    label = rpName,
+                    publicKeyCose = cose,
+                    keySizeBits = 256,
+                    strongBoxBacked = keystoreManager.isStrongBoxAvailable(),
+                    // What the key IS, not what the ceremony asked for. Recording the
+                    // request would claim an auth-bound key on a device with nothing
+                    // enrolled, and the assertion path reads this flag to decide the
+                    // UV bit — it would then sign UV=1 for an unverified ceremony.
+                    biometricRequired = authDurationSeconds >= 0,
+                    authDurationSeconds = authDurationSeconds,
+                    exportable = false,
+                    shareable = false,
+                    source = "local",
+                    createdAt = System.currentTimeMillis(),
+                    rpId = rpId,
+                    rpName = rpName,
+                    userId = userId,
+                    userName = userName,
+                    userDisplayName = userDisplayName,
+                    isDiscoverable = isDiscoverable,
+                    signCount = 0
+                ))
+            } catch (e: Exception) {
+                // Non-fatal - credential_metadata is the primary store for CredentialProvider
+                Log.w(TAG, "Failed to sync to unified key store: ${e.message}")
+            }
+            cose
         }
 
         // Log successful registration

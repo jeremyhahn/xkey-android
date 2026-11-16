@@ -60,6 +60,7 @@ import com.automatethethings.xkey.storage.deleteKeyRow
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.withKeyMutation
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.google.android.material.card.MaterialCardView
@@ -1125,53 +1126,57 @@ class KeyManagementActivity : AppCompatActivity() {
                 // turned off — and on a device with nothing enrolled, Keystore
                 // refuses such a key and creation failed outright.
                 val authDuration = if (biometric) 5 else -1
-                var publicKeyDer: ByteArray? = null
-                var keySizeBits = 0
+                // Generated and recorded under the key's mutation lock, the
+                // one every key creation and delete holds.
+                withKeyMutation(keyId) {
+                    var publicKeyDer: ByteArray? = null
+                    var keySizeBits = 0
 
-                when (keyType) {
-                    "signing", "tls", "ssh" -> {
-                        publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
-                        keySizeBits = actualKeySizeBits(publicKeyDer)
-                            ?: nominalKeySizeBits(algorithm)
-                    }
-                    "encryption" -> {
-                        // Generated at the requested modulus size. The size is
-                        // still read back off the key rather than assumed, so a
-                        // row can never describe something that was not produced.
-                        val requestedBits = if (algorithm == "RSA-OAEP-4096") 4096 else 2048
-                        publicKeyDer = keystoreManager.generateRSAEncryptionKey(
-                            keyId,
-                            requestedBits,
-                            authDuration
-                        )
-                        keySizeBits = actualKeySizeBits(publicKeyDer) ?: requestedBits
-                    }
-                    "secret" -> {
-                        keySizeBits = when (algorithm) {
-                            "AES-128" -> 128
-                            "AES-256" -> 256
-                            else -> 256
+                    when (keyType) {
+                        "signing", "tls", "ssh" -> {
+                            publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
+                            keySizeBits = actualKeySizeBits(publicKeyDer)
+                                ?: nominalKeySizeBits(algorithm)
                         }
-                        keystoreManager.generateSymmetricKey(keyId, keySizeBits, authDuration)
+                        "encryption" -> {
+                            // Generated at the requested modulus size. The size is
+                            // still read back off the key rather than assumed, so a
+                            // row can never describe something that was not produced.
+                            val requestedBits = if (algorithm == "RSA-OAEP-4096") 4096 else 2048
+                            publicKeyDer = keystoreManager.generateRSAEncryptionKey(
+                                keyId,
+                                requestedBits,
+                                authDuration
+                            )
+                            keySizeBits = actualKeySizeBits(publicKeyDer) ?: requestedBits
+                        }
+                        "secret" -> {
+                            keySizeBits = when (algorithm) {
+                                "AES-128" -> 128
+                                "AES-256" -> 256
+                                else -> 256
+                            }
+                            keystoreManager.generateSymmetricKey(keyId, keySizeBits, authDuration)
+                        }
+                        "hmac" -> {
+                            keySizeBits = if (algorithm.contains("512")) 512 else 256
+                            keystoreManager.generateHMACKey(keyId, algorithm)
+                        }
                     }
-                    "hmac" -> {
-                        keySizeBits = if (algorithm.contains("512")) 512 else 256
-                        keystoreManager.generateHMACKey(keyId, algorithm)
-                    }
-                }
 
-                val entity = KeyEntity(
-                    keyId = keyId,
-                    keyType = keyType,
-                    algorithm = algorithm,
-                    label = label,
-                    publicKeyDer = publicKeyDer,
-                    keySizeBits = keySizeBits,
-                    biometricRequired = biometric,
-                    source = "local",
-                    createdAt = System.currentTimeMillis()
-                )
-                keyDao.insert(entity)
+                    val entity = KeyEntity(
+                        keyId = keyId,
+                        keyType = keyType,
+                        algorithm = algorithm,
+                        label = label,
+                        publicKeyDer = publicKeyDer,
+                        keySizeBits = keySizeBits,
+                        biometricRequired = biometric,
+                        source = "local",
+                        createdAt = System.currentTimeMillis()
+                    )
+                    keyDao.insert(entity)
+                }
                 Snackbar.make(rootLayout, getString(R.string.key_create_success), Snackbar.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 android.util.Log.e("KeyManagement", "Key creation failed", e)
