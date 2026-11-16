@@ -169,6 +169,46 @@ class LocalKeyNamespaceTest {
         assertEquals(emptySet<String>(), metadata.toSet())
     }
 
+    @Test
+    fun deletingACredentialByItsIdDeletesItsKeyAndMetadata() = runBlocking<Unit> {
+        aliases += "xkey_credential_k"
+        rows["k"] = row("k", KeyNamespace.CREDENTIAL)
+        metadata += "k"
+
+        val response = call(MethodNames.LOCAL_DELETE_KEY, JSONObject().put("keyId", "k"))
+
+        assertEquals("the credential's private key goes", emptySet<String>(), aliases.toSet())
+        assertEquals("its metadata goes", emptySet<String>(), metadata.toSet())
+        assertEquals("its row goes", emptySet<String>(), rows.keys.toSet())
+        assertEquals(true, response.optJSONObject("result")?.optBoolean("deleted"))
+    }
+
+    @Test
+    fun deletingAnUnrecordedCredentialRowByItsIdDeletesItsKeyAndMetadata() = runBlocking<Unit> {
+        aliases += "xkey_credential_k"
+        rows["k"] = row("k", KeyNamespace.CREDENTIAL).copy(materialNamespace = null)
+        metadata += "k"
+
+        val response = call(MethodNames.LOCAL_DELETE_KEY, JSONObject().put("keyId", "k"))
+
+        assertEquals("the credential's private key goes", emptySet<String>(), aliases.toSet())
+        assertEquals("its metadata goes", emptySet<String>(), metadata.toSet())
+        assertEquals("its row goes", emptySet<String>(), rows.keys.toSet())
+        assertEquals(true, response.optJSONObject("result")?.optBoolean("deleted"))
+    }
+
+    @Test
+    fun deletingAGeneralKeyByItsIdKeepsTheCredentialOfItsId() = runBlocking<Unit> {
+        aliases += listOf("xkey_credential_k", "xkey_key_k")
+        rows["k"] = row("k", KeyNamespace.GENERAL)
+        metadata += "k"
+
+        call(MethodNames.LOCAL_DELETE_KEY, JSONObject().put("keyId", "k"))
+
+        assertEquals("only the general key goes", setOf("xkey_credential_k"), aliases.toSet())
+        assertEquals("the credential's metadata survives", setOf("k"), metadata.toSet())
+    }
+
     private suspend fun call(method: String, params: JSONObject): JSONObject {
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", method).put("params", params)
         return JSONObject(String(realHandler().handleRawRequest(request.toString().toByteArray())))
