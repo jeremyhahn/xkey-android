@@ -16,10 +16,13 @@ package com.automatethethings.xkey.storage
 
 import androidx.annotation.StringRes
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.ca.AndroidCA
 import com.automatethethings.xkey.crypto.KeyPresenceUnreadableException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.UserKeyKind
+import java.security.KeyStore
+import java.util.Base64
 
 /**
  * What a screen's read of a key read (#255 review r7): the value, nothing
@@ -89,9 +92,34 @@ fun KeystoreManager.readOwnPublicKeyDer(keyId: String, kind: UserKeyKind): KeyRe
  * Unreadable is a store the key could live in that cannot be read. The
  * screen takes it through [orRefuse], never an exception out of its button
  * or coroutine, and never a fallback to another namespace.
+ *
+ * The root and intermediate CA keys are listed by their raw Keystore
+ * aliases ([CA_KEY_ALIASES]) and are no user key: their public key is read
+ * from the alias's certificate ([caPublicKeyPem]), and the alias resolves in
+ * no namespace for any write, delete or private-key use.
  */
 fun KeystoreManager.readOwnPublicKey(keyId: String): KeyRead<String> =
-    readRefusingUnreadable { soleKind(keyId)?.let { getPublicKeyPEM(keyId, it) } }
+    readRefusingUnreadable {
+        if (keyId in CA_KEY_ALIASES) caPublicKeyPem(keyId) else soleKind(keyId)?.let { getPublicKeyPEM(keyId, it) }
+    }
+
+/** The raw Keystore aliases of the CA keys a screen lists ([AndroidCA]). */
+private val CA_KEY_ALIASES = setOf(AndroidCA.ROOT_CA_ALIAS, AndroidCA.INTERMEDIATE_CA_ALIAS)
+
+/**
+ * The PEM public key of the CA key under [alias], read from its Keystore
+ * certificate only, or null when there is none or the Keystore cannot be
+ * read. Laid out as [KeystoreManager.getPublicKeyPEM] lays out a user key's.
+ */
+private fun caPublicKeyPem(alias: String): String? {
+    val der = try {
+        KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.getCertificate(alias)?.publicKey?.encoded
+    } catch (e: Exception) {
+        null
+    } ?: return null
+    val body = Base64.getEncoder().encodeToString(der).chunked(64).joinToString("\n")
+    return "-----BEGIN PUBLIC KEY-----\n$body\n-----END PUBLIC KEY-----"
+}
 
 /**
  * What a key share may send for a key: its software material, or the public
