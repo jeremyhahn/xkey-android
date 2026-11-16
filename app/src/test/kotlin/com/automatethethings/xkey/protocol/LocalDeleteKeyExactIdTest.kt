@@ -188,24 +188,27 @@ class LocalDeleteKeyExactIdTest {
     }
 
     /**
-     * Canonical ID `k` with both a credential `xkey_credential_k` and a general
-     * key `xkey_key_k` names the general key, as `local.deleteKey` always did:
-     * deleting `k` deletes `xkey_key_k` and leaves the credential usable.
+     * Delete canonical ID `k`, whose row is [row], over Keystore [aliases];
+     * returns the response. The Keystore mock answers from [aliases].
      */
-    @Test
-    fun aCanonicalIdWithBothAliasesDeletesTheGeneralKeyAndLeavesTheCredential() = runBlocking<Unit> {
-        val credential = "xkey_credential_k"
-        val general = "xkey_key_k"
-        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.exists("k") } returns true
-        val keystore = mockk<KeystoreManager>(relaxed = true)
+    private suspend fun deleteCanonicalK(
+        row: com.automatethethings.xkey.storage.entity.KeyEntity?,
+        aliases: MutableSet<String>,
+        keyDao: KeyDao,
+        keystore: KeystoreManager
+    ): JSONObject {
+        coEvery { keyDao.exists("k") } returns (row != null)
+        coEvery { keyDao.getByKeyId("k") } returns row
         every { keystore.resolveKeystoreAlias(any()) } answers {
             val id = firstArg<String>()
             listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
         }
+        every { keystore.listAllKeystoreAliases() } answers { aliases.toList() }
         every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
         every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
+        every { keystore.deleteKey(any()) } answers {
+            keystore.resolveKeystoreAlias(firstArg())?.let { aliases.remove(it) } ?: false
+        }
         every { keystore.generalKeyExists(any()) } answers { "xkey_key_${firstArg<String>()}" in aliases }
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
@@ -213,15 +216,63 @@ class LocalDeleteKeyExactIdTest {
 
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", MethodNames.LOCAL_DELETE_KEY)
             .put("params", JSONObject().put("keyId", "k"))
-        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
+        return JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
+    }
 
-        assertTrue("the general key must be deleted, left $aliases", general !in aliases)
+    /**
+     * Canonical ID `k` with a row written before its namespace was recorded,
+     * and both a credential `xkey_credential_k` and a general key
+     * `xkey_key_k`: which key the row is cannot be told, so `local.deleteKey`
+     * refuses with an error, as the key screens do, and deletes nothing.
+     */
+    @Test
+    fun anUnrecordedIdWithBothAliasesIsRefusedAndNothingIsDeleted() = runBlocking<Unit> {
+        val credential = "xkey_credential_k"
+        val general = "xkey_key_k"
+        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        val row = com.automatethethings.xkey.storage.entity.KeyEntity(
+            keyId = "k", keyType = "signing", algorithm = "ES256", label = "k", keySizeBits = 256, source = "local"
+        )
+
+        val response = deleteCanonicalK(row, aliases, keyDao, keystore)
+
+        assertTrue("the general key must survive, left $aliases", general in aliases)
         assertTrue("the credential must survive, left $aliases", credential in aliases)
         assertTrue(
-            "the delete must succeed once the general key is gone, got $response",
-            response.optJSONObject("result")?.optBoolean("deleted") == true
+            "the delete must answer an error, got $response",
+            response.optJSONObject("error")?.optInt("code") == ErrorCodes.INVALID_PARAMS &&
+                !response.has("result")
         )
-        verify(exactly = 0) { keystore.deleteByAlias(credential) }
+        coVerify(exactly = 0) { keyDao.deleteByKeyId("k") }
+    }
+
+    /**
+     * Canonical ID `k` whose row records an unknown namespace: its key cannot
+     * be told, so the delete is refused with an error and general key
+     * `xkey_key_k` is left, not taken as the row's.
+     */
+    @Test
+    fun anUnknownRecordedNamespaceIsRefusedAndNothingIsDeleted() = runBlocking<Unit> {
+        val general = "xkey_key_k"
+        val aliases = java.util.Collections.synchronizedSet(hashSetOf(general))
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        val row = com.automatethethings.xkey.storage.entity.KeyEntity(
+            keyId = "k", keyType = "signing", algorithm = "ES256", label = "k", keySizeBits = 256, source = "local",
+            materialNamespace = "vault"
+        )
+
+        val response = deleteCanonicalK(row, aliases, keyDao, keystore)
+
+        assertTrue("the general key must survive, left $aliases", general in aliases)
+        assertTrue(
+            "the delete must answer an error, got $response",
+            response.optJSONObject("error")?.optInt("code") == ErrorCodes.INVALID_PARAMS &&
+                !response.has("result")
+        )
+        coVerify(exactly = 0) { keyDao.deleteByKeyId("k") }
     }
 
     /**
