@@ -1210,6 +1210,54 @@ class KeyShareAuditTest {
     }
 
     /**
+     * #270 verify r4: local.sign and local.getPublicKey of one id name the
+     * same key, through one ownership decision. A credential row beside a
+     * general key of the same id exports the credential's key, so local.sign
+     * never signs with the general key in its place: it signs with the
+     * exported key or refuses, never returns a signature that the exported
+     * key does not verify.
+     */
+    @Test
+    fun signAndExportOfASharedIdNameTheSameKey() = runTest {
+        val credential = ecKeyPair()
+        val general = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential, "xkey_key_$KEY_ID" to general))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "fido2")
+            .copy(algorithm = "ES256", publicKeyDer = credential.public.encoded)
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = KeystoreManager(context),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val getPublicKey = Request(
+            id = 8,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+        val exported = java.security.KeyFactory.getInstance("EC").generatePublic(
+            java.security.spec.X509EncodedKeySpec(
+                Base64.getDecoder().decode(success(served(getPublicKey)).getString("publicKey"))
+            )
+        )
+
+        val signed = JSONObject(String(served(
+            keyUse(MethodNames.LOCAL_SIGN, "data", "userVerificationRequired" to false, "algorithm" to "ES256"),
+            peer = PEER
+        )))
+        if (signed.has("error")) return@runTest
+        val verifier = java.security.Signature.getInstance("SHA256withECDSA")
+        verifier.initVerify(exported)
+        verifier.update("payload".toByteArray())
+        assertTrue(
+            "local.sign signs with the key local.getPublicKey exports",
+            verifier.verify(Base64.getDecoder().decode(signed.getJSONObject("result").getString("signature")))
+        )
+    }
+
+    /**
      * #255 review r5: with the Ed25519 store unreadable, whether a legacy
      * general Ed25519 key holds the id is unknown, so a credential of that
      * id is never exported in its place: local.getPublicKey and
