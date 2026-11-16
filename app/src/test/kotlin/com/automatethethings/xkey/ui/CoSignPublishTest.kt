@@ -655,6 +655,54 @@ class CoSignPublishTest {
     }
 
     @Test
+    fun `a copy whose entries match its document is still refused when the co-signer's signature does not verify`() {
+        val resolver = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().contentResolver
+        val witness = ecKey()
+        val fingerprint = MediaHasher.hashBytes(witness.public.encoded)
+        val known: (String) -> ByteArray? = { if (it == fingerprint) witness.public.encoded else null }
+
+        fun document(file: File): Uri {
+            ReadOnlyMediaProvider.files[file.name] = file
+            return Uri.parse("content://${ReadOnlyMediaProvider.AUTHORITY}/${file.name}")
+        }
+
+        // The copy expects exactly the entries its document carries, so the
+        // entry check passes and only the signature check can refuse it.
+        fun copyOf(file: File) = PendingCoSignedCopy(
+            File(file.parentFile, "cosign-gone.png"), "Witness", fingerprint, XmpMetadataHelper.readSignature(file.path)!!, original
+        )
+
+        // The control: a valid signature over the payload is placed.
+        val (held, payload) = cosignedPng("matched.png", witness)
+        assertTrue("a valid matching copy is placed", copyInPlace(resolver, document(held), copyOf(held), known))
+
+        // A value signed by the witness over other bytes.
+        val (altered, _) = cosignedPng("matched-altered.png", witness, signed = { "b".repeat(64) })
+        val alteredCopy = copyOf(altered)
+        assertEquals("the recorded hash is the payload's", payload, alteredCopy.data.contentHash)
+        assertFalse("a signature over other bytes is refused", copyInPlace(resolver, document(altered), alteredCopy, known))
+
+        // A value signed by another key, under the witness's fingerprint.
+        val forger = ecKey()
+        val (forged, _) = cosignedPng("matched-forged.png", forger)
+        val forgedData = XmpMetadataHelper.readSignature(forged.path)!!
+        XmpMetadataHelper.writeSignature(
+            forged.path,
+            forgedData.copy(signatures = forgedData.signatures.map { it.copy(keyFingerprint = fingerprint) })
+        )
+        assertFalse("another key's signature is refused", copyInPlace(resolver, document(forged), copyOf(forged), known))
+
+        // A value that is not a signature at all.
+        val (garbled, _) = cosignedPng("matched-garbled.png", witness)
+        val garbledData = XmpMetadataHelper.readSignature(garbled.path)!!
+        XmpMetadataHelper.writeSignature(
+            garbled.path,
+            garbledData.copy(signatures = garbledData.signatures.map { it.copy(value = "AAAA") })
+        )
+        assertFalse("a garbled signature value is refused", copyInPlace(resolver, document(garbled), copyOf(garbled), known))
+    }
+
+    @Test
     fun `a recovered copy counts as placed only while it keeps every earlier signature`() {
         val resolver = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().contentResolver
         val witness = ecKey()
