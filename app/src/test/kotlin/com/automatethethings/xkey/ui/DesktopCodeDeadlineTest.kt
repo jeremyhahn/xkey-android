@@ -61,9 +61,9 @@ class DesktopCodeDeadlineTest {
         clock = clock
     )
 
-    private fun entity() = OathCredentialEntity(
+    private fun entity(oathType: String = "TOTP") = OathCredentialEntity(
         oathId = "GitHub:alice",
-        oathType = "TOTP",
+        oathType = oathType,
         algorithm = "SHA1",
         digits = 6,
         periodSeconds = 30,
@@ -74,9 +74,9 @@ class DesktopCodeDeadlineTest {
         createdAt = 0L
     )
 
-    private suspend fun codeReply(json: String): DesktopCodeDeadline {
+    private suspend fun codeReply(json: String, oathType: String = "TOTP"): DesktopCodeDeadline {
         sender.succeedWith(json)
-        val outcome = actions().desktopCode(entity())
+        val outcome = actions().desktopCode(entity(oathType))
         return (outcome as OathDesktopActions.Outcome.Code).deadline
     }
 
@@ -124,11 +124,31 @@ class DesktopCodeDeadlineTest {
 
     @Test
     fun `a counter-based code has no deadline`() = runTest {
-        val deadline = codeReply("""{"code":"492039"}""")
+        val deadline = codeReply("""{"code":"492039"}""", oathType = "HOTP")
         assertEquals(DesktopCodeDeadline.View.NoExpiry("492039"), deadline.view())
         now += 3_600_000
         assertEquals(DesktopCodeDeadline.View.NoExpiry("492039"), deadline.view())
         assertNull(deadline.millisUntilChange())
+    }
+
+    @Test
+    fun `a TOTP reply with only a code is never shown as non-expiring`() = runTest {
+        sender.succeedWith("""{"code":"492039"}""")
+        val outcome = actions().desktopCode(entity("TOTP"))
+
+        assertTrue(
+            "a TOTP code without expires_in must not be shown, got $outcome",
+            outcome is OathDesktopActions.Outcome.Failed
+        )
+        assertFalse("the refusal must not carry the code", outcome.toString().contains("492039"))
+    }
+
+    @Test
+    fun `a TOTP code lives no longer than its period`() = runTest {
+        val deadline = codeReply("""{"code":"492039","expires_in":3600}""")
+        assertEquals(DesktopCodeDeadline.View.Live("492039", 30), deadline.view())
+        now += 30_000
+        assertEquals(DesktopCodeDeadline.View.Expired, deadline.view())
     }
 
     @Test
