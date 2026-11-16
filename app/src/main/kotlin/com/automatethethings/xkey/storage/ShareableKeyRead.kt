@@ -94,13 +94,20 @@ fun KeystoreManager.readOwnPublicKeyDer(keyId: String, kind: UserKeyKind): KeyRe
  * or coroutine, and never a fallback to another namespace.
  *
  * The root and intermediate CA keys are listed by their raw Keystore
- * aliases ([CA_KEY_ALIASES]) and are no user key: their public key is read
- * from the alias's certificate ([caPublicKeyPem]), and the alias resolves in
- * no namespace for any write, delete or private-key use.
+ * aliases ([CA_KEY_ALIASES]) and are no user key. A user key may hold such
+ * an alias as its id, and then owns it (#255 verify r4): user-key ownership
+ * is probed first, with its refusals, and the CA's certificate
+ * ([caPublicKeyPem]) is read only when neither namespace holds the id. The
+ * alias resolves in no namespace for any write, delete or private-key use.
  */
 fun KeystoreManager.readOwnPublicKey(keyId: String): KeyRead<String> =
     readRefusingUnreadable {
-        if (keyId in CA_KEY_ALIASES) caPublicKeyPem(keyId) else soleKind(keyId)?.let { getPublicKeyPEM(keyId, it) }
+        val kind = soleKind(keyId)
+        when {
+            kind != null -> getPublicKeyPEM(keyId, kind)
+            keyId in CA_KEY_ALIASES && UserKeyKind.entries.none { holdsUserKey(keyId, it) } -> caPublicKeyPem(keyId)
+            else -> null
+        }
     }
 
 /** The raw Keystore aliases of the CA keys a screen lists ([AndroidCA]). */
