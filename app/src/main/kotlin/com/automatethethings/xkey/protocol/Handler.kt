@@ -50,6 +50,7 @@ import com.automatethethings.xkey.crypto.XKeyCryptoException
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.KeyNamespace
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.deleteKeyAliasRow
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -2321,13 +2322,20 @@ class RequestHandler(
         val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
         var materialRemoved = false
         val rowsDeleted = try {
-            keyDao.deleteKeyAndMaterial(canonicalId) {
-                materialRemoved = if (canonicalId != keyId) {
-                    deleteKeystoreAlias(canonicalId, keyId)
-                } else {
+            if (canonicalId != keyId) {
+                // A raw alias: that entry goes, and the row and credential
+                // metadata of ID canonicalId only when they are its namespace's.
+                val (removed, rows) = keyDao.deleteKeyAliasRow(
+                    canonicalId, keyId, keystoreManager, softwareKeys,
+                    XKeyDatabase.getInstance(context).credentialMetadataDao()
+                ) { deleteKeystoreAlias(canonicalId, keyId) }
+                materialRemoved = removed
+                rows
+            } else {
+                keyDao.deleteKeyAndMaterial(canonicalId) {
                     // Every material under the ID goes (software and hardware
                     // general key alike), or none is reported deleted.
-                    com.automatethethings.xkey.storage.removeAllKeyMaterial(
+                    materialRemoved = com.automatethethings.xkey.storage.removeAllKeyMaterial(
                         canonicalId, keystoreManager, softwareKeys
                     )
                 }

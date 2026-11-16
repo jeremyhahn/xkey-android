@@ -117,6 +117,10 @@ class LocalDeleteKeyExactIdTest {
     fun aRawAliasWithNoKeyOfItsOwnStillDeletesItsKey() = runBlocking<Unit> {
         val keyDao = mockk<KeyDao>(relaxed = true)
         coEvery { keyDao.exists("b") } returns true
+        // Its row, written before a namespace was recorded.
+        coEvery { keyDao.getByKeyId("b") } returns com.automatethethings.xkey.storage.entity.KeyEntity(
+            keyId = "b", keyType = "signing", algorithm = "ES256", label = "b", keySizeBits = 256, source = "local"
+        )
         val keystore = mockk<KeystoreManager>(relaxed = true)
         every { keystore.resolveKeystoreAlias(any()) } answers {
             firstArg<String>().takeIf { it == "xkey_key_b" || it == "b" }?.let { "xkey_key_b" }
@@ -147,6 +151,7 @@ class LocalDeleteKeyExactIdTest {
         val general = "xkey_key_k"
         val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
         val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.getByKeyId(any()) } returns null
         val keystore = mockk<KeystoreManager>(relaxed = true)
         every { keystore.resolveKeystoreAlias(any()) } answers {
             val id = firstArg<String>()

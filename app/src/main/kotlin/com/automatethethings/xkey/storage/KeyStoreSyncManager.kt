@@ -460,6 +460,42 @@ suspend fun KeyDao.deleteKeyRow(
 }
 
 /**
+ * The delete of Keystore entry [alias] of key [keyId], for `local.deleteKey`
+ * given a raw alias (`xkey_credential_<id>`, `xkey_key_<id>`): [removeAlias]
+ * removes that one entry, a credential's metadata goes with its alias, and
+ * row [keyId] goes only when its material is in the alias's namespace
+ * ([KeyNamespace.of], read before anything is removed). Deleting one
+ * namespace's alias never removes the other namespace's row or metadata; an
+ * unrecorded row whose ID names material in both stays, listing what is left.
+ * All of it runs in one [SharePermissionLedger] revoke of [keyId].
+ *
+ * @return whether the entry was removed, and the rows deleted.
+ */
+suspend fun KeyDao.deleteKeyAliasRow(
+    keyId: String,
+    alias: String,
+    keystoreManager: KeystoreManager,
+    softwareKeys: SoftwareKeyStore,
+    credentials: CredentialMetadataDao,
+    removeAlias: () -> Boolean
+): Pair<Boolean, Int> {
+    val aliasNamespace = if (alias == KeyStoreSyncManager.credentialAliasOf(keyId)) {
+        KeyNamespace.CREDENTIAL
+    } else {
+        KeyNamespace.GENERAL
+    }
+    var removed = false
+    val rows = SharePermissionLedger.revoking(keyId) {
+        val row = getByKeyId(keyId)
+        val rowGoes = row == null || KeyNamespace.of(row, keystoreManager, softwareKeys) == aliasNamespace
+        removed = removeAlias()
+        if (aliasNamespace == KeyNamespace.CREDENTIAL) credentials.deleteByCredentialId(keyId)
+        if (rowGoes) deleteByKeyId(keyId) else 0
+    }
+    return removed to rows
+}
+
+/**
  * The one delete of the material under key ID [keyId], for `local.deleteKey`
  * and [deleteKeyRow]: the software key of that ID and the hardware general
  * key of that ID (`xkey_key_<keyId>`) both go, since an install upgraded from
