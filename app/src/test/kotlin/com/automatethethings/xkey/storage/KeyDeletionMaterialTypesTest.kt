@@ -458,6 +458,56 @@ class KeyDeletionMaterialTypesTest {
     }
 
     /**
+     * #270 verify r2 (1): a passkey's row records its public key as COSE
+     * only (`publicKeyDer` null), as the credential provider and the sync
+     * write it. Beside a general key of its id, the row's delete reads the
+     * COSE key and deletes the credential; the general key stays.
+     */
+    @Test
+    fun aCoseOnlyCredentialRowBesideASameIdGeneralKeyDeletesTheCredential() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val credentialCose = byteArrayOf(0xA5.toByte(), 1, 2)
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        every { keystore.getPublicKeyDER("k", UserKeyKind.GENERAL) } returns byteArrayOf(1, 2, 3)
+        every { keystore.getPublicKeyDER("k", UserKeyKind.CREDENTIAL) } returns byteArrayOf(9)
+        every { keystore.getCOSEPublicKey("k", UserKeyKind.GENERAL) } returns byteArrayOf(0xA5.toByte(), 7)
+        every { keystore.getCOSEPublicKey("k", UserKeyKind.CREDENTIAL) } returns credentialCose
+        val row = tables.addKey(
+            "k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE,
+            keyType = "fido2", publicKeyDer = null, publicKeyCose = credentialCose
+        )
+
+        assertTrue(store.deleteKey("k", row, keyMaterialDeleter(context, keystore, row = tables.key("k"))))
+        assertEquals("the passkey's delete took the general key", setOf("xkey_key_k"), entries.keys)
+        assertEquals(null, tables.key("k"))
+        assertFalse(store.isDeletionPending("k"))
+    }
+
+    /**
+     * #270 verify r2 (2): a tombstone whose recorded generation cannot be
+     * read names no material it may delete, but the key may still be there:
+     * the replay deletes nothing and keeps the tombstone, so every use of
+     * the key is still refused and the sync cannot list it again.
+     */
+    @Test
+    fun aTombstoneWithAnUnreadableGenerationStaysOwed() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store(KeyPolicyStore.KeyResolver { id, kind -> keystore.resolveKey(id, kind) })
+        keystoreKey("xkey_key_k", certificate = true)
+        tables.deletions.value = mapOf("k" to KeyDeletionEntity("k", 1L, "android", "{unreadable"))
+
+        replayKeyDeletions(context, store, keystore)
+
+        assertTrue("the unreadable tombstone was dropped", store.isDeletionPending("k"))
+        assertEquals(setOf("xkey_key_k"), entries.keys)
+        org.junit.Assert.assertThrows(KeyPolicyStore.KeyDeletedException::class.java) {
+            kotlinx.coroutines.runBlocking { store.requireUsable("k", UserKeyKind.GENERAL) }
+        }
+    }
+
+    /**
      * #255 review: a credential delete still owed beside the general key's
      * surviving row refuses uses of the credential only; the general key,
      * whose material and policy the delete kept, stays usable. A whole-key

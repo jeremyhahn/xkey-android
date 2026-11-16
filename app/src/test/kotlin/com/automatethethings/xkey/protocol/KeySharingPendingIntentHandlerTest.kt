@@ -605,7 +605,18 @@ class KeySharingPendingIntentHandlerTest {
         every { keystore.holdsInternalKey(internal) } returns true
         every { keystore.deleteByAlias(any()) } returns true
         val store = store
-        assertTrue(store.deleteMaterial(internal, materialDelete { false }))
+        // A tombstone that recorded the internal alias, outside the id's
+        // user-key namespace: the replay refuses it and deletes nothing.
+        val recorded = object : com.automatethethings.xkey.storage.KeyMaterial {
+            override suspend fun generation(held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld, source: String?): String =
+                """{"keystore:$internal":"1"}"""
+
+            override suspend fun delete(
+                held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld,
+                tombstone: com.automatethethings.xkey.storage.entity.KeyDeletionEntity
+            ): Boolean = false
+        }
+        assertTrue(store.deleteMaterial(internal, recorded))
         assertTrue(store.isDeletionPending(internal))
 
         com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
@@ -689,6 +700,34 @@ class KeySharingPendingIntentHandlerTest {
         io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(id, match { "keystore:xkey_credential_$id" in it }) }
         assertEquals("the general key's material stayed", mapOf("keystore:xkey_credential_$id" to "1"), held)
         assertEquals("the general key's row stayed", null, tables.key(id))
+    }
+
+    /**
+     * #270 verify r2 (1): a passkey's row records its public key as COSE
+     * only, as the credential provider writes it. Beside a general key of
+     * its id, local.deleteKey reads the COSE key: the credential's material
+     * and row go, the general key stays.
+     */
+    @Test
+    fun anRpcDeleteOfACoseOnlyCredentialRowKeepsTheSameIdGeneralKey() = runTest {
+        val id = "k-cose"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+        val credentialCose = byteArrayOf(0xA5.toByte(), 1, 2)
+        var held = mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers { held }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { held = held - secondArg<Map<String, String>>().keys; emptyMap() }
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns byteArrayOf(1, 2, 3)
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
+        every { keystore.getCOSEPublicKey(id, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns byteArrayOf(0xA5.toByte(), 7)
+        every { keystore.getCOSEPublicKey(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns credentialCose
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = null, publicKeyCose = credentialCose)
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        assertEquals("the passkey's delete took the general key", mapOf("keystore:xkey_key_$id" to "1"), held)
+        assertEquals("the passkey's row stayed", null, tables.key(id))
     }
 
     /**
