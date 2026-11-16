@@ -264,6 +264,30 @@ class KeyPolicyStoreTest {
     }
 
     /**
+     * #270 review r4: a key row with no policy row (one added by
+     * KeyStoreSyncManager.track or CreateCredentialHandler after the
+     * migration) owes its obligation like any other: a held one is recorded,
+     * in a policy row made for it, once the database is writable.
+     */
+    @Test
+    fun aHeldObligationOfAKeyWithNoPolicyRowIsRecordedOnRetry() = runBlocking {
+        val instance = tables.insertKey(FakeKeyPolicyTables.entity("k", SELECTED_PEERS))
+        tables.grant("k", PEER)
+        tables.failing += setOf("deleteGrant", "putPolicyRow")
+        val store = store()
+        assertEquals(KeyPolicyStore.Withdrawal.HELD, store.withdraw("k", instance, PEER))
+        tables.failing.clear()
+
+        assertTrue("the held obligation was not recorded", store.recordHeld("k", instance))
+        assertFalse(store.isHeld("k", instance))
+        val row = tables.rows.value["k"]!!
+        assertEquals(instance, row.keyInstance)
+        assertEquals(SELECTED_PEERS, row.sharingPolicy)
+        assertTrue(row.clearGrants)
+        assertEquals(PRIVATE, KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap()).enforcedPolicy(tables.key("k")!!))
+    }
+
+    /**
      * The bypass guard (#193, ruling 554): the denial and grant-clear
      * columns are written only by [KeyPolicyStore]'s obligation choke point.
      * A main source elsewhere that sets them (a Room entity argument, a
