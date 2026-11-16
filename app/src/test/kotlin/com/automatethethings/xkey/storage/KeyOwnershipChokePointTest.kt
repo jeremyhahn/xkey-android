@@ -83,6 +83,26 @@ class KeyOwnershipChokePointTest {
         assertFalse("discovery reads ownership from the Keystore alone", Regex("""fun ownedByUserKey\(keyStore""").containsMatchIn(sync))
     }
 
+    /** #270 verify r2: every row delete hands `rowKeyKind` both encodings of the row's key; a passkey row is COSE only. */
+    @Test
+    fun everyRowDeleteMatchesTheRowsKeyInEveryEncoding() {
+        val manager = source("crypto/KeystoreManager.kt")
+        val rowKeyKind = body(manager, "rowKeyKind")
+        assertTrue("rowKeyKind does not match through matchRowPublicKey", "matchRowPublicKey(" in rowKeyKind)
+        assertTrue("the match ignores the DER key", "getPublicKeyDER(" in rowKeyKind)
+        assertTrue("the match ignores the COSE key", "getCOSEPublicKey(" in rowKeyKind)
+        val match = body(manager, "matchRowPublicKey")
+        assertTrue("the match reads one encoding", "row.der" in match && "row.cose" in match)
+        val calls = main.walkTopDown().filter { it.isFile && it.extension == "kt" }.flatMap { file ->
+            val text = stripComments(file.readText())
+            Regex("""\.rowKeyKind\(""").findAll(text).map { file.name to text.substring(it.range.first, minOf(text.length, it.range.first + 240)) }
+        }.toList()
+        assertTrue("no row delete calls rowKeyKind", calls.isNotEmpty())
+        for ((file, call) in calls) {
+            assertTrue("$file hands rowKeyKind no COSE key: $call", Regex("""RowPublicKey\([^)]*publicKeyCose""").containsMatchIn(call))
+        }
+    }
+
     private fun lineOf(text: String, offset: Int): Int = text.substring(0, offset).count { it == '\n' } + 1
 
     private fun stripComments(text: String): String =

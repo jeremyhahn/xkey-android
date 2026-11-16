@@ -2425,7 +2425,7 @@ class RequestHandler(
     private fun deleteTarget(keyId: String, entity: KeyEntity?, legacy: Boolean): Pair<com.automatethethings.xkey.crypto.UserKeyKind, Boolean>? {
         val (generation, rowKind) = try {
             val generation = com.automatethethings.xkey.storage.keyMaterialGeneration(context, keyId, keystoreManager).keys
-            generation to entity?.let { keystoreManager.rowKeyKind(keyId, it.keyType, { it.publicKeyDer }, generation) }
+            generation to entity?.let { keystoreManager.rowKeyKind(keyId, it.keyType, { com.automatethethings.xkey.crypto.RowPublicKey(it.publicKeyDer, it.publicKeyCose) }, generation) }
         } catch (e: Exception) {
             Log.w(TAG, "Key material of $keyId could not be read or its row placed; delete refused", e)
             return null

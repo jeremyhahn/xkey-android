@@ -58,9 +58,11 @@ fun deleteKeyMaterial(
     val entries = try {
         decodeGeneration(generation)
     } catch (e: org.json.JSONException) {
-        // A record that cannot be read names no material either.
-        Log.w(TAG, "Deletion of ${held.keyId} recorded an unreadable generation; nothing deleted")
-        return true
+        // A record that cannot be read names no material it may delete, but
+        // the key may still be there (#270 verify r2): the tombstone stays
+        // owed, so the key is still refused and the sync cannot list it.
+        Log.w(TAG, "Deletion of ${held.keyId} recorded an unreadable generation; nothing deleted, still owed")
+        return false
     }
     // Whether the delete is a user key's is read from what its tombstone
     // recorded, never from a presence probe (#270 verify): a failed Ed25519
@@ -234,7 +236,10 @@ fun keyMaterialDeleter(
         private fun rowKind(row: com.automatethethings.xkey.storage.entity.KeyEntity): UserKeyKind {
             if (isInternalKey(row.keyId, manager)) throw InternalKeyException(row.keyId)
             val present = keyMaterialGeneration(context, row.keyId, manager).keys
-            return manager.rowKeyKind(row.keyId, row.keyType, { row.publicKeyDer }, present)
+            return manager.rowKeyKind(
+                row.keyId, row.keyType,
+                { com.automatethethings.xkey.crypto.RowPublicKey(row.publicKeyDer, row.publicKeyCose) }, present
+            )
         }
 
         override fun isEmpty(generation: String): Boolean = decodeGeneration(generation).isEmpty()

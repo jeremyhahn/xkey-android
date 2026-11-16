@@ -112,6 +112,15 @@ class KeyPresenceUnreadableException(val alias: String, cause: Throwable?) :
 class KeyOwnershipUnknownException(val keyId: String) :
     java.security.GeneralSecurityException("Cannot tell which key under $keyId its row describes")
 
+/**
+ * A key row's public key as the row records it ([KeystoreManager.rowKeyKind]):
+ * SPKI [der], [cose] or both. A passkey's row holds COSE only, as the
+ * credential provider and the sync write it (#270 verify r2).
+ */
+class RowPublicKey(val der: ByteArray?, val cose: ByteArray?) {
+    val isEmpty: Boolean get() = der == null && cose == null
+}
+
 /** A MAC and the algorithm that computed it ("HMAC-SHA256" or "HMAC-SHA512"). */
 class HmacResult(val mac: ByteArray, val algorithm: String)
 
@@ -1509,7 +1518,7 @@ class KeystoreManager(private val context: Context) {
 
     /**
      * The user key a key row under [keyId] of [keyType] and
-     * public key ([publicKeyDer], read only when it is needed) describes, given the id's material [generation]
+     * public key ([publicKey], DER or COSE, read only when it is needed) describes, given the id's material [generation]
      * entries: every delete of a key row resolves its key here (#270
      * review). With at most one key under the id, the row's type says it.
      * With a credential and a general key sharing the id, the type does
@@ -1524,22 +1533,26 @@ class KeystoreManager(private val context: Context) {
      * type names it. Only with no material under the id does the type say.
      * So a retry, which never switches kind, still deletes the row's key.
      */
-    fun rowKeyKind(keyId: String, keyType: String, publicKeyDer: () -> ByteArray?, generation: Set<String>): UserKeyKind {
+    fun rowKeyKind(keyId: String, keyType: String, publicKey: () -> RowPublicKey, generation: Set<String>): UserKeyKind {
         val held = ownersOf(keyId, generation)
         if (held.isEmpty()) return userKeyKindOf(keyType)
-        val der = publicKeyDer()
+        val row = publicKey()
+        // The row's key read in each encoding it holds ([matchRowPublicKey]).
+        val rowPublicKeyMatch = { kind: UserKeyKind ->
+            matchRowPublicKey(row, { getPublicKeyDER(keyId, kind) }, { getCOSEPublicKey(keyId, kind) })
+        }
         held.singleOrNull()?.let { only ->
             // A key with no readable public half (symmetric, software) is
             // the row's: only a public key that differs names another key.
-            val own = der == null ||
-                runCatching { getPublicKeyDER(keyId, only) }.getOrNull()?.contentEquals(der) != false
+            val own = row.isEmpty || rowPublicKeyMatch(only) != false
             return if (own) only else userKeyKindOf(keyType)
         }
-        val owners = if (der == null) emptyList() else UserKeyKind.entries.filter {
-            getPublicKeyDER(keyId, it)?.contentEquals(der) == true
+        val owners = if (row.isEmpty) emptyList() else UserKeyKind.entries.filter {
+            rowPublicKeyMatch(it) == true
         }
         return owners.singleOrNull() ?: throw KeyOwnershipUnknownException(keyId)
     }
+
 
     /**
      * Get a general key's public key in PEM format.
@@ -2481,6 +2494,23 @@ class KeystoreManager(private val context: Context) {
          */
         fun ownersOf(keyId: String, material: Set<String>): Set<UserKeyKind> =
             UserKeyKind.entries.filterTo(LinkedHashSet()) { holdsKind(keyId, material, it) }
+
+        /**
+         * Whether a key is the one [row] records, read in each encoding the
+         * row holds ([der], [cose]; #270 verify r2: a passkey row's key is
+         * COSE only): true if one matches, false if one differs and none
+         * matches, null if the key's public half cannot be read in either
+         * (a symmetric or non-EC key has none to compare).
+         */
+        fun matchRowPublicKey(row: RowPublicKey, der: () -> ByteArray?, cose: () -> ByteArray?): Boolean? {
+            val byDer = row.der?.let { d -> runCatching(der).getOrNull()?.contentEquals(d) }
+            val byCose = row.cose?.let { c -> runCatching(cose).getOrNull()?.contentEquals(c) }
+            return when {
+                byDer == true || byCose == true -> true
+                byDer == false || byCose == false -> false
+                else -> null
+            }
+        }
 
         /** Whether [generation] holds material of [keyId]'s [kind] key; a software key is a general key. */
         fun holdsKind(keyId: String, generation: Set<String>, kind: UserKeyKind): Boolean = generation.any {
