@@ -389,6 +389,75 @@ class KeyDeletionMaterialTypesTest {
     }
 
     /**
+     * #270 verify (1): a fido2 row whose key `local.generateKey` put under
+     * the general alias, beside a credential of its id whose delete failed
+     * and is owed. The row's delete settles that tombstone first, so it is
+     * a retry; its key is the one the material shows under the id, never
+     * the credential the row's type names, and is deleted with the row.
+     */
+    @Test
+    fun aRowDeleteThatSettlesAnotherKeysTombstoneDeletesTheRowsKey() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val generalDer = byteArrayOf(1, 2, 3)
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        every { keystore.getPublicKeyDER("k", UserKeyKind.GENERAL) } answers { generalDer.takeIf { "xkey_key_k" in entries } }
+        every { keystore.getPublicKeyDER("k", UserKeyKind.CREDENTIAL) } answers { byteArrayOf(9).takeIf { "xkey_credential_k" in entries } }
+        val row = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = generalDer)
+
+        stuck += "xkey_credential_k"
+        assertTrue(store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
+        assertTrue("the failed credential delete is not owed", store.isDeletionPending("k"))
+
+        stuck.clear()
+        assertTrue(store.deleteKey("k", row, keyMaterialDeleter(context, keystore, row = tables.key("k"))))
+        assertEquals("the row's general key outlived its row", emptySet<String>(), entries.keys)
+        assertFalse(store.isDeletionPending("k"))
+    }
+
+    /**
+     * #270 verify (2): an Ed25519 user key whose id is also an internal
+     * Keystore alias. Its delete's commit fails: the preferences' cache no
+     * longer lists the key, the disk still does. The replay reads what the
+     * tombstone recorded, never that stale cache, so it does not take the
+     * id for the internal key and drop the tombstone; the internal key is
+     * never touched.
+     */
+    @Test
+    fun aFailedEd25519DeleteOfAnIdNamedLikeAnInternalAliasStaysOwed() = kotlinx.coroutines.test.runTest {
+        val id = "xkey_seal_store_key"
+        val user = "xkey_key_$id"
+        keystoreKey(id, certificate = false)
+        val disk = HashMap(mapOf(user to "c2VjcmV0"))
+        val cache = HashMap(disk)
+        var writable = false
+        val prefs = mockk<SharedPreferences>()
+        every { prefs.getString(any(), any()) } answers { cache[firstArg()] ?: secondArg() }
+        every { prefs.contains(any()) } answers { firstArg<String>() in cache }
+        every { prefs.edit() } answers {
+            val editor = mockk<SharedPreferences.Editor>()
+            every { editor.remove(any()) } answers { cache.remove(firstArg<String>()); editor }
+            every { editor.commit() } answers {
+                if (writable) { disk.clear(); disk.putAll(cache) }
+                writable
+            }
+            editor
+        }
+        every { keystore.ed25519Prefs() } returns prefs
+        val deleter = keyMaterialDeleter(context, keystore, UserKeyKind.GENERAL)
+        val tombstone = KeyDeletionEntity(id, 1L, "android", deleter.generation(held(id), "android"))
+
+        repeat(2) { assertFalse("replay ${it + 1} dropped an uncommitted delete", deleter.delete(held(id), tombstone)) }
+        assertEquals(setOf(user), disk.keys)
+
+        writable = true
+        assertTrue(deleter.delete(held(id), tombstone))
+        assertTrue("the Ed25519 key is still on disk", disk.isEmpty())
+        assertTrue("the internal key was deleted", id in entries)
+    }
+
+    /**
      * #255 review: a credential delete still owed beside the general key's
      * surviving row refuses uses of the credential only; the general key,
      * whose material and policy the delete kept, stays usable. A whole-key

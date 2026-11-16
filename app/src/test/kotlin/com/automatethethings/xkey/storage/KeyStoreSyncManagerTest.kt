@@ -292,4 +292,55 @@ class KeyStoreSyncManagerTest {
 
         coVerify(exactly = 1) { keyDao.update(match { it.keyId == internal && it.isSystemKey }) }
     }
+
+    /**
+     * #270 verify (3): a user key named like an internal alias whose
+     * material is not in the Keystore (a software store key, an Ed25519
+     * key) still owns its row. Discovery reads the id's owners from every
+     * backend ([KeystoreManager.userKeyOwners]), so the internal alias of
+     * the same name neither inserts the row as a system key nor flips it.
+     */
+    @Test
+    fun aSoftwareOrEd25519UserKeyNamedLikeAnInternalAliasStaysAUserKey() = runBlocking<Unit> {
+        val internal = "xkey_seal_store_key"
+        val files = java.nio.file.Files.createTempDirectory("software-keys").toFile()
+        try {
+            io.mockk.mockkConstructor(com.automatethethings.xkey.crypto.KeystoreAeadCipher::class)
+            every { anyConstructed<com.automatethethings.xkey.crypto.KeystoreAeadCipher>().encrypt(any()) } answers { ByteArray(12) + firstArg<ByteArray>() }
+            every { anyConstructed<com.automatethethings.xkey.crypto.KeystoreAeadCipher>().decrypt(any()) } answers { firstArg<ByteArray>().copyOfRange(12, firstArg<ByteArray>().size) }
+            val context = mockk<android.content.Context>(relaxed = true)
+            every { context.filesDir } returns files
+            every { keyStore.aliases() } answers { Collections.enumeration(listOf(internal)) }
+            every { keyStore.containsAlias(any()) } answers { firstArg<String>() == internal }
+            val ed25519 = HashMap<String, String>()
+            val prefs = mockk<android.content.SharedPreferences>()
+            every { prefs.getString(any(), any()) } answers { ed25519[firstArg()] ?: secondArg() }
+            every { prefs.contains(any()) } answers { firstArg<String>() in ed25519 }
+
+            for (backend in listOf("software", "ed25519")) {
+                files.listFiles()?.forEach { it.deleteRecursively() }
+                ed25519.clear()
+                val real = io.mockk.spyk(KeystoreManager(context))
+                every { real.ed25519Prefs() } returns prefs
+                if (backend == "software") {
+                    com.automatethethings.xkey.crypto.SoftwareKeyStore(context).put(
+                        com.automatethethings.xkey.crypto.SoftwareKey(internal, "AES256-GCM", "symmetric", 256, true, true, ByteArray(32))
+                    )
+                } else {
+                    ed25519["xkey_key_$internal"] = "c2VjcmV0"
+                }
+                val userRow = KeyEntity(keyId = internal, keyType = "signing", algorithm = "Ed25519", label = internal, keySizeBits = 256, source = "local")
+                val dao = mockk<KeyDao>(relaxed = true)
+                coEvery { dao.getByKeyId(internal) } returns userRow
+                coEvery { dao.exists(internal) } returns false
+                KeyStoreSyncManager(real, credentialDao, dao, tables.store()).discoverKeystoreEntries()
+                coVerify(exactly = 0) { dao.insert(match { it.keyId == internal && it.isSystemKey }) }
+                coEvery { dao.exists(internal) } returns true
+                KeyStoreSyncManager(real, credentialDao, dao, tables.store()).discoverKeystoreEntries()
+                coVerify(exactly = 0) { dao.update(match { it.keyId == internal && it.isSystemKey }) }
+            }
+        } finally {
+            files.deleteRecursively()
+        }
+    }
 }
