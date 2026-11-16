@@ -147,11 +147,11 @@ internal fun copyInPlace(
 
 /**
  * The public key xKey holds for [fingerprint]: a contact's, else a local
- * key's whose own hash is [fingerprint]. Blocks: call it off the main thread.
+ * key's whose own hash is [fingerprint]. Suspends on the database.
  */
-internal fun knownPublicKey(context: Context, fingerprint: String): ByteArray? = kotlinx.coroutines.runBlocking {
+internal suspend fun knownPublicKey(context: Context, fingerprint: String): ByteArray? {
     val db = XKeyDatabase.getInstance(context)
-    db.contactDao().getByFingerprint(fingerprint)?.publicKeyDer
+    return db.contactDao().getByFingerprint(fingerprint)?.publicKeyDer
         ?: db.keyDao().getAll().firstNotNullOfOrNull { key ->
             key.publicKeyDer?.takeIf { MediaHasher.hashBytes(it) == fingerprint }
         }
@@ -1269,7 +1269,8 @@ class CoSignActivity : AppCompatActivity() {
             // swept with the process that staged it: the copy counts as
             // written only when the document holds it.
             if (!copy.staged.exists()) {
-                if (copyInPlace(resolver, run.target, copy) { knownPublicKey(app, it) }) return@attach
+                val known = knownPublicKey(app, copy.fingerprint)
+                if (copyInPlace(resolver, run.target, copy) { fingerprint -> known.takeIf { fingerprint == copy.fingerprint } }) return@attach
                 throw IOException(lost)
             }
             MediaPublisher.writeCopy(copy.staged) { MediaPublisher.openCreated(resolver, run.target) }

@@ -110,7 +110,7 @@ object MediaSaveRuns {
 
     /** The run of [id], started with [write] unless it already runs; its result is [write]'s. */
     @Suppress("UNCHECKED_CAST")
-    fun <T> attach(id: String, write: () -> T): Deferred<T> =
+    fun <T> attach(id: String, write: suspend () -> T): Deferred<T> =
         runs.computeIfAbsent(id) { scope.async { write() } } as Deferred<T>
 
     /**
