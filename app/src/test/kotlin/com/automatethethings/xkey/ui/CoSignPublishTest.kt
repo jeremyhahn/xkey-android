@@ -655,6 +655,47 @@ class CoSignPublishTest {
     }
 
     @Test
+    fun `a recovered copy counts as placed only while it keeps every earlier signature`() {
+        val resolver = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().contentResolver
+        val witness = ecKey()
+        val fingerprint = MediaHasher.hashBytes(witness.public.encoded)
+        val known: (String) -> ByteArray? = { if (it == fingerprint) witness.public.encoded else null }
+        val creator = com.automatethethings.xkey.media.SignatureEntry(
+            keyFingerprint = "SHA256:creator",
+            signerName = "Creator",
+            algorithm = "ES256",
+            value = "Y3JlYXRvcg==",
+            timestamp = "2026-11-14T00:00:00Z"
+        )
+        // The copy as co-signed: the creator's entry, then the witness's.
+        val (held, _) = cosignedPng("both.png", witness)
+        val witnessed = XmpMetadataHelper.readSignature(held.path)!!
+        val expected = witnessed.copy(signatures = listOf(creator) + witnessed.signatures)
+        XmpMetadataHelper.writeSignature(held.path, expected)
+        val copy = PendingCoSignedCopy(File(held.parentFile, "cosign-gone.png"), "Witness", fingerprint, expected, original)
+
+        fun document(file: File): Uri {
+            ReadOnlyMediaProvider.files[file.name] = file
+            return Uri.parse("content://${ReadOnlyMediaProvider.AUTHORITY}/${file.name}")
+        }
+
+        assertTrue("the document holds every entry", copyInPlace(resolver, document(held), copy, known))
+
+        // The witness's own entry still verifies, but the creator's is gone.
+        val (stripped, _) = cosignedPng("stripped.png", witness)
+        XmpMetadataHelper.writeSignature(stripped.path, witnessed)
+        assertFalse("a dropped earlier signature is refused", copyInPlace(resolver, document(stripped), copy, known))
+
+        // The creator's entry is there, but changed.
+        val (changed, _) = cosignedPng("changed.png", witness)
+        XmpMetadataHelper.writeSignature(
+            changed.path,
+            witnessed.copy(signatures = listOf(creator.copy(value = "b3RoZXI=")) + witnessed.signatures)
+        )
+        assertFalse("a changed earlier signature is refused", copyInPlace(resolver, document(changed), copy, known))
+    }
+
+    @Test
     fun `a copy picker that cannot open fails the append and leaves nothing pending`() {
         val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
         shadowOf(Looper.getMainLooper()).idle()
