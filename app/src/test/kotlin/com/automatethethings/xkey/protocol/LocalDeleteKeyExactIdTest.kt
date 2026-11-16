@@ -224,6 +224,44 @@ class LocalDeleteKeyExactIdTest {
         verify(exactly = 0) { keystore.deleteByAlias(credential) }
     }
 
+    /**
+     * The base generateKey path creates credential `k` (alias
+     * `xkey_credential_k`) with no keys row. Deleting `k` before any sync
+     * deletes that credential's private key and metadata, from the material
+     * present, and answers deleted=true; nothing is left usable.
+     */
+    @Test
+    fun aCanonicalIdOfACredentialWithNoRowDeletesTheCredential() = runBlocking<Unit> {
+        val credential = "xkey_credential_k"
+        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential))
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.exists(any()) } returns false
+        coEvery { keyDao.getByKeyId(any()) } returns null
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.resolveKeystoreAlias(any()) } answers {
+            val id = firstArg<String>()
+            listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
+        }
+        every { keystore.listAllKeystoreAliases() } answers { aliases.toList() }
+        every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
+        every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
+        every { keystore.generalKeyExists(any()) } answers { "xkey_key_${firstArg<String>()}" in aliases }
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
+
+        val request = JSONObject().put("jsonrpc", "2.0").put("id", 5).put("method", MethodNames.LOCAL_DELETE_KEY)
+            .put("params", JSONObject().put("keyId", "k"))
+        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
+
+        assertTrue("the credential's private key must be deleted, left $aliases", credential !in aliases)
+        assertTrue(
+            "the delete must succeed once the credential is gone, got $response",
+            response.optJSONObject("result")?.optBoolean("deleted") == true
+        )
+        coVerify { XKeyDatabase.getInstance(context).credentialMetadataDao().deleteByCredentialId("k") }
+    }
+
     /** The real [RequestHandler] with only its Android and storage edges mocked. */
     private fun realHandler(keyDao: KeyDao, keystore: KeystoreManager): RequestHandler {
         mockkStatic(Looper::class)
