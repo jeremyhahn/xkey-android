@@ -1167,6 +1167,41 @@ class KeyShareAuditTest {
     }
 
     /**
+     * #270 review r4: a credential row beside a general key of the same id
+     * exports the key its row describes ([KeystoreManager.rowKeyKind]), the
+     * credential's, under the row's algorithm, never the general key's.
+     */
+    @Test
+    fun aCredentialRowBesideASameIdGeneralKeyExportsTheCredentialsKey() = runTest {
+        val credential = ecKeyPair()
+        val general = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential, "xkey_key_$KEY_ID" to general))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "fido2")
+            .copy(algorithm = "ES256", publicKeyDer = credential.public.encoded)
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = KeystoreManager(context),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val getPublicKey = Request(
+            id = 8,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+
+        val result = success(served(getPublicKey))
+        assertEquals(
+            "getPublicKey exports the credential's key",
+            Base64.getEncoder().encodeToString(credential.public.encoded),
+            result.getString("publicKey")
+        )
+        assertEquals("ES256", result.getString("algorithm"))
+    }
+
+    /**
      * #255 review r5: with the Ed25519 store unreadable, whether a legacy
      * general Ed25519 key holds the id is unknown, so a credential of that
      * id is never exported in its place: local.getPublicKey and
