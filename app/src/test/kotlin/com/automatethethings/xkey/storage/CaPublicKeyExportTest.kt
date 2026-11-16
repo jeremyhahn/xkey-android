@@ -51,6 +51,8 @@ class CaPublicKeyExportTest {
         AndroidCA.ROOT_CA_ALIAS to root,
         AndroidCA.INTERMEDIATE_CA_ALIAS to intermediate
     )
+    /** User keys by Keystore alias, some with an id that is a CA's raw alias. */
+    private val userKeys = mutableMapOf<String, ByteArray>()
     private lateinit var keystore: KeystoreManager
 
     @Before
@@ -60,9 +62,9 @@ class CaPublicKeyExportTest {
         every { android.util.Log.w(any(), any<String>()) } returns 0
         every { android.util.Log.w(any(), any<String>(), any()) } returns 0
         val platform = mockk<KeyStore>(relaxed = true)
-        every { platform.containsAlias(any()) } answers { firstArg<String>() in certificates }
+        every { platform.containsAlias(any()) } answers { firstArg<String>().let { it in certificates || it in userKeys } }
         every { platform.getCertificate(any()) } answers {
-            certificates[firstArg<String>()]?.let { der ->
+            (certificates[firstArg<String>()] ?: userKeys[firstArg<String>()])?.let { der ->
                 mockk<Certificate> { every { publicKey } returns mockk { every { encoded } returns der } }
             }
         }
@@ -100,6 +102,37 @@ class CaPublicKeyExportTest {
             assertNull(keystore.soleKind(alias))
             for (kind in UserKeyKind.entries) assertNull(keystore.resolveKey(alias, kind))
         }
+    }
+
+    /**
+     * A user key may hold a CA's raw alias as its id (#255 verify r4): it
+     * owns that id, so its own public key is exported, never the CA's.
+     */
+    @Test
+    fun aGeneralKeyWithTheRootCaIdExportsItsOwnPublicKey() {
+        val own = ecPublicKeyDer()
+        userKeys["xkey_key_${AndroidCA.ROOT_CA_ALIAS}"] = own
+        assertExports(AndroidCA.ROOT_CA_ALIAS, own)
+    }
+
+    @Test
+    fun aCredentialWithTheIntermediateCaIdExportsItsOwnPublicKey() {
+        val own = ecPublicKeyDer()
+        userKeys["xkey_credential_${AndroidCA.INTERMEDIATE_CA_ALIAS}"] = own
+        assertExports(AndroidCA.INTERMEDIATE_CA_ALIAS, own)
+    }
+
+    @Test
+    fun aCaIdBothNamespacesHoldExportsNothing() {
+        userKeys["xkey_key_${AndroidCA.ROOT_CA_ALIAS}"] = ecPublicKeyDer()
+        userKeys["xkey_credential_${AndroidCA.ROOT_CA_ALIAS}"] = ecPublicKeyDer()
+        assertTrue(keystore.readOwnPublicKey(AndroidCA.ROOT_CA_ALIAS) == KeyRead.Unavailable)
+    }
+
+    @Test
+    fun aCaIdWithAnUnreadableStoreIsRefused() {
+        every { keystore.ed25519Prefs() } throws java.security.GeneralSecurityException("master key unavailable")
+        for (alias in certificates.keys) assertTrue(alias, keystore.readOwnPublicKey(alias) == KeyRead.Unreadable)
     }
 
     private fun assertExports(alias: String, der: ByteArray) {
