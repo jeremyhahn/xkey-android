@@ -337,8 +337,8 @@ class KeyPolicyStore(
      * The choke point (#193, ruling 554): records the obligation of a failed
      * [narrowing] (Private or Selected Peers), or of a failed withdrawal
      * (null), in [keyId]'s policy row, if its key row is still [instance],
-     * by [obligation]; an owed clear, recorded or held, is kept. If the row
-     * cannot be written, or there is none, the obligation is held in the
+     * by [obligation]; an owed clear, recorded or held, is kept. A key row
+     * with no policy row gets one. If the row cannot be written, the obligation is held in the
      * process instead; the write's failure is added to [failure]. Returns
      * whether the obligation is durable: recorded in the row, or owed by no
      * key row (it is gone or replaced). Never throws but for cancellation.
@@ -349,7 +349,12 @@ class KeyPolicyStore(
         var owed = obligation(narrowing, heldClear)
         try {
             val recorded = transactor.run {
-                val row = bound(keyId, instance) ?: return@run false
+                // A key row with no policy row of its own (one added by
+                // KeyStoreSyncManager.track or CreateCredentialHandler after
+                // the migration) gets one here, at its stored policy (#270
+                // review r4), so its obligation is recorded, not held forever.
+                val row = bound(keyId, instance)
+                    ?: KeyPolicyEntity(keyId, instance, dao.storedPolicy(keyId) ?: throw KeyChangedException(keyId))
                 owed = obligation(narrowing, heldClear || row.clearGrants)
                 dao.putPolicyRow(
                     row.copy(pendingPolicy = narrowing ?: row.pendingPolicy, denial = owed.denial, clearGrants = owed.clearGrants)
