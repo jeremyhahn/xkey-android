@@ -2397,7 +2397,7 @@ class RequestHandler(
         // A probe that cannot read the material is never read as "nothing
         // held": the delete is refused with nothing removed (#270 round 4).
         val (kind, besideRow) = deleteTarget(keyId, entity, legacy)
-            ?: return Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Key material of $keyId could not be read; not deleted")
+            ?: return Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Key material of $keyId could not be read or its row placed; not deleted")
         val material = com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager, kind = kind)
         if (entity == null || besideRow) {
             // No key row, or the row is the other key's: the material alone,
@@ -2418,19 +2418,23 @@ class RequestHandler(
      * The key under [keyId] a delete removes ([KeystoreManager.deleteTarget]),
      * and whether the id's row is the other key's: a credential and a general
      * key both hold material under the id and the row is not the target's.
-     * Null when the material cannot be read: the delete is refused.
+     * Null when the material cannot be read, or the row's key cannot be
+     * told apart from a same-id key ([KeystoreManager.rowKeyKind]): the
+     * delete is refused.
      */
     private fun deleteTarget(keyId: String, entity: KeyEntity?, legacy: Boolean): Pair<com.automatethethings.xkey.crypto.UserKeyKind, Boolean>? {
-        val generation = try {
-            com.automatethethings.xkey.storage.keyMaterialGeneration(context, keyId, keystoreManager).keys
+        val (generation, rowKind) = try {
+            val generation = com.automatethethings.xkey.storage.keyMaterialGeneration(context, keyId, keystoreManager).keys
+            generation to entity?.let { keystoreManager.rowKeyKind(keyId, it.keyType, { it.publicKeyDer }, generation) }
         } catch (e: Exception) {
-            Log.w(TAG, "Key material of $keyId could not be read; delete refused", e)
+            Log.w(TAG, "Key material of $keyId could not be read or its row placed; delete refused", e)
             return null
         }
-        val kind = KeystoreManager.deleteTarget(keyId, entity?.keyType, generation, legacy)
+        val named = if (legacy) com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL else com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        val kind = KeystoreManager.deleteTarget(keyId, rowKind ?: named, generation, legacy)
         val other = com.automatethethings.xkey.crypto.UserKeyKind.entries.firstOrNull { it != kind }
-        val besideRow = entity != null && other != null &&
-            KeystoreManager.userKeyKindOf(entity.keyType) != kind && KeystoreManager.holdsKind(keyId, generation, other)
+        val besideRow = rowKind != null && other != null &&
+            rowKind != kind && KeystoreManager.holdsKind(keyId, generation, other)
         return kind to besideRow
     }
 

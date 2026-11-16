@@ -673,6 +673,7 @@ class KeySharingPendingIntentHandlerTest {
     @Test
     fun anRpcDeleteOfAGeneralFido2RowKeepsTheSameIdCredential() = runTest {
         val id = "k-dual"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
         val generalDer = byteArrayOf(1, 2, 3)
         var held = mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
         every { keystore.holdsInternalKey(id) } returns false
@@ -698,6 +699,7 @@ class KeySharingPendingIntentHandlerTest {
     @Test
     fun anRpcDeleteOfARowOwnedByNeitherSharedKeyIsRefused() = runTest {
         val id = "k-unowned"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
         every { keystore.holdsInternalKey(id) } returns false
         every { keystore.userKeyGeneration(id) } returns mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
         every { keystore.getPublicKeyDER(id, any()) } returns byteArrayOf(9, 9)

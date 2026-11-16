@@ -185,7 +185,12 @@ fun isInternalKey(keyId: String, keystore: KeystoreManager): Boolean = keystore.
  * refused with nothing deleted and dropped: no user material is owed
  * (#193 r11).
  */
-fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null, kind: UserKeyKind? = null): KeyMaterial {
+fun keyMaterialDeleter(
+    context: Context,
+    keystore: KeystoreManager? = null,
+    kind: UserKeyKind? = null,
+    row: com.automatethethings.xkey.storage.entity.KeyEntity? = null
+): KeyMaterial {
     val manager by lazy { keystore ?: KeystoreManager(context) }
     return object : KeyMaterial {
         // A user delete names its [kind]; replays and settles delete what
@@ -193,14 +198,27 @@ fun keyMaterialDeleter(context: Context, keystore: KeystoreManager? = null, kind
         // would select both namespaces under the id, so it records no
         // delete: refused here, the one place a delete's generation is
         // read, before any tombstone or row is touched (#270 round 4).
+        // A delete of a key [row] names no kind: its key is resolved here,
+        // under the store's lock, from the row and the id's material
+        // ([KeystoreManager.rowKeyKind]), so a same-id key is never taken
+        // for the row's (#270 review).
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String =
             readKeyMaterialGeneration(context, held, source, manager, deleteKind(held))
 
         override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?, retry: Boolean): String =
             readKeyMaterialGeneration(context, held, source, manager, deleteKind(held), retry)
 
-        private fun deleteKind(held: KeyPolicyStore.KeyMaterialHeld): UserKeyKind =
-            checkNotNull(kind) { "A delete of ${held.keyId} names no key kind; refused" }
+        private fun deleteKind(held: KeyPolicyStore.KeyMaterialHeld): UserKeyKind = kind
+            ?: row?.let { rowKind(it) }
+            ?: error("A delete of ${held.keyId} names no key kind; refused")
+
+        // The internal-key guard [readKeyMaterialGeneration] applies, first:
+        // an internal or unreadable id is refused before its material is probed.
+        private fun rowKind(row: com.automatethethings.xkey.storage.entity.KeyEntity): UserKeyKind {
+            if (isInternalKey(row.keyId, manager)) throw InternalKeyException(row.keyId)
+            val present = keyMaterialGeneration(context, row.keyId, manager).keys
+            return manager.rowKeyKind(row.keyId, row.keyType, { row.publicKeyDer }, present)
+        }
 
         override fun isEmpty(generation: String): Boolean = decodeGeneration(generation).isEmpty()
 

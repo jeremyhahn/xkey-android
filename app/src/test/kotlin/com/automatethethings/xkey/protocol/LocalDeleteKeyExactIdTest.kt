@@ -130,7 +130,7 @@ class LocalDeleteKeyExactIdTest {
     private fun rpcDelete(keyId: String): Boolean? {
         if (isInternalKey(keyId, keystore)) return null
         val generation = keyMaterialGeneration(context, keyId, keystore).keys
-        val kind = KeystoreManager.deleteTarget(keyId, null, generation, legacy = false)
+        val kind = KeystoreManager.deleteTarget(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL, generation, legacy = false)
         val held = KeyPolicyStore.KeyMaterialHeld(keyId)
         val tombstone = readKeyMaterialGeneration(context, held, "android", keystore, kind)
         return deleteKeyMaterial(context, held, KeyDeletionEntity(keyId, 1L, "android", tombstone), keystore)

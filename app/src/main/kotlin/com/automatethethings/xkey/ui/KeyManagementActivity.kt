@@ -1298,8 +1298,7 @@ class KeyManagementActivity : AppCompatActivity() {
             // the material only once the rows of this key row are deleted,
             // in the store's serialisation of its material (#193 r8).
             val outcome = deleteUserKey(key, keyPolicyStore,
-                com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyManagementActivity,
-                    kind = com.automatethethings.xkey.crypto.KeystoreManager.userKeyKindOf(key.keyType)))
+                com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyManagementActivity, row = key))
             val shown = outcome.refusal ?: R.string.key_deleted
             Snackbar.make(rootLayout, getString(shown), Snackbar.LENGTH_SHORT).show()
         }

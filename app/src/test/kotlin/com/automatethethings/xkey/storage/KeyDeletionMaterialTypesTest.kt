@@ -262,22 +262,22 @@ class KeyDeletionMaterialTypesTest {
         val both = setOf("keystore:xkey_credential_k", "keystore:xkey_key_k")
         val general = setOf("software")
         // Legacy deleteKey names a credential.
-        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "ec", both, legacy = true))
-        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "ec", general, legacy = true))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", UserKeyKind.GENERAL, both, legacy = true))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", UserKeyKind.GENERAL, general, legacy = true))
         // local.deleteKey names the row's key, else a general key.
-        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "ec", both, legacy = false))
-        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "fido2", both, legacy = false))
-        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", null, general, legacy = false))
-        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", null, setOf("ed25519:xkey_credential_k"), legacy = false))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", UserKeyKind.GENERAL, both, legacy = false))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", UserKeyKind.CREDENTIAL, both, legacy = false))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", UserKeyKind.GENERAL, general, legacy = false))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", UserKeyKind.GENERAL, setOf("ed25519:xkey_credential_k"), legacy = false))
         // One key under the id is the target whatever its row's type says.
-        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "ec", setOf("keystore:xkey_credential_k"), legacy = false))
-        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "fido2", general, legacy = true))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", UserKeyKind.GENERAL, setOf("keystore:xkey_credential_k"), legacy = false))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", UserKeyKind.CREDENTIAL, general, legacy = true))
         // No material: still one kind, never every alias (#270 round 4):
         // the row's, else the one the method names.
-        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", "ec", emptySet(), legacy = false))
-        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", "fido2", emptySet(), legacy = false))
-        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", null, emptySet(), legacy = false))
-        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", null, emptySet(), legacy = true))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", UserKeyKind.GENERAL, emptySet(), legacy = false))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", UserKeyKind.CREDENTIAL, emptySet(), legacy = false))
+        assertEquals(UserKeyKind.GENERAL, KeystoreManager.deleteTarget("k", UserKeyKind.GENERAL, emptySet(), legacy = false))
+        assertEquals(UserKeyKind.CREDENTIAL, KeystoreManager.deleteTarget("k", UserKeyKind.CREDENTIAL, emptySet(), legacy = true))
     }
 
     /**
@@ -357,6 +357,35 @@ class KeyDeletionMaterialTypesTest {
         assertEquals("the credential delete took the general key", setOf("xkey_key_k"), entries.keys)
         assertTrue(store.deleteKey("k", row, keyMaterialDeleter(context, keystore, UserKeyKind.GENERAL)))
         assertTrue("the general delete left its key", entries.isEmpty())
+    }
+
+    /**
+     * #270 review: a screen's delete names its key row, not a kind. A fido2
+     * row under the general alias beside a same-id credential deletes the
+     * general key only; a row whose public key names neither key is
+     * refused with both keys, the row and no tombstone left.
+     */
+    @Test
+    fun aRowDeleteResolvesItsKeyFromThePublicKeyNotTheType() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        val generalDer = byteArrayOf(1, 2, 3)
+        keystoreKey("xkey_credential_k", certificate = true)
+        keystoreKey("xkey_key_k", certificate = true)
+        every { keystore.getPublicKeyDER("k", UserKeyKind.GENERAL) } returns generalDer
+        every { keystore.getPublicKeyDER("k", UserKeyKind.CREDENTIAL) } returns byteArrayOf(9)
+
+        val unowned = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = byteArrayOf(7))
+        org.junit.Assert.assertThrows(com.automatethethings.xkey.crypto.KeyOwnershipUnknownException::class.java) {
+            kotlinx.coroutines.runBlocking { store.deleteKey("k", unowned, keyMaterialDeleter(context, keystore, row = tables.key("k"))) }
+        }
+        assertEquals(setOf("xkey_credential_k", "xkey_key_k"), entries.keys)
+        org.junit.Assert.assertNotNull("the unowned row went", tables.key("k"))
+        assertFalse(store.isDeletionPending("k"))
+
+        val general = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = generalDer)
+        assertTrue(store.deleteKey("k", general, keyMaterialDeleter(context, keystore, row = tables.key("k"))))
+        assertEquals("the general row's delete took the credential", setOf("xkey_credential_k"), entries.keys)
     }
 
     /**

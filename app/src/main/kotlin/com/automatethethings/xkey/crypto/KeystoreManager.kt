@@ -104,6 +104,14 @@ enum class KeyBackend { KEYSTORE, ED25519, SOFTWARE }
 class KeyPresenceUnreadableException(val alias: String, cause: Throwable?) :
     KeyStoreException("Cannot read whether a key is stored under $alias", cause)
 
+/**
+ * A credential and a general key share [keyId] and a key row's public key
+ * names neither, or both: which of them the row describes is unknown, and
+ * a delete of the row is refused with nothing removed (#270 review).
+ */
+class KeyOwnershipUnknownException(val keyId: String) :
+    java.security.GeneralSecurityException("Cannot tell which key under $keyId its row describes")
+
 /** A MAC and the algorithm that computed it ("HMAC-SHA256" or "HMAC-SHA512"). */
 class HmacResult(val mac: ByteArray, val algorithm: String)
 
@@ -1500,6 +1508,27 @@ class KeystoreManager(private val context: Context) {
     }
 
     /**
+     * The user key a key row under [keyId] of [keyType] and
+     * public key ([publicKeyDer], read only when it is needed) describes, given the id's material [generation]
+     * entries: every delete of a key row resolves its key here (#270
+     * review). With at most one key under the id, the row's type says it.
+     * With a credential and a general key sharing the id, the type does
+     * not (`local.generateKey` makes fido2 rows under the general alias):
+     * the row's public key must be exactly one of the two keys', or
+     * [KeyOwnershipUnknownException] refuses the delete.
+     */
+    fun rowKeyKind(keyId: String, keyType: String, publicKeyDer: () -> ByteArray?, generation: Set<String>): UserKeyKind {
+        if (!holdsKind(keyId, generation, UserKeyKind.CREDENTIAL) || !holdsKind(keyId, generation, UserKeyKind.GENERAL)) {
+            return userKeyKindOf(keyType)
+        }
+        val der = publicKeyDer()
+        val owners = if (der == null) emptyList() else UserKeyKind.entries.filter {
+            getPublicKeyDER(keyId, it)?.contentEquals(der) == true
+        }
+        return owners.singleOrNull() ?: throw KeyOwnershipUnknownException(keyId)
+    }
+
+    /**
      * Get a general key's public key in PEM format.
      *
      * The PEM format wraps the DER-encoded public key in Base64 with
@@ -2376,8 +2405,10 @@ class KeystoreManager(private val context: Context) {
 
         /**
          * Which of the keys under [keyId] an RPC delete removes (#255
-         * review), given the id's key row type ([rowKeyType], null with no
-         * row) and its material [generation] entries. With one key under the
+         * review), given the kind of the id's key row ([rowKind], resolved
+         * by [rowKeyKind]; with no row, the kind the method names: the
+         * credential for the legacy `deleteKey`, else the general key) and
+         * its material [generation] entries. With one key under the
          * id, that key (its row, if any, is its own). With a credential and
          * a general key sharing the id, the legacy `deleteKey` names the
          * credential and `local.deleteKey` the row's key, or with no row the
@@ -2386,16 +2417,15 @@ class KeystoreManager(private val context: Context) {
          * written under the id meanwhile in the other namespace stays
          * (#270 round 4).
          */
-        fun deleteTarget(keyId: String, rowKeyType: String?, generation: Set<String>, legacy: Boolean): UserKeyKind {
+        fun deleteTarget(keyId: String, rowKind: UserKeyKind, generation: Set<String>, legacy: Boolean): UserKeyKind {
             val credential = holdsKind(keyId, generation, UserKeyKind.CREDENTIAL)
             val general = holdsKind(keyId, generation, UserKeyKind.GENERAL)
             return when {
                 credential && !general -> UserKeyKind.CREDENTIAL
                 general && !credential -> UserKeyKind.GENERAL
-                !credential -> rowKeyType?.let { userKeyKindOf(it) } ?: if (legacy) UserKeyKind.CREDENTIAL else UserKeyKind.GENERAL
+                !credential -> rowKind
                 legacy -> UserKeyKind.CREDENTIAL
-                rowKeyType != null -> userKeyKindOf(rowKeyType)
-                else -> UserKeyKind.GENERAL
+                else -> rowKind
             }
         }
 

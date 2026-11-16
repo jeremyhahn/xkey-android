@@ -141,7 +141,8 @@ class UserKeyDeleteTest {
      * Bypass guard (#255 review): every user key delete names which key of
      * its id it deletes, so a credential and a general key sharing an id
      * never lose each other's material. A deleter built for a delete with
-     * no kind would delete both.
+     * no kind would delete both. A screen's deleter names the key row it
+     * deletes, and resolves the row's kind from it (#270 review).
      */
     @Test
     fun everyUserKeyDeleteNamesTheKeyItDeletes() {
@@ -155,7 +156,9 @@ class UserKeyDeleteTest {
                     // A delete's deleter: on a deleteUserKey( line or the next.
                     val deleting = "deleteUserKey(" in code || i > 0 && "deleteUserKey(" in lines[i - 1] ||
                         i > 0 && "deleteMaterial(" in lines[i - 1]
-                    if (deleting && "keyMaterialDeleter(" in code && "kind" !in code + lines.getOrElse(i + 1) { "" }) "${file.name}:${i + 1}" else null
+                    // A screen names its key row (row = ...): the deleter resolves its kind (#270 review).
+                    val named = code + lines.getOrElse(i + 1) { "" }
+                    if (deleting && "keyMaterialDeleter(" in code && "kind" !in named && "row = " !in named) "${file.name}:${i + 1}" else null
                 }
             }
             .toList()
