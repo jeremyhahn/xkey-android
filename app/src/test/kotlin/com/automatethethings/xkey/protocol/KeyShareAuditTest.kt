@@ -743,9 +743,9 @@ class KeyShareAuditTest {
             .map { Regex("fun (?:<[^>]*> )?(\\w+)").find(it)!!.groupValues[1] }
         assertEquals(setOf("withUsableSoftwareKey", "auditKeyType", "handleImportSharedKey"), readers.toSet())
         assertTrue(
-            "the choke point reads the record inside withUsableKey",
+            "the choke point reads the record inside the general key's use gate",
             Regex(
-                "fun <T> withUsableSoftwareKey\\([\\s\\S]*?withUsableKey\\([^)]*\\)\\s*\\{\\s*" +
+                "fun <T> withUsableSoftwareKey\\([\\s\\S]*?withUsableGeneralKey\\([^)]*\\)\\s*\\{\\s*" +
                     "com\\.automatethethings\\.xkey\\.crypto\\.SoftwareKeyStore\\(context\\)\\.get\\("
             ).containsMatchIn(source)
         )

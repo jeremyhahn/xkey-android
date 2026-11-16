@@ -183,6 +183,10 @@ class HmacEcdhAuditTest {
         every { pairedDevices.lookupDevice(PEER_B) } returns DeviceLookup.Paired(device("Desktop B"))
 
         keystore = mockk(relaxed = true)
+        // Each key here is a general key: the use gate resolves the id's key
+        // from its row and material (#270 verify r4).
+        every { keystore.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystore.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         coEvery { keystore.computeHMAC("hw-hmac", any()) } returns keystoreMac
         coEvery { keystore.computeHMACWithAlgorithm("hw-hmac", any()) } returns
             HmacResult(keystoreMac, "HMAC-SHA256")

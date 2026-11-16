@@ -51,6 +51,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -172,7 +173,8 @@ class SignAfterDeleteTest {
                 val lines = file.readLines()
                 lines.mapIndexedNotNull { i, line ->
                     val code = line.substringBefore("//")
-                    if (!crypto.containsMatchIn(code) || "withUsableKey(" in code) return@mapIndexedNotNull null
+                    // withUsableGeneralKey is the key uses' gate: it runs withUsableKey (asserted below).
+                    if (!crypto.containsMatchIn(code) || "withUsableKey(" in code || "withUsableGeneralKey(" in code) return@mapIndexedNotNull null
                     // A software key's crypto runs in the use block of
                     // withUsableSoftwareKey, the gate's software-key choke point.
                     if (lines.getOrNull(i - 1)?.trimEnd()?.endsWith("{ sw ->") == true &&
@@ -184,6 +186,10 @@ class SignAfterDeleteTest {
                 }
             }
         assertEquals(emptyList<String>(), bypasses)
+        val handler = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
+        val gate = handler.substringAfter("fun <T> withUsableGeneralKey(").substringBefore("\n    }\n")
+        assertTrue("withUsableGeneralKey resolves the id's key", "ownedKeyKind(" in gate)
+        assertTrue("withUsableGeneralKey runs inside withUsableKey", "keyPolicyStore.withUsableKey(" in gate)
     }
 
     private suspend fun sign(): Response {

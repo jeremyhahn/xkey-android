@@ -1830,7 +1830,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val signature = keyPolicyStore.withUsableKey(signParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm) }
+        val signature = withUsableGeneralKey(signParams.keyId) { keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm) }
         val durationMs = System.currentTimeMillis() - startTime
 
         // Record usage
@@ -1874,7 +1874,7 @@ class RequestHandler(
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val decrypted = keyPolicyStore.withUsableKey(decryptParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.rsaDecryptWithAlgorithm(
+        val decrypted = withUsableGeneralKey(decryptParams.keyId) { keystoreManager.rsaDecryptWithAlgorithm(
             decryptParams.keyId, decryptParams.getCiphertextBytes()
         ) }
         val durationMs = System.currentTimeMillis() - startTime
@@ -1908,9 +1908,48 @@ class RequestHandler(
         keyId: String,
         use: (com.automatethethings.xkey.crypto.SoftwareKey) -> T
     ): Pair<com.automatethethings.xkey.crypto.SoftwareKey, T>? =
-        keyPolicyStore.withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+        withUsableGeneralKey(keyId) {
             com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId)?.let { sw -> sw to use(sw) }
         }
+
+    /**
+     * The one decision of which user key a `local.*` request by key id names
+     * (#270 verify r4, ruling 554): the key its row describes
+     * ([KeystoreManager.rowKeyKind]), or with no row the one the material
+     * holds. Every backend of both namespaces is probed first
+     * ([KeystoreManager.exportKind]), so an unreadable store is refused,
+     * never read as an empty one. A row that names neither of two keys
+     * sharing the id is refused with [refusal]. Export and every key use
+     * read the kind here, so they never name different keys of one id.
+     */
+    private suspend fun ownedKeyKind(keyId: String, row: KeyEntity?, refusal: Int): com.automatethethings.xkey.crypto.UserKeyKind {
+        val held = keystoreManager.exportKind(keyId)
+        if (row == null) return held
+        return try {
+            keystoreManager.rowKeyKind(
+                keyId, row.keyType,
+                { com.automatethethings.xkey.crypto.RowPublicKey(row.publicKeyDer, row.publicKeyCose) },
+                com.automatethethings.xkey.storage.keyMaterialGeneration(context, keyId, keystoreManager).keys
+            )
+        } catch (e: com.automatethethings.xkey.crypto.KeyOwnershipUnknownException) {
+            throw ProtocolException("Cannot tell which key $keyId names", errorCode = refusal)
+        }
+    }
+
+    /**
+     * The use gate of every key-use method (sign, decrypt, encrypt, HMAC,
+     * ECDH), which runs on the general key only: the id's key
+     * ([ownedKeyKind]) must be its general key, so a credential row beside
+     * a general key of the same id is refused, never served by the general
+     * key while local.getPublicKey exports the credential's.
+     */
+    private suspend inline fun <T> withUsableGeneralKey(keyId: String, use: () -> T): T {
+        val kind = ownedKeyKind(keyId, keyDao.getByKeyId(keyId), ErrorCodes.OPERATION_DENIED)
+        if (kind != com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+            throw ProtocolException("Key $keyId names a credential, not a general key", errorCode = ErrorCodes.OPERATION_DENIED)
+        }
+        return keyPolicyStore.withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL, use)
+    }
 
     /**
      * Handles local.symmetricEncrypt - AES-GCM encryption.
@@ -1945,7 +1984,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val ciphertext = keyPolicyStore.withUsableKey(symParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.symmetricEncrypt(
+        val ciphertext = withUsableGeneralKey(symParams.keyId) { keystoreManager.symmetricEncrypt(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
         ) }
         val durationMs = System.currentTimeMillis() - startTime
@@ -2000,7 +2039,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val plaintext = keyPolicyStore.withUsableKey(symParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.symmetricDecrypt(
+        val plaintext = withUsableGeneralKey(symParams.keyId) { keystoreManager.symmetricDecrypt(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
         ) }
         val durationMs = System.currentTimeMillis() - startTime
@@ -2143,7 +2182,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val hmac = keyPolicyStore.withUsableKey(hmacParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes()) }
+        val hmac = withUsableGeneralKey(hmacParams.keyId) { keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes()) }
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
@@ -2183,7 +2222,7 @@ class RequestHandler(
         val ecdhParams = LocalECDHParams.fromJson(params)
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val sharedSecret = keyPolicyStore.withUsableKey(ecdhParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.performECDH(
+        val sharedSecret = withUsableGeneralKey(ecdhParams.keyId) { keystoreManager.performECDH(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
         ) }
         val durationMs = System.currentTimeMillis() - startTime
@@ -2235,27 +2274,17 @@ class RequestHandler(
         val keyEntity = keyDao.getByKeyId(pubKeyParams.keyId)
             ?: throw ProtocolException("Key not found: ${pubKeyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
-        // The namespace is resolved once, from the key row (#270 review r4):
-        // the key its row describes ([KeystoreManager.rowKeyKind]), so a
-        // credential row beside a general key of the same id exports the
-        // credential's key under the row's algorithm, and a row that names
-        // neither key is refused. A credential that lives only under its
-        // credential alias exports like a general key.
+        // The namespace is resolved once, by the decision every key use
+        // reads too ([ownedKeyKind], #270 review r4 and verify r4): the key
+        // its row describes, so a credential row beside a general key of the
+        // same id exports the credential's key under the row's algorithm, and
+        // local.sign of that id refuses rather than sign with the general key.
+        // A row that names neither key is refused, and so is an unreadable
+        // store. A credential that lives only under its credential alias
+        // exports like a general key.
         // The use gate and every read below name that same kind, so a key
-        // pending deletion is refused rather than exported, and an
-        // unreadable store is refused, never read as an empty one: every
-        // backend of both namespaces is probed first ([KeystoreManager.exportKind]
-        // throws [com.automatethethings.xkey.crypto.KeyPresenceUnreadableException]).
-        keystoreManager.exportKind(pubKeyParams.keyId)
-        val exportKind = try {
-            keystoreManager.rowKeyKind(
-                pubKeyParams.keyId, keyEntity.keyType,
-                { com.automatethethings.xkey.crypto.RowPublicKey(keyEntity.publicKeyDer, keyEntity.publicKeyCose) },
-                com.automatethethings.xkey.storage.keyMaterialGeneration(context, pubKeyParams.keyId, keystoreManager).keys
-            )
-        } catch (e: com.automatethethings.xkey.crypto.KeyOwnershipUnknownException) {
-            throw ProtocolException("Cannot tell which key ${pubKeyParams.keyId} names", errorCode = ErrorCodes.EXPORT_FAILED)
-        }
+        // pending deletion is refused rather than exported.
+        val exportKind = ownedKeyKind(pubKeyParams.keyId, keyEntity, ErrorCodes.EXPORT_FAILED)
         val publicKey: String = keyPolicyStore.withUsableKey(pubKeyParams.keyId, exportKind) { when (pubKeyParams.format) {
             ExportFormats.DER -> {
                 val der = keystoreManager.getPublicKeyDER(pubKeyParams.keyId, exportKind)
@@ -4528,7 +4557,7 @@ class RequestHandler(
             val hashBytes = hexToBytes(contentHash)
             // The signature and the public key it is checked by are read
             // under one use gate (#255 review r2), from the alias it resolves.
-            val (signatureBytes, publicKeyDer) = keyPolicyStore.withUsableKey(signingKey.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(
+            val (signatureBytes, publicKeyDer) = withUsableGeneralKey(signingKey.keyId) { keystoreManager.signWithAlgorithm(
                 signingKey.keyId, hashBytes, signingKey.algorithm
             ) to keystoreManager.getPublicKeyDER(signingKey.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) }
             if (publicKeyDer == null) {
