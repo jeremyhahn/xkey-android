@@ -2339,9 +2339,15 @@ class RequestHandler(
                     // other ID loses every general material under it (software
                     // and hardware alike), or none is reported deleted. An
                     // unrecorded row with material in both namespaces names its
-                    // general key, as local.deleteKey always did.
-                    val namespace = keyDao.getByKeyId(canonicalId)
-                        ?.let { KeyNamespace.of(it, keystoreManager, softwareKeys) }
+                    // general key, as local.deleteKey always did. An ID with no
+                    // row (the base generateKey path creates a credential
+                    // without one) is read from the material present.
+                    val row = keyDao.getByKeyId(canonicalId)
+                    val namespace = if (row != null) {
+                        KeyNamespace.of(row, keystoreManager, softwareKeys)
+                    } else {
+                        KeyNamespace.ofMaterial(canonicalId, keystoreManager, softwareKeys)
+                    }
                     materialRemoved = if (namespace == KeyNamespace.CREDENTIAL) {
                         com.automatethethings.xkey.storage.removeCredentialMaterial(
                             canonicalId, keystoreManager, XKeyDatabase.getInstance(context).credentialMetadataDao()

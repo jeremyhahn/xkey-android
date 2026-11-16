@@ -252,14 +252,16 @@ class LocalDeleteKeyExactIdTest {
 
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 5).put("method", MethodNames.LOCAL_DELETE_KEY)
             .put("params", JSONObject().put("keyId", "k"))
-        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
+        val handler = realHandler(keyDao, keystore)
+        val metadata = XKeyDatabase.getInstance(context).credentialMetadataDao()
+        val response = JSONObject(String(handler.handleRawRequest(request.toString().toByteArray())))
 
         assertTrue("the credential's private key must be deleted, left $aliases", credential !in aliases)
         assertTrue(
             "the delete must succeed once the credential is gone, got $response",
             response.optJSONObject("result")?.optBoolean("deleted") == true
         )
-        coVerify { XKeyDatabase.getInstance(context).credentialMetadataDao().deleteByCredentialId("k") }
+        coVerify { metadata.deleteByCredentialId("k") }
     }
 
     /** The real [RequestHandler] with only its Android and storage edges mocked. */

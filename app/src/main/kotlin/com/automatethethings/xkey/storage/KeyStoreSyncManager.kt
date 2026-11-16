@@ -413,9 +413,19 @@ enum class KeyNamespace(val stored: String) {
          */
         fun of(key: KeyEntity, keystoreManager: KeystoreManager, softwareKeys: SoftwareKeyStore): KeyNamespace? {
             key.materialNamespace?.let { return ofStored(it) }
-            val credential = KeyStoreSyncManager.credentialAliasOf(key.keyId) in
+            return ofMaterial(key.keyId, keystoreManager, softwareKeys)
+        }
+
+        /**
+         * The one namespace holding material of [keyId], for an ID with no
+         * recorded namespace (an unrecorded row, or no row at all: the base
+         * generateKey path creates a credential without one). General when
+         * neither holds any; null when both do.
+         */
+        fun ofMaterial(keyId: String, keystoreManager: KeystoreManager, softwareKeys: SoftwareKeyStore): KeyNamespace? {
+            val credential = KeyStoreSyncManager.credentialAliasOf(keyId) in
                 keystoreManager.listAllKeystoreAliases()
-            val general = keystoreManager.generalKeyExists(key.keyId) || softwareKeys.contains(key.keyId)
+            val general = keystoreManager.generalKeyExists(keyId) || softwareKeys.contains(keyId)
             return when {
                 credential && general -> null
                 credential -> CREDENTIAL
