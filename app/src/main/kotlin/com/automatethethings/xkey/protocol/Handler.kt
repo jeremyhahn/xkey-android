@@ -162,6 +162,21 @@ class RequestHandler(
          */
         private val credentialDeleteLocks = HashMap<String, CredentialDeleteLock>()
 
+        /**
+         * True when [keyId] is reserved for xKey's own keys (the ephemeral
+         * agreement keys). The one rule for both ends: no RPC creates a key
+         * under a reserved ID, and [refuseInternalAlias] refuses its delete.
+         */
+        internal fun isReservedKeyId(keyId: String): Boolean =
+            keyId.startsWith(com.automatethethings.xkey.crypto.FileEncryptor.EPHEMERAL_KEY_PREFIX)
+
+        /** Refuses (INVALID_PARAMS) a key creation under a reserved ID ([isReservedKeyId]). */
+        private fun refuseReservedKeyId(keyId: String) {
+            if (isReservedKeyId(keyId)) {
+                throw ProtocolException("Key ID $keyId is reserved for xKey's own keys", errorCode = ErrorCodes.INVALID_PARAMS)
+            }
+        }
+
         /** A credential alias's delete lock and the deletes holding or awaiting it. */
         private class CredentialDeleteLock {
             val mutex = Mutex()
@@ -711,6 +726,7 @@ class RequestHandler(
             )
         }
 
+        refuseReservedKeyId(generateParams.credentialId)
         // As in local.generateKey: the reservation holds the id from this check
         // until the creation ends, and the creation rechecks after the approval.
         val reservation = "credential:${generateParams.credentialId}"
@@ -1404,6 +1420,7 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val genParams = LocalGenerateKeyParams.fromJson(params)
+        refuseReservedKeyId(genParams.keyId)
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
         // An ID in an existing key's raw alias form names that key.
@@ -2506,7 +2523,8 @@ class RequestHandler(
     private fun refuseInternalAlias(alias: String) {
         val userKey = (alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX) ||
             alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL)) &&
-            !alias.startsWith(KeystoreManager.generalKeyAlias(com.automatethethings.xkey.crypto.FileEncryptor.EPHEMERAL_KEY_PREFIX))
+            !(alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL) &&
+                isReservedKeyId(alias.removePrefix(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL)))
         if (userKey || alias !in keystoreManager.listAllKeystoreAliases()) return
         AuditLogger.logPolicyDenied(keyId = alias, keyLabel = alias, reason = "delete of an internal key refused")
         throw ProtocolException(
