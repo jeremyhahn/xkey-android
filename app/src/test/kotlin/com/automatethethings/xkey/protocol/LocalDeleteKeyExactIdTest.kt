@@ -264,6 +264,62 @@ class LocalDeleteKeyExactIdTest {
         coVerify { metadata.deleteByCredentialId("k") }
     }
 
+    /**
+     * Delete credential `k` (alias `xkey_credential_k`, no keys row) by its
+     * canonical ID through the real [KeystoreManager] over an in-memory
+     * Keystore; [metadataFails] makes the metadata cleanup after the key's
+     * removal throw. Returns the aliases left.
+     */
+    private fun deleteCredentialByCanonicalId(metadataFails: Boolean): Set<String> = runBlocking {
+        val aliases = java.util.Collections.synchronizedSet(hashSetOf("xkey_credential_k"))
+        val store = mockk<KeyStore>(relaxed = true)
+        every { store.containsAlias(any()) } answers { firstArg<String>() in aliases }
+        every { store.deleteEntry(any()) } answers { aliases.remove(firstArg<String>()); Unit }
+        every { store.aliases() } answers { java.util.Collections.enumeration(aliases.toList()) }
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns store
+        every { context.filesDir } returns Files.createTempDirectory("xkey-files").toFile().apply { deleteOnExit() }
+        val keystore = KeystoreManager(context)
+
+        mockkObject(com.automatethethings.xkey.audit.AuditLogger)
+        every { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.exists(any()) } returns false
+        coEvery { keyDao.getByKeyId(any()) } returns null
+        mockkConstructor(SoftwareKeyStore::class)
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
+
+        val handler = realHandler(keyDao, keystore)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns store
+        val metadata = XKeyDatabase.getInstance(context).credentialMetadataDao()
+        if (metadataFails) coEvery { metadata.deleteByCredentialId(any()) } throws RuntimeException("metadata store down")
+
+        val request = JSONObject().put("jsonrpc", "2.0").put("id", 6).put("method", MethodNames.LOCAL_DELETE_KEY)
+            .put("params", JSONObject().put("keyId", "k"))
+        handler.handleRawRequest(request.toString().toByteArray())
+        aliases.toSet()
+    }
+
+    /** Deleting a credential by its canonical ID records one KEY_DELETED event for it. */
+    @Test
+    fun deletingACredentialByCanonicalIdAuditsTheDeletion() {
+        val left = deleteCredentialByCanonicalId(metadataFails = false)
+
+        assertTrue("the credential's key is gone, left $left", left.isEmpty())
+        verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted("k", any(), "fido2") }
+        verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(any(), any(), any()) }
+    }
+
+    /** The audit is recorded once the key is removed, even when its metadata cleanup then fails. */
+    @Test
+    fun aCredentialDeleteWhoseMetadataCleanupFailsIsStillAudited() {
+        val left = deleteCredentialByCanonicalId(metadataFails = true)
+
+        assertTrue("the credential's key is gone, left $left", left.isEmpty())
+        verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted("k", any(), "fido2") }
+    }
+
     /** The real [RequestHandler] with only its Android and storage edges mocked. */
     private fun realHandler(keyDao: KeyDao, keystore: KeystoreManager): RequestHandler {
         mockkStatic(Looper::class)

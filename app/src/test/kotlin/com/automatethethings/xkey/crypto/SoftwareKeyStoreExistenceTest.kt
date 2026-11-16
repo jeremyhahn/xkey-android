@@ -56,4 +56,25 @@ class SoftwareKeyStoreExistenceTest {
         SoftwareKeyStore(context).delete("k")
         assertFalse(SoftwareKeyStore(context).contains("k"))
     }
+
+    @Test
+    fun `deleting a software key records one KEY_DELETED event, deleting none records nothing`() {
+        val context = context()
+        val dir = File(context.filesDir, "software_keys").apply { mkdirs() }
+        val stem = SyncCodec.sha256Hex("k".toByteArray(Charsets.UTF_8))
+        File(dir, "$stem.key").writeBytes(byteArrayOf(1))
+        File(dir, "$stem.meta").writeText("""{"keyId":"k"}""")
+        io.mockk.mockkObject(com.automatethethings.xkey.audit.AuditLogger)
+        try {
+            every { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
+
+            SoftwareKeyStore(context).delete("k")
+            SoftwareKeyStore(context).delete("absent")
+
+            io.mockk.verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted("k", any(), "software") }
+            io.mockk.verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(any(), any(), any()) }
+        } finally {
+            io.mockk.unmockkObject(com.automatethethings.xkey.audit.AuditLogger)
+        }
+    }
 }
