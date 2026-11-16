@@ -239,6 +239,7 @@ object XmpContainers {
         if (vp8x != null) {
             val length = vp8x.payloadEnd - vp8x.payloadStart
             if (length < 10) return false
+            if (declaresMissingXmp(vp8x.head[0].toInt() and 0xFF, parts.map { it.type })) return false
             val flag = ((vp8x.head[0].toInt() and 0xFF) or WEBP_XMP_FLAG).toByte()
             // strip would take it for the VP8X embed adds and drop the one the file came with.
             if (parts.size == 2 && parts[0] === vp8x && length == 10L) {
@@ -272,6 +273,15 @@ object XmpContainers {
         output.write(xmpChunk)
         return true
     }
+
+    /**
+     * Whether a VP8X carrying [flags] declares XMP (0x04) while no `XMP `
+     * chunk is among [chunkTypes]. Both WebP writers refuse such a file, so
+     * it takes the sidecar: strip clears the flag, and the canonical bytes
+     * would not be the file signed.
+     */
+    private fun declaresMissingXmp(flags: Int, chunkTypes: List<String>): Boolean =
+        flags and WEBP_XMP_FLAG != 0 && chunkTypes.none { it == "XMP " }
 
     private fun writeRiffHeader(output: OutputStream, chunks: Long) {
         output.write(riffHeader(chunks))
@@ -598,6 +608,9 @@ object XmpContainers {
         if (vp8x != null) {
             if (vp8x.payloadEnd - vp8x.payloadStart < 10) return null
             val flags = base[vp8x.payloadStart].toInt() and 0xFF
+            // strip clears the flag, so a file declaring XMP it does not carry
+            // would not strip back to itself.
+            if (declaresMissingXmp(flags, parts.map { it.type })) return null
             val header = base.copyOfRange(vp8x.payloadStart, vp8x.payloadEnd)
             header[0] = (flags or WEBP_XMP_FLAG).toByte()
             // strip would take it for the VP8X embed adds and drop the one the file came with.
