@@ -665,6 +665,53 @@ class KeySharingPendingIntentHandlerTest {
     }
 
     /**
+     * #270 review: a fido2 row under the general alias (as
+     * local.generateKey makes it) shares its id with a credential. The
+     * row's public key names the general key: local.deleteKey removes the
+     * general key's material and row, and the credential stays.
+     */
+    @Test
+    fun anRpcDeleteOfAGeneralFido2RowKeepsTheSameIdCredential() = runTest {
+        val id = "k-dual"
+        val generalDer = byteArrayOf(1, 2, 3)
+        var held = mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers { held }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { held = held - secondArg<Map<String, String>>().keys; emptyMap() }
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns generalDer
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = generalDer)
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(id, match { "keystore:xkey_credential_$id" in it }) }
+        assertEquals("the general key's material stayed", mapOf("keystore:xkey_credential_$id" to "1"), held)
+        assertEquals("the general key's row stayed", null, tables.key(id))
+    }
+
+    /**
+     * #270 review: a fido2 row whose public key names neither key under a
+     * shared id cannot be placed: the delete is refused and both keys and
+     * the row stay.
+     */
+    @Test
+    fun anRpcDeleteOfARowOwnedByNeitherSharedKeyIsRefused() = runTest {
+        val id = "k-unowned"
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } returns mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
+        every { keystore.getPublicKeyDER(id, any()) } returns byteArrayOf(9, 9)
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = null)
+
+        assertNotNull("an unowned row's delete went through", rpcDeleteKey(id).error)
+
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        assertNotNull("the key row was deleted", tables.key(id))
+        assertFalse(store.isDeletionPending(id))
+    }
+
+    /**
      * Round 12 (4): every key delete records one key-deletion audit event:
      * local.deleteKey of a key row, of material with no row, and the legacy
      * deleteKey.
