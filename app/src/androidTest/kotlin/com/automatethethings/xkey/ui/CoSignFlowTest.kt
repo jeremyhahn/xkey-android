@@ -52,6 +52,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.CoSignRequest
 import com.automatethethings.xkey.media.CoSignResponse
+import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.XmpMetadataHelper
@@ -113,13 +114,12 @@ class CoSignFlowTest {
     private val signerName = "UITestSigner$runId"
 
     /**
-     * Even-length, all-hex, and unique to this run.
-     *
-     * The run id leads so the 16-character preview the signature card renders
-     * is distinctive too; the padding only fills the tail out to a SHA-256
-     * sized string.
+     * [signedJpeg]'s real canonical content hash, as the co-sign flow hashes
+     * its payload before it appends. The JPEG's colour comes from the run id,
+     * so the hash (and the 16-character preview the signature card renders)
+     * is unique to this run.
      */
-    private val contentHash = runId.toString(16).padEnd(64, '0')
+    private lateinit var contentHash: String
 
     private lateinit var context: Context
     private lateinit var keystoreManager: KeystoreManager
@@ -171,6 +171,8 @@ class CoSignFlowTest {
 
         plainJpeg = writeJpeg("plain")
         signedJpeg = writeJpeg("signed").also { file ->
+            // The canonical hash leaves signature metadata out, so it is the same after the write.
+            contentHash = MediaHasher.hashStreamed({ file.inputStream() }, "image/jpeg").canonical
             XmpMetadataHelper.writeSignature(
                 file.path,
                 ContentAuthenticityData(
@@ -681,11 +683,14 @@ class CoSignFlowTest {
     // Helpers: fixtures
     // -----------------------------------------------------------------
 
-    /** Writes a small real JPEG so `ExifInterface` has something it can edit. */
+    /**
+     * Writes a small real JPEG so `ExifInterface` has something it can edit;
+     * its colour comes from the run id, so its payload is this run's own.
+     */
     private fun writeJpeg(suffix: String): File {
         val file = File(context.cacheDir, "ui-test-cosign-$suffix-$runId.jpg")
         val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
-        bitmap.eraseColor(Color.rgb(0x11, 0x55, 0x99))
+        bitmap.eraseColor(Color.rgb((runId and 0xFF).toInt(), (runId shr 8 and 0xFF).toInt(), (runId shr 16 and 0xFF).toInt()))
         FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
         bitmap.recycle()
         return file
