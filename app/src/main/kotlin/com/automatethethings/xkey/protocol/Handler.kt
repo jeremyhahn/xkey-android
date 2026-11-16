@@ -1703,7 +1703,9 @@ class RequestHandler(
                 } else {
                     SharingPolicyType.PRIVATE
                 },
-                source = "local"
+                source = "local",
+                // A software key is in the general namespace: never a credential.
+                materialNamespace = KeyNamespace.GENERAL.stored
             )
         )
 
