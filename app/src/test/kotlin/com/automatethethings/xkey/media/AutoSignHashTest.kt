@@ -163,18 +163,18 @@ class AutoSignHashTest {
                 MediaHasher.contentHashMatches(read.contentHash, signedBytes, mime, MediaHasher.SignatureSource.IN_BAND)
             )
 
-            // Oversized media already carrying an embedded signature keeps it:
-            // a sidecar would be shadowed by it, so both steps refuse.
+            // Oversized media already carrying an embedded signature: the
+            // automatic signer's hash refuses it, but the writer streams a
+            // replacement as it streamed the first embed, never a sidecar.
             val signed = XmpContainers.embed(original, XmpContainers.Format.ISO_BMFF, XmpFixtures.json())!!
             val carried = tempFolder.newFile("carried.mp4").apply { writeBytes(signed) }
             val (signedResolver, signedUri) = resolverFor(mime, carried)
             assertThrows(AutoSignHash.TooLargeException::class.java) {
                 AutoSignHash.contentHashUri(signedResolver, signedUri)
             }
-            assertThrows(java.io.IOException::class.java) {
-                XmpMetadataHelper.writeSignature(carried.path, signatureOver(hash))
-            }
-            assertArrayEquals(signed, carried.readBytes())
+            XmpMetadataHelper.writeSignature(carried.path, signatureOver(hash))
+            assertEquals(signatureOver(hash), XmpMetadataHelper.readSignature(carried.path))
+            assertArrayEquals(original, XmpContainers.strip(carried.readBytes(), XmpContainers.Format.ISO_BMFF))
             assertFalse(File(XmpMetadataHelper.getSidecarPath(carried.path)).exists())
         } finally {
             XmpMetadataHelper.maxEmbedBytes = bound

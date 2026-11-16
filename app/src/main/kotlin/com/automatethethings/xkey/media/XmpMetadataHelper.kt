@@ -297,12 +297,14 @@ object XmpMetadataHelper {
 
     /**
      * Embeds [data] in the file as XMP: the one embed path for MP4/MOV, PNG
-     * and WebP. A file with no XMP packet is embedded streaming, whatever
-     * its size ([XmpContainers.embedFile]); one that already carries a
-     * packet is rewritten in memory up to [maxEmbedBytes]. False when the
-     * file cannot carry it, so the caller writes a sidecar instead. A file
-     * that already carries an embedded signature it cannot rewrite throws:
-     * a sidecar would be shadowed by the stale embedded one.
+     * and WebP, first embed, co-sign and re-sign alike. Every write streams
+     * ([XmpContainers.embedFile]), whatever the file's size: a file that
+     * already carries our packet is first streamed to its stripped form
+     * ([XmpContainers.stripPlan]), which then takes the new packet, so a
+     * file the first embed signed can always be signed again. False when
+     * the file cannot carry it, so the caller writes a sidecar instead. A
+     * file that already carries an embedded signature it cannot rewrite
+     * throws: a sidecar would be shadowed by the stale embedded one.
      *
      * The new bytes replace the media atomically ([MediaPublisher.replaceFile]):
      * a failed write never leaves half a video, and no other write shares or
@@ -315,43 +317,41 @@ object XmpMetadataHelper {
     ): Boolean {
         val file = File(filePath)
         val json = data.toJsonString()
+        // A failed read propagates (no catch): it has not shown the file
+        // unsigned, and a sidecar beside a signed file would be shadowed.
+        val refused: () -> Boolean = {
+            // The readers' view: a file the writer refuses, such as one with
+            // too many boxes to parse, may still read as signed.
+            if (file.inputStream().use { XmpContainers.read(it.buffered(), format) } != null) {
+                throw IOException("$filePath carries an embedded signature that cannot be rewritten")
+            }
+            false
+        }
         return MediaPublisher.replaceFile(file) { temp ->
-            // Media with no XMP packet, the common case, is embedded streaming
-            // at any size: a camera video never falls back to a sidecar.
             val streamed = temp.outputStream().buffered().use { XmpContainers.embedFile(file, it, format, json) }
-            val embedded: ByteArray? = when (streamed) {
-                XmpContainers.FileEmbed.WRITTEN -> null
-                XmpContainers.FileEmbed.REFUSED -> {
-                    // The readers' view: a file the walk refuses, such as one with
-                    // too many boxes to parse, may still read as signed.
-                    if (file.inputStream().use { XmpContainers.read(it.buffered(), format) } != null) {
-                        throw IOException("$filePath carries an embedded signature that cannot be rewritten")
-                    }
-                    return@replaceFile false
-                }
+            when (streamed) {
+                XmpContainers.FileEmbed.WRITTEN -> true
+                XmpContainers.FileEmbed.REFUSED -> refused()
                 XmpContainers.FileEmbed.CARRIES_XMP -> {
-                    // A failed read propagates (no catch): it has not shown the file
-                    // unsigned, and a sidecar beside a signed file would be shadowed.
-                    if (file.length() > maxEmbedBytes) {
-                        val carried = file.inputStream().use { XmpContainers.read(it.buffered(), format) }
-                        if (carried != null) {
-                            throw IOException("$filePath is larger than $maxEmbedBytes bytes and carries an embedded signature")
+                    // The file without our packet, streamed beside the staging
+                    // file (both this write's own under the path lock), then
+                    // embedded as unsigned media is: what [XmpContainers.embed]
+                    // returns for its bytes, without loading them.
+                    val base = File(temp.path + ".base")
+                    try {
+                        val plan = java.io.RandomAccessFile(file, "r").use {
+                            XmpContainers.stripPlan(FileByteSource(it), format)
+                        } ?: return@replaceFile refused()
+                        file.inputStream().buffered().use { input ->
+                            base.outputStream().buffered().use { Pieces.write(plan, input, it) }
                         }
-                        return@replaceFile false
-                    }
-                    val bytes = file.readBytes()
-                    XmpContainers.embed(bytes, format, json) ?: run {
-                        // The readers' view: a file embed refuses, such as one with too
-                        // many boxes to parse, may still read as signed.
-                        if (XmpContainers.read(bytes.inputStream(), format) != null) {
-                            throw IOException("$filePath carries an embedded signature that cannot be rewritten")
-                        }
-                        return@replaceFile false
+                        val written = temp.outputStream().buffered().use { XmpContainers.embedFile(base, it, format, json) }
+                        written == XmpContainers.FileEmbed.WRITTEN || refused()
+                    } finally {
+                        base.delete()
                     }
                 }
             }
-            if (embedded != null) temp.writeBytes(embedded)
-            true
         }
     }
 
