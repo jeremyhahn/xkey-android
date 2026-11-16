@@ -40,6 +40,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.withResumed
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.FileEncryptor
@@ -1117,28 +1118,51 @@ class FileOperationActivity : AppCompatActivity() {
                             showResult(getString(R.string.file_operation_sign_success))
                         }
                     } else {
-                        pendingSignedCopy = PendingSignedCopy(uri, mimeType, cad)
-
                         keyDao.recordUsage(key.keyId)
                         AuditLogger.logFileSigned(key.keyId, key.label, fileName)
 
-                        withContext(Dispatchers.Main) {
+                        openSavePicker(
+                            pend = { pendingSignedCopy = PendingSignedCopy(uri, mimeType, cad) },
+                            clear = { pendingSignedCopy = null }
+                        ) {
                             createSignedCopyLauncher.launch(SignedCopyDocument.named(fileName, mimeType.ifBlank { null }, "signed"))
                         }
                     }
                 } else {
                     // Save as sidecar: prompt user for output location
-                    pendingSignatureJson = cad.toJsonString()
-
                     keyDao.recordUsage(key.keyId)
                     AuditLogger.logFileSigned(key.keyId, key.label, fileName)
 
-                    withContext(Dispatchers.Main) {
+                    val json = cad.toJsonString()
+                    openSavePicker(
+                        pend = { pendingSignatureJson = json },
+                        clear = { pendingSignatureJson = null }
+                    ) {
                         createSignatureFileLauncher.launch("$fileName.xkeysig")
                     }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { showError(e) }
+            }
+        }
+    }
+
+    /**
+     * Hand an output to its save picker: [pend] sets the pending state and
+     * [launch] opens the picker together, on the main thread while the screen
+     * is resumed, so no recreation falls between them (the saved state never
+     * holds a pending save whose picker was not opened). A launch that throws
+     * runs [clear]; a screen destroyed first cancels the handoff, leaving
+     * nothing pending.
+     */
+    private suspend fun openSavePicker(pend: () -> Unit, clear: () -> Unit, launch: () -> Unit) {
+        withResumed {
+            pend()
+            try {
+                launch()
+            } catch (e: RuntimeException) {
+                clear()
+                throw e
             }
         }
     }
