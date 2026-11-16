@@ -297,8 +297,12 @@ class XKeyDatabaseMigrationTest {
         val keyId = "legacy-key-v$version"
         val credentialId = "legacy-credential-v$version"
 
+        // A database from v11 on was written after MIGRATION_10_11, which
+        // does not run when it is opened: its rows already carry the current
+        // source token.
+        val seededSource = if (version >= 11) CURRENT_SOURCE else LEGACY_SOURCE
         createLegacyDatabase(version) { db ->
-            insertKey(db, keyId = keyId, source = LEGACY_SOURCE)
+            insertKey(db, keyId = keyId, source = seededSource)
             insertCredential(db, credentialId)
         }
 
@@ -308,9 +312,13 @@ class XKeyDatabaseMigrationTest {
             assertEquals("test-label", key!!.label)
             assertEquals("ES256", key.algorithm)
             assertEquals(
-                "MIGRATION_10_11 must run as part of every path",
+                "every path must end on the current source token (MIGRATION_10_11 below v11)",
                 CURRENT_SOURCE,
                 key.source
+            )
+            assertNull(
+                "a row migrated from v$version has no recorded material namespace (MIGRATION_13_14)",
+                key.materialNamespace
             )
 
             val credential = db.credentialMetadataDao().getByCredentialId(credentialId)
