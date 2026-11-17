@@ -144,6 +144,31 @@ class AndroidFidoCredentialBackendTest {
     }
 
     @Test
+    fun `passkeys stored with padded, standard or raw ids are listed and sign under their stored id`() = runTest {
+        // Stored ids as other writers left them: padded base64, standard
+        // base64 with '+' and '/', and an id that is not base64 at all.
+        val padded = shared.copy(keyId = "AQI=")
+        val standard = shared.copy(keyId = "+/8A")
+        val raw = shared.copy(keyId = "passkey#1")
+        val stored = listOf(padded, standard, raw)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns stored
+        stored.forEach { coEvery { keyDao.getByKeyId(it.keyId) } returns it }
+
+        val listed = backend().credentials("example.com")
+
+        assertEquals(3, listed.size)
+        assertArrayEquals(byteArrayOf(1, 2), listed[0].id)
+        assertArrayEquals(byteArrayOf(0xFB.toByte(), 0xFF.toByte(), 0), listed[1].id)
+        assertArrayEquals("passkey#1".toByteArray(Charsets.UTF_8), listed[2].id)
+        listed.zip(stored).forEach { (credential, entity) ->
+            val signed = backend().sign(credential, { byteArrayOf(5) }, ByteArray(32))
+            assertArrayEquals(byteArrayOf(0x30), signed.signature)
+            coVerify(exactly = 1) { signCounter.next(entity.keyId) }
+            coVerify(exactly = 1) { keystore.signWithoutBiometric(entity.keyId, any()) }
+        }
+    }
+
+    @Test
     fun `create stores a passkey a BLE client can use again`() = runTest {
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
         val stored = slot<KeyEntity>()
