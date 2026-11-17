@@ -171,8 +171,42 @@ class FidoGattServerTest {
         )
 
         assertEquals(BluetoothGatt.GATT_SUCCESS, responses[0].first)
-        assertArrayEquals(byteArrayOf(0x02, 0x00), responses[0].second)
+        // The default ATT MTU of 23 leaves 20 bytes for a write.
+        assertArrayEquals(byteArrayOf(0x00, 20), responses[0].second)
         assertArrayEquals(byteArrayOf(FidoBle.SERVICE_REVISION_FIDO2), responses[1].second)
+    }
+
+    private fun readControlPointLength(): Int {
+        callback.captured.onCharacteristicReadRequest(device, 5, 0, characteristic(FidoBle.CONTROL_POINT_LENGTH_UUID))
+        val value = responses.last().second!!
+        return ((value[0].toInt() and 0xFF) shl 8) or (value[1].toInt() and 0xFF)
+    }
+
+    @Test
+    fun `the control point length follows the MTU this client negotiated`() {
+        callback.captured.onMtuChanged(device, 185)
+        assertEquals(182, readControlPointLength())
+
+        callback.captured.onMtuChanged(device, 517)
+        assertEquals("never more than 512", 512, readControlPointLength())
+    }
+
+    @Test
+    fun `each client reads the control point length of its own MTU`() {
+        val other = mockk<BluetoothDevice>(relaxed = true)
+        every { other.address } returns "02:00:00:00:00:02"
+        callback.captured.onMtuChanged(other, 247)
+
+        assertEquals(20, readControlPointLength())
+        callback.captured.onCharacteristicReadRequest(other, 6, 0, characteristic(FidoBle.CONTROL_POINT_LENGTH_UUID))
+        assertArrayEquals(byteArrayOf(0x00, 244.toByte()), responses.last().second)
+    }
+
+    @Test
+    fun `a control point write longer than the advertised length is refused`() {
+        write(ByteArray(21))
+
+        assertEquals(BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH, responses.last().first)
     }
 
     @Test
