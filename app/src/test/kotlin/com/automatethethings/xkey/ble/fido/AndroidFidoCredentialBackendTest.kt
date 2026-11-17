@@ -15,7 +15,11 @@
 
 package com.automatethethings.xkey.ble.fido
 
+import android.content.Context
+import android.content.Intent
 import android.util.Log
+import androidx.biometric.BiometricManager
+import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
@@ -302,6 +306,42 @@ class AndroidFidoCredentialBackendTest {
         assertEquals(shared.keyId, prompt.signed.single().first)
         assertArrayEquals(byteArrayOf(5) + cdh, prompt.signed.single().second)
         coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
+    }
+
+    @Test
+    fun `per-operation passkeys in the general and the credential namespace sign under their own Keystore alias`() = runTest {
+        // local.generateKey stores a desktop-made passkey as xkey_key_<id>; the
+        // credential provider as xkey_credential_<id>. The key-bound prompt
+        // must be handed the alias the key really has.
+        val general = shared.copy(keyId = "gen1", authDurationSeconds = 0)
+        val credential = shared.copy(keyId = "cred1", authDurationSeconds = 0)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(general, credential)
+        coEvery { keyDao.getByKeyId("gen1") } returns general
+        coEvery { keyDao.getByKeyId("cred1") } returns credential
+        every { keystore.resolveKeystoreAlias("gen1") } returns "xkey_key_gen1"
+        every { keystore.resolveKeystoreAlias("cred1") } returns "xkey_credential_cred1"
+        val manager = mockk<BiometricManager>()
+        every { manager.canAuthenticate(any()) } returns BiometricManager.BIOMETRIC_SUCCESS
+        mockkStatic(BiometricManager::class)
+        every { BiometricManager.from(any()) } returns manager
+        val launcher = mockk<BiometricActivityLauncher>(relaxed = true)
+        val aliases = mutableListOf<String?>()
+        coEvery {
+            launcher.requestCryptoSignature(any(), any(), any(), any(), any(), captureNullable(aliases), any())
+        } returns byteArrayOf(0x36)
+        val unlocked = object : FidoLockScreen {
+            override val locked = false
+            override fun post(operationType: String, rpId: String, key: String, prompt: Intent, onTimeout: () -> Unit) = Unit
+            override fun cancel(key: String) = Unit
+        }
+        val prompt = BiometricFidoUserPrompt(mockk<Context>(relaxed = true), unlocked) { launcher }
+
+        val signatures = backend(prompt).credentials("example.com").map { cred ->
+            backend(prompt).sign(cred, { byteArrayOf(1) }, ByteArray(32)).signature
+        }
+
+        assertEquals(listOf("xkey_key_gen1", "xkey_credential_cred1"), aliases)
+        signatures.forEach { assertArrayEquals(byteArrayOf(0x36), it) }
     }
 
     @Test
