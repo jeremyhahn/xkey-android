@@ -172,6 +172,15 @@ client negotiates a larger MTU; longer control point writes are refused.
 Below API 33 every client shares fidoStatus's one value, so setting it and
 the notify call run under one server-wide lock: a frame for one client is
 never sent to another.
+Every frame reaches the stack through one delivery path, and a frame leaves
+the queue only once the stack reports it sent. A notify call the stack
+refuses is tried again after 50 ms; a notification whose completion reports
+a failure is sent again at once. After three attempts at one frame the
+session closes and the connection is cancelled, so a client never gets a
+message with a frame missing.
+A request must arrive whole within 3 seconds of its first frame; otherwise
+the client gets ERROR ERR_REQ_TIMEOUT, the partial message is dropped, and
+the next command on the connection starts afresh.
 Every outgoing message (MSG, PING, ERROR, KEEPALIVE) is queued whole under
 one lock, and the keepalive is joined before the MSG response. A session stays
 busy until its request has sent its response and cleaned up, so a MSG during
@@ -194,6 +203,8 @@ response carries only the public COSE key and signatures.
 | Malformed CBOR / wrong types / missing parameters | CTAP2_ERR_INVALID_CBOR, CBOR_UNEXPECTED_TYPE, MISSING_PARAMETER |
 | Client sends CANCEL, even before the request starts | CTAP2_ERR_KEEPALIVE_CANCEL (0x2D), exactly one response per MSG |
 | Request fails unexpectedly | CTAP2_ERR_OTHER (0x7F) |
+| Request frames stop before the message is whole (3 s) | ERROR ERR_REQ_TIMEOUT (0x05); the partial message is dropped |
+| A reply frame is not delivered after three attempts | No more frames; the connection is cancelled |
 | Several discoverable passkeys and the owner picks none (or cannot be asked) | CTAP2_ERR_OPERATION_DENIED, nothing signed |
 | Per-operation passkey with no prompt, or its prompt declined | CTAP2_ERR_OPERATION_DENIED |
 | Passkey no longer shared (or gone) once it has signed | CTAP2_ERR_OPERATION_DENIED, signature dropped |
@@ -212,10 +223,10 @@ assertions.
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleFramingTest.kt` | Fragment and reassembly, SEQ wrap, every framing fault |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/CborCodecTest.kt` | Canonical encoding, decoding, every decoder refusal |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/Ctap2AuthenticatorTest.kt` | The three commands end to end over CBOR bytes with a fake backend, signature verified, counter, the owner's account choice, every refusal including UV |
-| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSessionTest.kt` | PING, MSG, keepalive, CANCEL (also before start), handler failure, BUSY, framing errors, close |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSessionTest.kt` | PING, MSG, keepalive, CANCEL (also before start), handler failure, BUSY, framing errors, the reassembly timeout and the command after it, close |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/AndroidFidoCredentialBackendTest.kt` | Sharing policy on list and sign, shared counter, one Keystore signature over unhashed data, per-operation passkeys, account names in the chooser, rollback of a failed MakeCredential |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric; both prompts over the lock screen with their own notification; the account chooser |
-| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoGattServerTest.kt` | Control point write to fidoStatus notification, permissions, revision, MTU, subscription, the bounded queue, no cross-client frame below API 33 |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoGattServerTest.kt` | Control point write to fidoStatus notification, permissions, revision, MTU, subscription, the bounded queue, no cross-client frame below API 33, a refused or failed notification sent again and the connection ended after three attempts |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/ProtocolConstantsTest.kt` | Method name constants |
