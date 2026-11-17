@@ -24,7 +24,8 @@ Certificates reach the store in four ways:
 
 The store is then used to check chains: `verifyIDevIDChain` runs PKIX
 validation (revocation checking off) against the stored CAs. TPM enrollment in
-`GattServer` uses it on the endorsement key (EK) certificate.
+`GattServer` uses it on the endorsement key (EK) certificate, through
+`IDevIDVerifier`.
 
 ## Components
 
@@ -40,7 +41,7 @@ validation (revocation checking off) against the stored CAs. TPM enrollment in
 | `IDevIDVerifier`, `IDevIDVerificationResult` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/IDevIDVerifier.kt` | `verify(certificateChain)` and `isIDevIDStillValid`, built on `verifyIDevIDChain` |
 | `SettingsActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/SettingsActivity.kt` | "Fetch CA" button: derives bootstrap settings from the server URL, runs `fetchCABundle`, imports the result |
 | `TrustStoreActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/TrustStoreActivity.kt` | Trusted-CA screen: bootstrap with one chosen method, URL import, manual import, built-in xKey CAs |
-| `GattServer` | `app/src/main/kotlin/com/automatethethings/xkey/ble/GattServer.kt` | TPM enrollment: checks the EK certificate with `verifyIDevIDChain` |
+| `GattServer` | `app/src/main/kotlin/com/automatethethings/xkey/ble/GattServer.kt` | TPM enrollment: checks the EK certificate with `IDevIDVerifier.verify`; only `Trusted` continues |
 
 ## Android entry points
 
@@ -82,6 +83,7 @@ sequenceDiagram
     participant Srv as CA server
     participant TS as TrustStoreRepository
     participant GS as GattServer
+    participant IV as IDevIDVerifier
 
     User->>UI: Fetch CA (server URL)
     UI->>UI: deriveSettingsFromUrl(url)
@@ -102,8 +104,10 @@ sequenceDiagram
     end
 
     Note over GS,TS: later, TPM enrollment
-    GS->>TS: verifyIDevIDChain([EK certificate])
-    TS-->>GS: Valid / NoTrustAnchors / SelfSigned / Invalid
+    GS->>IV: verify([EK certificate])
+    IV->>TS: verifyIDevIDChain([EK certificate])
+    TS-->>IV: Valid / NoTrustAnchors / SelfSigned / Invalid
+    IV-->>GS: Trusted (continue) / SelfSigned / Untrusted / Error (refuse)
 ```
 
 ## Errors and refusals
@@ -133,13 +137,18 @@ Trust store:
 - `verifyIDevIDChain` returns `VerificationResult`: `Valid(trustLevel)`,
   `Invalid`, `SelfSigned` or `NoTrustAnchors`.
 
-In TPM enrollment, `GattServer` logs `Valid`, accepts `NoTrustAnchors` with a
-warning, and refuses `SelfSigned` and `Invalid` with
-`EnrollmentRefusal.UntrustedEndorsement`. Without a trust store, the EK
-certificate is not checked.
+`IDevIDVerifier.verify(certificateChain)` wraps `verifyIDevIDChain` and
+returns `IDevIDVerificationResult`: `Trusted`, `SelfSigned`,
+`Untrusted(reason)` (which includes `NoTrustAnchors`), `NoCertificate` or
+`Error(message)` (a parse failure or a chain check that threw).
 
-`IDevIDVerifier` (results `Trusted`, `SelfSigned`, `Untrusted(reason)`,
-`NoCertificate`, `Error(message)`) has no caller on main outside its tests.
+Its caller is TPM enrollment: `GattServer.verifyEndorsementKey` checks the
+EK certificate through the `IDevIDVerifier` it is given
+(`XKeyGattService` builds it over the `TrustStoreRepository`). Only
+`Trusted` lets enrollment continue. Every other result, and a `GattServer`
+with no verifier wired, refuses with `EnrollmentRefusal.UntrustedEndorsement`
+and the reason, never the certificate bytes. A store with no TPM vendor roots
+therefore refuses TPM enrollment until roots are imported.
 
 ## Tests
 
@@ -152,6 +161,7 @@ certificate is not checked.
 | `CABundleFetcherTest` (`app/src/test/.../truststore/`) | `/acme/ca-bundle` fetch |
 | `TrustStoreRepositoryTest`, `TrustStorePersistenceTest` (`app/src/test/.../truststore/`) | Import, refusals, persistence, chain checks |
 | `IDevIDVerifierTest` (`app/src/test/.../truststore/`) | `IDevIDVerifier` results |
+| `GattServerEndorsementVerifierTest` (`app/src/test/.../ble/`) | TPM enrollment continues only on `Trusted` |
 | `SyncEngineTrustStoreTest` (`app/src/test/.../sync/`) | Certificate merge through the store |
 | `BootstrapSettingsRepositoryTest` (`app/src/androidTest/.../settings/`) | Stored bootstrap settings |
 | `TrustStoreSystemInstallTest` (`app/src/androidTest/.../truststore/`) | System-install status |

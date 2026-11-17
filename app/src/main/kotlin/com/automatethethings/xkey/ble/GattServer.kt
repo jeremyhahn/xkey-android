@@ -85,8 +85,9 @@ import com.automatethethings.xkey.protocol.RemoteGetTCGCSRIDevIDParams
 import com.automatethethings.xkey.protocol.RemoteGetTCGCSRIDevIDResult
 import com.automatethethings.xkey.protocol.RemoteStoreEnrollmentCertsParams
 import com.automatethethings.xkey.protocol.RemoteStoreEnrollmentCertsResult
+import com.automatethethings.xkey.truststore.IDevIDVerificationResult
+import com.automatethethings.xkey.truststore.IDevIDVerifier
 import com.automatethethings.xkey.truststore.TrustStoreRepository
-import com.automatethethings.xkey.truststore.VerificationResult
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x500.X500NameBuilder
 import org.bouncycastle.asn1.x500.style.BCStyle
@@ -124,7 +125,12 @@ class GattServer(
     private val trustedComputingSettingsRepository: TrustedComputingSettingsRepository? = null,
     private val androidCA: AndroidCA? = null,
     private val enrolledDeviceRepository: EnrolledDeviceRepository? = null,
-    private val trustStoreRepository: TrustStoreRepository? = null,
+    trustStoreRepository: TrustStoreRepository? = null,
+    /**
+     * Checks the EK certificate in TPM enrollment, the one place enrollment
+     * decides whether to trust it (#280). Without one, enrollment refuses.
+     */
+    private val idevidVerifier: IDevIDVerifier? = trustStoreRepository?.let { IDevIDVerifier(it) },
     /** How long a send waits for the peer to write the CCCD before giving up. */
     private val notificationReadyTimeoutMs: Long = NOTIFICATION_READY_TIMEOUT_MS
 ) {
@@ -2284,10 +2290,10 @@ class GattServer(
      * the CSR signature and the copy outside is not, so a mismatch means the
      * unsigned one was substituted.
      *
-     * Chain validation is done against the trust store's TPM vendor roots. A
-     * store with no anchors cannot refute the certificate, so enrollment
-     * continues and says so; a store that has anchors and rejects the chain
-     * ends enrollment.
+     * The certificate is then checked by [IDevIDVerifier] against the trust
+     * store's TPM vendor roots. Only [IDevIDVerificationResult.Trusted] lets
+     * enrollment continue; every other result, a store with no anchors among
+     * them, and a server with no verifier end enrollment (#280).
      */
     private suspend fun verifyEndorsementKey(
         csr: TcgCsrIDevID,
@@ -2357,34 +2363,44 @@ class GattServer(
             )
         }
 
-        val trustStore = trustStoreRepository
-        if (trustStore == null) {
-            Log.w(TAG, "No trust store configured; EK certificate chain was not checked")
-            return ekCertificate
-        }
+        val verifier = idevidVerifier
+            ?: refuseEnrollment(
+                publicKeyHex, deviceName,
+                EnrollmentRefusal.UntrustedEndorsement(
+                    "no IDevID verifier is configured, so the EK certificate cannot be checked"
+                )
+            )
 
-        when (val result = trustStore.verifyIDevIDChain(listOf(ekCertificate.encoded))) {
-            is VerificationResult.Valid ->
+        // The reasons below never carry certificate bytes.
+        when (val result = verifier.verify(listOf(ekCertificate.encoded))) {
+            is IDevIDVerificationResult.Trusted ->
                 Log.i(TAG, "EK certificate chains to a trusted root (${result.trustLevel})")
 
-            is VerificationResult.NoTrustAnchors ->
-                Log.w(
-                    TAG,
-                    "Trust store holds no TPM vendor roots; EK certificate for $deviceName " +
-                        "was accepted without a chain check"
-                )
-
-            is VerificationResult.SelfSigned ->
+            is IDevIDVerificationResult.SelfSigned ->
                 refuseEnrollment(
                     publicKeyHex, deviceName,
                     EnrollmentRefusal.UntrustedEndorsement("EK certificate is self-signed")
                 )
 
-            is VerificationResult.Invalid ->
+            is IDevIDVerificationResult.Untrusted ->
                 refuseEnrollment(
                     publicKeyHex, deviceName,
                     EnrollmentRefusal.UntrustedEndorsement(
-                        "EK certificate does not chain to a trusted TPM vendor root: ${result.error}"
+                        "EK certificate does not chain to a trusted TPM vendor root: ${result.reason}"
+                    )
+                )
+
+            is IDevIDVerificationResult.NoCertificate ->
+                refuseEnrollment(
+                    publicKeyHex, deviceName,
+                    EnrollmentRefusal.UntrustedEndorsement("no EK certificate to verify")
+                )
+
+            is IDevIDVerificationResult.Error ->
+                refuseEnrollment(
+                    publicKeyHex, deviceName,
+                    EnrollmentRefusal.UntrustedEndorsement(
+                        "EK certificate could not be verified: ${result.message}"
                     )
                 )
         }
