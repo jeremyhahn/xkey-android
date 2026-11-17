@@ -59,9 +59,26 @@ class Ctap2AuthenticatorTest {
         override var userVerificationAvailable = true
         override var strictUserVerification = true
 
-        fun add(id: ByteArray, rpId: String, discoverable: Boolean = true, user: ByteArray? = byteArrayOf(7)) {
+        fun add(
+            id: ByteArray,
+            rpId: String,
+            discoverable: Boolean = true,
+            user: ByteArray? = byteArrayOf(7),
+            name: String = "alice"
+        ) {
             keys[id.hex()] = newKey()
-            stored += FidoCredential(id, rpId, user, "alice", "Alice", discoverable)
+            stored += FidoCredential(id, rpId, user, name, name.replaceFirstChar { it.uppercase() }, discoverable)
+        }
+
+        /** The owner's pick among the accounts offered; null declines. */
+        var choice: (List<FidoCredential>) -> FidoCredential? = { null }
+
+        /** Every list of accounts the owner was asked to choose from. */
+        val offered = mutableListOf<List<FidoCredential>>()
+
+        suspend fun chooseCredential(rpId: String, candidates: List<FidoCredential>): FidoCredential? {
+            offered += candidates
+            return choice(candidates)
         }
 
         override suspend fun credentials(rpId: String): List<FidoCredential> =
@@ -225,6 +242,61 @@ class Ctap2AuthenticatorTest {
         assertEquals(Ctap2.OK, status)
         assertArrayEquals(byteArrayOf(2), (body!![1L] as Map<*, *>)["id"] as ByteArray)
         assertArrayEquals(byteArrayOf(42), (body[4L] as Map<*, *>)["id"] as ByteArray)
+    }
+
+    @Test
+    fun `with no allow list and two discoverable accounts the owner's pick signs and its user is returned`() = runTest {
+        backend.add(byteArrayOf(1), rpId, user = byteArrayOf(41), name = "alice")
+        backend.add(byteArrayOf(2), rpId, user = byteArrayOf(42), name = "bob")
+        backend.choice = { offered -> offered.single { it.userName == "bob" } }
+
+        val (status, body) = call(Ctap2.CMD_GET_ASSERTION, assertion())
+
+        assertEquals(Ctap2.OK, status)
+        assertEquals(listOf(listOf("alice", "bob")), backend.offered.map { list -> list.map { it.userName } })
+        assertArrayEquals(byteArrayOf(2), (body!![1L] as Map<*, *>)["id"] as ByteArray)
+        assertArrayEquals(byteArrayOf(42), (body[4L] as Map<*, *>)["id"] as ByteArray)
+        val verifier = Signature.getInstance("SHA256withECDSA")
+        verifier.initVerify(backend.publicKey(byteArrayOf(2)))
+        verifier.update((body[2L] as ByteArray) + clientDataHash)
+        assertTrue(verifier.verify(body[3L] as ByteArray))
+    }
+
+    @Test
+    fun `an account choice the owner declines answers CTAP2_ERR_OPERATION_DENIED and signs nothing`() = runTest {
+        backend.add(byteArrayOf(1), rpId, user = byteArrayOf(41), name = "alice")
+        backend.add(byteArrayOf(2), rpId, user = byteArrayOf(42), name = "bob")
+        backend.choice = { null }
+
+        val (status, body) = call(Ctap2.CMD_GET_ASSERTION, assertion())
+
+        assertEquals(Ctap2.ERR_OPERATION_DENIED, status)
+        assertEquals(null, body)
+        assertEquals(1, backend.offered.size)
+        assertEquals(0L, backend.counter)
+    }
+
+    @Test
+    fun `the account chooser offers only the discoverable accounts the policy shows`() = runTest {
+        backend.add(byteArrayOf(1), rpId, user = byteArrayOf(41), name = "alice")
+        backend.add(byteArrayOf(2), rpId, user = byteArrayOf(42), name = "bob")
+        backend.add(byteArrayOf(3), rpId, user = byteArrayOf(43), name = "carol")
+        backend.add(byteArrayOf(4), rpId, discoverable = false, user = byteArrayOf(44), name = "dave")
+        backend.hidden += byteArrayOf(3).hex()
+        backend.choice = { it.first() }
+
+        assertEquals(Ctap2.OK, call(Ctap2.CMD_GET_ASSERTION, assertion()).first)
+
+        assertEquals(listOf(listOf("alice", "bob")), backend.offered.map { list -> list.map { it.userName } })
+    }
+
+    @Test
+    fun `a single discoverable account signs without a chooser`() = runTest {
+        backend.add(byteArrayOf(1), rpId, user = byteArrayOf(41))
+
+        assertEquals(Ctap2.OK, call(Ctap2.CMD_GET_ASSERTION, assertion()).first)
+
+        assertTrue(backend.offered.isEmpty())
     }
 
     @Test
