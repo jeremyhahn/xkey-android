@@ -114,6 +114,7 @@ class AndroidFidoCredentialBackend(
         val count = signCounter.next(keyId)
         val authData = authenticatorData(count)
         val signature = signInKeystore(entity, credential.rpId, authData + clientDataHash)
+        releasable(keyId, credential.rpId)
         Log.i(TAG, "Signed a CTAP2 assertion over BLE, rpId=${credential.rpId}, signCount=$count")
         runCatching {
             AuditLogger.logFido2Authentication(
@@ -231,6 +232,20 @@ class AndroidFidoCredentialBackend(
             throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey's prompt failed")
         } catch (e: IllegalStateException) {
             throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "No prompt can be shown")
+        }
+    }
+
+    /**
+     * The last check before a signature leaves the phone, run after every
+     * signature on either path: the prompt can stay up for as long as the
+     * user takes, and the passkey may have been made private, shared with
+     * selected peers only, or deleted meanwhile. Then the signature is
+     * dropped and the client gets CTAP2_ERR_OPERATION_DENIED.
+     */
+    private suspend fun releasable(keyId: String, rpId: String) {
+        val now = keyDao.getByKeyId(keyId)
+        if (now == null || now.keyType != KeyTypeFido2 || now.rpId != rpId || !shared(now)) {
+            throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "Passkey sharing changed while it signed")
         }
     }
 
