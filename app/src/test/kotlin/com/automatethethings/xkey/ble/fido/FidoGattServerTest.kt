@@ -332,6 +332,7 @@ class FidoGattServerTest {
         rejectNotify { it >= 2 }
 
         send(FidoBle.CMD_PING, fiftyBytes)
+        callback.captured.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
 
         verify(timeout = 5_000) { stack.cancelConnection(device) }
         val frames = notified.size

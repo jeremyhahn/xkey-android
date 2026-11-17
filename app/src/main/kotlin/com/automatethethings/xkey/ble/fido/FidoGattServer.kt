@@ -41,6 +41,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -220,6 +221,7 @@ class FidoGattServer(
             synchronized(session) { session.close() }
             synchronized(queue) {
                 queue.clear()
+                current = null
                 inFlight = false
             }
         }
@@ -257,21 +259,71 @@ class FidoGattServer(
             }
         }
 
-        fun onSent() = synchronized(queue) {
+        /** The frame being delivered: in the stack, or waiting to be sent again. */
+        private var current: ByteArray? = null
+        private var attempts = 0
+        private var retryPending = false
+
+        /** Set once a frame could not be delivered; nothing more is sent on this connection. */
+        private var failed = false
+
+        /**
+         * The stack's answer for the frame in flight. On success the next frame
+         * goes; on failure the same frame is sent again, never skipped.
+         */
+        fun onSent(status: Int) = synchronized(queue) {
+            if (!inFlight) return@synchronized
             inFlight = false
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                current = null
+                attempts = 0
+            }
             sendNext()
         }
 
-        /** Caller holds the queue lock. */
+        /**
+         * The one way a frame reaches the stack (caller holds the queue lock).
+         * A frame is sent until the stack reports it delivered: a refused
+         * notify call is tried again after [NOTIFY_RETRY_DELAY_MILLIS], a
+         * failed completion at once, [MAX_NOTIFY_ATTEMPTS] times in all. Then
+         * the connection ends, so the client never gets a message with a
+         * frame missing and never sees the frames after it.
+         */
         private fun sendNext() {
-            val frame = queue.removeFirstOrNull() ?: return
+            if (inFlight || retryPending || failed) return
+            val frame = current ?: queue.removeFirstOrNull()?.also { current = it; attempts = 0 } ?: return
             val s = server
             val characteristic = statusCharacteristic
-            if (s == null || characteristic == null || !notify(s, characteristic, frame)) {
-                queue.clear()
+            if (s == null || characteristic == null || attempts >= MAX_NOTIFY_ATTEMPTS) {
+                fail()
                 return
             }
-            inFlight = true
+            attempts++
+            if (notify(s, characteristic, frame)) {
+                inFlight = true
+                return
+            }
+            retryPending = true
+            scope.launch {
+                delay(NOTIFY_RETRY_DELAY_MILLIS)
+                synchronized(queue) {
+                    retryPending = false
+                    sendNext()
+                }
+            }
+        }
+
+        /** Caller holds the queue lock. */
+        private fun fail() {
+            failed = true
+            queue.clear()
+            current = null
+            Log.w(TAG, "FIDO notification not delivered after $attempts attempts; ending the connection")
+            // Not on this thread, for the same reason as the overflow close.
+            scope.launch {
+                synchronized(session) { session.close() }
+                runCatching { server?.cancelConnection(device) }
+            }
         }
 
         private fun notify(s: BluetoothGattServer, characteristic: BluetoothGattCharacteristic, frame: ByteArray) =
@@ -302,7 +354,7 @@ class FidoGattServer(
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-            clients[device.address]?.onSent()
+            clients[device.address]?.onSent(status)
         }
 
         override fun onCharacteristicReadRequest(
@@ -409,6 +461,12 @@ class FidoGattServer(
          * keepalives and some PING echoes to spare.
          */
         const val MAX_QUEUED_FRAMES = 96
+
+        /** Sends of one frame (the first and its retries) before the connection ends. */
+        const val MAX_NOTIFY_ATTEMPTS = 3
+
+        /** Wait before sending a frame again that the stack refused (it may be busy). */
+        const val NOTIFY_RETRY_DELAY_MILLIS = 50L
         const val SERVICE_ADD_TIMEOUT_SECONDS = 5L
     }
 }
