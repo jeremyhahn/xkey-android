@@ -25,7 +25,6 @@ import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
-import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 
@@ -98,8 +97,7 @@ class AndroidFidoCredentialBackend(
         }
         val count = signCounter.next(keyId)
         val authData = authenticatorData(count)
-        val dataHash = MessageDigest.getInstance("SHA-256").digest(authData + clientDataHash)
-        val signature = keystoreManager.signWithoutBiometric(credentialId = keyId, dataHash = dataHash)
+        val signature = signInKeystore(keyId, authData + clientDataHash)
         Log.i(TAG, "Signed a CTAP2 assertion over BLE, rpId=${credential.rpId}, signCount=$count")
         runCatching {
             AuditLogger.logFido2Authentication(
@@ -178,6 +176,14 @@ class AndroidFidoCredentialBackend(
         }
         return NewCredential(rawId, cose)
     }
+
+    /**
+     * The one signing path for BLE assertions. [signedData] is
+     * `authenticatorData || clientDataHash`, unhashed: the Keystore signature
+     * is SHA256withECDSA, which hashes it once, as WebAuthn expects.
+     */
+    private suspend fun signInKeystore(keyId: String, signedData: ByteArray): ByteArray =
+        keystoreManager.signWithoutBiometric(credentialId = keyId, dataHash = signedData)
 
     private suspend fun shared(entity: KeyEntity): Boolean = sharePermission.canShare(entity, null)
 
