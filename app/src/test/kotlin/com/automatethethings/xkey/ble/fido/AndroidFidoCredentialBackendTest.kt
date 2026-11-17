@@ -20,6 +20,13 @@ import android.content.Intent
 import android.util.Log
 import androidx.biometric.BiometricManager
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.NotificationKeys
+import com.automatethethings.xkey.auth.PromptOwnership
+import com.automatethethings.xkey.crypto.BiometricHelper
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
@@ -342,6 +349,55 @@ class AndroidFidoCredentialBackendTest {
 
         assertEquals(listOf("xkey_key_gen1", "xkey_credential_cred1"), aliases)
         signatures.forEach { assertArrayEquals(byteArrayOf(0x36), it) }
+    }
+
+    @Test
+    fun `concurrent provider and BLE assertions sign strictly increasing counters in signing order`() = runTest {
+        val perOperation = shared.copy(authDurationSeconds = 0)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(perOperation)
+        coEvery { keyDao.getByKeyId(shared.keyId) } returns perOperation
+        var counter = 0L
+        coEvery { signCounter.next(shared.keyId) } answers { ++counter }
+        val signedCounts = mutableListOf<Long>()
+        // The key-bound prompt as the launcher runs it: its own entry on the
+        // one prompt queue, signing only once that entry's turn comes.
+        val prompt = object : FidoUserPrompt {
+            override val available = true
+            override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.VERIFIED
+            override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? = null
+            override suspend fun signWithKey(
+                keyId: String,
+                keyAlias: String,
+                signedData: ByteArray,
+                rpId: String
+            ): ByteArray = PromptOwnership.process.turn(
+                NotificationKeys.wakeOnly("bleSignature"),
+                PromptOwnership.Kind.CRYPTO_SIGNING
+            ) {
+                signedCounts += signedData[0].toLong()
+                byteArrayOf(0x37)
+            }!!
+        }
+        // A credential provider assertion holds the screen first: it reads
+        // its counter and signs inside its one queue turn, as
+        // GetCredentialHandler does.
+        val providerMayFinish = CompletableDeferred<Unit>()
+        val provider = launch {
+            BiometricHelper.inOneTurn("passkeyAssertion") {
+                providerMayFinish.await()
+                signedCounts += signCounter.next(shared.keyId)
+            }
+        }
+        runCurrent()
+        val cred = backend(prompt).credentials("example.com").single()
+
+        val ble = async { backend(prompt).sign(cred, { count -> byteArrayOf(count.toByte()) }, ByteArray(32)) }
+        runCurrent()
+        providerMayFinish.complete(Unit)
+        provider.join()
+        ble.await()
+
+        assertEquals("counters in the order they were signed", listOf(1L, 2L), signedCounts)
     }
 
     @Test
