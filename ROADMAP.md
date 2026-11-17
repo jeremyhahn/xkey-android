@@ -65,7 +65,7 @@ Release-readiness checklist for [Dev complete](../../milestone/23), done; none o
 
 ## Now
 
-- **fido2-phone-backend** — CTAP2 over BLE for `xkey fido2 --backend phone`; `local.listFido2Credentials` and `local.signFido2Assertion` over the paired Noise session ship today — [#281](../../issues/281) — in progress: CTAP2 over BLE not yet shipped
+- **fido2-phone-backend** — CTAP2 over BLE for `xkey fido2 --backend phone`; `local.listFido2Credentials` and `local.signFido2Assertion` over the paired Noise session ship today — [#281](../../issues/281) — in progress: the FIDO GATT service with CTAP2 GetInfo, GetAssertion and MakeCredential is built and unit tested (MTU-sized control point, phone prompts over the lock screen, account choice by successive prompts); left: on-device verification against a CTAP2 BLE client and the desktop, clientPin, GetNextAssertion, `up` false assertions, a list screen for account choice
 
 ## Next
 
