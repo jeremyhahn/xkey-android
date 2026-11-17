@@ -76,7 +76,7 @@ class Ctap2AuthenticatorTest {
         /** Every list of accounts the owner was asked to choose from. */
         val offered = mutableListOf<List<FidoCredential>>()
 
-        suspend fun chooseCredential(rpId: String, candidates: List<FidoCredential>): FidoCredential? {
+        override suspend fun chooseCredential(rpId: String, candidates: List<FidoCredential>): FidoCredential? {
             offered += candidates
             return choice(candidates)
         }

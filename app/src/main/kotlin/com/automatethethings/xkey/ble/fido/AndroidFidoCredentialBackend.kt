@@ -42,6 +42,13 @@ interface FidoUserPrompt {
     suspend fun verify(rpId: String, registering: Boolean): UserCheck
 
     /**
+     * Ask the owner which of [accounts] (each a passkey's display name and
+     * user name) signs in to [rpId]. Returns its index, or null when the
+     * owner declines or no prompt can be shown.
+     */
+    suspend fun chooseAccount(rpId: String, accounts: List<String>): Int?
+
+    /**
      * Sign [signedData] with the passkey [keyId] behind a prompt bound to that
      * one signature, for a key Keystore lets sign only right after its own
      * authentication (a per-operation passkey). Signs inside Keystore.
@@ -99,6 +106,13 @@ class AndroidFidoCredentialBackend(
         val prompt = userPrompt ?: return UserCheck.UNAVAILABLE
         if (!prompt.available) return UserCheck.UNAVAILABLE
         return prompt.verify(rpId, registering)
+    }
+
+    override suspend fun chooseCredential(rpId: String, candidates: List<FidoCredential>): FidoCredential? {
+        val prompt = userPrompt ?: return null
+        if (!prompt.available) return null
+        val index = prompt.chooseAccount(rpId, candidates.mapIndexed { i, c -> accountName(c, i) }) ?: return null
+        return candidates.getOrNull(index)
     }
 
     override suspend fun sign(
@@ -260,6 +274,21 @@ class AndroidFidoCredentialBackend(
         const val PER_OPERATION = 0
 
         fun encodeId(raw: ByteArray): String = Base64.getUrlEncoder().withoutPadding().encodeToString(raw)
+
+        /**
+         * How the chooser names a passkey: its display name and user name,
+         * either alone when the other is missing or the same, else its place.
+         */
+        fun accountName(credential: FidoCredential, index: Int): String {
+            val display = credential.userDisplayName?.takeIf { it.isNotBlank() }
+            val name = credential.userName?.takeIf { it.isNotBlank() }
+            return when {
+                display != null && name != null && display != name -> "$display ($name)"
+                display != null -> display
+                name != null -> name
+                else -> "Account ${index + 1}"
+            }
+        }
 
         /** Passkey ids and user handles are stored base64url; anything else is skipped. */
         fun decodeId(text: String): ByteArray? = try {

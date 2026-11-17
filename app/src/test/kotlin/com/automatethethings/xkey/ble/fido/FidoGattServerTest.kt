@@ -75,6 +75,7 @@ class FidoGattServerTest {
         override val strictUserVerification = true
         override suspend fun credentials(rpId: String) = emptyList<FidoCredential>()
         override suspend fun checkUser(rpId: String, registering: Boolean) = UserCheck.DECLINED
+        override suspend fun chooseCredential(rpId: String, candidates: List<FidoCredential>): FidoCredential? = null
         override suspend fun sign(
             credential: FidoCredential,
             authenticatorData: (signCount: Long) -> ByteArray,

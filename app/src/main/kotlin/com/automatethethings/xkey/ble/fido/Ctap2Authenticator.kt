@@ -111,6 +111,14 @@ interface FidoCredentialBackend {
     suspend fun checkUser(rpId: String, registering: Boolean): UserCheck
 
     /**
+     * Ask the owner on the phone which of [candidates] (two or more
+     * discoverable passkeys for [rpId], each named by its user name and
+     * display name) signs. Returns the one chosen, or null when the owner
+     * declines or the phone cannot ask.
+     */
+    suspend fun chooseCredential(rpId: String, candidates: List<FidoCredential>): FidoCredential?
+
+    /**
      * Advance [credential]'s counter, build authenticator data with it, and
      * sign `authenticatorData || clientDataHash` with the credential's key.
      *
@@ -215,7 +223,7 @@ class Ctap2Authenticator(
         } else {
             available.filter { it.discoverable }
         }
-        val credential = candidates.firstOrNull() ?: throw CtapError(Ctap2.ERR_NO_CREDENTIALS)
+        val credential = pick(rpId, candidates, discovered = allowList == null, onUserActionNeeded)
 
         val verified = approve(rpId, registering = false, uvRequested, onUserActionNeeded)
         val flags = UserVerificationCompliance.flags(userPresent = true, userVerified = verified)
@@ -278,6 +286,27 @@ class Ctap2Authenticator(
             aaguid + byteArrayOf((made.id.size shr 8).toByte(), made.id.size.toByte()) +
             made.id + made.cosePublicKey
         return mapOf(1 to "none", 2 to authData, 3 to emptyMap<Any, Any?>())
+    }
+
+    /**
+     * The credential an assertion signs with. An allow list names the
+     * client's own choice, and a single discoverable passkey needs none; with
+     * several discoverable passkeys the owner picks the account on the phone,
+     * and only one of those offered can be picked. A declined choice is
+     * CTAP2_ERR_OPERATION_DENIED.
+     */
+    private suspend fun pick(
+        rpId: String,
+        candidates: List<FidoCredential>,
+        discovered: Boolean,
+        onUserActionNeeded: () -> Unit
+    ): FidoCredential {
+        if (candidates.isEmpty()) throw CtapError(Ctap2.ERR_NO_CREDENTIALS)
+        if (!discovered || candidates.size == 1) return candidates.first()
+        onUserActionNeeded()
+        val chosen = backend.chooseCredential(rpId, candidates)
+        return candidates.firstOrNull { chosen != null && it.id.contentEquals(chosen.id) }
+            ?: throw CtapError(Ctap2.ERR_OPERATION_DENIED)
     }
 
     /**

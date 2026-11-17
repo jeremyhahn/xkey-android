@@ -36,6 +36,7 @@ import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.crypto.XKeyCryptoException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -494,6 +495,38 @@ class BiometricFidoUserPrompt(
             // The launcher is not registered: no prompt can be shown.
             UserCheck.UNAVAILABLE
         }
+    }
+
+    /**
+     * The account chooser: one prompt per account, in order, each naming
+     * the account it signs in as. Approving a prompt picks its account;
+     * cancelling it shows the next, and cancelling the last declines. Any
+     * other failure declines at once.
+     */
+    override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? {
+        val l = launcher() ?: return null
+        accounts.forEachIndexed { i, account ->
+            try {
+                onLockScreen("getAssertion", rpId) { locked, onLaunch ->
+                    l.requestAuthentication(
+                        title = "Sign in as $account?",
+                        subtitle = rpId,
+                        description = "Account ${i + 1} of ${accounts.size} for a Bluetooth security key client. " +
+                            if (i + 1 < accounts.size) "Cancel to see the next account." else "Cancel to decline.",
+                        showOnLockScreen = locked,
+                        onLaunch = onLaunch
+                    )
+                }
+                return i
+            } catch (e: UserCancelledException) {
+                // The next account.
+            } catch (e: XKeyCryptoException) {
+                return null
+            } catch (e: IllegalStateException) {
+                return null
+            }
+        }
+        return null
     }
 
     /**

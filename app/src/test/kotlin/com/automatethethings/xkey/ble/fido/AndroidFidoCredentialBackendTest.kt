@@ -219,6 +219,7 @@ class AndroidFidoCredentialBackendTest {
         val prompt = object : FidoUserPrompt {
             override val available = true
             override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.DECLINED
+            override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? = null
             override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String) = ByteArray(0)
         }
 
@@ -226,11 +227,35 @@ class AndroidFidoCredentialBackendTest {
         assertEquals(true, backend(prompt).userVerificationAvailable)
     }
 
+    @Test
+    fun `the account chooser names each passkey by display name and user name and returns the pick`() = runTest {
+        fun named(id: Byte, name: String?, display: String?) =
+            FidoCredential(byteArrayOf(id), "example.com", byteArrayOf(id), name, display, discoverable = true)
+        val candidates = listOf(named(1, "alice", "Alice"), named(2, "bob", "bob"), named(3, null, null))
+        val asked = mutableListOf<List<String>>()
+        val prompt = object : FidoUserPrompt {
+            override val available = true
+            override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.VERIFIED
+            override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int {
+                asked += accounts
+                return 1
+            }
+            override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String) = ByteArray(0)
+        }
+
+        val chosen = backend(prompt).chooseCredential("example.com", candidates)
+
+        assertEquals(listOf(listOf("Alice (alice)", "bob", "Account 3")), asked)
+        assertArrayEquals(byteArrayOf(2), chosen!!.userHandle)
+        assertEquals(null, backend().chooseCredential("example.com", candidates))
+    }
+
     /** A prompt whose key-bound signature records what it was asked to sign. */
     private class BoundPrompt(private val outcome: () -> ByteArray) : FidoUserPrompt {
         val signed = mutableListOf<Pair<String, ByteArray>>()
         override val available = true
         override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.VERIFIED
+        override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? = null
         override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String): ByteArray {
             signed += keyId to signedData
             return outcome()

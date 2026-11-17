@@ -169,4 +169,37 @@ class BiometricFidoUserPromptTest {
         assertEquals(UserCheck.DECLINED, check)
         assertEquals(listOf("approval-3"), lockScreen.cancelled)
     }
+
+    /** The chooser's prompts answer in turn: true approves, false cancels. */
+    private fun answer(vararg approvals: Boolean): MutableList<String> {
+        val titles = mutableListOf<String>()
+        val next = approvals.iterator()
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } coAnswers {
+            titles += firstArg<String>()
+            if (!next.next()) throw UserCancelledException()
+        }
+        return titles
+    }
+
+    @Test
+    fun `the account chooser names each account in turn until the owner approves one`() = runTest {
+        val titles = answer(false, true)
+
+        val chosen = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { launcher }
+            .chooseAccount("example.com", listOf("Alice (alice)", "Bob (bob)", "Carol (carol)"))
+
+        assertEquals(1, chosen)
+        assertEquals(listOf("Sign in as Alice (alice)?", "Sign in as Bob (bob)?"), titles)
+    }
+
+    @Test
+    fun `cancelling every account declines the choice`() = runTest {
+        val titles = answer(false, false)
+
+        val chosen = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { launcher }
+            .chooseAccount("example.com", listOf("alice", "bob"))
+
+        assertEquals(null, chosen)
+        assertEquals(2, titles.size)
+    }
 }
