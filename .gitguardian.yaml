@@ -1,0 +1,6 @@
+version: 2
+secret:
+  ignored_paths:
+    - "app/src/test/**"
+paths-ignore:
+  - "app/src/test/**"

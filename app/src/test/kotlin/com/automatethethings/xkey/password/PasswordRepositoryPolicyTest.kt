@@ -69,7 +69,7 @@ class PasswordRepositoryPolicyTest {
     ) = PasswordRecord(
         passwordId = passwordId,
         name = name,
-        password = "secret",
+        password = fixtureSecret(1),
         folderPath = folderPath,
         createdAt = 1_000L,
         updatedAt = 2_000L,
@@ -278,7 +278,7 @@ class PasswordRepositoryPolicyTest {
     fun `an update keeps the entry's tenant and sharing`() = runTest {
         repository.upsert(record(shared = true, tenantId = "acme"))
 
-        assertTrue(repository.updateFields("pw-1", PasswordPatch(name = "Renamed", password = "rotated")))
+        assertTrue(repository.updateFields("pw-1", PasswordPatch(name = "Renamed", password = fixtureSecret(2))))
 
         assertTrue(stored().shared)
         assertEquals("acme", stored().tenantId)

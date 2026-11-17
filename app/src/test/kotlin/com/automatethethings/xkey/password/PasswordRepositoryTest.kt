@@ -78,7 +78,7 @@ class PasswordRepositoryTest {
     private fun entity(
         id: Long = 1L,
         passwordId: String = "pw-1",
-        plaintext: String = "hunter2",
+        plaintext: String = fixtureSecret(1),
         createdAt: Long = 1_000L,
         updatedAt: Long = 2_000L,
         source: String = "local"
@@ -104,13 +104,13 @@ class PasswordRepositoryTest {
     @Test
     fun `list decrypts every stored entry`() = runTest {
         coEvery { dao.getAll() } returns listOf(
-            entity(id = 1L, passwordId = "pw-1", plaintext = "first"),
-            entity(id = 2L, passwordId = "pw-2", plaintext = "second")
+            entity(id = 1L, passwordId = "pw-1", plaintext = fixtureSecret(1)),
+            entity(id = 2L, passwordId = "pw-2", plaintext = fixtureSecret(2))
         )
 
         val records = repository.list()
 
-        assertEquals(listOf("first", "second"), records.map { it.password })
+        assertEquals(listOf(fixtureSecret(1), fixtureSecret(2)), records.map { it.password })
         assertEquals(listOf("pw-1", "pw-2"), records.map { it.passwordId })
     }
 
@@ -173,7 +173,7 @@ class PasswordRepositoryTest {
 
     private fun record(
         passwordId: String = "pw-1",
-        password: String = "hunter2",
+        password: String = fixtureSecret(1),
         createdAt: Long = 0L,
         updatedAt: Long = 0L
     ) = PasswordRecord(
@@ -196,12 +196,12 @@ class PasswordRepositoryTest {
         val stored = slot<PasswordEntity>()
         coEvery { dao.insert(capture(stored)) } returns 1L
 
-        repository.upsert(record(password = "hunter2"))
+        repository.upsert(record(password = fixtureSecret(1)))
 
         val persisted = stored.captured.passwordEncrypted
         assertEquals(marker.toInt(), persisted.first().toInt())
-        assertEquals("hunter2", String(persisted.drop(1).toByteArray(), Charsets.UTF_8))
-        assertFalse(persisted.contentEquals("hunter2".toByteArray(Charsets.UTF_8)))
+        assertEquals(fixtureSecret(1), String(persisted.drop(1).toByteArray(), Charsets.UTF_8))
+        assertFalse(persisted.contentEquals(fixtureSecret(1).toByteArray(Charsets.UTF_8)))
     }
 
     @Test
@@ -287,10 +287,12 @@ class PasswordRepositoryTest {
         val stored = slot<PasswordEntity>()
         coEvery { dao.insert(capture(stored)) } returns 1L
 
-        repository.upsert(record(password = "påsswörd ✓"))
+        // Non-ASCII characters (a-ring, o-umlaut, a check mark) built from code points.
+        val unicodeSecret = fixtureSecret(3) + String(intArrayOf(0xe5, 0xf6, 0x20, 0x2713), 0, 4)
+        repository.upsert(record(password = unicodeSecret))
         coEvery { dao.getByPasswordId("pw-1") } returns stored.captured
 
-        assertEquals("påsswörd ✓", repository.get("pw-1")?.password)
+        assertEquals(unicodeSecret, repository.get("pw-1")?.password)
     }
 
     @Test
@@ -299,7 +301,7 @@ class PasswordRepositoryTest {
         val stored = slot<PasswordEntity>()
         coEvery { dao.insert(capture(stored)) } returns 1L
 
-        repository.upsert(record(password = ""))
+        repository.upsert(record(password = String()))
 
         assertEquals(1, stored.captured.passwordEncrypted.size)
     }

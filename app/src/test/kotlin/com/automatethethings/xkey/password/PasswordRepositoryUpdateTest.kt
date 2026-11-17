@@ -65,7 +65,7 @@ class PasswordRepositoryUpdateTest {
     }
 
     private fun record(
-        password: String = "original",
+        password: String = fixtureSecret(1),
         notes: String? = "notes",
         source: String = "local",
         updatedAt: Long = 2_000L
@@ -122,16 +122,16 @@ class PasswordRepositoryUpdateTest {
         assertEquals("user@example.com", stored().username)
         assertEquals("notes", stored().notes)
         assertEquals("/work", stored().folderPath)
-        assertEquals("original", storedPassword())
+        assertEquals(fixtureSecret(1), storedPassword())
     }
 
     @Test
     fun `a new password replaces the stored one`() = runTest {
         repository.upsert(record())
 
-        assertTrue(repository.updateFields("pw-1", PasswordPatch(password = "rotated")))
+        assertTrue(repository.updateFields("pw-1", PasswordPatch(password = fixtureSecret(2))))
 
-        assertEquals("rotated", storedPassword())
+        assertEquals(fixtureSecret(2), storedPassword())
     }
 
     @Test
@@ -141,13 +141,13 @@ class PasswordRepositoryUpdateTest {
             // The sync lands as soon as the update has read the row.
             dao.afterRead = {
                 dao.afterRead = null
-                syncReplaces("replaced", notes = "sync notes")
+                syncReplaces(fixtureSecret(3), notes = "sync notes")
             }
 
             val updated = repository.updateFields("pw-1", PasswordPatch(notes = "usb notes", updatedAt = 3_000L))
 
             assertTrue(updated)
-            assertEquals("the replaced password must not be restored", "replaced", storedPassword())
+            assertEquals("the replaced password must not be restored", fixtureSecret(3), storedPassword())
             assertEquals("usb notes", stored().notes)
             assertEquals(3_000L, stored().updatedAt)
             assertEquals("remote", stored().source)
@@ -159,7 +159,7 @@ class PasswordRepositoryUpdateTest {
         // The USB request sets only the username; the sync changes the notes after the update read the row.
         dao.afterRead = {
             dao.afterRead = null
-            syncReplaces("replaced", notes = "sync notes")
+            syncReplaces(fixtureSecret(3), notes = "sync notes")
         }
 
         val updated = repository.updateFields("pw-1", PasswordPatch(username = "usb-user", updatedAt = 3_000L))
@@ -167,7 +167,7 @@ class PasswordRepositoryUpdateTest {
         assertTrue(updated)
         assertEquals("the sync's notes must not be overwritten", "sync notes", stored().notes)
         assertEquals("usb-user", stored().username)
-        assertEquals("replaced", storedPassword())
+        assertEquals(fixtureSecret(3), storedPassword())
     }
 
     @Test
@@ -196,7 +196,7 @@ class PasswordRepositoryUpdateTest {
         var replacements = 0
         dao.afterRead = {
             replacements++
-            syncReplaces("replaced-$replacements", notes = "sync notes")
+            syncReplaces(fixtureSecret(10 + replacements), notes = "sync notes")
         }
 
         try {
@@ -207,7 +207,7 @@ class PasswordRepositoryUpdateTest {
         }
 
         assertEquals("one read, then one retry", 2, replacements)
-        assertEquals("replaced-2", storedPassword())
+        assertEquals(fixtureSecret(12), storedPassword())
         assertEquals("sync notes", stored().notes)
     }
 
@@ -221,7 +221,7 @@ class PasswordRepositoryUpdateTest {
                 repository.delete("pw-1")
             }
 
-            val updated = repository.updateFields("pw-1", PasswordPatch(password = "rotated"))
+            val updated = repository.updateFields("pw-1", PasswordPatch(password = fixtureSecret(2)))
 
             assertFalse(updated)
             assertTrue("the deleted entry must not be recreated", dao.rows.isEmpty())
@@ -253,15 +253,15 @@ class PasswordRepositoryUpdateTest {
 
     @Test
     fun `the size check is made again against the password a sync put there`() = runTest {
-        repository.upsert(record(password = "a"))
-        // Notes that fit beside "a" with 100 bytes to spare, not beside the sync's longer password.
+        repository.upsert(record(password = fixtureSecret(4)))
+        // Notes that fit beside the short password with 100 bytes to spare, not beside the sync's longer password.
         val base = PasswordEntryLimit.serializedSize(
-            PasswordEntryLimit.getResponse(record(password = "a", notes = null, updatedAt = 3_000L))
+            PasswordEntryLimit.getResponse(record(password = fixtureSecret(4), notes = null, updatedAt = 3_000L))
         )
         val notes = "n".repeat(PasswordEntryLimit.MAX_ENTRY_SIZE - base - ",\"notes\":\"\"".length - 100)
         dao.afterRead = {
             dao.afterRead = null
-            syncReplaces("p".repeat(1_000), notes = "sync notes")
+            syncReplaces(fixtureSecret(5, 1_000), notes = "sync notes")
         }
 
         try {
@@ -271,7 +271,7 @@ class PasswordRepositoryUpdateTest {
             // expected
         }
 
-        assertEquals("p".repeat(1_000), storedPassword())
+        assertEquals(fixtureSecret(5, 1_000), storedPassword())
         assertEquals("sync notes", stored().notes)
     }
 }
