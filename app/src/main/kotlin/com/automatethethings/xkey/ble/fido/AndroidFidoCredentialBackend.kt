@@ -18,6 +18,7 @@ import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.crypto.BiometricException
+import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
@@ -49,15 +50,17 @@ interface FidoUserPrompt {
     suspend fun chooseAccount(rpId: String, accounts: List<String>): Int?
 
     /**
-     * Sign [signedData] with the passkey [keyId], whose Keystore alias is
-     * [keyAlias], behind a prompt bound to that one signature, for a key
-     * Keystore lets sign only right after its own authentication (a
-     * per-operation passkey). Signs inside Keystore.
+     * Sign with the passkey [keyId], whose Keystore alias is [keyAlias],
+     * behind a prompt bound to that one signature, for a key Keystore lets
+     * sign only right after its own authentication (a per-operation passkey).
+     * Signs inside Keystore. [signedData] is called once, when this
+     * signature's turn on the shared prompt queue has come, and its result is
+     * what is signed.
      *
      * @throws com.automatethethings.xkey.crypto.UserCancelledException and the
      *   other biometric failures when the user does not approve.
      */
-    suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String): ByteArray
+    suspend fun signWithKey(keyId: String, keyAlias: String, rpId: String, signedData: suspend () -> ByteArray): ByteArray
 }
 
 /**
@@ -142,9 +145,17 @@ class AndroidFidoCredentialBackend(
         ) {
             throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "Passkey is gone or no longer shared")
         }
-        val count = signCounter.next(keyId)
-        val authData = authenticatorData(count)
-        val signature = signInKeystore(entity, credential.rpId, authData + clientDataHash)
+        // The counter is read and authenticatorData built only once this
+        // assertion's signing turn has come, so no other assertion for the
+        // passkey, over BLE or from the credential provider, signs a later
+        // count before this one.
+        var count = 0L
+        var authData = ByteArray(0)
+        val signature = signInKeystore(entity, credential.rpId) {
+            count = signCounter.next(keyId)
+            authData = authenticatorData(count)
+            authData + clientDataHash
+        }
         releasable(keyId, credential.rpId)
         Log.i(TAG, "Signed a CTAP2 assertion over BLE, rpId=${credential.rpId}, signCount=$count")
         runCatching {
@@ -234,21 +245,33 @@ class AndroidFidoCredentialBackend(
     }
 
     /**
-     * The one signing path for BLE assertions. [signedData] is
+     * The one signing path for BLE assertions. [signedData] makes
      * `authenticatorData || clientDataHash`, unhashed: every Keystore signature
-     * here is SHA256withECDSA, which hashes it once, as WebAuthn expects.
+     * here is SHA256withECDSA, which hashes it once, as WebAuthn expects. It is
+     * called only on this signature's turn on the shared prompt queue (the
+     * turn the credential provider signs in), so counters are signed in the
+     * order they are read.
      *
      * A per-operation passkey (auth duration 0), or any key Keystore will not
      * use without fresh authentication, signs behind a prompt bound to this
      * signature, as the credential provider signs it. A declined or
      * impossible prompt is a refusal, never a signature.
      */
-    private suspend fun signInKeystore(entity: KeyEntity, rpId: String, signedData: ByteArray): ByteArray {
+    private suspend fun signInKeystore(
+        entity: KeyEntity,
+        rpId: String,
+        signedData: suspend () -> ByteArray
+    ): ByteArray {
         if (entity.authDurationSeconds != PER_OPERATION) {
             try {
-                return keystoreManager.signWithoutBiometric(credentialId = entity.keyId, dataHash = signedData)
+                return BiometricHelper.inOneTurn("fidoBleAssertion") {
+                    keystoreManager.signWithoutBiometric(credentialId = entity.keyId, dataHash = signedData())
+                }
             } catch (e: BiometricRequiredException) {
-                // Auth-bound after all: fall through to the key-bound prompt.
+                // Auth-bound after all: fall through to the key-bound prompt,
+                // which reads the next count (the one read here is a gap).
+            } catch (e: BiometricException) {
+                throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "No signing turn came")
             }
         }
         val prompt = userPrompt?.takeIf { it.available }
@@ -259,7 +282,7 @@ class AndroidFidoCredentialBackend(
         val alias = keystoreManager.resolveKeystoreAlias(entity.keyId)
             ?: throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "The passkey's key is not in Keystore")
         return try {
-            prompt.signWithKey(entity.keyId, alias, signedData, rpId)
+            prompt.signWithKey(entity.keyId, alias, rpId, signedData)
         } catch (e: UserCancelledException) {
             throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The user declined the passkey's prompt")
         } catch (e: BiometricLockoutException) {

@@ -256,7 +256,7 @@ class AndroidFidoCredentialBackendTest {
             override val available = true
             override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.DECLINED
             override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? = null
-            override suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String) = ByteArray(0)
+            override suspend fun signWithKey(keyId: String, keyAlias: String, rpId: String, signedData: suspend () -> ByteArray) = ByteArray(0)
         }
 
         assertEquals(UserCheck.DECLINED, backend(prompt).checkUser("example.com", registering = true))
@@ -276,7 +276,7 @@ class AndroidFidoCredentialBackendTest {
                 asked += accounts
                 return 1
             }
-            override suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String) = ByteArray(0)
+            override suspend fun signWithKey(keyId: String, keyAlias: String, rpId: String, signedData: suspend () -> ByteArray) = ByteArray(0)
         }
 
         val chosen = backend(prompt).chooseCredential("example.com", candidates)
@@ -292,8 +292,13 @@ class AndroidFidoCredentialBackendTest {
         override val available = true
         override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.VERIFIED
         override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? = null
-        override suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String): ByteArray {
-            signed += keyId to signedData
+        override suspend fun signWithKey(
+            keyId: String,
+            keyAlias: String,
+            rpId: String,
+            signedData: suspend () -> ByteArray
+        ): ByteArray {
+            signed += keyId to signedData()
             return outcome()
         }
     }
@@ -334,7 +339,7 @@ class AndroidFidoCredentialBackendTest {
         val launcher = mockk<BiometricActivityLauncher>(relaxed = true)
         val aliases = mutableListOf<String?>()
         coEvery {
-            launcher.requestCryptoSignature(any(), any(), any(), any(), any(), captureNullable(aliases), any())
+            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), captureNullable(aliases), any())
         } returns byteArrayOf(0x36)
         val unlocked = object : FidoLockScreen {
             override val locked = false
@@ -368,13 +373,13 @@ class AndroidFidoCredentialBackendTest {
             override suspend fun signWithKey(
                 keyId: String,
                 keyAlias: String,
-                signedData: ByteArray,
-                rpId: String
+                rpId: String,
+                signedData: suspend () -> ByteArray
             ): ByteArray = PromptOwnership.process.turn(
                 NotificationKeys.wakeOnly("bleSignature"),
                 PromptOwnership.Kind.CRYPTO_SIGNING
             ) {
-                signedCounts += signedData[0].toLong()
+                signedCounts += signedData()[0].toLong()
                 byteArrayOf(0x37)
             }!!
         }

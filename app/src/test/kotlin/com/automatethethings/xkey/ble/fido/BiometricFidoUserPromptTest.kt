@@ -125,14 +125,14 @@ class BiometricFidoUserPromptTest {
         val lockScreen = FakeLockScreen(locked = true)
         val overLockScreen = slot<Boolean>()
         coEvery {
-            launcher.requestCryptoSignature(any(), any(), any(), any(), capture(overLockScreen), any(), any())
+            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), capture(overLockScreen), any(), any())
         } coAnswers {
             arg<(String, Intent) -> Unit>(6)("signature-1", promptIntent)
             byteArrayOf(0x30)
         }
 
         val signature = BiometricFidoUserPrompt(context, lockScreen) { launcher }
-            .signWithKey("key", "xkey_credential_key", byteArrayOf(1), "example.com")
+            .signWithKey("key", "xkey_credential_key", "example.com") { byteArrayOf(1) }
 
         assertArrayEquals(byteArrayOf(0x30), signature)
         assertTrue(overLockScreen.captured)
