@@ -44,13 +44,14 @@ class PasswordVaultCredentialTest {
 
     @Test
     fun `a passphrase credential parses factor and passphrase`() {
+        val phrase = fixtureSecret(1)
         val credential = PasswordVaultCredential.fromJson(
-            JSONObject("""{"factor":"passphrase","passphrase":"correct horse"}""")
+            JSONObject("""{"factor":"passphrase","passphrase":"$phrase"}""")
         )
 
         assertTrue(credential is PasswordVaultCredential.Passphrase)
         assertEquals("passphrase", credential.factor)
-        assertEquals("correct horse", (credential as PasswordVaultCredential.Passphrase).passphrase)
+        assertEquals(phrase, (credential as PasswordVaultCredential.Passphrase).passphrase)
     }
 
     @Test
@@ -110,7 +111,7 @@ class PasswordVaultCredentialTest {
 
     @Test
     fun `a body without a factor is invalid`() {
-        assertEquals("factor is required", invalid("""{"passphrase":"x"}""").message)
+        assertEquals("factor is required", invalid("""{"passphrase":"${fixtureSecret(1).take(1)}"}""").message)
     }
 
     @Test
@@ -120,7 +121,7 @@ class PasswordVaultCredentialTest {
 
     @Test
     fun `an empty passphrase is invalid`() {
-        assertEquals("passphrase is required", invalid("""{"factor":"passphrase","passphrase":""}""").message)
+        assertEquals("passphrase is required", invalid("""{"factor":"passphrase","passphrase":"${fixtureSecret(1).take(0)}"}""").message)
     }
 
     @Test
