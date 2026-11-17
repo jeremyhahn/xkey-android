@@ -350,8 +350,10 @@ class FidoGattServer(
 }
 
 /**
- * The phone's approval prompt for a BLE ceremony: strong biometric or the
- * device credential, through the same launcher as every other xkey approval.
+ * The phone's approval prompt for a BLE ceremony, through the same launcher
+ * as every other xkey approval. TransparentBiometricActivity allows a strong
+ * biometric only, so that is all [available] (getInfo's `uv`) checks: a phone
+ * with only a PIN or password does not advertise verification it cannot do.
  */
 class BiometricFidoUserPrompt(
     private val context: Context,
@@ -360,7 +362,7 @@ class BiometricFidoUserPrompt(
 
     override val available: Boolean
         get() = launcher() != null && BiometricManager.from(context).canAuthenticate(
-            BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            BiometricManager.Authenticators.BIOMETRIC_STRONG
         ) == BiometricManager.BIOMETRIC_SUCCESS
 
     override suspend fun verify(rpId: String, registering: Boolean): UserCheck {
