@@ -36,7 +36,9 @@ import java.util.concurrent.atomic.AtomicReference
  * CANCEL stops the pending MSG, which then answers
  * CTAP2_ERR_KEEPALIVE_CANCEL. One MSG runs at a time, until it has sent its
  * response and cleaned up; another answers ERR_BUSY. Replies are fragmented
- * to [maxFrameSize], and every message's frames reach [send] together.
+ * to [maxFrameSize], and every message's frames reach [send] together. A
+ * request not received whole within [reassemblyTimeoutMillis] of its first
+ * frame answers ERROR ERR_REQ_TIMEOUT and is dropped.
  *
  * [onControlPointWrite] and [close] are called from one thread (the GATT
  * callback thread); [send] must queue frames in order and must not call back
@@ -47,7 +49,8 @@ class FidoBleSession(
     private val scope: CoroutineScope,
     private val send: (frame: ByteArray) -> Unit,
     private val maxFrameSize: () -> Int,
-    private val keepaliveIntervalMillis: Long = KEEPALIVE_INTERVAL_MILLIS
+    private val keepaliveIntervalMillis: Long = KEEPALIVE_INTERVAL_MILLIS,
+    private val reassemblyTimeoutMillis: Long = REASSEMBLY_TIMEOUT_MILLIS
 ) {
     private val reassembler = FidoBleReassembler()
 
@@ -73,18 +76,56 @@ class FidoBleSession(
     @Volatile
     private var closed = false
 
-    fun onControlPointWrite(frame: ByteArray) {
-        if (closed) return
+    /** Expires the message being reassembled; null when no message is partly received. */
+    private var reassemblyDeadline: Job? = null
+
+    fun onControlPointWrite(frame: ByteArray) = synchronized(this) {
+        if (closed) return@synchronized
         when (val result = reassembler.accept(frame)) {
-            FidoBleReassembler.Result.Incomplete -> Unit
-            is FidoBleReassembler.Result.Error -> sendMessage(listOf(FidoBle.errorFrame(result.code)))
-            is FidoBleReassembler.Result.Complete -> dispatch(result.command, result.data)
+            FidoBleReassembler.Result.Incomplete -> startReassemblyDeadline()
+            is FidoBleReassembler.Result.Error -> {
+                stopReassemblyDeadline()
+                sendMessage(listOf(FidoBle.errorFrame(result.code)))
+            }
+            is FidoBleReassembler.Result.Complete -> {
+                stopReassemblyDeadline()
+                dispatch(result.command, result.data)
+            }
         }
     }
 
+    /**
+     * The CTAP BLE framing timeout: a message must arrive whole within
+     * [reassemblyTimeoutMillis] of its first frame. Otherwise the client is
+     * answered ERROR ERR_REQ_TIMEOUT and the partial message is dropped, so
+     * the next command on this connection starts afresh. Caller holds the
+     * session lock.
+     */
+    private fun startReassemblyDeadline() {
+        if (reassemblyDeadline != null) return
+        reassemblyDeadline = scope.launch {
+            delay(reassemblyTimeoutMillis)
+            val deadline = coroutineContext[Job]
+            synchronized(this@FidoBleSession) {
+                // A newer message or a finished one owns the deadline now.
+                if (closed || reassemblyDeadline !== deadline) return@synchronized
+                reassemblyDeadline = null
+                reassembler.reset()
+                sendMessage(listOf(FidoBle.errorFrame(FidoBle.ERR_REQ_TIMEOUT)))
+            }
+        }
+    }
+
+    /** Caller holds the session lock. */
+    private fun stopReassemblyDeadline() {
+        reassemblyDeadline?.cancel()
+        reassemblyDeadline = null
+    }
+
     /** Stop any pending request; nothing more is sent. */
-    fun close() {
+    fun close() = synchronized(this) {
         closed = true
+        stopReassemblyDeadline()
         current.get()?.job?.cancel()
         reassembler.reset()
     }
@@ -163,5 +204,8 @@ class FidoBleSession(
     companion object {
         /** CTAP 2.1 asks for a KEEPALIVE at least every 500 ms while processing. */
         const val KEEPALIVE_INTERVAL_MILLIS = 400L
+
+        /** How long a message may take to arrive whole, from its first frame. */
+        const val REASSEMBLY_TIMEOUT_MILLIS = 3_000L
     }
 }
