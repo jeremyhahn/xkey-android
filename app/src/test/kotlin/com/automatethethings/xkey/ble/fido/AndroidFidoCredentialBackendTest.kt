@@ -24,6 +24,7 @@ import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import io.mockk.coEvery
@@ -160,6 +161,52 @@ class AndroidFidoCredentialBackendTest {
         assertEquals(SharingPolicyType.ALL_PEERS, stored.captured.sharingPolicy)
         coVerify { credentialDao.insert(any()) }
     }
+
+    /** Rows the DAOs hold, so a test sees what a failed create leaves behind. */
+    private fun trackStoredRows(): Pair<MutableSet<String>, MutableSet<String>> {
+        val keyRows = mutableSetOf<String>()
+        val metadataRows = mutableSetOf<String>()
+        coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
+        coEvery { keyDao.insert(any()) } answers { keyRows += firstArg<KeyEntity>().keyId; 1L }
+        coEvery { keyDao.deleteByKeyId(any()) } answers { if (keyRows.remove(firstArg())) 1 else 0 }
+        coEvery { credentialDao.insert(any()) } answers {
+            metadataRows += firstArg<CredentialMetadataEntity>().credentialId; 1L
+        }
+        coEvery { credentialDao.deleteByCredentialId(any()) } answers { if (metadataRows.remove(firstArg())) 1 else 0 }
+        return keyRows to metadataRows
+    }
+
+    private fun assertCreateLeavesNothing(failure: Throwable, failKeyRow: Boolean) {
+        val (keyRows, metadataRows) = trackStoredRows()
+        if (failKeyRow) {
+            coEvery { keyDao.insert(any()) } throws failure
+        } else {
+            coEvery { credentialDao.insert(any()) } throws failure
+        }
+
+        val thrown = runCatching {
+            kotlinx.coroutines.runBlocking {
+                backend().create(CredentialRequest("example.com", "Example", byteArrayOf(7), "alice", "Alice", true))
+            }
+        }.exceptionOrNull()
+
+        assertTrue("create must fail", thrown != null)
+        assertEquals("no key row may outlive a failed create", emptySet<String>(), keyRows)
+        assertEquals("no metadata row may point at a deleted key", emptySet<String>(), metadataRows)
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(any()) }
+    }
+
+    @Test
+    fun `a failed key row write leaves no metadata and no Keystore key`() =
+        assertCreateLeavesNothing(IllegalStateException("disk full"), failKeyRow = true)
+
+    @Test
+    fun `a cancelled key row write leaves no metadata and no Keystore key`() =
+        assertCreateLeavesNothing(kotlinx.coroutines.CancellationException("disconnected"), failKeyRow = true)
+
+    @Test
+    fun `a failed metadata write leaves no key row and no Keystore key`() =
+        assertCreateLeavesNothing(IllegalStateException("disk full"), failKeyRow = false)
 
     @Test
     fun `without a prompt the user check is unavailable`() = runTest {
