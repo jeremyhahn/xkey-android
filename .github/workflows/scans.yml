@@ -1,0 +1,191 @@
+# scans-template: v1.0.0 (customized) — the scheduled scans on main.
+# The hermetic CI Gate (owner ruling 742 (1)) moves every check that fails on
+# the state of the world rather than on a change here, and only here: `make
+# deps-check`, `make security` (trivy fs, vuln and secret) and `trivy image`
+# of the integration image. It runs on a schedule and on workflow_dispatch on
+# main, never on a pull_request or a push, and it is not the workflow named
+# CI, so a finding never reads as a red main and never blocks a PR. A finding
+# opens or updates ONE issue, found by its fixed title (SCAN_ISSUE_TITLE),
+# with the run link, and fails this job, so the Actions run is red; a run
+# with no finding closes that issue.
+#
+# CUSTOMIZE (xkey-android), against the template:
+#   - Each check is its own step, named and run as it was in ci.yml's image
+#     job; the images are built as that job builds them (the Alpine and
+#     Debian package index sums, `make -s it-image`, `make docker-build`, the
+#     images by ID). trivy image fetches the Java DB first with a 30-minute
+#     timeout (Fleet Ops 11-13).
+#   - No bump half: a Gradle project has no `make deps-bump`.
+
+name: Scheduled Scans
+
+on:
+  schedule:
+    - cron: '37 6 * * *'   # CUSTOMIZE: the minute, per repository
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scans-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  SCAN_ISSUE_TITLE: 'scans: findings the scheduled scans report on main (ruling 742)'
+
+jobs:
+  scans:
+    name: Scheduled scans
+    if: ${{ github.server_url == 'https://github.com' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Least privilege: the one write is the issue for a finding.
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      CI_CACHE_CLASS: pr
+      CI_CACHE: 'off'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          docker image prune --all --force
+          df -h /
+
+      - name: Build the devcontainer images
+        env:
+          IMAGE_ID_DIR: ${{ runner.temp }}/image-ids
+        run: |
+          APK_BASE_IMAGES=$(. scripts/tool-pins.sh && printf '%s' "$BASE_IMAGE")
+          export APK_BASE_IMAGES
+          APK_INDEX_SUM=$(scripts/apk-index-sum.sh)
+          APT_INDEX_SUM=$(scripts/apt-index-sum.sh)
+          export APK_INDEX_SUM APT_INDEX_SUM
+          it_name=$(make -s it-image)
+          make docker-build IT_IMAGE="$it_name"
+          tc=$(make -s toolchain-image-id)
+          it=$(make -s it-image-id IT_IMAGE="$it_name")
+          {
+            echo "APK_INDEX_SUM=$APK_INDEX_SUM"
+            echo "APT_INDEX_SUM=$APT_INDEX_SUM"
+            echo "TOOLCHAIN_IMAGE=$tc"
+            echo "IT_IMAGE=$it"
+          } >> "$GITHUB_ENV"
+
+      # The checks that left ci.yml (ruling 742 (1)), each its own step with
+      # ci.yml's command, so a red one names itself. Each runs to the end
+      # (continue-on-error); "Collect the findings" lists the failed ones.
+      - name: make deps-check
+        id: deps
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        continue-on-error: true
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make deps-check
+
+      - name: make security
+        id: security
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        continue-on-error: true
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make security"
+
+      # As ci.yml ran it: the jars in the image's Gradle cache need the Java DB,
+      # fetched first with a 30-minute timeout; trivy's cache and temp files go
+      # under /src, the stage container's writable layer.
+      - name: trivy image (integration image)
+        id: trivy
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        continue-on-error: true
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: |
+          docker save -o it-image.tar "$IT_IMAGE"
+          scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" \
+            "mkdir -p /src/.trivy/tmp && export TMPDIR=/src/.trivy/tmp && trivy image --cache-dir /src/.trivy/cache --timeout 30m --download-java-db-only && trivy image --cache-dir /src/.trivy/cache --timeout 30m --skip-java-db-update --input it-image.tar --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1"
+
+      # A step that did not succeed is a finding: failed, or skipped because
+      # the images did not build.
+      - name: Collect the findings
+        id: scans
+        if: ${{ !cancelled() }}
+        env:
+          DEPS: ${{ steps.deps.outcome }}
+          SECURITY: ${{ steps.security.outcome }}
+          TRIVY: ${{ steps.trivy.outcome }}
+        run: |
+          fired=
+          [ "$DEPS" = success ] || fired="$fired deps-check"
+          [ "$SECURITY" = success ] || fired="$fired security"
+          [ "$TRIVY" = success ] || fired="$fired trivy-image"
+          fired=${fired# }
+          echo "scans: ${fired:-none fired}"
+          echo "fired=$fired" >> "$GITHUB_OUTPUT"
+
+      # ONE issue for the findings, found by its exact title among the open
+      # issues (pull requests excluded): created when none is open, its body
+      # replaced when one is, and closed with a comment by the first run with
+      # no finding.
+      - name: Open, update or close the scan issue
+        if: ${{ !cancelled() && steps.scans.outcome == 'success' }}
+        env:
+          FIRED: ${{ steps.scans.outputs.fired }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          issue=$(gh api --paginate "repos/$REPO/issues?state=open&per_page=100" \
+            --jq ".[] | select(.pull_request == null and .title == \"$SCAN_ISSUE_TITLE\") | .number" | head -n1)
+          if [ -z "$FIRED" ]; then
+            if [ -n "$issue" ]; then
+              gh api "repos/$REPO/issues/$issue/comments" -f body="The scheduled scans found nothing. Run: $RUN_URL" >/dev/null
+              gh api -X PATCH "repos/$REPO/issues/$issue" -f state=closed -f state_reason=completed >/dev/null
+              echo "closed #$issue"
+            fi
+            exit 0
+          fi
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            'The scheduled scans on main (scans.yml, ruling 742 (1)) fired: a dependency behind its latest release with no reason comment, a vulnerable version, or an image package. Each needs a fix PR or a documented reason (devops.md §9). The failed steps of the run name each finding.' \
+            "Firing: $FIRED." \
+            "Run: $RUN_URL")
+          if [ -z "$issue" ]; then
+            issue=$(jq -n --arg t "$SCAN_ISSUE_TITLE" --arg b "$body" '{title: $t, body: $b}' | gh api "repos/$REPO/issues" --input - --jq .number)
+            echo "opened #$issue"
+          else
+            jq -n --arg b "$body" '{body: $b}' | gh api -X PATCH "repos/$REPO/issues/$issue" --input - >/dev/null
+            echo "updated #$issue"
+          fi
+
+      # A finding fails the run, after the issue is open, so it is seen and
+      # fixed. This is not CI: no PR and no main commit status reads it.
+      - name: Fail on a finding
+        if: ${{ !cancelled() && steps.scans.outputs.fired != '' }}
+        env:
+          FIRED: ${{ steps.scans.outputs.fired }}
+        run: |
+          echo "::error title=scans::firing: $FIRED (see the failed steps' logs)"
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: |
+          rm -f it-image.tar
+          rm -rf "$RUNNER_TEMP/image-ids"
