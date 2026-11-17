@@ -249,7 +249,7 @@ class AndroidFidoCredentialBackendTest {
             override val available = true
             override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.DECLINED
             override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? = null
-            override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String) = ByteArray(0)
+            override suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String) = ByteArray(0)
         }
 
         assertEquals(UserCheck.DECLINED, backend(prompt).checkUser("example.com", registering = true))
@@ -269,7 +269,7 @@ class AndroidFidoCredentialBackendTest {
                 asked += accounts
                 return 1
             }
-            override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String) = ByteArray(0)
+            override suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String) = ByteArray(0)
         }
 
         val chosen = backend(prompt).chooseCredential("example.com", candidates)
@@ -285,7 +285,7 @@ class AndroidFidoCredentialBackendTest {
         override val available = true
         override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.VERIFIED
         override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? = null
-        override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String): ByteArray {
+        override suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String): ByteArray {
             signed += keyId to signedData
             return outcome()
         }

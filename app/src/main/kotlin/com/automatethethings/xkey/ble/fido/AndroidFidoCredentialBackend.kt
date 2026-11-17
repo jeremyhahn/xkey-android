@@ -49,14 +49,15 @@ interface FidoUserPrompt {
     suspend fun chooseAccount(rpId: String, accounts: List<String>): Int?
 
     /**
-     * Sign [signedData] with the passkey [keyId] behind a prompt bound to that
-     * one signature, for a key Keystore lets sign only right after its own
-     * authentication (a per-operation passkey). Signs inside Keystore.
+     * Sign [signedData] with the passkey [keyId], whose Keystore alias is
+     * [keyAlias], behind a prompt bound to that one signature, for a key
+     * Keystore lets sign only right after its own authentication (a
+     * per-operation passkey). Signs inside Keystore.
      *
      * @throws com.automatethethings.xkey.crypto.UserCancelledException and the
      *   other biometric failures when the user does not approve.
      */
-    suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String): ByteArray
+    suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String): ByteArray
 }
 
 /**
@@ -252,8 +253,13 @@ class AndroidFidoCredentialBackend(
         }
         val prompt = userPrompt?.takeIf { it.available }
             ?: throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "This passkey needs a prompt bound to its key")
+        // The alias the key really has: a passkey local.generateKey made lives
+        // under xkey_key_<id>, one the credential provider made under
+        // xkey_credential_<id>. The signing activity is told which.
+        val alias = keystoreManager.resolveKeystoreAlias(entity.keyId)
+            ?: throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "The passkey's key is not in Keystore")
         return try {
-            prompt.signWithKey(entity.keyId, signedData, rpId)
+            prompt.signWithKey(entity.keyId, alias, signedData, rpId)
         } catch (e: UserCancelledException) {
             throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The user declined the passkey's prompt")
         } catch (e: BiometricLockoutException) {

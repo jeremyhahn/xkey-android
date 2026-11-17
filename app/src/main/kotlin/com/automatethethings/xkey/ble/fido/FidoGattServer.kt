@@ -589,10 +589,10 @@ class BiometricFidoUserPrompt(
 
     /**
      * The credential provider's key-bound prompt: CryptoSigningActivity signs
-     * [signedData] with SHA256withECDSA inside Keystore once the prompt
-     * unlocks that one signature.
+     * [signedData] with SHA256withECDSA inside Keystore, with the key under
+     * [keyAlias], once the prompt unlocks that one signature.
      */
-    override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String): ByteArray {
+    override suspend fun signWithKey(keyId: String, keyAlias: String, signedData: ByteArray, rpId: String): ByteArray {
         val l = launcher() ?: throw IllegalStateException("No prompt launcher")
         return onLockScreen("getAssertion", rpId) { locked, onLaunch ->
             l.requestCryptoSignature(
@@ -601,6 +601,7 @@ class BiometricFidoUserPrompt(
                 title = "Sign in with a passkey",
                 subtitle = rpId,
                 showOnLockScreen = locked,
+                keyAlias = keyAlias,
                 onLaunch = onLaunch
             )
         }
