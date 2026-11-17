@@ -16,6 +16,7 @@ package com.automatethethings.xkey.ble.fido
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -83,7 +84,9 @@ class FidoBleSession(
                     return
                 }
                 cancelRequested = false
-                pending = scope.launch { run(data) }
+                // ATOMIC: the body runs even when CANCEL lands before the
+                // coroutine starts, so that request still gets its answer.
+                pending = scope.launch(start = CoroutineStart.ATOMIC) { run(data) }
             }
             else -> send(FidoBle.errorFrame(FidoBle.ERR_INVALID_CMD))
         }
@@ -102,19 +105,21 @@ class FidoBleSession(
                 )
             }
         }
-        try {
-            val response = handler.handle(request) { waitingForUser.set(true) }
-            keepalive.cancel()
-            if (!closed) reply(FidoBle.CMD_MSG, response)
+        // The one way a request ends: exactly one MSG response, whether the
+        // authenticator answered, the client cancelled (even before the
+        // request started) or the authenticator failed. Only a closed session
+        // answers nothing.
+        val response = try {
+            handler.handle(request) { waitingForUser.set(true) }
         } catch (e: CancellationException) {
-            keepalive.cancel()
-            if (cancelRequested && !closed) {
-                reply(FidoBle.CMD_MSG, byteArrayOf(Ctap2.ERR_KEEPALIVE_CANCEL.toByte()))
-            }
-            throw e
+            if (!cancelRequested) throw e
+            byteArrayOf(Ctap2.ERR_KEEPALIVE_CANCEL.toByte())
+        } catch (e: Exception) {
+            byteArrayOf(Ctap2.ERR_OTHER.toByte())
         } finally {
             keepalive.cancel()
         }
+        if (!closed) reply(FidoBle.CMD_MSG, response)
     }
 
     private fun reply(command: Byte, data: ByteArray) {
