@@ -136,6 +136,38 @@ class FidoBleSessionTest {
         assertArrayEquals(byteArrayOf(Ctap2.ERR_KEEPALIVE_CANCEL.toByte()), msg.data)
     }
 
+    private fun msgReplies() = sent.count { it[0] == FidoBle.CMD_MSG }
+
+    @Test
+    fun `CANCEL before the request starts still answers CTAP2_ERR_KEEPALIVE_CANCEL once`() = runTest {
+        val session = session(GatedHandler())
+
+        // No runCurrent between them: the request's coroutine has not run yet.
+        write(session, FidoBle.CMD_MSG, byteArrayOf(0x02))
+        write(session, FidoBle.CMD_CANCEL, ByteArray(0))
+        runCurrent()
+        advanceTimeBy(500)
+
+        assertEquals("exactly one response", 1, msgReplies())
+        assertArrayEquals(byteArrayOf(Ctap2.ERR_KEEPALIVE_CANCEL.toByte()), reply().data)
+        assertTrue("no keepalive after the response", sent.last()[0] == FidoBle.CMD_MSG)
+    }
+
+    @Test
+    fun `a handler that fails answers CTAP2_ERR_OTHER rather than nothing`() = runTest {
+        val failing = object : FidoMessageHandler {
+            override suspend fun handle(request: ByteArray, onUserActionNeeded: () -> Unit): ByteArray =
+                throw IllegalStateException("Keystore unavailable")
+        }
+        val session = session(failing)
+
+        write(session, FidoBle.CMD_MSG, byteArrayOf(0x02))
+        runCurrent()
+
+        assertEquals("exactly one response", 1, msgReplies())
+        assertArrayEquals(byteArrayOf(Ctap2.ERR_OTHER.toByte()), reply().data)
+    }
+
     @Test
     fun `CANCEL with no request pending sends nothing`() = runTest {
         val session = session(GatedHandler())
