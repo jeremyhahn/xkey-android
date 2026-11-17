@@ -244,6 +244,47 @@ class AndroidFidoCredentialBackendTest {
     fun `a failed metadata write leaves no key row and no Keystore key`() =
         assertCreateLeavesNothing(IllegalStateException("disk full"), failKeyRow = false)
 
+    /** [shared] and [private] stored as rows, both discoverable for user 9 on example.com. */
+    private fun storedResidents(): Pair<MutableSet<String>, MutableSet<String>> {
+        val (keyRows, metadataRows) = trackStoredRows()
+        keyRows += listOf(shared.keyId, private.keyId)
+        metadataRows += listOf(shared.keyId, private.keyId)
+        return keyRows to metadataRows
+    }
+
+    @Test
+    fun `a repeated resident registration replaces the client's discoverable passkey for that user`() = runTest {
+        val (keyRows, metadataRows) = storedResidents()
+
+        val made = backend().create(
+            CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", discoverable = true)
+        )
+
+        // The new passkey replaces the shared one in both stores and in
+        // Keystore. The private one, which a BLE client never sees, stays.
+        assertEquals(setOf(private.keyId, b64(made.id)), keyRows)
+        assertEquals(setOf(private.keyId, b64(made.id)), metadataRows)
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(shared.keyId) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(private.keyId) }
+    }
+
+    @Test
+    fun `a failed resident registration leaves the old passkey usable`() = runTest {
+        val (keyRows, metadataRows) = storedResidents()
+        coEvery { credentialDao.insert(any()) } throws IllegalStateException("disk full")
+
+        val thrown = runCatching {
+            backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+        }.exceptionOrNull()
+
+        assertTrue("create must fail", thrown != null)
+        assertEquals(setOf(shared.keyId, private.keyId), keyRows)
+        assertEquals(setOf(shared.keyId, private.keyId), metadataRows)
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        val signed = backend().sign(backend().credentials("example.com").single(), { byteArrayOf(5) }, ByteArray(32))
+        assertArrayEquals(byteArrayOf(0x30), signed.signature)
+    }
+
     @Test
     fun `without a prompt the user check is unavailable`() = runTest {
         assertEquals(UserCheck.UNAVAILABLE, backend().checkUser("example.com", registering = false))
