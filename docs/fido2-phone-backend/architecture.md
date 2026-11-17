@@ -1,7 +1,7 @@
 # FIDO2 phone backend architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of how a paired desktop (`xkey fido2 --backend phone`) discovers and uses passkeys held on the phone.
+> **Status: REFERENCE** · Last verified: 2026-11-17
+> As-built description of how a paired desktop (`xkey fido2 --backend phone`) discovers and uses passkeys held on the phone, and of the phone's CTAP2 BLE authenticator.
 
 ## Summary
 
@@ -16,7 +16,13 @@ verification, the phone raises a biometric prompt before signing, and the UV
 flag in the signed authenticator data reports only verification that actually
 happened.
 
-CTAP2 over BLE, which the SPEC row requires, is not yet shipped (#281).
+The phone is also a standard CTAP2 authenticator over BLE (#281): the FIDO
+GATT service 0xFFFD (see [ble-transport](../ble-transport/architecture.md))
+carries authenticatorGetInfo, authenticatorGetAssertion and
+authenticatorMakeCredential to `Ctap2Authenticator`, over the same passkey
+store, sign counter, sharing policy and user verification rules. See
+[CTAP2 over BLE](#ctap2-over-ble). It has not yet been verified on a device
+against a CTAP2 BLE client.
 
 ## Components
 
@@ -116,10 +122,69 @@ If UV is required but `SessionAuthManager` reports no fresh biometric is needed,
 or no `BiometricActivityLauncher` is set, no prompt is shown and the UV flag is
 clear; whether the ceremony then proceeds depends on `strictUserVerification`.
 
+## CTAP2 over BLE
+
+### Components
+
+| Class | File | Role |
+|-------|------|------|
+| `FidoGattServer`, `BiometricFidoUserPrompt` | `app/src/main/kotlin/com/automatethethings/xkey/ble/fido/FidoGattServer.kt` | The 0xFFFD GATT service; the phone's biometric or device-credential prompt |
+| `FidoBleSession` | `app/src/main/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSession.kt` | One client's request loop: PING, MSG, CANCEL, KEEPALIVE |
+| `FidoBle`, `FidoBleReassembler` | `app/src/main/kotlin/com/automatethethings/xkey/ble/fido/FidoBleFraming.kt` | CMD/CONT framing |
+| `Ctap2Authenticator` | `app/src/main/kotlin/com/automatethethings/xkey/ble/fido/Ctap2Authenticator.kt` | The one choke point: parses the three commands, refuses, prompts, builds authenticator data |
+| `AndroidFidoCredentialBackend` | `app/src/main/kotlin/com/automatethethings/xkey/ble/fido/AndroidFidoCredentialBackend.kt` | Passkeys by sharing policy, `PasskeySignCounter`, Keystore signing and key creation |
+| `CborEncoder.encode`, `CborDecoder` | `app/src/main/kotlin/com/automatethethings/xkey/crypto/CborEncoder.kt` | Canonical CTAP2 CBOR; the decoder refuses indefinite lengths, tags, duplicate keys, trailing bytes, nesting over 8 and invalid UTF-8 |
+
+### Commands
+
+| Command | Behaviour |
+|---------|-----------|
+| authenticatorGetInfo (0x04) | versions `FIDO_2_0`; AAGUID all zeros (as the passkey provider); options `rk`, `up`, `uv` (a prompt can be shown), `plat` false, no `clientPin`; maxMsgSize 1024; transports `ble`; algorithms ES256 |
+| authenticatorGetAssertion (0x02) | the first passkey in the allowList, or without one the first discoverable passkey, among those the sharing policy shows; prompt; counter from `PasskeySignCounter`; signature over `SHA-256(authData \|\| clientDataHash)` in Keystore; returns credential, authData, signature, user id |
+| authenticatorMakeCredential (0x01) | ES256 only; prompt; a new Keystore P-256 key (not auth-bound, as on the JSON-RPC path, since the prompt gates every use); stored in `keys` and `credential_metadata` with sign count 0; attestation `none` with AT set |
+
+The BLE client is not a paired desktop and has no Noise static key, so
+`SharePermission.canShare(entity, null)` decides: `ALL_PEERS` passkeys are
+offered, `PRIVATE` and `SELECTED_PEERS` never. The policy is read again just
+before signing, so a passkey made private while its prompt was open is
+refused (CTAP2_ERR_NO_CREDENTIALS) before the counter moves. A passkey made
+over BLE is stored as `ALL_PEERS` so that client can use it again; paired
+desktops see it too.
+
+Every GetAssertion and MakeCredential prompts on the phone, so UP and UV are
+set only by a prompt the user passed. No private key leaves Keystore; the
+response carries only the public COSE key and signatures.
+
+### Refusals
+
+| Condition | Status |
+|-----------|--------|
+| No passkey the policy shows matches | CTAP2_ERR_NO_CREDENTIALS (0x2E), before any prompt |
+| User declines, cancels or is locked out | CTAP2_ERR_OPERATION_DENIED (0x27) |
+| No prompt possible, `uv` requested, strict user verification on | CTAP2_ERR_PIN_REQUIRED (0x36), from `UserVerificationCompliance.enforce` |
+| No prompt possible otherwise | CTAP2_ERR_OPERATION_DENIED: nothing shows a person is there |
+| `pinUvAuthParam` present (no clientPin) | CTAP2_ERR_PIN_AUTH_INVALID (0x33) |
+| GetAssertion with `up` false | CTAP2_ERR_UNSUPPORTED_OPTION (0x2B) |
+| MakeCredential with `up` false | CTAP2_ERR_INVALID_OPTION (0x2C) |
+| MakeCredential without ES256 | CTAP2_ERR_UNSUPPORTED_ALGORITHM (0x26) |
+| excludeList names a passkey the client may see | CTAP2_ERR_CREDENTIAL_EXCLUDED (0x19), after the prompt |
+| Malformed CBOR / wrong types / missing parameters | CTAP2_ERR_INVALID_CBOR, CBOR_UNEXPECTED_TYPE, MISSING_PARAMETER |
+| Client sends CANCEL | CTAP2_ERR_KEEPALIVE_CANCEL (0x2D) |
+| Any other command | CTAP1_ERR_INVALID_COMMAND |
+
+Not implemented: clientPin, authenticatorGetNextAssertion,
+credential management, extensions, U2F, and silent (`up` false)
+assertions.
+
 ## Tests
 
 | Test | Covers |
 |------|--------|
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleFramingTest.kt` | Fragment and reassembly, SEQ wrap, every framing fault |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/CborCodecTest.kt` | Canonical encoding, decoding, every decoder refusal |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/Ctap2AuthenticatorTest.kt` | The three commands end to end over CBOR bytes with a fake backend, signature verified, counter, every refusal including UV |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSessionTest.kt` | PING, MSG, keepalive, CANCEL, BUSY, framing errors, close |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/AndroidFidoCredentialBackendTest.kt` | Sharing policy on list and sign, shared counter, Keystore signing, stored passkey |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/ProtocolConstantsTest.kt` | Method name constants |
