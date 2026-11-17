@@ -188,11 +188,33 @@ class FidoGattServer(
             }
         }
 
+        /** Set once the queue overflowed; nothing more is queued on this connection. */
+        private var overflowed = false
+
+        /**
+         * The one notification queue for this client, bounded at
+         * [MAX_QUEUED_FRAMES]. A client that keeps writing (PING needs no
+         * approval) while delivery stalls fills it; then the queued frames are
+         * dropped, one ERROR (ERR_OTHER) frame is queued, and the session is
+         * closed, so the client must reconnect.
+         */
         private fun enqueue(frame: ByteArray) {
-            synchronized(queue) {
-                if (!subscribed) return
-                queue.addLast(frame)
+            val overflowNow = synchronized(queue) {
+                if (!subscribed || overflowed) return
+                val full = queue.size >= MAX_QUEUED_FRAMES
+                if (full) {
+                    overflowed = true
+                    queue.clear()
+                    queue.addLast(FidoBle.errorFrame(FidoBle.ERR_OTHER))
+                } else {
+                    queue.addLast(frame)
+                }
                 if (!inFlight) sendNext()
+                full
+            }
+            if (overflowNow) {
+                Log.w(TAG, "FIDO notification queue full; closing the session")
+                synchronized(session) { session.close() }
             }
         }
 
@@ -345,6 +367,13 @@ class FidoGattServer(
         const val DEFAULT_ATT_MTU = 23
         const val ATT_NOTIFY_OVERHEAD = 3
         const val MIN_FRAME_SIZE = 20
+
+        /**
+         * Frames queued for one client: the largest reply (1024 bytes) at the
+         * smallest frame size is 54 frames, so this holds it with its
+         * keepalives and some PING echoes to spare.
+         */
+        const val MAX_QUEUED_FRAMES = 96
         const val SERVICE_ADD_TIMEOUT_SECONDS = 5L
     }
 }
