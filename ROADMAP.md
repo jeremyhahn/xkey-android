@@ -30,7 +30,6 @@ Wire-coupled to go-xkms through the pairing contract (Noise-XX + JSON-RPC), not 
 - **piv** — `local.piv*` and `remote.piv*` — as built, no closing issue — done
 - **oath** — `local.oath*` with TOTP matching the desktop — as built, no closing issue — done
 - **passkey-provider** — Credential Provider service, proven against the go-xkms RP — as built, no closing issue — done
-- **fido2-phone-backend** — `xkey fido2 --backend phone` over BLE — as built, no closing issue — done
 - **store-sync** — one `SyncEngine` for trust store, OATH and passwords — as built, no closing issue — done
 - **desktop-backup-store** — `local.createBackup` and `local.restoreBackup` round-trip — as built, no closing issue — done
 - **remote-key-access** — `remote.*` to xkmsd backends through the desktop bridge — as built, no closing issue — done
@@ -66,7 +65,7 @@ Release-readiness checklist for [Dev complete](../../milestone/23), done; none o
 
 ## Now
 
-None.
+- **fido2-phone-backend** — CTAP2 over BLE for `xkey fido2 --backend phone`; `local.listFido2Credentials` and `local.signFido2Assertion` over the paired Noise session ship today — [#281](../../issues/281) — in progress: CTAP2 over BLE not yet shipped
 
 ## Next
 
