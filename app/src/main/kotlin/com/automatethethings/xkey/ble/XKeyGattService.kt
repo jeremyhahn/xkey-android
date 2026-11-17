@@ -20,7 +20,13 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.ble.fido.AndroidFidoCredentialBackend
+import com.automatethethings.xkey.ble.fido.BiometricFidoUserPrompt
+import com.automatethethings.xkey.ble.fido.Ctap2Authenticator
+import com.automatethethings.xkey.ble.fido.FidoGattServer
+import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.BiometricSettingsRepository
@@ -111,6 +117,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     // BLE components
     private var gattServer: GattServer? = null
     private var advertiser: Advertiser? = null
+
+    /** The standard FIDO BLE authenticator (service 0xFFFD), beside the xkey service. */
+    private var fidoGattServer: FidoGattServer? = null
 
     // Protocol handler
     private var requestHandler: RequestHandler? = null
@@ -348,6 +357,24 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         // Initialize advertiser
         advertiser = Advertiser(bluetoothAdapter)
 
+        // The FIDO BLE authenticator: its own GATT server, so the xkey
+        // service's table and callbacks are untouched.
+        val db = XKeyDatabase.getInstance(this)
+        fidoGattServer = FidoGattServer(
+            context = this,
+            handler = Ctap2Authenticator(
+                AndroidFidoCredentialBackend(
+                    keyDao = db.keyDao(),
+                    credentialDao = db.credentialMetadataDao(),
+                    sharePermission = SharePermission(db.keySharingPolicyDao(), pairedDeviceRepository),
+                    signCounter = PasskeySignCounter(db.credentialMetadataDao(), db.keyDao()),
+                    keystoreManager = keystoreManager!!,
+                    userPrompt = BiometricFidoUserPrompt(this) { biometricLauncher },
+                    settings = { currentSettings }
+                )
+            )
+        )
+
         // Observe settings changes
         serviceScope.launch {
             settingsRepository?.settingsFlow?.collect { settings ->
@@ -396,6 +423,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
 
         gattServer?.destroy()
         gattServer = null
+        fidoGattServer?.destroy()
+        fidoGattServer = null
         pairedDeviceRepository = null
         bleMessageRouter = null
 
@@ -469,6 +498,11 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                     }
                 }
 
+                // The FIDO service is best effort: the xkey service runs without it.
+                fidoGattServer?.let { fido ->
+                    if (!fido.isRunning() && !fido.start()) Log.w(TAG, "FIDO GATT service did not start")
+                }
+
                 // Start advertising (must be on main thread for BLE APIs)
                 launch(Dispatchers.Main) {
                     val advStarted = adv.startAdvertising()
@@ -494,6 +528,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
 
         advertiser?.stopAdvertising()
         gattServer?.stop()
+        fidoGattServer?.stop()
         releaseWakeLock()
 
         _serviceState.value = ServiceState.Ready
