@@ -60,7 +60,9 @@ import java.util.concurrent.TimeUnit
 @SuppressLint("MissingPermission")
 class FidoGattServer(
     private val context: Context,
-    private val handler: FidoMessageHandler
+    private val handler: FidoMessageHandler,
+    /** The API level whose notify call is used; tests pick the pre-33 path. */
+    private val sdkInt: Int = Build.VERSION.SDK_INT
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val clients = ConcurrentHashMap<String, Client>()
@@ -253,7 +255,7 @@ class FidoGattServer(
 
         private fun notify(s: BluetoothGattServer, characteristic: BluetoothGattCharacteristic, frame: ByteArray) =
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (sdkInt >= Build.VERSION_CODES.TIRAMISU) {
                     s.notifyCharacteristicChanged(device, characteristic, false, frame) == BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")

@@ -26,6 +26,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
+import android.os.Build
 import com.automatethethings.xkey.crypto.CborDecoder
 import io.mockk.every
 import io.mockk.mockk
@@ -39,6 +40,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 
 /**
  * [FidoGattServer] driven through the GATT callbacks a Bluetooth stack calls:
@@ -276,6 +281,60 @@ class FidoGattServerTest {
         assertTrue("queued ${notified.size} frames", notified.size <= MAX_EXPECTED_FRAMES)
         assertArrayEquals(FidoBle.errorFrame(FidoBle.ERR_OTHER), notified.last())
     }
+
+    @Test
+    fun `below API 33 a frame for one client is never notified to another`() {
+        // Below API 33 every client shares fidoStatus's one value: it is set,
+        // then notified. Client B's reply is forced in while client A's
+        // notification is still in the stack.
+        server.destroy()
+        server = FidoGattServer(context, Ctap2Authenticator(backend), sdkInt = Build.VERSION_CODES.S_V2)
+        assertTrue(server.start())
+        val other = mockk<BluetoothDevice>(relaxed = true)
+        every { other.address } returns "02:00:00:00:00:02"
+        val sent = Collections.synchronizedList(mutableListOf<Pair<String, ByteArray>>())
+        val otherInStack = CountDownLatch(1)
+        val forced = AtomicBoolean(false)
+        var otherReply: Thread? = null
+        every { stack.notifyCharacteristicChanged(any(), any(), any<Boolean>()) } answers {
+            val to = arg<BluetoothDevice>(0)
+            val status = arg<BluetoothGattCharacteristic>(1)
+            if (to === device && forced.compareAndSet(false, true)) {
+                otherReply = thread { pingFrom(other, 0x0B) }
+                otherInStack.await(1, TimeUnit.SECONDS)
+            } else if (to === other) {
+                otherInStack.countDown()
+            }
+            @Suppress("DEPRECATION")
+            sent += to.address to status.value.copyOf()
+            true
+        }
+        for (d in listOf(device, other)) {
+            callback.captured.onConnectionStateChange(d, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED)
+            subscribe(d)
+        }
+
+        pingFrom(device, 0x0A)
+        otherReply!!.join(5_000)
+
+        val toA = sent.filter { it.first == device.address }.map { it.second.toList() }
+        val toB = sent.filter { it.first == other.address }.map { it.second.toList() }
+        assertEquals(listOf(pingFrame(0x0A).toList()), toA)
+        assertEquals(listOf(pingFrame(0x0B).toList()), toB)
+    }
+
+    private fun subscribe(to: BluetoothDevice) {
+        val cccd = characteristic(FidoBle.STATUS_UUID).getDescriptor(FidoBle.CCCD_UUID)
+        callback.captured.onDescriptorWriteRequest(
+            to, 1, cccd, false, true, 0, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        )
+    }
+
+    private fun pingFrame(payload: Byte) = FidoBle.fragment(FidoBle.CMD_PING, byteArrayOf(payload), 20).single()
+
+    private fun pingFrom(from: BluetoothDevice, payload: Byte) = callback.captured.onCharacteristicWriteRequest(
+        from, 7, characteristic(FidoBle.CONTROL_POINT_UUID), false, true, 0, pingFrame(payload)
+    )
 
     private companion object {
         /** One largest reply at the smallest frame size, with room to spare. */
