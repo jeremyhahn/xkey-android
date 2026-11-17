@@ -17,7 +17,11 @@ package com.automatethethings.xkey.ble.fido
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.credential.PasskeySignCounter
+import com.automatethethings.xkey.crypto.BiometricException
+import com.automatethethings.xkey.crypto.BiometricLockoutException
+import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
@@ -34,6 +38,16 @@ interface FidoUserPrompt {
     val available: Boolean
 
     suspend fun verify(rpId: String, registering: Boolean): UserCheck
+
+    /**
+     * Sign [signedData] with the passkey [keyId] behind a prompt bound to that
+     * one signature, for a key Keystore lets sign only right after its own
+     * authentication (a per-operation passkey). Signs inside Keystore.
+     *
+     * @throws com.automatethethings.xkey.crypto.UserCancelledException and the
+     *   other biometric failures when the user does not approve.
+     */
+    suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String): ByteArray
 }
 
 /**
@@ -97,7 +111,7 @@ class AndroidFidoCredentialBackend(
         }
         val count = signCounter.next(keyId)
         val authData = authenticatorData(count)
-        val signature = signInKeystore(keyId, authData + clientDataHash)
+        val signature = signInKeystore(entity, credential.rpId, authData + clientDataHash)
         Log.i(TAG, "Signed a CTAP2 assertion over BLE, rpId=${credential.rpId}, signCount=$count")
         runCatching {
             AuditLogger.logFido2Authentication(
@@ -179,11 +193,36 @@ class AndroidFidoCredentialBackend(
 
     /**
      * The one signing path for BLE assertions. [signedData] is
-     * `authenticatorData || clientDataHash`, unhashed: the Keystore signature
-     * is SHA256withECDSA, which hashes it once, as WebAuthn expects.
+     * `authenticatorData || clientDataHash`, unhashed: every Keystore signature
+     * here is SHA256withECDSA, which hashes it once, as WebAuthn expects.
+     *
+     * A per-operation passkey (auth duration 0), or any key Keystore will not
+     * use without fresh authentication, signs behind a prompt bound to this
+     * signature, as the credential provider signs it. A declined or
+     * impossible prompt is a refusal, never a signature.
      */
-    private suspend fun signInKeystore(keyId: String, signedData: ByteArray): ByteArray =
-        keystoreManager.signWithoutBiometric(credentialId = keyId, dataHash = signedData)
+    private suspend fun signInKeystore(entity: KeyEntity, rpId: String, signedData: ByteArray): ByteArray {
+        if (entity.authDurationSeconds != PER_OPERATION) {
+            try {
+                return keystoreManager.signWithoutBiometric(credentialId = entity.keyId, dataHash = signedData)
+            } catch (e: BiometricRequiredException) {
+                // Auth-bound after all: fall through to the key-bound prompt.
+            }
+        }
+        val prompt = userPrompt?.takeIf { it.available }
+            ?: throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "This passkey needs a prompt bound to its key")
+        return try {
+            prompt.signWithKey(entity.keyId, signedData, rpId)
+        } catch (e: UserCancelledException) {
+            throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The user declined the passkey's prompt")
+        } catch (e: BiometricLockoutException) {
+            throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "Biometrics are locked out")
+        } catch (e: BiometricException) {
+            throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey's prompt failed")
+        } catch (e: IllegalStateException) {
+            throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "No prompt can be shown")
+        }
+    }
 
     private suspend fun shared(entity: KeyEntity): Boolean = sharePermission.canShare(entity, null)
 
@@ -191,6 +230,9 @@ class AndroidFidoCredentialBackend(
         const val TAG = "FidoBleBackend"
         const val KeyTypeFido2 = "fido2"
         const val CREDENTIAL_ID_BYTES = 32
+
+        /** Auth duration of a key that authenticates for each use. */
+        const val PER_OPERATION = 0
 
         fun encodeId(raw: ByteArray): String = Base64.getUrlEncoder().withoutPadding().encodeToString(raw)
 

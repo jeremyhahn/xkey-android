@@ -384,6 +384,21 @@ class BiometricFidoUserPrompt(
         }
     }
 
+    /**
+     * The credential provider's key-bound prompt: CryptoSigningActivity signs
+     * [signedData] with SHA256withECDSA inside Keystore once the prompt
+     * unlocks that one signature.
+     */
+    override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String): ByteArray {
+        val l = launcher() ?: throw IllegalStateException("No prompt launcher")
+        return l.requestCryptoSignature(
+            credentialId = keyId,
+            dataHash = signedData,
+            title = "Sign in with a passkey",
+            subtitle = rpId
+        )
+    }
+
     private companion object {
         val UNAVAILABLE_CODES = setOf(
             androidx.biometric.BiometricPrompt.ERROR_HW_UNAVAILABLE,
