@@ -230,4 +230,202 @@ object CborEncoder {
 
         buffer.write(bytes)
     }
+
+    /**
+     * Encode [value] as CTAP2 canonical CBOR (CTAP 2.1, "Message Encoding").
+     *
+     * Supports [Int], [Long], [ByteArray], [String], [Boolean], `null`,
+     * [List] and [Map]. Integers use their shortest form, lengths are
+     * definite, and map keys (integers or text) are sorted by their encoded
+     * bytes, shorter first, which is the CTAP2 canonical order.
+     *
+     * @throws CborEncodingException for a value of any other type.
+     */
+    fun encode(value: Any?): ByteArray {
+        val buffer = ByteArrayOutputStream()
+        writeValue(buffer, value)
+        return buffer.toByteArray()
+    }
+
+    private fun writeValue(buffer: ByteArrayOutputStream, value: Any?) {
+        when (value) {
+            null -> buffer.write(0xF6)
+            is Boolean -> buffer.write(if (value) 0xF5 else 0xF4)
+            is Int -> writeInteger(buffer, value.toLong())
+            is Long -> writeInteger(buffer, value)
+            is ByteArray -> {
+                writeHead(buffer, 2, value.size.toLong())
+                buffer.write(value)
+            }
+            is String -> {
+                val utf8 = value.toByteArray(Charsets.UTF_8)
+                writeHead(buffer, 3, utf8.size.toLong())
+                buffer.write(utf8)
+            }
+            is List<*> -> {
+                writeHead(buffer, 4, value.size.toLong())
+                value.forEach { writeValue(buffer, it) }
+            }
+            is Map<*, *> -> {
+                val entries = value.entries.map { (k, v) ->
+                    if (k !is Int && k !is Long && k !is String) {
+                        throw CborEncodingException("CBOR map key must be an integer or text, got ${k?.javaClass}")
+                    }
+                    encode(k) to v
+                }.sortedWith { a, b -> compareCanonical(a.first, b.first) }
+                writeHead(buffer, 5, entries.size.toLong())
+                entries.forEach { (key, v) ->
+                    buffer.write(key)
+                    writeValue(buffer, v)
+                }
+            }
+            else -> throw CborEncodingException("Cannot CBOR-encode ${value.javaClass}")
+        }
+    }
+
+    private fun writeInteger(buffer: ByteArrayOutputStream, value: Long) {
+        if (value >= 0) writeHead(buffer, 0, value) else writeHead(buffer, 1, -1 - value)
+    }
+
+    private fun writeHead(buffer: ByteArrayOutputStream, major: Int, argument: Long) {
+        val type = major shl 5
+        when {
+            argument < 24 -> buffer.write(type or argument.toInt())
+            argument <= 0xFF -> {
+                buffer.write(type or 24)
+                buffer.write(argument.toInt())
+            }
+            argument <= 0xFFFF -> {
+                buffer.write(type or 25)
+                for (shift in intArrayOf(8, 0)) buffer.write((argument shr shift).toInt() and 0xFF)
+            }
+            argument <= 0xFFFFFFFFL -> {
+                buffer.write(type or 26)
+                for (shift in intArrayOf(24, 16, 8, 0)) buffer.write((argument shr shift).toInt() and 0xFF)
+            }
+            else -> {
+                buffer.write(type or 27)
+                for (shift in 56 downTo 0 step 8) buffer.write((argument shr shift).toInt() and 0xFF)
+            }
+        }
+    }
+
+    private fun compareCanonical(a: ByteArray, b: ByteArray): Int {
+        if (a.size != b.size) return a.size - b.size
+        for (i in a.indices) {
+            val d = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
+            if (d != 0) return d
+        }
+        return 0
+    }
+}
+
+/** Thrown when CBOR input is malformed, truncated or outside what [CborDecoder] accepts. */
+class CborDecodingException(message: String) : Exception(message)
+
+/**
+ * Minimal CBOR decoder (RFC 8949) for CTAP2 requests.
+ *
+ * Accepts definite-length unsigned and negative integers, byte strings, text
+ * strings, arrays, maps, `false`, `true` and `null`. Integers decode to
+ * [Long], byte strings to [ByteArray], text to [String], arrays to [List] and
+ * maps to an insertion-ordered [Map]. Indefinite lengths, tags, floats,
+ * trailing bytes and nesting deeper than [MAX_DEPTH] are refused: CTAP2
+ * messages never use them, and refusing keeps a hostile client from
+ * steering the parser.
+ */
+object CborDecoder {
+
+    /** Deepest nesting accepted; CTAP2 messages need four levels. */
+    const val MAX_DEPTH = 8
+
+    fun decode(bytes: ByteArray): Any? {
+        val reader = Reader(bytes)
+        val value = reader.read(0)
+        if (reader.pos != bytes.size) {
+            throw CborDecodingException("${bytes.size - reader.pos} trailing bytes after the CBOR item")
+        }
+        return value
+    }
+
+    private class Reader(val bytes: ByteArray) {
+        var pos = 0
+
+        fun byte(): Int {
+            if (pos >= bytes.size) throw CborDecodingException("CBOR input ends early")
+            return bytes[pos++].toInt() and 0xFF
+        }
+
+        fun argument(info: Int): Long = when {
+            info < 24 -> info.toLong()
+            info == 24 -> byte().toLong()
+            info == 25 -> (byte().toLong() shl 8) or byte().toLong()
+            info == 26 -> (0 until 4).fold(0L) { acc, _ -> (acc shl 8) or byte().toLong() }
+            info == 27 -> {
+                val v = (0 until 8).fold(0L) { acc, _ -> (acc shl 8) or byte().toLong() }
+                if (v < 0) throw CborDecodingException("CBOR integer exceeds 63 bits")
+                v
+            }
+            else -> throw CborDecodingException("CBOR indefinite or reserved length (info $info)")
+        }
+
+        fun length(info: Int): Int {
+            val n = argument(info)
+            if (n > bytes.size - pos) throw CborDecodingException("CBOR length $n exceeds the input")
+            return n.toInt()
+        }
+
+        fun read(depth: Int): Any? {
+            if (depth > MAX_DEPTH) throw CborDecodingException("CBOR nesting deeper than $MAX_DEPTH")
+            val initial = byte()
+            val major = initial shr 5
+            val info = initial and 0x1F
+            return when (major) {
+                0 -> argument(info)
+                1 -> -1L - argument(info)
+                2 -> {
+                    val n = length(info)
+                    bytes.copyOfRange(pos, pos + n).also { pos += n }
+                }
+                3 -> {
+                    val n = length(info)
+                    val decoder = Charsets.UTF_8.newDecoder()
+                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    val text = try {
+                        decoder.decode(java.nio.ByteBuffer.wrap(bytes, pos, n)).toString()
+                    } catch (e: java.nio.charset.CharacterCodingException) {
+                        throw CborDecodingException("CBOR text string is not valid UTF-8")
+                    }
+                    pos += n
+                    text
+                }
+                4 -> {
+                    // Each element takes at least one byte, so the bound holds.
+                    val n = length(info)
+                    List(n) { read(depth + 1) }
+                }
+                5 -> {
+                    val n = length(info)
+                    val map = LinkedHashMap<Any?, Any?>()
+                    repeat(n) {
+                        val key = read(depth + 1)
+                        if (key is ByteArray || key is List<*> || key is Map<*, *>) {
+                            throw CborDecodingException("CBOR map key must be an integer or text")
+                        }
+                        if (map.containsKey(key)) throw CborDecodingException("CBOR map has duplicate key $key")
+                        map[key] = read(depth + 1)
+                    }
+                    map
+                }
+                7 -> when (info) {
+                    20 -> false
+                    21 -> true
+                    22 -> null
+                    else -> throw CborDecodingException("CBOR simple or float value $info is not supported")
+                }
+                else -> throw CborDecodingException("CBOR major type $major is not supported")
+            }
+        }
+    }
 }
