@@ -82,6 +82,33 @@ class FidoBleSessionTest {
     }
 
     @Test
+    fun `an incomplete request times out with ERR_REQ_TIMEOUT and the next command on the connection runs`() = runTest {
+        val session = session(GatedHandler())
+        val ping = ByteArray(40) { it.toByte() }
+
+        // Only the first fragment arrives; the rest never does.
+        session.onControlPointWrite(FidoBle.fragment(FidoBle.CMD_PING, ping, 20).first())
+        runCurrent()
+        assertTrue("nothing is answered before the deadline", sent.isEmpty())
+        advanceTimeBy(10_000)
+        runCurrent()
+
+        assertEquals(1, sent.size)
+        assertArrayEquals(FidoBle.errorFrame(FidoBle.ERR_REQ_TIMEOUT), sent.single())
+
+        sent.clear()
+        write(session, FidoBle.CMD_PING, ping)
+        runCurrent()
+        advanceTimeBy(10_000)
+        runCurrent()
+
+        val echo = reply()
+        assertEquals(FidoBle.CMD_PING, echo.command)
+        assertArrayEquals(ping, echo.data)
+        assertTrue("a whole request starts no timeout", sent.none { it[0] == FidoBle.CMD_ERROR })
+    }
+
+    @Test
     fun `MSG is answered with the authenticator's response in frames of the notification size`() = runTest {
         val handler = GatedHandler()
         val session = session(handler, frameSize = 23)
