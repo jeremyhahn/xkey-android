@@ -167,6 +167,26 @@ class FidoGattServer(
     private fun client(device: BluetoothDevice): Client =
         clients.getOrPut(device.address) { Client(device) }
 
+    /** Held from setting fidoStatus's shared value until the stack has taken it. */
+    private val sharedValueLock = Any()
+
+    /**
+     * The one pre-API-33 notification: every client shares fidoStatus's one
+     * value, and the stack sends whatever it holds when notified, so setting
+     * it and notifying run under one server-wide lock. Without it a frame for
+     * one client could be sent to another.
+     */
+    @Suppress("DEPRECATION")
+    private fun notifyShared(
+        s: BluetoothGattServer,
+        characteristic: BluetoothGattCharacteristic,
+        device: BluetoothDevice,
+        frame: ByteArray
+    ): Boolean = synchronized(sharedValueLock) {
+        characteristic.value = frame
+        s.notifyCharacteristicChanged(device, characteristic, false)
+    }
+
     /** One connected FIDO client: its session, ATT MTU and notification queue. */
     private inner class Client(private val device: BluetoothDevice) {
         @Volatile
@@ -258,10 +278,7 @@ class FidoGattServer(
                 if (sdkInt >= Build.VERSION_CODES.TIRAMISU) {
                     s.notifyCharacteristicChanged(device, characteristic, false, frame) == BluetoothStatusCodes.SUCCESS
                 } else {
-                    @Suppress("DEPRECATION")
-                    characteristic.value = frame
-                    @Suppress("DEPRECATION")
-                    s.notifyCharacteristicChanged(device, characteristic, false)
+                    notifyShared(s, characteristic, device, frame)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "FIDO notification refused by the stack", e)
