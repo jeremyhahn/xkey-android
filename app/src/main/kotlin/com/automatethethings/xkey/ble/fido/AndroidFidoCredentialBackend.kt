@@ -225,12 +225,21 @@ class AndroidFidoCredentialBackend(
                 )
             )
         } catch (e: Throwable) {
-            withContext(NonCancellable) {
-                runCatching { credentialDao.deleteByCredentialId(keyId) }
-                runCatching { keyDao.deleteByKeyId(keyId) }
-                runCatching { keystoreManager.deleteKey(keyId) }
-            }
+            withContext(NonCancellable) { remove(keyId) }
             throw e
+        }
+        // Only now that the new passkey is whole: it replaces the discoverable
+        // passkey this client could see for the same account. One the sharing
+        // policy hides from BLE clients is never touched.
+        if (request.discoverable) {
+            withContext(NonCancellable) {
+                keyDao.getFido2ByRpId(request.rpId)
+                    .filter {
+                        it.keyId != keyId && it.keyType == KeyTypeFido2 && it.rpId == request.rpId &&
+                            it.isDiscoverable && it.userId == userId && shared(it)
+                    }
+                    .forEach { remove(it.keyId) }
+            }
         }
         Log.i(TAG, "Created a passkey over BLE, rpId=${request.rpId}")
         runCatching {
@@ -309,6 +318,17 @@ class AndroidFidoCredentialBackend(
     }
 
     private suspend fun shared(entity: KeyEntity): Boolean = sharePermission.canShare(entity, null)
+
+    /**
+     * Remove a passkey from all three places it lives: the metadata the
+     * credential provider lists, its key row, then its Keystore key, so no
+     * row ever points at a key that is gone.
+     */
+    private suspend fun remove(keyId: String) {
+        runCatching { credentialDao.deleteByCredentialId(keyId) }
+        runCatching { keyDao.deleteByKeyId(keyId) }
+        runCatching { keystoreManager.deleteKey(keyId) }
+    }
 
     private companion object {
         const val TAG = "FidoBleBackend"
