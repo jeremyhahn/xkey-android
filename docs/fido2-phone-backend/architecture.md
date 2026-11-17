@@ -167,6 +167,10 @@ next, and cancelling the last declines (CTAP2_ERR_OPERATION_DENIED). The
 usual user check prompt follows the choice. A single passkey, or an
 allowList, needs no choice.
 
+The 0xFFFD service sits beside the xkey service. Every FIDO characteristic
+needs an encrypted, MITM-protected link, and fidoServiceRevisionBitfield
+accepts only the FIDO2 revision.
+
 fidoControlPointLength is per client: min(512, ATT MTU − 3), 20 until the
 client negotiates a larger MTU; longer control point writes are refused.
 Below API 33 every client shares fidoStatus's one value, so setting it and
@@ -215,6 +219,10 @@ response carries only the public COSE key and signatures.
 Not implemented: clientPin, authenticatorGetNextAssertion,
 credential management, extensions, U2F, and silent (`up` false)
 assertions.
+
+Left: verification on a device against a CTAP2 BLE client and
+`xkey fido2 --backend phone`, and a list screen for the account choice in
+place of successive prompts.
 
 ## Tests
 
