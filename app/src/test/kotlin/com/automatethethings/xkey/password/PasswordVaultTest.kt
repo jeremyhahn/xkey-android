@@ -84,8 +84,8 @@ class PasswordVaultTest {
         attempts: VaultUnlockAttemptStore = InMemoryAttemptStore()
     ) = PasswordVault(store, attempts, countingHasher, clock = { now })
 
-    private val wrong = PasswordVaultCredential.Passphrase("tr0ub4dor")
-    private val right = PasswordVaultCredential.Passphrase("correct horse battery staple")
+    private val wrong = PasswordVaultCredential.Passphrase(fixtureSecret(2))
+    private val right = PasswordVaultCredential.Passphrase(fixtureSecret(1))
 
     private suspend fun failTimes(vault: PasswordVault, times: Int) = repeat(times) {
         assertTrue(rejection(vault, wrong) is VaultCredentialRejectedException)
@@ -102,10 +102,10 @@ class PasswordVaultTest {
     @Test
     fun `the enrolled passphrase unlocks the vault`() = runTest {
         val vault = vault()
-        vault.enrollPassphrase("correct horse battery staple")
+        vault.enrollPassphrase(fixtureSecret(1))
         assertTrue(vault.isLocked())
 
-        vault.unlock(PasswordVaultCredential.Passphrase("correct horse battery staple"))
+        vault.unlock(PasswordVaultCredential.Passphrase(fixtureSecret(1)))
 
         assertTrue(vault.isUnlocked())
         assertFalse(vault.isLocked())
@@ -114,9 +114,9 @@ class PasswordVaultTest {
     @Test
     fun `a wrong passphrase is rejected without detail and leaves the vault locked`() = runTest {
         val vault = vault()
-        vault.enrollPassphrase("correct horse battery staple")
+        vault.enrollPassphrase(fixtureSecret(1))
 
-        val e = rejection(vault, PasswordVaultCredential.Passphrase("tr0ub4dor"))
+        val e = rejection(vault, PasswordVaultCredential.Passphrase(fixtureSecret(2)))
 
         assertTrue(e is VaultCredentialRejectedException)
         assertEquals("password vault credential rejected", e.message)
@@ -127,7 +127,7 @@ class PasswordVaultTest {
     fun `an unlock before any enrollment is not initialized`() = runTest {
         val vault = vault()
 
-        val e = rejection(vault, PasswordVaultCredential.Passphrase("anything"))
+        val e = rejection(vault, PasswordVaultCredential.Passphrase(fixtureSecret(3)))
 
         assertTrue(e is VaultNotInitializedException)
         assertFalse("an uninitialized vault does not gate the store", vault.isLocked())
@@ -136,7 +136,7 @@ class PasswordVaultTest {
     @Test
     fun `a passkey credential is rejected because no passkey factor can be enrolled`() = runTest {
         val vault = vault()
-        vault.enrollPassphrase("correct horse battery staple")
+        vault.enrollPassphrase(fixtureSecret(1))
 
         val e = rejection(vault, PasswordVaultCredential.Passkey(byteArrayOf(1), ByteArray(32), null))
 
@@ -146,7 +146,7 @@ class PasswordVaultTest {
     @Test
     fun `a key credential is rejected because no key factor can be enrolled`() = runTest {
         val vault = vault()
-        vault.enrollPassphrase("correct horse battery staple")
+        vault.enrollPassphrase(fixtureSecret(1))
 
         val e = rejection(vault, PasswordVaultCredential.Key("tpm", "fp", byteArrayOf(1)))
 
@@ -156,8 +156,8 @@ class PasswordVaultTest {
     @Test
     fun `lock relocks an unlocked vault`() = runTest {
         val vault = vault()
-        vault.enrollPassphrase("pass")
-        vault.unlock(PasswordVaultCredential.Passphrase("pass"))
+        vault.enrollPassphrase(fixtureSecret(4))
+        vault.unlock(PasswordVaultCredential.Passphrase(fixtureSecret(4)))
 
         vault.lock()
 
@@ -171,16 +171,16 @@ class PasswordVaultTest {
 
     @Test
     fun `the verifier is not the passphrase`() = runTest {
-        val record = vault().enrollPassphrase("pass")
+        val record = vault().enrollPassphrase(fixtureSecret(4))
 
-        assertFalse(record.verifier.contentEquals("pass".toByteArray()))
+        assertFalse(record.verifier.contentEquals(fixtureSecret(4).toByteArray()))
         assertEquals(16, record.salt.size)
     }
 
     @Test
     fun `the file store round-trips enrolled factors`() = runTest {
         val dir = tmp.newFolder("vault")
-        val written = vault(FilePasswordVaultFactorStore(dir)).enrollPassphrase("pass", label = "laptop")
+        val written = vault(FilePasswordVaultFactorStore(dir)).enrollPassphrase(fixtureSecret(4), label = "laptop")
 
         val reloaded = FilePasswordVaultFactorStore(dir).list().single()
 
@@ -194,11 +194,11 @@ class PasswordVaultTest {
     @Test
     fun `a fresh vault over a persisted factor starts locked and unlocks`() = runTest {
         val dir = tmp.newFolder("vault")
-        vault(FilePasswordVaultFactorStore(dir)).enrollPassphrase("pass")
+        vault(FilePasswordVaultFactorStore(dir)).enrollPassphrase(fixtureSecret(4))
 
         val session = vault(FilePasswordVaultFactorStore(dir))
         assertTrue(session.isLocked())
-        session.unlock(PasswordVaultCredential.Passphrase("pass"))
+        session.unlock(PasswordVaultCredential.Passphrase(fixtureSecret(4)))
 
         assertFalse(session.isLocked())
     }
@@ -229,7 +229,7 @@ class PasswordVaultTest {
         assertFalse(vault.isUnlocked())
 
         // An enrollment must not replace factors it could not read.
-        thrown { vault.enrollPassphrase("pass") }
+        thrown { vault.enrollPassphrase(fixtureSecret(4)) }
         assertTrue(factors.isDirectory)
     }
 
@@ -238,8 +238,8 @@ class PasswordVaultTest {
         val dir = tmp.newFolder("vault")
         val store = FilePasswordVaultFactorStore(dir)
         val vault = vault(store)
-        vault.enrollPassphrase("pass")
-        vault.unlock(PasswordVaultCredential.Passphrase("pass"))
+        vault.enrollPassphrase(fixtureSecret(4))
+        vault.unlock(PasswordVaultCredential.Passphrase(fixtureSecret(4)))
         // A directory where factors.json was: the read fails even for root.
         val factors = File(dir, "factors.json")
         assertTrue(factors.delete())
@@ -257,7 +257,7 @@ class PasswordVaultTest {
     @Test
     fun `a factor file the process may not read fails closed`() = runTest {
         val dir = tmp.newFolder("vault")
-        vault(FilePasswordVaultFactorStore(dir)).enrollPassphrase("pass")
+        vault(FilePasswordVaultFactorStore(dir)).enrollPassphrase(fixtureSecret(4))
         val factors = File(dir, "factors.json")
         assertTrue(factors.setReadable(false, false))
         try {

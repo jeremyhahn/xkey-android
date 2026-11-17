@@ -62,8 +62,8 @@ class PinSettingsVaultUnlockAttemptStoreTest {
         }
     }
 
-    private val wrong = PasswordVaultCredential.Passphrase("tr0ub4dor")
-    private val right = PasswordVaultCredential.Passphrase("correct horse battery staple")
+    private val wrong = PasswordVaultCredential.Passphrase(fixtureSecret(2))
+    private val right = PasswordVaultCredential.Passphrase(fixtureSecret(1))
 
     /** One process's view of the PIN settings file: its own DataStore, scope, repository and adapter. */
     private class Opened(file: File) {

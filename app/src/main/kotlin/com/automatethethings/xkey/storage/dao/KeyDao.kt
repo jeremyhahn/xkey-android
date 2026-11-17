@@ -20,6 +20,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.flow.Flow
@@ -34,35 +35,73 @@ import kotlinx.coroutines.flow.Flow
  * All mutating operations are suspend functions for coroutine compatibility.
  * Observation queries return [Flow] for reactive UI updates.
  */
+/**
+ * Marks the raw Room writes behind [KeyDao]'s row writes. Only [KeyDao]'s own
+ * wrappers opt in: every other caller goes through a wrapper, which commits
+ * the write as a [SharePermissionLedger] revoke of the key.
+ */
+@RequiresOptIn(
+    message = "A raw key-row write bypasses SharePermissionLedger; call the KeyDao wrapper instead.",
+    level = RequiresOptIn.Level.ERROR
+)
+@Retention(AnnotationRetention.BINARY)
+@Target(AnnotationTarget.FUNCTION)
+annotation class RawKeyRowWrite
+
+/**
+ * Data Access Object for unified key storage operations.
+ *
+ * Every write that replaces, changes the sharing permission of, or deletes a
+ * key row is a [SharePermissionLedger] revoke of that key, at this one choke
+ * point: a desktop share of the key waiting at a transport's admission is
+ * refused. The raw Room writes are [RawKeyRowWrite] and called only by the
+ * wrappers here. [recordUsage] and [updateSignCount] change counters only,
+ * not what a key may be shared with, and are not revokes.
+ */
 @Dao
+@OptIn(RawKeyRowWrite::class)
 interface KeyDao {
 
     /**
-     * Insert a new key entry.
-     *
-     * If a key with the same `key_id` already exists, it will be replaced.
+     * Insert a key entry, as a revoke of its `key_id`: if a row with the
+     * same `key_id` already exists, it is replaced.
      *
      * @param key The key entity to insert.
      * @return The row ID of the inserted entry.
      */
+    suspend fun insert(key: KeyEntity): Long =
+        SharePermissionLedger.revoking(key.keyId) { insertRow(key) }
+
+    /** Raw insert-or-replace; call [insert]. */
+    @RawKeyRowWrite
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(key: KeyEntity): Long
+    suspend fun insertRow(key: KeyEntity): Long
 
     /**
-     * Update an existing key entry.
+     * Update an existing key entry, as a revoke of its `key_id`.
      *
      * @param key The key entity to update.
      */
+    suspend fun update(key: KeyEntity) =
+        SharePermissionLedger.revoking(key.keyId) { updateRow(key) }
+
+    /** Raw update; call [update]. */
+    @RawKeyRowWrite
     @Update
-    suspend fun update(key: KeyEntity)
+    suspend fun updateRow(key: KeyEntity)
 
     /**
-     * Delete a key entry.
+     * Delete a key entry, as a revoke of its `key_id`.
      *
      * @param key The key entity to delete.
      */
+    suspend fun delete(key: KeyEntity) =
+        SharePermissionLedger.revoking(key.keyId) { deleteRow(key) }
+
+    /** Raw delete; call [delete]. */
+    @RawKeyRowWrite
     @Delete
-    suspend fun delete(key: KeyEntity)
+    suspend fun deleteRow(key: KeyEntity)
 
     /**
      * Observe all keys ordered by creation time (newest first).
@@ -213,6 +252,11 @@ interface KeyDao {
      * @param keyId The unique key identifier.
      * @param policy The new sharing policy type.
      */
+    suspend fun updateSharingPolicy(keyId: String, policy: SharingPolicyType) =
+        SharePermissionLedger.revoking(keyId) { updateSharingPolicyRow(keyId, policy) }
+
+    /** Raw policy update; call [updateSharingPolicy]. */
+    @RawKeyRowWrite
     @Query(
         """
         UPDATE keys SET
@@ -222,7 +266,7 @@ interface KeyDao {
         WHERE key_id = :keyId
         """
     )
-    suspend fun updateSharingPolicy(keyId: String, policy: SharingPolicyType)
+    suspend fun updateSharingPolicyRow(keyId: String, policy: SharingPolicyType)
 
     /**
      * Set the sharing policy for a key only while it is still [expected].
@@ -316,28 +360,34 @@ interface KeyDao {
     // -------------------------------------------------------------------------
 
     /**
-     * Delete a key by its unique key identifier.
+     * Delete a key by its unique key identifier, as a revoke of that key.
      *
      * @param keyId The unique key identifier.
      * @return Number of rows deleted.
      */
+    suspend fun deleteByKeyId(keyId: String): Int =
+        SharePermissionLedger.revoking(keyId) { deleteRowByKeyId(keyId) }
+
+    /** Raw delete by key ID; call [deleteByKeyId]. */
+    @RawKeyRowWrite
     @Query("DELETE FROM keys WHERE key_id = :keyId")
-    suspend fun deleteByKeyId(keyId: String): Int
+    suspend fun deleteRowByKeyId(keyId: String): Int
 
     /**
-     * Delete all FIDO2 keys for a relying party.
+     * Delete all FIDO2 keys for a relying party, each as a revoke of its key.
      *
      * @param rpId The relying party identifier.
      * @return Number of rows deleted.
      */
-    @Query("DELETE FROM keys WHERE key_type = 'fido2' AND rp_id = :rpId")
-    suspend fun deleteFido2ByRpId(rpId: String): Int
+    suspend fun deleteFido2ByRpId(rpId: String): Int =
+        getFido2ByRpId(rpId).sumOf { deleteByKeyId(it.keyId) }
 
     /**
-     * Delete all keys.
+     * Delete all keys, each as a revoke of its key.
      */
-    @Query("DELETE FROM keys")
-    suspend fun deleteAll()
+    suspend fun deleteAll() {
+        getAll().forEach { deleteByKeyId(it.keyId) }
+    }
 
     // -------------------------------------------------------------------------
     // Counting and existence checks
@@ -389,3 +439,21 @@ interface KeyDao {
     @Query("SELECT DISTINCT rp_id FROM keys WHERE key_type = 'fido2' AND rp_id IS NOT NULL ORDER BY rp_id")
     suspend fun getFido2RpIds(): List<String>
 }
+
+/**
+ * Deletes key [keyId]: its key material, through [removeMaterial], then its
+ * metadata row, as one [SharePermissionLedger] revoke opened before the first
+ * removal. A share of the key waiting at transport admission is refused from
+ * the moment any of the key is removed, never admitted between the material
+ * going and the row going. Every delete of a key's material goes through here.
+ *
+ * @param keyId The unique key identifier.
+ * @param removeMaterial Removes the key's material (Keystore entry, software
+ *   store file); runs inside the revoke.
+ * @return Number of rows deleted.
+ */
+suspend fun KeyDao.deleteKeyAndMaterial(keyId: String, removeMaterial: suspend () -> Unit): Int =
+    SharePermissionLedger.revoking(keyId) {
+        removeMaterial()
+        deleteByKeyId(keyId)
+    }

@@ -19,7 +19,7 @@ import android.util.Log
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
-import com.automatethethings.xkey.remote.MessageSender
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.automatethethings.xkey.transport.StreamPairingSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,7 +64,7 @@ class TcpHsmServer(
     messageRouter: BidirectionalMessageRouter? = null,
     pairingCallback: com.automatethethings.xkey.ble.PairingConfirmationCallback? = null,
     pairedDeviceRepository: com.automatethethings.xkey.settings.PairedDeviceRepository? = null
-) : MessageSender {
+) {
     companion object {
         private const val TAG = "TcpHsmServer"
 
@@ -207,23 +207,15 @@ class TcpHsmServer(
     }
 
     /**
-     * Sends an encrypted message to the connected desktop (outbound remote.*).
+     * The desktop on this server for outbound `remote.*` clients, or null
+     * unless a session is [TcpHsmState.Connected].
      */
-    override suspend fun sendEncryptedMessage(data: ByteArray) {
-        pairingSession.sendEncryptedMessage(data)
-    }
-
-    /**
-     * Sends on [connection] alone, refused unless it is still the current TCP
-     * connection (see [StreamPairingSession.sendEncryptedMessageOn]).
-     */
-    override suspend fun sendEncryptedMessageOn(
-        connection: com.automatethethings.xkey.remote.ConfirmedConnection,
-        data: ByteArray
-    ) = pairingSession.sendEncryptedMessageOn(connection, data)
-
-    /** The TCP connection's own confirmed peer (see [StreamPairingSession.confirmedConnection]). */
-    override fun confirmedConnection() = pairingSession.confirmedConnection()
+    fun connectedDesktop(router: BidirectionalMessageRouter?): ConnectedDesktop? =
+        ConnectedDesktop.ifEstablished(
+            state.value is TcpHsmState.Connected,
+            pairingSession.boundSender(),
+            router
+        )
 
     private fun closeQuietly(closeable: java.io.Closeable?) {
         try {

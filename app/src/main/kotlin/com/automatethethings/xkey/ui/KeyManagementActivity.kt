@@ -55,6 +55,8 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.storage.deleteKeyRow
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -1257,13 +1259,7 @@ class KeyManagementActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            if (key.source != "xkmsd") {
-                val alias = keystoreManager.resolveKeystoreAlias(key.keyId)
-                if (alias != null) {
-                    keystoreManager.deleteByAlias(alias)
-                }
-            }
-            keyDao.deleteByKeyId(key.keyId)
+            keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyManagementActivity))
             Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
         }
     }

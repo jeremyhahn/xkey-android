@@ -22,8 +22,11 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -78,6 +81,31 @@ class ShareSessionChangesTest {
         assertNull(seen[1]!!.peerPublicKeyHex)
         assertEquals(peer, seen[2]!!.peerPublicKeyHex)
         assertNull(seen[3])
+    }
+
+    /**
+     * A transport may build a fresh sender on every lookup: sessions are told
+     * apart by the connection their sender is bound to, never by the sender
+     * object, so a fresh sender on one connection is the same session and a
+     * sender on another connection is not.
+     */
+    @Test
+    fun `fresh senders bound to one connection are one session`() {
+        val connection = Any()
+        fun freshSender(on: Any) = object : MessageSender {
+            override val binding: Any get() = on
+            override fun confirmedConnection() = ConfirmedConnection(peer, on)
+            override suspend fun sendEncryptedMessage(data: ByteArray) = Unit
+        }
+        fun lookup(on: Any): ShareSession =
+            ShareSession.of(listOf(ShareSession.Transport(freshSender(on), router))) { it.sameAs(lookup(on)) }!!
+
+        val first = lookup(connection)
+        val second = lookup(connection)
+        assertNotSame(first.sender, second.sender)
+        assertTrue("a fresh sender on the same connection is the same session", first.sameAs(second))
+        assertTrue("the session stays current across fresh lookups", first.isCurrent())
+        assertFalse("another connection is another session", first.sameAs(lookup(Any())))
     }
 
     @Test
