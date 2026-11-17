@@ -171,11 +171,19 @@ class FidoGattServer(
         private val queue = ArrayDeque<ByteArray>()
         private var inFlight = false
 
+        /**
+         * fidoControlPointLength for this client, the one size for both
+         * directions: what one ATT write or notification carries at its
+         * negotiated MTU (23 until it negotiates), at most 512.
+         */
+        val controlPointLength: Int
+            get() = (mtu - ATT_NOTIFY_OVERHEAD).coerceIn(MIN_FRAME_SIZE, FidoBle.CONTROL_POINT_LENGTH)
+
         val session = FidoBleSession(
             handler = handler,
             scope = scope,
             send = ::enqueue,
-            maxFrameSize = { (mtu - ATT_NOTIFY_OVERHEAD).coerceIn(MIN_FRAME_SIZE, FidoBle.CONTROL_POINT_LENGTH) }
+            maxFrameSize = { controlPointLength }
         )
 
         fun onWrite(frame: ByteArray) = synchronized(session) { session.onControlPointWrite(frame) }
@@ -276,10 +284,9 @@ class FidoGattServer(
             characteristic: BluetoothGattCharacteristic
         ) {
             val value = when (characteristic.uuid) {
-                FidoBle.CONTROL_POINT_LENGTH_UUID -> byteArrayOf(
-                    (FidoBle.CONTROL_POINT_LENGTH shr 8).toByte(),
-                    FidoBle.CONTROL_POINT_LENGTH.toByte()
-                )
+                FidoBle.CONTROL_POINT_LENGTH_UUID -> client(device).controlPointLength.let {
+                    byteArrayOf((it shr 8).toByte(), it.toByte())
+                }
                 FidoBle.SERVICE_REVISION_BITFIELD_UUID -> byteArrayOf(FidoBle.SERVICE_REVISION_FIDO2)
                 else -> null
             }
@@ -303,7 +310,7 @@ class FidoGattServer(
             val status = when {
                 preparedWrite || offset != 0 -> BluetoothGatt.GATT_INVALID_OFFSET
                 characteristic.uuid == FidoBle.CONTROL_POINT_UUID ->
-                    if (data.size > FidoBle.CONTROL_POINT_LENGTH) {
+                    if (data.size > client(device).controlPointLength) {
                         BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH
                     } else {
                         BluetoothGatt.GATT_SUCCESS
