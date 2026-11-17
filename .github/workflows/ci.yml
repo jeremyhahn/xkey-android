@@ -1,3 +1,11 @@
+# Hermetic CI Gate (owner ruling 742 (1); ci-template v1.42's hermetic gate,
+# Tenant Agent rollout order): the gate's outcome depends only on the tree
+# under test. `make security` (trivy fs, vuln and secret), `make deps-check`
+# and `trivy image` of the integration image read advisory databases and the
+# dependency repositories, so they could fail a PR or turn main red with no
+# change to the tree. They run in .github/workflows/scans.yml on main (a
+# schedule and workflow_dispatch), never on a pull request or a push.
+#
 # CI for a Kotlin/Gradle Android app. Every stage runs a make target inside
 # this repository's devcontainer images (build/docker/devcontainer), so CI and
 # a developer's machine run the same tools at the same pinned versions; no
@@ -10,12 +18,12 @@
 # none is sharded. Each run gets fresh runners whose Docker daemon no other
 # job shares, so no job leases, locks or reaps images.
 #
-# Tiers. A pull request runs the PR tier: lint, deps-check, build and the unit
-# suite with coverage (the image job), the repository's own gates
-# (lint-gates) and the changed-files detection with the architecture gate
-# (preflight). The full tier adds
-# integration, security and `trivy image`; it runs on a push to main, on
-# workflow_dispatch and on a PR labelled ci:full.
+# Tiers. A pull request runs the PR tier: lint, build and the unit suite with
+# coverage (the image job), the repository's own gates (lint-gates) and the
+# changed-files detection with the architecture gate (preflight). The full
+# tier adds integration; it runs on a push to main, on workflow_dispatch and
+# on a PR labelled ci:full. security, deps-check and `trivy image` are
+# scans.yml's (above).
 # Soak runs on workflow_dispatch only. A draft PR runs no
 # CI, and CI Gate fails on a draft. A PR whose every changed file matches
 # DOCS_ONLY_PATTERN runs lint alone.
@@ -217,7 +225,7 @@ jobs:
   # Runner: GitHub-hosted ubuntu-latest, which has Docker. The cold image
   # builds (no layer cache survives a run) and the stages fit 150 minutes.
   image:
-    name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
+    name: Devcontainer image [lint, build, test]
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight
     timeout-minutes: 120
@@ -338,42 +346,11 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make coverage COVERAGE_THRESHOLD=$COVERAGE_THRESHOLD"
 
-      # make security is trivy fs, vuln and secret, blocking on CRITICAL/HIGH,
-      # over the repo and build/docker.
-      - name: make security
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make security"
-
-      # Fails when a library, first-party or third-party, is behind its latest
-      # release without a documented reason. A lint-class gate of seconds on
-      # the PR tier, every event, a docs-only PR included, so a dependency
-      # behind its floor fails the PR, not main after the merge.
-      - name: make deps-check
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make deps-check
-
-      # The integration image is scanned with --ignore-unfixed; trivy fs and
-      # make security never take it. A PR builds no image for a registry, so
-      # the scan is full tier. The jars in the image's Gradle cache are
-      # scanned. trivy's cache (--cache-dir) and temp files (TMPDIR) go under
-      # /src, the stage container's writable layer on the host's disk: those
-      # jars need the Java DB, whose download and extraction overflow the
-      # container's 3 GiB /tmp. Fleet Ops 11-13: the 952 MiB Java DB download
-      # hit trivy's default 5-minute timeout on the shared link, so the Java DB is
-      # fetched first with a 30-minute timeout and the scan then skips its
-      # update; the scan keeps the 30-minute timeout.
-      - name: trivy image (integration image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: |
-          docker save -o it-image.tar "$IT_IMAGE"
-          scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" \
-            "mkdir -p /src/.trivy/tmp && export TMPDIR=/src/.trivy/tmp && trivy image --cache-dir /src/.trivy/cache --timeout 30m --download-java-db-only && trivy image --cache-dir /src/.trivy/cache --timeout 30m --skip-java-db-update --input it-image.tar --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1"
+      # Ruling 742 (1): `make security`, `make deps-check` and `trivy image
+      # (integration image)` left this job. Each reads an advisory database or
+      # the dependency repositories, whose answer changes with no change to
+      # the tree. scans.yml runs them on main with the same commands and opens
+      # or updates ONE issue on a finding.
 
       - name: Tear down
         if: always()
