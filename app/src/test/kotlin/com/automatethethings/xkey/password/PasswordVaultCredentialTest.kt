@@ -125,7 +125,7 @@ class PasswordVaultCredentialTest {
 
     @Test
     fun `a secret that is not base64 is invalid`() {
-        val e = invalid("""{"factor":"piv","key_fingerprint":"fp","secret":"not base64!"}""")
+        val e = invalid("""{"factor":"piv","key_fingerprint":"fp","secret":"${fixtureSecret(1)}!"}""")
 
         assertEquals("secret must be base64", e.message)
     }
