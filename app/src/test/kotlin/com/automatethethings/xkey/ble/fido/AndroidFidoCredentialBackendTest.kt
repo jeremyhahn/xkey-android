@@ -110,17 +110,19 @@ class AndroidFidoCredentialBackendTest {
     }
 
     @Test
-    fun `sign takes the shared counter and signs the hash in Keystore`() = runTest {
+    fun `sign hashes authenticatorData and clientDataHash once inside the signature`() = runTest {
         val cred = backend().credentials("example.com").single()
-        val hash = slot<ByteArray>()
-        coEvery { keystore.signWithoutBiometric(shared.keyId, capture(hash)) } returns byteArrayOf(0x31)
+        val input = slot<ByteArray>()
+        coEvery { keystore.signWithoutBiometric(shared.keyId, capture(input)) } returns byteArrayOf(0x31)
         val cdh = ByteArray(32) { 1 }
 
         val signed = backend().sign(cred, { count -> byteArrayOf(count.toByte()) }, cdh)
 
         assertArrayEquals(byteArrayOf(5), signed.authenticatorData)
         assertArrayEquals(byteArrayOf(0x31), signed.signature)
-        assertArrayEquals(MessageDigest.getInstance("SHA-256").digest(byteArrayOf(5) + cdh), hash.captured)
+        // SHA256withECDSA hashes its input, so the input is the raw
+        // concatenation; a pre-hashed input would sign SHA-256(SHA-256(...)).
+        assertArrayEquals(byteArrayOf(5) + cdh, input.captured)
         coVerify(exactly = 1) { signCounter.next(shared.keyId) }
     }
 
