@@ -152,7 +152,19 @@ over BLE is stored as `ALL_PEERS` so that client can use it again; paired
 desktops see it too.
 
 Every GetAssertion and MakeCredential prompts on the phone, so UP and UV are
-set only by a prompt the user passed. No private key leaves Keystore; the
+set only by a prompt the user passed. On a locked phone both prompts take the
+path the JSON-RPC approvals take: shown over the lock screen, with a
+notification that opens that request's own prompt, taken down when it ends.
+The sharing policy is checked once more after every signature and before it
+is released: a passkey made private, narrowed or deleted while its prompt was
+up answers CTAP2_ERR_OPERATION_DENIED.
+
+fidoControlPointLength is per client: min(512, ATT MTU − 3), 20 until the
+client negotiates a larger MTU; longer control point writes are refused.
+Every outgoing message (MSG, PING, ERROR, KEEPALIVE) is queued whole under
+one lock, and the keepalive is joined before the MSG response. A session stays
+busy until its request has sent its response and cleaned up, so a MSG during
+a cancelled request's unwind answers ERR_BUSY. No private key leaves Keystore; the
 response carries only the public COSE key and signatures.
 
 ### Refusals
@@ -172,6 +184,8 @@ response carries only the public COSE key and signatures.
 | Client sends CANCEL, even before the request starts | CTAP2_ERR_KEEPALIVE_CANCEL (0x2D), exactly one response per MSG |
 | Request fails unexpectedly | CTAP2_ERR_OTHER (0x7F) |
 | Per-operation passkey with no prompt, or its prompt declined | CTAP2_ERR_OPERATION_DENIED |
+| Passkey no longer shared (or gone) once it has signed | CTAP2_ERR_OPERATION_DENIED, signature dropped |
+| MSG while another, even a cancelled one still unwinding, is in flight | BLE ERROR frame (ERR_BUSY) |
 | Client lets 96 notification frames queue unsent | BLE ERROR frame (ERR_OTHER), queue dropped, session closed |
 | Any other command | CTAP1_ERR_INVALID_COMMAND |
 
@@ -188,7 +202,7 @@ assertions.
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/Ctap2AuthenticatorTest.kt` | The three commands end to end over CBOR bytes with a fake backend, signature verified, counter, every refusal including UV |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSessionTest.kt` | PING, MSG, keepalive, CANCEL (also before start), handler failure, BUSY, framing errors, close |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/AndroidFidoCredentialBackendTest.kt` | Sharing policy on list and sign, shared counter, one Keystore signature over unhashed data, per-operation passkeys, rollback of a failed MakeCredential |
-| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric; both prompts over the lock screen with their own notification |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoGattServerTest.kt` | Control point write to fidoStatus notification, permissions, revision, MTU, subscription, the bounded queue |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
