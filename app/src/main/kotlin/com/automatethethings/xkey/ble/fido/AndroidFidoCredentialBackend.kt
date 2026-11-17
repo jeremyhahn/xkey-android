@@ -29,6 +29,8 @@ import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import java.security.SecureRandom
 import java.util.Base64
 
@@ -135,20 +137,11 @@ class AndroidFidoCredentialBackend(
         )
         val userId = encodeId(request.userHandle)
         val rpName = request.rpName ?: request.rpId
+        // The Keystore key, then its key row, then the metadata the credential
+        // provider lists. Any failure, a cancellation (the client disconnected
+        // or sent CANCEL) included, removes all three, so no row ever points
+        // at a key that does not exist.
         try {
-            credentialDao.insert(
-                CredentialMetadataEntity(
-                    credentialId = keyId,
-                    rpId = request.rpId,
-                    rpName = rpName,
-                    userId = userId,
-                    userName = request.userName ?: "",
-                    userDisplayName = request.userDisplayName ?: request.userName ?: "",
-                    publicKeyCose = cose,
-                    signCount = 0,
-                    isDiscoverable = request.discoverable
-                )
-            )
             keyDao.insert(
                 KeyEntity(
                     keyId = keyId,
@@ -175,8 +168,25 @@ class AndroidFidoCredentialBackend(
                     sharingPolicy = SharingPolicyType.ALL_PEERS
                 )
             )
-        } catch (e: Exception) {
-            keystoreManager.deleteKey(keyId)
+            credentialDao.insert(
+                CredentialMetadataEntity(
+                    credentialId = keyId,
+                    rpId = request.rpId,
+                    rpName = rpName,
+                    userId = userId,
+                    userName = request.userName ?: "",
+                    userDisplayName = request.userDisplayName ?: request.userName ?: "",
+                    publicKeyCose = cose,
+                    signCount = 0,
+                    isDiscoverable = request.discoverable
+                )
+            )
+        } catch (e: Throwable) {
+            withContext(NonCancellable) {
+                runCatching { credentialDao.deleteByCredentialId(keyId) }
+                runCatching { keyDao.deleteByKeyId(keyId) }
+                runCatching { keystoreManager.deleteKey(keyId) }
+            }
             throw e
         }
         Log.i(TAG, "Created a passkey over BLE, rpId=${request.rpId}")
