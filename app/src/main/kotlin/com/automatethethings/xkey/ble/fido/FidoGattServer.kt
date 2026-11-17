@@ -40,6 +40,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
@@ -226,7 +227,10 @@ class FidoGattServer(
             }
             if (overflowNow) {
                 Log.w(TAG, "FIDO notification queue full; closing the session")
-                synchronized(session) { session.close() }
+                // Not on this thread: it is inside the session's send lock,
+                // and the GATT thread may hold the session while it waits
+                // for that lock.
+                scope.launch { synchronized(session) { session.close() } }
             }
         }
 
