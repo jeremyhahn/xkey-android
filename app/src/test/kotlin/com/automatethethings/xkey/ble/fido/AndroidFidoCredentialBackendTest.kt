@@ -17,7 +17,9 @@ package com.automatethethings.xkey.ble.fido
 
 import android.util.Log
 import com.automatethethings.xkey.credential.PasskeySignCounter
+import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
@@ -170,10 +172,81 @@ class AndroidFidoCredentialBackendTest {
         val prompt = object : FidoUserPrompt {
             override val available = true
             override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.DECLINED
+            override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String) = ByteArray(0)
         }
 
         assertEquals(UserCheck.DECLINED, backend(prompt).checkUser("example.com", registering = true))
         assertEquals(true, backend(prompt).userVerificationAvailable)
+    }
+
+    /** A prompt whose key-bound signature records what it was asked to sign. */
+    private class BoundPrompt(private val outcome: () -> ByteArray) : FidoUserPrompt {
+        val signed = mutableListOf<Pair<String, ByteArray>>()
+        override val available = true
+        override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.VERIFIED
+        override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String): ByteArray {
+            signed += keyId to signedData
+            return outcome()
+        }
+    }
+
+    @Test
+    fun `a per-operation passkey signs through a prompt bound to its signature`() = runTest {
+        val perOperation = shared.copy(authDurationSeconds = 0)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(perOperation)
+        coEvery { keyDao.getByKeyId(shared.keyId) } returns perOperation
+        val prompt = BoundPrompt { byteArrayOf(0x32) }
+        val cdh = ByteArray(32) { 2 }
+        val cred = backend(prompt).credentials("example.com").single()
+
+        val signed = backend(prompt).sign(cred, { count -> byteArrayOf(count.toByte()) }, cdh)
+
+        assertArrayEquals(byteArrayOf(0x32), signed.signature)
+        assertEquals(shared.keyId, prompt.signed.single().first)
+        assertArrayEquals(byteArrayOf(5) + cdh, prompt.signed.single().second)
+        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
+    }
+
+    @Test
+    fun `a passkey Keystore will not sign silently signs through the bound prompt`() = runTest {
+        coEvery { keystore.signWithoutBiometric(any(), any()) } throws BiometricRequiredException()
+        val prompt = BoundPrompt { byteArrayOf(0x33) }
+        val cred = backend(prompt).credentials("example.com").single()
+
+        val signed = backend(prompt).sign(cred, { byteArrayOf(1) }, ByteArray(32))
+
+        assertArrayEquals(byteArrayOf(0x33), signed.signature)
+        assertEquals(1, prompt.signed.size)
+    }
+
+    @Test
+    fun `a declined key-bound prompt answers OPERATION_DENIED and signs nothing`() = runTest {
+        val perOperation = shared.copy(authDurationSeconds = 0)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(perOperation)
+        coEvery { keyDao.getByKeyId(shared.keyId) } returns perOperation
+        val prompt = BoundPrompt { throw UserCancelledException() }
+        val cred = backend(prompt).credentials("example.com").single()
+
+        val e = assertThrows(FidoRefusedException::class.java) {
+            kotlinx.coroutines.runBlocking { backend(prompt).sign(cred, { byteArrayOf(1) }, ByteArray(32)) }
+        }
+
+        assertEquals(Ctap2.ERR_OPERATION_DENIED, e.status)
+    }
+
+    @Test
+    fun `a per-operation passkey without a prompt answers OPERATION_DENIED`() = runTest {
+        val perOperation = shared.copy(authDurationSeconds = 0)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(perOperation)
+        coEvery { keyDao.getByKeyId(shared.keyId) } returns perOperation
+        val cred = backend().credentials("example.com").single()
+
+        val e = assertThrows(FidoRefusedException::class.java) {
+            kotlinx.coroutines.runBlocking { backend().sign(cred, { byteArrayOf(1) }, ByteArray(32)) }
+        }
+
+        assertEquals(Ctap2.ERR_OPERATION_DENIED, e.status)
+        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
     }
 
     private companion object {
