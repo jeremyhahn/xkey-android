@@ -296,6 +296,42 @@ class AndroidFidoCredentialBackendTest {
         coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
     }
 
+    @Test
+    fun `a passkey made private while its key-bound prompt was open releases no signature`() = runTest {
+        val perOperation = shared.copy(authDurationSeconds = 0)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(perOperation)
+        coEvery { keyDao.getByKeyId(shared.keyId) } returns perOperation
+        val prompt = BoundPrompt {
+            // The owner makes the passkey private while the prompt is up.
+            coEvery { keyDao.getByKeyId(shared.keyId) } returns perOperation.copy(
+                sharingPolicy = SharingPolicyType.PRIVATE
+            )
+            byteArrayOf(0x34)
+        }
+        val cred = backend(prompt).credentials("example.com").single()
+
+        val e = assertThrows(FidoRefusedException::class.java) {
+            kotlinx.coroutines.runBlocking { backend(prompt).sign(cred, { byteArrayOf(1) }, ByteArray(32)) }
+        }
+
+        assertEquals(Ctap2.ERR_OPERATION_DENIED, e.status)
+    }
+
+    @Test
+    fun `a passkey deleted while it signed releases no signature`() = runTest {
+        coEvery { keystore.signWithoutBiometric(any(), any()) } answers {
+            coEvery { keyDao.getByKeyId(shared.keyId) } returns null
+            byteArrayOf(0x35)
+        }
+        val cred = backend().credentials("example.com").single()
+
+        val e = assertThrows(FidoRefusedException::class.java) {
+            kotlinx.coroutines.runBlocking { backend().sign(cred, { byteArrayOf(1) }, ByteArray(32)) }
+        }
+
+        assertEquals(Ctap2.ERR_OPERATION_DENIED, e.status)
+    }
+
     private companion object {
         fun b64(b: ByteArray): String = Base64.getUrlEncoder().withoutPadding().encodeToString(b)
     }
