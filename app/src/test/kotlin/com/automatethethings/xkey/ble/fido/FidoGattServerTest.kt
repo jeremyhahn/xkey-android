@@ -31,6 +31,7 @@ import com.automatethethings.xkey.crypto.CborDecoder
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
+import io.mockk.verify
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -281,6 +282,79 @@ class FidoGattServerTest {
 
         assertTrue("queued ${notified.size} frames", notified.size <= MAX_EXPECTED_FRAMES)
         assertArrayEquals(FidoBle.errorFrame(FidoBle.ERR_OTHER), notified.last())
+    }
+
+    /** The stack refuses the notify calls [reject] picks (1-based), and accepts the rest. */
+    private fun rejectNotify(reject: (call: Int) -> Boolean) {
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        every { stack.notifyCharacteristicChanged(any(), any(), any(), any<ByteArray>()) } answers {
+            if (reject(calls.incrementAndGet())) {
+                BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY
+            } else {
+                notified += arg<ByteArray>(3)
+                BluetoothStatusCodes.SUCCESS
+            }
+        }
+    }
+
+    private val fiftyBytes = ByteArray(50) { it.toByte() }
+
+    @Test
+    fun `a fragmented reply survives a notification the stack rejects once`() {
+        subscribe()
+        rejectNotify { it == 2 }
+
+        send(FidoBle.CMD_PING, fiftyBytes)
+        val echo = awaitReply()
+
+        assertArrayEquals(fiftyBytes, echo.data)
+        assertEquals("every frame once, none dropped", 3, notified.size)
+    }
+
+    @Test
+    fun `a fragmented reply survives a notification whose completion fails`() {
+        subscribe()
+
+        send(FidoBle.CMD_PING, fiftyBytes)
+        callback.captured.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
+        // The second frame did not reach the client.
+        notified.removeAt(notified.lastIndex)
+        callback.captured.onNotificationSent(device, BluetoothGatt.GATT_FAILURE)
+        val echo = awaitReply()
+
+        assertArrayEquals(fiftyBytes, echo.data)
+        assertEquals(3, notified.size)
+    }
+
+    @Test
+    fun `a frame the stack keeps rejecting ends the client's connection, not the message`() {
+        subscribe()
+        rejectNotify { it >= 2 }
+
+        send(FidoBle.CMD_PING, fiftyBytes)
+
+        verify(timeout = 5_000) { stack.cancelConnection(device) }
+        val frames = notified.size
+        send(FidoBle.CMD_PING, byteArrayOf(1))
+        release()
+        assertEquals("the first frame only; nothing after the failure", 1, frames)
+        assertEquals("the session is over", frames, notified.size)
+    }
+
+    @Test
+    fun `a frame whose completion keeps failing ends the client's connection, not the message`() {
+        subscribe()
+
+        send(FidoBle.CMD_PING, fiftyBytes)
+        callback.captured.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
+        repeat(10) { callback.captured.onNotificationSent(device, BluetoothGatt.GATT_FAILURE) }
+
+        verify(timeout = 5_000) { stack.cancelConnection(device) }
+        val frames = notified.size
+        send(FidoBle.CMD_PING, byteArrayOf(1))
+        release()
+        assertTrue("the third frame is never sent", notified.none { it[0] == 1.toByte() })
+        assertEquals("the session is over", frames, notified.size)
     }
 
     @Test
