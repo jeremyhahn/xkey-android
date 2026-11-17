@@ -88,19 +88,31 @@ class AndroidFidoCredentialBackend(
         get() = settings().strictUserVerification
 
     override suspend fun credentials(rpId: String): List<FidoCredential> =
-        keyDao.getFido2ByRpId(rpId)
+        offered(rpId).map { (entity, id) ->
+            FidoCredential(
+                id = id,
+                rpId = rpId,
+                userHandle = entity.userId?.let { decodeBase64(it) },
+                userName = entity.userName,
+                userDisplayName = entity.userDisplayName,
+                discoverable = entity.isDiscoverable
+            )
+        }
+
+    /**
+     * The one map between stored passkeys and wire credential IDs: each
+     * passkey for [rpId] the sharing policy shows a BLE client, with the ID
+     * the client sees ([wireId] of its stored key ID). Listing and signing
+     * both go through here, so a wire ID always leads back to the key ID
+     * exactly as the database and Keystore hold it. Two stored IDs that
+     * would reach the client as the same bytes are both left out.
+     */
+    private suspend fun offered(rpId: String): List<Pair<KeyEntity, ByteArray>> {
+        val all = keyDao.getFido2ByRpId(rpId)
             .filter { it.keyType == KeyTypeFido2 && it.rpId == rpId && shared(it) }
-            .mapNotNull { entity ->
-                val id = decodeId(entity.keyId) ?: return@mapNotNull null
-                FidoCredential(
-                    id = id,
-                    rpId = rpId,
-                    userHandle = entity.userId?.let { decodeId(it) },
-                    userName = entity.userName,
-                    userDisplayName = entity.userDisplayName,
-                    discoverable = entity.isDiscoverable
-                )
-            }
+            .map { it to wireId(it.keyId) }
+        return all.filter { (_, id) -> all.count { it.second.contentEquals(id) } == 1 }
+    }
 
     override suspend fun checkUser(rpId: String, registering: Boolean): UserCheck {
         val prompt = userPrompt ?: return UserCheck.UNAVAILABLE
@@ -120,9 +132,13 @@ class AndroidFidoCredentialBackend(
         authenticatorData: (signCount: Long) -> ByteArray,
         clientDataHash: ByteArray
     ): SignedAssertion {
-        val keyId = encodeId(credential.id)
-        val entity = keyDao.getByKeyId(keyId)
-        if (entity == null || entity.keyType != KeyTypeFido2 || entity.rpId != credential.rpId || !shared(entity)) {
+        // The stored key ID, never one re-encoded from the wire ID: stored IDs
+        // come padded, in standard base64 or not in base64 at all.
+        val keyId = offered(credential.rpId).singleOrNull { it.second.contentEquals(credential.id) }?.first?.keyId
+        val entity = keyId?.let { keyDao.getByKeyId(it) }
+        if (keyId == null || entity == null || entity.keyType != KeyTypeFido2 ||
+            entity.rpId != credential.rpId || !shared(entity)
+        ) {
             throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "Passkey is gone or no longer shared")
         }
         val count = signCounter.next(keyId)
@@ -290,11 +306,30 @@ class AndroidFidoCredentialBackend(
             }
         }
 
-        /** Passkey ids and user handles are stored base64url; anything else is skipped. */
-        fun decodeId(text: String): ByteArray? = try {
-            Base64.getUrlDecoder().decode(text.trimEnd('='))
-        } catch (e: IllegalArgumentException) {
-            null
+        /**
+         * The credential ID a BLE client sees for a stored key ID: its bytes
+         * when the stored ID is base64 (URL-safe or standard, padded or not),
+         * else the stored ID's own UTF-8 bytes. Never null, so every stored
+         * passkey can be offered.
+         */
+        fun wireId(keyId: String): ByteArray = decodeBase64(keyId) ?: keyId.toByteArray(Charsets.UTF_8)
+
+        /** Base64 in either alphabet, padded or not; null for anything else. */
+        fun decodeBase64(text: String): ByteArray? {
+            val bare = text.trimEnd('=')
+            if (bare.isEmpty() || text.length - bare.length > 2) return null
+            val decoder = when {
+                bare.all { it.isLetterOrDigitAscii() || it == '-' || it == '_' } -> Base64.getUrlDecoder()
+                bare.all { it.isLetterOrDigitAscii() || it == '+' || it == '/' } -> Base64.getDecoder()
+                else -> return null
+            }
+            return try {
+                decoder.decode(bare)
+            } catch (e: IllegalArgumentException) {
+                null
+            }
         }
+
+        private fun Char.isLetterOrDigitAscii(): Boolean = this in 'A'..'Z' || this in 'a'..'z' || this in '0'..'9'
     }
 }

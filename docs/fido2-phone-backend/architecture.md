@@ -151,6 +151,11 @@ refused (CTAP2_ERR_NO_CREDENTIALS) before the counter moves. A passkey made
 over BLE is stored as `ALL_PEERS` so that client can use it again; paired
 desktops see it too.
 
+A passkey's stored key ID is never rewritten. The ID a BLE client sees is the
+stored ID's bytes when it is base64 (URL-safe or standard, padded or not),
+else its UTF-8 bytes; one lookup (`offered`) maps that wire ID back to the
+stored ID for the counter and Keystore, for listing and signing alike.
+
 Every GetAssertion and MakeCredential prompts on the phone, so UP and UV are
 set only by a prompt the user passed. On a locked phone both prompts take the
 path the JSON-RPC approvals take: shown over the lock screen, with a
