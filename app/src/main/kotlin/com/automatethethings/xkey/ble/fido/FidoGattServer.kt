@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.ble.fido
 
 import android.annotation.SuppressLint
+import android.app.KeyguardManager
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
@@ -26,10 +27,12 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.util.Log
 import androidx.biometric.BiometricManager
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.auth.BiometricNotificationHelper
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.UserCancelledException
@@ -38,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -386,13 +390,56 @@ class FidoGattServer(
 }
 
 /**
+ * The lock screen a BLE prompt must reach: the phone is usually locked in a
+ * pocket when a laptop asks it for a passkey.
+ */
+interface FidoLockScreen {
+    val locked: Boolean
+
+    /**
+     * Posts the notification that opens [prompt], the launcher request's own
+     * intent, under its notification [key]; [onTimeout] runs if it expires
+     * unanswered.
+     */
+    fun post(operationType: String, rpId: String, key: String, prompt: Intent, onTimeout: () -> Unit)
+
+    fun cancel(key: String)
+}
+
+/** The keyguard and the lock-screen notification every other xkey approval uses. */
+class AndroidFidoLockScreen(private val context: Context) : FidoLockScreen {
+    private val keyguard by lazy { context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager }
+    private val notifications by lazy { BiometricNotificationHelper(context) }
+
+    override val locked: Boolean
+        get() = keyguard?.isKeyguardLocked == true
+
+    override fun post(operationType: String, rpId: String, key: String, prompt: Intent, onTimeout: () -> Unit) =
+        notifications.showBiometricRequiredNotification(
+            operationType = operationType,
+            rpName = rpId,
+            requestId = key,
+            onTimeout = onTimeout,
+            promptIntent = prompt
+        )
+
+    override fun cancel(key: String) = notifications.cancelNotification(key)
+}
+
+/**
  * The phone's approval prompt for a BLE ceremony, through the same launcher
  * as every other xkey approval. TransparentBiometricActivity allows a strong
  * biometric only, so that is all [available] (getInfo's `uv`) checks: a phone
  * with only a PIN or password does not advertise verification it cannot do.
+ *
+ * Both prompts take the path the JSON-RPC approvals take on a locked phone:
+ * shown over the lock screen, with a notification that opens the launched
+ * request's own intent (so answering it completes this request), taken down
+ * once the request ends.
  */
 class BiometricFidoUserPrompt(
     private val context: Context,
+    private val lockScreen: FidoLockScreen = AndroidFidoLockScreen(context),
     private val launcher: () -> BiometricActivityLauncher?
 ) : FidoUserPrompt {
 
@@ -404,11 +451,15 @@ class BiometricFidoUserPrompt(
     override suspend fun verify(rpId: String, registering: Boolean): UserCheck {
         val l = launcher() ?: return UserCheck.UNAVAILABLE
         return try {
-            l.requestAuthentication(
-                title = if (registering) "Create a passkey" else "Sign in with a passkey",
-                subtitle = rpId,
-                description = "Requested by a Bluetooth security key client"
-            )
+            onLockScreen(if (registering) "makeCredential" else "getAssertion", rpId) { locked, onLaunch ->
+                l.requestAuthentication(
+                    title = if (registering) "Create a passkey" else "Sign in with a passkey",
+                    subtitle = rpId,
+                    description = "Requested by a Bluetooth security key client",
+                    showOnLockScreen = locked,
+                    onLaunch = onLaunch
+                )
+            }
             UserCheck.VERIFIED
         } catch (e: UserCancelledException) {
             UserCheck.DECLINED
@@ -429,12 +480,43 @@ class BiometricFidoUserPrompt(
      */
     override suspend fun signWithKey(keyId: String, signedData: ByteArray, rpId: String): ByteArray {
         val l = launcher() ?: throw IllegalStateException("No prompt launcher")
-        return l.requestCryptoSignature(
-            credentialId = keyId,
-            dataHash = signedData,
-            title = "Sign in with a passkey",
-            subtitle = rpId
-        )
+        return onLockScreen("getAssertion", rpId) { locked, onLaunch ->
+            l.requestCryptoSignature(
+                credentialId = keyId,
+                dataHash = signedData,
+                title = "Sign in with a passkey",
+                subtitle = rpId,
+                showOnLockScreen = locked,
+                onLaunch = onLaunch
+            )
+        }
+    }
+
+    /**
+     * The one lock-screen path for both prompts, as RequestHandler's own
+     * notifications: over the lock screen when the phone is locked; on
+     * launch, a notification that opens that request's intent and, should it
+     * expire with the prompt never up, settles the request; every
+     * notification this prompt posted is taken down when it ends, however it
+     * ends.
+     */
+    private suspend fun <T> onLockScreen(
+        operationType: String,
+        rpId: String,
+        prompt: suspend (locked: Boolean, onLaunch: (String, Intent) -> Unit) -> T
+    ): T {
+        val posted = ConcurrentLinkedQueue<String>()
+        val onLaunch: (String, Intent) -> Unit = { key, intent ->
+            if (lockScreen.locked) {
+                posted.add(key)
+                lockScreen.post(operationType, rpId, key, intent) { launcher()?.expireUnshown(key) }
+            }
+        }
+        try {
+            return prompt(lockScreen.locked, onLaunch)
+        } finally {
+            while (true) lockScreen.cancel(posted.poll() ?: break)
+        }
     }
 
     private companion object {
