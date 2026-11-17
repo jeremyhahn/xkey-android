@@ -139,9 +139,9 @@ clear; whether the ceremony then proceeds depends on `strictUserVerification`.
 
 | Command | Behaviour |
 |---------|-----------|
-| authenticatorGetInfo (0x04) | versions `FIDO_2_0`; AAGUID all zeros (as the passkey provider); options `rk`, `up`, `uv` (a prompt can be shown), `plat` false, no `clientPin`; maxMsgSize 1024; transports `ble`; algorithms ES256 |
-| authenticatorGetAssertion (0x02) | the first passkey in the allowList, or without one the first discoverable passkey, among those the sharing policy shows; prompt; counter from `PasskeySignCounter`; signature over `SHA-256(authData \|\| clientDataHash)` in Keystore; returns credential, authData, signature, user id |
-| authenticatorMakeCredential (0x01) | ES256 only; prompt; a new Keystore P-256 key (not auth-bound, as on the JSON-RPC path, since the prompt gates every use); stored in `keys` and `credential_metadata` with sign count 0; attestation `none` with AT set |
+| authenticatorGetInfo (0x04) | versions `FIDO_2_0`; AAGUID all zeros (as the passkey provider); options `rk`, `up`, `uv` (a strong biometric is enrolled: the prompt accepts nothing else), `plat` false, no `clientPin`; maxMsgSize 1024; transports `ble`; algorithms ES256 |
+| authenticatorGetAssertion (0x02) | the first passkey in the allowList, or without one the first discoverable passkey, among those the sharing policy shows; prompt; counter from `PasskeySignCounter`; `authData \|\| clientDataHash` signed once with SHA256withECDSA in Keystore (never pre-hashed); a per-operation passkey signs behind a prompt bound to that signature; returns credential, authData, signature, user id |
+| authenticatorMakeCredential (0x01) | ES256 only; prompt; a new Keystore P-256 key (not auth-bound, as on the JSON-RPC path, since the prompt gates every use); stored in `keys`, then `credential_metadata`, with sign count 0; any failure or cancellation deletes the metadata, the key row and the Keystore key; attestation `none` with AT set |
 
 The BLE client is not a paired desktop and has no Noise static key, so
 `SharePermission.canShare(entity, null)` decides: `ALL_PEERS` passkeys are
@@ -169,7 +169,10 @@ response carries only the public COSE key and signatures.
 | MakeCredential without ES256 | CTAP2_ERR_UNSUPPORTED_ALGORITHM (0x26) |
 | excludeList names a passkey the client may see | CTAP2_ERR_CREDENTIAL_EXCLUDED (0x19), after the prompt |
 | Malformed CBOR / wrong types / missing parameters | CTAP2_ERR_INVALID_CBOR, CBOR_UNEXPECTED_TYPE, MISSING_PARAMETER |
-| Client sends CANCEL | CTAP2_ERR_KEEPALIVE_CANCEL (0x2D) |
+| Client sends CANCEL, even before the request starts | CTAP2_ERR_KEEPALIVE_CANCEL (0x2D), exactly one response per MSG |
+| Request fails unexpectedly | CTAP2_ERR_OTHER (0x7F) |
+| Per-operation passkey with no prompt, or its prompt declined | CTAP2_ERR_OPERATION_DENIED |
+| Client lets 96 notification frames queue unsent | BLE ERROR frame (ERR_OTHER), queue dropped, session closed |
 | Any other command | CTAP1_ERR_INVALID_COMMAND |
 
 Not implemented: clientPin, authenticatorGetNextAssertion,
@@ -183,8 +186,10 @@ assertions.
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleFramingTest.kt` | Fragment and reassembly, SEQ wrap, every framing fault |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/CborCodecTest.kt` | Canonical encoding, decoding, every decoder refusal |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/Ctap2AuthenticatorTest.kt` | The three commands end to end over CBOR bytes with a fake backend, signature verified, counter, every refusal including UV |
-| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSessionTest.kt` | PING, MSG, keepalive, CANCEL, BUSY, framing errors, close |
-| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/AndroidFidoCredentialBackendTest.kt` | Sharing policy on list and sign, shared counter, Keystore signing, stored passkey |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSessionTest.kt` | PING, MSG, keepalive, CANCEL (also before start), handler failure, BUSY, framing errors, close |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/AndroidFidoCredentialBackendTest.kt` | Sharing policy on list and sign, shared counter, one Keystore signature over unhashed data, per-operation passkeys, rollback of a failed MakeCredential |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoGattServerTest.kt` | Control point write to fidoStatus notification, permissions, revision, MTU, subscription, the bounded queue |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/ProtocolConstantsTest.kt` | Method name constants |
