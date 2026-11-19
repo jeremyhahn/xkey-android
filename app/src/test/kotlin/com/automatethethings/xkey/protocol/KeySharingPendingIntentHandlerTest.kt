@@ -675,6 +675,30 @@ class KeySharingPendingIntentHandlerTest {
         assertFalse(store.isDeletionPending(id))
     }
 
+/**
+     * #270 review r5: a key from the laptop's KMS daemon (`xkmsd`) is a
+     * reference with no local material. Its local.deleteKey reads the row's
+     * source before any local probe, so an unreadable Ed25519 preferences
+     * store and software-key directory never refuse it: the reference row
+     * goes, and no local backend is probed or deleted.
+     */
+    @Test
+    fun anRpcDeleteOfAnXkmsdReferenceProbesNoLocalBackend() = runTest {
+        val id = "k-xkmsd"
+        every { keystore.holdsInternalKey(id) } throws com.automatethethings.xkey.crypto.KeyPresenceUnreadableException(id, null)
+        every { keystore.userKeyGeneration(id) } throws IllegalStateException("Ed25519 preferences unreadable")
+        every { keystore.exportKind(id) } throws IllegalStateException("Ed25519 preferences unreadable")
+        val unreadable = java.nio.file.Files.createTempFile("software-keys", "").toFile().apply { deleteOnExit() }
+        fakeSoftwareKeyStore(unreadable)
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "signing", publicKeyDer = byteArrayOf(4, 5, 6), source = "xkmsd")
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        assertEquals("the reference row went", null, tables.key(id))
+        io.mockk.verify(exactly = 0) { keystore.userKeyGeneration(id) }
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(id, any()) }
+    }
+
     /**
      * #270 review: a fido2 row under the general alias (as
      * local.generateKey makes it) shares its id with a credential. The

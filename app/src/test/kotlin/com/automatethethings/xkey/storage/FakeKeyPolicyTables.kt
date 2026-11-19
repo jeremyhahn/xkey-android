@@ -53,11 +53,11 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
         KeyPolicyStore(this, this, unrecordedDenials, keys = keys)
 
     /** A key row as an unrouted path would leave it, with the row the 12 -> 13 migration seeds. */
-    fun addKey(keyId: String, policy: SharingPolicyType, keyType: String? = null, publicKeyDer: ByteArray? = null, publicKeyCose: ByteArray? = null): Long {
+    fun addKey(keyId: String, policy: SharingPolicyType, keyType: String? = null, publicKeyDer: ByteArray? = null, publicKeyCose: ByteArray? = null, source: String? = null): Long {
         val instance = nextInstance++
         val row = entity(keyId, policy, instance).let {
             if (keyType == null) it else it.copy(keyType = keyType, publicKeyDer = publicKeyDer, publicKeyCose = publicKeyCose)
-        }
+        }.let { if (source == null) it else it.copy(source = source) }
         keys.value = keys.value + (keyId to row)
         rows.value = rows.value + (keyId to KeyPolicyEntity(keyId, instance, policy))
         return instance
