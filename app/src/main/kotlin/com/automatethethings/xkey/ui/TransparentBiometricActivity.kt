@@ -18,6 +18,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import androidx.activity.OnBackPressedCallback
 import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricManager
@@ -27,6 +28,8 @@ import androidx.fragment.app.FragmentActivity
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.PromptOwnership
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Transparent activity for showing biometric prompts from background services.
@@ -361,7 +364,10 @@ class TransparentBiometricActivity : FragmentActivity() {
          * out, its caller gone) with the prompt on screen. A start of it that
          * comes later prompts for nothing, and a shown one is cancelled and
          * finished without a result, since nobody waits on it. The launcher
-         * calls this before the queue starts the next prompt.
+         * calls this before the queue starts the next prompt, from whichever
+         * thread its caller was cancelled on (a BLE session's, for one), so
+         * this returns only once the prompt is dismissed on the main thread:
+         * the next request never launches while this prompt is still up.
          */
         internal fun withdraw(requestId: String) {
             val instance = synchronized(this) {
@@ -369,11 +375,29 @@ class TransparentBiometricActivity : FragmentActivity() {
                 while (expired.size > MAX_EXPIRED) expired.remove(expired.first())
                 live[requestId]?.get()
             } ?: return
-            instance.runOnUiThread {
+            val dismiss = Runnable {
                 instance.biometricPrompt?.cancelAuthentication()
                 instance.finishWithResult()
             }
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                dismiss.run()
+                return
+            }
+            val dismissed = CountDownLatch(1)
+            instance.runOnUiThread {
+                try {
+                    dismiss.run()
+                } finally {
+                    dismissed.countDown()
+                }
+            }
+            // Bounded: a main thread that is itself waiting on this caller
+            // must not hold the queue forever. The dismissal still runs.
+            dismissed.await(DISMISS_WAIT_MILLIS, TimeUnit.MILLISECONDS)
         }
+
+        /** How long a withdrawal off the main thread waits for its prompt to go. */
+        private const val DISMISS_WAIT_MILLIS = 2_000L
 
         /** Records [instance] as showing [requestId]; false once it is withdrawn. */
         @Synchronized
