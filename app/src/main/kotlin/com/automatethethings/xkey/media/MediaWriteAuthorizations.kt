@@ -67,23 +67,32 @@ object MediaWriteAuthorizations {
     /** Forget every queued capture. */
     fun clear(context: Context): Unit = synchronized(lock) { store(context).delete() }
 
+    /** A write request shown to the user: the captures it asks for ([uris]) and its [intent]. */
+    class WriteRequest(val uris: List<String>, val intent: PendingIntent)
+
     /** The write request for every queued capture, or null when none waits. */
-    fun request(context: Context): PendingIntent? {
-        val uris = pending(context).map { Uri.parse(it.uri) }
+    fun request(context: Context): WriteRequest? {
+        val uris = pending(context).map { it.uri }
         if (uris.isEmpty()) return null
-        return MediaPublisher.writeRequest(context, uris)
+        return WriteRequest(uris, MediaPublisher.writeRequest(context, uris.map(Uri::parse)))
     }
 
     /**
      * Sign every queued capture the user granted write access to, calling
-     * [onSigned] for each; one still without a grant stays queued. One that
-     * fails (changed since it was signed, gone, or its write failed) is
-     * dropped: its signature no longer matches anything worth keeping.
+     * [onSigned] for each; one still without a grant stays queued, and so
+     * does one whose write failed ([MediaPublishException]): its media is
+     * whole again, so the next request retries it. One that changed since it
+     * was signed, or is gone, is dropped: its signature matches nothing.
      */
     fun publishGranted(context: Context, onSigned: (PendingMediaWrite) -> Unit) {
         for (write in pending(context)) {
             val outcome = try {
                 XmpMetadataHelper.signMedia(context, Uri.parse(write.uri), write.filePath, write.data)
+            } catch (e: MediaPublishException) {
+                Log.w(TAG, "Writing ${write.uri} failed; it stays queued", e)
+                // The capture is whole and the retry stages afresh; a copy that could not be put back is kept.
+                if (e.original == null) e.kept.delete()
+                continue
             } catch (e: Exception) {
                 Log.w(TAG, "Not signing ${write.uri}", e)
                 null
@@ -94,10 +103,15 @@ object MediaWriteAuthorizations {
         }
     }
 
-    /** The user refused the write request: the queued captures stay unsigned. */
-    fun deny(context: Context) {
+    /**
+     * The user refused the write request for [requested]: those captures
+     * stay unsigned and leave the queue. Any queued after the request was
+     * shown are kept for the next one.
+     */
+    fun deny(context: Context, requested: Collection<String>) {
         val refused = pending(context).filter {
-            MediaPublisher.writeAccess(context, Uri.parse(it.uri)) == MediaPublisher.MediaWriteAccess.NEEDS_GRANT
+            it.uri in requested &&
+                MediaPublisher.writeAccess(context, Uri.parse(it.uri)) == MediaPublisher.MediaWriteAccess.NEEDS_GRANT
         }
         refused.forEach { remove(context, it.uri) }
     }

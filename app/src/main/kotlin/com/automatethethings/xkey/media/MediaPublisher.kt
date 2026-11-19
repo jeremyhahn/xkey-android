@@ -21,6 +21,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.provider.MediaStore
 import java.io.File
@@ -31,9 +32,11 @@ import java.io.OutputStream
 /**
  * Writing the bytes it was publishing failed, or closing the destination
  * did; they are kept, whole, at [kept] for recovery, and the media the user
- * already had is untouched.
+ * already had is untouched, unless [original] is set: a granted write that
+ * failed part-way and could not put the media back, whose prior bytes are
+ * kept there.
  */
-class MediaPublishException(val kept: File, cause: Throwable) :
+class MediaPublishException(val kept: File, cause: Throwable, val original: File? = null) :
     IOException("the signed media could not be written; it is kept at ${kept.path}", cause)
 
 /**
@@ -206,18 +209,61 @@ object MediaPublisher {
      * one path for media another app owns, which xKey may write only with
      * the user's grant ([writeAccess] GRANTED) and never by renaming over its
      * file. Without the grant it throws [WriteAuthorizationRequiredException]
-     * and writes nothing. [staged] is deleted only once the write and the
-     * close both succeeded; a failure keeps it and throws
-     * [MediaPublishException], which names it.
+     * and writes nothing.
+     *
+     * A content URI offers no atomic replace, so the capture is never
+     * truncated up front: it is first copied whole to the recovery
+     * directory, then overwritten in place ([overwrite]) and cut to length
+     * only once every new byte is in. A write that fails part-way puts the
+     * copy back; [MediaPublishException] says whether that worked
+     * ([MediaPublishException.original] names the copy when it did not).
+     * [staged] is deleted only once the write and the close both succeeded.
      */
     fun writeGranted(context: Context, target: Uri, staged: File) {
         if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) throw WriteAuthorizationRequiredException(target)
+        val resolver = context.contentResolver
+        val backup = File.createTempFile("original-", ".bak", recoveryDirectory(context))
         try {
-            val output = context.contentResolver.openOutputStream(target, "wt") ?: throw IOException("cannot write $target")
-            output.use { out -> staged.inputStream().use { it.copyTo(out) } }
+            (resolver.openInputStream(target) ?: throw IOException("cannot read $target")).use { input ->
+                backup.outputStream().use { input.copyTo(it) }
+            }
         } catch (e: Throwable) {
+            backup.delete()
             throw MediaPublishException(staged, e)
         }
+        var touched = false
+        try {
+            overwrite(resolver, target, staged) { touched = true }
+        } catch (e: Throwable) {
+            val intact = !touched || runCatching { overwrite(resolver, target, backup) {} }.isSuccess
+            if (intact) backup.delete()
+            throw MediaPublishException(staged, e, original = if (intact) null else backup)
+        }
+        backup.delete()
         staged.delete()
+    }
+
+    /**
+     * Write [source] over the content at [target] in place: opened "rw",
+     * which never truncates on open, and cut to [source]'s length only after
+     * every byte is written. [beforeWrite] runs before the first byte changes.
+     */
+    private fun overwrite(resolver: ContentResolver, target: Uri, source: File, beforeWrite: () -> Unit) {
+        val descriptor = resolver.openFileDescriptor(target, "rw") ?: throw IOException("cannot write $target")
+        ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
+            val channel = output.channel
+            channel.position(0)
+            source.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    beforeWrite()
+                    output.write(buffer, 0, n)
+                }
+            }
+            channel.truncate(source.length())
+            output.fd.sync()
+        }
     }
 }

@@ -142,7 +142,7 @@ class CameraMediaWriteAuthorizationTest {
         assertTrue("nothing is signed without the grant", signed.isEmpty())
         assertEquals(1, MediaWriteAuthorizations.pending(context).size)
 
-        MediaWriteAuthorizations.deny(context)
+        MediaWriteAuthorizations.deny(context, listOf(uri.toString()))
 
         assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
         assertArrayEquals(original, capture.readBytes())
