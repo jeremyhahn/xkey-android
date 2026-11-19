@@ -35,7 +35,6 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkAll
-import io.mockk.verify
 import java.io.File
 import java.nio.file.Files
 import java.security.KeyStore
@@ -52,10 +51,10 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * xKey reserves key IDs starting with `ephemeral_` for its own agreement
- * keys, and `local.deleteKey` refuses to delete them. No RPC may create a key
- * under such an ID either, or a paired desktop would make a key it can never
- * delete: every creation RPC refuses a reserved ID before any key is made.
+ * Key IDs starting with `ephemeral_` name xKey's own agreement keys only when
+ * xKey made them (no key row). Key creation keeps main's contract: every ID
+ * main accepts, `ephemeral_` ones included, is created as it would be under
+ * any other ID, and only the delete guard reads the ephemeral rule.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ReservedKeyIdTest {
@@ -64,7 +63,8 @@ class ReservedKeyIdTest {
     private lateinit var keyDao: KeyDao
     private lateinit var keystore: KeystoreManager
 
-    private val reservedId = "${FileEncryptor.EPHEMERAL_KEY_PREFIX}desktop"
+    private val ephemeralId = "${FileEncryptor.EPHEMERAL_KEY_PREFIX}desktop"
+    private val plainId = "desktop-key"
 
     @Before
     fun setUp() {
@@ -95,74 +95,56 @@ class ReservedKeyIdTest {
         Dispatchers.resetMain()
     }
 
-    @Test
-    fun everyCreationRpcRefusesAReservedKeyId() = runBlocking<Unit> {
-        val creations = listOf(
-            MethodNames.LOCAL_GENERATE_KEY to JSONObject().put("keyId", reservedId).put("algorithm", "ES256")
-                .put("requireUserVerification", false),
-            MethodNames.LOCAL_GENERATE_KEY to JSONObject().put("keyId", reservedId).put("algorithm", "AES-256")
-                .put("requireUserVerification", false),
-            MethodNames.GENERATE_KEY to JSONObject().put("credentialId", reservedId).put("algorithm", CoseAlgorithms.ES256)
-                .put("requireUserVerification", false)
-        )
-        val handler = realHandler()
-        for ((n, creation) in creations.withIndex()) {
-            val response = send(handler, n, creation.first, creation.second)
+    private fun creations(id: String) = listOf(
+        MethodNames.LOCAL_GENERATE_KEY to JSONObject().put("keyId", id).put("algorithm", "ES256")
+            .put("requireUserVerification", false),
+        MethodNames.LOCAL_GENERATE_KEY to JSONObject().put("keyId", id).put("algorithm", "AES-256")
+            .put("requireUserVerification", false),
+        MethodNames.GENERATE_KEY to JSONObject().put("credentialId", id).put("algorithm", CoseAlgorithms.ES256)
+            .put("requireUserVerification", false)
+    )
 
-            assertEquals(
-                "${creation.first} of reserved ID $reservedId must be refused, got $response",
-                ErrorCodes.INVALID_PARAMS,
-                response.optJSONObject("error")?.optInt("code")
+    @Test
+    fun everyCreationRpcAcceptsAnEphemeralNamedIdAsMainDoes() = runBlocking<Unit> {
+        val handler = realHandler()
+        for ((n, creation) in creations(ephemeralId).withIndex()) {
+            val response = send(handler, n, creation.first, creation.second)
+            assertTrue(
+                "${creation.first} of $ephemeralId must not be refused as reserved, got $response",
+                response.optJSONObject("error")?.optString("message")?.contains("reserved") != true
             )
         }
-        coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) }
-        coVerify(exactly = 0) { keystore.generateKeyWithAuthDuration(any(), any(), any()) }
-        coVerify(exactly = 0) { keystore.generateSymmetricKey(any(), any(), any()) }
-        coVerify(exactly = 0) { keystore.generateHMACKey(any(), any()) }
-        verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().put(any()) }
+        coVerify(exactly = 1) { keystore.generateKeyForAlgorithm(ephemeralId, any(), any(), any()) }
     }
 
     @Test
-    fun anUnreservedIdIsNotRefusedAsReserved() = runBlocking<Unit> {
-        val response = send(
-            realHandler(), 0, MethodNames.LOCAL_GENERATE_KEY,
-            JSONObject().put("keyId", "desktop_ephemeral_").put("algorithm", "ES256").put("requireUserVerification", false)
-        )
+    fun anEphemeralNamedIdIsCreatedExactlyAsAnyOtherId() = runBlocking<Unit> {
+        fun outcome(r: JSONObject) = r.optJSONObject("error")?.optInt("code")
+        val handler = realHandler()
+        val plain = creations(plainId).mapIndexed { n, c -> outcome(send(handler, n, c.first, c.second)) }
+        val ephemeral = creations(ephemeralId).mapIndexed { n, c -> outcome(send(handler, n + 10, c.first, c.second)) }
 
-        assertTrue(
-            "an ID that only contains the prefix is not reserved, got $response",
-            response.optJSONObject("error")?.optString("message")?.contains("reserved") != true
-        )
+        assertEquals("an ephemeral_ ID is created as any other ID is", plain, ephemeral)
     }
 
     /**
-     * Every Handler function that creates a key under a caller's ID refuses a
-     * reserved ID first, and the delete guard reads the same rule.
+     * No creation path refuses an ID by the ephemeral rule (that would change
+     * the desktop key-creation contract), and the delete guard is the one
+     * place that reads it.
      */
     @Test
-    fun everyCreationPathAndTheDeleteGuardShareTheReservedIdRule() {
+    fun onlyTheDeleteGuardReadsTheEphemeralIdRule() {
         val code = File("src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt").readText()
         val functions = Regex("""\n    (?:private |internal )?(?:suspend )?fun (?:<[^>]+> )?(\w+)\(""").findAll(code).toList()
         fun body(i: Int) = code.substring(functions[i].range.first, functions.getOrNull(i + 1)?.range?.first ?: code.length)
 
-        val creators = listOf("createLocalKey", "createCredential")
-        var callers = 0
-        for (i in functions.indices) {
-            val name = functions[i].groupValues[1]
-            if (name in creators) continue
-            val text = body(i)
-            val call = creators.mapNotNull { c -> Regex("""\b$c\(""").find(text)?.range?.first }.minOrNull() ?: continue
-            callers++
-            val refusal = text.indexOf("refuseReservedKeyId(")
-            assertTrue("$name creates a key and must refuse a reserved ID before it does", refusal in 0 until call)
-        }
-        assertTrue("the creation RPCs must be found", callers >= 2)
-
-        val guard = functions.indexOfFirst { it.groupValues[1] == "refuseInternalAlias" }
-        assertTrue("refuseInternalAlias must exist", guard >= 0)
-        assertTrue("the delete guard must read the reserved ID rule", body(guard).contains("isReservedKeyId("))
+        val readers = functions.indices
+            .filter { Regex("""\bisReservedKeyId\(""").containsMatchIn(body(it)) }
+            .map { functions[it].groupValues[1] }
+            .filter { it != "isReservedKeyId" }
+        assertEquals("only the delete guard reads the ephemeral ID rule", listOf("refuseInternalAlias"), readers)
         assertEquals(
-            "Handler may spell the ephemeral prefix only in its reserved ID rule",
+            "Handler may spell the ephemeral prefix only in its ephemeral ID rule",
             1,
             Regex(Regex.escape("EPHEMERAL_KEY_PREFIX")).findAll(code).count()
         )

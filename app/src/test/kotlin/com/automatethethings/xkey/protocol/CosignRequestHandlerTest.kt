@@ -782,6 +782,42 @@ class CosignRequestHandlerTest {
         assertNothingSigned()
     }
 
+    // A user key may be named like xKey's ephemeral agreement keys (key
+    // creation accepts every ID main accepts). Co-signing stays safe through
+    // the approved key binding, not a reserved-ID rule: an agreement key made
+    // under the approved alias is not the key the owner approved.
+    private val ephemeralNamedKey = key("ephemeral_00000000-0000-0000-0000-0000000000aa", "signing")
+
+    @Test
+    fun `a signing key named like an ephemeral key co-signs once approved`() = runTest {
+        coEvery { keyDao.getByKeyId(ephemeralNamedKey.keyId) } returns ephemeralNamedKey
+
+        val response = handler().handleRequest(request(keyId = ephemeralNamedKey.keyId))
+
+        assertNull(response.error?.message, response.error)
+        coVerify(exactly = 1) {
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(ephemeralNamedKey.keyId), publicKeyDer, any(), any())
+        }
+    }
+
+    @Test
+    fun `an agreement key made under an approved ephemeral-named key's alias signs nothing`() = runTest {
+        coEvery { keyDao.getByKeyId(ephemeralNamedKey.keyId) } returns ephemeralNamedKey
+        val alias = KeystoreManager.generalKeyAlias(ephemeralNamedKey.keyId)
+        screen.autoAnswer = null
+        val response = async { handler().handleRequest(request(keyId = ephemeralNamedKey.keyId)) }
+        runCurrent()
+        checkNotNull(screen.visible) { "the co-sign's prompt is up" }
+        // A file encryption's agreement key now holds the alias the owner approved.
+        every { keystoreManager.publicKeyDERAt(alias) } returns ByteArray(91) { 5 }
+        coEvery { keystoreManager.signApproved(alias, publicKeyDer, any(), any()) } throws
+            com.automatethethings.xkey.crypto.ApprovedKeyChangedException(alias)
+        screen.answer(approved = true)
+        runCurrent()
+
+        assertError(ErrorCodes.OPERATION_DENIED, response.getCompleted())
+    }
+
     @Test
     fun `a replacement holding the key's lock as the approval lands is refused, never raced`() = runTest {
         // A key mutation (creation, deletion) holds the key's lock when the
