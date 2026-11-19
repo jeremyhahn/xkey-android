@@ -43,7 +43,8 @@ esac
 
 case "${1:-}" in
 	toolchain)
-		hash=$(cat build/docker/devcontainer/Dockerfile build/docker/devcontainer/fetch.sh scripts/tool-pins.sh \
+		hash=$(cat build/docker/devcontainer/Dockerfile build/docker/devcontainer/fetch.sh \
+			build/docker/devcontainer/apt-retries.conf scripts/tool-pins.sh \
 			gradle/libs.versions.toml gradle/wrapper/gradle-wrapper.properties \
 			gradle/gradle-daemon-jvm.properties gradle.properties \
 			settings.gradle.kts build.gradle.kts app/build.gradle.kts |
