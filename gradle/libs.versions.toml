@@ -27,7 +27,7 @@ okhttp = "5.5.1"
 coroutines = "1.11.0"
 
 # BouncyCastle
-bouncycastle = "1.86"
+bouncycastle = "1.87"
 
 # Argon2
 argon2 = "13.1"

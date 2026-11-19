@@ -1217,7 +1217,7 @@ class CertificateManagementActivity : AppCompatActivity() {
                 }
 
                 val keyId = UUID.randomUUID().toString()
-                val keystoreAlias = "xkey_key_$keyId"
+                val keystoreAlias = KeystoreManager.generalKeyAlias(keyId)
                 // In the store's one serialisation of this id's key material (#193 r8).
                 val publicKeyDer = keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(this@CertificateManagementActivity, keystoreManager)) {
                     withContext(Dispatchers.IO) {

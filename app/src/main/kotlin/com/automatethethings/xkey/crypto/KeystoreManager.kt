@@ -216,7 +216,7 @@ class KeystoreManager(private val context: Context) {
 
         // Delete existing key if present (credential regeneration)
         if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
+            withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
 
         try {
@@ -257,7 +257,7 @@ class KeystoreManager(private val context: Context) {
             )
             keyPairGenerator.initialize(specBuilder.build())
 
-            val keyPair = keyPairGenerator.generateKeyPair()
+            val keyPair = withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
             markStrongBoxSpec(alias, Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable())
             // The audit line only; callers read the level themselves and see a failure.
             val strongBoxBacked =
@@ -318,7 +318,7 @@ class KeystoreManager(private val context: Context) {
 
         // Delete existing key if present (credential regeneration)
         if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
+            withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
 
         try {
@@ -384,7 +384,7 @@ class KeystoreManager(private val context: Context) {
             )
             keyPairGenerator.initialize(specBuilder.build())
 
-            val keyPair = keyPairGenerator.generateKeyPair()
+            val keyPair = withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
             markStrongBoxSpec(alias, Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable())
             return encodeCOSEPublicKey(keyPair.public)
         } catch (e: Exception) {
@@ -457,7 +457,7 @@ class KeystoreManager(private val context: Context) {
             )
             keyPairGenerator.initialize(specBuilder.build())
 
-            val keyPair = keyPairGenerator.generateKeyPair()
+            val keyPair = withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
             return encodeCOSEPublicKey(keyPair.public)
         } catch (e: Exception) {
             throw KeyGenerationException("Failed to generate key with auth duration without StrongBox", e)
@@ -502,7 +502,7 @@ class KeystoreManager(private val context: Context) {
             )
             keyPairGenerator.initialize(specBuilder.build())
 
-            val keyPair = keyPairGenerator.generateKeyPair()
+            val keyPair = withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
             return encodeCOSEPublicKey(keyPair.public)
         } catch (e: Exception) {
             throw KeyGenerationException("Failed to generate key without StrongBox", e)
@@ -866,7 +866,7 @@ class KeystoreManager(private val context: Context) {
 
         // Delete existing key if present
         if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
+            withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
 
         val isEC = algorithm.startsWith("ES")
@@ -944,7 +944,7 @@ class KeystoreManager(private val context: Context) {
                 KEYSTORE_PROVIDER
             )
             keyPairGenerator.initialize(specBuilder.build())
-            return keyPairGenerator.generateKeyPair().also { markStrongBoxSpec(alias, strongBoxSpec) }
+            return withAliasGate(alias) { keyPairGenerator.generateKeyPair() }.also { markStrongBoxSpec(alias, strongBoxSpec) }
         } catch (e: Exception) {
             // StrongBox fallback
             if (preferStrongBox && isStrongBoxAvailable()) {
@@ -963,7 +963,7 @@ class KeystoreManager(private val context: Context) {
                     KEYSTORE_PROVIDER
                 )
                 keyPairGenerator.initialize(fallbackBuilder.build())
-                return keyPairGenerator.generateKeyPair().also { markStrongBoxSpec(alias, false) }
+                return withAliasGate(alias) { keyPairGenerator.generateKeyPair() }.also { markStrongBoxSpec(alias, false) }
             }
             throw e
         }
@@ -999,7 +999,7 @@ class KeystoreManager(private val context: Context) {
             "Unsupported RSA modulus size: $keySizeBits"
         }
         val alias = buildGeneralAlias(keyId)
-        if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+        if (keyStore.containsAlias(alias)) withAliasGate(alias) { keyStore.deleteEntry(alias) }
 
         val specBuilder = KeyGenParameterSpec.Builder(
             alias,
@@ -1020,7 +1020,7 @@ class KeystoreManager(private val context: Context) {
                 KEYSTORE_PROVIDER
             )
             generator.initialize(specBuilder.build())
-            return generator.generateKeyPair().public.encoded
+            return withAliasGate(alias) { generator.generateKeyPair() }.public.encoded
         } catch (e: Exception) {
             throw KeyGenerationException("Failed to generate RSA encryption key", e)
         }
@@ -1054,7 +1054,7 @@ class KeystoreManager(private val context: Context) {
                 KEYSTORE_PROVIDER
             )
             keyPairGenerator.initialize(specBuilder.build())
-            return keyPairGenerator.generateKeyPair().also { markStrongBoxSpec(alias, strongBoxSpec) }
+            return withAliasGate(alias) { keyPairGenerator.generateKeyPair() }.also { markStrongBoxSpec(alias, strongBoxSpec) }
         } catch (e: Exception) {
             // StrongBox fallback
             if (preferStrongBox && isStrongBoxAvailable()) {
@@ -1075,7 +1075,7 @@ class KeystoreManager(private val context: Context) {
                     KEYSTORE_PROVIDER
                 )
                 keyPairGenerator.initialize(fallbackBuilder.build())
-                return keyPairGenerator.generateKeyPair().also { markStrongBoxSpec(alias, false) }
+                return withAliasGate(alias) { keyPairGenerator.generateKeyPair() }.also { markStrongBoxSpec(alias, false) }
             }
             throw e
         }
@@ -1093,7 +1093,7 @@ class KeystoreManager(private val context: Context) {
         authDurationSeconds: Int
     ): java.security.KeyPair {
         val keyPairGenerator = KeyPairGenerator.getInstance("Ed25519")
-        val keyPair = keyPairGenerator.generateKeyPair()
+        val keyPair = withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
 
         // Store private key in EncryptedSharedPreferences since Android Keystore
         // does not support Ed25519
@@ -1153,7 +1153,7 @@ class KeystoreManager(private val context: Context) {
 
         // Delete existing key if present
         if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
+            withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
 
         try {
@@ -1172,7 +1172,7 @@ class KeystoreManager(private val context: Context) {
                 KEYSTORE_PROVIDER
             )
             keyGenerator.init(specBuilder.build())
-            keyGenerator.generateKey()
+            withAliasGate(alias) { keyGenerator.generateKey() }
             markStrongBoxSpec(alias, false)
         } catch (e: KeyGenerationException) {
             throw e
@@ -1206,7 +1206,7 @@ class KeystoreManager(private val context: Context) {
 
         // Delete existing key if present
         if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
+            withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
 
         try {
@@ -1217,7 +1217,7 @@ class KeystoreManager(private val context: Context) {
 
             val keyGenerator = KeyGenerator.getInstance(jcaAlgorithm, KEYSTORE_PROVIDER)
             keyGenerator.init(specBuilder.build())
-            keyGenerator.generateKey()
+            withAliasGate(alias) { keyGenerator.generateKey() }
             markStrongBoxSpec(alias, false)
         } catch (e: UnsupportedAlgorithmException) {
             throw e
@@ -1265,6 +1265,77 @@ class KeystoreManager(private val context: Context) {
             throw BiometricRequiredException()
         } catch (e: Exception) {
             throw SigningException("Signing with $algorithm failed", e)
+        }
+    }
+
+    /**
+     * The X.509 public key of the entry under Keystore [alias] exactly, with
+     * no alias resolution: what an approval snapshots and rechecks for the
+     * alias its signer ([signApproved]) signs with.
+     *
+     * @return DER-encoded public key bytes, or null if [alias] holds no key.
+     */
+    fun publicKeyDERAt(alias: String): ByteArray? =
+        keyStore.getCertificate(alias)?.publicKey?.encoded
+
+    /**
+     * The Keystore alias the key of key row [keyId] (of [keyType]) lives under.
+     *
+     * Every row but a FIDO2 one is a general key ([generalKeyAlias]). A FIDO2
+     * row is a credential ([credentialAlias]) when the phone registered it,
+     * but a general key when the desktop created it with `local.generateKey`.
+     * A credential and a general key may share an id, so a FIDO2 row takes
+     * the alias whose public key is the row's own [storedPublicKeyDer]; a row
+     * with no stored key (or one neither alias holds) takes the credential if
+     * there is one, else the general key. This never resolves by id alone,
+     * which prefers the credential whatever the row is.
+     */
+    fun keyRowAlias(keyId: String, keyType: String, storedPublicKeyDer: ByteArray?): String {
+        val general = generalKeyAlias(keyId)
+        if (keyType != FIDO2_KEY_TYPE) return general
+        val credential = credentialAlias(keyId)
+        if (storedPublicKeyDer != null && storedPublicKeyDer.isNotEmpty()) {
+            listOf(credential, general)
+                .firstOrNull { publicKeyDERAt(it)?.contentEquals(storedPublicKeyDer) == true }
+                ?.let { return it }
+        }
+        return if (publicKeyDERAt(credential) != null) credential else general
+    }
+
+    /**
+     * Signs [data] with JCA [jcaAlgorithm] using the key under [alias], only
+     * if that key is still the one the owner approved: the public key under
+     * [alias] must equal [approvedPublicKeyDer]. The key approved and the key
+     * signed with are read from the one alias, so no other entry (such as a
+     * FIDO2 alias of the same id) can stand in for it. The check, the key read
+     * and the signature run inside [withAliasGate] for [alias], which every
+     * delete and key generation under an alias also takes, so no key can be
+     * replaced between the check and the signature.
+     *
+     * @throws KeyNotFoundException if [alias] holds no key.
+     * @throws ApprovedKeyChangedException if the key under [alias] is not the approved one.
+     * @throws BiometricRequiredException if the key requires user authentication.
+     * @throws SigningException if signing fails.
+     */
+    suspend fun signApproved(
+        alias: String,
+        approvedPublicKeyDer: ByteArray,
+        data: ByteArray,
+        jcaAlgorithm: String
+    ): ByteArray = withAliasGate(alias) {
+        val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
+        if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+            ?: throw KeyNotFoundException(alias)
+        try {
+            val signature = Signature.getInstance(jcaAlgorithm)
+            signature.initSign(privateKey)
+            signature.update(data)
+            signature.sign()
+        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+            throw BiometricRequiredException()
+        } catch (e: Exception) {
+            throw SigningException("Signing with $jcaAlgorithm failed", e)
         }
     }
 
@@ -1691,7 +1762,7 @@ class KeystoreManager(private val context: Context) {
             throw AttestationException("Failed to generate attestation key", e)
         } finally {
             try {
-                keyStore.deleteEntry(tempAlias)
+                withAliasGate(tempAlias) { keyStore.deleteEntry(tempAlias) }
             } catch (_: Exception) {
                 // Best-effort cleanup
             }
@@ -1707,14 +1778,14 @@ class KeystoreManager(private val context: Context) {
     ): List<Certificate> {
         // Delete if a stale entry exists from a previous failed attempt
         if (keyStore.containsAlias(alias)) {
-            keyStore.deleteEntry(alias)
+            withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
         val keyPairGenerator = KeyPairGenerator.getInstance(
             KeyProperties.KEY_ALGORITHM_EC,
             KEYSTORE_PROVIDER
         )
         keyPairGenerator.initialize(specBuilder.build())
-        keyPairGenerator.generateKeyPair()
+        withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
 
         return keyStore.getCertificateChain(alias)?.toList()
             ?: throw AttestationException("No certificate chain available for attestation key")
@@ -1999,7 +2070,7 @@ class KeystoreManager(private val context: Context) {
             when {
                 entry.startsWith(KEYSTORE_ENTRY) -> {
                     val alias = entry.removePrefix(KEYSTORE_ENTRY)
-                    if (alias in namespace && keystoreTag(alias) == tag) keyStore.deleteEntry(alias)
+                    if (alias in namespace) withAliasGate(alias) { if (keystoreTag(alias) == tag) keyStore.deleteEntry(alias) }
                 }
                 entry.startsWith(ED25519_ENTRY) -> {
                     val alias = entry.removePrefix(ED25519_ENTRY)
@@ -2075,7 +2146,7 @@ class KeystoreManager(private val context: Context) {
         // PIV slot keys are deleted through PivKeyManager with their row.
         if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
         if (!keyStore.containsAlias(alias)) return false
-        keyStore.deleteEntry(alias)
+        withAliasGate(alias) { keyStore.deleteEntry(alias) }
         return true
     }
 
@@ -2101,7 +2172,7 @@ class KeystoreManager(private val context: Context) {
         return try {
             // A presence read that fails is taken as held: the delete is tried.
             if (!runCatching { keyStore.containsAlias(alias) }.getOrDefault(true)) return GeneratedKeyDiscard.ABSENT
-            keyStore.deleteEntry(alias)
+            withAliasGate(alias) { keyStore.deleteEntry(alias) }
             if (keyStore.containsAlias(alias)) GeneratedKeyDiscard.FAILED else GeneratedKeyDiscard.DELETED
         } catch (e: Exception) {
             GeneratedKeyDiscard.FAILED
@@ -2130,13 +2201,37 @@ class KeystoreManager(private val context: Context) {
         if (!keyStore.containsAlias(alias)) {
             return false
         }
-        keyStore.deleteEntry(alias)
+        withAliasGate(alias) { keyStore.deleteEntry(alias) }
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
             keyId = keyId,
             keyLabel = keyId,
             keyType = "general"
+        )
+
+        return true
+    }
+
+    /**
+     * Delete exactly FIDO2 credential [credentialId]'s Keystore entry
+     * (`xkey_credential_<id>`), never the general key of the same ID, and
+     * audit the deletion as [deleteKey] does.
+     *
+     * @param credentialId Credential identifier.
+     * @return true if the entry was deleted, false if it did not exist.
+     */
+    fun deleteCredentialKey(credentialId: String): Boolean {
+        val alias = credentialAlias(credentialId)
+        if (!keyStore.containsAlias(alias)) {
+            return false
+        }
+        withAliasGate(alias) { keyStore.deleteEntry(alias) }
+
+        AuditLogger.logKeyDeleted(
+            keyId = credentialId,
+            keyLabel = credentialId,
+            keyType = FIDO2_KEY_TYPE
         )
 
         return true
@@ -2257,15 +2352,7 @@ class KeystoreManager(private val context: Context) {
      * @return JCA signature algorithm name (e.g., "SHA256withECDSA").
      * @throws SigningException if the algorithm is not supported.
      */
-    private fun getJCASignatureAlgorithm(algorithm: String): String = when (algorithm) {
-        "ES256" -> SIG_ALGORITHM_ES256
-        "ES384" -> SIG_ALGORITHM_ES384
-        "ES512" -> SIG_ALGORITHM_ES512
-        "RS256" -> SIG_ALGORITHM_RS256
-        "RS384" -> SIG_ALGORITHM_RS384
-        "RS512" -> SIG_ALGORITHM_RS512
-        else -> throw SigningException("Unsupported algorithm: $algorithm")
-    }
+    private fun getJCASignatureAlgorithm(algorithm: String): String = jcaSignatureAlgorithm(algorithm)
 
     /**
      * Get the JCA digest property constant from a COSE/JOSE algorithm identifier.
@@ -2283,7 +2370,7 @@ class KeystoreManager(private val context: Context) {
     /**
      * Build the keystore alias for a general-purpose key.
      */
-    private fun buildGeneralAlias(keyId: String): String = KEY_ALIAS_PREFIX_GENERAL + keyId
+    private fun buildGeneralAlias(keyId: String): String = generalKeyAlias(keyId)
 
     // -------------------------------------------------------------------------
     // Private Helpers - SSH Key Encoding
@@ -2416,19 +2503,102 @@ class KeystoreManager(private val context: Context) {
     /**
      * Build the keystore alias from a credential ID.
      */
-    private fun buildAlias(credentialId: String): String {
-        return KEY_ALIAS_PREFIX + credentialId
-    }
+    private fun buildAlias(credentialId: String): String = credentialAlias(credentialId)
 
     companion object {
+        /** The full Keystore alias of general-purpose key [keyId]. */
+        fun generalKeyAlias(keyId: String): String = KEY_ALIAS_PREFIX_GENERAL + keyId
+
+        /** The full Keystore alias of FIDO2 credential [credentialId]. */
+        fun credentialAlias(credentialId: String): String = KEY_ALIAS_PREFIX + credentialId
+
+        /**
+         * The JCA signature algorithm a key of COSE/JOSE [algorithm] signs with.
+         *
+         * @param algorithm "ES256", "ES384", "ES512", "RS256", "RS384", or "RS512".
+         * @throws SigningException if the algorithm is not supported.
+         */
+        fun jcaSignatureAlgorithm(algorithm: String): String = when (algorithm) {
+            "ES256" -> SIG_ALGORITHM_ES256
+            "ES384" -> SIG_ALGORITHM_ES384
+            "ES512" -> SIG_ALGORITHM_ES512
+            "RS256" -> SIG_ALGORITHM_RS256
+            "RS384" -> SIG_ALGORITHM_RS384
+            "RS512" -> SIG_ALGORITHM_RS512
+            else -> throw SigningException("Unsupported algorithm: $algorithm")
+        }
+
+        /** The JCA algorithm passkey assertions sign their hash with. */
+        const val PASSKEY_SIGNATURE_ALGORITHM = "SHA256withECDSA"
+
+        /**
+         * The lock for one Keystore alias and how many threads hold it or
+         * wait on it. [users] changes only inside the registry's per-key
+         * `compute`, so an entry is dropped exactly when its last user leaves.
+         */
+        private class AliasGate {
+            val lock = java.util.concurrent.locks.ReentrantLock()
+            var users = 0
+        }
+
+        /**
+         * One gate per Keystore alias, shared by every instance in the
+         * process. An alias has an entry only while some thread holds or
+         * waits on its gate, so churned aliases leave nothing behind.
+         */
+        private val aliasGates = java.util.concurrent.ConcurrentHashMap<String, AliasGate>()
+
+        /**
+         * Runs [block] holding the process-wide gate for Keystore [alias].
+         * [signApproved] checks and signs inside it, and every delete or key
+         * generation under an alias takes it, so a key cannot be replaced
+         * between an approved-key check and its signature. [block] cannot
+         * suspend: the gate is a thread lock.
+         *
+         * A caller joins the alias's entry before it waits on the lock and
+         * leaves it after it unlocks, both inside the registry's atomic
+         * per-key `compute`. Two concurrent users of one alias therefore
+         * always share one lock, and the entry goes once neither needs it.
+         */
+        fun <T> withAliasGate(alias: String, block: () -> T): T {
+            val gate = aliasGates.compute(alias) { _, existing ->
+                (existing ?: AliasGate()).also { it.users++ }
+            }!!
+            try {
+                gate.lock.lock()
+                try {
+                    return block()
+                } finally {
+                    gate.lock.unlock()
+                }
+            } finally {
+                aliasGates.compute(alias) { _, existing ->
+                    check(existing === gate) { "alias gate for $alias replaced while in use" }
+                    gate.users--
+                    if (gate.users == 0) null else gate
+                }
+            }
+        }
+
+        /** How many aliases the gate registry holds an entry for. */
+        @androidx.annotation.VisibleForTesting
+        internal fun aliasGateCount(): Int = aliasGates.size
+
         /** Android Keystore provider name. */
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
 
-        /** Prefix for all xKey credential key aliases. */
-        private const val KEY_ALIAS_PREFIX = "xkey_credential_"
+        /**
+         * Prefix for all xKey credential key aliases. Code outside this class
+         * names an alias through [credentialAlias], [generalKeyAlias] or
+         * [keyRowAlias], never by hand (KeystoreAliasNamingChokePointTest).
+         */
+        internal const val KEY_ALIAS_PREFIX = "xkey_credential_"
 
-        /** Prefix for general-purpose key aliases. */
-        private const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
+        /** Prefix for general-purpose key aliases (see [KEY_ALIAS_PREFIX]). */
+        internal const val KEY_ALIAS_PREFIX_GENERAL = "xkey_key_"
+
+        /** A FIDO2 key row's type (protocol KeyTypes.FIDO2; crypto does not import protocol). */
+        private const val FIDO2_KEY_TYPE = "fido2"
 
         /**
          * The user-key namespace of [keyId]: the only Keystore aliases a
@@ -2438,12 +2608,12 @@ class KeystoreManager(private val context: Context) {
          * attestation, sealing or encryption keys) or a foreign one.
          */
         fun userKeyAliases(keyId: String): List<String> =
-            listOf(KEY_ALIAS_PREFIX + keyId, KEY_ALIAS_PREFIX_GENERAL + keyId)
+            listOf(credentialAlias(keyId), generalKeyAlias(keyId))
 
         /** The one alias of [keyId]'s user key of [kind]. */
         fun userKeyAlias(keyId: String, kind: UserKeyKind): String = when (kind) {
-            UserKeyKind.CREDENTIAL -> KEY_ALIAS_PREFIX + keyId
-            UserKeyKind.GENERAL -> KEY_ALIAS_PREFIX_GENERAL + keyId
+            UserKeyKind.CREDENTIAL -> credentialAlias(keyId)
+            UserKeyKind.GENERAL -> generalKeyAlias(keyId)
         }
 
         /**

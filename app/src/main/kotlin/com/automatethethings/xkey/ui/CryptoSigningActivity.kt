@@ -26,6 +26,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.crypto.KeystoreManager
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.Signature
@@ -175,7 +176,7 @@ class CryptoSigningActivity : FragmentActivity() {
     ) {
         // Get private key from keystore; a full alias names a key outside the
         // credential namespace (the user verification key).
-        val alias = intent.getStringExtra(EXTRA_KEY_ALIAS) ?: (KEY_ALIAS_PREFIX + credentialId)
+        val alias = intent.getStringExtra(EXTRA_KEY_ALIAS) ?: KeystoreManager.credentialAlias(credentialId)
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
 
         val privateKey = keyStore.getKey(alias, null) as? PrivateKey
@@ -187,7 +188,9 @@ class CryptoSigningActivity : FragmentActivity() {
         // Initialize signature object
         val signature: Signature
         try {
-            signature = Signature.getInstance(SIGNATURE_ALGORITHM)
+            signature = Signature.getInstance(
+                intent.getStringExtra(EXTRA_SIGNATURE_ALGORITHM) ?: SIGNATURE_ALGORITHM
+            )
             signature.initSign(privateKey)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize signature", e)
@@ -339,9 +342,6 @@ class CryptoSigningActivity : FragmentActivity() {
         /** Android Keystore provider name. */
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
 
-        /** Prefix for all xKey credential key aliases. */
-        private const val KEY_ALIAS_PREFIX = "xkey_credential_"
-
         /** Signature algorithm (ECDSA with SHA-256). */
         private const val SIGNATURE_ALGORITHM = "SHA256withECDSA"
 
@@ -391,6 +391,12 @@ class CryptoSigningActivity : FragmentActivity() {
          * Type: String (optional)
          */
         const val EXTRA_KEY_ALIAS = "com.automatethethings.xkey.extra.KEY_ALIAS"
+
+        /**
+         * Extra key for the JCA signature algorithm the key signs with.
+         * Type: String (optional; SHA256withECDSA when absent)
+         */
+        const val EXTRA_SIGNATURE_ALGORITHM = "com.automatethethings.xkey.extra.SIGNATURE_ALGORITHM"
 
         /**
          * Extra key indicating whether the operation succeeded.
@@ -456,6 +462,8 @@ class CryptoSigningActivity : FragmentActivity() {
          * @param showOnLockScreen Whether to show the prompt over the lock screen.
          * @param keyAlias A full Keystore alias to sign with instead of the
          *   credential's; null for a credential key.
+         * @param signatureAlgorithm The JCA signature algorithm of that key;
+         *   null for SHA256withECDSA.
          * @return An intent configured to launch the activity.
          */
         fun createIntent(
@@ -466,10 +474,12 @@ class CryptoSigningActivity : FragmentActivity() {
             title: String = DEFAULT_TITLE,
             subtitle: String = DEFAULT_SUBTITLE,
             showOnLockScreen: Boolean = false,
-            keyAlias: String? = null
+            keyAlias: String? = null,
+            signatureAlgorithm: String? = null
         ): Intent {
             return Intent(context, CryptoSigningActivity::class.java).apply {
                 keyAlias?.let { putExtra(EXTRA_KEY_ALIAS, it) }
+                signatureAlgorithm?.let { putExtra(EXTRA_SIGNATURE_ALGORITHM, it) }
                 putExtra(EXTRA_REQUEST_ID, requestId)
                 putExtra(EXTRA_CREDENTIAL_ID, credentialId)
                 putExtra(EXTRA_DATA_HASH, dataHashBase64)

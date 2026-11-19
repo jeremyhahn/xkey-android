@@ -108,7 +108,7 @@ class SignAfterDeleteTest {
 
         keystore = mockk(relaxed = true)
         every { keystore.soleKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
-        coEvery { keystore.signWithoutBiometric(any(), any(), any()) } returns ByteArray(64) { 7 }
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } returns ByteArray(64) { 7 }
 
         // The prompt stays open until the test approves it.
         biometricLauncher = mockk(relaxed = true)
@@ -148,7 +148,7 @@ class SignAfterDeleteTest {
         val response = pending.await()
 
         assertEquals(ErrorCodes.KEY_NOT_FOUND, response.error?.code)
-        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any(), any()) }
+        coVerify(exactly = 0) { keystore.signApproved(any(), any(), any(), any()) }
     }
 
     @Test
@@ -158,7 +158,7 @@ class SignAfterDeleteTest {
         approval.complete(Unit)
 
         assertEquals(null, pending.await().error)
-        coVerify(exactly = 1) { keystore.signWithoutBiometric(any(), any(), any()) }
+        coVerify(exactly = 1) { keystore.signApproved(any(), any(), any(), any()) }
     }
 
     @Test
@@ -166,9 +166,11 @@ class SignAfterDeleteTest {
         val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
         val crypto = Regex(
             """keystoreManager\.(sign|signWithoutBiometric|signWithAlgorithm|rsaDecrypt\w*|decrypt\w*|encrypt\w*|symmetric\w*|computeHMAC\w*|performECDH|ecdh\w*)\(""" +
-                """|requestCryptoSignature\(|SoftwareKeyOps\.(aesGcm\w*|hmac|sign\w*|ecdh\w*)\("""
+                """|requestCryptoSignature\(|approvals\.sign\(|SoftwareKeyOps\.(aesGcm\w*|hmac|sign\w*|ecdh\w*)\("""
         )
-        val bypasses = File(root, "com/automatethethings/xkey/protocol").listFiles { f -> f.extension == "kt" }!!
+        // CosignApprovalPrompts is the co-sign prompt itself: its caller's
+        // `approvals.sign(` is swept here instead.
+        val bypasses = File(root, "com/automatethethings/xkey/protocol").listFiles { f -> f.extension == "kt" && f.name != "CosignApprovalPrompts.kt" }!!
             .flatMap { file ->
                 val lines = file.readLines()
                 lines.mapIndexedNotNull { i, line ->

@@ -80,6 +80,8 @@ class CoSignInitiatorQrRefusalTest {
         set(activity, "keystoreManager", keystore)
         set(activity, "currentSignatureData", ContentAuthenticityData(contentHash = "00", signatures = emptyList()))
         set(activity, "signingKeyIds", listOf(KEY_ID))
+        set(activity, "signingKeyTypes", listOf("signing"))
+        set(activity, "signingKeyMaterials", listOf<ByteArray?>(null))
         val spinner = get(activity, "keySpinner") as Spinner
         spinner.adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_item, listOf(KEY_ID))
         spinner.setSelection(0)
@@ -203,6 +205,8 @@ class CoSignInitiatorQrRefusalTest {
         set(activity, "keystoreManager", keystore)
         set(activity, "currentSignatureData", ContentAuthenticityData(contentHash = "00", signatures = emptyList()))
         set(activity, "signingKeyIds", ids)
+        set(activity, "signingKeyTypes", ids.map { "signing" })
+        set(activity, "signingKeyMaterials", ids.map { null })
         val spinner = get(activity, "keySpinner") as Spinner
         spinner.adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_item, ids)
         spinner.setSelection(0)

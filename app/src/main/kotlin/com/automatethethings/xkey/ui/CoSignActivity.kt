@@ -85,6 +85,10 @@ class CoSignActivity : AppCompatActivity() {
     private lateinit var keySpinner: Spinner
     private var signingKeyIds = listOf<String>()
 
+    /** Each offered row's key type, index-aligned with [signingKeyIds]. */
+    private var signingKeyTypes = listOf<String>()
+    private var signingKeyMaterials = listOf<ByteArray?>()
+
     private lateinit var witnessQrImage: ImageView
     private lateinit var witnessQrLabel: TextView
 
@@ -623,8 +627,12 @@ class CoSignActivity : AppCompatActivity() {
         // be read, is a refusal shown here and no QR, never an exception out
         // of the Generate QR listener and never the key id in the owner's
         // place.
+        // The key is read under the namespace its row really lives in
+        // (a phone-registered FIDO2 row is a credential, every other row a
+        // general key: [initiatorKeyKind]).
+        val kind = initiatorKeyKind(keystoreManager, keyId, signingKeyTypes[selectedKeyIndex], signingKeyMaterials[selectedKeyIndex])
         val pubKeyDer = keystoreManager
-            .readOwnPublicKeyDer(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+            .readOwnPublicKeyDer(keyId, kind)
             .orRefuse(R.string.cosign_owner_key_unavailable) { refusal ->
                 Snackbar.make(rootLayout, getString(refusal), Snackbar.LENGTH_SHORT).show()
             } ?: return
@@ -663,7 +671,17 @@ class CoSignActivity : AppCompatActivity() {
 
                 // Under the material-use lock and its deleted-key recheck (#255 review).
                 val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
-                    .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(keyId, request.hashBytes(), keyEntity.algorithm) }
+                    .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+                        // The key named and the key signed with are one: the
+                        // signature is made only by the key under the general
+                        // alias whose public key the fingerprint names.
+                        keystoreManager.signApproved(
+                            KeystoreManager.generalKeyAlias(keyId),
+                            pubKeyDer,
+                            request.hashBytes(),
+                            KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
+                        )
+                    }
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
                 val responsePayload = CoSignResponse(
@@ -853,10 +871,14 @@ class CoSignActivity : AppCompatActivity() {
                     !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh")
                 }
                 val keyIds = keys.map { it.keyId }
+                val keyTypes = keys.map { it.keyType }
+                val keyMaterials = keys.map { it.publicKeyDer }
                 val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
 
                 withContext(Dispatchers.Main) {
                     signingKeyIds = keyIds
+                    signingKeyTypes = keyTypes
+                    signingKeyMaterials = keyMaterials
                     keySpinner.adapter = ArrayAdapter(
                         this@CoSignActivity,
                         android.R.layout.simple_spinner_dropdown_item,
@@ -891,3 +913,25 @@ class CoSignActivity : AppCompatActivity() {
         const val STATE_KEY_ID = "cosign_key_id"
     }
 }
+
+/**
+ * The namespace of the key the selected row holds: a credential when the
+ * row's alias is the credential alias, else a general key.
+ *
+ * The row's key is read under the alias it really lives under
+ * ([KeystoreManager.keyRowAlias], from the row's [keyType] and its
+ * [storedPublicKeyDer]): a phone-registered FIDO2 row is a credential, a
+ * desktop-created one a general key, every other row a general key. This only
+ * names the key; nothing is signed here, so it needs no approved-key lookup.
+ */
+internal fun initiatorKeyKind(
+    keystoreManager: KeystoreManager,
+    keyId: String,
+    keyType: String,
+    storedPublicKeyDer: ByteArray?
+): com.automatethethings.xkey.crypto.UserKeyKind =
+    if (keystoreManager.keyRowAlias(keyId, keyType, storedPublicKeyDer) == KeystoreManager.credentialAlias(keyId)) {
+        com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+    } else {
+        com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+    }

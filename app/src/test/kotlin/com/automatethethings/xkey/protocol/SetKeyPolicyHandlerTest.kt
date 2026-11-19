@@ -37,6 +37,7 @@ import com.automatethethings.xkey.storage.dao.KeyPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -231,7 +232,11 @@ class SetKeyPolicyHandlerTest {
         context = context,
         keystoreManager = mockk<KeystoreManager>(relaxed = true),
         biometricLauncher = if (withLauncher) launcher else null,
-        sessionAuthManager = null
+        sessionAuthManager = null,
+        // A caller session's peer is confirmed by the paired-device store.
+        pairedDeviceRepository = mockk<PairedDeviceRepository> {
+            every { isDeviceKnown(any()) } answers { firstArg<String>() == peer }
+        }
     ).also { it.setConnectedDevicePublicKeyHex(confirmedPeer) }
 
     private fun key(policy: SharingPolicyType, label: String = "Work key") = KeyEntity(

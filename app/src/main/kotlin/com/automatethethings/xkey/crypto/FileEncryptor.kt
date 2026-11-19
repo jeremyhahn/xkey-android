@@ -287,7 +287,7 @@ private fun generateKeystoreAgreementKey(alias: String): ByteArray? {
     val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
     if (keyStore.containsAlias(alias)) {
-        keyStore.deleteEntry(alias)
+        KeystoreManager.withAliasGate(alias) { keyStore.deleteEntry(alias) }
     }
 
     val specBuilder = KeyGenParameterSpec.Builder(
@@ -302,5 +302,5 @@ private fun generateKeystoreAgreementKey(alias: String): ByteArray? {
         "AndroidKeyStore"
     )
     keyPairGenerator.initialize(specBuilder.build())
-    return keyPairGenerator.generateKeyPair()?.public?.encoded
+    return KeystoreManager.withAliasGate(alias) { keyPairGenerator.generateKeyPair() }?.public?.encoded
 }
