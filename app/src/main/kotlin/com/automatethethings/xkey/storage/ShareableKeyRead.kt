@@ -150,8 +150,9 @@ class ShareableKey(val software: SoftwareKey?, val publicKeyPem: String?)
  * A general key beside a credential of its id shares its own key, a software
  * key too: the general namespace counts the software store (#255 review r6),
  * so the kind is never the credential's while a software key holds the id. A
- * software key read under a credential kind (stored after the kind was
- * resolved) is shared as neither.
+ * software key read under a credential kind (a row describing the
+ * credential, or one stored after the kind was resolved) is never shared:
+ * the share sends the resolved credential's public key (#270 review r8).
  *
  * @param row the id's key row, which decides the key of a shared id
  * @param softwareKey reads the id's software key (a general key kept outside the Keystore)
@@ -169,7 +170,7 @@ suspend fun KeyPolicyStore.readShareable(
         when {
             software != null && kind != UserKeyKind.GENERAL -> {
                 software.material.fill(0)
-                ShareableKey(null, null)
+                ShareableKey(null, keystore.getPublicKeyPEM(keyId, kind))
             }
             software != null -> ShareableKey(software, null)
             else -> ShareableKey(null, keystore.getPublicKeyPEM(keyId, kind))
