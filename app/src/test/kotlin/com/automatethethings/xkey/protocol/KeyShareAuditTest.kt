@@ -31,6 +31,7 @@ import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.readShareable
 import com.automatethethings.xkey.storage.dao.ContactDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
@@ -1207,6 +1208,21 @@ class KeyShareAuditTest {
             result.getString("publicKey")
         )
         assertEquals("ES256", result.getString("algorithm"))
+
+        // #270 review r5: both sharing paths send the key the row describes,
+        // never the same-id general key's public half under the credential
+        // row's permissions: local.importSharedKey and the desktop sharing
+        // sheet's one share read (readShareable with the sheet's row).
+        val expected = Base64.getEncoder().encodeToString(credential.public.encoded)
+        val wrong = Base64.getEncoder().encodeToString(general.public.encoded)
+        val pem = success(served(importSharedKey())).getString("public_key_pem").replace("\n", "").replace("\r", "")
+        assertTrue("importSharedKey shares the credential's key: $pem", expected in pem && wrong !in pem)
+
+        val keystore = KeystoreManager(context)
+        val store = com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(context), keystore)
+        val sheetPem = store.readShareable(KEY_ID, keystore) { null }
+            .publicKeyPem!!.replace("\n", "").replace("\r", "")
+        assertTrue("the desktop share sends the credential's key: $sheetPem", expected in sheetPem && wrong !in sheetPem)
     }
 
     /**
