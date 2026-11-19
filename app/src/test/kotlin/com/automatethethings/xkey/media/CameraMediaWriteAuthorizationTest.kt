@@ -202,7 +202,8 @@ class CameraMediaWriteAuthorizationTest {
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
         granted = true
         // Every signed byte is in; the thread is interrupted before the cut to length.
-        MediaPublisher.overwriteStep = { if (it == "truncate") Thread.currentThread().interrupt() }
+        var interrupts = 1
+        MediaPublisher.overwriteStep = { if (it == "truncate" && interrupts-- > 0) Thread.currentThread().interrupt() }
 
         val signed = mutableListOf<PendingMediaWrite>()
         try {
