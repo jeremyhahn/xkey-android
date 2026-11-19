@@ -81,6 +81,8 @@ data class SoftwareKey(
 class SoftwareKeyStore(
     context: Context,
     cipher: KeystoreAeadCipher? = null,
+    /** Moves a file, true when it was moved: a test fails it as a failed rename would. */
+    private val rename: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
     /** Removes a file, true when it was removed: a test fails it as an I/O error would. */
     private val unlink: (File) -> Boolean = { it.delete() }
 ) {
@@ -456,8 +458,8 @@ class SoftwareKeyStore(
             val material = File(dir, "$stem.key")
             // A move is a write of the store: every instance's scan is redone.
             wrote()
-            if (material.renameTo(File(dir, "$target.key")) || filePresence(material) == KeyPresence.ABSENT) {
-                meta.renameTo(File(dir, "$target.meta"))
+            if (rename(material, File(dir, "$target.key")) || filePresence(material) == KeyPresence.ABSENT) {
+                rename(meta, File(dir, "$target.meta"))
             }
             wrote()
         }
