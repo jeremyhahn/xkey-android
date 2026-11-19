@@ -329,7 +329,9 @@ class FidoGattServer(
 
         private fun notify(s: BluetoothGattServer, characteristic: BluetoothGattCharacteristic, frame: ByteArray) =
             try {
-                if (sdkInt >= Build.VERSION_CODES.TIRAMISU) {
+                // Both checks: sdkInt lets tests pick the pre-33 path, and the
+                // device's own SDK_INT is what makes the API 33 call safe.
+                if (sdkInt >= Build.VERSION_CODES.TIRAMISU && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     s.notifyCharacteristicChanged(device, characteristic, false, frame) == BluetoothStatusCodes.SUCCESS
                 } else {
                     notifyShared(s, characteristic, device, frame)
