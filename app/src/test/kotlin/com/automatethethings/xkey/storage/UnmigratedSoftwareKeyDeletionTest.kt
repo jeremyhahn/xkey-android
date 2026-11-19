@@ -33,11 +33,13 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.security.KeyStore
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
 /**
@@ -58,8 +60,6 @@ class UnmigratedSoftwareKeyDeletionTest {
 
     /** Whether unlinks of the legacy record succeed. */
     private var legacyUnlinks = false
-
-    private val restore = softwareKeyStoreOf
 
     @Before
     fun setUp() {
@@ -82,13 +82,10 @@ class UnmigratedSoftwareKeyDeletionTest {
         every { keystore.holdsEd25519Keys() } returns true
         // Every reader of the store moves and unlinks as the test says.
         every { keystore.softwareKeys() } answers { store() }
-
-        softwareKeyStoreOf = { store(it) }
     }
 
     @After
     fun tearDown() {
-        softwareKeyStoreOf = restore
         files.deleteRecursively()
         unmockkAll()
     }
@@ -173,7 +170,47 @@ class UnmigratedSoftwareKeyDeletionTest {
         assertTrue("delete skips the legacy records", "for (stem in listOf(own) + legacy.sorted()) deleteRecord(stem)" in store)
         assertFalse("the store renames a file past its seam", Regex("""\.renameTo\(""").findAll(store).count() > 1)
         val replay = File(main, "com/automatethethings/xkey/storage/KeyDeletionReplay.kt").readText()
-        assertEquals("the deletion path builds a store past its seam", 1, Regex("""SoftwareKeyStore\(""").findAll(replay).count())
+        assertEquals("the deletion path builds a store of its own", 0, Regex("""SoftwareKeyStore\(""").findAll(replay).count())
+        assertEquals("the deletion path reads past the keystore's store", 2, Regex("""keystore\.softwareKeys\(\)""").findAll(replay).count())
+    }
+
+    /**
+     * #255 review: a stored key's ownership ([rowOwnerKind] through
+     * [keyMaterialGeneration]) is read from the software key store the
+     * [KeystoreManager] keeps. A store built per call would read the files
+     * directory again and rescan every record's metadata; the kept one does
+     * neither, so a record written past the store (no write it counts) stays
+     * unseen until the store's own next write.
+     */
+    @Test
+    fun ownershipResolutionReusesTheKeystoresSoftwareStore() {
+        val filesDirReads = AtomicInteger()
+        val counted = mockk<Context>(relaxed = true)
+        every { counted.filesDir } answers { filesDirReads.incrementAndGet(); files }
+        val prefs = mockk<SharedPreferences>()
+        every { prefs.getString(any(), any()) } answers { secondArg() }
+        every { prefs.contains(any()) } returns false
+        val manager = spyk(KeystoreManager(counted))
+        every { manager.ed25519Prefs() } returns prefs
+        every { manager.holdsEd25519Keys() } returns true
+        legacyRecord()
+
+        val first = keyMaterialGeneration(counted, ID, manager, UserKeyKind.GENERAL)
+        assertNotNull("the software record is not part of the generation", first[SOFTWARE_ENTRY])
+        val store = manager.softwareKeys()
+        val reads = filesDirReads.get()
+
+        // Another record naming the id, written past the store: only a new
+        // store or a rescan of the metadata would see it.
+        File(files, "software_keys/${LEGACY}2.key").writeBytes(Random.nextBytes(44))
+        File(files, "software_keys/${LEGACY}2.meta").writeText(JSONObject().put("keyId", ID).toString())
+
+        repeat(3) {
+            assertEquals("a repeated ownership read rescanned the store", first, keyMaterialGeneration(counted, ID, manager, UserKeyKind.GENERAL))
+        }
+        assertEquals(UserKeyKind.GENERAL, manager.rowOwnerKind(counted, ID, null))
+        assertSame("the keystore built a second software store", store, manager.softwareKeys())
+        assertEquals("an ownership read built a software store", reads, filesDirReads.get())
     }
 
     private companion object {

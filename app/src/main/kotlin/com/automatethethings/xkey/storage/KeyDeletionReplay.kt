@@ -163,7 +163,7 @@ fun keyMaterialGeneration(
     retry: Boolean = false
 ): Map<String, String> {
     val all = keystore.userKeyGeneration(keyId)
-    val software = softwareKeyStoreOf(context).generation(keyId)
+    val software = keystore.softwareKeys().generation(keyId)
     val present = if (software != null) all.keys + SOFTWARE_ENTRY else all.keys
     val target = kind?.let { if (retry) it else KeystoreManager.presentKind(keyId, present, it) }
     val generation = LinkedHashMap(if (target == null) all else all.filterKeys { KeystoreManager.isEntryOf(it, keyId, target) })
@@ -192,7 +192,7 @@ fun deleteKeyMaterialGeneration(
     }
     val softwareGone = try {
         val tag = generation[SOFTWARE_ENTRY]
-        tag == null || softwareKeyStoreOf(context).deleteGeneration(keyId, tag)
+        tag == null || keystore.softwareKeys().deleteGeneration(keyId, tag)
     } catch (e: Exception) {
         false
     }
@@ -201,13 +201,6 @@ fun deleteKeyMaterialGeneration(
 
 /** [keyMaterialGeneration] entry of a software key store record. */
 const val SOFTWARE_ENTRY = "software"
-
-/**
- * The software key store every delete reads and deletes its material
- * through: a test fails its file moves and unlinks as an I/O error would.
- */
-@androidx.annotation.VisibleForTesting
-internal var softwareKeyStoreOf: (Context) -> SoftwareKeyStore = { SoftwareKeyStore(it) }
 
 private const val TAG = "KeyDeletionReplay"
 
