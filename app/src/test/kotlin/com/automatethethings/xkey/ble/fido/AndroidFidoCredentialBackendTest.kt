@@ -370,6 +370,41 @@ class AndroidFidoCredentialBackendTest {
     }
 
     @Test
+    fun `a registration cancelled once the new passkey is stored leaves the old passkey whole`() = runTest {
+        val (keyRows, metadataRows) = storedResidents()
+        lateinit var registering: kotlinx.coroutines.Job
+        // The client sends CANCEL while the new passkey's last row is written.
+        coEvery { credentialDao.insert(any()) } answers {
+            metadataRows += firstArg<CredentialMetadataEntity>().credentialId
+            registering.cancel()
+            1L
+        }
+
+        registering = launch {
+            backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+        }
+        registering.join()
+
+        assertTrue(registering.isCancelled)
+        assertEquals(setOf(shared.keyId, private.keyId), keyRows)
+        assertEquals(setOf(shared.keyId, private.keyId), metadataRows)
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+    }
+
+    @Test
+    fun `a passkey made private after the replacement lookup is not replaced`() = runTest {
+        val (keyRows, metadataRows) = storedResidents()
+        // Listed as shared, then made private before its rows are deleted.
+        coEvery { keyDao.getByKeyId(shared.keyId) } returns shared.copy(sharingPolicy = SharingPolicyType.PRIVATE)
+
+        val made = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+
+        assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), keyRows)
+        assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), metadataRows)
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+    }
+
+    @Test
     fun `user handles match by their bytes, whatever base64 stored them`() = runTest {
         val handle = byteArrayOf(0xFB.toByte(), 0xFF.toByte())
         // "+/8=": the same bytes as the request's "-_8", in standard padded base64.
