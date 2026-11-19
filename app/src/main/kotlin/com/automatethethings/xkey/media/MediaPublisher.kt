@@ -173,7 +173,7 @@ object MediaPublisher {
                 PackageManager.PERMISSION_GRANTED
 
         override fun createWriteRequest(context: Context, uris: List<Uri>): PendingIntent {
-            check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { "write requests need Android 11" }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) throw IllegalStateException("write requests need Android 11")
             return MediaStore.createWriteRequest(context.contentResolver, uris)
         }
     }

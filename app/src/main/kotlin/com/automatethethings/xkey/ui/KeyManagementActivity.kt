@@ -1774,9 +1774,10 @@ class KeyManagementActivity : AppCompatActivity() {
  * the row, so the key stays listed and the screen says so. Only the
  * namespace of the row picked is deleted (a FIDO2 row's credential and its
  * metadata in [credentials], else the general key), never the other key of
- * the same ID.
+ * the same ID. The result is a string resource ID; it carries no
+ * `@StringRes`, which lint refuses on a suspend function (its JVM return
+ * type is Object).
  */
-@androidx.annotation.StringRes
 internal suspend fun KeyDao.deleteKeyForScreen(
     key: KeyEntity,
     keystoreManager: KeystoreManager,
