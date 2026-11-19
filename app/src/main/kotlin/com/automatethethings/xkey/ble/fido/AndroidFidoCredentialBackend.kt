@@ -30,7 +30,10 @@ import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.SecureRandom
 import java.util.Base64
@@ -168,7 +171,16 @@ class AndroidFidoCredentialBackend(
         return SignedAssertion(authData, signature)
     }
 
-    override suspend fun create(request: CredentialRequest): NewCredential {
+    /**
+     * Every BLE registration runs under [registration], the one lock in the
+     * process: two clients registering the same account at once replace one
+     * another in turn, never both insert beside the old passkey, nor each
+     * remove the other's.
+     */
+    override suspend fun create(request: CredentialRequest): NewCredential =
+        registration.withLock { createLocked(request) }
+
+    private suspend fun createLocked(request: CredentialRequest): NewCredential {
         val rawId = ByteArray(CREDENTIAL_ID_BYTES).also { SecureRandom().nextBytes(it) }
         val keyId = encodeId(rawId)
         // Not auth-bound: the phone's prompt gates every use, as on the
@@ -180,11 +192,22 @@ class AndroidFidoCredentialBackend(
         )
         val userId = encodeId(request.userHandle)
         val rpName = request.rpName ?: request.rpId
-        // The Keystore key, then its key row, then the metadata the credential
-        // provider lists. Any failure, a cancellation (the client disconnected
-        // or sent CANCEL) included, removes all three, so no row ever points
-        // at a key that does not exist.
-        try {
+        // The passkeys this one replaces, then its key row, then the metadata
+        // the credential provider lists. Any failure, a cancellation (the
+        // client disconnected or sent CANCEL) included, removes the new
+        // passkey and leaves the old ones untouched.
+        val replaced = try {
+            // The discoverable passkeys this client could see for the same
+            // account. One the sharing policy hides from BLE clients is never
+            // touched.
+            val old = if (request.discoverable) {
+                keyDao.getFido2ByRpId(request.rpId).filter {
+                    it.keyId != keyId && it.keyType == KeyTypeFido2 && it.rpId == request.rpId &&
+                        it.isDiscoverable && sameUser(it.userId, request.userHandle) && shared(it)
+                }
+            } else {
+                emptyList()
+            }
             keyDao.insert(
                 KeyEntity(
                     keyId = keyId,
@@ -224,21 +247,16 @@ class AndroidFidoCredentialBackend(
                     isDiscoverable = request.discoverable
                 )
             )
+            old
         } catch (e: Throwable) {
             withContext(NonCancellable) { remove(keyId) }
             throw e
         }
-        // Only now that the new passkey is whole: it replaces the discoverable
-        // passkey this client could see for the same account. One the sharing
-        // policy hides from BLE clients is never touched.
-        if (request.discoverable) {
-            withContext(NonCancellable) {
-                keyDao.getFido2ByRpId(request.rpId)
-                    .filter {
-                        it.keyId != keyId && it.keyType == KeyTypeFido2 && it.rpId == request.rpId &&
-                            it.isDiscoverable && it.userId == userId && shared(it)
-                    }
-                    .forEach { remove(it.keyId) }
+        // Only now that the new passkey is whole are the old ones removed. One
+        // whose rows will not go stays whole, Keystore key included, beside it.
+        withContext(NonCancellable) {
+            replaced.forEach {
+                if (!remove(it.keyId)) Log.w(TAG, "A replaced passkey could not be removed, rpId=${request.rpId}")
             }
         }
         Log.i(TAG, "Created a passkey over BLE, rpId=${request.rpId}")
@@ -292,6 +310,10 @@ class AndroidFidoCredentialBackend(
             ?: throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "The passkey's key is not in Keystore")
         return try {
             prompt.signWithKey(entity.keyId, alias, rpId, signedData)
+        } catch (e: CancellationException) {
+            // The client went away or sent CANCEL: never a refusal (a
+            // CancellationException is an IllegalStateException).
+            throw e
         } catch (e: UserCancelledException) {
             throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The user declined the passkey's prompt")
         } catch (e: BiometricLockoutException) {
@@ -321,19 +343,36 @@ class AndroidFidoCredentialBackend(
 
     /**
      * Remove a passkey from all three places it lives: the metadata the
-     * credential provider lists, its key row, then its Keystore key, so no
-     * row ever points at a key that is gone.
+     * credential provider lists, its key row, then its Keystore key. The key
+     * goes only once both rows are gone, so no row ever points at a key that
+     * is gone; false when a row stayed (and with it the key).
      */
-    private suspend fun remove(keyId: String) {
-        runCatching { credentialDao.deleteByCredentialId(keyId) }
-        runCatching { keyDao.deleteByKeyId(keyId) }
-        runCatching { keystoreManager.deleteKey(keyId) }
+    private suspend fun remove(keyId: String): Boolean {
+        val rowsGone = try {
+            credentialDao.deleteByCredentialId(keyId)
+            keyDao.deleteByKeyId(keyId)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "A passkey row could not be deleted; its Keystore key stays", e)
+            false
+        }
+        if (rowsGone) runCatching { keystoreManager.deleteKey(keyId) }
+        return rowsGone
     }
+
+    /** A stored base64 user ID and a wire user handle name the same user when their bytes match. */
+    private fun sameUser(storedUserId: String?, userHandle: ByteArray): Boolean =
+        storedUserId?.let { decodeBase64(it) }?.contentEquals(userHandle) == true
 
     private companion object {
         const val TAG = "FidoBleBackend"
         const val KeyTypeFido2 = "fido2"
         const val CREDENTIAL_ID_BYTES = 32
+
+        /** The one lock every BLE registration in the process runs under. */
+        val registration = Mutex()
 
         /** Auth duration of a key that authenticates for each use. */
         const val PER_OPERATION = 0

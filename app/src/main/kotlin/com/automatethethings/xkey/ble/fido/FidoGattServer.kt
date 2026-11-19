@@ -37,6 +37,7 @@ import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -549,6 +550,10 @@ class BiometricFidoUserPrompt(
             UserCheck.DECLINED
         } catch (e: BiometricException) {
             if (e.errorCode in UNAVAILABLE_CODES) UserCheck.UNAVAILABLE else UserCheck.DECLINED
+        } catch (e: CancellationException) {
+            // The client went away or sent CANCEL: never a user check (a
+            // CancellationException is an IllegalStateException).
+            throw e
         } catch (e: IllegalStateException) {
             // The launcher is not registered: no prompt can be shown.
             UserCheck.UNAVAILABLE
@@ -580,6 +585,8 @@ class BiometricFidoUserPrompt(
                 // The next account.
             } catch (e: XKeyCryptoException) {
                 return null
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: IllegalStateException) {
                 return null
             }

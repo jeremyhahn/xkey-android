@@ -102,6 +102,7 @@ class AndroidFidoCredentialBackendTest {
         mockkStatic(Log::class)
         every { Log.i(any(), any()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } returns 0
         coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(shared, private)
         coEvery { keyDao.getByKeyId(shared.keyId) } returns shared
         coEvery { keyDao.getByKeyId(private.keyId) } returns private
