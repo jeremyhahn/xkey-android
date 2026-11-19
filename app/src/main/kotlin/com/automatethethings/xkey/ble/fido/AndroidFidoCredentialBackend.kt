@@ -248,9 +248,11 @@ class AndroidFidoCredentialBackend(
             )
             // Read again right before they go: a passkey made private, shared
             // with selected peers only, or changed since the lookup is no
-            // longer this client's to replace, and stays.
-            val stillReplaceable = old.filter { candidate ->
-                keyDao.getByKeyId(candidate.keyId)?.let { replaceable(it, request, keyId) } == true
+            // longer this client's to replace, and stays. The rows as read
+            // here are what the delete matches, so a policy change after this
+            // read keeps the passkey too.
+            val stillReplaceable = old.mapNotNull { candidate ->
+                keyDao.getByKeyId(candidate.keyId)?.takeIf { replaceable(it, request, keyId) }
             }
             // The last point a cancellation (the client disconnected or sent
             // CANCEL) stops the registration: the new passkey is removed and
@@ -262,12 +264,13 @@ class AndroidFidoCredentialBackend(
             throw e
         }
         // Only now that the new passkey is whole are the old ones removed, all
-        // their rows in one transaction. When those rows will not go, none
+        // their rows in one transaction, each only while its sharing policy
+        // is still the one checked above. When those rows will not go, none
         // does: the registration fails and the new passkey is removed, so the
         // client and the credential provider see the passkeys they had.
         withContext(NonCancellable) {
             try {
-                delete(replaced.map { it.keyId })
+                delete(replaced)
             } catch (e: Throwable) {
                 Log.w(TAG, "The replaced passkeys could not be removed; the registration fails, rpId=${request.rpId}", e)
                 remove(keyId)
@@ -367,22 +370,33 @@ class AndroidFidoCredentialBackend(
             entity.isDiscoverable && sameUser(entity.userId, request.userHandle) && shared(entity)
 
     /**
-     * Delete the passkeys [keyIds] from all three places they live: their
-     * metadata rows (what the credential provider lists) and key rows, all in
-     * one transaction, then their Keystore keys. The keys go only once the
-     * rows are gone, so no row ever points at a key that is gone. Throws when
-     * the rows will not go, and then every row and key stays.
+     * The one way this backend deletes passkeys. Deletes the passkeys [read]
+     * from all three places they live: their key rows and metadata rows
+     * (what the credential provider lists), all in one transaction, then
+     * their Keystore keys. Only a passkey whose row is still as read, its
+     * sharing policy unchanged, goes: one the owner made private or shared
+     * with selected peers only since then keeps its rows and its key, the
+     * check and the delete being one statement ([KeyDao.deletePasskeyRows]).
+     * A key goes only once its rows are gone, so no row ever points at a key
+     * that is gone. Throws when the rows will not go, and then every row and
+     * key stays. Returns the key ids removed.
      */
-    private suspend fun delete(keyIds: List<String>) {
-        if (keyIds.isEmpty()) return
-        keyDao.deletePasskeyRows(keyIds)
-        keyIds.forEach { runCatching { keystoreManager.deleteKey(it) } }
+    private suspend fun delete(read: List<KeyEntity>): List<String> {
+        if (read.isEmpty()) return emptyList()
+        val removed = keyDao.deletePasskeyRows(read)
+        removed.forEach { runCatching { keystoreManager.deleteKey(it) } }
+        return removed
     }
 
-    /** Roll back the new passkey [keyId]: [delete], logged rather than thrown when its rows stay. */
+    /**
+     * Roll back the new passkey [keyId]: [delete] its row as it is now,
+     * logged rather than thrown when its rows stay. Before its key row was
+     * written there is only its Keystore key.
+     */
     private suspend fun remove(keyId: String) {
         try {
-            delete(listOf(keyId))
+            val row = keyDao.getByKeyId(keyId)
+            if (row == null) runCatching { keystoreManager.deleteKey(keyId) } else delete(listOf(row))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

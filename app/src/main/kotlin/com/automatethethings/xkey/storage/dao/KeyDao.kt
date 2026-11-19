@@ -375,28 +375,47 @@ interface KeyDao {
     suspend fun deleteRowByKeyId(keyId: String): Int
 
     /**
-     * Delete the passkeys [keyIds], each its `credential_metadata` row and
-     * its key row, in one transaction and as a revoke of each key: either
-     * every row goes or, when any delete throws, none does. Their Keystore
-     * keys are the caller's to delete, after this returns.
+     * Delete the passkeys [read], each its key row and its
+     * `credential_metadata` row, in one transaction and as a revoke of each
+     * key, but only a passkey whose row is still the one the caller read and
+     * decided on: the same row ([KeyEntity.id]), at the same
+     * [KeyEntity.policyRevision], with the same sharing policy. A passkey the
+     * owner made private, shared with selected peers only, or otherwise
+     * changed the policy of since that read keeps both its rows; the check
+     * and the delete are one statement, so no policy write lands between them.
+     *
+     * Either every matching passkey's rows go or, when any delete throws,
+     * none does. Returns the key ids of the passkeys removed: only their
+     * Keystore keys are the caller's to delete, after this returns.
      */
-    suspend fun deletePasskeyRows(keyIds: List<String>) {
-        suspend fun revokingAll(index: Int) {
-            if (index == keyIds.size) deletePasskeyRowsInTransaction(keyIds)
-            else SharePermissionLedger.revoking(keyIds[index]) { revokingAll(index + 1) }
-        }
-        revokingAll(0)
+    suspend fun deletePasskeyRows(read: List<KeyEntity>): List<String> {
+        suspend fun revokingAll(index: Int): List<String> =
+            if (index == read.size) deletePasskeyRowsInTransaction(read)
+            else SharePermissionLedger.revoking(read[index].keyId) { revokingAll(index + 1) }
+        return revokingAll(0)
     }
 
     /** Raw passkey rows delete in one transaction; call [deletePasskeyRows]. */
     @RawKeyRowWrite
     @Transaction
-    suspend fun deletePasskeyRowsInTransaction(keyIds: List<String>) {
-        keyIds.forEach {
-            deleteMetadataRowByCredentialId(it)
-            deleteRowByKeyId(it)
-        }
-    }
+    suspend fun deletePasskeyRowsInTransaction(read: List<KeyEntity>): List<String> =
+        read.filter { deletePasskeyRowIfUnchanged(it.id, it.keyId, it.policyRevision, it.sharingPolicy) == 1 }
+            .onEach { deleteMetadataRowByCredentialId(it.keyId) }
+            .map { it.keyId }
+
+    /**
+     * Raw conditional key row delete: 1 when that row still has that policy
+     * at that revision, else 0; call [deletePasskeyRows].
+     */
+    @RawKeyRowWrite
+    @Query(
+        """
+        DELETE FROM keys
+        WHERE id = :id AND key_id = :keyId AND policy_revision = :policyRevision
+            AND sharing_policy = :policy
+        """
+    )
+    suspend fun deletePasskeyRowIfUnchanged(id: Long, keyId: String, policyRevision: Long, policy: SharingPolicyType): Int
 
     /** Raw `credential_metadata` delete; call [deletePasskeyRows]. */
     @RawKeyRowWrite

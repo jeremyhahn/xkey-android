@@ -21,6 +21,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -35,7 +36,8 @@ import org.robolectric.annotation.Config
 
 /**
  * The passkey rows a BLE registration replaces go in one Room transaction:
- * each passkey's `credential_metadata` row and key row, all or none.
+ * each passkey's `credential_metadata` row and key row, all or none, and
+ * only a passkey whose sharing policy is still the one its caller read.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -59,7 +61,8 @@ class PasskeyRowsTransactionTest {
                         keySizeBits = 256,
                         source = "local",
                         rpId = "example.com",
-                        isDiscoverable = true
+                        isDiscoverable = true,
+                        sharingPolicy = SharingPolicyType.ALL_PEERS
                     )
                 )
                 database.credentialMetadataDao().insert(
@@ -82,10 +85,14 @@ class PasskeyRowsTransactionTest {
     @After
     fun tearDown() = database.close()
 
+    private suspend fun read(vararg keyIds: String): List<KeyEntity> =
+        keyIds.map { requireNotNull(database.keyDao().getByKeyId(it)) }
+
     @Test
     fun `deletePasskeyRows removes each passkey's metadata row and key row`() = runBlocking {
-        database.keyDao().deletePasskeyRows(listOf("a", "b"))
+        val removed = database.keyDao().deletePasskeyRows(read("a", "b"))
 
+        assertEquals(listOf("a", "b"), removed)
         listOf("a", "b").forEach {
             assertNull(database.keyDao().getByKeyId(it))
             assertNull(database.credentialMetadataDao().getByCredentialId(it))
@@ -100,7 +107,7 @@ class PasskeyRowsTransactionTest {
                 "BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"
         )
 
-        val thrown = runCatching { database.keyDao().deletePasskeyRows(listOf("a", "b")) }.exceptionOrNull()
+        val thrown = runCatching { database.keyDao().deletePasskeyRows(read("a", "b")) }.exceptionOrNull()
 
         assertTrue("the delete must fail, got $thrown", thrown != null)
         listOf("a", "b").forEach {
@@ -108,5 +115,36 @@ class PasskeyRowsTransactionTest {
             assertNotNull("metadata row $it must stay", database.credentialMetadataDao().getByCredentialId(it))
         }
         assertEquals(2, database.keyDao().countAll())
+    }
+
+    @Test
+    fun `a passkey whose policy changed since it was read keeps both its rows`() = runBlocking {
+        val asRead = read("a", "b")
+        database.keyDao().updateSharingPolicy("a", SharingPolicyType.PRIVATE)
+        // Changed away and back: the same policy, but a later revision.
+        database.keyDao().updateSharingPolicy("b", SharingPolicyType.SELECTED_PEERS)
+        database.keyDao().updateSharingPolicy("b", SharingPolicyType.ALL_PEERS)
+
+        val removed = database.keyDao().deletePasskeyRows(asRead)
+
+        assertEquals(emptyList<String>(), removed)
+        listOf("a", "b").forEach {
+            assertNotNull("key row $it must stay", database.keyDao().getByKeyId(it))
+            assertNotNull("metadata row $it must stay", database.credentialMetadataDao().getByCredentialId(it))
+        }
+    }
+
+    @Test
+    fun `only the passkeys still as read go`() = runBlocking {
+        val asRead = read("a", "b")
+        database.keyDao().updateSharingPolicy("a", SharingPolicyType.PRIVATE)
+
+        val removed = database.keyDao().deletePasskeyRows(asRead)
+
+        assertEquals(listOf("b"), removed)
+        assertNotNull(database.keyDao().getByKeyId("a"))
+        assertNotNull(database.credentialMetadataDao().getByCredentialId("a"))
+        assertNull(database.keyDao().getByKeyId("b"))
+        assertNull(database.credentialMetadataDao().getByCredentialId("b"))
     }
 }
