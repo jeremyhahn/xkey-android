@@ -1097,17 +1097,7 @@ class OathDesktopActions(
         val desktopId = links.get(peer.peerKeyHex, credential.oathId) ?: return Outcome.NotOnDesktop
         return try {
             val result = RemoteOathClient(peer).oathGenerate(desktopId)
-            // Only a counter-based (HOTP) code may have no deadline. A TOTP
-            // code lives at most one period: a reply without expires_in is
-            // refused, and a longer one is cut to the period.
-            val expiresIn = if (credential.oathType.equals("HOTP", ignoreCase = true)) {
-                result.expiresIn
-            } else {
-                val left = result.expiresIn
-                    ?: return Outcome.Failed("The desktop sent a TOTP code without its expiry")
-                if (credential.periodSeconds > 0) minOf(left, credential.periodSeconds) else left
-            }
-            Outcome.Code(DesktopCodeDeadline(result.code, expiresIn, clock))
+            Outcome.Code(DesktopCodeDeadline(result.code, result.expiresIn, clock))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
