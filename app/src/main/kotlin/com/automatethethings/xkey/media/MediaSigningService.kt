@@ -323,7 +323,9 @@ class MediaSigningService : Service() {
 
                 // Hash the media content
                 val contentHash = try {
-                    AutoSignHash.contentHashUri(contentResolver, uri)
+                    // The bytes signMedia stages and checks: the original,
+                    // location included, wherever it is readable.
+                    AutoSignHash.contentHashUri(contentResolver, MediaPublisher.originalUri(this@MediaSigningService, uri) ?: uri)
                 } catch (e: AutoSignHash.TooLargeException) {
                     // Refused, not failed: record it once so a repeated
                     // MediaStore event does not audit it again.

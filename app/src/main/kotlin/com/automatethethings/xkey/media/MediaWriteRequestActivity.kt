@@ -14,7 +14,10 @@
  */
 package com.automatethethings.xkey.media
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -53,6 +56,11 @@ class MediaWriteRequestActivity : ComponentActivity() {
         publish(result.resultCode == Activity.RESULT_OK, requested.toList())
     }
 
+    /** Location access answered (either way): the write request follows; without it nothing is rewritten. */
+    private val locationLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        launchWriteRequest()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (savedInstanceState != null) {
@@ -62,6 +70,19 @@ class MediaWriteRequestActivity : ComponentActivity() {
             if (answered) finishAfter(publication)
             return
         }
+        // A capture is rewritten only from its original bytes, location
+        // included (MediaPublisher.openOriginal): ask for that first.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED
+        ) {
+            locationLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
+            return
+        }
+        launchWriteRequest()
+    }
+
+    /** Ask, in one write request, for every queued capture; finish when none waits. */
+    private fun launchWriteRequest() {
         val request = try {
             MediaWriteAuthorizations.request(applicationContext)
         } catch (e: Exception) {

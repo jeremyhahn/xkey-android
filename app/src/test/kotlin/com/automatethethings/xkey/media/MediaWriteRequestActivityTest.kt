@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.media
 
+import android.Manifest
 import android.app.Activity
 import android.app.Application
 import android.app.PendingIntent
@@ -81,6 +82,7 @@ class MediaWriteRequestActivityTest {
                 PendingIntent.getActivity(context, 0, Intent(), PendingIntent.FLAG_IMMUTABLE)
         }
         MediaWriteAuthorizations.clear(context)
+        shadowOf(context as Application).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
     }
 
     @After
@@ -129,6 +131,25 @@ class MediaWriteRequestActivityTest {
             Thread.sleep(20)
         }
         return done()
+    }
+
+    @Test
+    fun `without location access the screen asks for it before the write request`() {
+        val app = context as Application
+        shadowOf(app).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        queue(first)
+        val controller = open()
+        val shadow = shadowOf(controller.get())
+
+        val asked = shadow.lastRequestedPermission ?: error("location access was not asked for")
+        assertEquals(listOf(Manifest.permission.ACCESS_MEDIA_LOCATION), asked.requestedPermissions.toList())
+        assertEquals("no write request before location access is answered", null, shadow.lastIntentSenderRequest)
+
+        shadowOf(app).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        @Suppress("DEPRECATION")
+        controller.get().onRequestPermissionsResult(asked.requestCode, asked.requestedPermissions, intArrayOf(0))
+
+        assertTrue("the write request follows", shadow.lastIntentSenderRequest != null)
     }
 
     @Test

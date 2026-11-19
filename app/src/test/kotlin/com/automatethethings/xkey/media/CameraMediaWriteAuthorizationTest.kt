@@ -468,4 +468,59 @@ class CameraMediaWriteAuthorizationTest {
         assertEquals(data.toJsonString(), embedded(media.readBytes()))
         assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
     }
+
+    @Test
+    fun `signMedia and a direct granted write both refuse while a recovery is pending`() {
+        val data = data()
+        killMidOverwrite(data)
+        val mixed = media.readBytes()
+        provider.failWrites = true
+        val staged = folder.newFile("staged-direct.png").apply { writeBytes(original) }
+
+        assertThrows(MediaPublisher.RecoveryPendingException::class.java) {
+            XmpMetadataHelper.signMedia(context, uri, capture.path, data)
+        }
+        assertThrows(MediaPublisher.RecoveryPendingException::class.java) {
+            MediaPublisher.writeGranted(context, uri, staged, data.contentHash, "image/png")
+        }
+        assertArrayEquals(mixed, media.readBytes())
+        assertTrue("the record stays for a later recovery", MediaPublisher.recoveryPending(context, uri))
+    }
+
+    @Test
+    fun `a denied request keeps a capture that is not restored yet`() {
+        killMidOverwrite(data())
+        granted = false
+
+        MediaWriteAuthorizations.deny(context, listOf(uri.toString()))
+
+        assertEquals(listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri })
+    }
+
+    @Test
+    fun `a granted write called directly refuses without location access`() {
+        val geotagged = useGeotaggedJpeg()
+        shadowOf(context as Application).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        granted = true
+        val staged = folder.newFile("staged-direct.jpg").apply { writeBytes(geotagged) }
+
+        assertThrows(MediaPublisher.OriginalUnavailableException::class.java) {
+            MediaPublisher.writeGranted(context, uri, staged, AutoSignHash.contentHashFile(media, "image/jpeg"), "image/jpeg")
+        }
+        assertArrayEquals(geotagged, media.readBytes())
+    }
+
+    @Test
+    fun `a capture is staged, backed up and checked only through its original`() {
+        val rel = "src/main/kotlin"
+        val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }
+            ?: error("$rel not found from ${File(".").absolutePath}")
+        val publisher = dir.walkTopDown().single { it.name == "MediaPublisher.kt" }.readText()
+        assertEquals("the publisher reads a capture only in openOriginal", 1, Regex("openInputStream\\(").findAll(publisher).count())
+        assertTrue("openOriginal reads the original URI", "openInputStream(original)" in publisher)
+        val helper = dir.walkTopDown().single { it.name == "XmpMetadataHelper.kt" }.readText()
+        val signMedia = helper.substringAfter("fun signMedia(").substringBefore("fun readSignature(")
+        assertTrue("signMedia stages through openOriginal", "MediaPublisher.openOriginal(" in signMedia)
+        assertTrue("signMedia never reads the redacted view", "openInputStream(" !in signMedia)
+    }
 }

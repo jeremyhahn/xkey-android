@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.media
 
+import android.Manifest
 import android.app.PendingIntent
 import android.content.ContentResolver
 import android.content.Context
@@ -27,6 +28,7 @@ import android.provider.MediaStore
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
 
 /**
@@ -200,6 +202,55 @@ object MediaPublisher {
     /** The request the user approves to let xKey write [targets]; an activity launches its intent sender. */
     fun writeRequest(context: Context, targets: List<Uri>): PendingIntent = mediaStore.createWriteRequest(context, targets)
 
+    /**
+     * [target] can be read only as MediaStore's redacted view, its location
+     * left out, because xKey lacks ACCESS_MEDIA_LOCATION: writing that view
+     * back, or keeping it as the backup, would erase the location for good,
+     * so nothing is staged, backed up or written.
+     */
+    class OriginalUnavailableException(val target: Uri) :
+        IOException("$target can be read only without its location; rewriting it needs location access")
+
+    /**
+     * The URI that reads [target] whole, its location metadata included: a
+     * content URI's original ([MediaStore.setRequireOriginal]) from Android
+     * 10, which needs ACCESS_MEDIA_LOCATION, or [target] itself where nothing
+     * is redacted (another scheme, or earlier Android). Null when that
+     * permission is missing.
+     */
+    fun originalUri(context: Context, target: Uri): Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return target
+        if (target.scheme != ContentResolver.SCHEME_CONTENT) return target
+        if (context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return null
+        }
+        return MediaStore.setRequireOriginal(target)
+    }
+
+    /**
+     * The one read of a capture xKey stages, backs up or checks before and
+     * after writing it in place: its original bytes ([originalUri]), never
+     * the redacted view. Throws [OriginalUnavailableException] when only
+     * that view is readable.
+     */
+    fun openOriginal(context: Context, target: Uri): InputStream {
+        val original = originalUri(context, target) ?: throw OriginalUnavailableException(target)
+        return context.contentResolver.openInputStream(original) ?: throw IOException("cannot read $target")
+    }
+
+    /**
+     * A granted write of [target] an earlier call or process was interrupted
+     * in could not be put back yet (no write grant now, or the restore
+     * failed): the capture may be part-written, so nothing stages or writes
+     * it until a later recovery restores [backup].
+     */
+    class RecoveryPendingException(val target: Uri, val backup: File) :
+        IOException("$target is not restored yet; its prior bytes are kept at ${backup.path}")
+
+    /** Whether [target] has a granted write recorded that is not yet put back. */
+    fun recoveryPending(context: Context, target: Uri): Boolean =
+        GrantedWriteJournal(recoveryDirectory(context), target).recorded()
+
     /** Writing [target] needs a write grant the user has not given. */
     class WriteAuthorizationRequiredException(val target: Uri) :
         IOException("writing $target needs the user's write access")
@@ -228,13 +279,17 @@ object MediaPublisher {
      */
     fun writeGranted(context: Context, target: Uri, staged: File, sourceHash: String, mimeType: String) = synchronized(grantedWrites) {
         if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) throw WriteAuthorizationRequiredException(target)
+        // The backup must be the capture whole, location included, or the
+        // write would leave nothing to put the location back from.
+        if (originalUri(context, target) == null) throw OriginalUnavailableException(target)
         val resolver = context.contentResolver
-        // A write of this capture an earlier process died in is put back first.
+        // A write of this capture an earlier process died in is put back
+        // first; one that cannot be yet throws RecoveryPendingException.
         recoverInterruptedWrite(context, target)
         val journal = GrantedWriteJournal(recoveryDirectory(context), target)
         val partial = File.createTempFile(GrantedWriteJournal.PREFIX, ".part", recoveryDirectory(context))
         try {
-            (resolver.openInputStream(target) ?: throw IOException("cannot read $target")).use { input ->
+            openOriginal(context, target).use { input ->
                 FileOutputStream(partial).use { out ->
                     input.copyTo(out)
                     out.fd.sync()
@@ -257,7 +312,7 @@ object MediaPublisher {
         try {
             overwrite(resolver, target, staged) { touched = true }
         } catch (e: Throwable) {
-            val intact = !touched || restore(resolver, target, journal.backup)
+            val intact = !touched || restore(context, target, journal.backup)
             // One that could not be put back keeps its record: the next start or retry restores it.
             if (intact) journal.clear()
             throw MediaPublishException(staged, e, original = if (intact) null else journal.backup)
@@ -277,7 +332,8 @@ object MediaPublisher {
     /**
      * Run [block] holding the granted-write lock, once any write of
      * [target] an earlier process died in has been put back: what [block]
-     * stages is then the capture as it was, never one half-written.
+     * stages is then the capture as it was, never one half-written. When it
+     * cannot be put back yet, [block] does not run: [RecoveryPendingException].
      */
     inline fun <T> grantedSection(context: Context, target: Uri, block: () -> T): T = synchronized(grantedWrites) {
         recoverInterruptedWrite(context, target)
@@ -295,17 +351,28 @@ object MediaPublisher {
         GrantedWriteJournal.all(recoveryDirectory(context)).forEach { recover(context, it) }
     }
 
-    /** [recoverInterruptedWrites] for [target] alone. */
+    /**
+     * [recoverInterruptedWrites] for [target] alone, which must succeed
+     * before anything stages or writes it: a capture left part-written
+     * that cannot be put back yet throws [RecoveryPendingException], and its
+     * record and backup stay for a later call.
+     */
     fun recoverInterruptedWrite(context: Context, target: Uri) = synchronized(grantedWrites) {
         val journal = GrantedWriteJournal(recoveryDirectory(context), target)
-        if (journal.recorded()) recover(context, journal)
+        if (journal.recorded() && !recover(context, journal)) throw RecoveryPendingException(target, journal.backup)
     }
 
-    private fun recover(context: Context, journal: GrantedWriteJournal) {
-        val target = journal.target() ?: return journal.clear()
-        if (!journal.backup.isFile) return journal.clear()
-        if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) return
-        if (restore(context.contentResolver, target, journal.backup)) journal.clear()
+    /** Put back what [journal] records; true once nothing is left to put back. */
+    private fun recover(context: Context, journal: GrantedWriteJournal): Boolean {
+        val target = journal.target()
+        if (target == null || !journal.backup.isFile) {
+            journal.clear()
+            return true
+        }
+        if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) return false
+        if (!restore(context, target, journal.backup)) return false
+        journal.clear()
+        return true
     }
 
     /**
@@ -359,14 +426,14 @@ object MediaPublisher {
      * thread's interrupt held back (a few tries, should another arrive) and
      * re-asserts it after. True only when [target] reads back as [backup].
      */
-    private fun restore(resolver: ContentResolver, target: Uri, backup: File): Boolean {
+    private fun restore(context: Context, target: Uri, backup: File): Boolean {
         var interrupted = false
         try {
             repeat(RESTORE_ATTEMPTS) {
                 if (Thread.interrupted()) interrupted = true
                 val restored = runCatching {
-                    overwrite(resolver, target, backup) {}
-                    sameBytes(resolver, target, backup)
+                    overwrite(context.contentResolver, target, backup) {}
+                    sameBytes(context, target, backup)
                 }.getOrDefault(false)
                 if (restored) return true
             }
@@ -378,9 +445,9 @@ object MediaPublisher {
     }
 
     /** Whether the content at [target] is exactly [file]'s bytes. */
-    private fun sameBytes(resolver: ContentResolver, target: Uri, file: File): Boolean {
-        val input = resolver.openInputStream(target) ?: return false
-        return input.buffered().use { content ->
+    private fun sameBytes(context: Context, target: Uri, file: File): Boolean {
+        // The original, as the backup was read: a redacted view never matches it.
+        return openOriginal(context, target).buffered().use { content ->
             file.inputStream().buffered().use { expected ->
                 var a: Int
                 do {

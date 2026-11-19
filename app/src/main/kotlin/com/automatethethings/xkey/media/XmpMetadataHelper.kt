@@ -137,8 +137,9 @@ object XmpMetadataHelper {
             val staged = File.createTempFile("sign-", stagingSuffix(mimeType), MediaPublisher.recoveryDirectory(context))
             var kept = false
             try {
-                val input = context.contentResolver.openInputStream(uri) ?: throw IOException("cannot read $uri")
-                input.use { source -> staged.outputStream().use { source.copyTo(it) } }
+                // The capture whole, location included: the signed bytes
+                // written over it are made from this copy.
+                MediaPublisher.openOriginal(context, uri).use { source -> staged.outputStream().use { source.copyTo(it) } }
                 if (AutoSignHash.contentHashFile(staged, mimeType) != data.contentHash) throw SourceChangedException()
                 writeSignatureLocked(staged.path, data)
                 val sidecar = File(getSidecarPath(staged.path))

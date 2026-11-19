@@ -95,6 +95,11 @@ object MediaWriteAuthorizations {
                 // The capture is whole and the retry stages afresh; a copy that could not be put back is kept.
                 if (e.original == null) e.kept.delete()
                 continue
+            } catch (e: MediaPublisher.RecoveryPendingException) {
+                // Part-written and not put back yet: nothing was staged, and the
+                // request stays queued so a later grant can restore and sign it.
+                Log.w(TAG, "${write.uri} is not restored yet; it stays queued", e)
+                continue
             } catch (e: Exception) {
                 Log.w(TAG, "Not signing ${write.uri}", e)
                 null
@@ -108,11 +113,13 @@ object MediaWriteAuthorizations {
     /**
      * The user refused the write request for [requested]: those captures
      * stay unsigned and leave the queue. Any queued after the request was
-     * shown are kept for the next one.
+     * shown are kept for the next one, and so is one a granted write left
+     * part-written: only a later grant can put it back.
      */
     fun deny(context: Context, requested: Collection<String>) {
         val refused = pending(context).filter {
             it.uri in requested &&
+                !MediaPublisher.recoveryPending(context, Uri.parse(it.uri)) &&
                 MediaPublisher.writeAccess(context, Uri.parse(it.uri)) == MediaPublisher.MediaWriteAccess.NEEDS_GRANT
         }
         refused.forEach { remove(context, it.uri) }
