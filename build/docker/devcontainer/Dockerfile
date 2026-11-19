@@ -20,7 +20,11 @@ FROM ${BASE_IMAGE} AS fetch
 ARG APT_PROXY=
 ARG TARGETARCH
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
-RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \
+# 80retries: every apt-get in this stage retries a transient mirror error
+# (an HTTP 500 on one index or package) instead of failing the build. base
+# writes the same file, and toolchain and integration inherit it from base.
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries \
+ && if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy
 COPY scripts/tool-pins.sh /tmp/tool-pins.sh
@@ -215,7 +219,11 @@ RUN rm -rf build app/build .gradle .kotlin "${GRADLE_USER_HOME}"; \
 # ---- base: the toolchain, the dependency cache and a non-root user ----
 FROM ${BASE_IMAGE} AS base
 ARG APT_PROXY=
-RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \
+# 80retries (as in fetch): kept in the image, so the apt-get calls of this
+# stage and of toolchain and integration (FROM base) all retry transient
+# mirror errors.
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries \
+ && if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \
  && apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy \
  && useradd --uid 1000 --create-home --shell /bin/bash builder \
