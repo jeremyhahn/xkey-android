@@ -147,9 +147,13 @@ mkdir -p "${REPO}" "${T}/parts" "${T}/prefs"
 } > "${REPO}/Release"
 : > "${T}/empty.conf"
 
-# stub <fail_n>: start the stub mirror; sets PORT and STUB_PID.
+# stub <fail_n>: start the stub mirror; sets PORT and STUB_PID. Fails, with
+# PORT empty, unless the stub writes a port within 60 s and accepts a TCP
+# connection on it: a stub that never starts is a failure, never a skip.
 stub() {
 	[ -z "${STUB_PID}" ] || { kill "${STUB_PID}" 2> /dev/null; wait "${STUB_PID}" 2> /dev/null; }
+	STUB_PID=
+	PORT=
 	rm -f "${T}/port"
 	java "${STUB}" "${REPO}" "$1" "${T}/port" 2>> "${T}/stub.log" &
 	STUB_PID=$!
@@ -159,8 +163,37 @@ stub() {
 		sleep 0.5
 	done
 	PORT=$(cat "${T}/port" 2> /dev/null) || PORT=
-	[ -n "${PORT}" ]
+	[[ ${PORT} =~ ^[0-9]+$ ]] || { PORT=; return 1; }
+	# Listening: a connection opens (bash's /dev/tcp, no extra tool).
+	if ! (exec 3<> "/dev/tcp/127.0.0.1/${PORT}") 2> /dev/null; then
+		PORT=
+		return 1
+	fi
 }
+
+# with_stub <fail_n> <name> <command...>: start a stub mirror and check the
+# command against it; a stub that does not start is a FAIL line for name.
+with_stub() {
+	local fail_n=$1 name=$2
+	shift 2
+	if ! stub "${fail_n}"; then
+		echo "FAIL ${name} (the stub mirror did not start)"
+		FAILED=1
+		return
+	fi
+	check "${name}" "$@"
+}
+
+# stub_cannot_start: with a stub path that does not exist, stub fails and
+# with_stub prints a FAIL line and sets FAILED, even for a command that
+# would pass (true). Runs in a subshell, so the real FAILED is untouched.
+stub_cannot_start() (
+	STUB=${T}/no-such-stub.java STUB_PID='' FAILED=0
+	! stub 0 || exit 1
+	[ -z "${PORT}" ] || exit 1
+	out=$(with_stub 0 probe true; echo "FAILED=${FAILED}")
+	[[ ${out} == *"FAIL probe (the stub mirror did not start)"* && ${out} == *FAILED=1 ]]
+)
 
 # update <apt-get args...>: apt-get update against the stub, as this user,
 # with private state, cache, sources and config, and the image builds'
@@ -186,10 +219,12 @@ if ! command -v apt-get > /dev/null || ! command -v java > /dev/null; then
 	echo "FAIL apt-get and java are needed for the behaviour check"
 	FAILED=1
 else
-	stub 0 && check "a healthy mirror updates (no retry needed)" update -o Acquire::Retries=0
-	stub 2 && check "two HTTP 500s then success: apt-retries.conf recovers" update -c "${CONF}"
-	stub 2 && check "two HTTP 500s then success: Acquire::Retries 0 fails" not update -o Acquire::Retries=0
-	stub -1 && check "a mirror that always returns 500 still fails" not update -c "${CONF}"
+	# The self-check: a stub that cannot start fails its check and the test.
+	check "a stub that cannot start is a failure, not a skip" stub_cannot_start
+	with_stub 0 "a healthy mirror updates (no retry needed)" update -o Acquire::Retries=0
+	with_stub 2 "two HTTP 500s then success: apt-retries.conf recovers" update -c "${CONF}"
+	with_stub 2 "two HTTP 500s then success: Acquire::Retries 0 fails" not update -o Acquire::Retries=0
+	with_stub -1 "a mirror that always returns 500 still fails" not update -c "${CONF}"
 fi
 
 if [ "${FAILED}" != 0 ]; then
