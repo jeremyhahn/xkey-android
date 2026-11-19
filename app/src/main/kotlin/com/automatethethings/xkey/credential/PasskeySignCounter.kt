@@ -19,7 +19,6 @@ import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * The one WebAuthn signature counter of a passkey.
@@ -49,7 +48,7 @@ class PasskeySignCounter(
      * alone. If a write fails the error propagates and the caller must not
      * sign.
      */
-    suspend fun next(credentialId: String): Long = lockFor(credentialId).withLock {
+    suspend fun next(credentialId: String): Long = withCounterLock(credentialId) {
         val metadataCount = credentialDao.getByCredentialId(credentialId)?.signCount ?: 0
         val keyCount = keyDao.getByKeyId(credentialId)?.signCount ?: 0
         val next = maxOf(metadataCount, keyCount) + 1
@@ -62,14 +61,39 @@ class PasskeySignCounter(
         /**
          * One lock per credential id, shared by every instance in the
          * process: the provider service and the protocol handler each build
-         * their own counter.
+         * their own counter. An entry lives only while a caller holds or
+         * waits for its lock, so credentials that come and go leave nothing
+         * behind. Guarded by itself.
          */
-        private val locks = ConcurrentHashMap<String, Mutex>()
+        private val locks = HashMap<String, CounterLock>()
+
+        /** A credential's lock and the callers holding or awaiting it. */
+        private class CounterLock {
+            val mutex = Mutex()
+            var users = 0
+        }
 
         /** The number of credential ids the registry holds a lock for. */
         @VisibleForTesting
-        internal fun lockCount(): Int = locks.size
+        internal fun lockCount(): Int = synchronized(locks) { locks.size }
 
-        fun lockFor(credentialId: String): Mutex = locks.computeIfAbsent(credentialId) { Mutex() }
+        /**
+         * Runs [block] under [credentialId]'s lock, dropping the registry
+         * entry when its last user leaves, whether [block] returns, throws
+         * or is cancelled, and whether the caller held the lock or was still
+         * waiting for it.
+         */
+        private suspend fun <T> withCounterLock(credentialId: String, block: suspend () -> T): T {
+            val lock = synchronized(locks) {
+                locks.getOrPut(credentialId) { CounterLock() }.also { it.users++ }
+            }
+            try {
+                return lock.mutex.withLock { block() }
+            } finally {
+                synchronized(locks) {
+                    if (--lock.users == 0) locks.remove(credentialId)
+                }
+            }
+        }
     }
 }
