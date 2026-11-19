@@ -158,6 +158,24 @@ class UnmigratedSoftwareKeyDeletionTest {
         assertEquals("the replay left the tombstone", null, tables.deletions.value[ID])
     }
 
+    /**
+     * The bypass guard of the one choke point: every software-store record
+     * a delete reads or removes goes through [SoftwareKeyStore]'s record
+     * walk, and the deletion path builds no store of its own past its seam.
+     */
+    @Test
+    fun everyDeleteOfSoftwareMaterialGoesThroughTheRecordWalk() {
+        val main = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val store = File(main, "com/automatethethings/xkey/crypto/SoftwareKeyStore.kt").readText()
+        assertEquals("a file of the store is unlinked outside deleteRecord", 2, Regex("""\bunlink\(""").findAll(store).count())
+        assertTrue("generation reads past the record walk", "return records(keyId).values" in store)
+        assertTrue("deleteGeneration reads past the record walk", "for ((stem, tag) in records(keyId)) if (doomed(tag)) deleteRecord(stem)" in store)
+        assertTrue("delete skips the legacy records", "for (stem in listOf(own) + legacy.sorted()) deleteRecord(stem)" in store)
+        assertFalse("the store renames a file past its seam", Regex("""\.renameTo\(""").findAll(store).count() > 1)
+        val replay = File(main, "com/automatethethings/xkey/storage/KeyDeletionReplay.kt").readText()
+        assertEquals("the deletion path builds a store past its seam", 1, Regex("""SoftwareKeyStore\(""").findAll(replay).count())
+    }
+
     private companion object {
         const val ID = "k/legacy"
         const val LEGACY = "k_legacy"

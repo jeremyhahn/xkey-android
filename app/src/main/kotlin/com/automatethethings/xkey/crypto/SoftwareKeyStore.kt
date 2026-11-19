@@ -371,19 +371,20 @@ class SoftwareKeyStore(
     private fun requireValidKeyId(keyId: String) =
         require(isValidKeyId(keyId)) { "Invalid key id: a software key's id must be non-empty" }
 
-    /** Delete a software key by id. */
+    /**
+     * Delete a software key by id: its record under its digest name, and
+     * every older build's record naming it that could not be migrated
+     * (#255 review r9), each through [deleteRecord].
+     */
     fun delete(keyId: String) {
         migrateLegacyRecords()
-        val id = fileId(keyId)
-        // The material first, and the metadata only once it is gone (#255
-        // verify r5): a failed material unlink leaves the record whole, so
-        // the delete's replay reads it as this id's key and retries.
-        val material = File(dir, "$id.key")
-        try {
-            if (unlink(material) || filePresence(material) == KeyPresence.ABSENT) unlink(File(dir, "$id.meta"))
-        } finally {
-            wrote()
+        val own = fileId(keyId)
+        val legacy = try {
+            legacyIndex(keyId).named[keyId].orEmpty() - own
+        } catch (e: KeyPresenceUnreadableException) {
+            emptySet()
         }
+        for (stem in listOf(own) + legacy.sorted()) deleteRecord(stem)
     }
 
     /**
@@ -393,13 +394,45 @@ class SoftwareKeyStore(
      * [delete] stopped between its two unlinks; [put] writes the material
      * first, so nothing else leaves one) has a [METADATA_ONLY] generation,
      * so a delete tracks it as well as the material (#255 verify r2y). Null
-     * if neither file is stored.
+     * if no record of the id is stored.
+     *
+     * The one read of what a delete owes ([records], #255 review r9): an
+     * older build's record of [keyId] that could not be moved onto its
+     * digest name is the id's material too, so its digest is part of the
+     * generation (comma-separated, sorted), and a store [presence] cannot
+     * vouch for refuses here as it does there. A record's digest names its
+     * content, never its file, so the record moved onto the digest name
+     * later is still the generation a tombstone recorded.
      */
     fun generation(keyId: String): String? {
         migrateLegacyRecords()
-        val id = fileId(keyId)
-        val keyFile = File(dir, "$id.key")
-        val metaFile = File(dir, "$id.meta")
+        return records(keyId).values.distinct().sorted().takeIf { it.isNotEmpty() }?.joinToString(GENERATION_SEPARATOR)
+    }
+
+    /**
+     * Every record of [keyId], by file stem, with its generation: the
+     * record under its digest name and each older build's record whose
+     * metadata names it. Refuses ([KeyPresenceUnreadableException]) exactly
+     * where [presence] reads [KeyPresence.UNREADABLE], so the two never
+     * disagree on whether the id holds material.
+     */
+    private fun records(keyId: String): Map<String, String> {
+        val own = fileId(keyId)
+        when (recordOf(keyId)) {
+            KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(keyId, null)
+            KeyPresence.ABSENT -> if (legacyRecordOf(keyId) == KeyPresence.UNREADABLE) throw KeyPresenceUnreadableException(keyId, null)
+            KeyPresence.PRESENT -> {}
+        }
+        val legacy = legacyIndex(keyId).named[keyId].orEmpty() - own
+        val records = LinkedHashMap<String, String>()
+        for (stem in listOf(own) + legacy.sorted()) recordGeneration(stem, keyId)?.let { records[stem] = it }
+        return records
+    }
+
+    /** The generation of the record named [stem]: its material's digest, or its metadata's when it has none. */
+    private fun recordGeneration(stem: String, keyId: String): String? {
+        val keyFile = File(dir, "$stem.key")
+        val metaFile = File(dir, "$stem.meta")
         val files = listOf(filePresence(keyFile), filePresence(metaFile))
         if (KeyPresence.UNREADABLE in files) throw KeyPresenceUnreadableException(keyId, null)
         return when {
@@ -412,19 +445,38 @@ class SoftwareKeyStore(
     }
 
     /**
+     * Unlinks the record named [stem]: the material first, and the metadata
+     * only once it is gone (#255 verify r5), so a failed material unlink
+     * leaves the record whole and the delete's replay reads it as this id's
+     * key and retries.
+     */
+    private fun deleteRecord(stem: String) {
+        val material = File(dir, "$stem.key")
+        try {
+            if (unlink(material) || filePresence(material) == KeyPresence.ABSENT) unlink(File(dir, "$stem.meta"))
+        } finally {
+            wrote()
+        }
+    }
+
+    /**
      * Delete the software key [keyId] only if it is still at [generation];
      * a key stored again since is left. A metadata-only record holds no
      * material and is what an interrupted delete of some generation left, so
      * it is retired whatever [generation] names: the replay of a delete that
      * stopped between its unlinks completes it, never reserving the id for
-     * good. Returns true when no material of [generation] and no
-     * metadata-only record remains.
+     * good. Each record of the id ([records]) is told apart by its own
+     * generation, so an older build's record that could not be migrated is
+     * deleted with the key, and one moved onto the digest name since is
+     * still the one [generation] recorded (#255 review r9). Returns true
+     * when no record of [generation] and no metadata-only record remains.
      */
     fun deleteGeneration(keyId: String, generation: String): Boolean {
-        val current = generation(keyId)
-        if (current == generation || current?.startsWith(METADATA_ONLY) == true) delete(keyId)
-        val left = generation(keyId)
-        return left != generation && left?.startsWith(METADATA_ONLY) != true
+        migrateLegacyRecords()
+        val owed = generation.split(GENERATION_SEPARATOR).toSet()
+        val doomed = { tag: String -> tag in owed || tag.startsWith(METADATA_ONLY) }
+        for ((stem, tag) in records(keyId)) if (doomed(tag)) deleteRecord(stem)
+        return records(keyId).values.none(doomed)
     }
 
     /** Filename stem for [keyId]: a digest, so distinct ids stay distinct. */
@@ -497,5 +549,8 @@ class SoftwareKeyStore(
 
         /** Prefix of a metadata-only record's [generation]. */
         const val METADATA_ONLY = "meta-only:"
+
+        /** Between the record generations of one [generation]: no digest or [METADATA_ONLY] tag holds it. */
+        private const val GENERATION_SEPARATOR = ","
     }
 }
