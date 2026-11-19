@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.media
 
 import android.content.ContentResolver
+import android.content.Context
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
@@ -69,6 +70,11 @@ object XmpMetadataHelper {
     private fun lockForKey(identity: String): Any = pathLocks[Math.floorMod(identity.hashCode(), pathLocks.size)]
 
     fun writeSignature(filePath: String, data: ContentAuthenticityData): Unit = synchronized(lockFor(filePath)) {
+        writeSignatureLocked(filePath, data)
+    }
+
+    /** [writeSignature] for a caller that already holds the lock of the media it writes. */
+    private fun writeSignatureLocked(filePath: String, data: ContentAuthenticityData) {
         val mimeType = getMimeType(filePath)
         val format = XmpContainers.formatOf(mimeType)
         when {
@@ -78,6 +84,77 @@ object XmpMetadataHelper {
             format != null && writeEmbeddedSignature(filePath, format, data) -> Unit
             else -> {
                 writeSidecarSignature(filePath, data)
+            }
+        }
+    }
+
+    /** What [signMedia] did with a MediaStore item. */
+    enum class MediaSignResult {
+        /** The signature is in the media (or its sidecar). */
+        Signed,
+
+        /** Another app owns the media and the user has not granted xKey write access: nothing was written. */
+        NeedsWriteAuthorization
+    }
+
+    /**
+     * Sign the MediaStore item at [uri], whose file is [filePath] when
+     * MediaStore names one: the auto-signer's one write. Media xKey owns is
+     * written by path ([writeSignature]). Media another app owns, a camera
+     * capture, is only ever written through its content URI once the user
+     * granted access ([MediaPublisher.writeGranted]): without that grant this
+     * returns [MediaSignResult.NeedsWriteAuthorization] and writes nothing,
+     * and the caller queues a write request ([MediaWriteAuthorizations]).
+     * With it the media is copied out, checked against [data]'s content hash
+     * ([SourceChangedException] when it changed since it was signed),
+     * signed and written back. A format that carries no in-band signature
+     * takes a sidecar, a file of xKey's own beside the media, which needs no
+     * grant.
+     */
+    fun signMedia(context: Context, uri: Uri, filePath: String?, data: ContentAuthenticityData): MediaSignResult {
+        val access = MediaPublisher.writeAccess(context, uri)
+        if (access == MediaPublisher.MediaWriteAccess.OWNED && filePath != null) {
+            writeSignature(filePath, data)
+            return MediaSignResult.Signed
+        }
+        // A provider that cannot type the item falls back to its file's suffix.
+        val providerType = try {
+            context.contentResolver.getType(uri)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        val mimeType = providerType ?: filePath?.let(::getMimeType) ?: "application/octet-stream"
+        if (!isJpeg(mimeType) && XmpContainers.formatOf(mimeType) == null) {
+            val path = filePath ?: throw IOException("no file holds $uri, so its sidecar has nowhere to go")
+            synchronized(lockFor(path)) { writeSidecarSignature(path, data) }
+            return MediaSignResult.Signed
+        }
+        if (access == MediaPublisher.MediaWriteAccess.NEEDS_GRANT) return MediaSignResult.NeedsWriteAuthorization
+        val lock = if (filePath != null) lockFor(filePath) else lockForKey(uri.toString())
+        synchronized(lock) {
+            val staged = File.createTempFile("sign-", stagingSuffix(mimeType), MediaPublisher.recoveryDirectory(context))
+            var kept = false
+            try {
+                val input = context.contentResolver.openInputStream(uri) ?: throw IOException("cannot read $uri")
+                input.use { source -> staged.outputStream().use { source.copyTo(it) } }
+                if (AutoSignHash.contentHashFile(staged, mimeType) != data.contentHash) throw SourceChangedException()
+                writeSignatureLocked(staged.path, data)
+                val sidecar = File(getSidecarPath(staged.path))
+                if (sidecar.exists()) {
+                    // The container refused the packet: the media stays as it
+                    // is and the signature goes beside it.
+                    val path = filePath ?: throw IOException("no file holds $uri, so its sidecar has nowhere to go")
+                    MediaPublisher.replaceFile(File(getSidecarPath(path))) { temp -> sidecar.copyTo(temp, overwrite = true); true }
+                    return MediaSignResult.Signed
+                }
+                MediaPublisher.writeGranted(context, uri, staged)
+                return MediaSignResult.Signed
+            } catch (e: MediaPublishException) {
+                kept = true
+                throw e
+            } finally {
+                File(getSidecarPath(staged.path)).delete()
+                if (!kept) staged.delete()
             }
         }
     }

@@ -14,9 +14,15 @@
  */
 package com.automatethethings.xkey.media
 
+import android.app.PendingIntent
 import android.content.ContentResolver
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.os.Process
+import android.provider.MediaStore
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -41,6 +47,11 @@ class MediaPublishException(val kept: File, cause: Throwable) :
  * new, never half ([replaceFile], [replace]). Any other provider offers no
  * atomic replace, so the caller writes a separate copy to a document the
  * user creates through a save picker ([writeCopy], [openCreated]).
+ *
+ * Media another app owns, a camera capture, is not xKey's to rename over:
+ * the user grants write access through a MediaStore write request
+ * ([writeAccess], [writeRequest]) and the new bytes go through its content
+ * URI ([writeGranted]), the one write MediaStore allows there.
  *
  * The bytes being published stay on disk until the write and the close of
  * the destination have both succeeded; a failure keeps them for recovery
@@ -124,4 +135,89 @@ object MediaPublisher {
      */
     fun openCreated(resolver: ContentResolver, target: Uri): OutputStream =
         resolver.openOutputStream(target, "wt") ?: throw IOException("cannot write $target")
+
+    /** How xKey may write the MediaStore item at a content URI. */
+    enum class MediaWriteAccess {
+        /** xKey created it (or storage is not scoped): its file is replaced by path. */
+        OWNED,
+
+        /** Another app owns it and the user granted xKey write access to it. */
+        GRANTED,
+
+        /** Another app owns it (a camera capture): the user must grant write access first. */
+        NEEDS_GRANT
+    }
+
+    /** The MediaStore facts [writeAccess] reads; settable so tests can stand in for the platform. */
+    interface MediaStoreAccess {
+        /** The package that owns [uri] (`OWNER_PACKAGE_NAME`), or null when MediaStore names none. */
+        fun ownerPackage(context: Context, uri: Uri): String?
+
+        /** Whether this process holds write access to [uri] (a granted write request). */
+        fun hasWriteGrant(context: Context, uri: Uri): Boolean
+
+        /** The user-approved write request for [uris] (`MediaStore.createWriteRequest`). */
+        fun createWriteRequest(context: Context, uris: List<Uri>): PendingIntent
+    }
+
+    /** The platform's MediaStore. */
+    object PlatformMediaStore : MediaStoreAccess {
+        override fun ownerPackage(context: Context, uri: Uri): String? {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+            return context.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.OWNER_PACKAGE_NAME), null, null, null)
+                ?.use { cursor -> if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null }
+        }
+
+        override fun hasWriteGrant(context: Context, uri: Uri): Boolean =
+            context.checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION) ==
+                PackageManager.PERMISSION_GRANTED
+
+        override fun createWriteRequest(context: Context, uris: List<Uri>): PendingIntent {
+            check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { "write requests need Android 11" }
+            return MediaStore.createWriteRequest(context.contentResolver, uris)
+        }
+    }
+
+    @Volatile
+    var mediaStore: MediaStoreAccess = PlatformMediaStore
+
+    /**
+     * How xKey may write the media at [target]. Before scoped storage
+     * (Android 10 and earlier) the file is xKey's to replace by path. From
+     * Android 11 only media whose owner is xKey is: anything else, a camera
+     * capture above all, needs the user's grant, and READ_MEDIA_* gives none.
+     */
+    fun writeAccess(context: Context, target: Uri): MediaWriteAccess {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return MediaWriteAccess.OWNED
+        if (target.scheme != ContentResolver.SCHEME_CONTENT) return MediaWriteAccess.OWNED
+        if (mediaStore.ownerPackage(context, target) == context.packageName) return MediaWriteAccess.OWNED
+        return if (mediaStore.hasWriteGrant(context, target)) MediaWriteAccess.GRANTED else MediaWriteAccess.NEEDS_GRANT
+    }
+
+    /** The request the user approves to let xKey write [targets]; an activity launches its intent sender. */
+    fun writeRequest(context: Context, targets: List<Uri>): PendingIntent = mediaStore.createWriteRequest(context, targets)
+
+    /** Writing [target] needs a write grant the user has not given. */
+    class WriteAuthorizationRequiredException(val target: Uri) :
+        IOException("writing $target needs the user's write access")
+
+    /**
+     * Write [staged] over the media at [target] through its content URI: the
+     * one path for media another app owns, which xKey may write only with
+     * the user's grant ([writeAccess] GRANTED) and never by renaming over its
+     * file. Without the grant it throws [WriteAuthorizationRequiredException]
+     * and writes nothing. [staged] is deleted only once the write and the
+     * close both succeeded; a failure keeps it and throws
+     * [MediaPublishException], which names it.
+     */
+    fun writeGranted(context: Context, target: Uri, staged: File) {
+        if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) throw WriteAuthorizationRequiredException(target)
+        try {
+            val output = context.contentResolver.openOutputStream(target, "wt") ?: throw IOException("cannot write $target")
+            output.use { out -> staged.inputStream().use { it.copyTo(out) } }
+        } catch (e: Throwable) {
+            throw MediaPublishException(staged, e)
+        }
+        staged.delete()
+    }
 }

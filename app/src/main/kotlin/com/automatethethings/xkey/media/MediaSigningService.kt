@@ -360,15 +360,22 @@ class MediaSigningService : Service() {
                     signatures = listOf(entry)
                 )
 
-                // The signature lives in the file's own metadata, so without a
-                // path there is nowhere to put it. Leaving the URI unprocessed
-                // lets a later event retry it; recording it as auto-signed would
-                // put a claim in the audit log that nothing backs.
-                val filePath = getFilePathFromUri(uri) ?: run {
-                    Log.w(TAG, "No file path for $uri; cannot persist a signature")
+                // The signature lives in the media's own metadata. A capture
+                // another app owns (the camera's) is written only through its
+                // content URI once the user grants access: until then it is
+                // queued and the user is asked, never renamed over by path.
+                val filePath = getFilePathFromUri(uri)
+                val signed = XmpMetadataHelper.signMedia(this@MediaSigningService, uri, filePath, data)
+                if (signed == XmpMetadataHelper.MediaSignResult.NeedsWriteAuthorization) {
+                    MediaWriteAuthorizations.add(
+                        this@MediaSigningService,
+                        PendingMediaWrite(uriString, filePath, keyId, keyEntity.label, data)
+                    )
+                    MediaWriteAuthorizations.notifyPending(this@MediaSigningService)
+                    processedUris.add(uriString)
+                    Log.i(TAG, "Signed $mediaType $uri; its write waits for the user's access")
                     return@launch
                 }
-                XmpMetadataHelper.writeSignature(filePath, data)
 
                 processedUris.add(uriString)
                 // Keep set bounded

@@ -216,6 +216,15 @@
             android:showWhenLocked="true"
             android:turnScreenOn="true" />
 
+        <!-- Asks for write access to captures another app owns, so the
+             auto-signer can embed their signature (MediaStore write request). -->
+        <activity
+            android:name=".media.MediaWriteRequestActivity"
+            android:exported="false"
+            android:theme="@style/Theme.xKey.Transparent"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
+
         <!-- BLE GATT Server Service for FIDO2 -->
         <service
             android:name=".ble.XKeyGattService"
