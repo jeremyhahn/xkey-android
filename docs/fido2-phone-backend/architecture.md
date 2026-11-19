@@ -16,6 +16,8 @@ verification, the phone raises a biometric prompt before signing, and the UV
 flag in the signed authenticator data reports only verification that actually
 happened.
 
+CTAP2 over BLE, which the SPEC row requires, is not yet shipped (#281).
+
 ## Components
 
 | Class | File | Role |
