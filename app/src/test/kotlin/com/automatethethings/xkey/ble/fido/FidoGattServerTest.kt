@@ -272,6 +272,56 @@ class FidoGattServerTest {
         assertTrue(notified.isEmpty())
     }
 
+    private fun unsubscribe() {
+        val cccd = characteristic(FidoBle.STATUS_UUID).getDescriptor(FidoBle.CCCD_UUID)
+        callback.captured.onDescriptorWriteRequest(
+            device, 7, cccd, false, true, 0, BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+        )
+    }
+
+    @Test
+    fun `no frame of a fragmented reply is notified after the client unsubscribes`() {
+        subscribe()
+
+        send(FidoBle.CMD_PING, fiftyBytes)
+        assertEquals("the first frame is in the stack", 1, notified.size)
+        unsubscribe()
+        // The stack still reports the frame in flight sent.
+        release()
+
+        assertEquals("nothing after the unsubscribe", 1, notified.size)
+    }
+
+    @Test
+    fun `a notify retry pending at the unsubscribe sends nothing`() {
+        subscribe()
+        rejectNotify { it == 2 }
+
+        send(FidoBle.CMD_PING, fiftyBytes)
+        // The second frame is refused, so its retry waits.
+        callback.captured.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
+        unsubscribe()
+        Thread.sleep(300)
+        release()
+
+        assertEquals("nothing after the unsubscribe", 1, notified.size)
+    }
+
+    @Test
+    fun `a client that subscribes again gets only new replies`() {
+        subscribe()
+        send(FidoBle.CMD_PING, fiftyBytes)
+        unsubscribe()
+        notified.clear()
+
+        subscribe()
+        send(FidoBle.CMD_PING, byteArrayOf(4, 5))
+        val echo = awaitReply()
+
+        assertArrayEquals(byteArrayOf(4, 5), echo.data)
+        assertEquals("no frame of the old reply", 1, notified.size)
+    }
+
     @Test
     fun `a client writing while notifications stall cannot grow the queue without bound`() {
         subscribe()
