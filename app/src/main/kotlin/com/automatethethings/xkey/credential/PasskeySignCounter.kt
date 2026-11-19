@@ -57,6 +57,16 @@ class PasskeySignCounter(
         next
     }
 
+    /**
+     * Runs [block] while holding [credentialId]'s counter, so no assertion
+     * advances it in between. A credential delete that reads, removes and
+     * may write back the passkey's metadata row runs under it, so the
+     * write-back never rewinds a count already handed out. [block] must not
+     * call [next] (the lock is not reentrant).
+     */
+    suspend fun <T> holding(credentialId: String, block: suspend () -> T): T =
+        lockFor(credentialId).withLock { block() }
+
     private companion object {
         /**
          * One lock per credential id, shared by every instance in the

@@ -2470,7 +2470,10 @@ class RequestHandler(
         return withCredentialDeleteLock(alias) {
             // KeystoreManager.deleteCredentialKey writes the delete's audit
             // record; persistAudited makes the whole delete non-cancellable.
-            persistAudited(write = {
+            // The passkey's signature counter is held from the metadata read
+            // to any write-back, so an assertion meanwhile cannot have its
+            // count rewound by the row written back.
+            persistAudited(write = { passkeySignCounter.holding(credentialId) {
                 val passkey = credentialMetadataDao.getByCredentialId(credentialId)
                 val removedPasskey = if (passkey == null) null else try {
                     passkey.takeIf { credentialMetadataDao.deleteByCredentialId(credentialId) > 0 }
@@ -2507,7 +2510,7 @@ class RequestHandler(
                     )
                 }
                 removed
-            }, record = {})
+            } }, record = {})
         }
     }
 
@@ -2517,14 +2520,18 @@ class RequestHandler(
      * `xkey_key_<id>` other than an ephemeral agreement key. Every other
      * entry in xKey's Keystore is its own (store-protection keys, device
      * identity and attestation keys, the CA, PIV slot keys, library master
-     * keys). An alias with no entry is not refused, so a missing key still
-     * answers `deleted: false`.
+     * keys). An ephemeral agreement key is one xKey made itself: a reserved
+     * ID ([isReservedKeyId]) with no key row. A user key made under such an
+     * ID before it was reserved has its key row and is not refused. An alias
+     * with no entry is not refused, so a missing key still answers
+     * `deleted: false`.
      */
-    private fun refuseInternalAlias(alias: String) {
-        val userKey = (alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX) ||
-            alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL)) &&
-            !(alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL) &&
-                isReservedKeyId(alias.removePrefix(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL)))
+    private suspend fun refuseInternalAlias(alias: String) {
+        val generalId = alias.takeIf { it.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL) }
+            ?.removePrefix(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL)
+        val ownEphemeralKey = generalId != null && isReservedKeyId(generalId) && !keyDao.exists(generalId)
+        val userKey = (alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX) || generalId != null) &&
+            !ownEphemeralKey
         if (userKey || alias !in keystoreManager.listAllKeystoreAliases()) return
         AuditLogger.logPolicyDenied(keyId = alias, keyLabel = alias, reason = "delete of an internal key refused")
         throw ProtocolException(
