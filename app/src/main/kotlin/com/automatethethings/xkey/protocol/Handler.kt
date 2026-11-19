@@ -2426,10 +2426,23 @@ class RequestHandler(
         // An internal key (a CA, attestation, sealing or encryption key) is
         // never a peer's to delete: refused before any row or tombstone is
         // touched. deleteKeyMaterial refuses it again under the lock (#193 r11).
+        // The row's source is read first (#270 review r5): a key from the KMS
+        // daemon (`xkmsd`) is a reference with no local material, so no
+        // local backend is probed for it, and one that is unreadable never
+        // refuses its delete. Its row goes through the store's source-aware
+        // delete ([keyMaterialDeleter] reads no material for that source).
+        val entity = keyDao.getByKeyId(keyId)
+        if (entity?.source == "xkmsd") {
+            val reference = com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager, row = entity)
+            if (!KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = reference)) {
+                return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
+            }
+            Log.i(TAG, "Deleted key reference: $keyId")
+            return Response.success(request.id, JSONObject().put("deleted", true))
+        }
         if (com.automatethethings.xkey.storage.isInternalKey(keyId, keystoreManager)) {
             return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "Key $keyId is not a user key; not deleted")
         }
-        val entity = keyDao.getByKeyId(keyId)
         // A credential and a general key may share an id: the delete names
         // one of them, and its material and tombstone hold only that key's
         // alias, so the other key, its row and its metadata stay (#255 review).
