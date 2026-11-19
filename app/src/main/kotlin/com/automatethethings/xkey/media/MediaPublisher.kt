@@ -212,38 +212,144 @@ object MediaPublisher {
      * and writes nothing.
      *
      * A content URI offers no atomic replace, so the capture is never
-     * truncated up front: it is first copied whole to the recovery
-     * directory, then overwritten in place ([overwrite]) and cut to length
-     * only once every new byte is in; nothing touches the capture before
-     * [staged] (the whole signed copy) and that recovery copy both exist. A
-     * write that fails or is interrupted part-way, an interrupt or a
-     * cancellation included, puts the copy back ([restore]) and checks it
-     * byte for byte; [MediaPublishException] says whether that worked
-     * ([MediaPublishException.original] names the copy when it did not).
+     * truncated up front. Its current bytes are first copied whole and
+     * synced to the recovery directory and checked against [sourceHash], the
+     * canonical hash ([mimeType]) of what was signed: an edit saved since
+     * staging throws [XmpMetadataHelper.SourceChangedException] and nothing
+     * is written. Then a synced record naming the capture and that backup is
+     * written ([GrantedWriteJournal]), and only then is the capture
+     * overwritten in place ([overwrite]) and cut to length once every new
+     * byte is in. A write that fails or is interrupted part-way puts the
+     * backup back ([restore]) and checks it byte for byte; one the process
+     * dies in, or whose restore fails, keeps its record, and the next start
+     * or retry puts the backup back ([recoverInterruptedWrites]).
+     * [MediaPublishException.original] names the backup while it is needed.
      * [staged] is deleted only once the write and the close both succeeded.
      */
-    fun writeGranted(context: Context, target: Uri, staged: File) {
+    fun writeGranted(context: Context, target: Uri, staged: File, sourceHash: String, mimeType: String) = synchronized(grantedWrites) {
         if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) throw WriteAuthorizationRequiredException(target)
         val resolver = context.contentResolver
-        val backup = File.createTempFile("original-", ".bak", recoveryDirectory(context))
+        // A write of this capture an earlier process died in is put back first.
+        recoverInterruptedWrite(context, target)
+        val journal = GrantedWriteJournal(recoveryDirectory(context), target)
+        val partial = File.createTempFile(GrantedWriteJournal.PREFIX, ".part", recoveryDirectory(context))
         try {
             (resolver.openInputStream(target) ?: throw IOException("cannot read $target")).use { input ->
-                backup.outputStream().use { input.copyTo(it) }
+                FileOutputStream(partial).use { out ->
+                    input.copyTo(out)
+                    out.fd.sync()
+                }
             }
+            // What is about to be overwritten must still be what was signed: an
+            // edit saved since the capture was staged is kept, not replaced by
+            // the older snapshot.
+            if (AutoSignHash.contentHashFile(partial, mimeType) != sourceHash) throw XmpMetadataHelper.SourceChangedException()
+            journal.commit(partial)
+        } catch (e: XmpMetadataHelper.SourceChangedException) {
+            partial.delete()
+            throw e
         } catch (e: Throwable) {
-            backup.delete()
+            partial.delete()
+            journal.clear()
             throw MediaPublishException(staged, e)
         }
         var touched = false
         try {
             overwrite(resolver, target, staged) { touched = true }
         } catch (e: Throwable) {
-            val intact = !touched || restore(resolver, target, backup)
-            if (intact) backup.delete()
-            throw MediaPublishException(staged, e, original = if (intact) null else backup)
+            val intact = !touched || restore(resolver, target, journal.backup)
+            // One that could not be put back keeps its record: the next start or retry restores it.
+            if (intact) journal.clear()
+            throw MediaPublishException(staged, e, original = if (intact) null else journal.backup)
         }
-        backup.delete()
+        journal.clear()
         staged.delete()
+    }
+
+    /**
+     * Held across every granted write and every recovery, so a recovery
+     * never puts a backup back under a write in progress. [grantedSection]
+     * lets a caller hold it from staging the capture to writing it.
+     */
+    @PublishedApi
+    internal val grantedWrites = Any()
+
+    /**
+     * Run [block] holding the granted-write lock, once any write of
+     * [target] an earlier process died in has been put back: what [block]
+     * stages is then the capture as it was, never one half-written.
+     */
+    inline fun <T> grantedSection(context: Context, target: Uri, block: () -> T): T = synchronized(grantedWrites) {
+        recoverInterruptedWrite(context, target)
+        block()
+    }
+
+    /**
+     * Put back every capture a granted write was interrupted in, by an
+     * exception, a cancellation or the process dying: each left a record
+     * naming the capture and its backup ([GrantedWriteJournal]). Called at
+     * start and before a retry; a capture xKey cannot write yet (no grant)
+     * keeps its record for a later call.
+     */
+    fun recoverInterruptedWrites(context: Context) = synchronized(grantedWrites) {
+        GrantedWriteJournal.all(recoveryDirectory(context)).forEach { recover(context, it) }
+    }
+
+    /** [recoverInterruptedWrites] for [target] alone. */
+    fun recoverInterruptedWrite(context: Context, target: Uri) = synchronized(grantedWrites) {
+        val journal = GrantedWriteJournal(recoveryDirectory(context), target)
+        if (journal.recorded()) recover(context, journal)
+    }
+
+    private fun recover(context: Context, journal: GrantedWriteJournal) {
+        val target = journal.target() ?: return journal.clear()
+        if (!journal.backup.isFile) return journal.clear()
+        if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) return
+        if (restore(context.contentResolver, target, journal.backup)) journal.clear()
+    }
+
+    /**
+     * The durable record of one granted write: the capture's prior bytes
+     * ([backup]) and, written and synced only once they are whole, a record
+     * naming the capture's URI. A record present means the capture may be
+     * part-written and [backup] is what it must hold.
+     */
+    class GrantedWriteJournal(private val directory: File, private val uri: Uri) {
+        private val key = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(uri.toString().toByteArray()).joinToString("") { "%02x".format(it) }
+
+        val backup = File(directory, "$PREFIX$key.bak")
+        private val record = File(directory, "$PREFIX$key$RECORD")
+
+        fun recorded() = record.isFile
+
+        fun target(): Uri? = runCatching { Uri.parse(record.readText()) }.getOrNull()
+
+        /** [whole] (synced) becomes the backup, then the record is written and synced. */
+        fun commit(whole: File) {
+            if (!whole.renameTo(backup)) throw IOException("cannot keep the capture's backup")
+            val temp = File(directory, "$PREFIX$key.tmp")
+            FileOutputStream(temp).use { out ->
+                out.write(uri.toString().toByteArray())
+                out.fd.sync()
+            }
+            if (!temp.renameTo(record)) throw IOException("cannot record the granted write")
+        }
+
+        /** The record goes first: a backup with no record is only a leftover. */
+        fun clear() {
+            record.delete()
+            backup.delete()
+        }
+
+        companion object {
+            const val PREFIX = "granted-"
+            private const val RECORD = ".uri"
+
+            fun all(directory: File): List<GrantedWriteJournal> =
+                directory.listFiles { f -> f.name.startsWith(PREFIX) && f.name.endsWith(RECORD) }.orEmpty()
+                    .mapNotNull { f -> runCatching { GrantedWriteJournal(directory, Uri.parse(f.readText())) }.getOrNull() }
+        }
     }
 
     /**

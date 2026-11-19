@@ -85,6 +85,8 @@ object MediaWriteAuthorizations {
      * was signed, or is gone, is dropped: its signature matches nothing.
      */
     fun publishGranted(context: Context, onSigned: (PendingMediaWrite) -> Unit) {
+        // A retry: captures an earlier write was interrupted in are whole first.
+        MediaPublisher.recoverInterruptedWrites(context)
         for (write in pending(context)) {
             val outcome = try {
                 XmpMetadataHelper.signMedia(context, Uri.parse(write.uri), write.filePath, write.data)

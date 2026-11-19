@@ -131,7 +131,9 @@ object XmpMetadataHelper {
         }
         if (access == MediaPublisher.MediaWriteAccess.NEEDS_GRANT) return MediaSignResult.NeedsWriteAuthorization
         val lock = if (filePath != null) lockFor(filePath) else lockForKey(uri.toString())
-        synchronized(lock) {
+        // The granted-write section puts back a write of this capture an
+        // earlier process died in before it is staged.
+        synchronized(lock) { MediaPublisher.grantedSection(context, uri) {
             val staged = File.createTempFile("sign-", stagingSuffix(mimeType), MediaPublisher.recoveryDirectory(context))
             var kept = false
             try {
@@ -147,7 +149,7 @@ object XmpMetadataHelper {
                     MediaPublisher.replaceFile(File(getSidecarPath(path))) { temp -> sidecar.copyTo(temp, overwrite = true); true }
                     return MediaSignResult.Signed
                 }
-                MediaPublisher.writeGranted(context, uri, staged)
+                MediaPublisher.writeGranted(context, uri, staged, data.contentHash, mimeType)
                 return MediaSignResult.Signed
             } catch (e: MediaPublishException) {
                 kept = true
@@ -156,7 +158,7 @@ object XmpMetadataHelper {
                 File(getSidecarPath(staged.path)).delete()
                 if (!kept) staged.delete()
             }
-        }
+        } }
     }
 
     fun readSignature(filePath: String): ContentAuthenticityData? {

@@ -223,6 +223,11 @@ class MediaSigningService : Service() {
         keystoreManager = KeystoreManager(this)
         settingsRepository = MediaSigningSettingsRepository(this)
         createNotificationChannel()
+        // A granted write an earlier process died in: its capture is put back.
+        serviceScope.launch {
+            runCatching { MediaPublisher.recoverInterruptedWrites(applicationContext) }
+                .onFailure { Log.w(TAG, "Recovering interrupted media writes failed", it) }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

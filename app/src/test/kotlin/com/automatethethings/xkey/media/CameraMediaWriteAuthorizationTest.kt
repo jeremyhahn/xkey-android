@@ -223,9 +223,11 @@ class CameraMediaWriteAuthorizationTest {
         assertEquals(data.toJsonString(), embedded(media.readBytes()))
     }
 
-    @Test
-    fun `a process killed part-way through the overwrite has its capture restored before the retry`() {
-        val data = data()
+    /**
+     * Queue [data]'s capture, grant it, and leave the disk as a process
+     * killed part-way through its overwrite would.
+     */
+    private fun killMidOverwrite(data: ContentAuthenticityData) {
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
         granted = true
         val recovery = MediaPublisher.recoveryDirectory(context)
@@ -253,6 +255,50 @@ class CameraMediaWriteAuthorizationTest {
         media.writeBytes(mediaAtKill)
         recovery.listFiles()!!.forEach { it.delete() }
         atKill.listFiles()!!.forEach { f -> f.copyTo(File(recovery, f.name)) }
+    }
+
+    @Test
+    fun `a process killed part-way through the overwrite has its capture restored at the next start`() {
+        killMidOverwrite(data())
+        assertTrue("the kill left the capture mixed", !media.readBytes().contentEquals(original))
+
+        MediaPublisher.recoverInterruptedWrites(context)
+
+        assertArrayEquals("the capture is whole again", original, media.readBytes())
+        assertTrue(
+            "the record and backup are gone",
+            MediaPublisher.recoveryDirectory(context).listFiles()!!.none { it.name.startsWith(MediaPublisher.GrantedWriteJournal.PREFIX) }
+        )
+    }
+
+    @Test
+    fun `a granted write called directly, past signMedia, still refuses an edited capture`() {
+        granted = true
+        val hash = AutoSignHash.contentHashFile(capture, "image/png")
+        val staged = folder.newFile("staged.png").apply { writeBytes(original) }
+        val edited = XmpFixtures.png(byteArrayOf(0x78, 0x9C.toByte(), 0x07, 0x07, 0x07))
+        media.writeBytes(edited)
+
+        assertThrows(XmpMetadataHelper.SourceChangedException::class.java) {
+            MediaPublisher.writeGranted(context, uri, staged, hash, "image/png")
+        }
+        assertArrayEquals(edited, media.readBytes())
+    }
+
+    @Test
+    fun `only signMedia calls the granted write`() {
+        val rel = "src/main/kotlin"
+        val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }
+            ?: error("$rel not found from ${File(".").absolutePath}")
+        val callers = dir.walkTopDown().filter { it.isFile && it.extension == "kt" }
+            .filter { "MediaPublisher.writeGranted(" in it.readText() }.map { it.name }.toList()
+        assertEquals(listOf("XmpMetadataHelper.kt"), callers)
+    }
+
+    @Test
+    fun `a process killed part-way through the overwrite has its capture restored before the retry`() {
+        val data = data()
+        killMidOverwrite(data)
         assertEquals("the request is still queued", listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri })
 
         val signed = mutableListOf<PendingMediaWrite>()
