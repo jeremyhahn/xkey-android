@@ -197,9 +197,25 @@ class FidoGattServer(
 
         @Volatile
         var subscribed = false
+            private set
 
         private val queue = ArrayDeque<ByteArray>()
         private var inFlight = false
+
+        /**
+         * The client's fidoStatus CCCD. Disabling it drops every frame not
+         * yet in the stack, the one being retried included, so nothing more
+         * is notified (a frame already in the stack still completes); a later
+         * subscription starts with an empty queue.
+         */
+        fun onSubscription(on: Boolean) = synchronized(queue) {
+            subscribed = on
+            if (!on) {
+                queue.clear()
+                current = null
+                attempts = 0
+            }
+        }
 
         /**
          * fidoControlPointLength for this client, the one size for both
@@ -288,10 +304,12 @@ class FidoGattServer(
          * notify call is tried again after [NOTIFY_RETRY_DELAY_MILLIS], a
          * failed completion at once, [MAX_NOTIFY_ATTEMPTS] times in all. Then
          * the connection ends, so the client never gets a message with a
-         * frame missing and never sees the frames after it.
+         * frame missing and never sees the frames after it. Nothing is sent
+         * while the client is not subscribed, whatever called this (a
+         * completion, a retry or a new frame).
          */
         private fun sendNext() {
-            if (inFlight || retryPending || failed) return
+            if (inFlight || retryPending || failed || !subscribed) return
             val frame = current ?: queue.removeFirstOrNull()?.also { current = it; attempts = 0 } ?: return
             val s = server
             val characteristic = statusCharacteristic
@@ -441,7 +459,7 @@ class FidoGattServer(
             value: ByteArray?
         ) {
             val ok = descriptor.uuid == FidoBle.CCCD_UUID && !preparedWrite && offset == 0 && value?.size == 2
-            if (ok) client(device).subscribed = (value!![0].toInt() and 0x01) != 0
+            if (ok) client(device).onSubscription((value!![0].toInt() and 0x01) != 0)
             if (responseNeeded) {
                 respond(device, requestId, if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_WRITE_NOT_PERMITTED, null)
             }
