@@ -837,6 +837,47 @@ class KeySharingPendingIntentHandlerTest {
     }
 
     /**
+     * #270 review r6: a key delete is audited with the type of the key it
+     * deleted, so a credential's delete stays under the audit log's FIDO2
+     * filter: the legacy deleteKey of a credential row and of credential
+     * material with no row is "fido2", a key row keeps its own type, and a
+     * general key with no row is "general".
+     */
+    @Test
+    fun aKeyDeleteIsAuditedWithTheDeletedKeysType() = runTest {
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        val aliases = mapOf(
+            "k-cred" to "xkey_credential_k-cred",
+            "k-bare-cred" to "xkey_credential_k-bare-cred",
+            "k-signing" to "xkey_key_k-signing",
+            "k-bare-gen" to "xkey_key_k-bare-gen"
+        )
+        val held = aliases.keys.toMutableSet()
+        for ((id, alias) in aliases) {
+            every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+            every { keystore.holdsInternalKey(id) } returns false
+            every { keystore.holdsAnyKey(id) } answers { id in held }
+            every { keystore.userKeyIdInUse(id) } answers { id in held }
+            every { keystore.userKeyGeneration(id) } answers { if (id in held) mapOf("keystore:$alias" to "1") else emptyMap() }
+            every { keystore.deleteUserKeyGeneration(id, any()) } answers { held -= id; emptyMap() }
+        }
+        tables.addKey("k-cred", SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyCose = byteArrayOf(0xA5.toByte(), 1, 2))
+        tables.addKey("k-signing", SharingPolicyType.PRIVATE, keyType = "signing", publicKeyDer = byteArrayOf(1, 2, 3))
+
+        assertEquals(null, rpcLegacyDeleteKey("k-cred").error)
+        assertEquals(null, rpcLegacyDeleteKey("k-bare-cred").error)
+        assertEquals(null, rpcDeleteKey("k-signing").error)
+        assertEquals(null, rpcDeleteKey("k-bare-gen").error)
+
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k-cred", any(), "fido2") }
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k-bare-cred", any(), "fido2") }
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k-signing", any(), "signing") }
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k-bare-gen", any(), "general") }
+        assertTrue("a delete left its material", held.isEmpty())
+    }
+
+    /**
      * Round 12 (1): a delete that reported success while its material is
      * still owed (its tombstone pending) leaves the key unusable at once:
      * every RPC naming it is refused as a deleted key, before it reaches
