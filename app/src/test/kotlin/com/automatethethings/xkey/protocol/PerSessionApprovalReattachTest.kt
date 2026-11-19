@@ -107,6 +107,13 @@ class PerSessionApprovalReattachTest {
             if (!keystoreWindowOpen) throw BiometricRequiredException()
             ByteArray(64) { 7 }
         }
+        // After a prompt the approved key signs under the alias it was read at.
+        every { keystore.resolveKeystoreAlias(any()) } answers { "xkey_credential_${firstArg<String>()}" }
+        every { keystore.publicKeyDERAt(any()) } returns ByteArray(91) { 3 }
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } answers {
+            if (!keystoreWindowOpen) throw BiometricRequiredException()
+            ByteArray(64) { 7 }
+        }
         biometricLauncher = mockk(relaxed = true)
         coEvery { biometricLauncher.requestAuthentication(any(), any(), any(), any(), any()) } answers {
             keystoreWindowOpen = true

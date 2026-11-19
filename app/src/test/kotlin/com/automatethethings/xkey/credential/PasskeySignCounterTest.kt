@@ -21,12 +21,16 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -203,6 +207,53 @@ class PasskeySignCounterTest {
     }
 
     /**
+     * The lock registry is process-wide, so an entry left behind per
+     * credential would grow for the life of the service as credentials come
+     * and go. Many credentials, each advanced by several callers at once (so
+     * some wait for the lock) and some failing their write, leave it empty.
+     */
+    @Test
+    fun theLockRegistryHoldsNothingOnceItsUsersLeave() = runBlocking {
+        val credentialDao = mockk<CredentialMetadataDao> {
+            coEvery { getByCredentialId(any()) } returns null
+            coEvery { updateSignCount(any(), any(), any()) } answers {
+                if (firstArg<String>().endsWith(FAILING_SUFFIX)) throw IllegalStateException("metadata store unavailable")
+            }
+        }
+        val keyDao = mockk<KeyDao> {
+            coEvery { getByKeyId(any()) } coAnswers {
+                delay(1)
+                null
+            }
+            coEvery { updateSignCount(any(), any(), any()) } returns Unit
+        }
+        val ids = (1..CHURN_IDS).map { n -> if (n % 10 == 0) "churn-$n$FAILING_SUFFIX" else "churn-$n" }
+
+        withContext(Dispatchers.Default) {
+            ids.flatMap { id ->
+                List(CALLERS_PER_ID) { async { runCatching { PasskeySignCounter(credentialDao, keyDao).next(id) } } }
+            }.awaitAll()
+        }
+
+        assertEquals("credential locks left behind", 0, PasskeySignCounter.lockCount())
+    }
+
+    /**
+     * Every lock the counter takes goes through its one reference-counted
+     * path: a second place that makes a registry entry or locks a mutex
+     * would bypass the count and leave entries behind.
+     */
+    @Test
+    fun everyCounterLockGoesThroughTheCountedPath() {
+        val code = File("src/main/kotlin/com/automatethethings/xkey/credential/PasskeySignCounter.kt").readText()
+        fun count(pattern: String) = Regex(pattern).findAll(code).count()
+
+        assertEquals("one place makes a registry entry", 1, count("""\blocks\.(getOrPut|computeIfAbsent|put)\b|\blocks\["""))
+        assertEquals("one place locks a credential", 1, count("""\.(withLock|lock|tryLock)\s*[({]"""))
+        assertEquals("one place drops a registry entry", 1, count("""\blocks\.remove\("""))
+    }
+
+    /**
      * One assertion the way both handlers run it: take the counter, then
      * sign. A value reaches [signed] only once the counter has returned it.
      */
@@ -215,5 +266,8 @@ class PasskeySignCounterTest {
     private companion object {
         const val ID = "credential-216"
         const val OVERLAP_WAIT_MS = 1_000L
+        const val CHURN_IDS = 200
+        const val CALLERS_PER_ID = 4
+        const val FAILING_SUFFIX = "-fails"
     }
 }
