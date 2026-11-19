@@ -113,6 +113,8 @@ class HmacEcdhAuditTest {
         coEvery { keyDao.getByKeyId(any()) } returns null
         coEvery { keyDao.getByKeyId("hw-ecdh") } returns
             KeyEntity(keyId = "hw-ecdh", keyType = "signing", algorithm = "ES256", label = "ecdh", keySizeBits = 256, source = "local")
+        coEvery { keyDao.getByKeyId("hw-ecdh-b") } returns
+            KeyEntity(keyId = "hw-ecdh-b", keyType = "signing", algorithm = "ES256", label = "ecdh-b", keySizeBits = 256, source = "local")
         coEvery { keyDao.getByKeyId("hw-hmac") } returns
             // The row says SHA-512; the Keystore key runs SHA-256 (below).
             KeyEntity(keyId = "hw-hmac", keyType = "secret", algorithm = "HMAC-SHA512", label = "hmac", keySizeBits = 256, source = "local")
@@ -373,6 +375,13 @@ class HmacEcdhAuditTest {
         coEvery { keystore.signWithAlgorithm("hw-ecdh", any(), any()) } coAnswers {
             pauseFirst(); ByteArray(64) { 8 }
         }
+        // An approved local.sign signs under its key's lock, so two signs of
+        // one key take turns: B signs with a second stored key of its own.
+        coEvery { keystore.generalKeyExists("hw-ecdh-b") } returns true
+        every { keystore.publicKeyDERAt(any()) } returns ByteArray(91) { 3 }
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } coAnswers {
+            pauseFirst(); ByteArray(64) { 8 }
+        }
         coEvery { keystore.rsaDecrypt("hw-ecdh", any()) } coAnswers { pauseFirst(); ByteArray(16) { 6 } }
         coEvery { keystore.rsaDecryptWithAlgorithm("hw-ecdh", any()) } coAnswers {
             pauseFirst(); DecryptResult(ByteArray(16) { 6 }, "RSA-OAEP-SHA-256-MGF1-SHA-1")
@@ -403,7 +412,9 @@ class HmacEcdhAuditTest {
             assertTrue("$method: A's request is paused in the crypto call", paused == null && !first.isCompleted)
 
             handler.setConnectedDevicePublicKeyHex(PEER_B)
-            val second = servedBy(PEER_B) { call(method, params) }
+            val secondParams =
+                if (method == MethodNames.LOCAL_SIGN) params.replace("\"hw-ecdh\"", "\"hw-ecdh-b\"") else params
+            val second = servedBy(PEER_B) { call(method, secondParams) }
             gate.complete(Unit)
             val firstResponse = first.await()
 

@@ -90,7 +90,7 @@ class FileEncryptor(
         val ephemeralKeyId = "$EPHEMERAL_KEY_PREFIX${UUID.randomUUID()}"
         try {
             // Generate ephemeral EC key in Keystore with PURPOSE_AGREE_KEY
-            generateEphemeralKey("xkey_key_$ephemeralKeyId")
+            generateEphemeralKey(KeystoreManager.generalKeyAlias(ephemeralKeyId))
 
             // Get ephemeral public key DER
             val ephemeralPubKeyDer = keystoreManager.getPublicKeyDER(ephemeralKeyId)
@@ -248,7 +248,7 @@ private fun generateKeystoreAgreementKey(alias: String) {
     val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
     if (keyStore.containsAlias(alias)) {
-        keyStore.deleteEntry(alias)
+        KeystoreManager.withAliasGate(alias) { keyStore.deleteEntry(alias) }
     }
 
     val specBuilder = KeyGenParameterSpec.Builder(
@@ -263,5 +263,5 @@ private fun generateKeystoreAgreementKey(alias: String) {
         "AndroidKeyStore"
     )
     keyPairGenerator.initialize(specBuilder.build())
-    keyPairGenerator.generateKeyPair()
+    KeystoreManager.withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
 }

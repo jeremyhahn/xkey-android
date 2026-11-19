@@ -388,6 +388,8 @@ class BiometricActivityLauncher(
      * @param showOnLockScreen Whether to show the prompt over the lock screen.
      * @param keyAlias A full Keystore alias to sign with instead of the
      *   credential's (the user verification key); null for a credential key.
+     * @param signatureAlgorithm The JCA signature algorithm of that key; null
+     *   for SHA256withECDSA.
      * @param onLaunch As for [requestAuthentication]: called with this
      *   request's notification key ([NotificationKeys.signature]) and prompt
      *   intent just before the prompt starts. The
@@ -412,8 +414,12 @@ class BiometricActivityLauncher(
         subtitle: String,
         showOnLockScreen: Boolean = false,
         keyAlias: String? = null,
+        signatureAlgorithm: String? = null,
         onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> }
-    ): ByteArray = cryptoSignature(credentialId, title, subtitle, showOnLockScreen, keyAlias, onLaunch, eager = dataHash)
+    ): ByteArray = cryptoSignature(
+        credentialId, title, subtitle, showOnLockScreen, keyAlias, onLaunch,
+        eager = dataHash, signatureAlgorithm = signatureAlgorithm
+    )
 
     /**
      * As [requestCryptoSignature], but what is signed comes from
@@ -442,7 +448,8 @@ class BiometricActivityLauncher(
         keyAlias: String?,
         onLaunch: (requestId: String, prompt: Intent) -> Unit,
         eager: ByteArray? = null,
-        signedData: (suspend () -> ByteArray)? = null
+        signedData: (suspend () -> ByteArray)? = null,
+        signatureAlgorithm: String? = null
     ): ByteArray {
         check(isRegistered) {
             "BiometricActivityLauncher must be registered before requesting crypto signature"
@@ -463,7 +470,8 @@ class BiometricActivityLauncher(
                 title = title,
                 subtitle = subtitle,
                 showOnLockScreen = showOnLockScreen,
-                keyAlias = keyAlias
+                keyAlias = keyAlias,
+                signatureAlgorithm = signatureAlgorithm
             )
             val key = NotificationKeys.signature(requestId)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -635,10 +643,12 @@ internal object PromptRequestIds {
  *   there is one screen whichever launcher a request came through
  * @param expirePrompt ends a request's prompt unshown, so a late start of it
  *   prompts for nothing; false while the prompt is up
+ * @param cancelPrompt takes down the prompt up for a withdrawn request
  */
 internal class PendingAuthentications(
     private val prompts: PromptOwnership = PromptOwnership.process,
     private val expirePrompt: (requestId: String) -> Boolean = TransparentBiometricActivity::expireUnshown,
+    private val cancelPrompt: (requestId: String) -> Unit = TransparentBiometricActivity::withdraw,
 ) {
     private val pending =
         ConcurrentHashMap<Long, CancellableContinuation<BiometricActivityLauncher.BiometricResult>>()
@@ -723,10 +733,13 @@ internal class PendingAuthentications(
         } finally {
             queued.remove(id, turnCame)
             // Withdrawn, if it has not settled: off the screen or out of the
-            // line. One withdrawn on screen has its prompt ended unshown, so a
-            // late tap on its notification prompts for nothing; the prompt
-            // activity gives way to the next request it is started for.
-            prompts.end(key) { wasActive -> if (wasActive) expirePrompt(id.toString()) }
+            // line. One withdrawn with its turn has its prompt ended unshown,
+            // so a late tap on its notification prompts for nothing, and a
+            // prompt already up (a co-sign's timeout, a cancelled caller) is
+            // taken down here, before the next request's turn starts.
+            prompts.end(key) { wasActive ->
+                if (wasActive && !expirePrompt(id.toString())) cancelPrompt(id.toString())
+            }
         }
     }
 

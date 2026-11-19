@@ -23,6 +23,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricSettingsData
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.UserVerificationPolicy
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
@@ -48,7 +49,8 @@ import java.util.concurrent.atomic.AtomicLong
  * separately because they are the ones that decide the error *code*, and the
  * desktop branches on that code.
  *
- * Nothing here needs a prompt, a paired peer or a live transport.
+ * Nothing here needs a prompt or a live transport. The session's peer is a
+ * paired desktop, because co-signing refuses an anonymous session first.
  *
  * Every key is per-run and removed in [tearDown]. The PIV slot used is only
  * ever probed with input that fails before the slot is touched, so no slot
@@ -76,17 +78,30 @@ class RequestHandlerRefusalDetailTest {
         /** Every key id this suite persists, torn down in [tearDown]. */
         private val createdKeyIds = mutableSetOf<String>()
 
+        private lateinit var pairedDevices: PairedDeviceRepository
+
+        /**
+         * A paired desktop, so a co-sign request is from a confirmed peer and
+         * reaches the digest checks (#177): an anonymous session is refused
+         * before its digest is ever decoded.
+         */
+        private val peerKeyHex =
+            ("fd" + java.lang.Long.toHexString(System.nanoTime())).padEnd(64, '0')
+
         @JvmStatic
         @BeforeClass
         fun setUp() {
             context = ApplicationProvider.getApplicationContext()
+            pairedDevices = PairedDeviceRepository(context)
             handler = RequestHandler(
                 context = context,
                 keystoreManager = KeystoreManager(context),
                 biometricLauncher = null,
                 sessionAuthManager = SessionAuthManager(),
+                pairedDeviceRepository = pairedDevices,
                 pivKeyManager = PivKeyManager(XKeyDatabase.getInstance(context).pivSlotDao())
             )
+            pairedDevices.addDevice(peerKeyHex, "RefusalDetail Desktop $runId")
         }
 
         @JvmStatic
@@ -106,11 +121,13 @@ class RequestHandlerRefusalDetailTest {
                     runCatching { db.auditLogDao().deleteByKeyId(keyId) }
                 }
             }
+            pairedDevices.removeDevice(peerKeyHex)
         }
     }
 
     @Before
     fun resetHandlerState() {
+        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
         handler.updateSettings(
             BiometricSettingsData(
                 uvPolicy = UserVerificationPolicy.DISABLED,
@@ -211,8 +228,9 @@ class RequestHandlerRefusalDetailTest {
      * already refused on length alone; an even-length string of non-hex
      * characters is the dangerous one, because `Character.digit` returns -1
      * rather than failing and the digest would otherwise be signed as garbage.
-     * The key has to exist, or the request is refused before the digest is
-     * ever decoded.
+     * The request comes from a confirmed peer and names an existing signing
+     * key, and the value is exactly a SHA-256 digest's length, so only its
+     * characters are wrong.
      */
     @Test
     fun cosignRejectsAnEvenLengthHashThatIsNotHexadecimal() {
@@ -221,11 +239,12 @@ class RequestHandlerRefusalDetailTest {
         val response = call(
             "cosign.request",
             JSONObject()
-                .put("hash", "zzzzzzzzzzzzzzzz")
+                .put("hash", "zz".repeat(32))
                 .put("keyId", keyId)
         )
 
         assertTrue("a non-hex digest must never be signed", response.isError())
+        assertEquals(ErrorCodes.INVALID_PARAMS, response.errorCode())
         assertTrue(
             "the refusal must point at the offending character, got: ${response.errorMessage()}",
             response.errorMessage().contains("non-hex")
@@ -233,25 +252,54 @@ class RequestHandlerRefusalDetailTest {
     }
 
     /**
-     * The same request with a well-formed digest of the same length succeeds,
-     * which is what makes the refusal above attributable to the characters
-     * rather than to the length or the key.
+     * Well-formed hex that is not a whole digest of the named algorithm is
+     * refused on its length: an 8-byte value is no SHA-256 digest, and would
+     * otherwise be signed as whatever it decodes to.
      */
     @Test
-    fun cosignAcceptsTheSameLengthDigestWhenItIsActuallyHexadecimal() {
-        val keyId = generateSigningKey("cosign-ok-$runId")
+    fun cosignRejectsAHexValueThatIsNotADigestOfItsAlgorithm() {
+        val keyId = generateSigningKey("cosign-len-$runId")
 
         val response = call(
             "cosign.request",
             JSONObject()
                 .put("hash", "0123456789abcdef")
+                .put("hashAlgorithm", "SHA-256")
                 .put("keyId", keyId)
         )
 
+        assertEquals(ErrorCodes.INVALID_PARAMS, response.errorCode())
         assertTrue(
-            "a well-formed digest must be co-signed: " + response.toJsonString(),
-            response.isSuccess()
+            "the refusal must name the digest length, got: ${response.errorMessage()}",
+            response.errorMessage().contains("32 bytes")
         )
+    }
+
+    /**
+     * A whole, well-formed digest from a confirmed peer passes every
+     * validation and reaches the owner's approval, which is what makes the
+     * refusals above attributable to the digest rather than to the peer or
+     * the key. This handler has no prompt to show, so the owner cannot
+     * approve and nothing is signed (#177).
+     */
+    @Test
+    fun cosignOfAWellFormedDigestStillNeedsTheOwnersApproval() {
+        val keyId = generateSigningKey("cosign-ok-$runId")
+
+        val response = call(
+            "cosign.request",
+            JSONObject()
+                .put("hash", "0123456789abcdef".repeat(4))
+                .put("hashAlgorithm", "SHA-256")
+                .put("keyId", keyId)
+        )
+
+        assertEquals(
+            "a co-signature needs the owner's approval: " + response.toJsonString(),
+            ErrorCodes.BIOMETRIC_FAILED,
+            response.errorCode()
+        )
+        assertEquals(null, response.result)
     }
 
     // ------------------------------------------------------------------

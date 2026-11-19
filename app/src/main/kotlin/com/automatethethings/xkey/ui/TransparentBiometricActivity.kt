@@ -108,6 +108,14 @@ class TransparentBiometricActivity : FragmentActivity() {
             return
         }
         claimed = true
+        // Withdrawn between the claim and now: it prompts for nothing.
+        if (!register(requestId, this)) {
+            release(requestId)
+            claimed = false
+            hasFinished = true
+            finish()
+            return
+        }
 
         val title = intent.getStringExtra(EXTRA_TITLE) ?: DEFAULT_TITLE
         val subtitle = intent.getStringExtra(EXTRA_SUBTITLE) ?: DEFAULT_SUBTITLE
@@ -169,6 +177,7 @@ class TransparentBiometricActivity : FragmentActivity() {
             hasFinished = true
         }
         if (claimed) {
+            unregister(requestId, this)
             release(requestId)
             claimed = false
         }
@@ -342,6 +351,41 @@ class TransparentBiometricActivity : FragmentActivity() {
             expired.add(requestId)
             while (expired.size > MAX_EXPIRED) expired.remove(expired.first())
             return true
+        }
+
+        /** The instance showing each claimed request's prompt. */
+        private val live = HashMap<String, java.lang.ref.WeakReference<TransparentBiometricActivity>>()
+
+        /**
+         * Takes [requestId]'s prompt down: its request was withdrawn (timed
+         * out, its caller gone) with the prompt on screen. A start of it that
+         * comes later prompts for nothing, and a shown one is cancelled and
+         * finished without a result, since nobody waits on it. The launcher
+         * calls this before the queue starts the next prompt.
+         */
+        internal fun withdraw(requestId: String) {
+            val instance = synchronized(this) {
+                expired.add(requestId)
+                while (expired.size > MAX_EXPIRED) expired.remove(expired.first())
+                live[requestId]?.get()
+            } ?: return
+            instance.runOnUiThread {
+                instance.biometricPrompt?.cancelAuthentication()
+                instance.finishWithResult()
+            }
+        }
+
+        /** Records [instance] as showing [requestId]; false once it is withdrawn. */
+        @Synchronized
+        private fun register(requestId: String, instance: TransparentBiometricActivity): Boolean {
+            if (requestId in expired) return false
+            live[requestId] = java.lang.ref.WeakReference(instance)
+            return true
+        }
+
+        @Synchronized
+        private fun unregister(requestId: String, instance: TransparentBiometricActivity) {
+            if (live[requestId]?.get() === instance) live.remove(requestId)
         }
 
         /**
