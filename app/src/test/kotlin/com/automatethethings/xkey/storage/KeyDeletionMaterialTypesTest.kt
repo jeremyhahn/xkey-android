@@ -107,6 +107,8 @@ class KeyDeletionMaterialTypesTest {
         }
         keystore = spyk(KeystoreManager(context))
         every { keystore.ed25519Prefs() } returns prefs
+        // The JVM's SDK_INT is 0: these Ed25519 keys stand for an API 33+ device.
+        every { keystore.holdsEd25519Keys() } returns true
     }
 
     @After
