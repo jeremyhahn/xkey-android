@@ -214,8 +214,11 @@ object MediaPublisher {
      * A content URI offers no atomic replace, so the capture is never
      * truncated up front: it is first copied whole to the recovery
      * directory, then overwritten in place ([overwrite]) and cut to length
-     * only once every new byte is in. A write that fails part-way puts the
-     * copy back; [MediaPublishException] says whether that worked
+     * only once every new byte is in; nothing touches the capture before
+     * [staged] (the whole signed copy) and that recovery copy both exist. A
+     * write that fails or is interrupted part-way, an interrupt or a
+     * cancellation included, puts the copy back ([restore]) and checks it
+     * byte for byte; [MediaPublishException] says whether that worked
      * ([MediaPublishException.original] names the copy when it did not).
      * [staged] is deleted only once the write and the close both succeeded.
      */
@@ -235,13 +238,55 @@ object MediaPublisher {
         try {
             overwrite(resolver, target, staged) { touched = true }
         } catch (e: Throwable) {
-            val intact = !touched || runCatching { overwrite(resolver, target, backup) {} }.isSuccess
+            val intact = !touched || restore(resolver, target, backup)
             if (intact) backup.delete()
             throw MediaPublishException(staged, e, original = if (intact) null else backup)
         }
         backup.delete()
         staged.delete()
     }
+
+    /**
+     * Put [backup] back over [target] after a write that failed part-way,
+     * and confirm it byte for byte. An interrupt closes a file channel at
+     * once and would refuse the restore too, so the restore runs with the
+     * thread's interrupt held back (a few tries, should another arrive) and
+     * re-asserts it after. True only when [target] reads back as [backup].
+     */
+    private fun restore(resolver: ContentResolver, target: Uri, backup: File): Boolean {
+        var interrupted = false
+        try {
+            repeat(RESTORE_ATTEMPTS) {
+                if (Thread.interrupted()) interrupted = true
+                val restored = runCatching {
+                    overwrite(resolver, target, backup) {}
+                    sameBytes(resolver, target, backup)
+                }.getOrDefault(false)
+                if (restored) return true
+            }
+            return false
+        } finally {
+            if (Thread.interrupted()) interrupted = true
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    /** Whether the content at [target] is exactly [file]'s bytes. */
+    private fun sameBytes(resolver: ContentResolver, target: Uri, file: File): Boolean {
+        val input = resolver.openInputStream(target) ?: return false
+        return input.buffered().use { content ->
+            file.inputStream().buffered().use { expected ->
+                var a: Int
+                do {
+                    a = content.read()
+                    if (a != expected.read()) return false
+                } while (a >= 0)
+                true
+            }
+        }
+    }
+
+    private const val RESTORE_ATTEMPTS = 3
 
     /** Runs at each named step of an in-place write; tests interrupt a write there. */
     @Volatile
