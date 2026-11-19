@@ -224,6 +224,61 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
+    fun `a process killed part-way through the overwrite has its capture restored before the retry`() {
+        val data = data()
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
+        granted = true
+        val recovery = MediaPublisher.recoveryDirectory(context)
+        val atKill = folder.newFolder("recovery-at-kill")
+        var mediaAtKill = ByteArray(0)
+        var kills = 1
+        // What a kill part-way through the write leaves on disk: the capture
+        // starts with signed bytes (past where they first differ from the
+        // original) and ends with the original's, and the recovery directory
+        // is as it stood. No catch block runs.
+        MediaPublisher.overwriteStep = {
+            if (it == "truncate" && kills-- > 0) {
+                val written = original.size - 4
+                mediaAtKill = media.readBytes().copyOf(written) + original.copyOfRange(written, original.size)
+                check(!mediaAtKill.contentEquals(original)) { "the kill must leave mixed bytes" }
+                recovery.listFiles()!!.forEach { f -> f.copyTo(File(atKill, f.name)) }
+                throw IllegalStateException("process killed")
+            }
+        }
+        try {
+            MediaWriteAuthorizations.publishGranted(context) {}
+        } finally {
+            MediaPublisher.overwriteStep = {}
+        }
+        media.writeBytes(mediaAtKill)
+        recovery.listFiles()!!.forEach { it.delete() }
+        atKill.listFiles()!!.forEach { f -> f.copyTo(File(recovery, f.name)) }
+        assertEquals("the request is still queued", listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri })
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertEquals("the retry finds the capture whole again and signs it", listOf(uri.toString()), signed.map { it.uri })
+        assertEquals(data.toJsonString(), embedded(media.readBytes()))
+        assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
+    }
+
+    @Test
+    fun `a capture edited after it was staged is refused and keeps the edit`() {
+        granted = true
+        val data = data()
+        val edited = XmpFixtures.png(byteArrayOf(0x78, 0x9C.toByte(), 0x09, 0x09, 0x09))
+        var reads = 0
+        // The first read stages the capture; the editor saves before the next one.
+        provider.onOpen = { mode -> if (mode == "r" && ++reads == 2) media.writeBytes(edited) }
+
+        assertThrows(XmpMetadataHelper.SourceChangedException::class.java) {
+            XmpMetadataHelper.signMedia(context, uri, capture.path, data)
+        }
+        assertArrayEquals("the edit is never overwritten by the older snapshot", edited, media.readBytes())
+    }
+
+    @Test
     fun `the signing service signs captures only through signMedia`() {
         val rel = "src/main/kotlin"
         val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }

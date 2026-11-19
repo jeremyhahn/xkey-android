@@ -35,12 +35,16 @@ class FakeMediaProvider : ContentProvider() {
     var failWrites = false
     val openModes = mutableListOf<String>()
 
+    /** Runs as each open begins, with its mode: a test edits [media] here as another app would. */
+    var onOpen: (String) -> Unit = {}
+
     override fun onCreate() = true
 
     override fun getType(uri: Uri): String = mimeType
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         openModes += mode
+        onOpen(mode)
         val writes = 'w' in mode
         if (writes && 't' in mode) media.writeBytes(ByteArray(0))
         if (writes && failWrites) return ParcelFileDescriptor.open(media, ParcelFileDescriptor.MODE_READ_ONLY)
