@@ -183,13 +183,24 @@ class AssertionSignCountTest {
         )
         val encryptor = java.io.File(root, "com/automatethethings/xkey/crypto/FileEncryptor.kt").readText()
         assertEquals("the file encryptor's ECDH calls", 2, call.findAll(encryptor).count())
+        // Handler's general-key gate (#270 review r5) and its software-key
+        // gate both end in withUsableKey: a use inside either is gated.
+        val gates = listOf("withUsableKey(", "withUsableGeneralKey(", "withUsableSoftwareKey(")
+        val handler = java.io.File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
+        val general = handler.substring(handler.indexOf("fun <T> withUsableGeneralKey("))
+        assertTrue(
+            "withUsableGeneralKey takes the use gate",
+            "keyPolicyStore.withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL, use)" in general.substring(0, general.indexOf("\n    }\n"))
+        )
+        val software = handler.substring(handler.indexOf("fun <T> withUsableSoftwareKey("))
+        assertTrue("withUsableSoftwareKey takes the general-key gate", "withUsableGeneralKey(keyId)" in software.substring(0, software.indexOf("\n    }\n")))
         val unguarded = root.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .flatMap { file ->
                 val lines = file.readLines()
                 lines.mapIndexedNotNull { i, line ->
                     val code = line.substringBefore("//")
-                    val guarded = (maxOf(0, i - 2)..i).any { "withUsableKey(" in lines[it] }
+                    val guarded = (maxOf(0, i - 2)..i).any { at -> gates.any { it in lines[at] } }
                     if (call.containsMatchIn(code) && !guarded) "${file.name}:${i + 1}" else null
                 }
             }
