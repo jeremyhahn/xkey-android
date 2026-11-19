@@ -1109,6 +1109,14 @@ class KeystoreManager(private val context: Context) {
     }
 
     /**
+     * Whether this device can hold Ed25519 keys at all: they are generated
+     * and read only from API 33 ([getEd25519PrivateKey]), so below it no
+     * key under any id is one.
+     */
+    @androidx.annotation.ChecksSdkIntAtLeast(api = Build.VERSION_CODES.TIRAMISU)
+    fun holdsEd25519Keys(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+
+    /**
      * Retrieve an Ed25519 private key from EncryptedSharedPreferences.
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
@@ -1546,7 +1554,11 @@ class KeystoreManager(private val context: Context) {
                 row,
                 {
                     runCatching { getPublicKeyDER(keyId, kind) }.getOrNull()
-                        ?: getEd25519PrivateKey(userKeyAlias(keyId, kind))?.let { ed25519PublicKeyDer(it) }
+                        ?: if (holdsEd25519Keys()) {
+                            getEd25519PrivateKey(userKeyAlias(keyId, kind))?.let { ed25519PublicKeyDer(it) }
+                        } else {
+                            null
+                        }
                 },
                 { getCOSEPublicKey(keyId, kind) }
             )
