@@ -212,6 +212,22 @@ class AndroidFidoCredentialBackendTest {
             metadataRows += firstArg<CredentialMetadataEntity>().credentialId; 1L
         }
         coEvery { credentialDao.deleteByCredentialId(any()) } answers { if (metadataRows.remove(firstArg())) 1 else 0 }
+        // One transaction over both row stores: a delete that throws (stubbed
+        // per row on the two deletes above) rolls every row back.
+        coEvery { keyDao.deletePasskeyRows(any()) } coAnswers {
+            val keysBefore = keyRows.toSet()
+            val metadataBefore = metadataRows.toSet()
+            try {
+                firstArg<List<String>>().forEach {
+                    credentialDao.deleteByCredentialId(it)
+                    keyDao.deleteByKeyId(it)
+                }
+            } catch (e: Throwable) {
+                keyRows.clear(); keyRows += keysBefore
+                metadataRows.clear(); metadataRows += metadataBefore
+                throw e
+            }
+        }
         return keyRows to metadataRows
     }
 
@@ -294,6 +310,9 @@ class AndroidFidoCredentialBackendTest {
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
         coEvery { keyDao.insert(any()) } answers { val e = firstArg<KeyEntity>(); rows[e.keyId] = e; 1L }
         coEvery { keyDao.deleteByKeyId(any()) } answers { if (rows.remove(firstArg<String>()) != null) 1 else 0 }
+        coEvery { keyDao.deletePasskeyRows(any()) } coAnswers {
+            firstArg<List<String>>().forEach { rows.remove(it) }
+        }
         coEvery { keyDao.getFido2ByRpId("example.com") } coAnswers { yield(); rows.values.toList() }
         return rows
     }

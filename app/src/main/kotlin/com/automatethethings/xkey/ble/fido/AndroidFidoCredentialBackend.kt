@@ -252,11 +252,17 @@ class AndroidFidoCredentialBackend(
             withContext(NonCancellable) { remove(keyId) }
             throw e
         }
-        // Only now that the new passkey is whole are the old ones removed. One
-        // whose rows will not go stays whole, Keystore key included, beside it.
+        // Only now that the new passkey is whole are the old ones removed, all
+        // their rows in one transaction. When those rows will not go, none
+        // does: the registration fails and the new passkey is removed, so the
+        // client and the credential provider see the passkeys they had.
         withContext(NonCancellable) {
-            replaced.forEach {
-                if (!remove(it.keyId)) Log.w(TAG, "A replaced passkey could not be removed, rpId=${request.rpId}")
+            try {
+                delete(replaced.map { it.keyId })
+            } catch (e: Throwable) {
+                Log.w(TAG, "The replaced passkeys could not be removed; the registration fails, rpId=${request.rpId}", e)
+                remove(keyId)
+                throw e
             }
         }
         Log.i(TAG, "Created a passkey over BLE, rpId=${request.rpId}")
@@ -342,24 +348,27 @@ class AndroidFidoCredentialBackend(
     private suspend fun shared(entity: KeyEntity): Boolean = sharePermission.canShare(entity, null)
 
     /**
-     * Remove a passkey from all three places it lives: the metadata the
-     * credential provider lists, its key row, then its Keystore key. The key
-     * goes only once both rows are gone, so no row ever points at a key that
-     * is gone; false when a row stayed (and with it the key).
+     * Delete the passkeys [keyIds] from all three places they live: their
+     * metadata rows (what the credential provider lists) and key rows, all in
+     * one transaction, then their Keystore keys. The keys go only once the
+     * rows are gone, so no row ever points at a key that is gone. Throws when
+     * the rows will not go, and then every row and key stays.
      */
-    private suspend fun remove(keyId: String): Boolean {
-        val rowsGone = try {
-            credentialDao.deleteByCredentialId(keyId)
-            keyDao.deleteByKeyId(keyId)
-            true
+    private suspend fun delete(keyIds: List<String>) {
+        if (keyIds.isEmpty()) return
+        keyDao.deletePasskeyRows(keyIds)
+        keyIds.forEach { runCatching { keystoreManager.deleteKey(it) } }
+    }
+
+    /** Roll back the new passkey [keyId]: [delete], logged rather than thrown when its rows stay. */
+    private suspend fun remove(keyId: String) {
+        try {
+            delete(listOf(keyId))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "A passkey row could not be deleted; its Keystore key stays", e)
-            false
         }
-        if (rowsGone) runCatching { keystoreManager.deleteKey(keyId) }
-        return rowsGone
     }
 
     /** A stored base64 user ID and a wire user handle name the same user when their bytes match. */

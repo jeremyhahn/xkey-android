@@ -19,6 +19,7 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -372,6 +373,35 @@ interface KeyDao {
     @RawKeyRowWrite
     @Query("DELETE FROM keys WHERE key_id = :keyId")
     suspend fun deleteRowByKeyId(keyId: String): Int
+
+    /**
+     * Delete the passkeys [keyIds], each its `credential_metadata` row and
+     * its key row, in one transaction and as a revoke of each key: either
+     * every row goes or, when any delete throws, none does. Their Keystore
+     * keys are the caller's to delete, after this returns.
+     */
+    suspend fun deletePasskeyRows(keyIds: List<String>) {
+        suspend fun revokingAll(index: Int) {
+            if (index == keyIds.size) deletePasskeyRowsInTransaction(keyIds)
+            else SharePermissionLedger.revoking(keyIds[index]) { revokingAll(index + 1) }
+        }
+        revokingAll(0)
+    }
+
+    /** Raw passkey rows delete in one transaction; call [deletePasskeyRows]. */
+    @RawKeyRowWrite
+    @Transaction
+    suspend fun deletePasskeyRowsInTransaction(keyIds: List<String>) {
+        keyIds.forEach {
+            deleteMetadataRowByCredentialId(it)
+            deleteRowByKeyId(it)
+        }
+    }
+
+    /** Raw `credential_metadata` delete; call [deletePasskeyRows]. */
+    @RawKeyRowWrite
+    @Query("DELETE FROM credential_metadata WHERE credential_id = :credentialId")
+    suspend fun deleteMetadataRowByCredentialId(credentialId: String): Int
 
     /**
      * Delete all FIDO2 keys for a relying party, each as a revoke of its key.
