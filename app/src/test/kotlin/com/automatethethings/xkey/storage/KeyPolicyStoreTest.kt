@@ -480,7 +480,7 @@ class KeyPolicyStoreTest {
     @Test
     fun aDeleteIsAuditedOnceWhenItCommits() = runBlocking {
         val audited = mutableListOf<String>()
-        val store = KeyPolicyStore(tables, tables, tables.unrecordedDenials, audit = { audited += it.keyId })
+        val store = KeyPolicyStore(tables, tables, tables.unrecordedDenials, audit = { tombstone, _ -> audited += tombstone.keyId })
         val key = tables.addKey("k", SELECTED_PEERS)
 
         assertFalse(store.deleteKey("k", key + 1, materialDelete { true }))
@@ -511,7 +511,7 @@ class KeyPolicyStoreTest {
             .toSet()
         assertEquals(setOf("AuditLogger.kt", "KeystoreManager.kt", "PivKeyManager.kt", "KeyPolicyStore.kt"), auditors)
         val store = java.io.File(root, "com/automatethethings/xkey/storage/KeyPolicyStore.kt").readText()
-        assertEquals("the store's deletes do not both audit", 2, Regex("""\baudited\(tombstone\)""").findAll(store).count())
+        assertEquals("the store's deletes do not both audit", 2, Regex("""\baudited\(tombstone,""").findAll(store).count())
         val direct = Regex("""\.(deleteKey|deleteGeneralKey)\(""")
         val protocolDeletes = java.io.File(root, "com/automatethethings/xkey/protocol").walkTopDown()
             .filter { it.isFile && it.extension == "kt" }

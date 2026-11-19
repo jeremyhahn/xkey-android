@@ -118,6 +118,11 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
         return keys.value[keyId]?.source
     }
 
+    override suspend fun keyType(keyId: String): String? {
+        check("keyType")
+        return keys.value[keyId]?.keyType
+    }
+
     override suspend fun putDeletion(row: KeyDeletionEntity) {
         check("putDeletion")
         deletions.value = deletions.value + (row.keyId to row)

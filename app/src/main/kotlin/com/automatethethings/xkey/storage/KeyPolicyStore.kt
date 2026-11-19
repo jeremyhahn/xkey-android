@@ -72,6 +72,12 @@ interface KeyMaterial {
     /** Whether [generation] names no material at all. */
     fun isEmpty(generation: String): Boolean = generation.isEmpty()
 
+    /**
+     * The kind of user key this delete names, if it names one: what a
+     * delete of material with no key row of its own is audited as.
+     */
+    val kind: UserKeyKind? get() = null
+
     companion object {
         /** No material: for a key whose material lives elsewhere. */
         val NONE: KeyMaterial = object : KeyMaterial {
@@ -146,18 +152,27 @@ class KeyPolicyStore(
      * by a replay or settle of the same delete.
      */
     fun interface DeletionAudit {
-        fun deleted(tombstone: KeyDeletionEntity)
+        /** [tombstone]'s delete committed; the key deleted was of [keyType]. */
+        fun deleted(tombstone: KeyDeletionEntity, keyType: String)
 
         companion object {
             /** The app's audit log. */
-            val APP = DeletionAudit { AuditLogger.logKeyDeleted(keyId = it.keyId, keyLabel = it.keyId, keyType = "general") }
+            val APP = DeletionAudit { tombstone, keyType ->
+                AuditLogger.logKeyDeleted(keyId = tombstone.keyId, keyLabel = tombstone.keyId, keyType = keyType)
+            }
         }
     }
 
-    /** Audits [tombstone]'s committed delete; a failed audit never fails the delete. */
-    private fun audited(tombstone: KeyDeletionEntity) {
+    /**
+     * Audits [tombstone]'s committed delete; a failed audit never fails the
+     * delete. The event names the type of the key deleted (#270 review r6):
+     * the deleted row's own `key_type` ([rowKeyType]), else, for material
+     * with no row of its own, the kind [material] names, so a credential's
+     * delete is "fido2" wherever it is deleted from.
+     */
+    private fun audited(tombstone: KeyDeletionEntity, rowKeyType: String?, material: KeyMaterial) {
         try {
-            audit.deleted(tombstone)
+            audit.deleted(tombstone, rowKeyType ?: if (material.kind == UserKeyKind.CREDENTIAL) "fido2" else "general")
         } catch (e: Exception) {
             // The delete is committed; its record is best effort, as every audit is.
         }
@@ -444,6 +459,7 @@ class KeyPolicyStore(
             // settled first: this tombstone never replaces it (#255 verify).
             val retry = noTombstoneOwed(held, material) ?: return@lockKeyMaterial false
             val source = dao.keySource(keyId)
+            val keyType = dao.keyType(keyId)
             // Under the lock every write of the id's material takes, so this
             // is the generation of the row being deleted (#193 r12).
             val generation = material.generation(held, source, retry)
@@ -457,7 +473,7 @@ class KeyPolicyStore(
                 dao.deleteKey(keyId) > 0
             }
             if (deleted) {
-                audited(tombstone)
+                audited(tombstone, keyType, material)
                 deleteMaterialOf(held, tombstone, material)
             }
             deleted
@@ -493,7 +509,7 @@ class KeyPolicyStore(
             }
             if (absent) {
                 // A delete of an id that holds nothing deletes nothing to record.
-                if (!material.isEmpty(generation)) audited(tombstone)
+                if (!material.isEmpty(generation)) audited(tombstone, null, material)
                 deleteMaterialOf(held, tombstone, material)
             }
             absent

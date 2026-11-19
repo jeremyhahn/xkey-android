@@ -94,6 +94,10 @@ interface KeyPolicyDao {
     @Query("SELECT source FROM keys WHERE key_id = :keyId")
     suspend fun keySource(keyId: String): String?
 
+    /** The `key_type` of [keyId]'s key row, or null if there is none. */
+    @Query("SELECT key_type FROM keys WHERE key_id = :keyId")
+    suspend fun keyType(keyId: String): String?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun putDeletion(row: KeyDeletionEntity)
 

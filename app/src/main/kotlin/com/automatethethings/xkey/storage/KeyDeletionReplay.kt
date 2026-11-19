@@ -226,7 +226,11 @@ fun keyMaterialDeleter(
     row: com.automatethethings.xkey.storage.entity.KeyEntity? = null
 ): KeyMaterial {
     val manager by lazy { keystore ?: KeystoreManager(context) }
+    val named = kind
     return object : KeyMaterial {
+        // What a delete of material with no row of its own is audited as.
+        override val kind: UserKeyKind? = named
+
         // A user delete names its [kind]; replays and settles delete what
         // the tombstone recorded, so they need none. A deleter with no kind
         // would select both namespaces under the id, so it records no
