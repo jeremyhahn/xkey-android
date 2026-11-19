@@ -202,4 +202,17 @@ class BiometricFidoUserPromptTest {
         assertEquals(null, chosen)
         assertEquals(2, titles.size)
     }
+
+    @Test
+    fun `a cancelled user check or account choice propagates the cancellation, not a refusal`() = runTest {
+        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } throws
+            kotlinx.coroutines.CancellationException("the client went away")
+        val prompt = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { launcher }
+
+        val verified = runCatching { prompt.verify("example.com", false) }.exceptionOrNull()
+        val chosen = runCatching { prompt.chooseAccount("example.com", listOf("alice", "bob")) }.exceptionOrNull()
+
+        assertTrue("verify got $verified", verified is kotlinx.coroutines.CancellationException)
+        assertTrue("chooseAccount got $chosen", chosen is kotlinx.coroutines.CancellationException)
+    }
 }

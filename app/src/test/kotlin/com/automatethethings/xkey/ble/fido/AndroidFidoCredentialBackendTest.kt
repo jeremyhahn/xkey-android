@@ -23,7 +23,9 @@ import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.BiometricHelper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
@@ -285,6 +287,81 @@ class AndroidFidoCredentialBackendTest {
         assertArrayEquals(byteArrayOf(0x30), signed.signature)
     }
 
+    /** Key rows as one live store: what a registration inserts, the next one's lookup sees. */
+    private fun liveKeyRows(): MutableMap<String, KeyEntity> {
+        val rows = linkedMapOf<String, KeyEntity>()
+        coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
+        coEvery { keyDao.insert(any()) } answers { val e = firstArg<KeyEntity>(); rows[e.keyId] = e; 1L }
+        coEvery { keyDao.deleteByKeyId(any()) } answers { if (rows.remove(firstArg<String>()) != null) 1 else 0 }
+        coEvery { keyDao.getFido2ByRpId("example.com") } coAnswers { yield(); rows.values.toList() }
+        return rows
+    }
+
+    @Test
+    fun `two concurrent resident registrations for one account leave exactly one discoverable passkey`() = runTest {
+        val rows = liveKeyRows()
+        val request = CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", discoverable = true)
+
+        val first = async { backend().create(request) }
+        val second = async { backend().create(request) }
+        val made = listOf(first.await(), second.await())
+
+        assertEquals(1, rows.size)
+        assertTrue(made.any { b64(it.id) in rows })
+    }
+
+    @Test
+    fun `a registration whose replacement lookup fails rolls back and leaves the old passkey usable`() = runTest {
+        val (keyRows, metadataRows) = storedResidents()
+        var lookups = 0
+        coEvery { keyDao.getFido2ByRpId("example.com") } answers {
+            if (lookups++ == 0) throw IllegalStateException("database closed") else listOf(shared, private)
+        }
+
+        val thrown = runCatching {
+            backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+        }.exceptionOrNull()
+
+        assertTrue("create must fail, got $thrown", thrown is IllegalStateException)
+        assertEquals(setOf(shared.keyId, private.keyId), keyRows)
+        assertEquals(setOf(shared.keyId, private.keyId), metadataRows)
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        val signed = backend().sign(backend().credentials("example.com").single(), { byteArrayOf(5) }, ByteArray(32))
+        assertArrayEquals(byteArrayOf(0x30), signed.signature)
+    }
+
+    @Test
+    fun `a replaced passkey whose key row will not delete keeps its Keystore key`() = runTest {
+        val (keyRows, _) = storedResidents()
+        coEvery { keyDao.deleteByKeyId(shared.keyId) } throws IllegalStateException("disk I/O error")
+
+        val made = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+
+        // The row still points at the old key, so the key stays.
+        assertTrue(shared.keyId in keyRows)
+        assertTrue(b64(made.id) in keyRows)
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+    }
+
+    @Test
+    fun `user handles match by their bytes, whatever base64 stored them`() = runTest {
+        val handle = byteArrayOf(0xFB.toByte(), 0xFF.toByte())
+        // "+/8=": the same bytes as the request's "-_8", in standard padded base64.
+        val sameUser = shared.copy(userId = Base64.getEncoder().encodeToString(handle))
+        val otherUser = passkey(byteArrayOf(5, 6), SharingPolicyType.ALL_PEERS)
+            .copy(userId = b64(byteArrayOf(0xFB.toByte())))
+        val (keyRows, metadataRows) = trackStoredRows()
+        keyRows += listOf(sameUser.keyId, otherUser.keyId)
+        metadataRows += listOf(sameUser.keyId, otherUser.keyId)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(sameUser, otherUser)
+
+        val made = backend().create(CredentialRequest("example.com", "Example", handle, "alice", "Alice", true))
+
+        assertEquals(setOf(otherUser.keyId, b64(made.id)), keyRows)
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(sameUser.keyId) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(otherUser.keyId) }
+    }
+
     @Test
     fun `without a prompt the user check is unavailable`() = runTest {
         assertEquals(UserCheck.UNAVAILABLE, backend().checkUser("example.com", registering = false))
@@ -471,6 +548,19 @@ class AndroidFidoCredentialBackendTest {
         }
 
         assertEquals(Ctap2.ERR_OPERATION_DENIED, e.status)
+    }
+
+    @Test
+    fun `a cancelled key-bound sign propagates the cancellation, not a CTAP error`() = runTest {
+        val perOperation = shared.copy(authDurationSeconds = 0)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(perOperation)
+        coEvery { keyDao.getByKeyId(shared.keyId) } returns perOperation
+        val prompt = BoundPrompt { throw CancellationException("the client went away") }
+        val cred = backend(prompt).credentials("example.com").single()
+
+        val thrown = runCatching { backend(prompt).sign(cred, { byteArrayOf(1) }, ByteArray(32)) }.exceptionOrNull()
+
+        assertTrue("got $thrown", thrown is CancellationException)
     }
 
     @Test
