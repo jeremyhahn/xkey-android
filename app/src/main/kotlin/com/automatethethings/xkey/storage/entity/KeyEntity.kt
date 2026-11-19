@@ -243,18 +243,7 @@ data class KeyEntity(
 
     /** Whether this is a system/framework key that must not be deleted. */
     @ColumnInfo(name = "is_system_key")
-    val isSystemKey: Boolean = false,
-
-    /**
-     * Where this key's material was stored when the row was written:
-     * "credential" (`xkey_credential_<id>` with its metadata) or "general"
-     * (`xkey_key_<id>`, a software key or a raw alias). Null on rows written
-     * before it was recorded. The key type does not say: local.generateKey
-     * stores a FIDO2-type key as a general key. See
-     * [com.automatethethings.xkey.storage.KeyNamespace].
-     */
-    @ColumnInfo(name = "material_namespace")
-    val materialNamespace: String? = null
+    val isSystemKey: Boolean = false
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -295,7 +284,6 @@ data class KeyEntity(
         if (isDiscoverable != other.isDiscoverable) return false
         if (signCount != other.signCount) return false
         if (isSystemKey != other.isSystemKey) return false
-        if (materialNamespace != other.materialNamespace) return false
 
         return true
     }
@@ -328,7 +316,6 @@ data class KeyEntity(
         result = 31 * result + isDiscoverable.hashCode()
         result = 31 * result + signCount.hashCode()
         result = 31 * result + isSystemKey.hashCode()
-        result = 31 * result + (materialNamespace?.hashCode() ?: 0)
         return result
     }
 }

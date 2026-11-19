@@ -81,13 +81,6 @@ class LocalDeleteKeyExactIdTest {
         val keyDao = mockk<KeyDao>(relaxed = true)
         coEvery { keyDao.exists(software) } returns true
         coEvery { keyDao.exists(hardware) } returns true
-        // Rows written before a namespace was recorded.
-        coEvery { keyDao.getByKeyId(any()) } answers {
-            com.automatethethings.xkey.storage.entity.KeyEntity(
-                keyId = firstArg(), keyType = "signing", algorithm = "ES256", label = firstArg(), keySizeBits = 256,
-                source = "local"
-            )
-        }
         val keystore = mockk<KeystoreManager>(relaxed = true)
         // Hardware key `a` lives at Keystore alias `xkey_key_a`.
         every { keystore.resolveKeystoreAlias(any()) } answers {
@@ -97,9 +90,8 @@ class LocalDeleteKeyExactIdTest {
             }
         }
         mockkConstructor(SoftwareKeyStore::class)
-        var softwareLeft = true
-        every { anyConstructed<SoftwareKeyStore>().contains(any()) } answers { softwareLeft && firstArg<String>() == software }
-        every { anyConstructed<SoftwareKeyStore>().delete(any()) } answers { if (firstArg<String>() == software) softwareLeft = false }
+        every { anyConstructed<SoftwareKeyStore>().contains(any()) } answers { firstArg<String>() == software }
+        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
 
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", MethodNames.LOCAL_DELETE_KEY)
             .put("params", JSONObject().put("keyId", software))
@@ -124,10 +116,6 @@ class LocalDeleteKeyExactIdTest {
     fun aRawAliasWithNoKeyOfItsOwnStillDeletesItsKey() = runBlocking<Unit> {
         val keyDao = mockk<KeyDao>(relaxed = true)
         coEvery { keyDao.exists("b") } returns true
-        // Its row, written before a namespace was recorded.
-        coEvery { keyDao.getByKeyId("b") } returns com.automatethethings.xkey.storage.entity.KeyEntity(
-            keyId = "b", keyType = "signing", algorithm = "ES256", label = "b", keySizeBits = 256, source = "local"
-        )
         val keystore = mockk<KeystoreManager>(relaxed = true)
         every { keystore.resolveKeystoreAlias(any()) } answers {
             firstArg<String>().takeIf { it == "xkey_key_b" || it == "b" }?.let { "xkey_key_b" }
@@ -158,7 +146,6 @@ class LocalDeleteKeyExactIdTest {
         val general = "xkey_key_k"
         val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
         val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.getByKeyId(any()) } returns null
         val keystore = mockk<KeystoreManager>(relaxed = true)
         every { keystore.resolveKeystoreAlias(any()) } answers {
             val id = firstArg<String>()
@@ -195,187 +182,39 @@ class LocalDeleteKeyExactIdTest {
     }
 
     /**
-     * Delete canonical ID `k`, whose row is [row], over Keystore [aliases];
-     * returns the response. The Keystore mock answers from [aliases].
+     * Canonical ID `k` with both a credential `xkey_credential_k` and a general
+     * key `xkey_key_k` names the general key, as `local.deleteKey` always did:
+     * deleting `k` deletes `xkey_key_k` and leaves the credential usable.
      */
-    private suspend fun deleteCanonicalK(
-        row: com.automatethethings.xkey.storage.entity.KeyEntity?,
-        aliases: MutableSet<String>,
-        keyDao: KeyDao,
-        keystore: KeystoreManager
-    ): JSONObject {
-        coEvery { keyDao.exists("k") } returns (row != null)
-        coEvery { keyDao.getByKeyId("k") } returns row
+    @Test
+    fun aCanonicalIdWithBothAliasesDeletesTheGeneralKeyAndLeavesTheCredential() = runBlocking<Unit> {
+        val credential = "xkey_credential_k"
+        val general = "xkey_key_k"
+        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.exists("k") } returns true
+        val keystore = mockk<KeystoreManager>(relaxed = true)
         every { keystore.resolveKeystoreAlias(any()) } answers {
             val id = firstArg<String>()
             listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
         }
-        every { keystore.listAllKeystoreAliases() } answers { aliases.toList() }
         every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
         every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
-        every { keystore.deleteKey(any()) } answers {
-            keystore.resolveKeystoreAlias(firstArg())?.let { aliases.remove(it) } ?: false
-        }
-        every { keystore.generalKeyExists(any()) } answers { "xkey_key_${firstArg<String>()}" in aliases }
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
         every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
 
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", MethodNames.LOCAL_DELETE_KEY)
             .put("params", JSONObject().put("keyId", "k"))
-        return JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
-    }
+        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
 
-    /**
-     * Canonical ID `k` with a row written before its namespace was recorded,
-     * and both a credential `xkey_credential_k` and a general key
-     * `xkey_key_k`: which key the row is cannot be told, so `local.deleteKey`
-     * refuses with an error, as the key screens do, and deletes nothing.
-     */
-    @Test
-    fun anUnrecordedIdWithBothAliasesIsRefusedAndNothingIsDeleted() = runBlocking<Unit> {
-        val credential = "xkey_credential_k"
-        val general = "xkey_key_k"
-        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        val row = com.automatethethings.xkey.storage.entity.KeyEntity(
-            keyId = "k", keyType = "signing", algorithm = "ES256", label = "k", keySizeBits = 256, source = "local"
-        )
-
-        val response = deleteCanonicalK(row, aliases, keyDao, keystore)
-
-        assertTrue("the general key must survive, left $aliases", general in aliases)
+        assertTrue("the general key must be deleted, left $aliases", general !in aliases)
         assertTrue("the credential must survive, left $aliases", credential in aliases)
         assertTrue(
-            "the delete must answer an error, got $response",
-            response.optJSONObject("error")?.optInt("code") == ErrorCodes.INVALID_PARAMS &&
-                !response.has("result")
-        )
-        coVerify(exactly = 0) { keyDao.deleteByKeyId("k") }
-    }
-
-    /**
-     * Canonical ID `k` whose row records an unknown namespace: its key cannot
-     * be told, so the delete is refused with an error and general key
-     * `xkey_key_k` is left, not taken as the row's.
-     */
-    @Test
-    fun anUnknownRecordedNamespaceIsRefusedAndNothingIsDeleted() = runBlocking<Unit> {
-        val general = "xkey_key_k"
-        val aliases = java.util.Collections.synchronizedSet(hashSetOf(general))
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        val row = com.automatethethings.xkey.storage.entity.KeyEntity(
-            keyId = "k", keyType = "signing", algorithm = "ES256", label = "k", keySizeBits = 256, source = "local",
-            materialNamespace = "vault"
-        )
-
-        val response = deleteCanonicalK(row, aliases, keyDao, keystore)
-
-        assertTrue("the general key must survive, left $aliases", general in aliases)
-        assertTrue(
-            "the delete must answer an error, got $response",
-            response.optJSONObject("error")?.optInt("code") == ErrorCodes.INVALID_PARAMS &&
-                !response.has("result")
-        )
-        coVerify(exactly = 0) { keyDao.deleteByKeyId("k") }
-    }
-
-    /**
-     * The base generateKey path creates credential `k` (alias
-     * `xkey_credential_k`) with no keys row. Deleting `k` before any sync
-     * deletes that credential's private key and metadata, from the material
-     * present, and answers deleted=true; nothing is left usable.
-     */
-    @Test
-    fun aCanonicalIdOfACredentialWithNoRowDeletesTheCredential() = runBlocking<Unit> {
-        val credential = "xkey_credential_k"
-        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential))
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.exists(any()) } returns false
-        coEvery { keyDao.getByKeyId(any()) } returns null
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.resolveKeystoreAlias(any()) } answers {
-            val id = firstArg<String>()
-            listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
-        }
-        every { keystore.listAllKeystoreAliases() } answers { aliases.toList() }
-        every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
-        every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
-        every { keystore.generalKeyExists(any()) } answers { "xkey_key_${firstArg<String>()}" in aliases }
-        mockkConstructor(SoftwareKeyStore::class)
-        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
-        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
-
-        val request = JSONObject().put("jsonrpc", "2.0").put("id", 5).put("method", MethodNames.LOCAL_DELETE_KEY)
-            .put("params", JSONObject().put("keyId", "k"))
-        val handler = realHandler(keyDao, keystore)
-        val metadata = XKeyDatabase.getInstance(context).credentialMetadataDao()
-        val response = JSONObject(String(handler.handleRawRequest(request.toString().toByteArray())))
-
-        assertTrue("the credential's private key must be deleted, left $aliases", credential !in aliases)
-        assertTrue(
-            "the delete must succeed once the credential is gone, got $response",
+            "the delete must succeed once the general key is gone, got $response",
             response.optJSONObject("result")?.optBoolean("deleted") == true
         )
-        coVerify { metadata.deleteByCredentialId("k") }
-    }
-
-    /**
-     * Delete credential `k` (alias `xkey_credential_k`, no keys row) by its
-     * canonical ID through the real [KeystoreManager] over an in-memory
-     * Keystore; [metadataFails] makes the metadata cleanup after the key's
-     * removal throw. Returns the aliases left.
-     */
-    private fun deleteCredentialByCanonicalId(metadataFails: Boolean): Set<String> = runBlocking {
-        val aliases = java.util.Collections.synchronizedSet(hashSetOf("xkey_credential_k"))
-        val store = mockk<KeyStore>(relaxed = true)
-        every { store.containsAlias(any()) } answers { firstArg<String>() in aliases }
-        every { store.deleteEntry(any()) } answers { aliases.remove(firstArg<String>()); Unit }
-        every { store.aliases() } answers { java.util.Collections.enumeration(aliases.toList()) }
-        mockkStatic(KeyStore::class)
-        every { KeyStore.getInstance("AndroidKeyStore") } returns store
-        every { context.filesDir } returns Files.createTempDirectory("xkey-files").toFile().apply { deleteOnExit() }
-        val keystore = KeystoreManager(context)
-
-        mockkObject(com.automatethethings.xkey.audit.AuditLogger)
-        every { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
-
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.exists(any()) } returns false
-        coEvery { keyDao.getByKeyId(any()) } returns null
-        mockkConstructor(SoftwareKeyStore::class)
-        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
-
-        val handler = realHandler(keyDao, keystore)
-        every { KeyStore.getInstance("AndroidKeyStore") } returns store
-        val metadata = XKeyDatabase.getInstance(context).credentialMetadataDao()
-        if (metadataFails) coEvery { metadata.deleteByCredentialId(any()) } throws RuntimeException("metadata store down")
-
-        val request = JSONObject().put("jsonrpc", "2.0").put("id", 6).put("method", MethodNames.LOCAL_DELETE_KEY)
-            .put("params", JSONObject().put("keyId", "k"))
-        handler.handleRawRequest(request.toString().toByteArray())
-        aliases.toSet()
-    }
-
-    /** Deleting a credential by its canonical ID records one KEY_DELETED event for it. */
-    @Test
-    fun deletingACredentialByCanonicalIdAuditsTheDeletion() {
-        val left = deleteCredentialByCanonicalId(metadataFails = false)
-
-        assertTrue("the credential's key is gone, left $left", left.isEmpty())
-        verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted("k", any(), "fido2") }
-        verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted(any(), any(), any()) }
-    }
-
-    /** The audit is recorded once the key is removed, even when its metadata cleanup then fails. */
-    @Test
-    fun aCredentialDeleteWhoseMetadataCleanupFailsIsStillAudited() {
-        val left = deleteCredentialByCanonicalId(metadataFails = true)
-
-        assertTrue("the credential's key is gone, left $left", left.isEmpty())
-        verify(exactly = 1) { com.automatethethings.xkey.audit.AuditLogger.logKeyDeleted("k", any(), "fido2") }
+        verify(exactly = 0) { keystore.deleteByAlias(credential) }
     }
 
     /** The real [RequestHandler] with only its Android and storage edges mocked. */

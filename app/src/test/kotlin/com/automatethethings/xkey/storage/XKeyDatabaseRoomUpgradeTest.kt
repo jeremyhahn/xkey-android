@@ -99,15 +99,14 @@ class XKeyDatabaseRoomUpgradeTest {
 
     private companion object {
         /** The version `@Database` declares. */
-        const val CURRENT_VERSION = 14
+        const val CURRENT_VERSION = 13
 
         /**
-         * `identityHash` of the committed 14.json (13.json holds
-         * e02480570d8c7a895d2410493d8e9e08). (12.json, written by Room
+         * `identityHash` of the committed 13.json. (12.json, written by Room
          * 2.7.0 in #42, holds 346118e31d0992f85496533bbc1b5d5b, which 2.8.5
          * reproduced for the v12 entities.)
          */
-        const val CURRENT_IDENTITY_HASH = "6aeec0cb065baced6ea54e4f89b7bc7b"
+        const val CURRENT_IDENTITY_HASH = "e02480570d8c7a895d2410493d8e9e08"
 
         /** The migrations `XKeyDatabase.buildDatabase` registers, in its order. */
         val APP_MIGRATIONS = listOf(
@@ -122,8 +121,7 @@ class XKeyDatabaseRoomUpgradeTest {
             XKeyDatabase.MIGRATION_9_10,
             XKeyDatabase.MIGRATION_10_11,
             XKeyDatabase.MIGRATION_11_12,
-            XKeyDatabase.MIGRATION_12_13,
-            XKeyDatabase.MIGRATION_13_14
+            XKeyDatabase.MIGRATION_12_13
         )
     }
 }

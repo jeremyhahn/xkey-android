@@ -159,7 +159,6 @@
     <string name="key_badge_system">System</string>
     <string name="key_badge_shared">Shared</string>
     <string name="key_deleted">Key deleted</string>
-    <string name="key_delete_refused">Key not deleted: its key material could not be removed</string>
 
     <!-- Key Context Menu -->
     <string name="key_menu_share_settings">Share Settings</string>

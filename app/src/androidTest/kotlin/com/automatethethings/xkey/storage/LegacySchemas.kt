@@ -37,7 +37,7 @@ object LegacySchemas {
     const val OLDEST = 3
 
     /** The schema version the app currently ships. */
-    const val CURRENT = 14
+    const val CURRENT = 13
 
     /** Every version that can serve as a migration starting point. */
     val TESTABLE_VERSIONS: List<Int> get() = SCHEMAS.keys.sorted()
@@ -356,14 +356,6 @@ object LegacySchemas {
     ).let {
         // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim
         // (11.json differs from 10.json in its version number alone).
-        // Schema 13 (13.json) is schema 12 with MIGRATION_12_13 applied: the
-        // keys table's policy_revision column and its trigger.
-        val v12 = it.getValue(12)
-        val v13 = v12.dropLast(1) + listOf(
-            "ALTER TABLE `keys` ADD COLUMN `policy_revision` INTEGER NOT NULL DEFAULT 0",
-            XKeyDatabase.CREATE_POLICY_REVISION_TRIGGER,
-            "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e02480570d8c7a895d2410493d8e9e08')"
-        )
-        it + (11 to it.getValue(10)) + (13 to v13)
+        it + (11 to it.getValue(10))
     }
 }

@@ -98,7 +98,7 @@ import java.util.concurrent.atomic.AtomicReference
         PivSlotEntity::class,
         PasswordEntity::class
     ],
-    version = 14,
+    version = 13,
     exportSchema = true
 )
 @TypeConverters(AuditOperationTypeConverter::class)
@@ -612,18 +612,6 @@ abstract class XKeyDatabase : RoomDatabase() {
         }
 
         /**
-         * Migration from v13 to v14: record where a key's material is stored
-         * (`material_namespace`, [KeyNamespace]). Existing rows keep null:
-         * their delete tells the namespace from the material it finds, and
-         * refuses when both namespaces hold the ID.
-         */
-        val MIGRATION_13_14 = object : Migration(13, 14) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE `keys` ADD COLUMN `material_namespace` TEXT")
-            }
-        }
-
-        /**
          * Creates what Room's schema does not carry on a fresh install: the
          * policy revision trigger a migrated database gets from
          * [MIGRATION_12_13].
@@ -660,7 +648,7 @@ abstract class XKeyDatabase : RoomDatabase() {
                 XKeyDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
                 .addCallback(CREATE_TRIGGERS)
                 .build()
         }

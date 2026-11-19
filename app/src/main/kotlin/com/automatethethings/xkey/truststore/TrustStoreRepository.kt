@@ -82,15 +82,6 @@ public data class ClearResult(
 }
 
 /**
- * What a trust-store file removal or restore left on disk. Only [REMOVED]
- * is proof that the file is gone: a certificate is recorded as deleted, and
- * its row dropped, on [REMOVED] alone. [PRESENT] means the file is on disk
- * (it may be a whole DER that still anchors chains); [UNKNOWN] means its
- * state could not be read.
- */
-internal enum class FileOutcome { REMOVED, PRESENT, UNKNOWN }
-
-/**
  * Repository for managing trusted CA certificates.
  *
  * Certificates are stored in the app's private directory and used
@@ -104,9 +95,7 @@ public class TrustStoreRepository(
     /** Deletes one file; tests inject a deleter that refuses. */
     private val fileDeleter: (File) -> Boolean = { it.delete() },
     /** Writes text to one file; tests inject a writer that fails part-way. */
-    private val fileWriter: (File, String) -> Unit = { file, text -> file.writeText(text) },
-    /** Writes a certificate file back; tests inject a writer whose close fails. */
-    private val fileBytesWriter: (File, ByteArray) -> Unit = { file, bytes -> file.writeBytes(bytes) }
+    private val fileWriter: (File, String) -> Unit = { file, text -> file.writeText(text) }
 ) {
     private val trustStoreDir: File by lazy {
         context.getDir("trust_store", Context.MODE_PRIVATE)
@@ -316,7 +305,7 @@ public class TrustStoreRepository(
         // Read the DER before deleting it, so a failed metadata rewrite can
         // write it back. A file that exists but cannot be read is kept.
         val der = if (fileExisted) readOrNull(certFile) else null
-        if (fileExisted && (der == null || removeFile(certFile) != FileOutcome.REMOVED)) {
+        if (fileExisted && (der == null || !removeFile(certFile))) {
             auditDelete(subject, fingerprint, FILE_NOT_DELETED)
             return false
         }
@@ -327,10 +316,8 @@ public class TrustStoreRepository(
                 val error = "$METADATA_NOT_UPDATED: ${e.message}"
                 // The row is still in the metadata: with its file written back
                 // the CA stays trusted everywhere (listed and a chain anchor).
-                // A file that did not exist before stays proven absent.
-                val left = if (der != null) restoreFile(certFile, der) else FileOutcome.REMOVED
-                if (left != FileOutcome.REMOVED) {
-                    auditDelete(subject, fingerprint, restoreError(error, left))
+                if (der != null && restoreFile(certFile, der)) {
+                    auditDelete(subject, fingerprint, error)
                     return false
                 }
                 // No file on disk: no chain verifies against this CA, so it
@@ -362,7 +349,7 @@ public class TrustStoreRepository(
         val backups = entries.associate { it.fingerprint to readOrNull(getCertificateFile(it.fingerprint)) }
         val filesRemoved = entries.filter {
             val file = getCertificateFile(it.fingerprint)
-            (!file.exists() || backups[it.fingerprint] != null) && removeFile(file) == FileOutcome.REMOVED
+            (!file.exists() || backups[it.fingerprint] != null) && removeFile(file)
         }
         val kept = entries.filter { it !in filesRemoved }
 
@@ -370,7 +357,7 @@ public class TrustStoreRepository(
         val metadataError: String? = try {
             if (kept.isNotEmpty()) {
                 saveMetadataSync(kept)
-            } else if (metadataFile.exists() && removeFile(metadataFile) != FileOutcome.REMOVED) {
+            } else if (metadataFile.exists() && !removeFile(metadataFile)) {
                 saveMetadataSync(emptyList())
             }
             null
@@ -382,17 +369,14 @@ public class TrustStoreRepository(
         // certificates included: write their files back so they stay trusted
         // everywhere (listed and chain anchors). One whose file is not on disk
         // anchors no chain, so it counts as removed; its stale row is left
-        // for a later delete or clear. Only a file proven gone counts: one
-        // whose restore failed and left a file, or an unreadable state, stays.
-        val left: Map<TrustedCA, FileOutcome> = if (metadataError == null) {
-            emptyMap()
+        // for a later delete or clear.
+        val restored = if (metadataError == null) {
+            emptyList()
         } else {
-            filesRemoved.associateWith { entry ->
-                backups[entry.fingerprint]?.let { restoreFile(getCertificateFile(entry.fingerprint), it) }
-                    ?: FileOutcome.REMOVED
-            }.filterValues { it != FileOutcome.REMOVED }
+            filesRemoved.filter { entry ->
+                backups[entry.fingerprint]?.let { restoreFile(getCertificateFile(entry.fingerprint), it) } == true
+            }
         }
-        val restored = left.keys.toList()
         val removed = filesRemoved - restored.toSet()
 
         // Files no metadata row names (strays): remove them too, except the
@@ -403,7 +387,7 @@ public class TrustStoreRepository(
         val listing = trustStoreDir.listFiles()
         val (strays, strayLeft) = listing.orEmpty()
             .filter { it.name !in keepNames }
-            .partition { removeFile(it) == FileOutcome.REMOVED }
+            .partition { removeFile(it) }
         // A removed certificate file is a removed certificate even when its
         // metadata row was lost: audit it, with no subject to name.
         val strayRemoved = strays.filter { it.name.endsWith(".der") }.map { it.name.removeSuffix(".der") }
@@ -416,9 +400,7 @@ public class TrustStoreRepository(
                 auditDelete(it.subjectDN, it.fingerprint, "$metadataError; $METADATA_ROW_LEFT", removed = true)
             }
         }
-        left.forEach { (entry, outcome) ->
-            auditDelete(entry.subjectDN, entry.fingerprint, restoreError(metadataError ?: "", outcome))
-        }
+        restored.forEach { auditDelete(it.subjectDN, it.fingerprint, metadataError) }
         kept.forEach { auditDelete(it.subjectDN, it.fingerprint, FILE_NOT_DELETED) }
         strayRemoved.forEach { auditDelete("", it) }
         strayFailed.forEach { auditDelete("", it, FILE_NOT_DELETED) }
@@ -643,24 +625,10 @@ public class TrustStoreRepository(
         }
     }
 
-    /**
-     * Delete [file] through [fileDeleter] and report what is left on disk.
-     * The deleter's own Boolean is not read: only the file's absence,
-     * checked afterwards, proves the removal.
-     */
-    private fun removeFile(file: File): FileOutcome {
-        try {
-            fileDeleter(file)
-        } catch (e: SecurityException) {
-            // Checked below: the file's state decides the outcome.
-        } catch (e: IOException) {
-            // Likewise.
-        }
-        return try {
-            if (file.exists()) FileOutcome.PRESENT else FileOutcome.REMOVED
-        } catch (e: SecurityException) {
-            FileOutcome.UNKNOWN
-        }
+    /** Delete [file] through [fileDeleter]; true only if it is gone. */
+    private fun removeFile(file: File): Boolean {
+        fileDeleter(file)
+        return !file.exists()
     }
 
     /** The bytes of [file], or null when it is missing or cannot be read. */
@@ -670,29 +638,19 @@ public class TrustStoreRepository(
         null
     }
 
-    /**
-     * Write [bytes] back to [file]: [FileOutcome.PRESENT] when it holds them
-     * again. A write that fails may still leave a usable file (one whose
-     * close throws after the last byte), so it is removed through
-     * [removeFile] and that removal's outcome is the result: a file that
-     * could not be removed is [FileOutcome.PRESENT], never reported gone.
-     */
-    private fun restoreFile(file: File, bytes: ByteArray): FileOutcome = try {
-        fileBytesWriter(file, bytes)
-        FileOutcome.PRESENT
+    /** Write [bytes] back to [file]; true only if it holds them again. */
+    private fun restoreFile(file: File, bytes: ByteArray): Boolean = try {
+        file.writeBytes(bytes)
+        true
     } catch (e: IOException) {
-        removeFile(file)
+        file.delete()
+        false
     }
-
-    /** The failure recorded for a certificate whose restore left [outcome]. */
-    private fun restoreError(error: String, outcome: FileOutcome): String =
-        if (outcome == FileOutcome.UNKNOWN) "$error; $FILE_STATE_UNKNOWN" else error
 
     private companion object {
         const val FILE_NOT_DELETED = "could not delete the certificate file"
         const val METADATA_NOT_UPDATED = "could not update the trust store metadata"
         const val METADATA_ROW_LEFT = "certificate file removed, its metadata row left"
-        const val FILE_STATE_UNKNOWN = "the certificate file's state could not be read"
 
         /**
          * One lock per trust store directory, shared by every repository

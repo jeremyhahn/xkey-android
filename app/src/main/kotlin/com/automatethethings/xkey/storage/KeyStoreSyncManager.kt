@@ -24,7 +24,6 @@ import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
-import com.automatethethings.xkey.storage.dao.withKeyMutation
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import java.security.KeyStore
@@ -72,9 +71,6 @@ class KeyStoreSyncManager(
          */
         private const val EPHEMERAL_ALIAS_PREFIX = KEY_ALIAS_PREFIX_GENERAL + FileEncryptor.EPHEMERAL_KEY_PREFIX
 
-        /** The Keystore alias of FIDO2 credential [credentialId]. */
-        fun credentialAliasOf(credentialId: String): String = KEY_ALIAS_PREFIX + credentialId
-
         /**
          * The Keystore aliases [discoverKeystoreEntries] maps to key ID
          * [keyId], in [KeystoreManager.resolveKeystoreAlias]'s order. The ID
@@ -87,21 +83,6 @@ class KeyStoreSyncManager(
                 !(keyId.startsWith(KEY_ALIAS_PREFIX) || keyId.startsWith(KEY_ALIAS_PREFIX_GENERAL))
             return listOfNotNull(KEY_ALIAS_PREFIX + keyId, KEY_ALIAS_PREFIX_GENERAL + keyId, keyId.takeIf { raw })
         }
-
-        /**
-         * Whether Keystore alias [alias] is a key of xKey itself or of the
-         * platform (an encryption key of the password vault, OATH secrets,
-         * seal store or software key store, the device identity, attestation
-         * or user verification key, a PIV slot key): no key delete removes it.
-         * xKey names user keys only `xkey_credential_*` and `xkey_key_*`, so
-         * any other `xkey_` alias but a CA's is its own.
-         */
-        fun isInternalAlias(alias: String): Boolean =
-            alias !in CA_ALIASES && (
-                SYSTEM_KEY_PREFIXES.any { alias.startsWith(it) } ||
-                    alias.startsWith("xkey_") &&
-                    !alias.startsWith(KEY_ALIAS_PREFIX) && !alias.startsWith(KEY_ALIAS_PREFIX_GENERAL)
-                )
 
         /** Alias prefixes used by Android framework libraries (must not be deleted). */
         private val SYSTEM_KEY_PREFIXES = listOf(
@@ -152,22 +133,17 @@ class KeyStoreSyncManager(
         var skipped = 0
 
         for (cred in credentials) {
-            // Under the key's mutation lock, so no delete of the ID runs
-            // between the existence checks and the insert.
-            withKeyMutation(cred.credentialId) {
-                if (keyDao.exists(cred.credentialId)) return@withKeyMutation
+            if (keyDao.exists(cred.credentialId)) continue
 
-                val alias = keystoreManager.resolveKeystoreAlias(cred.credentialId)
-                if (alias == null) {
-                    skipped++
-                    Log.d(TAG, "Skipped credential with no Keystore key: ${cred.credentialId}")
-                    return@withKeyMutation
-                }
-
-                keyDao.insert(mapCredentialToKeyEntity(cred, alias))
-                synced++
-                Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
+            if (keystoreManager.resolveKeystoreAlias(cred.credentialId) == null) {
+                skipped++
+                Log.d(TAG, "Skipped credential with no Keystore key: ${cred.credentialId}")
+                continue
             }
+
+            keyDao.insert(mapCredentialToKeyEntity(cred))
+            synced++
+            Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
         }
 
         Log.d(TAG, "Synced $synced credentials from credential_metadata, " +
@@ -209,14 +185,12 @@ class KeyStoreSyncManager(
                 }
             }
 
-            withKeyMutation(keyId) {
-                if (!keyDao.exists(keyId)) {
-                    val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
-                    if (entity != null) {
-                        keyDao.insert(entity)
-                        discovered++
-                        Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
-                    }
+            if (!keyDao.exists(keyId)) {
+                val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
+                if (entity != null) {
+                    keyDao.insert(entity)
+                    discovered++
+                    Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
                 }
             }
         }
@@ -242,14 +216,10 @@ class KeyStoreSyncManager(
             // Classify by the resolved alias, never the logical id: a general
             // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
             // a raw PIV slot alias row never resolves and so is removed here.
-            // Checked and removed under the key's mutation lock, so a key
-            // recreated under the ID meanwhile is never taken for stale.
-            withKeyMutation(key.keyId) {
-                if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
-                    SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
-                    removed++
-                    Log.d(TAG, "Removed stale key entry: ${key.keyId}")
-                }
+            if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
+                SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
+                removed++
+                Log.d(TAG, "Removed stale key entry: ${key.keyId}")
             }
         }
 
@@ -355,13 +325,7 @@ class KeyStoreSyncManager(
                 biometricRequired = true, // Default assumption
                 source = "local",
                 createdAt = System.currentTimeMillis(), // Actual creation time not available from Keystore
-                isSystemKey = isSystemKey,
-                // The alias found is where the material is stored.
-                materialNamespace = if (alias == credentialAliasOf(keyId)) {
-                    KeyNamespace.CREDENTIAL.stored
-                } else {
-                    KeyNamespace.GENERAL.stored
-                }
+                isSystemKey = isSystemKey
             )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to read keystore entry: $alias", e)
@@ -370,12 +334,9 @@ class KeyStoreSyncManager(
     }
 
     /**
-     * Maps a CredentialMetadataEntity to a KeyEntity. The credential
-     * namespace is recorded only when [alias], the Keystore entry its ID
-     * resolves to, is the credential's own alias; otherwise none is recorded
-     * and a delete reads where the material is ([KeyNamespace.of]).
+     * Maps a CredentialMetadataEntity to a KeyEntity.
      */
-    private fun mapCredentialToKeyEntity(cred: CredentialMetadataEntity, alias: String): KeyEntity {
+    private fun mapCredentialToKeyEntity(cred: CredentialMetadataEntity): KeyEntity {
         return KeyEntity(
             keyId = cred.credentialId,
             keyType = "fido2",
@@ -393,200 +354,34 @@ class KeyStoreSyncManager(
             userName = cred.userName,
             userDisplayName = cred.userDisplayName,
             isDiscoverable = cred.isDiscoverable,
-            signCount = cred.signCount,
-            materialNamespace = KeyNamespace.CREDENTIAL.stored.takeIf { alias == credentialAliasOf(cred.credentialId) }
+            signCount = cred.signCount
         )
     }
 }
 
 /**
- * The namespace a key row's material lives in: a credential is
- * `xkey_credential_<id>` with its metadata, a general key is
- * `xkey_key_<id>`, a software key or a raw alias. One ID can name a key in
- * each; a delete reaches only the row's. The key type does not say which:
- * local.generateKey stores a FIDO2-type key as a general key.
+ * Deletes the key behind one key row [key], as the key list and the key
+ * detail screen do: its material, then its row, inside one
+ * [SharePermissionLedger] revoke of the row's key ID ([deleteKeyAndMaterial]).
  *
- * @property stored the value recorded in [KeyEntity.materialNamespace].
- */
-enum class KeyNamespace(val stored: String) {
-    CREDENTIAL("credential"), GENERAL("general");
-
-    companion object {
-        /** The namespace recorded as [value]; null for any other value. */
-        fun ofStored(value: String?): KeyNamespace? = entries.firstOrNull { it.stored == value }
-
-        /**
-         * Where [key]'s material is stored: the namespace recorded on the row
-         * when it was written; for a row written before that was recorded,
-         * the one namespace holding material of its ID. Null when it cannot
-         * be told: an unknown recorded value, or an unrecorded row whose ID
-         * names material in both namespaces.
-         */
-        fun of(key: KeyEntity, keystoreManager: KeystoreManager, softwareKeys: SoftwareKeyStore): KeyNamespace? {
-            key.materialNamespace?.let { return ofStored(it) }
-            return ofMaterial(key.keyId, keystoreManager, softwareKeys)
-        }
-
-        /**
-         * The one namespace holding material of [keyId], for an ID with no
-         * recorded namespace (an unrecorded row, or no row at all: the base
-         * generateKey path creates a credential without one). General when
-         * neither holds any; null when both do.
-         */
-        fun ofMaterial(keyId: String, keystoreManager: KeystoreManager, softwareKeys: SoftwareKeyStore): KeyNamespace? {
-            val credential = KeyStoreSyncManager.credentialAliasOf(keyId) in
-                keystoreManager.listAllKeystoreAliases()
-            val general = keystoreManager.generalKeyExists(keyId) || softwareKeys.contains(keyId)
-            return when {
-                credential && general -> null
-                credential -> CREDENTIAL
-                else -> GENERAL
-            }
-        }
-    }
-}
-
-/**
- * Whether [current], the row read now, is the row [confirmed] was captured
- * from: the same immutable row ID, key ID and recorded namespace. A row
- * deleted and recreated under its ID gets a new row ID, so a confirmation
- * opened before that never reaches the new row or its material.
- */
-internal fun isSameRow(current: KeyEntity?, confirmed: KeyEntity): Boolean =
-    current != null &&
-        current.id == confirmed.id &&
-        current.keyId == confirmed.keyId &&
-        current.materialNamespace == confirmed.materialNamespace
-
-/**
- * The one delete of a key row and its material, for every key screen: the
- * namespace is where the row's material is stored ([KeyNamespace.of]) and
- * the other namespace is never touched, so deleting credential `k` leaves
- * general key `k` and the reverse. A row whose namespace cannot be told is
- * refused with nothing removed. A credential row's delete needs
- * [credentials] to remove its metadata; without it the delete is refused.
- * [key] is the row the user confirmed: the row is read again inside the
- * revoke and the delete is refused unless it is still that row
- * ([isSameRow]), so a stale confirmation removes nothing.
+ * The row's ID names exactly one key, and only its material is removed: the
+ * software key of that ID if [softwareKeys] holds one, else the Keystore
+ * entry [KeyStoreSyncManager] discovers under that ID. Never
+ * [KeystoreManager.resolveKeystoreAlias], which reads `xkey_key_a` as the
+ * alias of hardware key `a`: software key `xkey_key_a` and hardware key `a`
+ * can both exist, and deleting the first must leave the second.
  *
- * @return the rows deleted; 0 when the delete was refused.
+ * @return Number of rows deleted.
  */
 suspend fun KeyDao.deleteKeyRow(
     key: KeyEntity,
     keystoreManager: KeystoreManager,
-    softwareKeys: SoftwareKeyStore,
-    credentials: CredentialMetadataDao? = null
-): Int = try {
-    deleteKeyAndMaterial(key.keyId) {
-        // The confirmation names the row it was opened for: if that row was
-        // replaced meanwhile (the ID deleted and recreated, its namespace
-        // changed), nothing of the replacement is touched. The read runs
-        // under the key's mutation lock (deleteKeyAndMaterial), so no
-        // replacement lands between it and the row going.
-        val current = getByKeyId(key.keyId)
-        check(isSameRow(current, key)) { "the row ${key.keyId} was confirmed is gone; nothing is deleted" }
-        if (key.source == "xkmsd") return@deleteKeyAndMaterial
-        val namespace = checkNotNull(KeyNamespace.of(key, keystoreManager, softwareKeys)) {
-            "the namespace of ${key.keyId} cannot be told; nothing is deleted"
-        }
-        when (namespace) {
-            KeyNamespace.CREDENTIAL -> {
-                checkNotNull(credentials) { "credential ${key.keyId} is deleted only with its metadata" }
-                removeCredentialMaterial(key.keyId, keystoreManager, credentials)
-            }
-            KeyNamespace.GENERAL -> removeAllKeyMaterial(key.keyId, keystoreManager, softwareKeys)
-        }
-    }
-} catch (e: IllegalStateException) {
-    // Material under the ID still stands: the row stays, so the key stays listed.
-    0
-}
-
-/**
- * The delete of Keystore entry [alias] of key [keyId], for `local.deleteKey`
- * given a raw alias (`xkey_credential_<id>`, `xkey_key_<id>`): [removeAlias]
- * removes that one entry, a credential's metadata goes with its alias, and
- * row [keyId] goes only when its material is in the alias's namespace
- * ([KeyNamespace.of], read before anything is removed). Deleting one
- * namespace's alias never removes the other namespace's row or metadata; an
- * unrecorded row whose ID names material in both stays, listing what is left.
- * All of it runs in one [SharePermissionLedger] revoke of [keyId].
- *
- * @return whether the entry was removed, and the rows deleted.
- */
-suspend fun KeyDao.deleteKeyAliasRow(
-    keyId: String,
-    alias: String,
-    keystoreManager: KeystoreManager,
-    softwareKeys: SoftwareKeyStore,
-    credentials: CredentialMetadataDao,
-    removeAlias: () -> Boolean
-): Pair<Boolean, Int> {
-    val aliasNamespace = if (alias == KeyStoreSyncManager.credentialAliasOf(keyId)) {
-        KeyNamespace.CREDENTIAL
+    softwareKeys: SoftwareKeyStore
+): Int = deleteKeyAndMaterial(key.keyId) {
+    if (key.source == "xkmsd") return@deleteKeyAndMaterial
+    if (softwareKeys.contains(key.keyId)) {
+        softwareKeys.delete(key.keyId)
     } else {
-        KeyNamespace.GENERAL
+        KeyStoreSyncManager.keystoreAliasesOf(key.keyId).firstOrNull { keystoreManager.deleteByAlias(it) }
     }
-    var removed = false
-    // Under the key's mutation lock: the row read here is the row deleted.
-    val rows = withKeyMutation(keyId) {
-        SharePermissionLedger.revoking(keyId) {
-            val row = getByKeyId(keyId)
-            val rowGoes = row == null || KeyNamespace.of(row, keystoreManager, softwareKeys) == aliasNamespace
-            removed = removeAlias()
-            if (aliasNamespace == KeyNamespace.CREDENTIAL) credentials.deleteByCredentialId(keyId)
-            if (rowGoes) deleteByKeyId(keyId) else 0
-        }
-    }
-    return removed to rows
-}
-
-/**
- * The one delete of the material under key ID [keyId], for `local.deleteKey`
- * and [deleteKeyRow]: the software key of that ID and the hardware general
- * key of that ID (`xkey_key_<keyId>`) both go, since an install upgraded from
- * a generator that checked only one namespace can hold both. When neither
- * exists, the Keystore entry [KeyStoreSyncManager] discovers under that ID
- * goes instead. Never [KeystoreManager.resolveKeystoreAlias]: software key
- * `xkey_key_a` and hardware key `a` are distinct keys.
- *
- * @return whether any material was removed.
- * @throws IllegalStateException when a software or hardware key of [keyId]
- *   still exists afterwards; the caller keeps the row and reports no delete.
- */
-fun removeAllKeyMaterial(keyId: String, keystoreManager: KeystoreManager, softwareKeys: SoftwareKeyStore): Boolean {
-    val hadSoftware = softwareKeys.contains(keyId)
-    if (hadSoftware) softwareKeys.delete(keyId)
-    // False when there is no general key of [keyId].
-    val hadGeneral = keystoreManager.deleteGeneralKey(keyId)
-    // Never the credential of the same ID: that is the other namespace's key.
-    val others = KeyStoreSyncManager.keystoreAliasesOf(keyId)
-        .filter { it != "xkey_key_$keyId" && it != KeyStoreSyncManager.credentialAliasOf(keyId) }
-    // The raw-alias fallback never reaches xKey's own keys: refused, not deleted.
-    check(hadSoftware || hadGeneral || others.none { KeyStoreSyncManager.isInternalAlias(it) }) {
-        "$keyId is an internal key; it is never deleted"
-    }
-    val removedOther = !hadSoftware && !hadGeneral && others.any { keystoreManager.deleteByAlias(it) }
-    check(!softwareKeys.contains(keyId) && !keystoreManager.generalKeyExists(keyId)) {
-        "key material of $keyId survived its delete"
-    }
-    return hadSoftware || hadGeneral || removedOther
-}
-
-/**
- * The delete of FIDO2 credential [credentialId] for [deleteKeyRow]: only its
- * alias ([KeyStoreSyncManager.credentialAliasOf]) and its metadata go. Never
- * [KeystoreManager.deleteKey], which resolves the ID and can reach the
- * general key `xkey_key_<id>` of the same ID.
- *
- * @return whether the credential's key was removed.
- */
-suspend fun removeCredentialMaterial(
-    credentialId: String,
-    keystoreManager: KeystoreManager,
-    credentials: CredentialMetadataDao
-): Boolean {
-    val removed = keystoreManager.deleteByAlias(KeyStoreSyncManager.credentialAliasOf(credentialId))
-    credentials.deleteByCredentialId(credentialId)
-    return removed
 }

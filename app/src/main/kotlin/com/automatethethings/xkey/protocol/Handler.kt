@@ -48,13 +48,9 @@ import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
 import com.automatethethings.xkey.remote.SharePermissionLedger
-import com.automatethethings.xkey.storage.KeyNamespace
-import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.XKeyDatabase
-import com.automatethethings.xkey.storage.deleteKeyAliasRow
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
-import com.automatethethings.xkey.storage.dao.withKeyMutation
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricAuthMode
@@ -1227,15 +1223,6 @@ class RequestHandler(
             )
         }
 
-        // A raw alias of xKey's own keys (an encryption key of the vault, the
-        // seal store, ...) is never deleted, as by every other key delete.
-        val alias = keystoreManager.resolveKeystoreAlias(deleteParams.credentialId)
-        if (alias != null &&
-            com.automatethethings.xkey.storage.KeyStoreSyncManager.isInternalAlias(alias)
-        ) {
-            throw ProtocolException("Internal key is not deletable", errorCode = ErrorCodes.OPERATION_DENIED)
-        }
-
         // The key the ID names: an alias form (xkey_key_<id>) removes <id>'s
         // Keystore entry, so it is <id> that is revoked and whose row goes.
         val keyId = canonicalKeyId(deleteParams.credentialId)
@@ -1511,9 +1498,7 @@ class RequestHandler(
                     } else {
                         SharingPolicyType.PRIVATE
                     },
-                    source = "remote_ble",
-                    // Stored as the general key xkey_key_<id> whatever its key type.
-                    materialNamespace = KeyNamespace.GENERAL.stored
+                    source = "remote_ble"
                 )
             )
 
@@ -1573,9 +1558,6 @@ class RequestHandler(
                     SharingPolicyType.PRIVATE
                 },
                 source = "remote_ble",
-                // Stored as the general key xkey_key_<id>, a FIDO2 key type too:
-                // its delete must never be routed to the credential namespace.
-                materialNamespace = KeyNamespace.GENERAL.stored,
                 rpId = genParams.rpId,
                 rpName = genParams.rpName,
                 userId = genParams.userId,
@@ -1706,9 +1688,7 @@ class RequestHandler(
                 } else {
                     SharingPolicyType.PRIVATE
                 },
-                source = "local",
-                // A software key is in the general namespace: never a credential.
-                materialNamespace = KeyNamespace.GENERAL.stored
+                source = "local"
             )
         )
 
@@ -1790,6 +1770,9 @@ class RequestHandler(
         val signature = keystoreManager.signWithAlgorithm(signParams.keyId, data, signAlgorithm)
         val durationMs = System.currentTimeMillis() - startTime
 
+        // Record usage
+        keyDao.recordUsage(signParams.keyId)
+
         // Log signing request
         // signWithAlgorithm ran signAlgorithm (it refuses any other name).
         logKeyUse(
@@ -1833,6 +1816,8 @@ class RequestHandler(
         )
         val durationMs = System.currentTimeMillis() - startTime
 
+        keyDao.recordUsage(decryptParams.keyId)
+
         // The OAEP parameters the cipher ran (KeystoreManager.rsaOaepSpec).
         logKeyUse(
             KeyUse.DECRYPT, decryptParams.keyId,
@@ -1868,17 +1853,10 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val swStart = System.currentTimeMillis()
             val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
             )
-            logKeyUse(
-                KeyUse.ENCRYPT, symParams.keyId,
-                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
-                durationMs = System.currentTimeMillis() - swStart,
-                caller = caller,
-                softwareKey = sw
-            )
+            keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(ct), payloadField = LocalSymmetricResult.FIELD_CIPHERTEXT).toJson()
@@ -1890,6 +1868,8 @@ class RequestHandler(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
         )
         val durationMs = System.currentTimeMillis() - startTime
+
+        keyDao.recordUsage(symParams.keyId)
 
         // Log encryption request
         logKeyUse(
@@ -1927,17 +1907,10 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val swStart = System.currentTimeMillis()
             val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
                 sw.material, symParams.getDataBytes(), symParams.getAadBytes()
             )
-            logKeyUse(
-                KeyUse.DECRYPT, symParams.keyId,
-                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
-                durationMs = System.currentTimeMillis() - swStart,
-                caller = caller,
-                softwareKey = sw
-            )
+            keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(pt), payloadField = LocalSymmetricResult.FIELD_PLAINTEXT).toJson()
@@ -1949,6 +1922,8 @@ class RequestHandler(
             symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
         )
         val durationMs = System.currentTimeMillis() - startTime
+
+        keyDao.recordUsage(symParams.keyId)
 
         // Log decryption request
         logKeyUse(
@@ -1992,18 +1967,9 @@ class RequestHandler(
     private enum class KeyUse { SIGN, DECRYPT, ENCRYPT, HMAC, KEY_DERIVATION }
 
     /**
-     * The one record of a completed key use (sign, decrypt, encrypt, HMAC,
-     * ECDH): the key's usage ([KeyDao.recordUsage]) and one success audit
-     * entry naming the key, its stored type ([auditKeyType]) and the
-     * algorithm that ran. Every handler calls it once its key operation has
-     * returned, and never records usage itself (KeyUseRecordChokePointTest).
-     *
-     * The record runs under [NonCancellable]: a transport cancels a request
-     * when its desktop disconnects or is unpaired, and the key has already
-     * been used by the time this runs, so a cancel at the usage write or the
-     * key-type lookup must not drop the entry. The caller still sees the
-     * cancellation once this returns. The audit entry is written even when
-     * the usage write fails.
+     * The one writer of key-use audit entries (sign, decrypt, encrypt, HMAC,
+     * ECDH): one success entry naming the key, its stored type
+     * ([auditKeyType]) and the algorithm that ran.
      *
      * [executedAlgorithm] is the algorithm the operation executed, taken from
      * the crypto path (an HmacResult, SoftwareKeyOps.hmacAlgorithm,
@@ -2027,33 +1993,29 @@ class RequestHandler(
         durationMs: Long,
         caller: AuditCaller,
         softwareKey: com.automatethethings.xkey.crypto.SoftwareKey? = null
-    ): Unit = withContext(NonCancellable) {
-        try {
-            keyDao.recordUsage(keyId)
-        } finally {
-            val keyType = auditKeyType(keyId, softwareKey)
-            when (use) {
-                KeyUse.SIGN -> AuditLogger.logSigningRequest(
-                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-                )
-                KeyUse.DECRYPT -> AuditLogger.logDecryptionRequest(
-                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-                )
-                KeyUse.ENCRYPT -> AuditLogger.logEncryptionRequest(
-                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-                )
-                KeyUse.HMAC -> AuditLogger.logHmacRequest(
-                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-                )
-                KeyUse.KEY_DERIVATION -> AuditLogger.logKeyDerivationRequest(
-                    keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
-                    deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
-                )
-            }
+    ) {
+        val keyType = auditKeyType(keyId, softwareKey)
+        when (use) {
+            KeyUse.SIGN -> AuditLogger.logSigningRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.DECRYPT -> AuditLogger.logDecryptionRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.ENCRYPT -> AuditLogger.logEncryptionRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.HMAC -> AuditLogger.logHmacRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
+            KeyUse.KEY_DERIVATION -> AuditLogger.logKeyDerivationRequest(
+                keyId = keyId, keyLabel = keyId, keyType = keyType, algorithm = executedAlgorithm,
+                deviceId = caller.peerPublicKeyHex, deviceName = caller.deviceName, success = true, durationMs = durationMs
+            )
         }
     }
 
@@ -2082,6 +2044,7 @@ class RequestHandler(
                 sw.material, hmacParams.getDataBytes(), sw.algorithm
             )
             val swDurationMs = System.currentTimeMillis() - swStart
+            keyDao.recordUsage(hmacParams.keyId)
             // The MAC and the data stay out of the entry.
             logKeyUse(
                 KeyUse.HMAC, hmacParams.keyId,
@@ -2100,6 +2063,7 @@ class RequestHandler(
         val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
         val durationMs = System.currentTimeMillis() - startTime
 
+        keyDao.recordUsage(hmacParams.keyId)
         logKeyUse(
             KeyUse.HMAC, hmacParams.keyId,
             executedAlgorithm = hmac.algorithm,
@@ -2140,6 +2104,8 @@ class RequestHandler(
             ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
         )
         val durationMs = System.currentTimeMillis() - startTime
+
+        keyDao.recordUsage(ecdhParams.keyId)
 
         // Log the key agreement; the shared secret and peer key stay out of it.
         logKeyUse(
@@ -2323,58 +2289,19 @@ class RequestHandler(
         val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
         val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
         var materialRemoved = false
-        val rowsDeleted = try {
-            if (canonicalId != keyId) {
-                // A raw alias: that entry goes, and the row and credential
-                // metadata of ID canonicalId only when they are its namespace's.
-                val (removed, rows) = keyDao.deleteKeyAliasRow(
-                    canonicalId, keyId, keystoreManager, softwareKeys,
-                    XKeyDatabase.getInstance(context).credentialMetadataDao()
-                ) { deleteKeystoreAlias(canonicalId, keyId) }
-                materialRemoved = removed
-                rows
-            } else {
-                keyDao.deleteKeyAndMaterial(canonicalId) {
-                    // The row's namespace, read inside the revoke: a credential
-                    // row loses its private key and metadata together; any
-                    // other ID loses every general material under it (software
-                    // and hardware alike), or none is reported deleted. An ID
-                    // with no row (the base generateKey path creates a
-                    // credential without one) is read from the material
-                    // present. A namespace that cannot be told (an unknown
-                    // recorded value, or an unrecorded ID holding both a
-                    // credential and a general key) is refused with nothing
-                    // removed, as the key screens refuse it: never taken as
-                    // general.
-                    val row = keyDao.getByKeyId(canonicalId)
-                    val namespace = if (row != null) {
-                        KeyNamespace.of(row, keystoreManager, softwareKeys)
-                    } else {
-                        KeyNamespace.ofMaterial(canonicalId, keystoreManager, softwareKeys)
-                    } ?: throw ProtocolException(
-                        "Key $keyId names more than one key or an unknown kind; nothing is deleted",
-                        errorCode = ErrorCodes.INVALID_PARAMS
-                    )
-                    materialRemoved = if (namespace == KeyNamespace.CREDENTIAL) {
-                        com.automatethethings.xkey.storage.removeCredentialMaterial(
-                            canonicalId, keystoreManager, XKeyDatabase.getInstance(context).credentialMetadataDao()
-                        ).also {
-                            // A credential that survives keeps its row: refused, not deleted.
-                            check(
-                                KeyStoreSyncManager.credentialAliasOf(canonicalId) !in
-                                    keystoreManager.listAllKeystoreAliases()
-                            ) { "credential $canonicalId survived its delete" }
-                        }
-                    } else {
-                        com.automatethethings.xkey.storage.removeAllKeyMaterial(
-                            canonicalId, keystoreManager, softwareKeys
-                        )
-                    }
+        val rowsDeleted = keyDao.deleteKeyAndMaterial(canonicalId) {
+            materialRemoved = when {
+                canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
+                softwareKeys.contains(canonicalId) -> {
+                    softwareKeys.delete(canonicalId)
+                    true
                 }
+                // A canonical ID names its general key `xkey_key_k` first, as
+                // this method always did; another alias only when it has none.
+                else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
+                    .sortedByDescending { it == "xkey_key_$canonicalId" }
+                    .any { deleteKeystoreAlias(canonicalId, it) }
             }
-        } catch (e: IllegalStateException) {
-            Log.w(TAG, "Delete of $keyId refused: ${e.message}")
-            throw ProtocolException("Key material of $keyId could not be removed", errorCode = ErrorCodes.INTERNAL_ERROR)
         }
 
         // Deleted only when the key's material or its row was removed.
@@ -3768,18 +3695,14 @@ class RequestHandler(
                 return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
             }
 
-            // The code exists (a HOTP counter has advanced): a cancel at the
-            // credential read must not drop the entry that names it.
-            val cred = withContext(NonCancellable) {
-                db.oathCredentialDao().getByOathId(credentialId).also {
-                    AuditLogger.logOathCodeGenerated(credentialId, it?.issuer, it?.accountName ?: "")
-                }
-            }
+            val cred = db.oathCredentialDao().getByOathId(credentialId)
             // expires_in: seconds until the current TOTP window ends (0 for HOTP).
             val expiresIn = if (cred?.oathType == "TOTP") {
                 val period = cred.periodSeconds.toLong()
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
+
+            AuditLogger.logOathCodeGenerated(credentialId, cred?.issuer, cred?.accountName ?: "")
 
             val result = JSONObject().apply {
                 put("code", code)
@@ -4288,42 +4211,36 @@ class RequestHandler(
                 params.optString("key_id", "").ifBlank { "shared-sym-${System.currentTimeMillis()}" }
             }
             val store = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
-            val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
-            // Checked and stored under the key's mutation lock: no creation or
-            // delete of the ID lands between the existence check and the put.
-            val exists = withKeyMutation(keyId) {
-                if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) return@withKeyMutation true
-                persistAudited(
-                    write = {
-                        store.put(
-                            com.automatethethings.xkey.crypto.SoftwareKey(
-                                keyId = keyId,
-                                algorithm = algorithm,
-                                keyType = "symmetric",
-                                keySize = params.optInt("key_size", material.size * 8),
-                                exportable = false,
-                                shareable = false,
-                                material = material
-                            )
-                        )
-                    },
-                    record = {
-                        AuditLogger.logKeyCreated(
-                            keyId = keyId,
-                            keyLabel = keyId,
-                            keyType = "symmetric",
-                            algorithm = algorithm,
-                            source = "shared",
-                            deviceId = peerPublicKeyHex,
-                            deviceName = auditPeerName(peerPublicKeyHex)
-                        )
-                    }
-                )
-                false
-            }
-            if (exists) {
+            if (store.contains(keyId) || keyDao.getByKeyId(keyId) != null) {
                 return Response.error(request.id, ErrorCodes.KEY_EXISTS, "Key already exists: $keyId")
             }
+            val algorithm = params.optString("algorithm", "").ifBlank { "AES" }
+            persistAudited(
+                write = {
+                    store.put(
+                        com.automatethethings.xkey.crypto.SoftwareKey(
+                            keyId = keyId,
+                            algorithm = algorithm,
+                            keyType = "symmetric",
+                            keySize = params.optInt("key_size", material.size * 8),
+                            exportable = false,
+                            shareable = false,
+                            material = material
+                        )
+                    )
+                },
+                record = {
+                    AuditLogger.logKeyCreated(
+                        keyId = keyId,
+                        keyLabel = keyId,
+                        keyType = "symmetric",
+                        algorithm = algorithm,
+                        source = "shared",
+                        deviceId = peerPublicKeyHex,
+                        deviceName = auditPeerName(peerPublicKeyHex)
+                    )
+                }
+            )
             Response.success(request.id, JSONObject().apply {
                 put("accepted", true)
                 put("import_id", keyId)
@@ -4458,21 +4375,11 @@ class RequestHandler(
             return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
         }
 
-        val caller = auditCaller()
-
         // Sign the content hash
         return try {
             val hashBytes = hexToBytes(contentHash)
-            val signAlgorithm = signingKey.algorithm
-            val startTime = System.currentTimeMillis()
             val signatureBytes = keystoreManager.signWithAlgorithm(
-                signingKey.keyId, hashBytes, signAlgorithm
-            )
-            logKeyUse(
-                KeyUse.SIGN, signingKey.keyId,
-                executedAlgorithm = signAlgorithm,
-                durationMs = System.currentTimeMillis() - startTime,
-                caller = caller
+                signingKey.keyId, hashBytes, signingKey.algorithm
             )
             val publicKeyDer = keystoreManager.getPublicKeyDER(signingKey.keyId)
                 ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")

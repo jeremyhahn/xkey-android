@@ -122,7 +122,6 @@ class KeyMaterialRemovalShareTest {
         every { softwareKeys.contains(any()) } answers { firstArg<String>() in softwareStore }
         every { softwareKeys.delete(any()) } answers { softwareStore -= firstArg<String>() }
         val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.getByKeyId(any()) } answers { stored[firstArg<String>()] }
         coEvery { keyDao.deleteByKeyId(any()) } answers { if (stored.remove(firstArg<String>()) != null) 1 else 0 }
         val revisionBefore = SharePermissionLedger.revision(software.keyId)
 

@@ -57,7 +57,6 @@ import com.automatethethings.xkey.ca.CertificateEntity
 import com.automatethethings.xkey.ca.CertificateProfile
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
-import com.automatethethings.xkey.storage.dao.withKeyMutation
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.truststore.TrustStoreRepository
@@ -1217,13 +1216,8 @@ class CertificateManagementActivity : AppCompatActivity() {
 
                 val keyId = UUID.randomUUID().toString()
                 val keystoreAlias = "xkey_key_$keyId"
-                // The key and its row are each created under the key's
-                // mutation lock, the one every key creation and delete holds;
-                // the rollback below deletes through it.
-                val publicKeyDer = withKeyMutation(keyId) {
-                    withContext(Dispatchers.IO) {
-                        keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1)
-                    }
+                val publicKeyDer = withContext(Dispatchers.IO) {
+                    keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1)
                 }
 
                 // The signing key now exists, but the certificate that gives it
@@ -1243,10 +1237,8 @@ class CertificateManagementActivity : AppCompatActivity() {
                         biometricRequired = false,
                         source = "local"
                     )
-                    withKeyMutation(keyId) {
-                        withContext(Dispatchers.IO) {
-                            keyDao.insert(keyEntity)
-                        }
+                    withContext(Dispatchers.IO) {
+                        keyDao.insert(keyEntity)
                     }
 
                     val subjectParts = mutableListOf("CN=$cn")

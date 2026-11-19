@@ -105,9 +105,6 @@ class XKeyDatabaseMigrationTest {
     @Test
     fun migratesFromVersion11() = assertMigratesAndPreservesData(11)
 
-    @Test
-    fun migratesFromVersion13() = assertMigratesAndPreservesData(13)
-
     /**
      * Guards the fixture itself: if a new schema is exported without a matching
      * test above, the coverage claim made by this suite quietly stops being
@@ -297,12 +294,8 @@ class XKeyDatabaseMigrationTest {
         val keyId = "legacy-key-v$version"
         val credentialId = "legacy-credential-v$version"
 
-        // A database from v11 on was written after MIGRATION_10_11, which
-        // does not run when it is opened: its rows already carry the current
-        // source token.
-        val seededSource = if (version >= 11) CURRENT_SOURCE else LEGACY_SOURCE
         createLegacyDatabase(version) { db ->
-            insertKey(db, keyId = keyId, source = seededSource)
+            insertKey(db, keyId = keyId, source = LEGACY_SOURCE)
             insertCredential(db, credentialId)
         }
 
@@ -312,13 +305,9 @@ class XKeyDatabaseMigrationTest {
             assertEquals("test-label", key!!.label)
             assertEquals("ES256", key.algorithm)
             assertEquals(
-                "every path must end on the current source token (MIGRATION_10_11 below v11)",
+                "MIGRATION_10_11 must run as part of every path",
                 CURRENT_SOURCE,
                 key.source
-            )
-            assertNull(
-                "a row migrated from v$version has no recorded material namespace (MIGRATION_13_14)",
-                key.materialNamespace
             )
 
             val credential = db.credentialMetadataDao().getByCredentialId(credentialId)
@@ -382,8 +371,7 @@ class XKeyDatabaseMigrationTest {
                 XKeyDatabase.MIGRATION_9_10,
                 XKeyDatabase.MIGRATION_10_11,
                 XKeyDatabase.MIGRATION_11_12,
-                XKeyDatabase.MIGRATION_12_13,
-                XKeyDatabase.MIGRATION_13_14
+                XKeyDatabase.MIGRATION_12_13
             )
             .build()
         try {
