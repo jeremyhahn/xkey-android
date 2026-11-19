@@ -2337,21 +2337,26 @@ class RequestHandler(
         // maps to it, by the rules `KeyDao.deleteKeyRow` uses. A credential `xkey_credential_k` and a
         // general key `xkey_key_k` can both exist, and deleting one must leave
         // the other.
+        //
+        // Under the key's lock, so an approved use already rechecking the key
+        // finishes with it before it goes.
         val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
         val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
         var materialRemoved = false
-        val rowsDeleted = keyDao.deleteKeyAndMaterial(canonicalId) {
-            materialRemoved = when {
-                canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
-                softwareKeys.contains(canonicalId) -> {
-                    softwareKeys.delete(canonicalId)
-                    true
+        val rowsDeleted = keyIds.withKeyLock(keyLockId(canonicalId)) {
+            keyDao.deleteKeyAndMaterial(canonicalId) {
+                materialRemoved = when {
+                    canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
+                    softwareKeys.contains(canonicalId) -> {
+                        softwareKeys.delete(canonicalId)
+                        true
+                    }
+                    // A canonical ID names its general key `xkey_key_k` first, as
+                    // this method always did; another alias only when it has none.
+                    else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
+                        .sortedByDescending { it == KeystoreManager.generalKeyAlias(canonicalId) }
+                        .any { deleteKeystoreAlias(canonicalId, it) }
                 }
-                // A canonical ID names its general key `xkey_key_k` first, as
-                // this method always did; another alias only when it has none.
-                else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
-                    .sortedByDescending { it == KeystoreManager.generalKeyAlias(canonicalId) }
-                    .any { deleteKeystoreAlias(canonicalId, it) }
             }
         }
 
@@ -4186,11 +4191,9 @@ class RequestHandler(
     /**
      * Runs [use] with the key [snapshot] names, once the owner has approved
      * it: the one way an approval-gated operation reaches its key. The key's
-     * lock ([keyLockId], which key creation takes too) is held from the
-     * recheck ([revalidateApprovedKey]) through the end of [use], so no
-     * replacement lands between the check and the signature. A delete takes
-     * no lock: a key deleted meanwhile is refused by [ApprovedKey.sign], which
-     * signs only while the alias still holds the approved public key.
+     * lock ([keyLockId], which key creation and deletion take too) is held
+     * from the recheck ([revalidateApprovedKey]) through the end of [use], so
+     * no replacement or deletion lands between the check and the signature.
      * [use] signs only through [ApprovedKey.sign], which signs under the
      * snapshot's alias and refuses a key other than the approved one.
      */
@@ -4213,7 +4216,7 @@ class RequestHandler(
         keyIds.withKeyLock(keyLockId(keyId)) { use(null) }
     }
 
-    /** The [keyIds] lock of stored key [keyId]: its creation and approved uses. */
+    /** The [keyIds] lock of stored key [keyId]: its creation, deletion and approved uses. */
     private fun keyLockId(keyId: String) = "key:$keyId"
 
     /**
