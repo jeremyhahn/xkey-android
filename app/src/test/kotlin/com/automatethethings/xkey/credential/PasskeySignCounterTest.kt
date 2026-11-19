@@ -21,6 +21,7 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -235,6 +236,21 @@ class PasskeySignCounterTest {
         }
 
         assertEquals("credential locks left behind", 0, PasskeySignCounter.lockCount())
+    }
+
+    /**
+     * Every lock the counter takes goes through its one reference-counted
+     * path: a second place that makes a registry entry or locks a mutex
+     * would bypass the count and leave entries behind.
+     */
+    @Test
+    fun everyCounterLockGoesThroughTheCountedPath() {
+        val code = File("src/main/kotlin/com/automatethethings/xkey/credential/PasskeySignCounter.kt").readText()
+        fun count(pattern: String) = Regex(pattern).findAll(code).count()
+
+        assertEquals("one place makes a registry entry", 1, count("""\blocks\.(getOrPut|computeIfAbsent|put)\b|\blocks\["""))
+        assertEquals("one place locks a credential", 1, count("""\.(withLock|lock|tryLock)\s*[({]"""))
+        assertEquals("one place drops a registry entry", 1, count("""\blocks\.remove\("""))
     }
 
     /**
