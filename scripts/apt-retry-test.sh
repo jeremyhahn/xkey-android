@@ -89,21 +89,19 @@ retries_covered() {
 	[ "${n}" -gt 0 ] && [ "${bad}" = 0 ]
 }
 
-# without <pattern>: a copy of the Dockerfile with the first line matching
-# pattern removed, printed as its path.
+# without <pattern> <k>: a copy of the Dockerfile with the k-th line (from 1)
+# matching pattern removed, printed as its path.
 without() {
-	local out=${T}/Dockerfile.$((++WITHOUT_N)) done=0 line
+	local out=${T}/Dockerfile.$2 seen=0 line
 	while IFS= read -r line || [ -n "${line}" ]; do
-		if [ "${done}" = 0 ] && [[ ${line} == *"$1"* ]]; then
-			done=1
+		if [[ ${line} == *"$1"* ]] && [ "$((++seen))" = "$2" ]; then
 			continue
 		fi
 		printf '%s\n' "${line}"
 	done < "${DOCKERFILE}" > "${out}"
-	[ "${done}" = 1 ] || { echo "apt-retry-test: no line matches '$1'" >&2; return 1; }
+	[ "${seen}" -ge "$2" ] || { echo "apt-retry-test: no line $2 matches '$1'" >&2; return 1; }
 	echo "${out}"
 }
-WITHOUT_N=0
 
 echo "== static: the Dockerfile's stages"
 check "every stage that runs apt-get retries" retries_covered "${DOCKERFILE}"
@@ -118,12 +116,12 @@ conf_retries() {
 check "apt-retries.conf sets Acquire::Retries above 0" conf_retries
 copies=()
 while IFS= read -r line; do
-	[[ ${line} == COPY*apt-retries.conf* ]] && copies+=("${line}")
+	[[ ${line} == 'COPY build/docker/devcontainer/apt-retries.conf '* ]] && copies+=("${line}")
 done < "${DOCKERFILE}"
 check "two stages copy apt-retries.conf (fetch, base)" test "${#copies[@]}" = 2
-for c in "${copies[@]}"; do
-	f=$(without "${c}") || { FAILED=1; continue; }
-	check "a copy without '${c:0:60}...' fails" not retries_covered "${f}"
+for k in $(seq 1 "${#copies[@]}"); do
+	f=$(without 'COPY build/docker/devcontainer/apt-retries.conf ' "${k}") || { FAILED=1; continue; }
+	check "a copy without apt-retries.conf copy ${k} of ${#copies[@]} fails" not retries_covered "${f}"
 done
 F=${T}/Dockerfile.bite
 printf 'FROM a AS one\nRUN apt-get update\n' > "${F}"
