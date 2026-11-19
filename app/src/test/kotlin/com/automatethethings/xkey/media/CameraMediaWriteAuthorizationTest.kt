@@ -32,11 +32,10 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
 
 /**
@@ -56,7 +55,9 @@ class CameraMediaWriteAuthorizationTest {
     private val uri: Uri = Uri.parse("content://media/external/images/media/4242")
     private lateinit var capture: File
     private lateinit var original: ByteArray
-    private val published = ByteArrayOutputStream()
+    /** What MediaStore serves at [uri]: the capture's bytes as its provider sees them. */
+    private lateinit var media: File
+    private lateinit var provider: FakeMediaProvider
 
     /** What the fake MediaStore answers, and the write requests it was asked for. */
     private var owner: String? = "com.example.camera"
@@ -71,8 +72,9 @@ class CameraMediaWriteAuthorizationTest {
         capture = File(folder.newFolder("DCIM", "Camera"), "IMG_0001.png")
         original = XmpFixtures.png()
         capture.writeBytes(original)
-        shadowOf(context.contentResolver).registerInputStreamSupplier(uri) { ByteArrayInputStream(capture.readBytes()) }
-        shadowOf(context.contentResolver).registerOutputStream(uri, published)
+        media = folder.newFile("media-4242.png").apply { writeBytes(original) }
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media")
+        provider.media = media
         MediaPublisher.mediaStore = object : MediaPublisher.MediaStoreAccess {
             override fun ownerPackage(context: Context, uri: Uri): String? = owner
             override fun hasWriteGrant(context: Context, uri: Uri): Boolean = granted
@@ -115,7 +117,7 @@ class CameraMediaWriteAuthorizationTest {
 
         assertEquals(XmpMetadataHelper.MediaSignResult.NeedsWriteAuthorization, first)
         assertArrayEquals("the capture is never renamed over", original, capture.readBytes())
-        assertEquals("nothing is written before the grant", 0, published.size())
+        assertArrayEquals("nothing is written before the grant", original, media.readBytes())
 
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
         assertNotNull(MediaWriteAuthorizations.request(context))
@@ -127,7 +129,7 @@ class CameraMediaWriteAuthorizationTest {
 
         assertEquals(listOf(uri.toString()), signed.map { it.uri })
         assertArrayEquals("the path is still not written", original, capture.readBytes())
-        assertEquals(data.toJsonString(), embedded(published.toByteArray()))
+        assertEquals(data.toJsonString(), embedded(media.readBytes()))
         assertTrue("the queue is empty", MediaWriteAuthorizations.pending(context).isEmpty())
         assertNull("no request once nothing waits", MediaWriteAuthorizations.request(context))
     }
@@ -144,7 +146,7 @@ class CameraMediaWriteAuthorizationTest {
 
         assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
         assertArrayEquals(original, capture.readBytes())
-        assertEquals(0, published.size())
+        assertArrayEquals(original, media.readBytes())
     }
 
     @Test
@@ -155,7 +157,7 @@ class CameraMediaWriteAuthorizationTest {
         assertThrows(XmpMetadataHelper.SourceChangedException::class.java) {
             XmpMetadataHelper.signMedia(context, uri, capture.path, stale)
         }
-        assertEquals(0, published.size())
+        assertArrayEquals(original, media.readBytes())
         assertArrayEquals(original, capture.readBytes())
     }
 
@@ -168,8 +170,30 @@ class CameraMediaWriteAuthorizationTest {
 
         assertEquals(XmpMetadataHelper.MediaSignResult.Signed, result)
         assertTrue(requests.isEmpty())
-        assertEquals(0, published.size())
+        assertArrayEquals(original, media.readBytes())
         assertEquals(data.toJsonString(), embedded(capture.readBytes()))
+    }
+
+    @Test
+    fun `a granted write that fails mid-copy leaves the capture whole and its request queued`() {
+        val data = data()
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
+        granted = true
+        provider.failWrites = true
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertTrue("nothing is reported signed", signed.isEmpty())
+        assertArrayEquals("the capture is never truncated before the signed copy is in", original, media.readBytes())
+        assertEquals("the request stays queued to retry", listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri })
+
+        provider.failWrites = false
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertEquals("the retry signs it", listOf(uri.toString()), signed.map { it.uri })
+        assertEquals(data.toJsonString(), embedded(media.readBytes()))
+        assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
     }
 
     @Test
