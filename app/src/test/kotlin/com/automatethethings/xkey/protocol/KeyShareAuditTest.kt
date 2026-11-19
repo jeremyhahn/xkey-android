@@ -174,6 +174,8 @@ class KeyShareAuditTest {
         every { keystoreManager.getPublicKeyPEM(any(), any()) } returns null
         // No Keystore key holds an id: a share reads the general namespace.
         every { keystoreManager.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        // ...and a key row describes the general key (#270 review r5).
+        every { keystoreManager.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         handler = RequestHandler(
             context = context,
             keystoreManager = keystoreManager,
@@ -1220,7 +1222,7 @@ class KeyShareAuditTest {
 
         val keystore = KeystoreManager(context)
         val store = com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(context), keystore)
-        val sheetPem = store.readShareable(KEY_ID, keystore) { null }
+        val sheetPem = store.readShareable(context, KEY_ID, keystore, keyDao.getByKeyId(KEY_ID)) { null }
             .publicKeyPem!!.replace("\n", "").replace("\r", "")
         assertTrue("the desktop share sends the credential's key: $sheetPem", expected in sheetPem && wrong !in sheetPem)
     }
@@ -1633,10 +1635,12 @@ class KeyShareAuditTest {
         val sheet = java.io.File(main, "com/automatethethings/xkey/ui/KeySharingBottomSheet.kt").readText()
         assertTrue("the desktop share reads through the one share read", "keyPolicyStore.readShareable(" in sheet)
         assertFalse("the desktop share reads no key itself", Regex("getPublicKey\\w*\\(").containsMatchIn(sheet))
-        assertTrue("importSharedKey reads through the one share read", "keyPolicyStore.readShareable(keyId, keystoreManager)" in source)
+        assertTrue("importSharedKey reads through the one share read", "keyPolicyStore.readShareable(context, keyId, keystoreManager, keyDao.getByKeyId(keyId))" in source)
+        assertTrue("the desktop share reads the key its row describes", "readShareable(context, keyId, KeystoreManager(context), entity)" in sheet)
         assertTrue("getPublicKey gates the kind it exports", "keyPolicyStore.withUsableKey(pubKeyParams.keyId, exportKind)" in source)
         val share = java.io.File(main, "com/automatethethings/xkey/storage/ShareableKeyRead.kt").readText()
-        assertTrue("the share read resolves its kind once", "val kind = keystore.exportKind(keyId)" in share && "withUsableKey(keyId, kind)" in share)
+        assertTrue("the share read resolves its kind once", "val kind = keystore.rowOwnerKind(context, keyId, row)" in share && "withUsableKey(keyId, kind)" in share)
+        assertTrue("Handler's key decision is the share read's", "keystoreManager.rowOwnerKind(context, keyId, row)" in source)
 
         val store = java.io.File(main, "com/automatethethings/xkey/storage/KeyPolicyStore.kt").readText()
         assertTrue("the gate resolves as the lookups do", "keys = KeyResolver { keyId, kind -> keystore.resolveKey(keyId, kind) }" in store)

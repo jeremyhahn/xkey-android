@@ -144,7 +144,7 @@ class LegacyRecordInvariantTest {
             val store = tables.store(KeyPolicyStore.KeyResolver { id, kind -> keystore.resolveKey(id, kind) })
             tables.addKey(ID, SharingPolicyType.ALL_PEERS)
             val kind = runCatching { keystore.exportKind(ID) }
-            val shared = runCatching { store.readShareable(ID, keystore) { software!!.get(it) } }
+            val shared = runCatching { store.readShareable(io.mockk.mockk<android.content.Context>(), ID, keystore, null) { software!!.get(it) } }
             if (shape == Shape.MISSING_FILE && placement == Placement.DIGEST) {
                 // Material alone under the id's own digest name is that id's
                 // (only its put or delete leaves it): the id holds a general
@@ -199,7 +199,7 @@ class LegacyRecordInvariantTest {
         val tables = FakeKeyPolicyTables()
         val store = tables.store(KeyPolicyStore.KeyResolver { id, kind -> keystore.resolveKey(id, kind) })
         tables.addKey(hexId, SharingPolicyType.ALL_PEERS)
-        val shared = store.readShareable(hexId, keystore) { software!!.get(it) }
+        val shared = store.readShareable(io.mockk.mockk<android.content.Context>(), hexId, keystore, null) { software!!.get(it) }
         assertEquals("the legacy key is shared", hexId, shared.software?.keyId)
         assertNull("the same-id credential was shared under the key's grants", shared.publicKeyPem)
         assertTrue("the record moved to its digest name", File(dir, "${digest(hexId)}.key").isFile)

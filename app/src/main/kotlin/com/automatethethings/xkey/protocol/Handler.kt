@@ -42,6 +42,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SigningException
 import com.automatethethings.xkey.storage.readShareable
+import com.automatethethings.xkey.storage.rowOwnerKind
 import com.automatethethings.xkey.crypto.StrongBoxUnavailableException
 import com.automatethethings.xkey.crypto.UnsupportedAlgorithmException
 import com.automatethethings.xkey.crypto.UserCancelledException
@@ -1923,14 +1924,8 @@ class RequestHandler(
      * read the kind here, so they never name different keys of one id.
      */
     private suspend fun ownedKeyKind(keyId: String, row: KeyEntity?, refusal: Int): com.automatethethings.xkey.crypto.UserKeyKind {
-        val held = keystoreManager.exportKind(keyId)
-        if (row == null) return held
         return try {
-            keystoreManager.rowKeyKind(
-                keyId, row.keyType,
-                { com.automatethethings.xkey.crypto.RowPublicKey(row.publicKeyDer, row.publicKeyCose) },
-                com.automatethethings.xkey.storage.keyMaterialGeneration(context, keyId, keystoreManager).keys
-            )
+            keystoreManager.rowOwnerKind(context, keyId, row)
         } catch (e: com.automatethethings.xkey.crypto.KeyOwnershipUnknownException) {
             throw ProtocolException("Cannot tell which key $keyId names", errorCode = refusal)
         }
@@ -4438,8 +4433,9 @@ class RequestHandler(
         val peerPublicKeyHex = requireConfirmedPeer("importSharedKey")
         return try {
             // The one read of what a share sends (#255 review r4): its
-            // namespace resolved once, then gated and read with that kind.
-            val shareable = keyPolicyStore.readShareable(keyId, keystoreManager) {
+            // key resolved once from its row (#270 review r5), then gated
+            // and read with that kind.
+            val shareable = keyPolicyStore.readShareable(context, keyId, keystoreManager, keyDao.getByKeyId(keyId)) {
                 com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(it)
             }
             val software = shareable.software

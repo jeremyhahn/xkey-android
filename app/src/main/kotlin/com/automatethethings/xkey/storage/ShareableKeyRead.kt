@@ -138,7 +138,10 @@ class ShareableKey(val software: SoftwareKey?, val publicKeyPem: String?)
  * The one read of a key a share sends (#255 review r4), for
  * `local.importSharedKey` and the key detail screen's desktop share alike.
  *
- * The namespace is resolved once ([KeystoreManager.exportKind]): a hardware
+ * The key is resolved once ([rowOwnerKind]): the key its [row] describes, or
+ * with no row the one the material holds, so a credential row beside a
+ * same-id general key shares the credential's public key, never the general
+ * key's under the credential row's permissions (#270 review r5). A hardware
  * key shares its public key from either namespace, so a credential that
  * lives only under its credential alias shares like a general key. Both
  * reads run inside the use gate of that same kind ([KeyPolicyStore.withUsableKey]),
@@ -150,14 +153,17 @@ class ShareableKey(val software: SoftwareKey?, val publicKeyPem: String?)
  * software key read under a credential kind (stored after the kind was
  * resolved) is shared as neither.
  *
+ * @param row the id's key row, which decides the key of a shared id
  * @param softwareKey reads the id's software key (a general key kept outside the Keystore)
  */
 suspend fun KeyPolicyStore.readShareable(
+    context: android.content.Context,
     keyId: String,
     keystore: KeystoreManager,
+    row: com.automatethethings.xkey.storage.entity.KeyEntity?,
     softwareKey: (String) -> SoftwareKey?
 ): ShareableKey {
-    val kind = keystore.exportKind(keyId)
+    val kind = keystore.rowOwnerKind(context, keyId, row)
     return withUsableKey(keyId, kind) {
         val software = softwareKey(keyId)
         when {
@@ -168,5 +174,35 @@ suspend fun KeyPolicyStore.readShareable(
             software != null -> ShareableKey(software, null)
             else -> ShareableKey(null, keystore.getPublicKeyPEM(keyId, kind))
         }
+    }
+}
+
+/**
+ * The one decision of which user key a request by [keyId] names (#270
+ * verify r4, review r5, ruling 554): the key its [row] describes
+ * ([KeystoreManager.rowKeyKind]), or with no row the one the material holds.
+ * Every backend of both namespaces is probed first
+ * ([KeystoreManager.exportKind]), so an unreadable store is refused, never
+ * read as an empty one. A row that names neither of two keys sharing the id
+ * throws [com.automatethethings.xkey.crypto.KeyOwnershipUnknownException]. A
+ * row with no public key (a software or symmetric key's) describes neither
+ * key's public half apart: the material decides, as with no row, and the
+ * general namespace counts the software store (#255 review r6), so a
+ * credential's public key never goes out under it.
+ * Sharing, export and every key use read the kind here, so they never name
+ * different keys of one id.
+ */
+fun KeystoreManager.rowOwnerKind(
+    context: android.content.Context,
+    keyId: String,
+    row: com.automatethethings.xkey.storage.entity.KeyEntity?
+): UserKeyKind {
+    val held = exportKind(keyId)
+    if (row == null) return held
+    val rowKey = com.automatethethings.xkey.crypto.RowPublicKey(row.publicKeyDer, row.publicKeyCose)
+    return try {
+        rowKeyKind(keyId, row.keyType, { rowKey }, keyMaterialGeneration(context, keyId, this).keys)
+    } catch (e: com.automatethethings.xkey.crypto.KeyOwnershipUnknownException) {
+        if (rowKey.isEmpty) held else throw e
     }
 }

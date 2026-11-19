@@ -169,7 +169,7 @@ class KeyPresenceUnreadableTest {
         for (id in listOf(GENERAL_AND_CREDENTIAL, CREDENTIAL_ONLY)) {
             tables.addKey(id, SharingPolicyType.ALL_PEERS)
             var softwareRead = false
-            val failure = runCatching { store.readShareable(id, keystore) { softwareRead = true; null } }.exceptionOrNull()
+            val failure = runCatching { store.readShareable(io.mockk.mockk<android.content.Context>(), id, keystore, null) { softwareRead = true; null } }.exceptionOrNull()
             assertTrue("$id shared with an unreadable store: $failure", failure is KeyPresenceUnreadableException)
             assertFalse("$id read its software key", softwareRead)
         }

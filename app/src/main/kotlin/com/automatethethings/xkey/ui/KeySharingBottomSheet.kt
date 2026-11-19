@@ -727,11 +727,12 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     ) {
         val context = requireContext().applicationContext
         val entity = keyDao.getByKeyId(keyId)
-        // The one read of what a share sends (#255 review r4): a credential
+        // The one read of what a share sends (#255 review r4), of the key
+        // the row describes (#270 review r5): a credential
         // that lives only under its credential alias shares its public key
         // too, and a key whose delete was acknowledged sends nothing.
         val shareable = try {
-            keyPolicyStore.readShareable(keyId, KeystoreManager(context)) { SoftwareKeyStore(context).get(it) }
+            keyPolicyStore.readShareable(context, keyId, KeystoreManager(context), entity) { SoftwareKeyStore(context).get(it) }
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             throw e
         } catch (e: Exception) {
