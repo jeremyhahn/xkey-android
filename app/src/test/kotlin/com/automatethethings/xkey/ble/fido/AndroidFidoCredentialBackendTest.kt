@@ -332,16 +332,22 @@ class AndroidFidoCredentialBackendTest {
     }
 
     @Test
-    fun `a replaced passkey whose key row will not delete keeps its Keystore key`() = runTest {
-        val (keyRows, _) = storedResidents()
+    fun `a replacement whose key row will not delete fails the registration and leaves the old passkey whole`() = runTest {
+        val (keyRows, metadataRows) = storedResidents()
         coEvery { keyDao.deleteByKeyId(shared.keyId) } throws IllegalStateException("disk I/O error")
 
-        val made = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+        val thrown = runCatching {
+            backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+        }.exceptionOrNull()
 
-        // The row still points at the old key, so the key stays.
-        assertTrue(shared.keyId in keyRows)
-        assertTrue(b64(made.id) in keyRows)
+        // The registration fails, the new passkey is gone, and the old one
+        // keeps both its rows (the credential provider still lists it) and
+        // its Keystore key.
+        assertTrue("create must fail, got $thrown", thrown is IllegalStateException)
+        assertEquals(setOf(shared.keyId, private.keyId), keyRows)
+        assertEquals(setOf(shared.keyId, private.keyId), metadataRows)
         io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(any()) }
     }
 
     @Test
