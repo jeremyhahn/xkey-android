@@ -23,10 +23,13 @@ import io.mockk.every
 import io.mockk.mockk
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -203,6 +206,38 @@ class PasskeySignCounterTest {
     }
 
     /**
+     * The lock registry is process-wide, so an entry left behind per
+     * credential would grow for the life of the service as credentials come
+     * and go. Many credentials, each advanced by several callers at once (so
+     * some wait for the lock) and some failing their write, leave it empty.
+     */
+    @Test
+    fun theLockRegistryHoldsNothingOnceItsUsersLeave() = runBlocking {
+        val credentialDao = mockk<CredentialMetadataDao> {
+            coEvery { getByCredentialId(any()) } returns null
+            coEvery { updateSignCount(any(), any(), any()) } answers {
+                if (firstArg<String>().endsWith(FAILING_SUFFIX)) throw IllegalStateException("metadata store unavailable")
+            }
+        }
+        val keyDao = mockk<KeyDao> {
+            coEvery { getByKeyId(any()) } coAnswers {
+                delay(1)
+                null
+            }
+            coEvery { updateSignCount(any(), any(), any()) } returns Unit
+        }
+        val ids = (1..CHURN_IDS).map { n -> if (n % 10 == 0) "churn-$n$FAILING_SUFFIX" else "churn-$n" }
+
+        withContext(Dispatchers.Default) {
+            ids.flatMap { id ->
+                List(CALLERS_PER_ID) { async { runCatching { PasskeySignCounter(credentialDao, keyDao).next(id) } } }
+            }.awaitAll()
+        }
+
+        assertEquals("credential locks left behind", 0, PasskeySignCounter.lockCount())
+    }
+
+    /**
      * One assertion the way both handlers run it: take the counter, then
      * sign. A value reaches [signed] only once the counter has returned it.
      */
@@ -215,5 +250,8 @@ class PasskeySignCounterTest {
     private companion object {
         const val ID = "credential-216"
         const val OVERLAP_WAIT_MS = 1_000L
+        const val CHURN_IDS = 200
+        const val CALLERS_PER_ID = 4
+        const val FAILING_SUFFIX = "-fails"
     }
 }

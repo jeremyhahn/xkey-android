@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.credential
 
+import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import kotlinx.coroutines.sync.Mutex
@@ -57,13 +58,17 @@ class PasskeySignCounter(
         next
     }
 
-    private companion object {
+    internal companion object {
         /**
          * One lock per credential id, shared by every instance in the
          * process: the provider service and the protocol handler each build
          * their own counter.
          */
-        val locks = ConcurrentHashMap<String, Mutex>()
+        private val locks = ConcurrentHashMap<String, Mutex>()
+
+        /** The number of credential ids the registry holds a lock for. */
+        @VisibleForTesting
+        internal fun lockCount(): Int = locks.size
 
         fun lockFor(credentialId: String): Mutex = locks.computeIfAbsent(credentialId) { Mutex() }
     }
