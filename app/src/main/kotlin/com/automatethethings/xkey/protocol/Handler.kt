@@ -163,19 +163,12 @@ class RequestHandler(
         private val credentialDeleteLocks = HashMap<String, CredentialDeleteLock>()
 
         /**
-         * True when [keyId] is reserved for xKey's own keys (the ephemeral
-         * agreement keys). The one rule for both ends: no RPC creates a key
-         * under a reserved ID, and [refuseInternalAlias] refuses its delete.
+         * True when [keyId] has the form of xKey's own ephemeral agreement
+         * keys. Only the delete guard ([refuseInternalAlias]) reads it, and
+         * only with the key row: key creation accepts such an ID as any other.
          */
         internal fun isReservedKeyId(keyId: String): Boolean =
             keyId.startsWith(com.automatethethings.xkey.crypto.FileEncryptor.EPHEMERAL_KEY_PREFIX)
-
-        /** Refuses (INVALID_PARAMS) a key creation under a reserved ID ([isReservedKeyId]). */
-        private fun refuseReservedKeyId(keyId: String) {
-            if (isReservedKeyId(keyId)) {
-                throw ProtocolException("Key ID $keyId is reserved for xKey's own keys", errorCode = ErrorCodes.INVALID_PARAMS)
-            }
-        }
 
         /** A credential alias's delete lock and the deletes holding or awaiting it. */
         private class CredentialDeleteLock {
@@ -726,7 +719,6 @@ class RequestHandler(
             )
         }
 
-        refuseReservedKeyId(generateParams.credentialId)
         // As in local.generateKey: the reservation holds the id from this check
         // until the creation ends, and the creation rechecks after the approval.
         val reservation = "credential:${generateParams.credentialId}"
@@ -1420,7 +1412,6 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val genParams = LocalGenerateKeyParams.fromJson(params)
-        refuseReservedKeyId(genParams.keyId)
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
 
         // An ID in an existing key's raw alias form names that key.
@@ -2522,7 +2513,7 @@ class RequestHandler(
      * identity and attestation keys, the CA, PIV slot keys, library master
      * keys). An ephemeral agreement key is one xKey made itself: a reserved
      * ID ([isReservedKeyId]) with no key row. A user key made under such an
-     * ID before it was reserved has its key row and is not refused. An alias
+     * ID has its key row and is not refused. An alias
      * with no entry is not refused, so a missing key still answers
      * `deleted: false`.
      */

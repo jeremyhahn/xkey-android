@@ -139,7 +139,7 @@ class ReservedKeyIdTest {
         fun body(i: Int) = code.substring(functions[i].range.first, functions.getOrNull(i + 1)?.range?.first ?: code.length)
 
         val readers = functions.indices
-            .filter { Regex("""\bisReservedKeyId\(""").containsMatchIn(body(it)) }
+            .filter { Regex("""(?<!fun )\bisReservedKeyId\(""").containsMatchIn(body(it)) }
             .map { functions[it].groupValues[1] }
             .filter { it != "isReservedKeyId" }
         assertEquals("only the delete guard reads the ephemeral ID rule", listOf("refuseInternalAlias"), readers)
