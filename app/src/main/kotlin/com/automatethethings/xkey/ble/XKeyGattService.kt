@@ -52,6 +52,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.ca.AndroidCA
 import com.automatethethings.xkey.ca.EnrolledDeviceRepository
 import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
+import com.automatethethings.xkey.truststore.IDevIDVerifier
 import com.automatethethings.xkey.truststore.TrustStoreRepository
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -341,7 +342,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             trustedComputingSettingsRepository = TrustedComputingSettingsRepository(this),
             androidCA = enrollmentCA,
             enrolledDeviceRepository = EnrolledDeviceRepository(this),
-            trustStoreRepository = TrustStoreRepository(this)
+            idevidVerifier = IDevIDVerifier(TrustStoreRepository(this))
         )
 
         // Initialize advertiser
