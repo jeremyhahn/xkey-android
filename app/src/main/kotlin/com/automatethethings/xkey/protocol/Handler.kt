@@ -65,8 +65,6 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -154,42 +152,6 @@ class RequestHandler(
         /** keyType of a key-use audit entry whose key has no stored metadata. */
         const val AUDIT_KEY_TYPE_UNKNOWN = "unknown"
 
-        /**
-         * One lock per credential alias, shared by every handler, so deletes of
-         * one credential run one at a time at [deleteCredentialKey]. An entry
-         * lives only while a delete holds or waits for it, so the map is empty
-         * when no delete runs. Guarded by itself.
-         */
-        private val credentialDeleteLocks = HashMap<String, CredentialDeleteLock>()
-
-        /**
-         * True when [keyId] has the form of xKey's own ephemeral agreement
-         * keys. Only the delete guard ([refuseInternalAlias]) reads it, and
-         * only with the key row: key creation accepts such an ID as any other.
-         */
-        internal fun isReservedKeyId(keyId: String): Boolean =
-            keyId.startsWith(com.automatethethings.xkey.crypto.FileEncryptor.EPHEMERAL_KEY_PREFIX)
-
-        /** A credential alias's delete lock and the deletes holding or awaiting it. */
-        private class CredentialDeleteLock {
-            val mutex = Mutex()
-            var holders = 0
-        }
-
-        /** Runs [block] under the delete lock of [alias], dropping the lock when its last holder leaves. */
-        private suspend fun <T> withCredentialDeleteLock(alias: String, block: suspend () -> T): T {
-            val lock = synchronized(credentialDeleteLocks) {
-                credentialDeleteLocks.getOrPut(alias) { CredentialDeleteLock() }.also { it.holders++ }
-            }
-            try {
-                return lock.mutex.withLock { block() }
-            } finally {
-                synchronized(credentialDeleteLocks) {
-                    if (--lock.holders == 0) credentialDeleteLocks.remove(alias)
-                }
-            }
-        }
-
         // Protocol version
         private const val PROTOCOL_VERSION = "1.0.0"
 
@@ -242,9 +204,6 @@ class RequestHandler(
 
     // Unified key storage DAO
     private val keyDao: KeyDao = XKeyDatabase.getInstance(context).keyDao()
-
-    // A passkey's Credential Provider metadata, removed with its key
-    private val credentialMetadataDao = XKeyDatabase.getInstance(context).credentialMetadataDao()
 
     // The one signature counter a passkey has, shared with the credential provider
     private val passkeySignCounter = PasskeySignCounter(
@@ -1296,12 +1255,7 @@ class RequestHandler(
         // revoked too when it differs.
         val deleted = SharePermissionLedger.revoking(keyId) {
             SharePermissionLedger.revoking(deleteParams.credentialId) {
-                // A Keystore entry goes through the one delete choke point (internal
-                // aliases refused, credential metadata removed, audited); a
-                // software key keeps its audited delete.
-                val alias = keystoreManager.resolveKeystoreAlias(deleteParams.credentialId)
-                val inKeystore = alias != null && alias in keystoreManager.listAllKeystoreAliases()
-                (if (inKeystore) deleteKeystoreAlias(keyId, alias!!) else keystoreManager.deleteKey(deleteParams.credentialId)).also { removed ->
+                keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
                     if (removed) keyDao.deleteByKeyId(keyId)
                 }
             }
@@ -2416,120 +2370,13 @@ class RequestHandler(
      * Deletes Keystore entry [alias] of key [keyId] for [handleLocalDeleteKey];
      * the general alias goes through [KeystoreManager.deleteGeneralKey], which
      * audits the deletion. False when no such entry exists.
-     *
-     * Every Keystore removal of a `local.deleteKey` comes here, and a paired
-     * desktop deletes only user keys: [refuseInternalAlias] refuses any
-     * entry xKey keeps for itself before anything is removed.
      */
-    private suspend fun deleteKeystoreAlias(@Suppress("UNUSED_PARAMETER") keyId: String, alias: String): Boolean {
-        refuseInternalAlias(alias)
-        return when {
-            alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX) ->
-                deleteCredentialKey(alias.removePrefix(KeystoreManager.KEY_ALIAS_PREFIX))
-            alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL) ->
-                keystoreManager.deleteGeneralKey(alias.removePrefix(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL))
-            // [refuseInternalAlias] lets an unprefixed alias through only
-            // when no such entry exists: nothing to remove.
-            else -> false
+    private fun deleteKeystoreAlias(keyId: String, alias: String): Boolean =
+        if (alias == KeystoreManager.generalKeyAlias(keyId)) {
+            keystoreManager.deleteGeneralKey(keyId)
+        } else {
+            keystoreManager.deleteByAlias(alias)
         }
-    }
-
-    /**
-     * Deletes FIDO2 credential [credentialId] for [deleteKeystoreAlias]: its
-     * Keystore entry through the audited [KeystoreManager.deleteCredentialKey]
-     * and its Credential Provider metadata, both or neither.
-     *
-     * Deletes of one credential run one at a time under its alias lock, and
-     * once begun a delete runs to the end even if its caller is cancelled, so
-     * a cancel never leaves metadata removed with the key kept.
-     *
-     * The metadata row is taken out first, because a removed Keystore entry
-     * cannot be put back. If the material is not removed the row is written
-     * back, but only the row this delete removed and only unless the key is
-     * confirmed gone, so a passkey is never offered for a key that is gone;
-     * a key whose state cannot be read counts as kept, and the delete fails. A
-     * delete that cannot remove the metadata is refused (INTERNAL_ERROR) and
-     * keeps both.
-     */
-    private suspend fun deleteCredentialKey(credentialId: String): Boolean {
-        val alias = KeystoreManager.credentialAlias(credentialId)
-        // No entry, nothing to remove and no lock to take, so deletes of
-        // nonexistent IDs leave nothing behind. An alias listing that fails
-        // goes on to the locked delete, which settles it.
-        val keyListed = runCatching { alias in keystoreManager.listAllKeystoreAliases() }.getOrDefault(true)
-        if (!keyListed) return false
-        return withCredentialDeleteLock(alias) {
-            // KeystoreManager.deleteCredentialKey writes the delete's audit
-            // record; persistAudited makes the whole delete non-cancellable.
-            // The passkey's signature counter is held from the metadata read
-            // to any write-back, so an assertion meanwhile cannot have its
-            // count rewound by the row written back.
-            persistAudited(write = { passkeySignCounter.holding(credentialId) {
-                val passkey = credentialMetadataDao.getByCredentialId(credentialId)
-                val removedPasskey = if (passkey == null) null else try {
-                    passkey.takeIf { credentialMetadataDao.deleteByCredentialId(credentialId) > 0 }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Cannot remove passkey metadata of $credentialId; key kept", e)
-                    throw ProtocolException(
-                        "Failed to delete credential: its passkey metadata cannot be removed",
-                        errorCode = ErrorCodes.INTERNAL_ERROR
-                    )
-                }
-                // Writes back the row this delete removed unless the key's
-                // removal is confirmed. A key whose state cannot be read
-                // counts as kept: true when that is so, and the delete fails.
-                suspend fun restoreIfKeyKept(): Boolean {
-                    val keyGone = try {
-                        alias !in keystoreManager.listAllKeystoreAliases()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Cannot tell whether credential $credentialId's key is gone; metadata kept", e)
-                        null
-                    }
-                    if (removedPasskey != null && keyGone != true) credentialMetadataDao.insert(removedPasskey)
-                    return keyGone == null
-                }
-                val removed = try {
-                    keystoreManager.deleteCredentialKey(credentialId)
-                } catch (e: Exception) {
-                    restoreIfKeyKept()
-                    throw e
-                }
-                if (!removed && restoreIfKeyKept()) {
-                    throw ProtocolException(
-                        "Failed to delete credential: its key state cannot be read",
-                        errorCode = ErrorCodes.INTERNAL_ERROR
-                    )
-                }
-                removed
-            } }, record = {})
-        }
-    }
-
-    /**
-     * Refuses (OPERATION_DENIED) a delete of Keystore entry [alias] unless it
-     * is a user key: a credential `xkey_credential_<id>` or a general key
-     * `xkey_key_<id>` other than an ephemeral agreement key. Every other
-     * entry in xKey's Keystore is its own (store-protection keys, device
-     * identity and attestation keys, the CA, PIV slot keys, library master
-     * keys). An ephemeral agreement key is one xKey made itself: a reserved
-     * ID ([isReservedKeyId]) with no key row. A user key made under such an
-     * ID has its key row and is not refused. An alias
-     * with no entry is not refused, so a missing key still answers
-     * `deleted: false`.
-     */
-    private suspend fun refuseInternalAlias(alias: String) {
-        val generalId = alias.takeIf { it.startsWith(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL) }
-            ?.removePrefix(KeystoreManager.KEY_ALIAS_PREFIX_GENERAL)
-        val ownEphemeralKey = generalId != null && isReservedKeyId(generalId) && !keyDao.exists(generalId)
-        val userKey = (alias.startsWith(KeystoreManager.KEY_ALIAS_PREFIX) || generalId != null) &&
-            !ownEphemeralKey
-        if (userKey || alias !in keystoreManager.listAllKeystoreAliases()) return
-        AuditLogger.logPolicyDenied(keyId = alias, keyLabel = alias, reason = "delete of an internal key refused")
-        throw ProtocolException(
-            "Key $alias is internal to xKey and cannot be deleted",
-            errorCode = ErrorCodes.OPERATION_DENIED
-        )
-    }
 
     /**
      * Handles local.setKeyPolicy - update key sharing policy.
@@ -4451,8 +4298,7 @@ class RequestHandler(
      * write: entering [NonCancellable] checks nothing, so without that check a
      * cancelled request with no suspension point since its cancellation would
      * still store. Every path that writes and records something, the share
-     * paths, the sharing-policy change and a credential key delete, goes
-     * through here.
+     * paths and the sharing-policy change, goes through here.
      *
      * @param write stores the shared material and returns its result
      * @param record writes the audit entry for what [write] stored
