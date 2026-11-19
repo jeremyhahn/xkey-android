@@ -32,6 +32,8 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -201,10 +203,7 @@ class AndroidFidoCredentialBackend(
             // account. One the sharing policy hides from BLE clients is never
             // touched.
             val old = if (request.discoverable) {
-                keyDao.getFido2ByRpId(request.rpId).filter {
-                    it.keyId != keyId && it.keyType == KeyTypeFido2 && it.rpId == request.rpId &&
-                        it.isDiscoverable && sameUser(it.userId, request.userHandle) && shared(it)
-                }
+                keyDao.getFido2ByRpId(request.rpId).filter { replaceable(it, request, keyId) }
             } else {
                 emptyList()
             }
@@ -247,7 +246,17 @@ class AndroidFidoCredentialBackend(
                     isDiscoverable = request.discoverable
                 )
             )
-            old
+            // Read again right before they go: a passkey made private, shared
+            // with selected peers only, or changed since the lookup is no
+            // longer this client's to replace, and stays.
+            val stillReplaceable = old.filter { candidate ->
+                keyDao.getByKeyId(candidate.keyId)?.let { replaceable(it, request, keyId) } == true
+            }
+            // The last point a cancellation (the client disconnected or sent
+            // CANCEL) stops the registration: the new passkey is removed and
+            // the old ones stay. Past here the old ones are deleted.
+            currentCoroutineContext().ensureActive()
+            stillReplaceable
         } catch (e: Throwable) {
             withContext(NonCancellable) { remove(keyId) }
             throw e
@@ -346,6 +355,16 @@ class AndroidFidoCredentialBackend(
     }
 
     private suspend fun shared(entity: KeyEntity): Boolean = sharePermission.canShare(entity, null)
+
+    /**
+     * Whether [entity] is a discoverable passkey this BLE client could see
+     * for [request]'s account, other than the new passkey [newKeyId], and so
+     * one the registration replaces. One the sharing policy hides from BLE
+     * clients is never touched.
+     */
+    private suspend fun replaceable(entity: KeyEntity, request: CredentialRequest, newKeyId: String): Boolean =
+        entity.keyId != newKeyId && entity.keyType == KeyTypeFido2 && entity.rpId == request.rpId &&
+            entity.isDiscoverable && sameUser(entity.userId, request.userHandle) && shared(entity)
 
     /**
      * Delete the passkeys [keyIds] from all three places they live: their
