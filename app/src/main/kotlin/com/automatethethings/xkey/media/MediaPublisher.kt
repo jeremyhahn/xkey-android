@@ -243,6 +243,10 @@ object MediaPublisher {
         staged.delete()
     }
 
+    /** Runs at each named step of an in-place write; tests interrupt a write there. */
+    @Volatile
+    internal var overwriteStep: (String) -> Unit = {}
+
     /**
      * Write [source] over the content at [target] in place: opened "rw",
      * which never truncates on open, and cut to [source]'s length only after
@@ -262,6 +266,7 @@ object MediaPublisher {
                     output.write(buffer, 0, n)
                 }
             }
+            overwriteStep("truncate")
             channel.truncate(source.length())
             output.fd.sync()
         }

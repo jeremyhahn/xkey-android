@@ -197,6 +197,32 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
+    fun `a granted write interrupted at its final step leaves the capture byte-for-byte whole`() {
+        val data = data()
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
+        granted = true
+        // Every signed byte is in; the thread is interrupted before the cut to length.
+        MediaPublisher.overwriteStep = { if (it == "truncate") Thread.currentThread().interrupt() }
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        try {
+            MediaWriteAuthorizations.publishGranted(context) { signed += it }
+        } finally {
+            MediaPublisher.overwriteStep = {}
+            Thread.interrupted()
+        }
+
+        assertTrue("nothing is reported signed", signed.isEmpty())
+        assertArrayEquals("the interrupted write is undone", original, media.readBytes())
+        assertEquals("the request stays queued to retry", listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri })
+
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertEquals("the retry signs it", listOf(uri.toString()), signed.map { it.uri })
+        assertEquals(data.toJsonString(), embedded(media.readBytes()))
+    }
+
+    @Test
     fun `the signing service signs captures only through signMedia`() {
         val rel = "src/main/kotlin"
         val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }
