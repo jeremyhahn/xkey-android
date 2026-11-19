@@ -14,11 +14,13 @@
  */
 package com.automatethethings.xkey.media
 
+import android.Manifest
 import android.app.Application
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.exifinterface.media.ExifInterface
 import androidx.test.core.app.ApplicationProvider
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -34,6 +36,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -84,6 +87,8 @@ class CameraMediaWriteAuthorizationTest {
             }
         }
         MediaWriteAuthorizations.clear(context)
+        // MediaStore serves a foreign capture's original bytes only with this.
+        shadowOf(context as Application).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
     }
 
     @After
@@ -332,5 +337,135 @@ class CameraMediaWriteAuthorizationTest {
         val service = dir.walkTopDown().single { it.name == "MediaSigningService.kt" }.readText()
         assertTrue("the service signs through signMedia", "XmpMetadataHelper.signMedia(" in service)
         assertTrue("the service never writes a path directly", "XmpMetadataHelper.writeSignature(" !in service)
+    }
+
+    private fun segment(marker: Int, payload: ByteArray): ByteArray {
+        val length = payload.size + 2
+        return byteArrayOf(0xFF.toByte(), marker.toByte(), (length shr 8).toByte(), length.toByte()) + payload
+    }
+
+    private val latitude = 37.42
+    private val longitude = -122.08
+
+    /** A camera JPEG whose EXIF carries the place it was taken. */
+    private fun geotaggedJpeg(): ByteArray {
+        val file = File.createTempFile("geotagged-", ".jpg", folder.root)
+        file.writeBytes(
+            byteArrayOf(0xFF.toByte(), 0xD8.toByte()) +
+                segment(0xE0, "JFIF\u0000\u0001\u0001".toByteArray()) +
+                segment(0xDB, ByteArray(65) { it.toByte() }) +
+                segment(0xDA, byteArrayOf(1, 1, 0, 0, 63, 0)) +
+                byteArrayOf(0x12, 0x34, 0x56, 0x78, 0x9A.toByte(), 0xBC.toByte()) +
+                byteArrayOf(0xFF.toByte(), 0xD9.toByte())
+        )
+        ExifInterface(file.path).apply {
+            setLatLong(latitude, longitude)
+            saveAttributes()
+        }
+        return file.readBytes().also { file.delete() }
+    }
+
+    /** [bytes] as MediaStore shows them to an app without ACCESS_MEDIA_LOCATION: no location. */
+    private fun withoutLocation(bytes: ByteArray): ByteArray {
+        val file = File.createTempFile("redacted-", ".jpg", folder.root)
+        file.writeBytes(bytes)
+        ExifInterface(file.path).apply {
+            listOf(
+                ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF,
+                ExifInterface.TAG_GPS_LONGITUDE, ExifInterface.TAG_GPS_LONGITUDE_REF
+            ).forEach { setAttribute(it, null) }
+            saveAttributes()
+        }
+        return file.readBytes().also { file.delete() }
+    }
+
+    private fun latLong(bytes: ByteArray): DoubleArray? = ExifInterface(ByteArrayInputStream(bytes)).latLong
+
+    /** Make the capture a foreign geotagged JPEG whose location MediaStore redacts; its bytes. */
+    private fun useGeotaggedJpeg(): ByteArray {
+        val geotagged = geotaggedJpeg()
+        check(latLong(geotagged) != null) { "the fixture must carry a location" }
+        check(latLong(withoutLocation(geotagged)) == null) { "the redacted view must carry none" }
+        capture = File(capture.parentFile, "IMG_0002.jpg").apply { writeBytes(geotagged) }
+        media.writeBytes(geotagged)
+        provider.mimeType = "image/jpeg"
+        provider.redact = ::withoutLocation
+        return geotagged
+    }
+
+    private fun queue(data: ContentAuthenticityData) =
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
+
+    @Test
+    fun `a foreign geotagged JPEG keeps its location when it is signed through its grant`() {
+        useGeotaggedJpeg()
+        val data = data(hash = AutoSignHash.contentHashFile(media, "image/jpeg"))
+        queue(data)
+        granted = true
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertEquals(listOf(uri.toString()), signed.map { it.uri })
+        val written = media.readBytes()
+        assertArrayEquals("the capture keeps where it was taken", doubleArrayOf(latitude, longitude), latLong(written), 1e-4)
+        assertEquals(data.toJsonString(), XmpMetadataHelper.readSignatureFromUri(context.contentResolver, uri, "image/jpeg")?.toJsonString())
+    }
+
+    @Test
+    fun `an interrupted write of a foreign geotagged JPEG puts back the capture with its location`() {
+        val geotagged = useGeotaggedJpeg()
+        queue(data(hash = AutoSignHash.contentHashFile(media, "image/jpeg")))
+        granted = true
+        var interrupts = 1
+        MediaPublisher.overwriteStep = { if (it == "truncate" && interrupts-- > 0) Thread.currentThread().interrupt() }
+
+        try {
+            MediaWriteAuthorizations.publishGranted(context) {}
+        } finally {
+            MediaPublisher.overwriteStep = {}
+            Thread.interrupted()
+        }
+
+        assertArrayEquals("the backup is the original, not the redacted view", geotagged, media.readBytes())
+    }
+
+    @Test
+    fun `without location access a foreign capture is never overwritten`() {
+        val geotagged = useGeotaggedJpeg()
+        shadowOf(context as Application).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        queue(data(hash = AutoSignHash.contentHashFile(media, "image/jpeg")))
+        granted = true
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertTrue("nothing is signed from the redacted view", signed.isEmpty())
+        assertArrayEquals("the capture is untouched", geotagged, media.readBytes())
+    }
+
+    @Test
+    fun `a recovery that fails keeps the request queued, and a later one restores and signs the capture`() {
+        val data = data()
+        killMidOverwrite(data)
+        val mixed = media.readBytes()
+        provider.failWrites = true
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertTrue("nothing is signed while the capture is half-written", signed.isEmpty())
+        assertArrayEquals("nothing is staged from or written over the half-written capture", mixed, media.readBytes())
+        assertEquals(
+            "the request stays queued, so a later grant can restore the capture",
+            listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri }
+        )
+
+        provider.failWrites = false
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertEquals("the later recovery restores it and the retry signs it", listOf(uri.toString()), signed.map { it.uri })
+        assertEquals(data.toJsonString(), embedded(media.readBytes()))
+        assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
     }
 }

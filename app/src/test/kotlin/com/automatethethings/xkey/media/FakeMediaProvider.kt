@@ -38,6 +38,13 @@ class FakeMediaProvider : ContentProvider() {
     /** Runs as each open begins, with its mode: a test edits [media] here as another app would. */
     var onOpen: (String) -> Unit = {}
 
+    /**
+     * When set, a read of a URI that does not ask for the original
+     * (`MediaStore.setRequireOriginal`) gets these bytes instead of [media]'s:
+     * the redacted view MediaStore gives an app without ACCESS_MEDIA_LOCATION.
+     */
+    var redact: ((ByteArray) -> ByteArray)? = null
+
     override fun onCreate() = true
 
     override fun getType(uri: Uri): String = mimeType
@@ -46,6 +53,14 @@ class FakeMediaProvider : ContentProvider() {
         openModes += mode
         onOpen(mode)
         val writes = 'w' in mode
+        val redacted = redact
+        if (!writes && redacted != null && uri.getQueryParameter("requireOriginal") != "1") {
+            // MediaStore's redacted view of a foreign capture: location left out.
+            val view = File.createTempFile("redacted-", ".view", media.parentFile)
+            view.writeBytes(redacted(media.readBytes()))
+            view.deleteOnExit()
+            return ParcelFileDescriptor.open(view, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
         if (writes && 't' in mode) media.writeBytes(ByteArray(0))
         if (writes && failWrites) return ParcelFileDescriptor.open(media, ParcelFileDescriptor.MODE_READ_ONLY)
         return ParcelFileDescriptor.open(media, ParcelFileDescriptor.parseMode(mode))
