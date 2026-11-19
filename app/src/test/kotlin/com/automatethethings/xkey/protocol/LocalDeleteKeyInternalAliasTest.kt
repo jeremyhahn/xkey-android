@@ -169,6 +169,30 @@ class LocalDeleteKeyInternalAliasTest {
         coVerify(exactly = 2) { keyDao.deleteByKeyId("u") }
     }
 
+    /**
+     * Only xKey's own ephemeral agreement keys, which have no key row, are
+     * internal. A user key made under an `ephemeral_` ID before such IDs were
+     * reserved has its key row and still deletes.
+     */
+    @Test
+    fun aUserKeyNamedLikeAnEphemeralKeyStillDeletes() = runBlocking<Unit> {
+        val handler = realHandler()
+        for ((n, id) in listOf("ephemeral_mine", "ephemeral_00000000-0000-0000-0000-000000000001").withIndex()) {
+            val alias = "xkey_key_$id"
+            aliases.add(alias)
+            coEvery { keyDao.exists(id) } returns true
+
+            val response = delete(handler, n, id)
+
+            assertTrue(
+                "deleting user key $id must succeed, got $response",
+                response.optJSONObject("result")?.optBoolean("deleted") == true
+            )
+            assertTrue("$id's key must be gone, left $aliases", alias !in aliases)
+            coVerify(exactly = 1) { keyDao.deleteByKeyId(id) }
+        }
+    }
+
     @Test
     fun aMissingKeyIsNotRefused() = runBlocking<Unit> {
         val response = delete(realHandler(), 0, "no-such-key")

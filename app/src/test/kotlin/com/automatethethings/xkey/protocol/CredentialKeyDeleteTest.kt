@@ -20,6 +20,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.os.Looper
 import android.util.Log
+import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -43,6 +44,7 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -171,6 +173,41 @@ class CredentialKeyDeleteTest {
             assertTrue("the key must be kept, left $aliases", credentialAlias in aliases)
             assertEquals("the metadata must be kept", passkey("c").rpId, metadata["c"]?.rpId)
         }
+    }
+
+    /**
+     * A failed delete writes back the metadata row it read. An assertion
+     * that advances the shared signature counter in between must not be
+     * undone by that write, or the next assertion signs the same count
+     * again (this passkey has no key row to keep the larger value).
+     */
+    @Test
+    fun anAssertionDuringAFailedDeleteNeverReusesASignCount() = runBlocking<Unit> {
+        coEvery { keyDao.getByKeyId(any()) } returns null
+        coEvery { credentialDao.updateSignCount(any(), any(), any()) } answers {
+            metadata.computeIfPresent(firstArg()) { _, row -> row.copy(signCount = secondArg()) }
+            Unit
+        }
+        metadata["c"] = passkey("c").copy(signCount = 5)
+        // The material stays, so the delete writes the metadata row back.
+        every { keystore.deleteCredentialKey(any<String>()) } returns false
+        val counter = PasskeySignCounter(credentialDao, keyDao)
+        val scope = this
+        val assertion = CompletableDeferred<Deferred<Long>>()
+        coEvery { credentialDao.deleteByCredentialId(any()) } coAnswers {
+            // An assertion arrives after the delete read the row, before it removes it.
+            val signed = scope.async(Dispatchers.Default) { counter.next("c") }
+            withTimeoutOrNull(500) { signed.await() }
+            assertion.complete(signed)
+            if (metadata.remove(firstArg<String>()) != null) 1 else 0
+        }
+
+        send(realHandler(), 0, localDelete("c"))
+        val first = withTimeout(10_000) { assertion.await().await() }
+        val second = counter.next("c")
+
+        assertTrue("the key must be kept, left $aliases", credentialAlias in aliases)
+        assertTrue("sign count $second must exceed $first, signed during the delete", second > first)
     }
 
     @Test
