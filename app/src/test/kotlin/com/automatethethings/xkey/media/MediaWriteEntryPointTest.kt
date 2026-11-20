@@ -103,4 +103,17 @@ class MediaWriteEntryPointTest {
         assertNull(MediaWriteAuthorizations.notificationPermissionToRequest(context))
     }
 
+    @Test
+    fun `before Android 13 no notification permission is asked for`() {
+        // The unit tests run offline on the SDK 34 runtime alone, so the pre-13 branch is
+        // reached by reporting SDK 32 (Android 12L) for this test, with the permission denied.
+        shadowOf(context as Application).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        val sdk = android.os.Build.VERSION.SDK_INT
+        org.robolectric.util.ReflectionHelpers.setStaticField(android.os.Build.VERSION::class.java, "SDK_INT", 32)
+        try {
+            assertNull(MediaWriteAuthorizations.notificationPermissionToRequest(context))
+        } finally {
+            org.robolectric.util.ReflectionHelpers.setStaticField(android.os.Build.VERSION::class.java, "SDK_INT", sdk)
+        }
+    }
 }

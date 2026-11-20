@@ -471,7 +471,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a staging failure before the granted write keeps the request queued, and a later retry signs the capture`() {
+    fun `a staging failure keeps the request queued and a later retry signs it, while a capture that is gone leaves the queue`() {
         val data = data()
         queue(data)
         granted = true
@@ -495,17 +495,14 @@ class CameraMediaWriteAuthorizationTest {
         assertEquals("the retry signs it", listOf(uri.toString()), signed.map { it.uri })
         assertEquals(data.toJsonString(), embedded(media.readBytes()))
         assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
-    }
 
-    @Test
-    fun `a capture that is gone leaves the queue`() {
-        queue(data())
-        granted = true
+        // A transient failure keeps the request; a capture that no longer exists is a permanent refusal.
+        queue(data)
         provider.onOpen = { mode -> if ('w' !in mode) throw java.io.FileNotFoundException("deleted") }
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
 
-        MediaWriteAuthorizations.publishGranted(context) { }
-
-        assertTrue("a capture that no longer exists is a permanent refusal", MediaWriteAuthorizations.pending(context).isEmpty())
+        assertEquals("a gone capture is not signed", 1, signed.size)
+        assertTrue("a capture that is gone leaves the queue", MediaWriteAuthorizations.pending(context).isEmpty())
     }
 
     @Test
