@@ -77,7 +77,9 @@ jobs:
           isrev() { ! zero "$1" && git cat-file -e "$1^{commit}" 2>/dev/null; }
           ASF="${RUNNER_TEMP:-/tmp}/allowed_signers"
           if [ "$EVENT" = pull_request_target ]; then
-            [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ] && [ -n "$PR" ] || { echo "FAIL a pull_request_target run without its base, head or number"; exit 1; }
+            if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ] || [ -z "$PR" ]; then
+              echo "FAIL a pull_request_target run without its base, head or number"; exit 1
+            fi
             REG="$BASE_SHA"
             # The pull request's commits, as objects only: nothing is checked
             # out or run. refs/pull/N/head carries fork heads too.
