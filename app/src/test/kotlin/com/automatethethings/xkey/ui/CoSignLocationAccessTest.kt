@@ -18,6 +18,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.Application
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Looper
 import android.view.View
@@ -141,6 +142,14 @@ class CoSignLocationAccessTest {
             scanner.requestCode,
             Activity.RESULT_OK,
             Intent().putExtra(QrScannerActivity.EXTRA_SCANNED_URI, response)
+        )
+
+        // Asked for location access first, the user declines.
+        shadowOf(Looper.getMainLooper()).idle()
+        val request = shadowOf(activity).lastRequestedPermission
+        assertNotNull("a fresh install is asked for location access", request)
+        activity.onRequestPermissionsResult(
+            request.requestCode, request.requestedPermissions, intArrayOf(PackageManager.PERMISSION_DENIED)
         )
 
         val unavailable = activity.getString(

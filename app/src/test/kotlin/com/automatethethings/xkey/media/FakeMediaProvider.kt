@@ -35,6 +35,9 @@ class FakeMediaProvider : ContentProvider() {
     var failWrites = false
     val openModes = mutableListOf<String>()
 
+    /** Each URI opened, in order: a read of the original carries `requireOriginal=1`. */
+    val openUris = mutableListOf<Uri>()
+
     /** Runs as each open begins, with its mode: a test edits [media] here as another app would. */
     var onOpen: (String) -> Unit = {}
 
@@ -51,6 +54,7 @@ class FakeMediaProvider : ContentProvider() {
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         openModes += mode
+        openUris += uri
         onOpen(mode)
         val writes = 'w' in mode
         val redacted = redact
