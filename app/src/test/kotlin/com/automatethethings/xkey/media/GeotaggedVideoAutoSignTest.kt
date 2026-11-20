@@ -22,12 +22,14 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -219,6 +221,33 @@ class GeotaggedVideoAutoSignTest {
         } finally {
             ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", sdk)
         }
+    }
+
+    @Test
+    fun `a signed geotagged video read without location access reports access unavailable, never a content-hash failure`() = runBlocking {
+        shadowOf(context as Application).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        granted = true
+        assertEquals(AutoSigner.Outcome.Signed, AutoSigner.signCapture(context, uri, null, "key-1", "Key"))
+        val stored = signedHashes.single()
+        assertEquals(
+            "the signed original verifies",
+            MediaHasher.ContentHashCheck.MATCHES,
+            MediaHasher.checkContentHashUri(context, uri, stored, MediaHasher.SignatureSource.IN_BAND)
+        )
+
+        // Revoked, or a recipient's installation without it: only the redacted view is readable.
+        shadowOf(context as Application).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+
+        assertEquals(
+            "verification reports the original unreadable, not tampering",
+            MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE,
+            MediaHasher.checkContentHashUri(context, uri, stored, MediaHasher.SignatureSource.IN_BAND)
+        )
+        // Signing and co-signing hash the same original: without access they hash nothing.
+        assertThrows(MediaPublisher.OriginalUnavailableException::class.java) {
+            MediaHasher.hashCanonicalUri(context, uri)
+        }
+        Unit
     }
 
     private fun geotaggedCopy(): File = folder.newFile().apply { writeBytes(geotagged) }
