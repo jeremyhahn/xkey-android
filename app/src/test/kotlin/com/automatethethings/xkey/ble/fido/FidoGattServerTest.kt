@@ -426,6 +426,62 @@ class FidoGattServerTest {
         assertEquals("the session is over", frames, notified.size)
     }
 
+    /**
+     * The device disconnects and reconnects, and subscribes again, while the
+     * first frame of a fragmented reply is in the stack's notify call: the
+     * rest of the reply is enqueued on the ended connection. The stack
+     * refuses the notify calls [reject] picks (1-based).
+     */
+    private fun reconnectDuringFirstNotify(reject: (call: Int) -> Boolean) {
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        every { stack.notifyCharacteristicChanged(any(), any(), any(), any<ByteArray>()) } answers {
+            val call = calls.incrementAndGet()
+            if (call == 1) {
+                callback.captured.onConnectionStateChange(device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED)
+                callback.captured.onConnectionStateChange(device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED)
+                subscribe()
+            }
+            if (reject(call)) {
+                BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY
+            } else {
+                notified += arg<ByteArray>(3)
+                BluetoothStatusCodes.SUCCESS
+            }
+        }
+    }
+
+    @Test
+    fun `no frame of a reply to an ended connection reaches the same device's new connection`() {
+        subscribe()
+        // The old connection's first frame is refused; a retry of it, or any
+        // frame after it, would go to the new connection.
+        reconnectDuringFirstNotify { it == 1 }
+
+        send(FidoBle.CMD_PING, fiftyBytes)
+        Thread.sleep(300)
+        release()
+        Thread.sleep(300)
+        release()
+
+        assertEquals("the new connection has one client", 1, clientCount())
+        assertTrue("no frame of the old reply reaches the new connection", notified.isEmpty())
+    }
+
+    @Test
+    fun `a send failure on an ended connection never cancels the same device's new connection`() {
+        subscribe()
+        // Every notify is refused: the old connection's frame runs out of
+        // attempts after the device has reconnected.
+        reconnectDuringFirstNotify { true }
+
+        send(FidoBle.CMD_PING, fiftyBytes)
+        Thread.sleep(500)
+
+        verify(exactly = 0) { stack.cancelConnection(device) }
+        assertEquals("the new connection has one client", 1, clientCount())
+        verify(exactly = 1) { stack.notifyCharacteristicChanged(any(), any(), any(), any<ByteArray>()) }
+    }
+
     @Test
     fun `below API 33 a frame for one client is never notified to another`() {
         // Below API 33 every client shares fidoStatus's one value: it is set,

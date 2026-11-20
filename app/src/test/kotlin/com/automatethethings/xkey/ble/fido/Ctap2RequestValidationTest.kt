@@ -259,4 +259,58 @@ class Ctap2RequestValidationTest {
     fun `an rpId that is empty is refused before any lookup`() = runTest {
         assertAssertionRefused("empty rpId", Ctap2.ERR_INVALID_LENGTH, assertion(allow = null, extra = mapOf(1 to "")))
     }
+
+    /**
+     * A present CBOR null is not an omitted field: every field whose type is
+     * not null is refused when it is encoded as null, before any prompt, with
+     * nothing created or replaced. The [extra] maps carry real CBOR nulls (the
+     * builders above omit a field given null).
+     */
+    @Test
+    fun `a present CBOR null in any registration field is refused before any prompt`() = runTest {
+        val rp = mapOf("id" to rpId, "name" to "Example")
+        val user = mapOf("id" to userId, "name" to "alice", "displayName" to "Alice")
+        val cases = listOf(
+            "excludeList" to registration(extra = mapOf(5 to null)),
+            "extensions" to registration(extra = mapOf(6 to null)),
+            "options" to registration(extra = mapOf(7 to null)),
+            "enterpriseAttestation" to registration(extra = mapOf(10 to null)),
+            "key 9" to registration(extra = mapOf(9 to null)),
+            "rp.name" to registration(rp = rp + ("name" to null)),
+            "rp.icon" to registration(rp = rp + ("icon" to null)),
+            "user.name" to registration(user = user + ("name" to null)),
+            "user.displayName" to registration(user = user + ("displayName" to null)),
+            "user.icon" to registration(user = user + ("icon" to null)),
+            "rp.id" to registration(rp = rp + ("id" to null)),
+            "user.id" to registration(user = user + ("id" to null)),
+            "rp" to registration(extra = mapOf(2 to null)),
+            "pubKeyCredParams" to registration(extra = mapOf(4 to null)),
+            "alg" to registration(params = listOf(mapOf("alg" to null, "type" to "public-key"))),
+            "param type" to registration(params = listOf(mapOf("alg" to -7, "type" to null))),
+            "descriptor id" to registration(exclude = listOf(mapOf("id" to null, "type" to "public-key"))),
+            "descriptor type" to registration(exclude = listOf(mapOf("id" to byteArrayOf(5), "type" to null))),
+            "transports" to registration(exclude = listOf(descriptor() + ("transports" to null))),
+            "option value" to registration(extra = mapOf(7 to mapOf("rk" to null)))
+        )
+        for ((label, request) in cases) {
+            assertRegistrationRefused(label, Ctap2.ERR_CBOR_UNEXPECTED_TYPE, request)
+        }
+    }
+
+    @Test
+    fun `a present CBOR null in any assertion field is refused before any lookup or signature`() = runTest {
+        val cases = listOf(
+            "allowList" to assertion(allow = null, extra = mapOf(3 to null)),
+            "extensions" to assertion(allow = null, extra = mapOf(4 to null)),
+            "options" to assertion(allow = null, extra = mapOf(5 to null)),
+            "key 7" to assertion(allow = null, extra = mapOf(7 to null)),
+            "rpId" to assertion(allow = null, extra = mapOf(1 to null)),
+            "clientDataHash" to assertion(allow = null, extra = mapOf(2 to null)),
+            "descriptor id" to assertion(allow = listOf(mapOf("id" to null, "type" to "public-key"))),
+            "transports" to assertion(allow = listOf(descriptor() + ("transports" to null)))
+        )
+        for ((label, request) in cases) {
+            assertAssertionRefused(label, Ctap2.ERR_CBOR_UNEXPECTED_TYPE, request)
+        }
+    }
 }
