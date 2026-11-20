@@ -256,6 +256,48 @@ object MediaPublisher {
         IOException("writing $target needs the user's write access")
 
     /**
+     * What a capture held when it was staged, before anything was embedded:
+     * the canonical hash of what was signed ([contentHash], typed by
+     * [mimeType]) and a SHA-256 of the whole snapshot ([digest]). The
+     * canonical hash leaves out metadata (a JPEG's APP and COM segments), so
+     * only the whole-file digest shows an edit of the location or
+     * orientation alone. The one check that a capture has not changed since
+     * staging: [of] at staging, [requireUnchanged] before it is overwritten.
+     */
+    class StagedSource internal constructor(val mimeType: String, val contentHash: String, val digest: String) {
+        /** Throws [XmpMetadataHelper.SourceChangedException] unless [current] is the staged snapshot, byte for byte. */
+        fun requireUnchanged(current: File) {
+            if (AutoSignHash.contentHashFile(current, mimeType) != contentHash) throw XmpMetadataHelper.SourceChangedException()
+            if (digestOf(current) != digest) throw XmpMetadataHelper.SourceChangedException()
+        }
+
+        companion object {
+            /**
+             * [snapshot], the capture as just staged, which must still hold
+             * what was signed ([contentHash]), else
+             * [XmpMetadataHelper.SourceChangedException].
+             */
+            fun of(snapshot: File, mimeType: String, contentHash: String): StagedSource {
+                if (AutoSignHash.contentHashFile(snapshot, mimeType) != contentHash) throw XmpMetadataHelper.SourceChangedException()
+                return StagedSource(mimeType, contentHash, digestOf(snapshot))
+            }
+
+            private fun digestOf(file: File): String {
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                file.inputStream().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        digest.update(buffer, 0, n)
+                    }
+                }
+                return digest.digest().joinToString("") { "%02x".format(it) }
+            }
+        }
+    }
+
+    /**
      * Write [staged] over the media at [target] through its content URI: the
      * one path for media another app owns, which xKey may write only with
      * the user's grant ([writeAccess] GRANTED) and never by renaming over its
@@ -264,9 +306,9 @@ object MediaPublisher {
      *
      * A content URI offers no atomic replace, so the capture is never
      * truncated up front. Its current bytes are first copied whole and
-     * synced to the recovery directory and checked against [sourceHash], the
-     * canonical hash ([mimeType]) of what was signed: an edit saved since
-     * staging throws [XmpMetadataHelper.SourceChangedException] and nothing
+     * synced to the recovery directory and checked against [source], what the
+     * capture held when it was staged ([StagedSource.requireUnchanged]): any
+     * edit saved since staging, its metadata alone included, throws [XmpMetadataHelper.SourceChangedException] and nothing
      * is written. Then a synced record naming the capture and that backup is
      * written ([GrantedWriteJournal]), and only then is the capture
      * overwritten in place ([overwrite]) and cut to length once every new
@@ -277,7 +319,7 @@ object MediaPublisher {
      * [MediaPublishException.original] names the backup while it is needed.
      * [staged] is deleted only once the write and the close both succeeded.
      */
-    fun writeGranted(context: Context, target: Uri, staged: File, sourceHash: String, mimeType: String) = synchronized(grantedWrites) {
+    fun writeGranted(context: Context, target: Uri, staged: File, source: StagedSource) = synchronized(grantedWrites) {
         if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) throw WriteAuthorizationRequiredException(target)
         // The backup must be the capture whole, location included, or the
         // write would leave nothing to put the location back from.
@@ -295,10 +337,10 @@ object MediaPublisher {
                     out.fd.sync()
                 }
             }
-            // What is about to be overwritten must still be what was signed: an
-            // edit saved since the capture was staged is kept, not replaced by
-            // the older snapshot.
-            if (AutoSignHash.contentHashFile(partial, mimeType) != sourceHash) throw XmpMetadataHelper.SourceChangedException()
+            // What is about to be overwritten must still be what was staged: an
+            // edit saved since, metadata alone included, is kept, not replaced
+            // by the older snapshot.
+            source.requireUnchanged(partial)
             journal.commit(partial)
         } catch (e: XmpMetadataHelper.SourceChangedException) {
             partial.delete()
@@ -362,10 +404,18 @@ object MediaPublisher {
         if (journal.recorded() && !recover(context, journal)) throw RecoveryPendingException(target, journal.backup)
     }
 
-    /** Put back what [journal] records; true once nothing is left to put back. */
+    /**
+     * Put back what [journal] records; true once nothing is left to put back.
+     * A record that cannot be read leaves the recovery pending (false), its
+     * record and backup kept: only a restore that succeeded clears them.
+     */
     private fun recover(context: Context, journal: GrantedWriteJournal): Boolean {
-        val target = journal.target()
-        if (target == null || !journal.backup.isFile) {
+        val target = try {
+            journal.target()
+        } catch (_: IOException) {
+            return false
+        }
+        if (!journal.backup.isFile) {
             journal.clear()
             return true
         }
@@ -390,7 +440,11 @@ object MediaPublisher {
 
         fun recorded() = record.isFile
 
-        fun target(): Uri? = runCatching { Uri.parse(readRecord(record)) }.getOrNull()
+        /**
+         * The capture the record names. A read that fails throws: it has not
+         * shown the record gone, so the record and backup must stay.
+         */
+        fun target(): Uri = Uri.parse(readRecord(record))
 
         /** [whole] (synced) becomes the backup, then the record is written and synced. */
         fun commit(whole: File) {
@@ -417,9 +471,19 @@ object MediaPublisher {
             @Volatile
             internal var readRecord: (File) -> String = { it.readText() }
 
+            /**
+             * Every recorded write. A record that cannot be read is skipped,
+             * never cleared: it and its backup stay for a later recovery.
+             */
             fun all(directory: File): List<GrantedWriteJournal> =
                 directory.listFiles { f -> f.name.startsWith(PREFIX) && f.name.endsWith(RECORD) }.orEmpty()
-                    .mapNotNull { f -> runCatching { GrantedWriteJournal(directory, Uri.parse(readRecord(f))) }.getOrNull() }
+                    .mapNotNull { f ->
+                        try {
+                            GrantedWriteJournal(directory, Uri.parse(readRecord(f)))
+                        } catch (_: IOException) {
+                            null
+                        }
+                    }
         }
     }
 

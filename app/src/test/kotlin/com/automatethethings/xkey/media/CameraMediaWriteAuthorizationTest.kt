@@ -286,7 +286,7 @@ class CameraMediaWriteAuthorizationTest {
         media.writeBytes(edited)
 
         assertThrows(XmpMetadataHelper.SourceChangedException::class.java) {
-            MediaPublisher.writeGranted(context, uri, staged, hash, "image/png")
+            MediaPublisher.writeGranted(context, uri, staged, MediaPublisher.StagedSource.of(staged, "image/png", hash))
         }
         assertArrayEquals(edited, media.readBytes())
     }
@@ -482,7 +482,7 @@ class CameraMediaWriteAuthorizationTest {
             XmpMetadataHelper.signMedia(context, uri, capture.path, data)
         }
         assertThrows(MediaPublisher.RecoveryPendingException::class.java) {
-            MediaPublisher.writeGranted(context, uri, staged, data.contentHash, "image/png")
+            MediaPublisher.writeGranted(context, uri, staged, MediaPublisher.StagedSource.of(staged, "image/png", data.contentHash))
         }
         assertArrayEquals(mixed, media.readBytes())
         assertTrue("the record stays for a later recovery", MediaPublisher.recoveryPending(context, uri))
@@ -566,7 +566,9 @@ class CameraMediaWriteAuthorizationTest {
         val staged = folder.newFile("staged-direct.jpg").apply { writeBytes(geotagged) }
 
         assertThrows(MediaPublisher.OriginalUnavailableException::class.java) {
-            MediaPublisher.writeGranted(context, uri, staged, AutoSignHash.contentHashFile(media, "image/jpeg"), "image/jpeg")
+            MediaPublisher.writeGranted(
+                context, uri, staged, MediaPublisher.StagedSource.of(staged, "image/jpeg", AutoSignHash.contentHashFile(media, "image/jpeg"))
+            )
         }
         assertArrayEquals(geotagged, media.readBytes())
     }

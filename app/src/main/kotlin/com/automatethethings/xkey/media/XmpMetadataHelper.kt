@@ -140,7 +140,9 @@ object XmpMetadataHelper {
                 // The capture whole, location included: the signed bytes
                 // written over it are made from this copy.
                 MediaPublisher.openOriginal(context, uri).use { source -> staged.outputStream().use { source.copyTo(it) } }
-                if (AutoSignHash.contentHashFile(staged, mimeType) != data.contentHash) throw SourceChangedException()
+                // What was staged, before the signature goes in: the granted
+                // write refuses a capture that no longer matches it.
+                val source = MediaPublisher.StagedSource.of(staged, mimeType, data.contentHash)
                 writeSignatureLocked(staged.path, data)
                 val sidecar = File(getSidecarPath(staged.path))
                 if (sidecar.exists()) {
@@ -150,7 +152,7 @@ object XmpMetadataHelper {
                     MediaPublisher.replaceFile(File(getSidecarPath(path))) { temp -> sidecar.copyTo(temp, overwrite = true); true }
                     return MediaSignResult.Signed
                 }
-                MediaPublisher.writeGranted(context, uri, staged, data.contentHash, mimeType)
+                MediaPublisher.writeGranted(context, uri, staged, source)
                 return MediaSignResult.Signed
             } catch (e: MediaPublishException) {
                 kept = true
