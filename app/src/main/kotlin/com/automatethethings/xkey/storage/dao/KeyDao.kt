@@ -22,6 +22,7 @@ import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
 import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.flow.Flow
@@ -421,6 +422,29 @@ interface KeyDao {
     @RawKeyRowWrite
     @Query("DELETE FROM credential_metadata WHERE credential_id = :credentialId")
     suspend fun deleteMetadataRowByCredentialId(credentialId: String): Int
+
+    /**
+     * Insert a new passkey's key row and its `credential_metadata` row in one
+     * transaction, as a revoke of its key: both rows are written or, when
+     * either insert throws, neither is. So no key row is ever left without
+     * the metadata the credential provider lists, nor metadata without its
+     * key row.
+     */
+    suspend fun insertPasskeyRows(key: KeyEntity, metadata: CredentialMetadataEntity) =
+        SharePermissionLedger.revoking(key.keyId) { insertPasskeyRowsInTransaction(key, metadata) }
+
+    /** Raw passkey rows insert in one transaction; call [insertPasskeyRows]. */
+    @RawKeyRowWrite
+    @Transaction
+    suspend fun insertPasskeyRowsInTransaction(key: KeyEntity, metadata: CredentialMetadataEntity) {
+        insertRow(key)
+        insertMetadataRow(metadata)
+    }
+
+    /** Raw `credential_metadata` insert-or-replace; call [insertPasskeyRows]. */
+    @RawKeyRowWrite
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMetadataRow(metadata: CredentialMetadataEntity): Long
 
     /**
      * Delete all FIDO2 keys for a relying party, each as a revoke of its key.
