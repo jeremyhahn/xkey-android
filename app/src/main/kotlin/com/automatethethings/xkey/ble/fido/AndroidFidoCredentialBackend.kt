@@ -388,11 +388,22 @@ class AndroidFidoCredentialBackend(
      * throws, or whose process dies before it, is deleted by a later
      * [retryPendingKeyDeletions] and never left behind with no row and no
      * record. A passkey whose rows stay is forgotten again: its row owns it.
+     *
+     * A [rollback] (a failed registration removing its own new passkey) never
+     * depends on that record: when it cannot be written (storage full, say),
+     * the rows and the key are deleted all the same, so a failed registration
+     * leaves nothing a client could be offered. A replacement without the
+     * record throws instead, and every old passkey stays.
      */
-    private suspend fun delete(read: List<KeyEntity>): List<String> {
+    private suspend fun delete(read: List<KeyEntity>, rollback: Boolean = false): List<String> {
         if (read.isEmpty()) return emptyList()
         val ids = read.map { it.keyId }
-        pendingKeyDeletions.add(ids)
+        try {
+            pendingKeyDeletions.add(ids)
+        } catch (e: Exception) {
+            if (!rollback) throw e
+            Log.w(TAG, "The deletion record could not be written; the failed passkey is removed without it", e)
+        }
         val removed = try {
             keyDao.deletePasskeyRows(read)
         } catch (e: Throwable) {
@@ -458,7 +469,7 @@ class AndroidFidoCredentialBackend(
     private suspend fun remove(keyId: String) {
         try {
             val row = keyDao.getByKeyId(keyId)
-            if (row == null) deleteKey(keyId) else delete(listOf(row))
+            if (row == null) deleteKey(keyId) else delete(listOf(row), rollback = true)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

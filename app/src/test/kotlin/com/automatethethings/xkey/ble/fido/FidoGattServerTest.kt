@@ -202,11 +202,23 @@ class FidoGattServerTest {
     fun `each client reads the control point length of its own MTU`() {
         val other = mockk<BluetoothDevice>(relaxed = true)
         every { other.address } returns "02:00:00:00:00:02"
+        callback.captured.onConnectionStateChange(other, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED)
         callback.captured.onMtuChanged(other, 247)
 
         assertEquals(20, readControlPointLength())
         callback.captured.onCharacteristicReadRequest(other, 6, 0, characteristic(FidoBle.CONTROL_POINT_LENGTH_UUID))
         assertArrayEquals(byteArrayOf(0x00, 244.toByte()), responses.last().second)
+    }
+
+    @Test
+    fun `a device connected before the server starts is admitted at start`() {
+        server.destroy()
+        every { manager.getConnectedDevices(BluetoothProfile.GATT_SERVER) } returns listOf(device)
+        server = FidoGattServer(context, Ctap2Authenticator(backend))
+        assertTrue(server.start())
+
+        assertEquals(1, clientCount())
+        assertEquals(20, readControlPointLength())
     }
 
     @Test

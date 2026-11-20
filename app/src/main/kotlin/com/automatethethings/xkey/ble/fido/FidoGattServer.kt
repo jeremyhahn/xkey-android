@@ -105,13 +105,19 @@ class FidoGattServer(
             stop()
             return false
         }
+        // A device connected before this server opened gets no connection
+        // callback here: admit it now. Its disconnect callback, which takes the
+        // same lock as the admission, removes it.
+        runCatching { manager.getConnectedDevices(BluetoothProfile.GATT_SERVER) }
+            .getOrNull()
+            ?.forEach { admit(it) }
         Log.i(TAG, "FIDO GATT service started")
         return true
     }
 
     /**
      * Closes every client session and the server. Under [lifecycle], so once
-     * it has run [client] admits nothing: a callback already past [client]
+     * it has run [admit] admits nothing and [client] finds nothing: a callback already past [client]
      * holds a closed client, whose session refuses every frame.
      */
     fun stop() {
@@ -184,14 +190,34 @@ class FidoGattServer(
     private val lifecycle = Any()
 
     /**
-     * The one lookup every GATT callback uses: this device's client on the
-     * current connection, created on its first callback, or null once the
-     * server has stopped. A callback looks it up once and keeps that client,
-     * so a stop or disconnect after the lookup leaves it holding a closed
-     * session, never a fresh one.
+     * The one lookup every GATT callback but the connection callback uses:
+     * this device's client on its current connection, or null when no
+     * connection of it is admitted (it disconnected, or the server stopped).
+     * A lookup never creates a client: only [admit] does. A callback looks it
+     * up once and keeps that client, so a stop or disconnect after the lookup
+     * leaves it holding a closed session, never a fresh one.
      */
     private fun client(device: BluetoothDevice): Client? = synchronized(lifecycle) {
-        if (server == null) null else clients.getOrPut(device.address) { Client(device) }
+        if (server == null) null else clients[device.address]
+    }
+
+    /**
+     * Admits [device]'s connection: its client, created on connection
+     * establishment under [lifecycle], while the server runs. A connection
+     * already admitted keeps its client.
+     */
+    private fun admit(device: BluetoothDevice) = synchronized(lifecycle) {
+        if (server != null && !clients.containsKey(device.address)) clients[device.address] = Client(device)
+    }
+
+    /**
+     * Records that [device]'s connection ended: under [lifecycle], so no
+     * callback is admitting or looking up its client meanwhile; after it no
+     * callback finds one, and the client a callback already holds is closed.
+     */
+    private fun disconnected(device: BluetoothDevice) {
+        val ended = synchronized(lifecycle) { clients.remove(device.address) }
+        ended?.close()
     }
 
     /** Held from setting fidoStatus's shared value until the stack has taken it. */
@@ -391,7 +417,10 @@ class FidoGattServer(
         }
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_DISCONNECTED) clients.remove(device.address)?.close()
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> admit(device)
+                BluetoothProfile.STATE_DISCONNECTED -> disconnected(device)
+            }
         }
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
