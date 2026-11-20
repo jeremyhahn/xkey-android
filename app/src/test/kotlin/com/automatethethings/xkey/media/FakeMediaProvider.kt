@@ -17,8 +17,10 @@ package com.automatethethings.xkey.media
 import android.content.ContentProvider
 import android.content.ContentValues
 import android.database.Cursor
+import android.database.MatrixCursor
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.provider.MediaStore
 import java.io.File
 
 /**
@@ -70,7 +72,16 @@ class FakeMediaProvider : ContentProvider() {
         return ParcelFileDescriptor.open(media, ParcelFileDescriptor.parseMode(mode))
     }
 
-    override fun query(uri: Uri, p: Array<out String>?, s: String?, a: Array<out String>?, o: String?): Cursor? = null
+    /** The file MediaStore names for every item (`_data`), or null for none: then a query finds nothing. */
+    var dataPath: String? = null
+
+    override fun query(uri: Uri, p: Array<out String>?, s: String?, a: Array<out String>?, o: String?): Cursor? {
+        val path = dataPath ?: return null
+        val columns = p ?: arrayOf(MediaStore.MediaColumns.DATA)
+        return MatrixCursor(columns).apply {
+            addRow(columns.map { if (it == MediaStore.MediaColumns.DATA) path else null }.toTypedArray())
+        }
+    }
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, s: String?, a: Array<out String>?) = 0
     override fun update(uri: Uri, v: ContentValues?, s: String?, a: Array<out String>?) = 0
