@@ -28,6 +28,8 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.testing.ReleaseMocks
+import io.mockk.clearAllMocks
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -50,6 +52,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import java.util.Base64
 
@@ -64,6 +67,10 @@ import java.util.Base64
 private fun JSONObject.keyNames(): Set<String> = keys().asSequence().toSet()
 
 class RemoteShareClientTest {
+
+    /** Drops what MockK recorded here, so it does not outlive the test. */
+    @get:Rule
+    val releaseMocks = ReleaseMocks()
 
     private lateinit var router: BidirectionalMessageRouter
     private lateinit var sender: ScriptedMessageSender
@@ -349,6 +356,10 @@ class RemoteShareClientTest {
             val request = JSONObject().put("jsonrpc", "2.0").put("id", i).put("method", MethodNames.LOCAL_DELETE_KEY)
                 .put("params", JSONObject().put("keyId", "absent-$i"))
             handler.handleRawRequest(request.toString().toByteArray())
+            // Every call above is recorded with a stack trace; 10 000 rounds of
+            // them fill the test JVM's heap. Nothing here is verified, so drop
+            // the recordings as they come and keep the stubs.
+            if (i % 500 == 499) clearAllMocks(answers = false, childMocks = false)
         }
 
         val after = SharePermissionLedger.retainedKeyCount()

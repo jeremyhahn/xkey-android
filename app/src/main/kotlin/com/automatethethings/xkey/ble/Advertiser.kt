@@ -8,6 +8,7 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.os.ParcelUuid
 import android.util.Log
+import com.automatethethings.xkey.ble.fido.FidoBle
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -134,6 +135,9 @@ class Advertiser(
             .setIncludeDeviceName(false) // Device name in scan response
             .setIncludeTxPowerLevel(false)
             .addServiceUuid(ParcelUuid(serviceUuid))
+            // The FIDO service, so CTAP2 BLE clients find the phone. Flags (3) +
+            // the 128-bit list (18) + the 16-bit list (4) fit the 31-byte PDU.
+            .addServiceUuid(ParcelUuid(FidoBle.SERVICE_UUID))
             .build()
 
         Log.i(TAG, "Advertise data built, service UUIDs: ${data.serviceUuids}")

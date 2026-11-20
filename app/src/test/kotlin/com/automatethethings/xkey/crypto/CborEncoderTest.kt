@@ -107,4 +107,25 @@ class CborEncoderTest {
         CborEncoder.encodeCOSEEC2Key(x, y)
     }
 
+    private fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
+
+    @Test
+    fun `map keys sort by major type before width so 24 precedes -1`() {
+        // 24 encodes 18 18 (major 0, two bytes); -1 encodes 20 (major 1, one byte).
+        assertEquals("a2" + "1818" + "01" + "20" + "02", hex(CborEncoder.encode(mapOf<Any, Any?>(-1 to 2, 24 to 1))))
+    }
+
+    @Test
+    fun `map keys sort integers before text whatever their width`() {
+        // 1000 encodes 19 03 e8 (major 0, three bytes); "a" encodes 61 61 (major 3, two bytes).
+        assertEquals("a2" + "1903e8" + "01" + "6161" + "02", hex(CborEncoder.encode(mapOf<Any, Any?>("a" to 2, 1000 to 1))))
+    }
+
+    @Test
+    fun `map keys sort within a major type shorter first then bytewise`() {
+        val encoded = CborEncoder.encode(mapOf<Any, Any?>(-25 to 0, -2 to 0, -1 to 0, 100 to 0, 2 to 0, "bb" to 0, "c" to 0, "a" to 0))
+        // 2, 100, -1, -2, -25, "a", "c", "bb"
+        assertEquals("a8" + "0200" + "186400" + "2000" + "2100" + "381800" + "616100" + "616300" + "62626200", hex(encoded))
+    }
+
 }

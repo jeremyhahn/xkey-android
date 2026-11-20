@@ -19,9 +19,11 @@ import androidx.biometric.BiometricPrompt
 import com.automatethethings.xkey.auth.BiometricActivityLauncher.CryptoSigningResult
 import com.automatethethings.xkey.ui.CryptoSigningCancellations
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.ConcurrentHashMap
@@ -77,8 +79,18 @@ internal class PendingCryptoSignatures(
      * after its launch fails with [BiometricPrompt.ERROR_TIMEOUT] and hands
      * the screen on ([expireUnshown]); one the owner is answering keeps
      * waiting, since its prompt answers when it goes away.
+     * With [prepare], the request's turn runs it first and launches only
+     * after it returns; if it throws, the request fails with that exception
+     * and nothing is shown.
      */
-    suspend fun await(launch: (requestId: String) -> Unit): CryptoSigningResult = coroutineScope {
+    suspend fun await(launch: (requestId: String) -> Unit): CryptoSigningResult = await(null, launch)
+
+    /** [await], running [prepare] (when given) once this request's turn has come, before [launch]. */
+    suspend fun await(
+        prepare: (suspend () -> Unit)?,
+        launch: (requestId: String) -> Unit
+    ): CryptoSigningResult = coroutineScope {
+        val scope = this
         val id = nextRequestId.incrementAndGet()
         val key = NotificationKeys.signature(id.toString())
         val launched = CompletableDeferred<Unit>()
@@ -110,12 +122,7 @@ internal class PendingCryptoSignatures(
                         }
                     },
                 ) {
-                    // Withdrawn as its turn came: its entry is released already.
-                    if (pending[id] !== continuation) return@enqueue
-                    try {
-                        launch(id.toString())
-                        launched.complete(Unit)
-                    } catch (e: Exception) {
+                    fun fail(e: Exception) {
                         // The launch may have posted the notification before
                         // the start threw: its prompt is ended, so a late
                         // delivery of that intent never signs.
@@ -123,6 +130,41 @@ internal class PendingCryptoSignatures(
                             pending.remove(id, continuation)
                         ) {
                             continuation.resumeWithException(e)
+                        }
+                    }
+                    fun start() {
+                        // Withdrawn as its turn came: its entry is released already.
+                        if (pending[id] !== continuation) return
+                        try {
+                            launch(id.toString())
+                            launched.complete(Unit)
+                        } catch (e: Exception) {
+                            fail(e)
+                        }
+                    }
+                    if (prepare == null) {
+                        start()
+                    } else if (pending[id] === continuation) {
+                        // What the prompt signs is made only now that its
+                        // turn has come (a passkey's counter), then it starts.
+                        scope.launch {
+                            try {
+                                prepare()
+                            } catch (e: CancellationException) {
+                                // The caller cancelled: its cancellation
+                                // handler has released the entry already.
+                                if (!isActive) throw e
+                                // A cancellation of the preparation's own
+                                // (a timeout inside it) while the caller
+                                // still waits: a failure, or the request
+                                // would hold the screen with nothing shown.
+                                fail(IllegalStateException("The signing request's preparation was cancelled", e))
+                                return@launch
+                            } catch (e: Exception) {
+                                fail(e)
+                                return@launch
+                            }
+                            start()
                         }
                     }
                 }
