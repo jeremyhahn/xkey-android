@@ -40,6 +40,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.databinding.ActivityVerifiedViewerBinding
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
+import com.automatethethings.xkey.media.MediaLocationAccess
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerVerification
 import com.automatethethings.xkey.media.XmpMetadataHelper
@@ -82,6 +83,9 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
     }
 
     private lateinit var binding: ActivityVerifiedViewerBinding
+
+    /** Asks for location access before the media's original is read. */
+    private val locationAccess = MediaLocationAccess(this)
     private lateinit var keyDao: KeyDao
     private lateinit var contactDao: ContactDao
 
@@ -126,7 +130,8 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
             else -> showImage(mediaUri)
         }
 
-        verifyMedia(mediaUri, mimeType)
+        // Verifying reads the media whole: a fresh install is asked for location access first.
+        locationAccess.withOriginals(listOf(mediaUri)) { verifyMedia(mediaUri, mimeType) }
     }
 
     override fun onDestroy() {

@@ -47,6 +47,7 @@ import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
+import com.automatethethings.xkey.media.MediaLocationAccess
 import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.MediaSaveRuns
 import com.automatethethings.xkey.media.SignedCopyDocument
@@ -168,6 +169,9 @@ class FileOperationActivity : AppCompatActivity() {
     // Activity result launchers. Every save picker's result goes through
     // onSavePicked, so a cancel always drops its pending output and frees
     // the screen.
+    /** Asks for location access before a capture's original is read. */
+    private val locationAccess = MediaLocationAccess(this)
+
     private val createSignatureFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri -> onSavePicked(uri, { pendingSignatureJson = null }, ::saveSignatureToUri) }
@@ -982,11 +986,18 @@ class FileOperationActivity : AppCompatActivity() {
         showProgress(true)
         resultCard.visibility = View.GONE
 
-        when (selectedOperation) {
-            OP_SIGN -> performSign()
-            OP_VERIFY -> performVerify()
-            OP_ENCRYPT -> performEncrypt()
-            OP_DECRYPT -> performDecrypt()
+        // Decrypting reads ciphertext; every other operation reads the
+        // media whole, so a fresh install is asked for location access first.
+        if (selectedOperation == OP_DECRYPT) {
+            performDecrypt()
+            return
+        }
+        locationAccess.withOriginals(fileUris) {
+            when (selectedOperation) {
+                OP_SIGN -> performSign()
+                OP_VERIFY -> performVerify()
+                OP_ENCRYPT -> performEncrypt()
+            }
         }
     }
 

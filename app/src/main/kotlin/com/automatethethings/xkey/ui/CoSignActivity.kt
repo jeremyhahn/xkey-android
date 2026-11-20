@@ -53,6 +53,7 @@ import com.automatethethings.xkey.media.CoSignRequest
 import com.automatethethings.xkey.media.CoSignResponse
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
+import com.automatethethings.xkey.media.MediaLocationAccess
 import com.automatethethings.xkey.media.MediaPublishException
 import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.MediaSaveRuns
@@ -353,6 +354,9 @@ class CoSignActivity : AppCompatActivity() {
      * Where a co-signed copy goes when the selected media cannot be replaced
      * in place: created as the media's own type, named after its display name.
      */
+    /** Asks for location access before a capture's original is read. */
+    private val locationAccess = MediaLocationAccess(this)
+
     private val coSignedCopyLauncher = registerForActivityResult(SignedCopyDocument.Create()) { uri ->
         onCoSignedCopyPicked(uri)
     }
@@ -839,7 +843,7 @@ class CoSignActivity : AppCompatActivity() {
             // The provider grants no persistable permission; the session grant still covers this screen.
         }
 
-        loadSignatures(uri)
+        locationAccess.withOriginals(listOf(uri)) { loadSignatures(uri) }
     }
 
     /** Reads the media's signature data into [currentSignatureData] and the card. */
@@ -1057,7 +1061,8 @@ class CoSignActivity : AppCompatActivity() {
      */
     private fun onResponseScanned(raw: String) {
         transition(CoSignExchange.Event.ScanEnded(raw))
-        appendQueuedResponse()
+        // The append reads the media whole: a fresh install is asked for location access first.
+        locationAccess.withOriginals(exchange.queued.mapNotNull { it.media }) { appendQueuedResponse() }
     }
 
     /**

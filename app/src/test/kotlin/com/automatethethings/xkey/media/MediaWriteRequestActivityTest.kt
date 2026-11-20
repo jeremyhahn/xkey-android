@@ -155,9 +155,10 @@ class MediaWriteRequestActivityTest {
     @Test
     fun `the screen holding the grant stays open until publication ends`() {
         queue(first)
+        // Not yet granted, so the screen asks; the user grants it in the dialog.
+        val controller = open()
         granted = true
         gate = CountDownLatch(1)
-        val controller = open()
 
         answer(controller, Activity.RESULT_OK)
         shadowOf(Looper.getMainLooper()).idle()

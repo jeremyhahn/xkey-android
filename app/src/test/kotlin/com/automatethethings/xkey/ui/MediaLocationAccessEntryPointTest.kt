@@ -150,10 +150,11 @@ class MediaLocationAccessEntryPointTest {
 
         grant(activity)
 
-        val signers = activity.findViewById<View>(R.id.signerListContainer)
+        val signers = activity.findViewById<ViewGroup>(R.id.signerListContainer)
         val none = activity.findViewById<TextView>(R.id.textNoSignatures)
-        idleUntil { signers.visibility == View.VISIBLE || none.text.toString() == MediaHasher.ACCESS_UNAVAILABLE_MESSAGE }
+        idleUntil { signers.childCount > 0 || none.text.toString() == MediaHasher.ACCESS_UNAVAILABLE_MESSAGE }
         assertEquals("the signers are shown, not access unavailable", View.VISIBLE, signers.visibility)
+        assertTrue("a row per signer", signers.childCount > 0)
         assertTrue("the original was read", originalRead())
     }
 
