@@ -391,6 +391,28 @@ class KeyDeletionMaterialTypesTest {
     }
 
     /**
+     * #270 review of 33427e39: a software symmetric key's row holds no
+     * public key. Beside a same-id credential (a state earlier builds
+     * allowed), the screen's delete of that row removes the software key and
+     * leaves the credential, never refusing the row as unowned.
+     */
+    @Test
+    fun aSymmetricRowBesideASameIdCredentialDeletesTheSoftwareKey() = kotlinx.coroutines.test.runTest {
+        val tables = FakeKeyPolicyTables()
+        val store = tables.store()
+        softwareKey("k")
+        keystoreKey("xkey_credential_k", certificate = true)
+        every { keystore.getPublicKeyDER("k", UserKeyKind.CREDENTIAL) } returns byteArrayOf(9)
+
+        val row = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE, keyType = "symmetric")
+        assertTrue(store.deleteKey("k", row, keyMaterialDeleter(context, keystore, row = tables.key("k"))))
+
+        assertFalse("the software key stayed", SoftwareKeyStore(context).contains("k"))
+        assertEquals("the symmetric key's delete took the credential", setOf("xkey_credential_k"), entries.keys)
+        org.junit.Assert.assertNull("the symmetric key's row stayed", tables.key("k"))
+    }
+
+    /**
      * #270 verify (1): a fido2 row whose key `local.generateKey` put under
      * the general alias, beside a credential of its id whose delete failed
      * and is owed. The row's delete settles that tombstone first, so it is
