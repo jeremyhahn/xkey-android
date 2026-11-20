@@ -54,10 +54,9 @@ import java.time.Instant
  * The content hash the automatic signer signs, kept apart from the service so
  * the signing-to-verification round trip can be tested on the JVM.
  *
- * Memory stays bounded for every capture: a JPEG is read into memory only up
- * to [MAX_CANONICAL_JPEG_BYTES], an MP4/MOV, PNG or WebP only up to
- * [XmpMetadataHelper.maxEmbedBytes], and anything larger or of another type
- * is hashed by streaming.
+ * Memory stays bounded for every capture: every one is hashed by streaming
+ * with constant-size buffers, never read into memory, and a JPEG above
+ * [MAX_CANONICAL_JPEG_BYTES] is refused.
  */
 internal object AutoSignHash {
 
@@ -97,9 +96,8 @@ internal object AutoSignHash {
      * An MP4/MOV, PNG or WebP may already carry an embedded signature (an
      * import, or a capture notified again after a restart), which the
      * canonical hash leaves out and [XmpMetadataHelper.writeSignature]
-     * replaces. Up to [embedLimit] bytes it is read into memory and hashed
-     * canonically. A larger one is hashed whole while streaming: unsigned,
-     * its canonical hash is its plain hash, and the writer embeds it
+     * replaces. It is hashed canonically while streaming. One above
+     * [embedLimit] bytes, unsigned, is embedded by the writer
      * streaming ([XmpContainers.embedFile]); if it already carries an embedded
      * signature, which only an in-memory rewrite replaces, it is refused with
      * [TooLargeException] and the existing signature is kept.
@@ -149,7 +147,16 @@ internal object AutoSignHash {
         embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
     ): String = contentHashOf(mimeType, limit, embedLimit) { file.inputStream() }
 
-    /** The one place the signer's content hash is computed, over the media [open] streams from its start. */
+    /**
+     * The one place the signer's content hash is computed, over the media
+     * [open] streams from its start, always with constant-size buffers
+     * ([MediaHasher.hashStreamed]): no capture is held in memory to hash it,
+     * so the hashing memory of every signing job is bounded whatever its
+     * size. A JPEG above [limit] bytes, which the writer would have to hold
+     * in memory to embed, is refused before it is hashed; so is an
+     * MP4/MOV, PNG or WebP above [embedLimit] that already carries an
+     * embedded signature, which only an in-memory rewrite replaces.
+     */
     private fun contentHashOf(
         mimeType: String?,
         limit: Int,
@@ -157,54 +164,31 @@ internal object AutoSignHash {
         open: () -> java.io.InputStream
     ): String {
         if (MediaHasher.isCanonicalisedJpeg(mimeType)) {
-            return contentHash(open().use { readAtMost(it, limit) }, mimeType)
+            if (open().use { lengthBeyond(it, limit.toLong()) }) throw TooLargeException(limit)
+            return MediaHasher.hashStreamed(open, mimeType).canonical
         }
         val format = XmpContainers.formatOf(mimeType) ?: return open().use { MediaHasher.hashStream(it) }
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        val bytes = open().use { readOrDigest(it, embedLimit, digest) }
-        if (bytes != null) return contentHash(bytes, mimeType)
-        val carried = open().use { XmpContainers.read(it.buffered(), format) }
-        if (carried != null) {
-            throw TooLargeException(
-                embedLimit,
-                "media is larger than $embedLimit bytes and already carries an embedded signature"
-            )
+        if (open().use { lengthBeyond(it, embedLimit.toLong()) }) {
+            val carried = open().use { XmpContainers.read(it.buffered(), format) }
+            if (carried != null) {
+                throw TooLargeException(
+                    embedLimit,
+                    "media is larger than $embedLimit bytes and already carries an embedded signature"
+                )
+            }
         }
-        return digest.digest().joinToString("") { "%02x".format(it) }
+        return MediaHasher.hashStreamed(open, mimeType).canonical
     }
 
-    /** All of [input], or [TooLargeException] as soon as it passes [limit] bytes. */
-    private fun readAtMost(input: java.io.InputStream, limit: Int): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
+    /** Whether [input] holds more than [limit] bytes, read with one constant-size buffer and stopping past it. */
+    private fun lengthBeyond(input: java.io.InputStream, limit: Long): Boolean {
         val buffer = ByteArray(8192)
         var total = 0L
         while (true) {
             val n = input.read(buffer)
-            if (n == -1) return out.toByteArray()
+            if (n == -1) return false
             total += n
-            if (total > limit) throw TooLargeException(limit)
-            out.write(buffer, 0, n)
-        }
-    }
-
-    /**
-     * All of [input] while it stays within [limit] bytes; past that, null,
-     * with every byte fed to [digest] and never more than [limit] bytes held.
-     */
-    private fun readOrDigest(
-        input: java.io.InputStream,
-        limit: Int,
-        digest: java.security.MessageDigest
-    ): ByteArray? {
-        var out: java.io.ByteArrayOutputStream? = java.io.ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        var total = 0L
-        while (true) {
-            val n = input.read(buffer)
-            if (n == -1) return out?.toByteArray()
-            digest.update(buffer, 0, n)
-            total += n
-            if (total > limit) out = null else out?.write(buffer, 0, n)
+            if (total > limit) return true
         }
     }
 }
@@ -219,7 +203,7 @@ internal object AutoSignHash {
  */
 internal object AutoSigner {
 
-    enum class Outcome { Signed, AwaitingAccess }
+    enum class Outcome { Signed, AwaitingAccess, QueuedForRetry }
 
     /**
      * Signs a content hash with the key [keyId]. The one signing step for
@@ -263,9 +247,40 @@ internal object AutoSigner {
      * without location access nothing is hashed or signed, and it is queued
      * unsigned until the user grants that access. A capture that needs write
      * access is queued with its signature. A JPEG too large to canonicalise
-     * throws [AutoSignHash.TooLargeException].
+     * throws [AutoSignHash.TooLargeException]. Any other failure to hash,
+     * sign or write it (a busy keystore or provider, memory running out) is
+     * queued unsigned for a retry ([Outcome.QueuedForRetry]), never dropped:
+     * the queue hashes and signs it again from its original. Only a queue
+     * that cannot be written throws.
      */
-    suspend fun signCapture(context: Context, uri: Uri, filePath: String?, keyId: String, keyLabel: String): Outcome {
+    suspend fun signCapture(context: Context, uri: Uri, filePath: String?, keyId: String, keyLabel: String): Outcome =
+        try {
+            signCaptureOnce(context, uri, filePath, keyId, keyLabel)
+        } catch (e: AutoSignHash.TooLargeException) {
+            throw e
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            queueForRetry(context, uri, filePath, keyId, keyLabel, e)
+        } catch (e: OutOfMemoryError) {
+            queueForRetry(context, uri, filePath, keyId, keyLabel, e)
+        }
+
+    private fun queueForRetry(
+        context: Context,
+        uri: Uri,
+        filePath: String?,
+        keyId: String,
+        keyLabel: String,
+        cause: Throwable
+    ): Outcome {
+        Log.w("AutoSigner", "Signing $uri failed; it is queued for a retry", cause)
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), filePath, keyId, keyLabel, null))
+        MediaWriteAuthorizations.notifyPending(context)
+        return Outcome.QueuedForRetry
+    }
+
+    private suspend fun signCaptureOnce(context: Context, uri: Uri, filePath: String?, keyId: String, keyLabel: String): Outcome {
         val contentHash = try {
             AutoSignHash.contentHashOriginal(context, uri)
         } catch (e: MediaPublisher.OriginalUnavailableException) {
@@ -317,6 +332,9 @@ class MediaSigningService : Service() {
      * events that are handled on [Dispatchers.IO] at the same time.
      */
     private val processedUris = RecentUris(RecentUris.DEFAULT_BOUND)
+
+    /** Every signing job starts here: one per URI in flight, their memory bounded together. */
+    private val signingGate = MediaJobGate.forSigning()
 
     /**
      * Every in-flight signing coroutine, so [onDestroy] cancels all of them
@@ -409,7 +427,8 @@ class MediaSigningService : Service() {
         val uriString = uri.toString()
         if (processedUris.contains(uriString)) return
 
-        val job = serviceScope.launch {
+        // The one start of a signing job: one per URI in flight, memory bounded across jobs.
+        val job = signingGate.launch(serviceScope, uriString) launch@{
             try {
                 // Small delay to ensure file is fully written
                 delay(SIGN_DELAY_MS)
@@ -449,9 +468,9 @@ class MediaSigningService : Service() {
                     processedUris.add(uriString)
                     return@launch
                 }
-                if (outcome == AutoSigner.Outcome.AwaitingAccess) {
+                if (outcome != AutoSigner.Outcome.Signed) {
                     processedUris.add(uriString)
-                    Log.i(TAG, "Queued $mediaType $uri; it is signed once the user grants access")
+                    Log.i(TAG, "Queued $mediaType $uri ($outcome); the queue signs it later")
                     return@launch
                 }
 
@@ -460,14 +479,17 @@ class MediaSigningService : Service() {
                 AuditLogger.logMediaAutoSigned(keyId, keyEntity.label, uriString)
                 Log.i(TAG, "Auto-signed $mediaType: $uri")
 
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
+                // Not handled: a later notification for this URI tries again.
                 Log.e(TAG, "Failed to auto-sign media: $uri", e)
             } catch (e: OutOfMemoryError) {
-                // Hashing is bounded, so this is a backstop: one capture
-                // that cannot be signed must not take the process down.
+                // Signing a capture queues it on running out of memory; this
+                // is a backstop for the steps around it, retried the same way.
                 Log.e(TAG, "Out of memory auto-signing media: $uri", e)
             }
-        }
+        } ?: return
         signingJobs += job
         job.invokeOnCompletion { signingJobs -= job }
     }

@@ -181,8 +181,17 @@ class MediaWriteRequestBatchTest {
 
         answer(controller, Activity.RESULT_CANCELED)
         assertTrue(awaitMain { requests.size == 2 })
+        val shown = shadowOf(controller.get()).lastIntentSenderRequest ?: error("the next batch was not asked for")
         controller.recreate()
-        answer(controller, Activity.RESULT_CANCELED)
+        // Give a publication the recreated screen might wrongly start time to run.
+        repeat(10) { shadowOf(Looper.getMainLooper()).idle(); Thread.sleep(30) }
+        assertEquals(
+            "the earlier batch's answer never applies to the open request",
+            5,
+            MediaWriteAuthorizations.pending(context).size
+        )
+        // The open request answers the recreated screen.
+        shadowOf(controller.get()).callOnActivityResult(shown.requestCode, Activity.RESULT_CANCELED, Intent())
 
         assertTrue(awaitMain { controller.get().isFinishing })
         assertEquals(listOf(batch, 5), requests.map { it.size })

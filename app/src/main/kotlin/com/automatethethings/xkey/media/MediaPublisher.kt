@@ -207,7 +207,13 @@ object MediaPublisher {
     }
 
     /** The request the user approves to let xKey write [targets]; an activity launches its intent sender. */
-    fun writeRequest(context: Context, targets: List<Uri>): PendingIntent = mediaStore.createWriteRequest(context, targets)
+    fun writeRequest(context: Context, targets: List<Uri>): PendingIntent {
+        // One request is one Binder transaction: its URI list stays bounded.
+        require(targets.size <= MediaWriteAuthorizations.MAX_WRITE_REQUEST_URIS) {
+            "a write request carries at most ${MediaWriteAuthorizations.MAX_WRITE_REQUEST_URIS} URIs, not ${targets.size}"
+        }
+        return mediaStore.createWriteRequest(context, targets)
+    }
 
     /**
      * [target] can be read only as MediaStore's redacted view, its location

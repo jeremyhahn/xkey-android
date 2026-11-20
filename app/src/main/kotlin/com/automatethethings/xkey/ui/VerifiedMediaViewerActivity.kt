@@ -333,7 +333,7 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
             else -> return@runCatching null
         }
         contentResolver.openInputStream(sidecarUri)?.use { input ->
-            ContentAuthenticityData.fromJsonString(input.readBytes().decodeToString())
+            ContentAuthenticityData.fromJsonStream(input)
         }
     }.getOrNull()
 
