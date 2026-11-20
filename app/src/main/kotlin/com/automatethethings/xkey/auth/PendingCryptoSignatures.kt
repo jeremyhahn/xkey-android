@@ -23,6 +23,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.ConcurrentHashMap
@@ -150,7 +151,15 @@ internal class PendingCryptoSignatures(
                             try {
                                 prepare()
                             } catch (e: CancellationException) {
-                                throw e
+                                // The caller cancelled: its cancellation
+                                // handler has released the entry already.
+                                if (!isActive) throw e
+                                // A cancellation of the preparation's own
+                                // (a timeout inside it) while the caller
+                                // still waits: a failure, or the request
+                                // would hold the screen with nothing shown.
+                                fail(IllegalStateException("The signing request's preparation was cancelled", e))
+                                return@launch
                             } catch (e: Exception) {
                                 fail(e)
                                 return@launch
