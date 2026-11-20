@@ -20,11 +20,13 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -36,6 +38,7 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.util.ReflectionHelpers
 import java.io.File
 
 /**
@@ -186,6 +189,36 @@ class GeotaggedVideoAutoSignTest {
         assertEquals(listOf(originalHash), signedHashes)
         assertTrue(hasLocation(media.readBytes()))
         assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
+    }
+
+    @Test
+    fun `on Android 10 a capture queued for location access drains once access is granted, with no write request`() {
+        // Before Android 11 xKey writes media by path and MediaStore has no
+        // write request (createWriteRequest needs Android 11). The unit tests
+        // run on the SDK 34 runtime alone, so Android 10 is reported for this
+        // test, with the platform's MediaStore in place.
+        MediaPublisher.mediaStore = MediaPublisher.PlatformMediaStore
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), media.path, "key-1", "Key", null))
+        shadowOf(context as Application).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        val sdk = Build.VERSION.SDK_INT
+        ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", Build.VERSION_CODES.Q)
+        try {
+            val request = MediaWriteAuthorizations.request(context)
+            assertNotNull("the queued capture is offered", request)
+            assertEquals(listOf(uri.toString()), request!!.uris)
+            assertNull("nothing queued needs a write grant before Android 11", request.intent)
+
+            val signed = mutableListOf<PendingMediaWrite>()
+            MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+            assertEquals(listOf(uri.toString()), signed.map { it.uri })
+            assertEquals(listOf(AutoSignHash.contentHashFile(geotaggedCopy(), "video/mp4")), signedHashes)
+            assertTrue("the video keeps where it was recorded", hasLocation(media.readBytes()))
+            assertTrue("the queue is empty", MediaWriteAuthorizations.pending(context).isEmpty())
+            assertNull("no request once nothing waits", MediaWriteAuthorizations.request(context))
+        } finally {
+            ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", sdk)
+        }
     }
 
     private fun geotaggedCopy(): File = folder.newFile().apply { writeBytes(geotagged) }
