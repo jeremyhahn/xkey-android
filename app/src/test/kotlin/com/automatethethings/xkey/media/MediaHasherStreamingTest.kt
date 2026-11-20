@@ -89,6 +89,8 @@ class MediaHasherStreamingTest {
         every { resolver.getType(uri) } returns mime
         val context = mockk<android.content.Context>()
         every { context.contentResolver } returns resolver
+        // The original is read only once no granted write of it is pending recovery.
+        every { context.filesDir } returns kotlin.io.path.createTempDirectory("files").toFile()
         return context to uri
     }
 

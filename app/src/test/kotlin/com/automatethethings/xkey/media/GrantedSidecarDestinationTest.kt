@@ -131,6 +131,29 @@ class GrantedSidecarDestinationTest {
     }
 
     @Test
+    fun `the sidecar xKey owns reads back by the capture's path, and an added signature is written back to it`() {
+        // Where MediaStore keeps the file it inserts: the external root and its relative path.
+        @Suppress("DEPRECATION")
+        val root = android.os.Environment.getExternalStorageDirectory()
+        val (relativePath, name) = XmpMetadataHelper.ownedSidecarLocation(capture.path, uri)
+        owned = File(File(root, relativePath).apply { mkdirs() }, name)
+        val signed = data()
+        try {
+            XmpMetadataHelper.signMedia(context, uri, capture.path, signed)
+
+            assertEquals(signed.toJsonString(), XmpMetadataHelper.readSignature(capture.path)?.toJsonString())
+            val cosigner = signed.signatures.single().copy(keyFingerprint = "d".repeat(64), role = SignerRole.WITNESS)
+            XmpMetadataHelper.appendSignature(capture.path, cosigner)
+
+            assertEquals(listOf("VID_0001.mp4"), cameraDir.listFiles()!!.map { it.name })
+            assertEquals(2, XmpMetadataHelper.readSignature(capture.path)?.signatures?.size)
+            assertArrayEquals("the capture is untouched", original, media.readBytes())
+        } finally {
+            owned.delete()
+        }
+    }
+
+    @Test
     fun `a queued capture whose container refuses the packet is signed and leaves the queue`() = runBlocking<Unit> {
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data()))
         val published = mutableListOf<PendingMediaWrite>()

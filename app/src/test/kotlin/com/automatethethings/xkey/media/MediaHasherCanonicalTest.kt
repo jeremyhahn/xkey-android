@@ -249,6 +249,8 @@ class MediaHasherCanonicalTest {
         every { resolver.getType(uri) } returns "image/jpeg"
         val context = mockk<android.content.Context>()
         every { context.contentResolver } returns resolver
+        // The original is read only once no granted write of it is pending recovery.
+        every { context.filesDir } returns kotlin.io.path.createTempDirectory("files").toFile()
 
         assertEquals(
             MediaHasher.ContentHashCheck.MATCHES,

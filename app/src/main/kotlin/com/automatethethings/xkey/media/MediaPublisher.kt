@@ -146,6 +146,15 @@ object MediaPublisher {
     fun openCreated(resolver: ContentResolver, target: Uri): OutputStream =
         resolver.openOutputStream(target, "wt") ?: throw IOException("cannot write $target")
 
+    /**
+     * Write [bytes] whole to [target], a file xKey itself owns in MediaStore
+     * ([MediaStoreAccess.ownedFile]): a sidecar of media another app owns,
+     * which the media's write grant does not cover. Never a capture.
+     */
+    fun writeOwned(context: Context, target: Uri, bytes: ByteArray) {
+        openCreated(context.contentResolver, target).use { it.write(bytes) }
+    }
+
     /** How xKey may write the MediaStore item at a content URI. */
     enum class MediaWriteAccess {
         /** xKey created it (or storage is not scoped): its file is replaced by path. */

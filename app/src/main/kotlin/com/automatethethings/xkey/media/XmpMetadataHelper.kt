@@ -498,8 +498,21 @@ object XmpMetadataHelper {
     }
 
     /** The sidecar beside [filePath], replaced atomically ([MediaPublisher.replaceFile]). */
+    /**
+     * The sidecar of [filePath] as it stands: the one beside it, else the
+     * one xKey owns for media another app owns ([ownedSidecarLocation]) when
+     * that exists, else the one beside it. Reads and the path writes
+     * ([writeSidecarSignature], so [appendSignature]) both go through here,
+     * so a signature is written back where it was read from.
+     */
+    private fun sidecarFileOf(filePath: String): File {
+        val beside = File(getSidecarPath(filePath))
+        if (beside.exists()) return beside
+        return ownedSidecarFile(filePath)?.takeIf { it.exists() } ?: beside
+    }
+
     private fun writeSidecarSignature(filePath: String, data: ContentAuthenticityData) {
-        MediaPublisher.replaceFile(File(getSidecarPath(filePath))) { temp -> temp.writeText(data.toJsonString()); true }
+        MediaPublisher.replaceFile(sidecarFileOf(filePath)) { temp -> temp.writeText(data.toJsonString()); true }
     }
 
     /**
@@ -510,24 +523,35 @@ object XmpMetadataHelper {
      */
     internal fun ownedSidecarLocation(filePath: String?, uri: Uri): Pair<String, String> {
         val name = (filePath?.let { File(it).name } ?: uri.lastPathSegment ?: "media") + SIDECAR_SUFFIX
+        return ownedSidecarDirectory(filePath) to name
+    }
+
+    /** The MediaStore relative path, ending in a slash, of the owned sidecar of [filePath]. */
+    private fun ownedSidecarDirectory(filePath: String?): String {
+        val root = externalRoot()
         val directory = filePath?.let { File(it).parentFile }?.let { parent ->
-            @Suppress("DEPRECATION")
-            val root = android.os.Environment.getExternalStorageDirectory()
+            if (root == null) return@let null
             try {
                 parent.canonicalFile.relativeToOrNull(root.canonicalFile)?.invariantSeparatorsPath
             } catch (_: IOException) {
                 null
             }
         }?.takeIf { it.isNotEmpty() && !it.startsWith("..") }
-        val relativePath = if (directory == null) "$OWNED_SIDECAR_ROOT/" else "$OWNED_SIDECAR_ROOT/$directory/"
-        return relativePath to name
+        return if (directory == null) "$OWNED_SIDECAR_ROOT/" else "$OWNED_SIDECAR_ROOT/$directory/"
     }
 
-    /** The file [ownedSidecarLocation] names, read by path. */
-    private fun ownedSidecarFile(filePath: String): File {
-        val (relativePath, name) = ownedSidecarLocation(filePath, Uri.EMPTY)
+    /** The shared storage root MediaStore relative paths start from, or null where there is none. */
+    private fun externalRoot(): File? = try {
         @Suppress("DEPRECATION")
-        return File(File(android.os.Environment.getExternalStorageDirectory(), relativePath), name)
+        android.os.Environment.getExternalStorageDirectory()
+    } catch (_: RuntimeException) {
+        null
+    }
+
+    /** The file [ownedSidecarLocation] names, read by path; null where there is no shared storage root. */
+    private fun ownedSidecarFile(filePath: String): File? {
+        val root = externalRoot() ?: return null
+        return File(File(root, ownedSidecarDirectory(filePath)), File(filePath).name + SIDECAR_SUFFIX)
     }
 
     /**
@@ -546,14 +570,13 @@ object XmpMetadataHelper {
             writeSidecarSignature(path, data)
             return
         }
-        val out = context.contentResolver.openOutputStream(target, "wt") ?: throw IOException("cannot write $target")
-        out.use { it.write(data.toJsonString().toByteArray(Charsets.UTF_8)) }
+        MediaPublisher.writeOwned(context, target, data.toJsonString().toByteArray(Charsets.UTF_8))
     }
 
     private fun readSidecarSignature(filePath: String): ContentAuthenticityData? {
         return try {
             // Beside the media, or, for media another app owns, the sidecar xKey owns for it.
-            val sidecarFile = File(getSidecarPath(filePath)).takeIf { it.exists() } ?: ownedSidecarFile(filePath)
+            val sidecarFile = sidecarFileOf(filePath)
             if (!sidecarFile.exists()) return null
             sidecarFile.inputStream().use { ContentAuthenticityData.fromJsonStream(it) }
         } catch (_: Exception) {
