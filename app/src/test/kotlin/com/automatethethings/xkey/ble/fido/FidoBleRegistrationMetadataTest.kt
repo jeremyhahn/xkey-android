@@ -21,6 +21,7 @@ import android.content.Context
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.credential.PasskeySignCounter
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.Request
@@ -49,6 +50,7 @@ import kotlinx.coroutines.test.setMain
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -165,5 +167,18 @@ class FidoBleRegistrationMetadataTest {
         assertEquals(keyId, info.getString("keyId"))
         assertEquals("example.com", info.getString("rpId"))
         assertTrue("getKeyInfo shareable", info.getBoolean("shareable"))
+    }
+
+    @Test
+    fun `a BLE-registered passkey records the security level its key was generated at`() = runTest {
+        // StrongBox is preferred; a phone without it generates in the TEE.
+        // The row says where the key really is, read from its KeyInfo.
+        every { keystore.credentialSecurityLevel(any()) } returns KeySecurityLevel.STRONGBOX
+        registerOverBle()
+        assertTrue("a StrongBox key is recorded as StrongBox-backed", stored.captured.strongBoxBacked)
+
+        every { keystore.credentialSecurityLevel(any()) } returns KeySecurityLevel.TEE
+        registerOverBle()
+        assertFalse("a TEE key is not recorded as StrongBox-backed", stored.captured.strongBoxBacked)
     }
 }
