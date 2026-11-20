@@ -236,6 +236,19 @@ class AndroidFidoCredentialBackendTest {
             metadataRows += firstArg<CredentialMetadataEntity>().credentialId; 1L
         }
         coEvery { credentialDao.deleteByCredentialId(any()) } answers { if (metadataRows.remove(firstArg())) 1 else 0 }
+        // A new passkey's two rows in one transaction (stubbed per row on the
+        // two inserts above): when the metadata insert throws, the key row
+        // is rolled back with it.
+        coEvery { keyDao.insertPasskeyRows(any(), any()) } coAnswers {
+            val key = firstArg<KeyEntity>()
+            keyDao.insert(key)
+            try {
+                credentialDao.insert(secondArg())
+            } catch (e: Throwable) {
+                keyRows.remove(key.keyId)
+                throw e
+            }
+        }
         // One transaction over both row stores: a delete that throws (stubbed
         // per row on the two deletes above) rolls every row back. A row goes
         // only while its policy is still the one the caller read.
@@ -315,6 +328,88 @@ class AndroidFidoCredentialBackendTest {
         assertTrue(
             "the failed passkey is never offered",
             backend(pending = unwritable).credentials("example.com").isEmpty()
+        )
+    }
+
+    /** Lists the key rows [keyRows] holds for example.com, as the DAO would. */
+    private fun listStoredRows(keyRows: Set<String>) {
+        coEvery { keyDao.getFido2ByRpId("example.com") } answers {
+            keyRows.toList().mapNotNull { id -> kotlinx.coroutines.runBlocking { keyDao.getByKeyId(id) } }
+        }
+    }
+
+    /** Storage that fails every row delete while [broken] says so, then recovers. */
+    private fun rowDeletesFailWhile(keyRows: MutableSet<String>, broken: () -> Boolean) {
+        coEvery { keyDao.deleteByKeyId(any()) } answers {
+            if (broken()) throw IllegalStateException("disk I/O error")
+            if (keyRows.remove(firstArg())) 1 else 0
+        }
+    }
+
+    @Test
+    fun `a failed metadata write whose rollback delete also fails is never offered and is cleaned up on retry`() = runTest {
+        val (keyRows, metadataRows) = trackStoredRows()
+        listStoredRows(keyRows)
+        var broken = true
+        rowDeletesFailWhile(keyRows) { broken }
+        coEvery { credentialDao.insert(any()) } answers {
+            if (broken) throw IllegalStateException("disk full")
+            metadataRows += firstArg<CredentialMetadataEntity>().credentialId; 1L
+        }
+
+        val thrown = runCatching {
+            backend().create(CredentialRequest("example.com", "Example", byteArrayOf(7), "alice", "Alice", true))
+        }.exceptionOrNull()
+        assertTrue("create must fail", thrown != null)
+        assertTrue("the failed registration is never offered", backend().credentials("example.com").isEmpty())
+
+        // Storage recovers; the next registration, on a fresh backend as
+        // after a restart, cleans up whatever the failed one left.
+        broken = false
+        val made = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", true))
+
+        assertEquals(setOf(b64(made.id)), keyRows)
+        assertEquals(setOf(b64(made.id)), metadataRows)
+        assertEquals(listOf(made.id.toList()), backend().credentials("example.com").map { it.id.toList() })
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(any()) }
+    }
+
+    @Test
+    fun `a failed replacement whose rollback delete also fails is never offered and is cleaned up on retry`() = runTest {
+        val (keyRows, metadataRows) = storedResidents()
+        listStoredRows(keyRows)
+        var broken = true
+        rowDeletesFailWhile(keyRows) { broken }
+        val generated = mutableListOf<String>()
+        coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } answers {
+            generated += firstArg<String>(); byteArrayOf(0xA5.toByte())
+        }
+
+        // The new passkey's rows are written, the old passkey's rows will not
+        // go, and neither will the new passkey's in the rollback.
+        val thrown = runCatching {
+            backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+        }.exceptionOrNull()
+        assertTrue("create must fail", thrown != null)
+        val failed = generated.single()
+        assertEquals(
+            "only the old shared passkey is offered",
+            listOf(byteArrayOf(1, 2).toList()),
+            backend().credentials("example.com").map { it.id.toList() }
+        )
+        val signed = backend().sign(backend().credentials("example.com").single(), { byteArrayOf(5) }, ByteArray(32))
+        assertArrayEquals(byteArrayOf(0x30), signed.signature)
+
+        broken = false
+        val made = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", false))
+
+        assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), keyRows)
+        assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), metadataRows)
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(failed) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        assertEquals(
+            listOf(byteArrayOf(1, 2).toList(), made.id.toList()).toSet(),
+            backend().credentials("example.com").map { it.id.toList() }.toSet()
         )
     }
 
