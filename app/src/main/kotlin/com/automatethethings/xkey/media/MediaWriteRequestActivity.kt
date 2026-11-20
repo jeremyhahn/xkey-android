@@ -23,27 +23,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.withResumed
 import com.automatethethings.xkey.audit.AuditLogger
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.util.UUID
 
-/**
- * Asks the user, in one MediaStore write request, for write access to the
- * captures the auto-signer could not write ([MediaWriteAuthorizations]);
- * once granted it signs them through their content URIs, and on a refusal
- * it drops the ones it asked for, unsigned. Opened from the write-access
- * notification.
- *
- * The grant lasts only as long as the activity that asked for it, so the
- * screen finishes only once publication has ended. The captures the shown
- * request names are kept in its saved state, so a refusal never drops one
- * queued while the dialog was open, even across recreation.
- */
 class MediaWriteRequestActivity : ComponentActivity() {
 
     /** The captures the shown request asks for. */
@@ -51,6 +35,17 @@ class MediaWriteRequestActivity : ComponentActivity() {
 
     /** Whether the user has answered it, so publication has started. */
     private var answered = false
+
+    /** The answer: true for a grant (publish), false for a refusal (drop [requested]). */
+    private var granted = false
+
+    /**
+     * The id of the publication the answer started, in [MediaSaveRuns], until
+     * this screen takes its outcome. Kept in the saved state with [granted]
+     * and [requested], so the instance restored after a process death, which
+     * took the publication with it, runs the same work again.
+     */
+    private var publicationId: String? = null
 
     /**
      * The request phase: false while the location-access question comes
@@ -61,8 +56,7 @@ class MediaWriteRequestActivity : ComponentActivity() {
     private var writeRequestLaunched = false
 
     private val launcher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        answered = true
-        publish(result.resultCode == Activity.RESULT_OK, requested.toList())
+        publish(result.resultCode == Activity.RESULT_OK, requested)
     }
 
     /** Location access answered (either way): the write request follows; without it nothing is rewritten. */
@@ -73,6 +67,8 @@ class MediaWriteRequestActivity : ComponentActivity() {
         if (savedInstanceState != null) {
             requested = savedInstanceState.getStringArrayList(KEY_REQUESTED) ?: arrayListOf()
             answered = savedInstanceState.getBoolean(KEY_ANSWERED)
+            granted = savedInstanceState.getBoolean(KEY_GRANTED)
+            publicationId = savedInstanceState.getString(KEY_PUBLICATION)
             writeRequestLaunched = savedInstanceState.getBoolean(KEY_WRITE_REQUEST_LAUNCHED)
             // Recreated while the location dialog was open: wait on its answer again.
             if (!writeRequestLaunched) {
@@ -80,7 +76,8 @@ class MediaWriteRequestActivity : ComponentActivity() {
                 return
             }
             // The write request was launched; an unanswered one still delivers its result here.
-            if (answered) finishAfter(publication)
+            // An answered one joins its publication, or runs it again when the process died.
+            if (answered) awaitPublication()
             return
         }
         askLocationThenRequest()
@@ -123,8 +120,7 @@ class MediaWriteRequestActivity : ComponentActivity() {
         val intent = request.intent
         if (intent == null) {
             // No queued capture needs a grant (Android 10 has no write request): publish now.
-            answered = true
-            publish(true, requested.toList())
+            publish(true, requested)
             return
         }
         launcher.launch(IntentSenderRequest.Builder(intent.intentSender).build())
@@ -134,47 +130,56 @@ class MediaWriteRequestActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
         outState.putStringArrayList(KEY_REQUESTED, requested)
         outState.putBoolean(KEY_ANSWERED, answered)
+        outState.putBoolean(KEY_GRANTED, granted)
+        outState.putString(KEY_PUBLICATION, publicationId)
         outState.putBoolean(KEY_WRITE_REQUEST_LAUNCHED, writeRequestLaunched)
     }
 
-    private fun publish(granted: Boolean, uris: List<String>) {
-        val context = applicationContext
-        // Off the main thread, outliving a recreation; this screen waits for it.
-        val job = publishing.launch {
-            try {
-                if (granted) {
-                    MediaWriteAuthorizations.publishGranted(context) { write ->
-                        AuditLogger.logMediaAutoSigned(write.keyId, write.keyLabel, write.uri)
-                    }
-                } else {
-                    MediaWriteAuthorizations.deny(context, uris)
-                }
-            } catch (e: MediaPublisher.UserActionRequiredException) {
-                // Android 10 asks at the write: this screen launches the question.
-                userAction = e
-            } catch (e: Exception) {
-                Log.e(TAG, "Publishing granted media failed", e)
-            } finally {
-                MediaWriteAuthorizations.notifyPending(context)
-            }
-        }
-        publication = job
-        finishAfter(job)
+    override fun onDestroy() {
+        // Gone for good, not recreated: no instance takes the outcome, and the
+        // publication, which goes on, is forgotten once it ends.
+        if (isFinishing && !isChangingConfigurations) publicationId?.let { MediaSaveRuns.abandon<Any?>(it) }
+        super.onDestroy()
     }
 
-    private fun finishAfter(job: Job?) {
+    /** The user answered the request for [uris]: record the answer, then start its publication. */
+    private fun publish(grant: Boolean, uris: List<String>) {
+        answered = true
+        granted = grant
+        requested = ArrayList(uris)
+        publicationId = UUID.randomUUID().toString()
+        awaitPublication()
+    }
+
+    /**
+     * Join the publication [publicationId] names, running it when this
+     * process has none ([MediaSaveRuns.attach]: a process death took it):
+     * publication of the granted captures, or the refusal of [requested].
+     * Either is safe to run again, as the queue records what is done. Its
+     * outcome is taken only while resumed ([MediaSaveRuns.outcome]), so never
+     * after the state was saved: a screen stopped first leaves it, the
+     * Android 10 question included, to the instance restored from that state.
+     */
+    private fun awaitPublication() {
+        val id = publicationId ?: run {
+            // Answered by an earlier build that kept no id: run the answer again.
+            publicationId = UUID.randomUUID().toString()
+            publicationId!!
+        }
+        val context = applicationContext
+        val grant = granted
+        val uris = requested.toList()
+        val run = MediaSaveRuns.attach(id) { publication(context, grant, uris) }
         lifecycleScope.launch {
-            job?.join()
-            // Taken and launched only while resumed, so never after the state
-            // was saved: a screen stopped first leaves the question to the
-            // instance restored from that state, which asks it.
-            withResumed {
-                val action = userAction
+            MediaSaveRuns.outcome(run, lifecycle) { outcome ->
+                MediaSaveRuns.finished(id)
+                publicationId = null
+                val action = outcome.getOrNull()
                 if (action == null) {
                     finish()
-                    return@withResumed
+                    return@outcome
                 }
-                userAction = null
+                // Android 10 asks at the write: this screen launches the question.
                 requested = arrayListOf(action.target.toString())
                 answered = false
                 launcher.launch(IntentSenderRequest.Builder(action.intentSender).build())
@@ -187,15 +192,37 @@ class MediaWriteRequestActivity : ComponentActivity() {
         const val QUEUE_UNREADABLE_MESSAGE = "Captures waiting for access cannot be loaded"
         const val KEY_REQUESTED = "requested"
         const val KEY_ANSWERED = "answered"
+        const val KEY_GRANTED = "granted"
+        const val KEY_PUBLICATION = "publication"
         const val KEY_WRITE_REQUEST_LAUNCHED = "write_request_launched"
-        val publishing = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-        /** The publication running for the last answered request. */
-        @Volatile
-        var publication: Job? = null
-
-        /** The Android 10 question the last publication stopped at, until launched. */
-        @Volatile
-        var userAction: MediaPublisher.UserActionRequiredException? = null
+        /**
+         * Publish the granted captures, or drop the refused [uris]; the
+         * Android 10 question it stops at, or null once it has ended. A
+         * failure is logged: the queue keeps what was not done.
+         */
+        suspend fun publication(
+            context: android.content.Context,
+            granted: Boolean,
+            uris: List<String>
+        ): MediaPublisher.UserActionRequiredException? = try {
+            if (granted) {
+                MediaWriteAuthorizations.publishGranted(context) { write ->
+                    AuditLogger.logMediaAutoSigned(write.keyId, write.keyLabel, write.uri)
+                }
+            } else {
+                MediaWriteAuthorizations.deny(context, uris)
+            }
+            null
+        } catch (e: MediaPublisher.UserActionRequiredException) {
+            e
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Publishing granted media failed", e)
+            null
+        } finally {
+            MediaWriteAuthorizations.notifyPending(context)
+        }
     }
 }

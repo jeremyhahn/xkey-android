@@ -185,8 +185,9 @@ class Android10ForeignCaptureTest {
             first = Robolectric.buildActivity(MediaWriteRequestActivity::class.java).setup()
             first.pause().saveInstanceState(saved).stop()
         }
-        val publication = { ReflectionHelpers.getStaticField<Job?>(MediaWriteRequestActivity::class.java, "publication") }
-        assertTrue("the publication ends with the user action", awaitMain { publication()?.isCompleted == true })
+        val id = saved.getString("publication") ?: error("the answer names no publication")
+        val runs = ReflectionHelpers.getField<Map<String, Job>>(MediaSaveRuns, "runs")
+        assertTrue("the publication ends with the user action", awaitMain { runs[id]?.isCompleted == true })
         assertEquals("nothing is asked while stopped", null, shadowOf(first.get()).lastIntentSenderRequest)
         first.destroy()
 
