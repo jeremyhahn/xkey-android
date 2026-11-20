@@ -27,6 +27,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -168,5 +169,96 @@ class Android10ForeignCaptureTest {
             XmpMetadataHelper.readSignatureFromUri(context.contentResolver, Uri.fromFile(provider.media), "image/png")
         )
         assertArrayEquals("the file is never written by path", original, capture.readBytes())
+    }
+
+    /**
+     * What a process killed part-way through an allowed write leaves: the
+     * capture mixed, its record and backup on disk. The next process holds
+     * no consent ([allowed] false again), as after a restart on Android 10.
+     */
+    private fun killMidAllowedWrite(): ByteArray {
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data()))
+        allowed = true
+        val recovery = MediaPublisher.recoveryDirectory(context)
+        val atKill = folder.newFolder("recovery-at-kill")
+        var mediaAtKill = ByteArray(0)
+        var kills = 1
+        MediaPublisher.overwriteStep = {
+            if (it == "truncate" && kills-- > 0) {
+                val written = original.size - 4
+                mediaAtKill = provider.media.readBytes().copyOf(written) + original.copyOfRange(written, original.size)
+                check(!mediaAtKill.contentEquals(original)) { "the kill must leave mixed bytes" }
+                recovery.listFiles()!!.forEach { f -> f.copyTo(File(atKill, f.name)) }
+                throw IllegalStateException("process killed")
+            }
+        }
+        try {
+            runBlocking { MediaWriteAuthorizations.publishGranted(context) {} }
+        } finally {
+            MediaPublisher.overwriteStep = {}
+        }
+        provider.media.writeBytes(mediaAtKill)
+        recovery.listFiles()!!.forEach { it.delete() }
+        atKill.listFiles()!!.forEach { f -> f.copyTo(File(recovery, f.name)) }
+        allowed = false
+        assertTrue("the kill left a recovery pending", MediaPublisher.recoveryPending(context, uri))
+        return mediaAtKill
+    }
+
+    private fun journal() = MediaPublisher.GrantedWriteJournal(MediaPublisher.recoveryDirectory(context), uri)
+
+    @Test
+    fun `an interrupted write whose restore needs renewed consent asks for it and keeps its journal`() {
+        val mixed = killMidAllowedWrite()
+
+        val refusal = runCatching { MediaPublisher.recoverInterruptedWrite(context, uri) }.exceptionOrNull()
+
+        assertTrue(
+            "the restore's refusal is the user action, not a pending recovery: ${refusal?.javaClass?.simpleName}",
+            refusal is MediaPublisher.UserActionRequiredException
+        )
+        assertTrue("the journal is kept", MediaPublisher.recoveryPending(context, uri))
+        assertTrue("the backup is kept", journal().backup.isFile)
+        assertArrayEquals("nothing was written", mixed, provider.media.readBytes())
+    }
+
+    @Test
+    fun `the write request screen asks consent for an interrupted write's restore and completes it once allowed`() {
+        killMidAllowedWrite()
+        val controller = Robolectric.buildActivity(MediaWriteRequestActivity::class.java).setup()
+        val shadow = shadowOf(controller.get())
+
+        assertTrue("the user action is launched", awaitMain { shadow.lastIntentSenderRequest != null })
+        assertTrue("the journal is kept while the question is open", MediaPublisher.recoveryPending(context, uri))
+        assertTrue("the backup is kept while the question is open", journal().backup.isFile)
+
+        allowed = true
+        val request = shadow.lastIntentSenderRequest!!
+        shadow.callOnActivityResult(request.requestCode, Activity.RESULT_OK, Intent())
+
+        assertTrue("published once allowed", awaitMain { MediaWriteAuthorizations.pending(context).isEmpty() })
+        assertTrue("the recovery is complete", !MediaPublisher.recoveryPending(context, uri))
+        assertTrue("the backup is gone with it", !journal().backup.isFile)
+        assertNotNull(
+            "the capture carries the signature",
+            XmpMetadataHelper.readSignatureFromUri(context.contentResolver, Uri.fromFile(provider.media), "image/png")
+        )
+    }
+
+    @Test
+    fun `a refused consent for an interrupted write's restore keeps its backup and journal`() {
+        val mixed = killMidAllowedWrite()
+        val controller = Robolectric.buildActivity(MediaWriteRequestActivity::class.java).setup()
+        val shadow = shadowOf(controller.get())
+
+        assertTrue("the user action is launched", awaitMain { shadow.lastIntentSenderRequest != null })
+        val request = shadow.lastIntentSenderRequest!!
+        shadow.callOnActivityResult(request.requestCode, Activity.RESULT_CANCELED, Intent())
+
+        assertTrue("the screen ends", awaitMain { controller.get().isFinishing })
+        assertTrue("the journal is kept", MediaPublisher.recoveryPending(context, uri))
+        assertTrue("the backup is kept", journal().backup.isFile)
+        assertEquals("the capture stays queued for a later consent", 1, MediaWriteAuthorizations.pending(context).size)
+        assertArrayEquals("nothing was written", mixed, provider.media.readBytes())
     }
 }
