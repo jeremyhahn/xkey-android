@@ -326,6 +326,10 @@ class CoSignActivity : AppCompatActivity() {
     private lateinit var keySpinner: Spinner
     private var signingKeyIds = listOf<String>()
 
+    /** Each offered row's key type, index-aligned with [signingKeyIds]. */
+    private var signingKeyTypes = listOf<String>()
+    private var signingKeyMaterials = listOf<ByteArray?>()
+
     private lateinit var witnessQrImage: ImageView
     private lateinit var witnessQrLabel: TextView
 
@@ -913,8 +917,12 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
-        val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
+        val fingerprint = initiatorFingerprint(
+            keystoreManager,
+            keyId,
+            signingKeyTypes[selectedKeyIndex],
+            signingKeyMaterials[selectedKeyIndex]
+        )
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
 
@@ -932,11 +940,20 @@ class CoSignActivity : AppCompatActivity() {
                 val keyEntity = db.keyDao().getByKeyId(keyId)
                     ?: throw Exception("Key not found")
 
-                val signature = keystoreManager.signWithAlgorithm(keyId, request.hashBytes(), keyEntity.algorithm)
+                // The key named and the key signed with are one lookup: the
+                // public key under the alias the signature is made with.
+                val alias = KeystoreManager.generalKeyAlias(keyId)
+                val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
+                    ?: throw Exception("Key not found")
+                val signature = keystoreManager.signApproved(
+                    alias,
+                    pubKeyDer,
+                    request.hashBytes(),
+                    KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
+                )
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
-                val pubKeyDer = keystoreManager.getPublicKeyDER(keyId)
-                val fingerprint = if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
+                val fingerprint = MediaHasher.hashBytes(pubKeyDer)
 
                 val responsePayload = CoSignResponse(
                     signature = signatureBase64,
@@ -1319,10 +1336,14 @@ class CoSignActivity : AppCompatActivity() {
                     !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh")
                 }
                 val keyIds = keys.map { it.keyId }
+                val keyTypes = keys.map { it.keyType }
+                val keyMaterials = keys.map { it.publicKeyDer }
                 val keyLabels = keys.map { "${it.label} (${it.algorithm})" }
 
                 withContext(Dispatchers.Main) {
                     signingKeyIds = keyIds
+                    signingKeyTypes = keyTypes
+                    signingKeyMaterials = keyMaterials
                     keySpinner.adapter = ArrayAdapter(
                         this@CoSignActivity,
                         android.R.layout.simple_spinner_dropdown_item,
@@ -1356,4 +1377,25 @@ class CoSignActivity : AppCompatActivity() {
         const val STATE_WITNESS_MODE = "cosign_witness_mode"
         const val STATE_KEY_ID = "cosign_key_id"
     }
+}
+
+/**
+ * The fingerprint an initiator QR names its key by: the hash of the public key
+ * the selected row holds, or [keyId] itself when no public key is found.
+ *
+ * The row's key is read under the alias it really lives under
+ * ([KeystoreManager.keyRowAlias], from the row's [keyType] and its
+ * [storedPublicKeyDer]): a phone-registered FIDO2 row is a credential, a
+ * desktop-created one a general key, every other row a general key. This only
+ * names the key; nothing is signed here, so it needs no approved-key lookup.
+ */
+internal fun initiatorFingerprint(
+    keystoreManager: KeystoreManager,
+    keyId: String,
+    keyType: String,
+    storedPublicKeyDer: ByteArray?
+): String {
+    val alias = keystoreManager.keyRowAlias(keyId, keyType, storedPublicKeyDer)
+    val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
+    return if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
 }
