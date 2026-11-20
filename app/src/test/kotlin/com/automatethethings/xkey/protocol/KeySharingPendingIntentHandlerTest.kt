@@ -809,6 +809,29 @@ class KeySharingPendingIntentHandlerTest {
     }
 
     /**
+     * #270 review (P1): local.deleteKey of an ID with no key row, no
+     * material and no pending deletion deletes nothing. It answers
+     * deleted=false, as it always did, writes no tombstone and audits no
+     * delete.
+     */
+    @Test
+    fun anRpcDeleteOfAnUnknownIdAnswersNotDeletedAndWritesNoTombstone() = runTest {
+        val id = "k-unknown"
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        every { keystore.userKeyIdInUse(id) } returns false
+        every { keystore.userKeyGeneration(id) } returns emptyMap()
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+
+        val response = rpcDeleteKey(id)
+
+        assertEquals(null, response.error)
+        assertEquals(false, response.result?.getBoolean("deleted"))
+        assertFalse("an unknown id's delete wrote a tombstone", store.isDeletionPending(id))
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        io.mockk.verify(exactly = 0) { AuditLogger.logKeyDeleted(id, any(), any()) }
+    }
+
+    /**
      * Round 12 (4): every key delete records one key-deletion audit event:
      * local.deleteKey of a key row, of material with no row, and the legacy
      * deleteKey.
