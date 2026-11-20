@@ -29,6 +29,11 @@ import kotlinx.coroutines.yield
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import com.automatethethings.xkey.protocol.KeyIdReservations
+import com.automatethethings.xkey.protocol.storedKeyLockId
 import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
@@ -592,6 +597,67 @@ class AndroidFidoCredentialBackendTest {
         assertEquals(setOf(private.keyId, b64(made.id), b64(next.id)), keys)
         io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId) }
         io.mockk.verify(exactly = 0) { keystore.deleteKey(private.keyId) }
+    }
+
+    /**
+     * local.generateKey making [keyId] again, as the JSON-RPC path does it:
+     * under the key's lock, its Keystore key first and, a second later, its
+     * row. Returns once the recreation holds the lock and has made the key.
+     */
+    private suspend fun recreateOverRpc(
+        scope: CoroutineScope,
+        keyId: String,
+        keys: MutableSet<String>,
+        keyRows: MutableSet<String>
+    ) {
+        val holding = CompletableDeferred<Unit>()
+        scope.launch {
+            KeyIdReservations.process.withKeyLock(storedKeyLockId(keyId)) {
+                keys += keyId
+                holding.complete(Unit)
+                delay(1_000)
+                keyRows += keyId
+            }
+        }
+        holding.await()
+    }
+
+    @Test
+    fun `a passkey made again over JSON-RPC while its replacement is cleaned up keeps its key and row`() = runTest {
+        val (keyRows, _) = storedResidents()
+        val keys = keystoreKeys { false }
+        val rpc = backgroundScope
+        coEvery { keyDao.completePasskeyRegistration(any(), any(), any()) } coAnswers {
+            keyDao.insertPasskeyRows(firstArg(), secondArg())
+            keyDao.deletePasskeyRows(thirdArg()).also {
+                // The replaced passkey's rows are gone; before its key is
+                // deleted, a JSON-RPC client makes the same ID again.
+                recreateOverRpc(rpc, shared.keyId, keys, keyRows)
+            }
+        }
+
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+        advanceUntilIdle()
+
+        assertTrue("the recreated passkey's row stays", shared.keyId in keyRows)
+        assertTrue("the recreated passkey's key stays", shared.keyId in keys)
+    }
+
+    @Test
+    fun `a passkey made again over JSON-RPC while its failed deletion is retried keeps its key and row`() = runTest {
+        val (keyRows, _) = storedResidents()
+        val keys = keystoreKeys { it == shared.keyId }
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", true))
+        assertTrue("the replaced passkey's rows are gone", shared.keyId !in keyRows)
+
+        // The deletion that failed is still recorded when a JSON-RPC client
+        // makes the same ID again, and the next registration retries it.
+        recreateOverRpc(backgroundScope, shared.keyId, keys, keyRows)
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", true))
+        advanceUntilIdle()
+
+        assertTrue("the recreated passkey's row stays", shared.keyId in keyRows)
+        assertTrue("the recreated passkey's key stays", shared.keyId in keys)
     }
 
     /** Key rows as one live store: what a registration inserts, the next one's lookup sees. */

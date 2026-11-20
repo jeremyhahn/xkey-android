@@ -190,6 +190,68 @@ class PasskeyReplacedWhileSigningTest {
         assertNoAssertion(backend())
     }
 
+    /** A prompt whose user check and account chooser run [during] while they wait. */
+    private inner class CeremonyPrompt(private val during: () -> Unit) : FidoUserPrompt {
+        override val available = true
+        override suspend fun verify(rpId: String, registering: Boolean): UserCheck {
+            during()
+            return UserCheck.VERIFIED
+        }
+        override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? {
+            during()
+            return 0
+        }
+        override suspend fun signWithKey(
+            keyId: String,
+            keyAlias: String,
+            rpId: String,
+            signedData: suspend () -> ByteArray
+        ): ByteArray = signatureBy(keys.getValue(keyAlias)).also { signedData() }
+    }
+
+    /**
+     * The order Ctap2Authenticator.getAssertion runs a ceremony in: list,
+     * choose the account, check the user, sign. [ask] is the step the
+     * passkey is recreated during.
+     */
+    private suspend fun assertNoAssertionAfter(
+        backend: AndroidFidoCredentialBackend,
+        ask: suspend (FidoCredential) -> Unit
+    ) {
+        val cred = backend.credentials("example.com").single()
+        ask(cred)
+        val outcome = runCatching { backend.sign(cred, { byteArrayOf(5) }, ByteArray(32)) }
+        outcome.getOrNull()?.let {
+            assertFalse("signed with the new key", it.signature.contentEquals(signatureBy(NEW_DER)))
+            fail("an assertion was released for a passkey replaced before it signed")
+        }
+        val refused = outcome.exceptionOrNull()
+        if (refused !is FidoRefusedException) throw AssertionError("expected a refusal, got $refused", refused)
+    }
+
+    @Test
+    fun `a passkey recreated during the user check yields no assertion`() = runTest {
+        stored(authDuration = -1)
+        val backend = backend(CeremonyPrompt { recreate(authDuration = -1) })
+        assertNoAssertionAfter(backend) { backend.checkUser("example.com", registering = false) }
+    }
+
+    @Test
+    fun `a passkey recreated while the account is chosen yields no assertion`() = runTest {
+        stored(authDuration = -1)
+        val backend = backend(CeremonyPrompt { recreate(authDuration = -1) })
+        assertNoAssertionAfter(backend) { cred ->
+            assertEquals(cred.id.toList(), backend.chooseCredential("example.com", listOf(cred))?.id?.toList())
+        }
+    }
+
+    @Test
+    fun `a key-bound passkey recreated during the user check yields no assertion`() = runTest {
+        stored(authDuration = 0)
+        val backend = backend(CeremonyPrompt { recreate(authDuration = 0) })
+        assertNoAssertionAfter(backend) { backend.checkUser("example.com", registering = false) }
+    }
+
     private companion object {
         val OLD_DER = byteArrayOf(0x30, 0x01)
         val NEW_DER = byteArrayOf(0x30, 0x02)
