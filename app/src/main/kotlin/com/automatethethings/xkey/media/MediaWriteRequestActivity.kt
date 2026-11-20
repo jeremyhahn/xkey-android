@@ -23,6 +23,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.withResumed
 import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -161,24 +162,23 @@ class MediaWriteRequestActivity : ComponentActivity() {
         finishAfter(job)
     }
 
-    /**
-     * Finish once [job] has ended (at once when none runs, as after a process
-     * death), unless Android 10 refused a write until the user allows it:
-     * then its question is launched, and the answer publishes again or drops
-     * that capture, as a write request's does.
-     */
     private fun finishAfter(job: Job?) {
         lifecycleScope.launch {
             job?.join()
-            val action = userAction
-            if (action == null) {
-                finish()
-                return@launch
+            // Taken and launched only while resumed, so never after the state
+            // was saved: a screen stopped first leaves the question to the
+            // instance restored from that state, which asks it.
+            withResumed {
+                val action = userAction
+                if (action == null) {
+                    finish()
+                    return@withResumed
+                }
+                userAction = null
+                requested = arrayListOf(action.target.toString())
+                answered = false
+                launcher.launch(IntentSenderRequest.Builder(action.intentSender).build())
             }
-            userAction = null
-            requested = arrayListOf(action.target.toString())
-            answered = false
-            launcher.launch(IntentSenderRequest.Builder(action.intentSender).build())
         }
     }
 

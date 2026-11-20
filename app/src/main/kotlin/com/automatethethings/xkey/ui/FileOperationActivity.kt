@@ -1302,7 +1302,8 @@ class FileOperationActivity : AppCompatActivity() {
                     }
                 } else {
                     // No embedded signature, prompt user to pick sidecar
-                    withContext(Dispatchers.Main) {
+                    // Launched only while resumed: never after the state was saved
+                    withResumed {
                         pickSidecarLauncher.launch(arrayOf("application/json", "*/*"))
                     }
                 }
@@ -1517,7 +1518,8 @@ class FileOperationActivity : AppCompatActivity() {
                         )
                     },
                     handOff = { tempFile ->
-                        withContext(Dispatchers.Main) {
+                        // Handed off only while resumed: never after the state was saved
+                        withResumed {
                             // Keep the staging file for the launcher callback
                             pendingEncryptedSave.handOff(tempFile) {
                                 createEncryptedFileLauncher.launch("$fileName.xkeyenc")
@@ -1601,7 +1603,8 @@ class FileOperationActivity : AppCompatActivity() {
                         AuditLogger.logFileDecrypted(key.keyId, originalName)
                     },
                     handOff = { tempFile ->
-                        withContext(Dispatchers.Main) {
+                        // Handed off only while resumed: never after the state was saved
+                        withResumed {
                             pendingDecryptedSave.handOff(tempFile) {
                                 createDecryptedFileLauncher.launch(outputName)
                             }
