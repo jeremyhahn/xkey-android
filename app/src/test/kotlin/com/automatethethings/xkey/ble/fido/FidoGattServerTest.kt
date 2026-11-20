@@ -449,6 +449,68 @@ class FidoGattServerTest {
         assertEquals(listOf(pingFrame(0x0B).toList()), toB)
     }
 
+    /** A handler that records every request that reaches it: a prompt or a credential would start here. */
+    private class RecordingHandler : FidoMessageHandler {
+        val requests = Collections.synchronizedList(mutableListOf<ByteArray>())
+        override suspend fun handle(request: ByteArray, onUserActionNeeded: () -> Unit): ByteArray {
+            requests += request
+            onUserActionNeeded()
+            return byteArrayOf(0x00)
+        }
+    }
+
+    /** Replaces the server under test with one whose handler records what reaches it. */
+    private fun recordingServer(): RecordingHandler {
+        server.destroy()
+        val handler = RecordingHandler()
+        server = FidoGattServer(context, handler)
+        assertTrue(server.start())
+        callback.captured.onConnectionStateChange(device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED)
+        return handler
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun clientCount(): Int {
+        val field = FidoGattServer::class.java.getDeclaredField("clients").apply { isAccessible = true }
+        return (field.get(server) as Map<String, *>).size
+    }
+
+    @Test
+    fun `a stop between a write's validation and its dispatch starts no session`() {
+        val handler = recordingServer()
+        subscribe()
+        // The stack takes the write response after the length check and
+        // before the frame is dispatched: stop the server right there.
+        every { stack.sendResponse(any(), any(), any(), any(), any()) } answers {
+            server.stop()
+            true
+        }
+
+        send(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()))
+        Thread.sleep(300)
+
+        assertEquals("no client outlives stop()", 0, clientCount())
+        assertTrue("no request reaches the handler after stop()", handler.requests.isEmpty())
+        assertTrue("nothing is notified after stop()", notified.isEmpty())
+    }
+
+    @Test
+    fun `no callback after stop creates a client or reaches the handler`() {
+        val handler = recordingServer()
+        val gatt = callback.captured
+        server.stop()
+
+        gatt.onMtuChanged(device, 185)
+        gatt.onCharacteristicReadRequest(device, 3, 0, characteristic(FidoBle.CONTROL_POINT_LENGTH_UUID))
+        subscribe()
+        send(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()))
+        Thread.sleep(300)
+
+        assertEquals(0, clientCount())
+        assertTrue(handler.requests.isEmpty())
+        assertTrue(notified.isEmpty())
+    }
+
     private fun subscribe(to: BluetoothDevice) {
         val cccd = characteristic(FidoBle.STATUS_UUID).getDescriptor(FidoBle.CCCD_UUID)
         callback.captured.onDescriptorWriteRequest(
