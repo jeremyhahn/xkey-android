@@ -259,6 +259,7 @@ class FidoGattServer(
          * subscription starts with an empty queue.
          */
         fun onSubscription(on: Boolean) = synchronized(queue) {
+            if (closed) return@synchronized
             subscribed = on
             if (!on) {
                 queue.clear()
@@ -284,13 +285,28 @@ class FidoGattServer(
 
         fun onWrite(frame: ByteArray) = synchronized(session) { session.onControlPointWrite(frame) }
 
+        /**
+         * Set once this connection ended, under the queue lock: from then on
+         * nothing is queued, sent, retried or completed on it, so a frame of
+         * a reply still being enqueued (a session send that passed its own
+         * closed check before the disconnect) never reaches the device's next
+         * connection.
+         */
+        private var closed = false
+
+        /**
+         * Ends this client: the queue is marked closed first, so a reply
+         * being enqueued meanwhile is refused frame by frame, then the
+         * session is closed.
+         */
         fun close() {
-            synchronized(session) { session.close() }
             synchronized(queue) {
+                closed = true
                 queue.clear()
                 current = null
                 inFlight = false
             }
+            synchronized(session) { session.close() }
         }
 
         /** Set once the queue overflowed; nothing more is queued on this connection. */
@@ -305,7 +321,7 @@ class FidoGattServer(
          */
         private fun enqueue(frame: ByteArray) {
             val overflowNow = synchronized(queue) {
-                if (!subscribed || overflowed) return
+                if (closed || !subscribed || overflowed) return
                 val full = queue.size >= MAX_QUEUED_FRAMES
                 if (full) {
                     overflowed = true
@@ -339,7 +355,7 @@ class FidoGattServer(
          * goes; on failure the same frame is sent again, never skipped.
          */
         fun onSent(status: Int) = synchronized(queue) {
-            if (!inFlight) return@synchronized
+            if (closed || !inFlight) return@synchronized
             inFlight = false
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 current = null
@@ -359,7 +375,7 @@ class FidoGattServer(
          * completion, a retry or a new frame).
          */
         private fun sendNext() {
-            if (inFlight || retryPending || failed || !subscribed) return
+            if (closed || inFlight || retryPending || failed || !subscribed) return
             val frame = current ?: queue.removeFirstOrNull()?.also { current = it; attempts = 0 } ?: return
             val s = server
             val characteristic = statusCharacteristic
@@ -391,8 +407,19 @@ class FidoGattServer(
             // Not on this thread, for the same reason as the overflow close.
             scope.launch {
                 synchronized(session) { session.close() }
-                runCatching { server?.cancelConnection(device) }
+                cancelOwnConnection()
             }
+        }
+
+        /**
+         * The one way a client ends its device's connection: only while it
+         * is still that device's admitted client, checked under [lifecycle].
+         * A failure on a connection that already ended (the device may have
+         * reconnected since) never cancels the connection that replaced it.
+         */
+        private fun cancelOwnConnection() = synchronized(lifecycle) {
+            val s = server
+            if (s != null && clients[device.address] === this) runCatching { s.cancelConnection(device) }
         }
 
         private fun notify(s: BluetoothGattServer, characteristic: BluetoothGattCharacteristic, frame: ByteArray) =
@@ -428,7 +455,7 @@ class FidoGattServer(
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-            clients[device.address]?.onSent(status)
+            client(device)?.onSent(status)
         }
 
         override fun onCharacteristicReadRequest(
@@ -497,7 +524,7 @@ class FidoGattServer(
                 respond(device, requestId, BluetoothGatt.GATT_READ_NOT_PERMITTED, null)
                 return
             }
-            val value = if (clients[device.address]?.subscribed == true) {
+            val value = if (client(device)?.subscribed == true) {
                 BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             } else {
                 BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
