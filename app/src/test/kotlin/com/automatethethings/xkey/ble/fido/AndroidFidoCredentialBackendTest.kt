@@ -201,7 +201,7 @@ class AndroidFidoCredentialBackendTest {
     fun `create stores a passkey a BLE client can use again`() = runTest {
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
         val stored = slot<KeyEntity>()
-        coEvery { keyDao.insert(capture(stored)) } returns 1L
+        coEvery { keyDao.insertPasskeyRows(capture(stored), any()) } returns Unit
 
         val made = backend().create(
             CredentialRequest("example.com", "Example", byteArrayOf(7), "alice", "Alice", discoverable = true)
@@ -213,7 +213,8 @@ class AndroidFidoCredentialBackendTest {
         assertEquals("example.com", stored.captured.rpId)
         assertEquals(b64(byteArrayOf(7)), stored.captured.userId)
         assertEquals(SharingPolicyType.ALL_PEERS, stored.captured.sharingPolicy)
-        coVerify { credentialDao.insert(any()) }
+        coVerify { keyDao.insertPasskeyRows(any(), match { it.credentialId == b64(made.id) }) }
+        assertTrue("a whole passkey is offered", pendingKeyDeletions.registrations().isEmpty())
     }
 
     /** What [KeyDao.deletePasskeyRows] matches: the row as read is the row now, its policy unchanged. */
@@ -312,8 +313,10 @@ class AndroidFidoCredentialBackendTest {
         // Storage is full: the deletion record cannot be written either.
         val unwritable = object : PendingKeyDeletions {
             override fun add(keyIds: Collection<String>) = throw java.io.IOException("disk full")
+            override fun addRegistration(keyId: String) = Unit
             override fun remove(keyId: String) = Unit
             override fun all(): Set<String> = emptySet()
+            override fun registrations(): Set<String> = emptySet()
         }
 
         val thrown = runCatching {
@@ -526,6 +529,7 @@ class AndroidFidoCredentialBackendTest {
         val rows = linkedMapOf<String, KeyEntity>()
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
         coEvery { keyDao.insert(any()) } answers { val e = firstArg<KeyEntity>(); rows[e.keyId] = e; 1L }
+        coEvery { keyDao.insertPasskeyRows(any(), any()) } coAnswers { keyDao.insert(firstArg()) }
         coEvery { keyDao.deleteByKeyId(any()) } answers { if (rows.remove(firstArg<String>()) != null) 1 else 0 }
         coEvery { keyDao.deletePasskeyRows(any()) } coAnswers {
             firstArg<List<KeyEntity>>().filter { unchanged(it, rows[it.keyId]) }.map { rows.remove(it.keyId); it.keyId }

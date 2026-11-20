@@ -92,7 +92,7 @@ class FidoBleRegistrationMetadataTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
-        coEvery { keyDao.insert(capture(stored)) } returns 1L
+        coEvery { keyDao.insertPasskeyRows(capture(stored), any()) } returns Unit
         coEvery { keyDao.getAll() } answers { listOf(stored.captured) }
         coEvery { keyDao.getByKeyId(any()) } answers {
             stored.captured.takeIf { it.keyId == firstArg<String>() }
