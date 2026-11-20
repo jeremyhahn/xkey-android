@@ -383,7 +383,7 @@ object MediaPublisher {
         // first; one that cannot be yet throws RecoveryPendingException.
         recoverInterruptedWrite(context, target)
         val journal = GrantedWriteJournal(recoveryDirectory(context), target)
-        val partial = File.createTempFile(GrantedWriteJournal.PREFIX, ".part", recoveryDirectory(context))
+        val partial = MediaSaveRuns.work(recoveryDirectory(context), ".part")
         try {
             openOriginal(context, target).use { input ->
                 FileOutputStream(partial).use { out ->
@@ -673,6 +673,19 @@ object MediaPublisher {
             /** The one read of a record's text; tests make it fail. */
             @Volatile
             internal var readRecord: (File) -> String = { it.readText() }
+
+            /**
+             * The files every recorded write in [directory] still needs (its
+             * backup and the bytes it wrote), read from the names alone, so a
+             * record that cannot be read keeps them too.
+             */
+            fun pendingFiles(directory: File): List<File> =
+                directory.listFiles { f -> f.name.startsWith(PREFIX) && f.name.endsWith(RECORD) }.orEmpty()
+                    .flatMap { record ->
+                        val key = record.name.removePrefix(PREFIX).removeSuffix(RECORD)
+                        listOf(File(directory, "$PREFIX$key.bak"), File(directory, "$PREFIX$key.new"))
+                    }
+                    .filter { it.exists() }
 
             /**
              * Every recorded write. A record that cannot be read is skipped,

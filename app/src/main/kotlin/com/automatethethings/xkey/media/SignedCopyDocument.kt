@@ -196,11 +196,40 @@ object MediaSaveRuns {
     const val STAGED_RETENTION_MS: Long = 7L * 24 * 60 * 60 * 1000
 
     /**
-     * Delete the staging files under [directory] an earlier process left
-     * that no saved screen state can still name: the runs that made them
-     * died with it, and the file is older than [STAGED_RETENTION_MS] since
-     * a screen last saved state naming it. This process's own stay; they are
-     * released by their run or screen (a placed or dropped copy, [abandon]).
+     * Every working file a save makes for itself starts with it ([work]): a
+     * signed copy's working file, a capture staged for its granted write,
+     * the backup read before that write. No saved state names one: a save
+     * restored after its process died makes a new one.
+     */
+    const val WORK_PREFIX = "work-"
+
+    /** Names earlier builds gave working files: nothing names them now, so they are only leftovers. */
+    private val LEGACY_WORK_PREFIXES = listOf(".xkey-sign.", "sign-")
+
+    /**
+     * A new working file in [directory] for a save of this process, ending
+     * in [suffix]: the one place every working file is made, so [sweep]
+     * knows each one an earlier process left.
+     */
+    fun work(directory: File, suffix: String?): File {
+        directory.mkdirs()
+        return File.createTempFile("$WORK_PREFIX$session-", suffix, directory)
+    }
+
+    /**
+     * Delete what an earlier process's saves left under [directory]: the
+     * runs that made them died with it.
+     *
+     * - Working files ([work]), and the temporary files a replace of one or
+     *   of a staging file makes beside it, go at once: no saved state names
+     *   them.
+     * - Staging files ([stage]) go once no saved screen state can still name
+     *   them: older than [STAGED_RETENTION_MS] since a screen last saved
+     *   state naming them.
+     *
+     * This process's own stay; they are released by their run or screen (a
+     * placed or dropped copy, [abandon]). So does a file a pending
+     * publication recovery still names ([MediaPublisher.GrantedWriteJournal.pendingFiles]).
      *
      * [keep] names earlier files a screen restored from saved state still
      * holds (a copy whose picker was open when the process died): they are
@@ -210,14 +239,29 @@ object MediaSaveRuns {
     fun sweep(directory: File, keep: Collection<File> = emptyList()) {
         keep.forEach { adopted.add(it.absolutePath) }
         val staleBefore = System.currentTimeMillis() - STAGED_RETENTION_MS
+        val recovering = MediaPublisher.GrantedWriteJournal.pendingFiles(directory)
         directory.listFiles()?.forEach { file ->
-            if (file.name.startsWith(STAGED_PREFIX) &&
-                !file.name.startsWith("$STAGED_PREFIX$session-") &&
-                file.absolutePath !in adopted &&
-                file.lastModified() < staleBefore
-            ) file.delete()
+            val name = file.name
+            val left = when {
+                isOwn(name) || file.absolutePath in adopted -> false
+                isWork(name) -> true
+                name.startsWith(STAGED_PREFIX) -> file.lastModified() < staleBefore
+                else -> false
+            }
+            if (left && recovering.none { sameFile(it, file) }) file.delete()
         }
     }
+
+    private fun isOwn(name: String): Boolean =
+        listOf(STAGED_PREFIX, WORK_PREFIX).any { name.startsWith("$it$session-") || name.startsWith(".$it$session-") }
+
+    /** A working file, or a replace's temporary file beside a working or staging file. */
+    private fun isWork(name: String): Boolean =
+        name.startsWith(WORK_PREFIX) || name.startsWith(".$WORK_PREFIX") || name.startsWith(".$STAGED_PREFIX") ||
+            LEGACY_WORK_PREFIXES.any { name.startsWith(it) }
+
+    private fun sameFile(a: File, b: File): Boolean =
+        runCatching { java.nio.file.Files.isSameFile(a.toPath(), b.toPath()) }.getOrDefault(false)
 
     /**
      * A screen is saving state that names [files]: restart their

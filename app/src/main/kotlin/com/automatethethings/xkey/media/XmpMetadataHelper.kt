@@ -134,7 +134,7 @@ object XmpMetadataHelper {
         // The granted-write section puts back a write of this capture an
         // earlier process died in before it is staged.
         synchronized(lock) { MediaPublisher.grantedSection(context, uri) {
-            val staged = File.createTempFile("sign-", stagingSuffix(mimeType), MediaPublisher.recoveryDirectory(context))
+            val staged = MediaSaveRuns.work(MediaPublisher.recoveryDirectory(context), stagingSuffix(mimeType))
             var kept = false
             try {
                 // The capture whole, location included: the signed bytes
@@ -338,8 +338,8 @@ object XmpMetadataHelper {
         destination: String,
         embed: (String) -> Boolean
     ): Boolean = synchronized(lockForKey(destination)) {
-        workDir.mkdirs()
-        val work = File.createTempFile(".xkey-sign.", ".xkeytmp", workDir)
+        // A save's working file: one a process death leaves, the next start reclaims.
+        val work = MediaSaveRuns.work(workDir, ".xkeytmp")
         var handed = false
         try {
             open().use { input -> work.outputStream().use { input.copyTo(it) } }

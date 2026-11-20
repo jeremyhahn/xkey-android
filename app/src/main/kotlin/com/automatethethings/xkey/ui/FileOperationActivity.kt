@@ -282,6 +282,8 @@ class FileOperationActivity : AppCompatActivity() {
         // Only a valid share sweeps: it removes what a dead process or a
         // shut-down instance left, never a live instance's staged output
         staging.sweep()
+        // A signed-copy save an earlier process died in left its working file
+        MediaSaveRuns.sweep(MediaPublisher.recoveryDirectory(applicationContext))
 
         // Build and set the programmatic UI
         setContentView(buildUI())
