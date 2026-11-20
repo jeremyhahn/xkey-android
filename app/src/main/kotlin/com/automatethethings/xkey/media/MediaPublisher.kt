@@ -232,6 +232,13 @@ object MediaPublisher {
         return if (authority == MediaStore.AUTHORITY) MediaStore.setRequireOriginal(target) else target
     }
 
+    /**
+     * Whether [target] is readable only as MediaStore's redacted view until
+     * xKey holds ACCESS_MEDIA_LOCATION ([originalUri] null): what
+     * [MediaLocationAccess] asks the user for.
+     */
+    fun needsLocationAccess(context: Context, target: Uri): Boolean = originalUri(context, target) == null
+
     /** The documents provider MediaStore backs (the system picker's Images, Videos and Audio roots). */
     private const val MEDIA_DOCUMENTS_AUTHORITY = "com.android.providers.media.documents"
 
