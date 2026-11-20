@@ -495,6 +495,61 @@ class FidoGattServerTest {
     }
 
     @Test
+    fun `a control point write that reaches the server after its disconnect starts no session`() {
+        val handler = recordingServer()
+        subscribe()
+        // The disconnect is handled while this write's callback is still on
+        // its way: its admission comes after the connection has ended.
+        callback.captured.onConnectionStateChange(device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED)
+        responses.clear()
+
+        send(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()))
+        callback.captured.onMtuChanged(device, 185)
+        Thread.sleep(300)
+
+        assertEquals("no client outlives its disconnect", 0, clientCount())
+        assertTrue("no request reaches the handler after the disconnect", handler.requests.isEmpty())
+        assertTrue("nothing is notified after the disconnect", notified.isEmpty())
+        assertTrue("the write is refused", responses.all { it.first == BluetoothGatt.GATT_FAILURE })
+    }
+
+    @Test
+    fun `a control point write whose admission overlaps the disconnect starts no session`() {
+        val handler = recordingServer()
+        subscribe()
+        // A second connection of the same device: its first callback, a
+        // write, looks the client up while the first connection's
+        // disconnect is being handled on another thread.
+        val other = mockk<BluetoothDevice>(relaxed = true)
+        val disconnecting = CountDownLatch(1)
+        every { other.address } answers {
+            if (disconnecting.count > 0) {
+                disconnecting.countDown()
+                thread {
+                    callback.captured.onConnectionStateChange(
+                        device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
+                    )
+                }.join(200)
+            }
+            "02:00:00:00:00:01"
+        }
+        val cp = characteristic(FidoBle.CONTROL_POINT_UUID)
+        FidoBle.fragment(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()), 20).forEach {
+            callback.captured.onCharacteristicWriteRequest(other, 2, cp, false, true, 0, it)
+        }
+        Thread.sleep(300)
+
+        assertEquals("no client outlives its disconnect", 0, clientCount())
+        // Whatever the write reached, the disconnect closed it: a later
+        // frame on that connection reaches nothing.
+        val before = handler.requests.size
+        send(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()))
+        Thread.sleep(300)
+        assertEquals("no request reaches the handler after the disconnect", before, handler.requests.size)
+        assertEquals("no client outlives its disconnect", 0, clientCount())
+    }
+
+    @Test
     fun `no callback after stop creates a client or reaches the handler`() {
         val handler = recordingServer()
         val gatt = callback.captured

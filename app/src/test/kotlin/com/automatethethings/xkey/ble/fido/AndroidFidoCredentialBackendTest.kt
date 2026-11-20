@@ -87,7 +87,10 @@ class AndroidFidoCredentialBackendTest {
         sharingPolicy = policy
     )
 
-    private fun backend(prompt: FidoUserPrompt? = null) = AndroidFidoCredentialBackend(
+    private fun backend(
+        prompt: FidoUserPrompt? = null,
+        pending: PendingKeyDeletions = pendingKeyDeletions
+    ) = AndroidFidoCredentialBackend(
         keyDao = keyDao,
         credentialDao = credentialDao,
         sharePermission = sharePermission,
@@ -95,7 +98,7 @@ class AndroidFidoCredentialBackendTest {
         keystoreManager = keystore,
         userPrompt = prompt,
         settings = { BiometricSettingsData() },
-        pendingKeyDeletions = pendingKeyDeletions
+        pendingKeyDeletions = pending
     )
 
     /** One record file per test, shared by every backend it makes, as across a restart. */
@@ -279,6 +282,35 @@ class AndroidFidoCredentialBackendTest {
     @Test
     fun `a failed metadata write leaves no key row and no Keystore key`() =
         assertCreateLeavesNothing(IllegalStateException("disk full"), failKeyRow = false)
+
+    @Test
+    fun `a failed metadata write whose deletion record cannot be written still leaves nothing`() = runTest {
+        val (keyRows, metadataRows) = trackStoredRows()
+        coEvery { credentialDao.insert(any()) } throws IllegalStateException("disk full")
+        coEvery { keyDao.getFido2ByRpId("example.com") } answers {
+            keyRows.mapNotNull { id -> kotlinx.coroutines.runBlocking { keyDao.getByKeyId(id) } }
+        }
+        // Storage is full: the deletion record cannot be written either.
+        val unwritable = object : PendingKeyDeletions {
+            override fun add(keyIds: Collection<String>) = throw java.io.IOException("disk full")
+            override fun remove(keyId: String) = Unit
+            override fun all(): Set<String> = emptySet()
+        }
+
+        val thrown = runCatching {
+            backend(pending = unwritable)
+                .create(CredentialRequest("example.com", "Example", byteArrayOf(7), "alice", "Alice", true))
+        }.exceptionOrNull()
+
+        assertTrue("create must fail", thrown != null)
+        assertEquals("no key row may outlive a failed create", emptySet<String>(), keyRows)
+        assertEquals("no metadata row may outlive a failed create", emptySet<String>(), metadataRows)
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(any()) }
+        assertTrue(
+            "the failed passkey is never offered",
+            backend(pending = unwritable).credentials("example.com").isEmpty()
+        )
+    }
 
     /** [shared] and [private] stored as rows, both discoverable for user 9 on example.com. */
     private fun storedResidents(): Pair<MutableSet<String>, MutableSet<String>> {
