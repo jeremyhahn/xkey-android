@@ -144,6 +144,39 @@ class MediaLocationAccessEntryPointTest {
     }
 
     @Test
+    fun `verifying recreated while location access is asked verifies the original once granted`() {
+        val intent = Intent(Intent.ACTION_SEND).setType("image/png").putExtra(Intent.EXTRA_STREAM, capture)
+        val controller = Robolectric.buildActivity(FileOperationActivity::class.java, intent).setup()
+        val first = controller.get()
+        shadowOf(Looper.getMainLooper()).idle()
+        fun field(name: String) = FileOperationActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
+        field("selectedOperation").setInt(first, 1) // OP_VERIFY
+        (field("processButton").get(first) as MaterialButton).performClick()
+        shadowOf(Looper.getMainLooper()).idle()
+        val request = shadowOf(first).lastRequestedPermission
+        assertNotNull("a fresh install is asked for location access", request)
+
+        // The screen rotates while the dialog is open.
+        controller.recreate()
+        val activity = controller.get()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals("the recreated screen joins the open dialog", null, shadowOf(activity).lastRequestedPermission)
+        assertFalse("nothing reads the original before the answer", originalRead())
+        assertFalse("the operation is still running", (field("processButton").get(activity) as MaterialButton).isEnabled)
+
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        activity.onRequestPermissionsResult(
+            request!!.requestCode, request.requestedPermissions, intArrayOf(PackageManager.PERMISSION_GRANTED)
+        )
+
+        val resultCard = field("resultCard").get(activity) as View
+        idleUntil { resultCard.visibility == View.VISIBLE }
+        val shown = (field("resultText").get(activity) as TextView).text.toString()
+        assertFalse("verified, not access unavailable: $shown", shown.contains(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE))
+        assertTrue("the original was read", originalRead())
+    }
+
+    @Test
     fun `the verified-media viewer asks for location access and verifies the original once granted`() {
         val intent = Intent(Intent.ACTION_VIEW).setDataAndType(capture, "image/png")
         val activity = Robolectric.buildActivity(VerifiedMediaViewerActivity::class.java, intent).setup().get()
