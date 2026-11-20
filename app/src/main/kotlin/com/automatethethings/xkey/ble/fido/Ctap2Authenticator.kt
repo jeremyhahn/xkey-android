@@ -51,15 +51,24 @@ object Ctap2 {
     const val ALG_ES256 = -7
 }
 
-/** A passkey the backend offers to a BLE client. */
+/**
+ * A passkey the backend offers to a BLE client. [selection] is what the
+ * backend read about it when it listed it, before any prompt: it signs with
+ * that key only, and only while it still holds. The authenticator hands back
+ * the same object it was given, never a copy.
+ */
 class FidoCredential(
     val id: ByteArray,
     val rpId: String,
     val userHandle: ByteArray?,
     val userName: String?,
     val userDisplayName: String?,
-    val discoverable: Boolean
+    val discoverable: Boolean,
+    val selection: FidoCredentialSelection? = null
 )
+
+/** A backend's own record of a listed credential, opaque to the authenticator. */
+interface FidoCredentialSelection
 
 /** The outcome of asking the phone's user to approve a ceremony. */
 enum class UserCheck {

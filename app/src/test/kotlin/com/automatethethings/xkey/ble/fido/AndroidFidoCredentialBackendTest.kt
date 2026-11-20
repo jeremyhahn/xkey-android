@@ -781,8 +781,9 @@ class AndroidFidoCredentialBackendTest {
         keyRows += listOf(sameUser.keyId, otherUser.keyId)
         metadataRows += listOf(sameUser.keyId, otherUser.keyId)
         coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(sameUser, otherUser)
-        coEvery { keyDao.getByKeyId(sameUser.keyId) } returns sameUser
-        coEvery { keyDao.getByKeyId(otherUser.keyId) } returns otherUser
+        // Each row is found until it is deleted.
+        coEvery { keyDao.getByKeyId(sameUser.keyId) } answers { sameUser.takeIf { it.keyId in keyRows } }
+        coEvery { keyDao.getByKeyId(otherUser.keyId) } answers { otherUser.takeIf { it.keyId in keyRows } }
 
         val made = backend().create(CredentialRequest("example.com", "Example", handle, "alice", "Alice", true))
 
