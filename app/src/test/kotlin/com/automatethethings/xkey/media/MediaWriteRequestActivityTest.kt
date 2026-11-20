@@ -25,6 +25,7 @@ import android.net.Uri
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -38,6 +39,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowToast
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -239,5 +241,31 @@ class MediaWriteRequestActivityTest {
             "the refused capture is dropped and the later one kept",
             awaitMain { MediaWriteAuthorizations.pending(context).map { it.uri } == listOf(later.toString()) }
         )
+    }
+
+    @Test
+    fun `a queue that cannot be read is reported, kept whole and never crashes the screen`() {
+        queue(first)
+        val store = File(context.filesDir, "media-write-requests.json")
+        val before = store.readBytes()
+
+        MediaWriteAuthorizations.readStore = { throw java.io.IOException("the queue could not be read") }
+        val controller = try {
+            open()
+        } finally {
+            MediaWriteAuthorizations.readStore = { it.readText() }
+        }
+        assertTrue("the screen ends without a request", controller.get().isFinishing)
+        assertEquals(
+            "the user is told",
+            "Captures waiting for access cannot be loaded",
+            ShadowToast.getTextOfLatestToast()
+        )
+        assertArrayEquals("the queue is untouched", before, store.readBytes())
+
+        store.writeText("{not a queue")
+        val malformed = open()
+        assertTrue(malformed.get().isFinishing)
+        assertEquals("a malformed queue is untouched", "{not a queue", store.readText())
     }
 }
