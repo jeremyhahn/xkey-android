@@ -86,14 +86,24 @@ object MediaWriteAuthorizations {
     /** Forget every queued capture. */
     fun clear(context: Context): Unit = synchronized(lock) { store(context).delete() }
 
-    /** A write request shown to the user: the captures it asks for ([uris]) and its [intent]. */
-    class WriteRequest(val uris: List<String>, val intent: PendingIntent)
+    /**
+     * What publishing the queue needs: every queued capture ([uris]) and the
+     * write request the user approves for those that need a grant ([intent],
+     * asking for [requested]). A null [intent] means none needs one (before
+     * Android 11 xKey writes media itself, and MediaStore has no write
+     * request there): the queue is published at once.
+     */
+    class WriteRequest(val uris: List<String>, val requested: List<String>, val intent: PendingIntent?)
 
     /** The write request for every queued capture, or null when none waits. */
     fun request(context: Context): WriteRequest? {
         val uris = pending(context).map { it.uri }
         if (uris.isEmpty()) return null
-        return WriteRequest(uris, MediaPublisher.writeRequest(context, uris.map(Uri::parse)))
+        val needGrant = uris.filter {
+            MediaPublisher.writeAccess(context, Uri.parse(it)) == MediaPublisher.MediaWriteAccess.NEEDS_GRANT
+        }
+        if (needGrant.isEmpty()) return WriteRequest(uris, emptyList(), null)
+        return WriteRequest(uris, needGrant, MediaPublisher.writeRequest(context, needGrant.map(Uri::parse)))
     }
 
     /**

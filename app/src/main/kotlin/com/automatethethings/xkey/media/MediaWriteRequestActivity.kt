@@ -93,8 +93,15 @@ class MediaWriteRequestActivity : ComponentActivity() {
             finish()
             return
         }
-        requested = ArrayList(request.uris)
-        launcher.launch(IntentSenderRequest.Builder(request.intent.intentSender).build())
+        requested = ArrayList(request.requested)
+        val intent = request.intent
+        if (intent == null) {
+            // No queued capture needs a grant (Android 10 has no write request): publish now.
+            answered = true
+            publish(true, requested.toList())
+            return
+        }
+        launcher.launch(IntentSenderRequest.Builder(intent.intentSender).build())
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
