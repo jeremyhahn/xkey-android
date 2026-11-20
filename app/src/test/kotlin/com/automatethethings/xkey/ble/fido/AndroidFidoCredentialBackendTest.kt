@@ -904,10 +904,18 @@ class AndroidFidoCredentialBackendTest {
     }
 
     /** A prompt whose key-bound signature records what it was asked to sign. */
-    private class BoundPrompt(private val outcome: () -> ByteArray) : FidoUserPrompt {
+    private class BoundPrompt(
+        private val check: () -> UserCheck = { UserCheck.VERIFIED },
+        private val outcome: () -> ByteArray
+    ) : FidoUserPrompt {
         val signed = mutableListOf<Pair<String, ByteArray>>()
+        /** Each generic prompt shown, as (rpId, registering). */
+        val verified = mutableListOf<Pair<String, Boolean>>()
         override val available = true
-        override suspend fun verify(rpId: String, registering: Boolean) = UserCheck.VERIFIED
+        override suspend fun verify(rpId: String, registering: Boolean): UserCheck {
+            verified += rpId to registering
+            return check()
+        }
         override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? = null
         override suspend fun signWithKey(
             keyId: String,
@@ -934,6 +942,7 @@ class AndroidFidoCredentialBackendTest {
         assertArrayEquals(byteArrayOf(0x32), signed.signature)
         assertEquals(shared.keyId, prompt.signed.single().first)
         assertArrayEquals(byteArrayOf(5) + cdh, prompt.signed.single().second)
+        assertTrue("a per-use key never takes a generic prompt", prompt.verified.isEmpty())
         coVerify(exactly = 0) { keystore.signApproved(any(), any(), any(), any()) }
     }
 
@@ -1023,7 +1032,57 @@ class AndroidFidoCredentialBackendTest {
     }
 
     @Test
+    fun `a time-window passkey that expired behind another approval reauthenticates with a generic prompt and signs`() = runTest {
+        // The default row is a time-window passkey (auth duration 5 s): its
+        // window closes while another approval holds the screen, so Keystore
+        // refuses the silent signature. A key-bound prompt cannot unlock a
+        // time-window key (its Signature.initSign fails first); only a fresh
+        // generic authentication opens the window again.
+        val prompt = BoundPrompt { byteArrayOf(0x33) }
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } answers {
+            if (prompt.verified.isEmpty()) throw BiometricRequiredException() else byteArrayOf(0x34)
+        }
+        val providerMayFinish = CompletableDeferred<Unit>()
+        val provider = launch {
+            BiometricHelper.inOneTurn("passkeyAssertion") { providerMayFinish.await() }
+        }
+        runCurrent()
+        val cred = backend(prompt).credentials("example.com").single()
+
+        val ble = async { backend(prompt).sign(cred, { byteArrayOf(1) }, ByteArray(32)) }
+        runCurrent()
+        providerMayFinish.complete(Unit)
+        provider.join()
+        val signed = ble.await()
+
+        assertArrayEquals(byteArrayOf(0x34), signed.signature)
+        assertEquals(listOf("example.com" to false), prompt.verified)
+        assertTrue("no key-bound prompt for a time-window key", prompt.signed.isEmpty())
+        coVerify(exactly = 2) { keystore.signApproved(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `a declined reauthentication of an expired time-window passkey answers OPERATION_DENIED and signs nothing`() = runTest {
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } throws BiometricRequiredException()
+        val prompt = BoundPrompt(check = { UserCheck.DECLINED }) { byteArrayOf(0x33) }
+        val cred = backend(prompt).credentials("example.com").single()
+
+        val thrown = runCatching { backend(prompt).sign(cred, { byteArrayOf(1) }, ByteArray(32)) }.exceptionOrNull()
+
+        assertTrue("got $thrown", thrown is FidoRefusedException)
+        assertEquals(Ctap2.ERR_OPERATION_DENIED, (thrown as FidoRefusedException).status)
+        assertEquals(1, prompt.verified.size)
+        assertTrue(prompt.signed.isEmpty())
+        coVerify(exactly = 1) { keystore.signApproved(any(), any(), any(), any()) }
+    }
+
+    @Test
     fun `a passkey Keystore will not sign silently signs through the bound prompt`() = runTest {
+        // A row with no auth duration of its own whose key Keystore still
+        // binds to authentication: only a key-bound prompt signs with it.
+        val unbound = shared.copy(authDurationSeconds = -1)
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(unbound)
+        coEvery { keyDao.getByKeyId(shared.keyId) } returns unbound
         coEvery { keystore.signApproved(any(), any(), any(), any()) } throws BiometricRequiredException()
         val prompt = BoundPrompt { byteArrayOf(0x33) }
         val cred = backend(prompt).credentials("example.com").single()
