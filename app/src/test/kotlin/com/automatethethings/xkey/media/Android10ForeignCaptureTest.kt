@@ -1,0 +1,172 @@
+/*
+ * Copyright (c) 2026 Jeremy Hahn
+ * Copyright (c) 2026 Automate The Things, LLC
+ *
+ * This file is part of xKey.
+ *
+ * xKey is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+package com.automatethethings.xkey.media
+
+import android.Manifest
+import android.app.Activity
+import android.app.Application
+import android.app.PendingIntent
+import android.app.RecoverableSecurityException
+import android.app.RemoteAction
+import android.content.Context
+import android.content.Intent
+import android.graphics.drawable.Icon
+import android.net.Uri
+import android.os.Build
+import android.os.Looper
+import androidx.test.core.app.ApplicationProvider
+import org.junit.After
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
+import org.robolectric.util.ReflectionHelpers
+import java.io.File
+import java.util.concurrent.TimeUnit
+
+/**
+ * Android 10 enforces scoped storage for xKey (targetSdk above 29, no legacy
+ * storage): a capture another app owns is written only through its content
+ * URI, never by path. MediaStore refuses that write with a
+ * RecoverableSecurityException until the user allows it; the write request
+ * screen launches its user action and, once allowed, publishes again.
+ *
+ * The unit tests run offline against one framework jar, so xKey's code is
+ * shown Android 10 through [Build.VERSION.SDK_INT].
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(application = Application::class, sdk = [34])
+class Android10ForeignCaptureTest {
+
+    @get:Rule
+    val folder = TemporaryFolder()
+
+    private lateinit var context: Context
+    private lateinit var provider: FakeMediaProvider
+    private val uri: Uri = Uri.parse("content://media/external/images/media/101")
+    private lateinit var capture: File
+    private lateinit var original: ByteArray
+
+    /** Whether the user allowed the write MediaStore's user action asked for. */
+    private var allowed = false
+    private val previousStore = MediaPublisher.mediaStore
+    private val previousSdk = Build.VERSION.SDK_INT
+
+    @Before
+    fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
+        ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", Build.VERSION_CODES.Q)
+        capture = File(folder.newFolder("DCIM", "Camera"), "IMG_0101.png").apply { writeBytes(XmpFixtures.png()) }
+        original = capture.readBytes()
+        val action = PendingIntent.getActivity(context, 0, Intent("test.ALLOW_WRITE"), PendingIntent.FLAG_IMMUTABLE)
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            media = folder.newFile("media.png").apply { writeBytes(original) }
+            onOpen = { mode ->
+                if ('w' in mode && !allowed) {
+                    throw RecoverableSecurityException(
+                        SecurityException("$uri is not owned by xKey"),
+                        "Allow xKey to modify this photo?",
+                        RemoteAction(Icon.createWithResource(context, android.R.drawable.ic_menu_edit), "Allow", "Allow", action)
+                    )
+                }
+            }
+        }
+        MediaPublisher.mediaStore = object : MediaPublisher.MediaStoreAccess {
+            override fun ownerPackage(context: Context, uri: Uri): String? = "com.example.camera"
+            override fun hasWriteGrant(context: Context, uri: Uri): Boolean = false
+            override fun createWriteRequest(context: Context, uris: List<Uri>): PendingIntent =
+                error("MediaStore has no write request below Android 11")
+        }
+        MediaWriteAuthorizations.clear(context)
+        shadowOf(context as Application).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+    }
+
+    @After
+    fun tearDown() {
+        ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", previousSdk)
+        MediaPublisher.mediaStore = previousStore
+        MediaWriteAuthorizations.clear(context)
+    }
+
+    private fun data() = ContentAuthenticityData(
+        contentHash = AutoSignHash.contentHashFile(capture, "image/png"),
+        signatures = listOf(
+            SignatureEntry(
+                keyFingerprint = "b".repeat(64),
+                signerName = "Test Signer",
+                algorithm = "ES256",
+                value = "c2lnbmF0dXJl",
+                timestamp = "2026-01-01T00:00:00Z",
+                role = SignerRole.CREATOR
+            )
+        )
+    )
+
+    private fun awaitMain(done: () -> Boolean): Boolean {
+        val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < end) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if (done()) return true
+            Thread.sleep(20)
+        }
+        return done()
+    }
+
+    @Test
+    fun `the auto-signer never writes a foreign capture by path on Android 10`() {
+        // MediaStore refuses the content-URI write until the user allows it.
+        val outcome = runCatching { XmpMetadataHelper.signMedia(context, uri, capture.path, data()) }
+        assertEquals("not signed before the user allows it", null, outcome.getOrNull())
+        assertEquals(
+            "the refusal names the user action",
+            "UserActionRequiredException",
+            outcome.exceptionOrNull()?.javaClass?.simpleName
+        )
+        assertTrue("the write went to the content URI", provider.openModes.any { 'w' in it })
+        assertArrayEquals("the file is never written by path", original, capture.readBytes())
+        assertArrayEquals("the refused write changed nothing", original, provider.media.readBytes())
+    }
+
+    @Test
+    fun `the write request screen launches MediaStore's user action and publishes once allowed`() {
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data()))
+        val controller = Robolectric.buildActivity(MediaWriteRequestActivity::class.java).setup()
+        val shadow = shadowOf(controller.get())
+
+        assertTrue("the user action is launched", awaitMain { shadow.lastIntentSenderRequest != null })
+        assertEquals("still queued until allowed", 1, MediaWriteAuthorizations.pending(context).size)
+        assertArrayEquals("nothing written yet", original, provider.media.readBytes())
+
+        allowed = true
+        val request = shadow.lastIntentSenderRequest!!
+        shadow.callOnActivityResult(request.requestCode, Activity.RESULT_OK, Intent())
+
+        assertTrue("published once allowed", awaitMain { MediaWriteAuthorizations.pending(context).isEmpty() })
+        assertNotNull(
+            "the capture carries the signature",
+            XmpMetadataHelper.readSignatureFromUri(context.contentResolver, Uri.fromFile(provider.media), "image/png")
+        )
+        assertArrayEquals("the file is never written by path", original, capture.readBytes())
+    }
+}
