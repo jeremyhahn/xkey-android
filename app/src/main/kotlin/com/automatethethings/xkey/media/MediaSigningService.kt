@@ -310,12 +310,13 @@ class MediaSigningService : Service() {
     private var imageObserver: ContentObserver? = null
     private var videoObserver: ContentObserver? = null
     /**
-     * URIs already signed, so a repeated MediaStore notification for the same
-     * item is ignored. Concurrent because a burst capture delivers several
+     * URIs already handled (signed, queued for the user's access or refused),
+     * so a repeated MediaStore notification for the same item is ignored.
+     * Bounded whatever the outcome: [RecentUris.add] is the one insertion and
+     * drops the oldest. Thread-safe because a burst capture delivers several
      * events that are handled on [Dispatchers.IO] at the same time.
      */
-    private val processedUris: MutableSet<String> =
-        java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+    private val processedUris = RecentUris(RecentUris.DEFAULT_BOUND)
 
     /**
      * Every in-flight signing coroutine, so [onDestroy] cancels all of them
@@ -455,11 +456,6 @@ class MediaSigningService : Service() {
                 }
 
                 processedUris.add(uriString)
-                // Keep set bounded
-                if (processedUris.size > 1000) {
-                    val iterator = processedUris.iterator()
-                    repeat(500) { if (iterator.hasNext()) { iterator.next(); iterator.remove() } }
-                }
 
                 AuditLogger.logMediaAutoSigned(keyId, keyEntity.label, uriString)
                 Log.i(TAG, "Auto-signed $mediaType: $uri")
