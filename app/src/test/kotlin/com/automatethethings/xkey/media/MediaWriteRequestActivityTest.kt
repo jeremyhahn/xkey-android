@@ -20,6 +20,7 @@ import android.app.Application
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
@@ -150,6 +151,59 @@ class MediaWriteRequestActivityTest {
         controller.get().onRequestPermissionsResult(asked.requestCode, asked.requestedPermissions, intArrayOf(0))
 
         assertTrue("the write request follows", shadow.lastIntentSenderRequest != null)
+    }
+
+    /**
+     * Opens the screen without location access, recreates it (a rotation)
+     * while the location-access dialog is open, then answers that dialog in
+     * the new instance with [result].
+     */
+    private fun recreateWhileAskingThenAnswer(result: Int): ActivityController<MediaWriteRequestActivity> {
+        val app = context as Application
+        shadowOf(app).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        queue(first)
+        val controller = open()
+        val asked = shadowOf(controller.get()).lastRequestedPermission ?: error("location access was not asked for")
+        assertEquals(null, shadowOf(controller.get()).lastIntentSenderRequest)
+
+        controller.recreate()
+        assertEquals(
+            "the recreated screen joins the open dialog, it does not ask again",
+            null,
+            shadowOf(controller.get()).lastRequestedPermission
+        )
+
+        if (result == PackageManager.PERMISSION_GRANTED) {
+            shadowOf(app).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        }
+        @Suppress("DEPRECATION")
+        controller.get().onRequestPermissionsResult(asked.requestCode, asked.requestedPermissions, intArrayOf(result))
+        shadowOf(Looper.getMainLooper()).idle()
+        return controller
+    }
+
+    @Test
+    fun `recreated while location access is asked, a grant still launches the write request`() {
+        val controller = recreateWhileAskingThenAnswer(PackageManager.PERMISSION_GRANTED)
+
+        assertTrue("the write request follows the grant", shadowOf(controller.get()).lastIntentSenderRequest != null)
+        granted = true
+        answer(controller, Activity.RESULT_OK)
+        assertTrue("it finishes once publication ends", awaitMain { controller.get().isFinishing })
+        assertTrue("the capture was published", MediaWriteAuthorizations.pending(context).isEmpty())
+    }
+
+    @Test
+    fun `recreated while location access is asked, a denial still launches the write request and never strands the capture`() {
+        val controller = recreateWhileAskingThenAnswer(PackageManager.PERMISSION_DENIED)
+
+        assertTrue("the write request follows the answer", shadowOf(controller.get()).lastIntentSenderRequest != null)
+        answer(controller, Activity.RESULT_CANCELED)
+        assertTrue(awaitMain { controller.get().isFinishing })
+        assertTrue(
+            "the refused capture is dropped, not left queued",
+            awaitMain { MediaWriteAuthorizations.pending(context).isEmpty() }
+        )
     }
 
     @Test

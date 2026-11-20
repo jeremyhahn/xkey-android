@@ -191,4 +191,52 @@ class MediaLocationAccessEntryPointTest {
         val shown = texts(activity.window.decorView)
         assertFalse("not access unavailable: $shown", unavailable in shown)
     }
+
+    @Test
+    fun `co-signing recreated while location access is asked appends over the original once granted`() {
+        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+        val first = controller.get()
+        shadowOf(Looper.getMainLooper()).idle()
+        fun field(name: String) = CoSignActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
+        fun exchange() = field("exchange").get(controller.get()) as CoSignExchange
+        field("exchange").set(first, exchange().copy(media = capture))
+        field("currentSignatureData").set(first, ContentAuthenticityData.fromJsonString(XmpFixtures.json(originalHash)))
+
+        fun findButton(view: View, text: String): Button? = when (view) {
+            is Button -> view.takeIf { it.text == text }
+            is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { findButton(view.getChildAt(it), text) }
+            else -> null
+        }
+        findButton(first.window.decorView, first.getString(R.string.cosign_scan_response))!!.performClick()
+        val scanner = shadowOf(first).nextStartedActivityForResult
+        val response = CoSignResponse("AAAA", "SHA256:witness", "Witness", "ES256").toJsonString()
+        first.activityResultRegistry.dispatchResult(
+            scanner.requestCode,
+            Activity.RESULT_OK,
+            Intent().putExtra(QrScannerActivity.EXTRA_SCANNED_URI, response)
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+        val request = shadowOf(first).lastRequestedPermission
+        assertNotNull("a fresh install is asked for location access", request)
+
+        controller.recreate()
+        val activity = controller.get()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals("the recreated screen joins the open dialog", null, shadowOf(activity).lastRequestedPermission)
+        assertFalse("nothing reads the original before the answer", originalRead())
+        val unavailable = activity.getString(
+            R.string.cosign_append_failed,
+            MediaPublisher.OriginalUnavailableException(capture).message
+        )
+        assertFalse("nothing failed before the answer", unavailable in texts(activity.window.decorView))
+
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        activity.onRequestPermissionsResult(
+            request!!.requestCode, request.requestedPermissions, intArrayOf(PackageManager.PERMISSION_GRANTED)
+        )
+
+        idleUntil { exchange().runningAppend == null && exchange().queued.isEmpty() && originalRead() }
+        val shown = texts(activity.window.decorView)
+        assertFalse("not access unavailable: $shown", unavailable in shown)
+    }
 }
