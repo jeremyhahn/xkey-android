@@ -18,9 +18,7 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.content.ContentResolver
 import android.net.Uri
-import android.provider.DocumentsContract
 import android.os.Bundle
 import android.util.Log
 import android.util.TypedValue
@@ -74,8 +72,6 @@ import java.util.Locale
  * verifies each signature, and renders a colour-coded badge overlay at the bottom
  * of the screen.
  */
-private const val SIDECAR_SUFFIX = ".xkeysig"
-
 class VerifiedMediaViewerActivity : AppCompatActivity() {
 
     private companion object {
@@ -260,10 +256,11 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                 // temp-copy read below keeps the in-band (canonical-only) rule.
                 var source = MediaHasher.SignatureSource.IN_BAND
 
-                // A sidecar written beside the real file, then the in-band read
-                // via a temp copy for formats that carry the signature inside.
+                // The sidecar where the signer wrote it (beside the real file,
+                // or the one xKey owns under Documents/xKey/), then the in-band
+                // read via a temp copy for formats that carry the signature inside.
                 if (sigData == null) {
-                    sigData = readSidecarBesideMedia(uri)
+                    sigData = XmpMetadataHelper.readSidecar(applicationContext, uri)
                     if (sigData != null) source = MediaHasher.SignatureSource.SIDECAR
                 }
                 if (sigData == null) {
@@ -314,36 +311,12 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
     }
 
     /**
-     * Reads the sidecar that sits beside [uri] in its own document tree.
-     *
-     * The copy-to-cache route below cannot find it: `readSignature` derives the
-     * sidecar path from the file it is given, so pointing it at
-     * `cacheDir/verify_temp.<ext>` makes it look for
-     * `verify_temp.<ext>.xkeysig` and never consult the real one. Sidecar-signed
-     * media therefore always read as unsigned.
-     */
-    private fun readSidecarBesideMedia(uri: Uri): ContentAuthenticityData? = runCatching {
-        val sidecarUri = when {
-            uri.scheme == ContentResolver.SCHEME_FILE ->
-                Uri.fromFile(File(uri.path + SIDECAR_SUFFIX))
-            DocumentsContract.isDocumentUri(this, uri) ->
-                DocumentsContract.buildDocumentUriUsingTree(
-                    uri, DocumentsContract.getDocumentId(uri) + SIDECAR_SUFFIX
-                )
-            else -> return@runCatching null
-        }
-        contentResolver.openInputStream(sidecarUri)?.use { input ->
-            ContentAuthenticityData.fromJsonStream(input)
-        }
-    }.getOrNull()
-
-    /**
      * Copy the content URI to a temporary file so that sidecar-based
      * signature reading works (for non-JPEG formats like video).
      *
      * Kept for the in-band read, which genuinely needs a real file path. It can
      * only ever find a sidecar the caller planted beside the temp copy, so
-     * [readSidecarBesideMedia] is tried first.
+     * [XmpMetadataHelper.readSidecar] is tried first.
      */
     private fun readSignatureViaTempFile(uri: Uri, mimeType: String): ContentAuthenticityData? {
         val extension = when {

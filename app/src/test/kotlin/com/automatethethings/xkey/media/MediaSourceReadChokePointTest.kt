@@ -42,13 +42,14 @@ class MediaSourceReadChokePointTest {
         "ui/CoSignActivity.kt" to 1,
         // A .xkeysig sidecar, and the ciphertext a decrypt reads.
         "ui/FileOperationActivity.kt" to 2,
-        // The image shown on screen (twice: bounds, then pixels) and a sidecar.
-        "ui/VerifiedMediaViewerActivity.kt" to 3,
+        // The image shown on screen (twice: bounds, then pixels).
+        "ui/VerifiedMediaViewerActivity.kt" to 2,
         // The redacted view hashed on purpose, to tell a redacted signature apart.
         "media/MediaSigningService.kt" to 1,
         // The resolver overloads instrumented tests call; app code takes the Context ones.
         "media/MediaHasher.kt" to 1,
-        "media/XmpMetadataHelper.kt" to 1,
+        // XmpMetadataHelper also reads a .xkeysig sidecar beside a document (readSidecar).
+        "media/XmpMetadataHelper.kt" to 2,
         // The choke point itself.
         "media/MediaPublisher.kt" to 1,
     )
