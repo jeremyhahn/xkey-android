@@ -66,6 +66,7 @@ import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
 import com.automatethethings.xkey.settings.UserVerificationPolicy
 import com.automatethethings.xkey.truststore.TrustStoreRepository
 import com.automatethethings.xkey.media.MediaSigningService
+import com.automatethethings.xkey.media.MediaWriteAuthorizations
 import com.automatethethings.xkey.settings.MediaSigningSettingsRepository
 import com.automatethethings.xkey.settings.PinSettingsRepository
 import com.automatethethings.xkey.usb.UsbHsmSettingsRepository
@@ -112,6 +113,13 @@ class SettingsActivity : AppCompatActivity() {
      * the flag is driven by [populateUi] rather than assigned at either site.
      */
     private var isInitializing: Boolean = true
+
+    /** Asks for POST_NOTIFICATIONS when auto-signing is turned on; a refusal leaves the settings entry as the way in. */
+    private val notificationPermissionLauncher =
+        registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
+
+    /** Refreshes the media-signing "pending captures" entry; set once that section is built. */
+    private var refreshPendingCaptures: () -> Unit = {}
 
     /**
      * The most recent user-verification policy write launched by the biometric
@@ -243,6 +251,12 @@ class SettingsActivity : AppCompatActivity() {
         setupActionBar()
         buildSettingsUI()
         loadSettings()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Back from the write request, or a capture queued meanwhile.
+        refreshPendingCaptures()
     }
 
     /**
@@ -1477,6 +1491,32 @@ class SettingsActivity : AppCompatActivity() {
         contentPadding.addView(signPhotosSwitch)
         contentPadding.addView(signVideosSwitch)
 
+        // Captures waiting for write access: reachable here even when the
+        // notification is refused or its channel is turned off.
+        val pendingCapturesButton = com.google.android.material.button.MaterialButton(
+            this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle
+        ).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+            visibility = View.GONE
+            setOnClickListener {
+                MediaWriteAuthorizations.settingsEntry(this@SettingsActivity)?.let { startActivity(it.intent) }
+            }
+        }
+        contentPadding.addView(pendingCapturesButton)
+        refreshPendingCaptures = {
+            val entry = MediaWriteAuthorizations.settingsEntry(this@SettingsActivity)
+            pendingCapturesButton.visibility = if (entry == null) View.GONE else View.VISIBLE
+            if (entry != null) {
+                pendingCapturesButton.text = resources.getQuantityString(
+                    R.plurals.settings_media_signing_pending, entry.count, entry.count
+                )
+            }
+        }
+        refreshPendingCaptures()
+
         // Config container visibility tied to auto-sign
         val configViews = listOf(keyLabel, keySpinner, signPhotosSwitch, signVideosSwitch)
         fun updateConfigVisibility(enabled: Boolean) {
@@ -1529,6 +1569,9 @@ class SettingsActivity : AppCompatActivity() {
                 mediaSigningRepo.setAutoSignEnabled(isChecked)
                 updateConfigVisibility(isChecked)
                 if (isChecked) {
+                    // The write-access notification needs this on Android 13+.
+                    MediaWriteAuthorizations.notificationPermissionToRequest(this@SettingsActivity)
+                        ?.let { notificationPermissionLauncher.launch(it) }
                     val intent = Intent(this@SettingsActivity, MediaSigningService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(intent)

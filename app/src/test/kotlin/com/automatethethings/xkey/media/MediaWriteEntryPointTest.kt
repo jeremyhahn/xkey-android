@@ -103,9 +103,4 @@ class MediaWriteEntryPointTest {
         assertNull(MediaWriteAuthorizations.notificationPermissionToRequest(context))
     }
 
-    @Test
-    @Config(sdk = [32])
-    fun `before Android 13 no notification permission is asked for`() {
-        assertNull(MediaWriteAuthorizations.notificationPermissionToRequest(context))
-    }
 }

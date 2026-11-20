@@ -40,8 +40,9 @@ data class PendingMediaWrite(
 /**
  * The captures the auto-signer signed but may not write yet: another app
  * owns them, so the user grants write access first. They are kept under
- * the app's files, so a process death loses none; a notification opens
- * [MediaWriteRequestActivity], which asks for every one in one write request
+ * the app's files, so a process death loses none; a notification, or the
+ * media-signing settings entry when notifications are off ([settingsEntry]),
+ * opens [MediaWriteRequestActivity], which asks for every one in one write request
  * ([request]) and then publishes the granted ones ([publishGranted]) or drops
  * them on a refusal ([deny]).
  */
@@ -92,8 +93,10 @@ object MediaWriteAuthorizations {
      * Sign every queued capture the user granted write access to, calling
      * [onSigned] for each; one still without a grant stays queued, and so
      * does one whose write failed ([MediaPublishException]): its media is
-     * whole again, so the next request retries it. One that changed since it
-     * was signed, or is gone, is dropped: its signature matches nothing.
+     * whole again, so the next request retries it. Any other failure to read,
+     * stage or embed keeps it queued too; only a permanent refusal
+     * ([permanentRefusal]: it changed since it was signed, is gone, or cannot
+     * be hashed) drops it, as its signature matches nothing.
      */
     fun publishGranted(context: Context, onSigned: (PendingMediaWrite) -> Unit) {
         // A retry: captures an earlier write was interrupted in are whole first.
@@ -112,6 +115,14 @@ object MediaWriteAuthorizations {
                 Log.w(TAG, "${write.uri} is not restored yet; it stays queued", e)
                 continue
             } catch (e: Exception) {
+                if (!permanentRefusal(e)) {
+                    // A read, staging or embedding failure (a full disk, a
+                    // provider that is busy): nothing was signed, and the
+                    // auto-signer will not offer this capture again, so the
+                    // queue is its only retry.
+                    Log.w(TAG, "Signing ${write.uri} failed; it stays queued", e)
+                    continue
+                }
                 Log.w(TAG, "Not signing ${write.uri}", e)
                 null
             }
@@ -136,6 +147,50 @@ object MediaWriteAuthorizations {
         refused.forEach { remove(context, it.uri) }
     }
 
+    /**
+     * A failure no retry can mend: the capture changed since it was signed
+     * (its signature matches nothing), is gone, or cannot be hashed. Every
+     * other failure is retried from the queue.
+     */
+    private fun permanentRefusal(e: Exception): Boolean =
+        e is XmpMetadataHelper.SourceChangedException ||
+            e is java.io.FileNotFoundException ||
+            e is MediaTooFragmentedException
+
+    /** The settings entry for captures waiting for write access: how many wait, and the [intent] that asks for them. */
+    class SettingsEntry(val count: Int, val intent: Intent)
+
+    /** The one way into [MediaWriteRequestActivity]: the notification and the settings entry both open it. */
+    fun requestIntent(context: Context): Intent = Intent(context, MediaWriteRequestActivity::class.java)
+
+    /**
+     * The settings entry for the waiting captures, or null when none waits or
+     * the queue cannot be read. It does not depend on the notification, which
+     * may be refused (POST_NOTIFICATIONS) or turned off.
+     */
+    fun settingsEntry(context: Context): SettingsEntry? {
+        val count = try {
+            pending(context).size
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "Cannot read the write-request queue", e)
+            return null
+        }
+        return if (count == 0) null else SettingsEntry(count, requestIntent(context))
+    }
+
+    /**
+     * The runtime permission to ask for when auto-signing is turned on, so
+     * the write-access notification can be posted: POST_NOTIFICATIONS on
+     * Android 13+ until it is granted, otherwise null.
+     */
+    fun notificationPermissionToRequest(context: Context): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
+        val permission = android.Manifest.permission.POST_NOTIFICATIONS
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(context, permission) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        return if (granted) null else permission
+    }
+
     /** Tell the user captures wait for write access; tapping it opens the request. */
     fun notifyPending(context: Context) {
         val count = try {
@@ -155,7 +210,7 @@ object MediaWriteAuthorizations {
                 NotificationChannel(CHANNEL_ID, "Media signing access", NotificationManager.IMPORTANCE_DEFAULT)
             )
         }
-        val intent = Intent(context, MediaWriteRequestActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val intent = requestIntent(context).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val open = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("Allow xKey to sign new media")
