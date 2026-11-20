@@ -90,13 +90,13 @@ class FileOperationVerifyAuditTest {
         db.close()
     }
 
-    private fun idleUntil(condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + 10_000
-        while (!condition()) {
-            assertTrue("timed out", System.currentTimeMillis() < deadline)
-            shadowOf(Looper.getMainLooper()).idle()
-            Thread.sleep(10)
-        }
+    /**
+     * Runs all the screen has queued, then expects [condition]. The verify
+     * work is run by the main looper, so nothing is waited for in real time.
+     */
+    private fun settled(what: String, condition: () -> Boolean) {
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("$what once the main looper is idle", condition())
     }
 
     private fun field(name: String) =
@@ -135,19 +135,14 @@ class FileOperationVerifyAuditTest {
     /** Waits for the error result, then expects exactly one not-verified audit record. */
     private fun assertErrorAuditedOnce(activity: FileOperationActivity) {
         val resultCard = field("resultCard").get(activity) as View
-        idleUntil { resultCard.visibility == View.VISIBLE }
-        val deadline = System.currentTimeMillis() + 2_000
-        while (fileVerified().isEmpty() && System.currentTimeMillis() < deadline) {
-            shadowOf(Looper.getMainLooper()).idle()
-            Thread.sleep(10)
-        }
+        settled("the error is shown") { resultCard.visibility == View.VISIBLE }
         assertEquals("one verification is audited", 1, fileVerified().size)
         assertFalse("a verify that failed with an error verified nothing", fileVerified().single())
     }
 
     private fun assertShownUnavailable(activity: FileOperationActivity) {
         val resultCard = field("resultCard").get(activity) as View
-        idleUntil { resultCard.visibility == View.VISIBLE }
+        settled("the result is shown") { resultCard.visibility == View.VISIBLE }
         val shown = (field("resultText").get(activity) as TextView).text.toString()
         assertTrue("access unavailable is shown: $shown", shown.contains(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE))
     }
@@ -179,7 +174,7 @@ class FileOperationVerifyAuditTest {
         val activity = verifyDeclined()
 
         assertShownUnavailable(activity)
-        idleUntil { fileVerified().isNotEmpty() }
+        settled("the verification is audited") { fileVerified().isNotEmpty() }
         assertEquals("one verification is audited", 1, fileVerified().size)
         assertFalse("the signature was never read, so nothing is verified", fileVerified().single())
     }
@@ -199,7 +194,7 @@ class FileOperationVerifyAuditTest {
 
         // No embedded signature: the screen asks for a sidecar, and the user picks one.
         var picker: ShadowActivity.IntentForResult? = null
-        idleUntil {
+        settled("the sidecar picker is open") {
             picker = generateSequence { shadowOf(activity).nextStartedActivityForResult }
                 .firstOrNull { it.intent.action == Intent.ACTION_OPEN_DOCUMENT }
             picker != null
@@ -209,7 +204,7 @@ class FileOperationVerifyAuditTest {
         )
 
         assertShownUnavailable(activity)
-        idleUntil { fileVerified().isNotEmpty() }
+        settled("the verification is audited") { fileVerified().isNotEmpty() }
         assertEquals("one verification is audited", 1, fileVerified().size)
         assertFalse("nothing was hashed or checked, so nothing is verified", fileVerified().single())
     }
@@ -237,7 +232,7 @@ class FileOperationVerifyAuditTest {
         val activity = verifyGranted()
 
         var picker: ShadowActivity.IntentForResult? = null
-        idleUntil {
+        settled("the sidecar picker is open") {
             picker = generateSequence { shadowOf(activity).nextStartedActivityForResult }
                 .firstOrNull { it.intent.action == Intent.ACTION_OPEN_DOCUMENT }
             picker != null
