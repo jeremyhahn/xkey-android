@@ -356,7 +356,7 @@ object MediaPublisher {
         try {
             overwrite(resolver, target, staged) { touched = true }
         } catch (e: Throwable) {
-            val intact = !touched || restore(context, target, journal.backup)
+            val intact = !touched || restore(context, target, journal)
             // One that could not be put back keeps its record: the next start or retry restores it.
             if (intact) journal.clear()
             throw MediaPublishException(staged, e, original = if (intact) null else journal.backup)
@@ -413,7 +413,8 @@ object MediaPublisher {
      *
      * A capture edited since the write (in a gallery, after the process
      * died) is never restored over: its content is not one the interrupted
-     * write can leave ([interruptedWriteExplains]). Its edit stays, the
+     * write, or a restore of it the process died in, can leave
+     * ([GrantedWriteJournal.explains]). A part-restored capture is put back. Its edit stays, the
      * backup is set aside ([GrantedWriteJournal.keepBackup]) so both
      * versions remain, and the record is cleared; signing it then meets the
      * changed-source check and is refused. A record from before [written]
@@ -431,9 +432,7 @@ object MediaPublisher {
         }
         if (journal.written.isFile) {
             val explained = try {
-                openOriginal(context, target).buffered().use { content ->
-                    interruptedWriteExplains(content, journal.written, journal.backup)
-                }
+                openOriginal(context, target).buffered().use { content -> journal.explains(content) }
             } catch (_: Exception) {
                 // Not readable as it is now: nothing shows it unedited, so nothing is written.
                 return false
@@ -446,32 +445,57 @@ object MediaPublisher {
             }
         }
         if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) return false
-        if (!restore(context, target, journal.backup)) return false
+        if (!restore(context, target, journal)) return false
         journal.clear()
         return true
     }
 
     /**
-     * Whether [content] is what an in-place write of [written] over [backup]
-     * can leave when it stops at any point ([overwrite]): [written]'s bytes up
-     * to where it stopped, then [backup]'s from there, ending where [backup]
-     * ends or, past it, where the write stopped. [backup] and the whole of
-     * [written] are such states too. Anything else was saved since.
+     * Whether [content] is a state an interrupted granted write, and any
+     * restore of [backup] after it, can leave: the one test that tells a
+     * capture to put back from one edited since. An in-place write of
+     * [written] ([overwrite]) leaves [written]'s bytes up to where it stopped,
+     * then [backup]'s from there, ending where [backup] ends or, past it,
+     * where the write stopped; or [written] whole once it was cut to length.
+     * Once a restore has begun ([restoring]), each try writes [backup] from
+     * the start over that, so [backup]'s bytes come first, up to where the
+     * furthest try stopped, then what the write left. [backup] itself is
+     * such a state. Anything else was saved since.
      */
-    internal fun interruptedWriteExplains(content: java.io.InputStream, written: File, backup: File): Boolean {
+    internal fun interruptedWriteExplains(content: java.io.InputStream, written: File, backup: File, restoring: Boolean): Boolean {
+        val writtenLength = written.length()
+        val backupLength = backup.length()
         written.inputStream().buffered().use { w ->
             backup.inputStream().buffered().use { b ->
-                var diverged = false
-                var c: Int
-                do {
-                    c = content.read()
+                // Which part of a layout the bytes so far can end in: the backup's
+                // bytes a restore put back ([restored], only once one began), the
+                // written bytes after them ([writing]), or the backup's bytes the
+                // write never reached ([untouched]). Each part may be empty.
+                var restored = restoring
+                var writing = true
+                var untouched = true
+                var n = 0L
+                while (true) {
+                    val c = content.read()
+                    if (c < 0) break
                     val nw = w.read()
                     val nb = b.read()
-                    if (!diverged && c != nw) diverged = true
-                    // Past where the write stopped, the capture holds the backup's bytes.
-                    if (diverged && c != nb) return false
-                } while (c >= 0)
-                return true
+                    val nextRestored = restored && c == nb
+                    val nextWriting = (restored || writing) && c == nw
+                    untouched = (restored || writing || untouched) && c == nb
+                    restored = nextRestored
+                    writing = nextWriting
+                    if (!restored && !writing && !untouched) return false
+                    n++
+                }
+                // Where each layout can end: a restore that put the backup back
+                // past where a written-whole capture ended stops anywhere from
+                // there; written bytes end where the write stopped (past the
+                // backup's end) or where a truncate cut the written file; the
+                // backup's own bytes end where the backup ends.
+                return (restored && (n == backupLength || n >= writtenLength)) ||
+                    (writing && (n >= backupLength || n == writtenLength)) ||
+                    (untouched && n == backupLength)
             }
         }
     }
@@ -481,8 +505,9 @@ object MediaPublisher {
      * ([backup]), the bytes written over them ([written], a link to the
      * staged file) and, written and synced only once both are whole, a record
      * naming the capture's URI. A record present means the capture may be
-     * part-written and [backup] is what it must hold; [written] tells a
-     * part-written capture from one edited since ([interruptedWriteExplains]).
+     * part-written and [backup] is what it must hold; [written], with the
+     * phase ([restoring], once a restore began), tells a part-written or
+     * part-restored capture from one edited since ([explains]).
      */
     class GrantedWriteJournal(private val directory: File, private val uri: Uri) {
         private val key = java.security.MessageDigest.getInstance("SHA-256")
@@ -492,7 +517,29 @@ object MediaPublisher {
         val written = File(directory, "$PREFIX$key.new")
         private val record = File(directory, "$PREFIX$key$RECORD")
 
+        /** Present once a restore of [backup] may have begun writing: the restore phase. */
+        val restoring = File(directory, "$PREFIX$key.restoring")
+
         fun recorded() = record.isFile
+
+        /**
+         * Record, synced, that a restore of [backup] begins: from here the
+         * capture may hold the backup's bytes before what the write left.
+         * Throws when it cannot be recorded, so nothing is restored unrecorded.
+         */
+        fun markRestoring() {
+            if (restoring.isFile) return
+            FileOutputStream(restoring).use { out -> out.fd.sync() }
+        }
+
+        /**
+         * Whether [content], the capture as it reads now, is a state this
+         * write or a restore of it can leave ([interruptedWriteExplains], in
+         * the phase recorded): the one check every recovery makes before it
+         * puts [backup] back.
+         */
+        fun explains(content: InputStream): Boolean =
+            interruptedWriteExplains(content, written, backup, restoring = restoring.isFile)
 
         /**
          * The capture the record names. A read that fails throws: it has not
@@ -505,6 +552,8 @@ object MediaPublisher {
          * and synced) as [written], then the record is written and synced.
          */
         fun commit(whole: File, staged: File) {
+            // A new write starts in the write phase: no restore of it has begun.
+            restoring.delete()
             if (!whole.renameTo(backup)) throw IOException("cannot keep the capture's backup")
             written.delete()
             try {
@@ -538,6 +587,7 @@ object MediaPublisher {
             record.delete()
             backup.delete()
             written.delete()
+            restoring.delete()
         }
 
         companion object {
@@ -567,13 +617,24 @@ object MediaPublisher {
     }
 
     /**
-     * Put [backup] back over [target] after a write that failed part-way,
-     * and confirm it byte for byte. An interrupt closes a file channel at
+     * Put [journal]'s backup back over [target] after a write that failed
+     * part-way, and confirm it byte for byte: the one path that restores. The
+     * journal records the restore phase first ([GrantedWriteJournal.markRestoring]),
+     * so a restore the process dies in is recognised by the next recovery
+     * ([GrantedWriteJournal.explains]) and finished; when that record cannot
+     * be written, nothing is. An interrupt closes a file channel at
      * once and would refuse the restore too, so the restore runs with the
      * thread's interrupt held back (a few tries, should another arrive) and
      * re-asserts it after. True only when [target] reads back as [backup].
      */
-    private fun restore(context: Context, target: Uri, backup: File): Boolean {
+    private fun restore(context: Context, target: Uri, journal: GrantedWriteJournal): Boolean {
+        val backup = journal.backup
+        try {
+            journal.markRestoring()
+        } catch (e: IOException) {
+            Log.w(TAG, "Cannot record the restore of $target", e)
+            return false
+        }
         var interrupted = false
         try {
             repeat(RESTORE_ATTEMPTS) {

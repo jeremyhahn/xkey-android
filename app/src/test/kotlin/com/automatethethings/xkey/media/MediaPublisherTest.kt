@@ -206,4 +206,52 @@ class MediaPublisherTest {
         val planted = "contentResolver.openOutputStream(uri, \"rwt\")"
         assertTrue(writingOpens.any { it in planted })
     }
+
+
+    private fun explains(content: String, written: String, backup: String, restoring: Boolean): Boolean {
+        val w = folder.newFile().apply { writeText(written) }
+        val b = folder.newFile().apply { writeText(backup) }
+        return MediaPublisher.interruptedWriteExplains(content.byteInputStream(), w, b, restoring)
+    }
+
+    @Test
+    fun `every layout a write longer than its backup and a restore after it leave is explained`() {
+        val b = "abcdefgh"
+        val w = "ABCDEFGHIJKL"
+        // The write stopped inside the backup, past it, or wrote all and was cut.
+        for (written in listOf("ABCDEfgh", "ABCDEFGHIJ", w, b)) {
+            assertTrue(written, explains(written, w, b, restoring = false))
+            assertTrue(written, explains(written, w, b, restoring = true))
+        }
+        // A restore put back the backup's first bytes over each of those.
+        for (restored in listOf("abCDEfgh", "abcDEFGHIJ", "abcdefghIJKL", "abcdeFGHIJKL", b)) {
+            assertTrue(restored, explains(restored, w, b, restoring = true))
+        }
+    }
+
+    @Test
+    fun `every layout a write shorter than its backup and a restore after it leave is explained`() {
+        val b = "abcdefgh"
+        val w = "WXYZ"
+        // Written whole but not yet cut (the backup's tail after it), or cut.
+        for (written in listOf("WXYZefgh", "WXcdefgh", w)) {
+            assertTrue(written, explains(written, w, b, restoring = false))
+        }
+        // Restored over the uncut write, over the cut one, and past the cut one's end.
+        for (restored in listOf("abYZefgh", "abYZ", "abcdef", "abcd", b)) {
+            assertTrue(restored, explains(restored, w, b, restoring = true))
+        }
+    }
+
+    @Test
+    fun `an edit is never explained, and a restore layout only once a restore began`() {
+        val b = "abcdefgh"
+        val w = "ABCDEFGHIJKL"
+        assertFalse("a restored prefix with no restore recorded", explains("abCDEfgh", w, b, restoring = false))
+        for (edited in listOf("abcdeXgh", "abCDxfgh", "abc", "abcdefghi", "ABCDEfg", "ABCDEFGHIJKLM", "")) {
+            assertFalse(edited, explains(edited, w, b, restoring = true))
+            assertFalse(edited, explains(edited, w, b, restoring = false))
+        }
+        assertFalse("a short prefix of the backup", explains("ab", "WXYZ", b, restoring = true))
+    }
 }
