@@ -413,7 +413,14 @@ object MediaPublisher {
             journal.clear()
             throw e
         } catch (e: Throwable) {
-            val intact = !touched || restore(context, target, journal)
+            val intact = try {
+                !touched || restore(context, target, journal)
+            } catch (ask: UserActionRequiredException) {
+                // The restore needs the user's consent: its record stays, and
+                // the recovery that follows the answer puts the capture back.
+                ask.addSuppressed(e)
+                throw ask
+            }
             // One that could not be put back keeps its record: the next start or retry restores it.
             if (intact) journal.clear()
             throw MediaPublishException(staged, e, original = if (intact) null else journal.backup)
@@ -446,17 +453,27 @@ object MediaPublisher {
      * exception, a cancellation or the process dying: each left a record
      * naming the capture and its backup ([GrantedWriteJournal]). Called at
      * start and before a retry; a capture xKey cannot write yet (no grant)
-     * keeps its record for a later call.
+     * keeps its record for a later call, and so does one Android 10 must
+     * ask the user about first: no screen asks here, so the recovery before
+     * that capture is written ([recoverInterruptedWrite]) raises the question.
      */
     fun recoverInterruptedWrites(context: Context) = synchronized(grantedWrites) {
-        GrantedWriteJournal.all(recoveryDirectory(context)).forEach { recover(context, it) }
+        GrantedWriteJournal.all(recoveryDirectory(context)).forEach {
+            try {
+                recover(context, it)
+            } catch (_: UserActionRequiredException) {
+                // Pending, journal and backup kept, until the user is asked.
+            }
+        }
     }
 
     /**
      * [recoverInterruptedWrites] for [target] alone, which must succeed
      * before anything stages or writes it: a capture left part-written
      * that cannot be put back yet throws [RecoveryPendingException], and its
-     * record and backup stay for a later call.
+     * record and backup stay for a later call. One Android 10 must ask the
+     * user about before restoring throws [UserActionRequiredException], its
+     * record and backup kept, so the write request screen asks.
      */
     fun recoverInterruptedWrite(context: Context, target: Uri) = synchronized(grantedWrites) {
         val journal = GrantedWriteJournal(recoveryDirectory(context), target)
@@ -683,6 +700,17 @@ object MediaPublisher {
      * once and would refuse the restore too, so the restore runs with the
      * thread's interrupt held back (a few tries, should another arrive) and
      * re-asserts it after. True only when [target] reads back as [backup].
+     *
+     * The one point a restore's need for the user's consent leaves by: when
+     * Android 10 refuses the write until the user allows it again (a new
+     * process holds no earlier consent), [overwrite] throws
+     * [UserActionRequiredException] with nothing written, and it propagates
+     * from here, never folded into false, with [journal] and its backup kept.
+     * The write request screen asks the user; the publication that follows
+     * the answer recovers again. Every caller lets it through: [recover]
+     * and [recoverInterruptedWrite] to the caller, [writeGranted]'s failure
+     * path with its first failure suppressed in it; only the sweep
+     * ([recoverInterruptedWrites]) leaves it pending, as it has no screen.
      */
     private fun restore(context: Context, target: Uri, journal: GrantedWriteJournal): Boolean {
         val backup = journal.backup
@@ -696,10 +724,15 @@ object MediaPublisher {
         try {
             repeat(RESTORE_ATTEMPTS) {
                 if (Thread.interrupted()) interrupted = true
-                val restored = runCatching {
+                val restored = try {
                     overwrite(context.contentResolver, target, backup) {}
                     sameBytes(context, target, backup)
-                }.getOrDefault(false)
+                } catch (e: UserActionRequiredException) {
+                    // Nothing written: the user is asked, the journal stays.
+                    throw e
+                } catch (_: Throwable) {
+                    false
+                }
                 if (restored) return true
             }
             return false
