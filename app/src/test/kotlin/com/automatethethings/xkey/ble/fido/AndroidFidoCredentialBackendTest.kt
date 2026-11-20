@@ -23,6 +23,8 @@ import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.NotificationKeys
 import com.automatethethings.xkey.auth.PromptOwnership
 import com.automatethethings.xkey.crypto.BiometricHelper
+import com.automatethethings.xkey.crypto.CborDecoder
+import com.automatethethings.xkey.crypto.CborEncoder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.yield
@@ -248,6 +250,73 @@ class AndroidFidoCredentialBackendTest {
         assertArrayEquals(byteArrayOf(0x30), signed.signature)
         coVerify(exactly = 1) { keystore.signApproved(aliasOf(shared.keyId), any(), any(), "SHA256withECDSA") }
         coVerify(exactly = 0) { keystore.signApproved(aliasOf(es384.keyId), any(), any(), "SHA256withECDSA") }
+    }
+
+    /** A shared passkey whose Keystore key is gone: its row stays, it cannot sign. */
+    private val keyless = passkey(byteArrayOf(0x51), SharingPolicyType.ALL_PEERS)
+
+    private fun approvingPrompt() = mockk<FidoUserPrompt>().also {
+        every { it.available } returns true
+        coEvery { it.verify(any(), any()) } returns UserCheck.VERIFIED
+        coEvery { it.chooseAccount(any(), any()) } returns 0
+    }
+
+    /** One authenticatorGetAssertion through the real authenticator over this backend. */
+    private suspend fun getAssertion(prompt: FidoUserPrompt, allow: List<ByteArray>?): Pair<Int, Map<*, *>?> {
+        val params = mutableMapOf<Any, Any?>(1 to "example.com", 2 to ByteArray(32))
+        if (allow != null) params[3] = allow.map { mapOf("id" to it, "type" to "public-key") }
+        val request = byteArrayOf(Ctap2.CMD_GET_ASSERTION.toByte()) + CborEncoder.encode(params)
+        val response = Ctap2Authenticator(backend(prompt)).handle(request) {}
+        val body = if (response.size > 1) {
+            CborDecoder.decode(response.copyOfRange(1, response.size)) as Map<*, *>
+        } else {
+            null
+        }
+        return (response[0].toInt() and 0xFF) to body
+    }
+
+    private fun withKeylessPasskey(vararg rows: KeyEntity) {
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns rows.toList()
+        coEvery { keyDao.getByKeyId(keyless.keyId) } returns keyless
+        every { keystore.publicKeyDERAt(aliasOf(keyless.keyId)) } returns null
+    }
+
+    @Test
+    fun `an allowList whose first passkey cannot sign signs with the next usable one`() = runTest {
+        withKeylessPasskey(keyless, shared)
+        val prompt = approvingPrompt()
+
+        val (status, body) = getAssertion(prompt, listOf(byteArrayOf(0x51), byteArrayOf(1, 2)))
+
+        assertEquals(Ctap2.OK, status)
+        assertArrayEquals(byteArrayOf(1, 2), (body!![1L] as Map<*, *>)["id"] as ByteArray)
+        coVerify(exactly = 1) { keystore.signApproved(aliasOf(shared.keyId), any(), any(), "SHA256withECDSA") }
+        coVerify(exactly = 0) { keystore.signApproved(aliasOf(keyless.keyId), any(), any(), any()) }
+    }
+
+    @Test
+    fun `a discoverable request leaves out a passkey whose key is missing`() = runTest {
+        withKeylessPasskey(keyless, shared)
+        val prompt = approvingPrompt()
+
+        assertEquals(listOf(byteArrayOf(1, 2).toList()), backend(prompt).credentials("example.com").map { it.id.toList() })
+        val (status, body) = getAssertion(prompt, allow = null)
+
+        assertEquals(Ctap2.OK, status)
+        assertArrayEquals(byteArrayOf(1, 2), (body!![1L] as Map<*, *>)["id"] as ByteArray)
+        // One usable account: nothing to choose, and the keyless one is never named.
+        coVerify(exactly = 0) { prompt.chooseAccount(any(), any()) }
+    }
+
+    @Test
+    fun `a request whose every match cannot sign answers no credentials before any prompt`() = runTest {
+        withKeylessPasskey(keyless)
+        val prompt = approvingPrompt()
+
+        assertEquals(Ctap2.ERR_NO_CREDENTIALS, getAssertion(prompt, listOf(byteArrayOf(0x51))).first)
+        assertEquals(Ctap2.ERR_NO_CREDENTIALS, getAssertion(prompt, allow = null).first)
+        coVerify(exactly = 0) { prompt.verify(any(), any()) }
+        coVerify(exactly = 0) { keystore.signApproved(any(), any(), any(), any()) }
     }
 
     @Test
