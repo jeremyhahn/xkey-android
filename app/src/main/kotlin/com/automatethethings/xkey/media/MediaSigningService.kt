@@ -121,6 +121,14 @@ internal object AutoSignHash {
      * is written would not match. Without location access it throws
      * [MediaPublisher.OriginalUnavailableException] and hashes nothing: the
      * capture waits until the original is readable.
+     *
+     * The one choke point every hash of a capture to sign goes through: a
+     * granted write of it that was interrupted is put back first
+     * ([MediaPublisher.recoverInterruptedWrite]). While that cannot be done
+     * yet it throws [MediaPublisher.RecoveryPendingException] (or
+     * [MediaPublisher.UserActionRequiredException] when Android 10 must ask
+     * the user first) and hashes nothing: part-written bytes are never
+     * signed, and the capture stays queued unsigned until it is restored.
      */
     fun contentHashOriginal(
         context: Context,
@@ -128,6 +136,7 @@ internal object AutoSignHash {
         limit: Int = MAX_CANONICAL_JPEG_BYTES,
         embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
     ): String {
+        MediaPublisher.recoverInterruptedWrite(context, uri)
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
         return contentHashOf(context.contentResolver.getType(uri), limit, embedLimit) {
             MediaPublisher.openOriginal(context, uri)
