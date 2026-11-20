@@ -18,6 +18,8 @@ import android.Manifest
 import android.app.PendingIntent
 import android.app.RecoverableSecurityException
 import android.content.ContentResolver
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
@@ -166,6 +168,18 @@ object MediaPublisher {
 
         /** The user-approved write request for [uris] (`MediaStore.createWriteRequest`). */
         fun createWriteRequest(context: Context, uris: List<Uri>): PendingIntent
+
+        /**
+         * A file xKey itself owns in MediaStore, [displayName] under
+         * [relativePath] (a sidecar for media another app owns): the one
+         * existing entry of that name xKey made, or a new insert. A write
+         * grant for a capture covers that capture alone, never a file beside
+         * it, so this is where the granted path writes anything else. Null
+         * before Android 10, which has no scoped storage to refuse a file
+         * beside the capture.
+         */
+        fun ownedFile(context: Context, relativePath: String, displayName: String): Uri? =
+            PlatformMediaStore.ownedFile(context, relativePath, displayName)
     }
 
     /** The platform's MediaStore. */
@@ -183,6 +197,26 @@ object MediaPublisher {
         override fun createWriteRequest(context: Context, uris: List<Uri>): PendingIntent {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) throw IllegalStateException("write requests need Android 11")
             return MediaStore.createWriteRequest(context.contentResolver, uris)
+        }
+
+        override fun ownedFile(context: Context, relativePath: String, displayName: String): Uri? {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+            val files = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val resolver = context.contentResolver
+            resolver.query(
+                files,
+                arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+                arrayOf(relativePath, displayName),
+                null
+            )?.use { cursor -> if (cursor.moveToFirst()) return ContentUris.withAppendedId(files, cursor.getLong(0)) }
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                // A generic type, so MediaStore keeps the .xkeysig suffix as named.
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+            }
+            return resolver.insert(files, values) ?: throw IOException("MediaStore refused $relativePath$displayName")
         }
     }
 

@@ -107,9 +107,10 @@ object XmpMetadataHelper {
      * and the caller queues a write request ([MediaWriteAuthorizations]).
      * With it the media is copied out, checked against [data]'s content hash
      * ([SourceChangedException] when it changed since it was signed),
-     * signed and written back. A format that carries no in-band signature
-     * takes a sidecar, a file of xKey's own beside the media, which needs no
-     * grant.
+     * signed and written back. A format that carries no in-band signature,
+     * or a container that refuses the packet, takes a sidecar: for media
+     * another app owns a file xKey owns ([writeOwnedSidecar]), never one
+     * beside the capture, which the grant does not cover.
      */
     fun signMedia(context: Context, uri: Uri, filePath: String?, data: ContentAuthenticityData): MediaSignResult {
         val access = MediaPublisher.writeAccess(context, uri)
@@ -125,8 +126,9 @@ object XmpMetadataHelper {
         }
         val mimeType = providerType ?: filePath?.let(::getMimeType) ?: "application/octet-stream"
         if (!isJpeg(mimeType) && XmpContainers.formatOf(mimeType) == null) {
-            val path = filePath ?: throw IOException("no file holds $uri, so its sidecar has nowhere to go")
-            synchronized(lockFor(path)) { writeSidecarSignature(path, data) }
+            // Not xKey's file: its sidecar is one xKey owns, never a file beside it.
+            val lock = if (filePath != null) lockFor(filePath) else lockForKey(uri.toString())
+            synchronized(lock) { writeOwnedSidecar(context, uri, filePath, data) }
             return MediaSignResult.Signed
         }
         if (access == MediaPublisher.MediaWriteAccess.NEEDS_GRANT) return MediaSignResult.NeedsWriteAuthorization
@@ -147,9 +149,9 @@ object XmpMetadataHelper {
                 val sidecar = File(getSidecarPath(staged.path))
                 if (sidecar.exists()) {
                     // The container refused the packet: the media stays as it
-                    // is and the signature goes beside it.
-                    val path = filePath ?: throw IOException("no file holds $uri, so its sidecar has nowhere to go")
-                    MediaPublisher.replaceFile(File(getSidecarPath(path))) { temp -> sidecar.copyTo(temp, overwrite = true); true }
+                    // is and the signature goes to a sidecar xKey owns: the
+                    // grant covers the capture alone, never a file beside it.
+                    writeOwnedSidecar(context, uri, filePath, data)
                     return MediaSignResult.Signed
                 }
                 MediaPublisher.writeGranted(context, uri, staged, source)
@@ -355,7 +357,12 @@ object XmpMetadataHelper {
         }
     }
 
-    fun getSidecarPath(filePath: String): String = "$filePath.xkeysig"
+    fun getSidecarPath(filePath: String): String = "$filePath$SIDECAR_SUFFIX"
+
+    private const val SIDECAR_SUFFIX = ".xkeysig"
+
+    /** Where xKey keeps the sidecars of media other apps own (MediaStore RELATIVE_PATH, no trailing slash). */
+    private const val OWNED_SIDECAR_ROOT = "Documents/xKey"
 
     /**
      * The EXIF signature written into a copy of [filePath] that replaces it
@@ -495,9 +502,58 @@ object XmpMetadataHelper {
         MediaPublisher.replaceFile(File(getSidecarPath(filePath))) { temp -> temp.writeText(data.toJsonString()); true }
     }
 
+    /**
+     * Where the sidecar of [filePath] (or of [uri] when no file is named)
+     * goes when the media is not xKey's own: a file xKey owns under
+     * `Documents/xKey/`, at the media's own relative directory, named
+     * `<media name>.xkeysig`. The relative path ends in a slash.
+     */
+    internal fun ownedSidecarLocation(filePath: String?, uri: Uri): Pair<String, String> {
+        val name = (filePath?.let { File(it).name } ?: uri.lastPathSegment ?: "media") + SIDECAR_SUFFIX
+        val directory = filePath?.let { File(it).parentFile }?.let { parent ->
+            @Suppress("DEPRECATION")
+            val root = android.os.Environment.getExternalStorageDirectory()
+            try {
+                parent.canonicalFile.relativeToOrNull(root.canonicalFile)?.invariantSeparatorsPath
+            } catch (_: IOException) {
+                null
+            }
+        }?.takeIf { it.isNotEmpty() && !it.startsWith("..") }
+        val relativePath = if (directory == null) "$OWNED_SIDECAR_ROOT/" else "$OWNED_SIDECAR_ROOT/$directory/"
+        return relativePath to name
+    }
+
+    /** The file [ownedSidecarLocation] names, read by path. */
+    private fun ownedSidecarFile(filePath: String): File {
+        val (relativePath, name) = ownedSidecarLocation(filePath, Uri.EMPTY)
+        @Suppress("DEPRECATION")
+        return File(File(android.os.Environment.getExternalStorageDirectory(), relativePath), name)
+    }
+
+    /**
+     * Write [data] as the sidecar of media another app owns at [uri]: the
+     * one sidecar write on the granted path. A write grant covers the capture
+     * alone, and scoped storage refuses a file created beside it, so the
+     * sidecar is a file xKey owns ([MediaPublisher.MediaStoreAccess.ownedFile],
+     * at [ownedSidecarLocation]). Before Android 10, which has no scoped
+     * storage, it goes beside [filePath] as before.
+     */
+    private fun writeOwnedSidecar(context: Context, uri: Uri, filePath: String?, data: ContentAuthenticityData) {
+        val (relativePath, name) = ownedSidecarLocation(filePath, uri)
+        val target = MediaPublisher.mediaStore.ownedFile(context, relativePath, name)
+        if (target == null) {
+            val path = filePath ?: throw IOException("no file holds $uri, so its sidecar has nowhere to go")
+            writeSidecarSignature(path, data)
+            return
+        }
+        val out = context.contentResolver.openOutputStream(target, "wt") ?: throw IOException("cannot write $target")
+        out.use { it.write(data.toJsonString().toByteArray(Charsets.UTF_8)) }
+    }
+
     private fun readSidecarSignature(filePath: String): ContentAuthenticityData? {
         return try {
-            val sidecarFile = File(getSidecarPath(filePath))
+            // Beside the media, or, for media another app owns, the sidecar xKey owns for it.
+            val sidecarFile = File(getSidecarPath(filePath)).takeIf { it.exists() } ?: ownedSidecarFile(filePath)
             if (!sidecarFile.exists()) return null
             sidecarFile.inputStream().use { ContentAuthenticityData.fromJsonStream(it) }
         } catch (_: Exception) {
