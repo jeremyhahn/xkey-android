@@ -268,4 +268,76 @@ class MediaWriteRequestActivityTest {
         assertTrue(malformed.get().isFinishing)
         assertEquals("a malformed queue is untouched", "{not a queue", store.readText())
     }
+
+    /**
+     * Answers the write request with [resultCode], then the process dies
+     * before the publication that answer started does anything: the screen
+     * was stopped with its state saved, the publication's work is lost (its
+     * reads of the queue fail, as a dead process reads nothing), and every
+     * process-local record of it is gone. Returns the screen restored from
+     * that saved state in the "next process".
+     */
+    private fun answerThenDieBeforePublishing(resultCode: Int): ActivityController<MediaWriteRequestActivity> {
+        queue(first)
+        val screen = open()
+        val previousRead = MediaWriteAuthorizations.readStore
+        val main = Looper.getMainLooper().thread
+        val deadReads = java.util.concurrent.atomic.AtomicInteger()
+        val saved = android.os.Bundle()
+        try {
+            MediaWriteAuthorizations.readStore = { file ->
+                if (Thread.currentThread() != main) {
+                    deadReads.incrementAndGet()
+                    throw java.io.IOException("the process died")
+                }
+                previousRead(file)
+            }
+            granted = resultCode == Activity.RESULT_OK
+            answer(screen, resultCode)
+            screen.pause().saveInstanceState(saved).stop()
+            // The publication and its notification update both read nothing.
+            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (deadReads.get() < 2 && System.nanoTime() < end) Thread.sleep(20)
+            assertTrue("the dead publication ran", deadReads.get() >= 2)
+            Thread.sleep(100)
+        } finally {
+            MediaWriteAuthorizations.readStore = previousRead
+        }
+        assertEquals("the dead publication published nothing", 1, MediaWriteAuthorizations.pending(context).size)
+        screen.destroy()
+        forgetProcessState()
+        return Robolectric.buildActivity(MediaWriteRequestActivity::class.java).setup(saved)
+    }
+
+    /** What a process death takes: every running publication and question this process held. */
+    private fun forgetProcessState() {
+        MediaWriteRequestActivity::class.java.declaredFields
+            .filter { java.lang.reflect.Modifier.isStatic(it.modifiers) && !java.lang.reflect.Modifier.isFinal(it.modifiers) }
+            .forEach { it.isAccessible = true; it.set(null, null) }
+        val runs = MediaSaveRuns::class.java.getDeclaredField("runs").apply { isAccessible = true }
+        (runs.get(MediaSaveRuns) as MutableMap<*, *>).clear()
+    }
+
+    @Test
+    fun `a grant the process died after is published by the restored screen`() {
+        val restored = answerThenDieBeforePublishing(Activity.RESULT_OK)
+
+        assertTrue(
+            "the granted capture is published after the restore",
+            awaitMain { MediaWriteAuthorizations.pending(context).isEmpty() }
+        )
+        assertTrue("the screen ends once it is", awaitMain { restored.get().isFinishing })
+    }
+
+    @Test
+    fun `a refusal the process died after is applied by the restored screen`() {
+        val restored = answerThenDieBeforePublishing(Activity.RESULT_CANCELED)
+
+        assertTrue(
+            "the refused capture is dropped after the restore",
+            awaitMain { MediaWriteAuthorizations.pending(context).isEmpty() }
+        )
+        assertTrue("the screen ends once it is", awaitMain { restored.get().isFinishing })
+        assertArrayEquals("nothing was written", capture.readBytes(), media.readBytes())
+    }
 }
