@@ -412,39 +412,116 @@ class AndroidFidoCredentialBackend(
      * turn the credential provider signs in), so counters are signed in the
      * order they are read.
      *
-     * A per-operation passkey (auth duration 0), or any key Keystore will not
-     * use without fresh authentication, signs behind a prompt bound to this
-     * signature, as the credential provider signs it. A declined or
-     * impossible prompt is a refusal, never a signature. Both paths sign
-     * through [signSelected], with [selected]'s alias only.
+     * Which prompt a passkey whose key will not sign silently takes is
+     * decided in one place, [reauthentication], as RequestHandler's
+     * signWithBiometric decides it:
+     *
+     * - a per-operation passkey (auth duration 0), or any other key Keystore
+     *   will not use without fresh authentication, signs behind a prompt
+     *   bound to this signature ([signBehindKeyBoundPrompt]), as the
+     *   credential provider signs it;
+     * - a time-window passkey (auth duration above 0) whose window closed,
+     *   say while this assertion waited behind another approval, takes a
+     *   fresh generic authentication and signs again inside the new window.
+     *   A key-bound prompt cannot unlock it: its signing activity's
+     *   Signature.initSign fails on the expired key before any prompt.
+     *
+     * A declined or impossible prompt is a refusal, never a signature. Every
+     * path signs through [signSelected], with [selected]'s alias only.
      */
     private suspend fun signInKeystore(
         selected: SelectedPasskey,
         signedData: suspend () -> ByteArray
     ): ByteArray {
-        if (selected.row.authDurationSeconds != PER_OPERATION) {
-            try {
-                return signSelected(selected, signedData) { checkedData ->
-                    BiometricHelper.inOneTurn("fidoBleAssertion") {
-                        keystoreManager.signApproved(
-                            alias = selected.alias,
-                            approvedPublicKeyDer = selected.publicKeyDer,
-                            data = checkedData(),
-                            jcaAlgorithm = SIGNING_JCA_ALGORITHM
-                        )
-                    }
+        val reauthentication = reauthentication(selected.row)
+        if (selected.row.authDurationSeconds == PER_OPERATION) {
+            return signBehindKeyBoundPrompt(selected, signedData)
+        }
+        try {
+            return signSilently(selected, signedData)
+        } catch (e: BiometricRequiredException) {
+            // The key wants fresh authentication after all (the count read
+            // here is a gap).
+        }
+        return when (reauthentication) {
+            Reauthentication.KEY_BOUND -> signBehindKeyBoundPrompt(selected, signedData)
+            Reauthentication.GENERIC -> {
+                reauthenticate(selected)
+                try {
+                    signSilently(selected, signedData)
+                } catch (e: BiometricRequiredException) {
+                    throw FidoRefusedException(
+                        Ctap2.ERR_OPERATION_DENIED,
+                        "The passkey's authentication window closed again before it signed"
+                    )
                 }
-            } catch (e: BiometricRequiredException) {
-                // Auth-bound after all: fall through to the key-bound prompt,
-                // which reads the next count (the one read here is a gap).
-            } catch (e: ApprovedKeyChangedException) {
-                throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey's key changed while it signed")
-            } catch (e: KeyNotFoundException) {
-                throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey's key went while it signed")
-            } catch (e: BiometricException) {
-                throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "No signing turn came")
             }
         }
+    }
+
+    /** The prompt a passkey whose key will not sign silently takes. */
+    private enum class Reauthentication { GENERIC, KEY_BOUND }
+
+    /**
+     * The one choice of prompt kind for a BLE signature, by the passkey's
+     * auth duration, as RequestHandler's signWithBiometric makes it: a
+     * time-window key takes a generic prompt, every other key one bound to
+     * its signature.
+     */
+    private fun reauthentication(row: KeyEntity): Reauthentication =
+        if (row.authDurationSeconds > 0) Reauthentication.GENERIC else Reauthentication.KEY_BOUND
+
+    /**
+     * A signature without a prompt, on this assertion's own queue turn,
+     * inside the key's authentication window (or for a key that needs none).
+     *
+     * @throws BiometricRequiredException when Keystore wants fresh
+     *   authentication first; every other failure is a refusal.
+     */
+    private suspend fun signSilently(
+        selected: SelectedPasskey,
+        signedData: suspend () -> ByteArray
+    ): ByteArray = try {
+        signSelected(selected, signedData) { checkedData ->
+            BiometricHelper.inOneTurn("fidoBleAssertion") {
+                keystoreManager.signApproved(
+                    alias = selected.alias,
+                    approvedPublicKeyDer = selected.publicKeyDer,
+                    data = checkedData(),
+                    jcaAlgorithm = SIGNING_JCA_ALGORITHM
+                )
+            }
+        }
+    } catch (e: BiometricRequiredException) {
+        throw e
+    } catch (e: ApprovedKeyChangedException) {
+        throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey's key changed while it signed")
+    } catch (e: KeyNotFoundException) {
+        throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey's key went while it signed")
+    } catch (e: BiometricException) {
+        throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "No signing turn came")
+    }
+
+    /**
+     * A fresh generic authentication for a time-window passkey, which opens
+     * its Keystore window again. Anything but a verified user is a refusal.
+     */
+    private suspend fun reauthenticate(selected: SelectedPasskey) {
+        val prompt = userPrompt?.takeIf { it.available }
+            ?: throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "This passkey needs a prompt to sign")
+        if (prompt.verify(selected.rpId, registering = false) != UserCheck.VERIFIED) {
+            throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The user declined the passkey's prompt")
+        }
+    }
+
+    /**
+     * A signature behind a prompt bound to it, for a key Keystore lets sign
+     * only right after its own authentication.
+     */
+    private suspend fun signBehindKeyBoundPrompt(
+        selected: SelectedPasskey,
+        signedData: suspend () -> ByteArray
+    ): ByteArray {
         val prompt = userPrompt?.takeIf { it.available }
             ?: throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "This passkey needs a prompt bound to its key")
         return try {
