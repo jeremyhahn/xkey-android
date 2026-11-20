@@ -491,8 +491,8 @@ class KeyPolicyStoreTest {
         store.replayDeletions(materialDelete { true })
         assertEquals("the replay audited the delete again", listOf("k"), audited)
 
-        assertTrue(store.deleteMaterial("bare", materialDelete { true }))
-        assertTrue(store.deleteMaterial("nothing", KeyMaterial.NONE))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("bare", materialDelete { true }))
+        assertEquals(KeyPolicyStore.MaterialDelete.NOTHING_HELD, store.deleteMaterial("nothing", KeyMaterial.NONE))
         assertEquals(listOf("k", "bare"), audited)
     }
 
@@ -537,7 +537,7 @@ class KeyPolicyStoreTest {
             fail("a key with a pending deletion was usable")
         } catch (expected: KeyPolicyStore.KeyDeletedException) {
         }
-        assertTrue(store.deleteMaterial("bare", materialDelete { false }))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("bare", materialDelete { false }))
         try {
             store.requireUsable("bare")
             fail("material with a pending deletion was usable")
@@ -675,10 +675,10 @@ class KeyPolicyStoreTest {
     fun aDeleteBesideTheOtherKeysRowKeepsItAndStaysOwed() = runBlocking {
         val key = tables.addKey("k", SELECTED_PEERS)
         val store = store()
-        assertFalse("a delete beside a row it did not find ran", store.deleteMaterial("k", materialDelete { true }))
-        assertFalse(store.deleteMaterial("k", materialDelete { true }, besideRow = key + 1))
+        assertEquals("a delete beside a row it did not find ran", KeyPolicyStore.MaterialDelete.CHANGED, store.deleteMaterial("k", materialDelete { true }))
+        assertEquals(KeyPolicyStore.MaterialDelete.CHANGED, store.deleteMaterial("k", materialDelete { true }, besideRow = key + 1))
 
-        assertTrue(store.deleteMaterial("k", materialDelete { false }, besideRow = key))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", materialDelete { false }, besideRow = key))
         assertEquals("the other key's row was deleted", key, store.instance("k"))
         store.replayDeletions(materialDelete { false })
         assertTrue("a delete beside a row was dropped unreplayed", store.isDeletionPending("k"))
@@ -699,15 +699,15 @@ class KeyPolicyStoreTest {
     @Test
     fun aSecondRowlessDeleteNeverReplacesAnOwedTombstone() = runBlocking {
         val store = store()
-        assertTrue(store.deleteMaterial("k", generationDelete("credential") { false }))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", generationDelete("credential") { false }))
 
-        assertFalse("a second delete replaced an owed tombstone", store.deleteMaterial("k", generationDelete("general") { false }))
+        assertEquals("a second delete replaced an owed tombstone", KeyPolicyStore.MaterialDelete.CHANGED, store.deleteMaterial("k", generationDelete("general") { false }))
         val owed = mutableListOf<String?>()
         store.replayDeletions(tombstoneDelete { _, tombstone -> owed += tombstone.generation; false })
         assertEquals("the owed material was dropped", listOf<String?>("credential"), owed)
 
         val deleted = mutableListOf<String?>()
-        assertTrue(store.deleteMaterial("k", generationDelete("general") { deleted += it.generation; true }))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", generationDelete("general") { deleted += it.generation; true }))
         assertEquals(listOf<String?>("credential", "general"), deleted)
         assertFalse(store.isDeletionPending("k"))
     }
@@ -717,7 +717,7 @@ class KeyPolicyStoreTest {
     fun aRowDeleteNeverReplacesAnOwedDeleteBesideIt() = runBlocking {
         val key = tables.addKey("k", SELECTED_PEERS)
         val store = store()
-        assertTrue(store.deleteMaterial("k", generationDelete("credential") { false }, besideRow = key))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", generationDelete("credential") { false }, besideRow = key))
 
         assertFalse("a row delete replaced an owed tombstone", store.deleteKey("k", key, generationDelete("general") { false }))
         assertEquals(key, store.instance("k"))
@@ -743,7 +743,7 @@ class KeyPolicyStoreTest {
     @Test
     fun aWriteUnderATombstoneSettlesItFirstOrIsRefused() = runBlocking {
         val store = store()
-        assertTrue(store.deleteMaterial("k", materialDelete { false }))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", materialDelete { false }))
         val written = mutableSetOf<String>()
 
         try {

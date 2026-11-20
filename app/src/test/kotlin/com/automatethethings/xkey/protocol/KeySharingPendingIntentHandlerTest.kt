@@ -618,7 +618,7 @@ class KeySharingPendingIntentHandlerTest {
                 tombstone: com.automatethethings.xkey.storage.entity.KeyDeletionEntity
             ): Boolean = false
         }
-        assertTrue(store.deleteMaterial(internal, recorded))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial(internal, recorded))
         assertTrue(store.isDeletionPending(internal))
 
         com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
@@ -1004,7 +1004,7 @@ class KeySharingPendingIntentHandlerTest {
         try {
             val store = store
             software += key
-            assertTrue(store.deleteMaterial(key, owedDelete()))
+            assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial(key, owedDelete()))
             // A write of another key under the same id holds its lock.
             val gate = CompletableDeferred<Unit>()
             val holder = async(UnconfinedTestDispatcher(testScheduler)) { store.lockKeyMaterial(key) { gate.await() } }
@@ -1038,9 +1038,11 @@ class KeySharingPendingIntentHandlerTest {
         val software = fakeSoftwareKeyStore(files)
         try {
             // An earlier delete of the id whose material delete did not
-            // confirm: its tombstone is owed.
+            // confirm: its tombstone is owed. The earlier key held material:
+            // a delete of an id that holds nothing writes no tombstone.
             val store = store
-            assertTrue(store.deleteMaterial(key, owedDelete()))
+            software += key
+            assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial(key, owedDelete()))
             assertTrue(store.isDeletionPending(key))
 
             handler.setConnectedDevicePublicKeyHex(PEER_A)

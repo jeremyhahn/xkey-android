@@ -320,11 +320,11 @@ class KeyDeletionMaterialTypesTest {
         val credential = keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL)
 
         stuck += "xkey_credential_k"
-        assertTrue(store.deleteMaterial("k", credential, besideRow = row))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", credential, besideRow = row))
         assertTrue("the failed delete is not owed", store.isDeletionPending("k"))
 
         stuck.clear()
-        assertTrue(store.deleteMaterial("k", credential, besideRow = row))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", credential, besideRow = row))
         assertFalse("the credential was left", "xkey_credential_k" in entries)
         assertEquals("the retry deleted the general key beside its row", setOf("xkey_key_k"), entries.keys)
         assertFalse(store.isDeletionPending("k"))
@@ -355,7 +355,7 @@ class KeyDeletionMaterialTypesTest {
         org.junit.Assert.assertNotNull("the row went", tables.key("k"))
         assertFalse(store.isDeletionPending("k"))
 
-        assertTrue(store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
         assertEquals("the credential delete took the general key", setOf("xkey_key_k"), entries.keys)
         assertTrue(store.deleteKey("k", row, keyMaterialDeleter(context, keystore, UserKeyKind.GENERAL)))
         assertTrue("the general delete left its key", entries.isEmpty())
@@ -409,7 +409,7 @@ class KeyDeletionMaterialTypesTest {
         val row = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = generalDer)
 
         stuck += "xkey_credential_k"
-        assertTrue(store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
         assertTrue("the failed credential delete is not owed", store.isDeletionPending("k"))
 
         stuck.clear()
@@ -572,7 +572,7 @@ class KeyDeletionMaterialTypesTest {
         keystoreKey("xkey_credential_k", certificate = true)
         keystoreKey("xkey_key_k", certificate = true)
         stuck += "xkey_credential_k"
-        assertTrue(store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
         assertTrue("the credential delete is owed", store.isDeletionPending("k"))
 
         store.requireUsable("k", UserKeyKind.GENERAL)
@@ -613,7 +613,7 @@ class KeyDeletionMaterialTypesTest {
         val row = tables.addKey("c", com.automatethethings.xkey.storage.entity.SharingPolicyType.PRIVATE)
         keystoreKey("xkey_credential_c", certificate = true)
         stuck += "xkey_credential_c"
-        assertTrue(store.deleteMaterial("c", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("c", keyMaterialDeleter(context, keystore, UserKeyKind.CREDENTIAL), besideRow = row))
         assertTrue("the credential delete is owed", store.isDeletionPending("c"))
         assertEquals(null, keystore.resolveKeystoreAlias("c", UserKeyKind.GENERAL))
         assertEquals(UserKeyKind.CREDENTIAL, keystore.soleKind("c"))

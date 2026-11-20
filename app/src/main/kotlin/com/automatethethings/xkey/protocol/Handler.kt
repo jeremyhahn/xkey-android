@@ -2506,9 +2506,17 @@ class RequestHandler(
         if (entity == null || besideRow) {
             // No key row, or the row is the other key's: the material alone,
             // in the store's serialisation, and only if the id's row is still
-            // what this request found (#193 r8).
-            if (!keyPolicyStore.deleteMaterial(keyId, material, besideRow = entity?.id.takeIf { besideRow })) {
-                return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
+            // what this request found (#193 r8). An id that holds nothing
+            // deletes nothing: deleted=false, as it always answered, with no
+            // tombstone written (#270 review).
+            when (keyPolicyStore.deleteMaterial(keyId, material, besideRow = entity?.id.takeIf { besideRow })) {
+                KeyPolicyStore.MaterialDelete.DELETED -> Unit
+                KeyPolicyStore.MaterialDelete.NOTHING_HELD -> {
+                    Log.i(TAG, "Nothing to delete: $keyId")
+                    return Response.success(request.id, JSONObject().put("deleted", false))
+                }
+                KeyPolicyStore.MaterialDelete.CHANGED ->
+                    return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
             }
         } else if (!KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = material)) {
             return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")

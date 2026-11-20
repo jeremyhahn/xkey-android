@@ -144,7 +144,7 @@ class KeyStoreSyncManagerTest {
         coEvery { keyDao.getAll() } returns emptyList()
 
         val store = tables.store()
-        assertTrue(store.deleteMaterial("general-1", materialDelete { false }))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("general-1", materialDelete { false }))
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, store).syncAll()
 
@@ -165,7 +165,7 @@ class KeyStoreSyncManagerTest {
         coEvery { keyDao.getAll() } returns emptyList()
 
         val store = tables.store()
-        assertTrue(store.deleteMaterial("cred-1", materialDelete { false }))
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("cred-1", materialDelete { false }))
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, store).syncAll()
 
@@ -184,7 +184,7 @@ class KeyStoreSyncManagerTest {
     fun `a deletion racing the sync never leaves a row under a tombstone`() = runTest {
         coEvery { keyDao.getAll() } returns emptyList()
         val store = tables.store()
-        var deletion: kotlinx.coroutines.Deferred<Boolean>? = null
+        var deletion: kotlinx.coroutines.Deferred<KeyPolicyStore.MaterialDelete>? = null
         coEvery { keyDao.insert(match { it.keyId == "general-1" }) } coAnswers {
             // A delete of the id starts while the sync's insert is landing.
             deletion = async(UnconfinedTestDispatcher(testScheduler)) { store.deleteMaterial("general-1", materialDelete { false }) }

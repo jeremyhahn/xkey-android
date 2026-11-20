@@ -484,20 +484,30 @@ class KeyPolicyStore(
      * Deletes the material of [keyId] when it has no key row ([material]),
      * inside [withKeyMaterial]: only if no key row appeared meanwhile, so a
      * key generated under the id while this waited keeps its material.
-     * A tombstone is written first, so a failed delete is replayed. Returns
-     * whether [material] was attempted.
+     * A tombstone is written first, so a failed delete is replayed.
+     *
+     * The one place a rowless delete decides whether a key exists to delete
+     * (#270 review): an id with no material and no pending deletion holds
+     * nothing, so no tombstone is written and nothing is audited
+     * ([MaterialDelete.NOTHING_HELD]). An id whose pending deletion this
+     * settles had a key, deleted now ([MaterialDelete.DELETED]).
      */
-    suspend fun deleteMaterial(keyId: String, material: KeyMaterial, besideRow: Long? = null): Boolean = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(keyId) {
+    suspend fun deleteMaterial(keyId: String, material: KeyMaterial, besideRow: Long? = null): MaterialDelete = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(keyId) {
         lockKeyMaterial(keyId) { held ->
             // [besideRow]: the id's key row is another key's (a credential
             // and a general key share the id) and stays, with its policy and
             // grants; [material] names only the deleted key's (#255 review).
-            if (dao.keyInstance(keyId) != besideRow) return@lockKeyMaterial false
+            if (dao.keyInstance(keyId) != besideRow) return@lockKeyMaterial MaterialDelete.CHANGED
             val source = dao.deletion(keyId)?.source
             // A delete names one key's material, so its generation need not
             // hold what an earlier tombstone owes: that one is settled first.
-            val retry = noTombstoneOwed(held, material) ?: return@lockKeyMaterial false
+            val retry = noTombstoneOwed(held, material) ?: return@lockKeyMaterial MaterialDelete.CHANGED
             val generation = material.generation(held, source, retry)
+            // Nothing held: no tombstone, nothing audited. A pending deletion
+            // just settled was the key's delete.
+            if (material.isEmpty(generation)) {
+                return@lockKeyMaterial if (retry) MaterialDelete.DELETED else MaterialDelete.NOTHING_HELD
+            }
             // A delete beside a row records that row's instance: the one
             // tombstone whose row is still there, which [settleDeletion]
             // replays instead of dropping.
@@ -507,13 +517,23 @@ class KeyPolicyStore(
                 dao.putDeletion(tombstone)
                 true
             }
-            if (absent) {
-                // A delete of an id that holds nothing deletes nothing to record.
-                if (!material.isEmpty(generation)) audited(tombstone, null, material)
-                deleteMaterialOf(held, tombstone, material)
-            }
-            absent
+            if (!absent) return@lockKeyMaterial MaterialDelete.CHANGED
+            audited(tombstone, null, material)
+            deleteMaterialOf(held, tombstone, material)
+            MaterialDelete.DELETED
         }
+    }
+
+    /** What [deleteMaterial] did. */
+    enum class MaterialDelete {
+        /** The id's material was deleted, or its tombstone written for a replay. */
+        DELETED,
+
+        /** The id held no material and no pending deletion: nothing was written. */
+        NOTHING_HELD,
+
+        /** The id's key row is no longer the one the delete named: nothing was written. */
+        CHANGED
     }
 
     /**
