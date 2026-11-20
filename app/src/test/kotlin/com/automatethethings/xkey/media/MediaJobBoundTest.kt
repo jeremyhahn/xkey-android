@@ -27,7 +27,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import java.lang.management.ManagementFactory
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
@@ -45,8 +44,11 @@ class MediaJobBoundTest {
 
     /** Bytes the calling thread has allocated so far. */
     private fun allocated(): Long {
-        val bean = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
-        return bean.getThreadAllocatedBytes(Thread.currentThread().id)
+        // The unit tests compile against android.jar, which has no java.lang.management: reflect.
+        val bean = Class.forName("java.lang.management.ManagementFactory").getMethod("getThreadMXBean").invoke(null)
+        val method = Class.forName("com.sun.management.ThreadMXBean")
+            .getMethod("getThreadAllocatedBytes", Long::class.javaPrimitiveType)
+        return method.invoke(bean, Thread.currentThread().id) as Long
     }
 
     /** An MP4 whose media data is [payload] bytes. */
@@ -55,7 +57,7 @@ class MediaJobBoundTest {
         file.outputStream().use { out ->
             out.write(box("ftyp", ascii("isom") + be32(0x200) + ascii("isommp42")))
             out.write(box("moov", box("mvhd", ByteArray(12) { 1 })))
-            out.write(be32(payload + 8) + ascii("mdat"))
+            out.write(be32(payload + 8L) + ascii("mdat"))
             val chunk = ByteArray(1024 * 1024) { 0x11 }
             var left = payload
             while (left > 0) {

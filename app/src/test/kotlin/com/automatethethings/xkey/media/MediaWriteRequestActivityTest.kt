@@ -233,14 +233,22 @@ class MediaWriteRequestActivityTest {
         queue(first)
         val controller = open()
         queue(later)
+        val firstRequest = shadowOf(controller.get()).lastIntentSenderRequest
 
         answer(controller, Activity.RESULT_CANCELED)
 
-        assertTrue(awaitMain { controller.get().isFinishing })
         assertTrue(
             "the refused capture is dropped and the later one kept",
             awaitMain { MediaWriteAuthorizations.pending(context).map { it.uri } == listOf(later.toString()) }
         )
+        assertTrue(
+            "the later capture is asked for in the next request",
+            awaitMain { shadowOf(controller.get()).lastIntentSenderRequest !== firstRequest }
+        )
+        assertTrue(!controller.get().isFinishing)
+
+        answer(controller, Activity.RESULT_CANCELED)
+        assertTrue(awaitMain { controller.get().isFinishing })
     }
 
     @Test
