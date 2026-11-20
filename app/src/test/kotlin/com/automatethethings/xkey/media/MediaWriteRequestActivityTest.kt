@@ -292,9 +292,12 @@ class MediaWriteRequestActivityTest {
         val main = Looper.getMainLooper().thread
         val deadReads = java.util.concurrent.atomic.AtomicInteger()
         val saved = android.os.Bundle()
+        // The process dies once the state is saved: until then the publication waits at its first read.
+        val died = CountDownLatch(1)
         try {
             MediaWriteAuthorizations.readStore = { file ->
                 if (Thread.currentThread() != main) {
+                    died.await(10, TimeUnit.SECONDS)
                     deadReads.incrementAndGet()
                     throw java.io.IOException("the process died")
                 }
@@ -304,12 +307,14 @@ class MediaWriteRequestActivityTest {
             answer(screen, resultCode)
             screen.pause().saveInstanceState(saved).stop()
             readsBeforeDeath = deadReads.get()
+            died.countDown()
             // The publication and its notification update both read nothing.
             val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
             while (deadReads.get() < 2 && System.nanoTime() < end) Thread.sleep(20)
             assertTrue("the dead publication ran", deadReads.get() >= 2)
             Thread.sleep(100)
         } finally {
+            died.countDown()
             MediaWriteAuthorizations.readStore = previousRead
         }
         assertEquals("the dead publication published nothing", 1, MediaWriteAuthorizations.pending(context).size)
