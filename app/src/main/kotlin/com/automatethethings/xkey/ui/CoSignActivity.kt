@@ -422,7 +422,9 @@ class CoSignActivity : AppCompatActivity() {
             keep = listOfNotNull(exchange.pendingCopy?.staged, exchange.runningCopy?.copy?.staged)
         )
         exchange.runningCopy?.let { runCopy(it) }
-        appendQueuedResponse()
+        // The append reads the media whole: after a recreation during the
+        // location dialog it waits on that dialog's answer.
+        locationAccess.withOriginals(exchange.queued.mapNotNull { it.media }) { appendQueuedResponse() }
     }
 
     override fun onDestroy() {
@@ -472,7 +474,7 @@ class CoSignActivity : AppCompatActivity() {
         }
         exchange.media?.let { restored ->
             selectedFileText.text = restored.lastPathSegment ?: restored.toString()
-            loadSignatures(restored)
+            locationAccess.withOriginals(listOf(restored)) { loadSignatures(restored) }
         }
     }
 

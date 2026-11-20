@@ -49,6 +49,14 @@ class MediaWriteRequestActivity : ComponentActivity() {
     /** Whether the user has answered it, so publication has started. */
     private var answered = false
 
+    /**
+     * The request phase: false while the location-access question comes
+     * first, true once the write request (or, with none needed, publication)
+     * has started. Kept in the saved state, so a recreation during the
+     * location dialog waits on its answer instead of a write request never launched.
+     */
+    private var writeRequestLaunched = false
+
     private val launcher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         answered = true
         publish(result.resultCode == Activity.RESULT_OK, requested.toList())
@@ -60,20 +68,35 @@ class MediaWriteRequestActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (savedInstanceState != null) {
-            // A recreated screen already launched its request; an unanswered one still delivers its result here.
             requested = savedInstanceState.getStringArrayList(KEY_REQUESTED) ?: arrayListOf()
             answered = savedInstanceState.getBoolean(KEY_ANSWERED)
+            writeRequestLaunched = savedInstanceState.getBoolean(KEY_WRITE_REQUEST_LAUNCHED)
+            // Recreated while the location dialog was open: wait on its answer again.
+            if (!writeRequestLaunched) {
+                askLocationThenRequest()
+                return
+            }
+            // The write request was launched; an unanswered one still delivers its result here.
             if (answered) finishAfter(publication)
             return
         }
-        // A capture is rewritten only from its original bytes, location
-        // included (MediaPublisher.openOriginal): ask for that first.
+        askLocationThenRequest()
+    }
+
+    /**
+     * A capture is rewritten only from its original bytes, location included
+     * (MediaPublisher.openOriginal): ask for that first, then launch the
+     * write request. After a recreation this joins the location request the
+     * previous instance left open ([MediaLocationAccess]).
+     */
+    private fun askLocationThenRequest() {
         val queued = MediaWriteAuthorizations.pending(applicationContext).map { Uri.parse(it.uri) }
         locationAccess.withOriginals(queued) { launchWriteRequest() }
     }
 
     /** Ask, in one write request, for every queued capture; finish when none waits. */
     private fun launchWriteRequest() {
+        writeRequestLaunched = true
         val request = try {
             MediaWriteAuthorizations.request(applicationContext)
         } catch (e: Exception) {
@@ -99,6 +122,7 @@ class MediaWriteRequestActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
         outState.putStringArrayList(KEY_REQUESTED, requested)
         outState.putBoolean(KEY_ANSWERED, answered)
+        outState.putBoolean(KEY_WRITE_REQUEST_LAUNCHED, writeRequestLaunched)
     }
 
     private fun publish(granted: Boolean, uris: List<String>) {
@@ -151,6 +175,7 @@ class MediaWriteRequestActivity : ComponentActivity() {
         const val TAG = "MediaWriteRequest"
         const val KEY_REQUESTED = "requested"
         const val KEY_ANSWERED = "answered"
+        const val KEY_WRITE_REQUEST_LAUNCHED = "write_request_launched"
         val publishing = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         /** The publication running for the last answered request. */
