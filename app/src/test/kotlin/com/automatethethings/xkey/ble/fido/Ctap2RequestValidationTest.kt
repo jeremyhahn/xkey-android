@@ -140,6 +140,14 @@ class Ctap2RequestValidationTest {
         assertRegistrationRefused("unsupported type", Ctap2.ERR_UNSUPPORTED_ALGORITHM,
             registration(params = listOf(mapOf("type" to "unsupported", "alg" to -7))))
         assertRegistrationRefused("no params", Ctap2.ERR_UNSUPPORTED_ALGORITHM, registration(params = emptyList<Any>()))
+
+        // ES256 is still chosen from a public-key entry after one of another type.
+        val (status, _) = call(Ctap2.CMD_MAKE_CREDENTIAL, registration(params = listOf(
+            mapOf("alg" to -7, "type" to "unsupported"),
+            mapOf("alg" to -7, "type" to "public-key")
+        )))
+        assertEquals(Ctap2.OK, status)
+        assertEquals(1, backend.created.size)
     }
 
     @Test
@@ -160,16 +168,6 @@ class Ctap2RequestValidationTest {
         }
         assertRegistrationRefused("params not a list", Ctap2.ERR_CBOR_UNEXPECTED_TYPE, registration(params = good))
         assertRegistrationRefused("params missing", Ctap2.ERR_MISSING_PARAMETER, registration(params = null))
-    }
-
-    @Test
-    fun `ES256 is chosen from the public-key entry when another type comes first`() = runTest {
-        val (status, _) = call(Ctap2.CMD_MAKE_CREDENTIAL, registration(params = listOf(
-            mapOf("alg" to -7, "type" to "unsupported"),
-            mapOf("alg" to -7, "type" to "public-key")
-        )))
-        assertEquals(Ctap2.OK, status)
-        assertEquals(1, backend.created.size)
     }
 
     @Test

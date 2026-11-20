@@ -17,8 +17,6 @@ package com.automatethethings.xkey.ble.fido
 import com.automatethethings.xkey.credential.UserVerificationCompliance
 import com.automatethethings.xkey.credential.UserVerificationRequiredException
 import com.automatethethings.xkey.credential.UvRequirement
-import com.automatethethings.xkey.crypto.CborDecoder
-import com.automatethethings.xkey.crypto.CborDecodingException
 import com.automatethethings.xkey.crypto.CborEncoder
 import java.nio.ByteBuffer
 import java.security.MessageDigest
@@ -182,11 +180,13 @@ class Ctap2Authenticator(
             when (request[0].toInt() and 0xFF) {
                 Ctap2.CMD_GET_INFO -> response(getInfo())
                 Ctap2.CMD_GET_ASSERTION ->
-                    response(getAssertion(decodeParams(request, GET_ASSERTION_OPTIONAL), onUserActionNeeded))
+                    response(getAssertion(Ctap2Requests.getAssertion(request), onUserActionNeeded))
                 Ctap2.CMD_MAKE_CREDENTIAL ->
-                    response(makeCredential(decodeParams(request, MAKE_CREDENTIAL_OPTIONAL), onUserActionNeeded))
+                    response(makeCredential(Ctap2Requests.makeCredential(request), onUserActionNeeded))
                 else -> status(Ctap2.ERR_INVALID_COMMAND)
             }
+        } catch (e: Ctap2RequestException) {
+            status(e.status)
         } catch (e: CtapError) {
             status(e.status)
         } catch (e: FidoRefusedException) {
@@ -195,34 +195,6 @@ class Ctap2Authenticator(
             throw e
         } catch (e: Exception) {
             status(Ctap2.ERR_OTHER)
-        }
-    }
-
-    /**
-     * The one place a request's parameters are decoded. Each optional
-     * container parameter ([optional]: allowList, excludeList, extensions,
-     * options) is first checked against its expected CBOR type: a value of
-     * any other type, empty or not, is CTAP2_ERR_CBOR_UNEXPECTED_TYPE. Only
-     * then is an empty container of the expected type dropped, so it means
-     * the same as an absent one: an empty allowList is discovery, never "no
-     * credential allowed", and an empty excludeList excludes nothing. Every
-     * command reads its parameters only from what this returns.
-     */
-    private fun decodeParams(request: ByteArray, optional: Map<Long, OptionalType>): Map<*, *> {
-        if (request.size < 2) throw CtapError(Ctap2.ERR_MISSING_PARAMETER)
-        val decoded = try {
-            CborDecoder.decode(request.copyOfRange(1, request.size))
-        } catch (e: CborDecodingException) {
-            throw CtapError(Ctap2.ERR_INVALID_CBOR)
-        }
-        val params = decoded as? Map<*, *> ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
-        return params.filterNot { (key, value) ->
-            val expected = (key as? Long)?.let { optional[it] } ?: return@filterNot false
-            val empty = when (expected) {
-                OptionalType.LIST -> (value as? List<*> ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)).isEmpty()
-                OptionalType.MAP -> (value as? Map<*, *> ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)).isEmpty()
-            }
-            empty
         }
     }
 
@@ -240,14 +212,12 @@ class Ctap2Authenticator(
         10 to listOf(mapOf("alg" to Ctap2.ALG_ES256, "type" to "public-key"))
     )
 
-    private suspend fun getAssertion(params: Map<*, *>, onUserActionNeeded: () -> Unit): Map<Any, Any?> {
-        val rpId = params.text(1L)
-        val clientDataHash = params.clientDataHash(2L)
-        val allowList = params.descriptorIds(3L)
-        val options = params.options(5L)
-        refusePinUvAuth(params, 6L)
-        if (options["up"] == false) throw CtapError(Ctap2.ERR_UNSUPPORTED_OPTION)
-        val uvRequested = options["uv"] == true
+    /** [request] passed [Ctap2Requests]: every entity is well formed and up is not false. */
+    private suspend fun getAssertion(request: GetAssertionRequest, onUserActionNeeded: () -> Unit): Map<Any, Any?> {
+        val rpId = request.rpId
+        val clientDataHash = request.clientDataHash
+        val allowList = request.allowList
+        val uvRequested = request.options["uv"] == true
 
         val available = backend.credentials(rpId)
         val candidates = if (allowList != null) {
@@ -275,23 +245,15 @@ class Ctap2Authenticator(
         return response
     }
 
-    private suspend fun makeCredential(params: Map<*, *>, onUserActionNeeded: () -> Unit): Map<Any, Any?> {
-        // Attestation "none" signs nothing, but the hash must still be well formed.
-        params.clientDataHash(1L)
-        val rp = params.map(2L)
-        val rpId = rp.text("id")
-        val user = params.map(3L)
-        val userHandle = user["id"] as? ByteArray ?: missingOrWrongType(user["id"])
-        val algorithms = params.list(4L).map {
-            ((it as? Map<*, *>)?.get("alg") as? Long) ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
-        }
-        val excludeList = params.descriptorIds(5L)
-        val options = params.options(7L)
-        refusePinUvAuth(params, 8L)
-
-        if (Ctap2.ALG_ES256.toLong() !in algorithms) throw CtapError(Ctap2.ERR_UNSUPPORTED_ALGORITHM)
-        if (options["up"] == false) throw CtapError(Ctap2.ERR_INVALID_OPTION)
-        val uvRequested = options["uv"] == true
+    /**
+     * [request] passed [Ctap2Requests]: every entity is well formed, a
+     * "public-key" ES256 parameter was offered and up is not false.
+     * Attestation "none" signs nothing, so the client data hash is unused.
+     */
+    private suspend fun makeCredential(request: MakeCredentialRequest, onUserActionNeeded: () -> Unit): Map<Any, Any?> {
+        val rpId = request.rpId
+        val excludeList = request.excludeList
+        val uvRequested = request.options["uv"] == true
 
         val existing = if (excludeList != null) backend.credentials(rpId) else emptyList()
         val excluded = excludeList?.any { id -> existing.any { it.id.contentEquals(id) } } == true
@@ -302,11 +264,11 @@ class Ctap2Authenticator(
         val made = backend.create(
             CredentialRequest(
                 rpId = rpId,
-                rpName = rp["name"] as? String,
-                userHandle = userHandle,
-                userName = user["name"] as? String,
-                userDisplayName = user["displayName"] as? String,
-                discoverable = options["rk"] == true
+                rpName = request.rpName,
+                userHandle = request.userHandle,
+                userName = request.userName,
+                userDisplayName = request.userDisplayName,
+                discoverable = request.options["rk"] == true
             )
         )
         val flags = UserVerificationCompliance.flags(
@@ -372,59 +334,13 @@ class Ctap2Authenticator(
         }
     }
 
-    /** No clientPin: any pinUvAuthParam fails verification. */
-    private fun refusePinUvAuth(params: Map<*, *>, key: Long) {
-        if (params.containsKey(key)) throw CtapError(Ctap2.ERR_PIN_AUTH_INVALID)
-    }
-
     private fun response(body: Map<Any, Any?>): ByteArray = byteArrayOf(Ctap2.OK.toByte()) + CborEncoder.encode(body)
 
     private fun status(code: Int): ByteArray = byteArrayOf(code.toByte())
 
-    /** The CBOR container type an optional parameter must have. */
-    private enum class OptionalType { LIST, MAP }
-
     private companion object {
-        /** authenticatorGetAssertion's optional containers: allowList (array), extensions and options (maps). */
-        val GET_ASSERTION_OPTIONAL = mapOf(3L to OptionalType.LIST, 4L to OptionalType.MAP, 5L to OptionalType.MAP)
-
-        /** authenticatorMakeCredential's optional containers: excludeList (array), extensions and options (maps). */
-        val MAKE_CREDENTIAL_OPTIONAL = mapOf(5L to OptionalType.LIST, 6L to OptionalType.MAP, 7L to OptionalType.MAP)
-
         fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
 
         fun Long.toUInt32(): ByteArray = ByteBuffer.allocate(4).putInt(toInt()).array()
-
-        fun missingOrWrongType(value: Any?): Nothing =
-            throw CtapError(if (value == null) Ctap2.ERR_MISSING_PARAMETER else Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
-
-        fun Map<*, *>.text(key: Any): String = this[key] as? String ?: missingOrWrongType(this[key])
-
-        fun Map<*, *>.map(key: Any): Map<*, *> = this[key] as? Map<*, *> ?: missingOrWrongType(this[key])
-
-        fun Map<*, *>.list(key: Any): List<*> = this[key] as? List<*> ?: missingOrWrongType(this[key])
-
-        fun Map<*, *>.clientDataHash(key: Any): ByteArray {
-            val hash = this[key] as? ByteArray ?: missingOrWrongType(this[key])
-            if (hash.size != 32) throw CtapError(Ctap2.ERR_INVALID_LENGTH)
-            return hash
-        }
-
-        fun Map<*, *>.options(key: Any): Map<*, *> {
-            val value = this[key] ?: return emptyMap<Any, Any>()
-            val options = value as? Map<*, *> ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
-            if (options.values.any { it !is Boolean }) throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
-            return options
-        }
-
-        /** The ids of a list of PublicKeyCredentialDescriptor, or null when absent. */
-        fun Map<*, *>.descriptorIds(key: Any): List<ByteArray>? {
-            val value = this[key] ?: return null
-            val list = value as? List<*> ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
-            return list.map { d ->
-                val descriptor = d as? Map<*, *> ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
-                descriptor["id"] as? ByteArray ?: missingOrWrongType(descriptor["id"])
-            }
-        }
     }
 }
