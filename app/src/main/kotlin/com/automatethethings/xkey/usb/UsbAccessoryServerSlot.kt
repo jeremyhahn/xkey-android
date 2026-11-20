@@ -48,10 +48,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  * @param newDetachWatcher Builds the detach watcher for each new server.
  * @param afterPublish Runs between publishing a server and connecting it;
  *   tests use it to interleave a [clear].
+ * @param awaitTeardown Waits for the session of the server that left the
+ *   slot before an open publishes its replacement. The default waits up to
+ *   [TEARDOWN_WAIT_MS] and then opens anyway; tests hand in a wait they
+ *   drive, so no clock decides when the teardown has ended.
  */
 class UsbAccessoryServerSlot(
     private val newDetachWatcher: () -> AccessoryDetachWatcher = { BroadcastAccessoryDetachWatcher() },
     private val afterPublish: (UsbAccessoryServer) -> Unit = {},
+    private val awaitTeardown: suspend (previous: Job) -> Unit = { awaitTeardownWithin(it) },
 ) {
     private val lock = Any()
 
@@ -113,9 +118,7 @@ class UsbAccessoryServerSlot(
             if (this.server != null) return null
             retiring to generation
         }
-        if (previous != null && withTimeoutOrNull(TEARDOWN_WAIT_MS) { previous.join() } == null) {
-            Log.w(TAG, "The previous USB session is still ending; opening anyway")
-        }
+        if (previous != null) awaitTeardown(previous)
         var published: UsbAccessoryServer? = null
         val server = UsbAccessoryServer(
             requestHandler,
@@ -202,5 +205,12 @@ class UsbAccessoryServerSlot(
 
         /** How long an attach waits for the previous session's teardown. */
         const val TEARDOWN_WAIT_MS = 5_000L
+
+        /** The production teardown wait: [previous] ends, or the time is up. */
+        suspend fun awaitTeardownWithin(previous: Job) {
+            if (withTimeoutOrNull(TEARDOWN_WAIT_MS) { previous.join() } == null) {
+                Log.w(TAG, "The previous USB session is still ending; opening anyway")
+            }
+        }
     }
 }
