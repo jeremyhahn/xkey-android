@@ -198,6 +198,52 @@ class AndroidFidoCredentialBackendTest {
     }
 
     @Test
+    fun `passkeys whose algorithm the BLE signer cannot use are never offered or signed with`() = runTest {
+        // local.generateKey can store shared fido2 rows of other algorithms;
+        // every BLE signature is ES256 (SHA256withECDSA on a P-256 key).
+        val others = listOf("ES384", "ES512", "RS256").mapIndexed { i, alg ->
+            shared.copy(keyId = b64(byteArrayOf(0x40, i.toByte())), algorithm = alg)
+        }
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns others
+        others.forEach { coEvery { keyDao.getByKeyId(it.keyId) } returns it }
+
+        assertTrue("no unsupported passkey is listed", backend().credentials("example.com").isEmpty())
+        others.forEach { entity ->
+            val wire = Base64.getUrlDecoder().decode(entity.keyId)
+            val e = assertThrows(FidoRefusedException::class.java) {
+                kotlinx.coroutines.runBlocking {
+                    backend().sign(
+                        FidoCredential(wire, "example.com", byteArrayOf(9), null, null, true),
+                        { byteArrayOf(5) },
+                        ByteArray(32)
+                    )
+                }
+            }
+            assertEquals(Ctap2.ERR_NO_CREDENTIALS, e.status)
+        }
+        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 0) { signCounter.next(any()) }
+    }
+
+    @Test
+    fun `an unsupported passkey ahead of an ES256 one in the allowList never shadows it`() = runTest {
+        val es384 = shared.copy(keyId = b64(byteArrayOf(0x41)), algorithm = "ES384")
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(es384, shared)
+        coEvery { keyDao.getByKeyId(es384.keyId) } returns es384
+        // The allowList as Ctap2Authenticator.getAssertion applies it: the
+        // credentials offered, filtered to the IDs the client allows.
+        val allowList = listOf(byteArrayOf(0x41), byteArrayOf(1, 2))
+        val listed = backend().credentials("example.com")
+        val candidates = listed.filter { c -> allowList.any { it.contentEquals(c.id) } }
+
+        assertEquals(listOf(byteArrayOf(1, 2).toList()), candidates.map { it.id.toList() })
+        val signed = backend().sign(candidates.first(), { byteArrayOf(5) }, ByteArray(32))
+        assertArrayEquals(byteArrayOf(0x30), signed.signature)
+        coVerify(exactly = 1) { keystore.signWithoutBiometric(shared.keyId, any()) }
+        coVerify(exactly = 0) { keystore.signWithoutBiometric(es384.keyId, any()) }
+    }
+
+    @Test
     fun `create stores a passkey a BLE client can use again`() = runTest {
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
         val stored = slot<KeyEntity>()
