@@ -21,6 +21,7 @@ import android.os.Looper
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.PromptOwnership
+import com.automatethethings.xkey.testing.ReleaseMocks
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import io.mockk.every
 import io.mockk.just
@@ -41,6 +42,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -62,6 +64,10 @@ import java.util.concurrent.Executors
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class)
 class FidoPromptCancellationTest {
+
+    /** Drops what MockK recorded here, so it does not outlive the test. */
+    @get:Rule
+    val releaseMocks = ReleaseMocks()
 
     private lateinit var app: Application
     private lateinit var launcher: BiometricActivityLauncher

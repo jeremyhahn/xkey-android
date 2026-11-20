@@ -22,6 +22,7 @@ import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.testing.ReleaseMocks
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -35,6 +36,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 
 /**
@@ -43,6 +45,10 @@ import org.junit.Test
  * (TransparentBiometricActivity) accepts a strong biometric only.
  */
 class BiometricFidoUserPromptTest {
+
+    /** Drops what MockK recorded here, so it does not outlive the test. */
+    @get:Rule
+    val releaseMocks = ReleaseMocks()
 
     private val context = mockk<Context>(relaxed = true)
     private val launcher = mockk<BiometricActivityLauncher>(relaxed = true)

@@ -28,6 +28,7 @@ import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
 import com.automatethethings.xkey.crypto.CborDecoder
+import com.automatethethings.xkey.testing.ReleaseMocks
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -37,6 +38,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -54,6 +56,10 @@ import kotlin.concurrent.thread
  */
 @RunWith(RobolectricTestRunner::class)
 class FidoGattServerTest {
+
+    /** Drops what MockK recorded here, so it does not outlive the test. */
+    @get:Rule
+    val releaseMocks = ReleaseMocks()
 
     private val context = mockk<Context>(relaxed = true)
     private val manager = mockk<BluetoothManager>()

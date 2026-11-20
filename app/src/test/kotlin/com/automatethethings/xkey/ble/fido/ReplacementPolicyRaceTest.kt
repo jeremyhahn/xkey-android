@@ -27,6 +27,7 @@ import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import com.automatethethings.xkey.testing.ReleaseMocks
 import io.mockk.coEvery
 import io.mockk.mockk
 import io.mockk.verify
@@ -35,6 +36,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -51,6 +53,10 @@ import java.util.Base64
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class ReplacementPolicyRaceTest {
+
+    /** Drops what MockK recorded here, so it does not outlive the test. */
+    @get:Rule
+    val releaseMocks = ReleaseMocks()
 
     private lateinit var database: XKeyDatabase
     private val keystore = mockk<KeystoreManager>(relaxed = true)

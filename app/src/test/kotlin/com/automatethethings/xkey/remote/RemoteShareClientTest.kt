@@ -28,6 +28,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.testing.ReleaseMocks
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -50,6 +51,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import java.util.Base64
 
@@ -64,6 +66,10 @@ import java.util.Base64
 private fun JSONObject.keyNames(): Set<String> = keys().asSequence().toSet()
 
 class RemoteShareClientTest {
+
+    /** Drops what MockK recorded here, so it does not outlive the test. */
+    @get:Rule
+    val releaseMocks = ReleaseMocks()
 
     private lateinit var router: BidirectionalMessageRouter
     private lateinit var sender: ScriptedMessageSender

@@ -40,6 +40,7 @@ import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import com.automatethethings.xkey.testing.ReleaseMocks
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -54,6 +55,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import java.security.MessageDigest
 import java.util.Base64
@@ -64,6 +66,10 @@ import java.util.Base64
  * the one [PasskeySignCounter], and the key never leaves Keystore.
  */
 class AndroidFidoCredentialBackendTest {
+
+    /** Drops what MockK recorded here, so it does not outlive the test. */
+    @get:Rule
+    val releaseMocks = ReleaseMocks()
 
     private val keyDao = mockk<KeyDao>(relaxed = true)
     private val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
