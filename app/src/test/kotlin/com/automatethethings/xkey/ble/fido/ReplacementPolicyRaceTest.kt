@@ -118,7 +118,10 @@ class ReplacementPolicyRaceTest {
             signCounter = mockk<PasskeySignCounter>(relaxed = true),
             keystoreManager = keystore,
             userPrompt = null,
-            settings = { BiometricSettingsData() }
+            settings = { BiometricSettingsData() },
+            pendingKeyDeletions = FilePendingKeyDeletions(
+                java.io.File.createTempFile("pending-key-deletions", "").also { it.delete(); it.deleteOnExit() }
+            )
         )
 
         backend.create(CredentialRequest("example.com", "Example", userHandle, "alice", "Alice", discoverable = true))

@@ -24,6 +24,7 @@ import com.automatethethings.xkey.ble.fido.AndroidFidoCredentialBackend
 import com.automatethethings.xkey.ble.fido.BiometricFidoUserPrompt
 import com.automatethethings.xkey.ble.fido.Ctap2Authenticator
 import com.automatethethings.xkey.ble.fido.FidoGattServer
+import com.automatethethings.xkey.ble.fido.FilePendingKeyDeletions
 import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.SharePermission
@@ -370,7 +371,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                     signCounter = PasskeySignCounter(db.credentialMetadataDao(), db.keyDao()),
                     keystoreManager = keystoreManager!!,
                     userPrompt = BiometricFidoUserPrompt(this) { biometricLauncher },
-                    settings = { currentSettings }
+                    settings = { currentSettings },
+                    pendingKeyDeletions = FilePendingKeyDeletions(java.io.File(noBackupFilesDir, "fido_pending_key_deletions"))
                 )
             )
         )

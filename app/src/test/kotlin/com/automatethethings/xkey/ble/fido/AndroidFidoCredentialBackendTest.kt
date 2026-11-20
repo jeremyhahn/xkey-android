@@ -94,7 +94,13 @@ class AndroidFidoCredentialBackendTest {
         signCounter = signCounter,
         keystoreManager = keystore,
         userPrompt = prompt,
-        settings = { BiometricSettingsData() }
+        settings = { BiometricSettingsData() },
+        pendingKeyDeletions = pendingKeyDeletions
+    )
+
+    /** One record file per test, shared by every backend it makes, as across a restart. */
+    private val pendingKeyDeletions = FilePendingKeyDeletions(
+        java.io.File.createTempFile("pending-key-deletions", "").also { it.delete(); it.deleteOnExit() }
     )
 
     @Before

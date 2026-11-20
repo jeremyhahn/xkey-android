@@ -87,7 +87,8 @@ class AndroidFidoCredentialBackend(
     private val signCounter: PasskeySignCounter,
     private val keystoreManager: KeystoreManager,
     private val userPrompt: FidoUserPrompt?,
-    private val settings: () -> BiometricSettingsData
+    private val settings: () -> BiometricSettingsData,
+    private val pendingKeyDeletions: PendingKeyDeletions
 ) : FidoCredentialBackend {
 
     override val userVerificationAvailable: Boolean
@@ -183,6 +184,7 @@ class AndroidFidoCredentialBackend(
         registration.withLock { createLocked(request) }
 
     private suspend fun createLocked(request: CredentialRequest): NewCredential {
+        retryPendingKeyDeletions()
         val rawId = ByteArray(CREDENTIAL_ID_BYTES).also { SecureRandom().nextBytes(it) }
         val keyId = encodeId(rawId)
         // Not auth-bound: the phone's prompt gates every use, as on the
@@ -380,23 +382,83 @@ class AndroidFidoCredentialBackend(
      * A key goes only once its rows are gone, so no row ever points at a key
      * that is gone. Throws when the rows will not go, and then every row and
      * key stays. Returns the key ids removed.
+     *
+     * Each key is recorded in [pendingKeyDeletions] before its rows go and
+     * forgotten only once Keystore has deleted it, so a key whose deletion
+     * throws, or whose process dies before it, is deleted by a later
+     * [retryPendingKeyDeletions] and never left behind with no row and no
+     * record. A passkey whose rows stay is forgotten again: its row owns it.
      */
     private suspend fun delete(read: List<KeyEntity>): List<String> {
         if (read.isEmpty()) return emptyList()
-        val removed = keyDao.deletePasskeyRows(read)
-        removed.forEach { runCatching { keystoreManager.deleteKey(it) } }
+        val ids = read.map { it.keyId }
+        pendingKeyDeletions.add(ids)
+        val removed = try {
+            keyDao.deletePasskeyRows(read)
+        } catch (e: Throwable) {
+            ids.forEach { forget(it) }
+            throw e
+        }
+        (ids - removed.toSet()).forEach { forget(it) }
+        removed.forEach { deleteKey(it) }
         return removed
+    }
+
+    /**
+     * The one way this backend deletes a Keystore key, for a passkey with no
+     * row left. A deletion that throws is kept in [pendingKeyDeletions] for
+     * [retryPendingKeyDeletions], never discarded; one that succeeds is
+     * forgotten. Throws only when a failed deletion cannot be recorded.
+     */
+    private fun deleteKey(keyId: String) {
+        try {
+            keystoreManager.deleteKey(keyId)
+        } catch (e: Exception) {
+            Log.w(TAG, "A passkey's Keystore key could not be deleted; it is kept for a later retry", e)
+            pendingKeyDeletions.add(listOf(keyId))
+            return
+        }
+        forget(keyId)
+    }
+
+    /**
+     * Retry every Keystore deletion [pendingKeyDeletions] records. Runs under
+     * [registration], the lock every deletion here runs under, so no delete is
+     * in flight meanwhile. A key a row still points at is never deleted: that
+     * row owns it, and its record is dropped. A retry that fails again stays
+     * recorded for the next registration, and never fails this one.
+     */
+    private suspend fun retryPendingKeyDeletions() {
+        try {
+            for (keyId in pendingKeyDeletions.all()) {
+                if (keyDao.getByKeyId(keyId) != null) forget(keyId) else deleteKey(keyId)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Pending Keystore deletions could not be retried; they stay recorded", e)
+        }
+    }
+
+    /** Drop [keyId]'s record. A record left behind is harmless: a retry deletes no key a row owns. */
+    private fun forget(keyId: String) {
+        try {
+            pendingKeyDeletions.remove(keyId)
+        } catch (e: Exception) {
+            Log.w(TAG, "A pending Keystore deletion record could not be cleared", e)
+        }
     }
 
     /**
      * Roll back the new passkey [keyId]: [delete] its row as it is now,
      * logged rather than thrown when its rows stay. Before its key row was
-     * written there is only its Keystore key.
+     * written there is only its Keystore key, which [deleteKey] deletes or
+     * keeps for a retry.
      */
     private suspend fun remove(keyId: String) {
         try {
             val row = keyDao.getByKeyId(keyId)
-            if (row == null) runCatching { keystoreManager.deleteKey(keyId) } else delete(listOf(row))
+            if (row == null) deleteKey(keyId) else delete(listOf(row))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
