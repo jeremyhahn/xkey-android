@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016,SC2154 # workflow text is matched literally; extract assigns by name
 # code-review-test.sh -- regression fixtures for .github/workflows/code-review.yml
-# (template v5.10.10 and v5.10.11).
+# (template v5.10.10, v5.10.11 and v5.12.5).
 #
 # pull_request_target runs the base branch's copy of the workflow, so a change
 # to it is never exercised by its own pull request's review run. These
@@ -19,6 +19,12 @@
 #      a leftover label off and keeps a fresh one.
 #   D. api_all (both copies) joins every page through stdin, past the 128 KiB
 #      argument limit, and fails closed on a failed or unreadable page.
+#   E. lock_wait (v5.12.5) and both of its callers, the Codex login refresh
+#      and the review: each flock waits for what the job's budget has left
+#      past $WORK/job-start, less what the job needs after the lock (normal
+#      and large reviews, a wait past 600 s), and dies when no time is left or
+#      the start time is unreadable or not a number. The clock (date +%s) and
+#      flock are stubbed.
 #
 # Needs bash and jq (the lint-gates job has no python3).
 # CODE_REVIEW_WORKFLOW overrides the workflow path (for a mutation check).
@@ -390,6 +396,80 @@ for c in "paging1.sh github per_page=100" "paging1.sh gitea limit=50" "paging2.s
 	paging "${s}" "${f}" 1=small 2=object
 	check "${w}: a page that is not a list fails closed" \
 		"$(yn [ "${RC}" -ne 0 ]) $(yn contains "${OUT}" DONE) $(yn partial)" "yes no no"
+done
+
+# ---- E: each review-lock wait is what the job's budget has left ------------
+# lib.sh's JOB_BUDGET and lock_wait are its last lines; each caller is read
+# from its lock_wait call through its flock line, and runs to a stub flock.
+extract lw "${WORKFLOW}" $'\n          JOB_BUDGET=' $'\n          LIB\n' "lib.sh's JOB_BUDGET and lock_wait"
+extract refresh_call "${WORKFLOW}" $'\n            wait_s=$(lock_wait ' $'\n              timeout -k 10 120 \\\n' \
+	"the Codex login refresh's lock wait"
+extract review_limit "${WORKFLOW}" $'\n          limit=1500\n' $'\n          fi\n' "the review's time limit"
+extract review_call "${WORKFLOW}" $'\n          wait_s=$(lock_wait ' $'\n            timeout -k 30 "$limit" \\\n' \
+	"the review's lock wait"
+mklock() { # file caller-text
+	{
+		printf '%s\n' 'set -euo pipefail' 'shopt -s inherit_errexit' \
+			'die() { echo "DIE: $*" >&2; exit 7; }' \
+			'date() { if [ "$*" = +%s ]; then cat "$WORK/now"; else command date "$@"; fi; }' \
+			'flock() { printf "%s\n" "$*" > "$WORK/flock"; }' \
+			'WORK=$1; nfiles=$2; large=100; EFFORT=medium; CODEX_MASTER=$WORK/codex'
+		printf 'JOB_BUDGET=%s\n' "${lw}"
+		printf '%s\n' "$2" '              true' 'echo "DONE wait_s=$wait_s"'
+	} > "$1"
+}
+mklock "${T}/lock-refresh.sh" "wait_s=\$(lock_wait ${refresh_call}"
+mklock "${T}/lock-review.sh" \
+	"limit=1500"$'\n'"${review_limit}"$'\n          fi\n'"wait_s=\$(lock_wait ${review_call}"
+L="${T}/l"
+S=1000000
+lockrun() { # script job-start now nfiles; job-start "-" writes no file
+	rm -rf "${L}"
+	mkdir -p "${L}"
+	[ "$2" = - ] || printf '%s\n' "$2" > "${L}/job-start"
+	printf '%s\n' "$3" > "${L}/now"
+	RC=0
+	OUT=$(bash "${T}/$1" "${L}" "$4" 2>&1) || RC=$?
+}
+flocked() { if [ -e "${L}/flock" ]; then jq -Rrs 'rtrimstr("\n")' "${L}/flock"; else echo none; fi; }
+lock_ok() { # name script job-start now nfiles want-wait
+	lockrun "$2" "$3" "$4" "$5"
+	check "$1" "${RC} $(flocked) $(yn contains "${OUT}" "DONE wait_s=$6")" \
+		"0 -w $6 -E 75 ${L}/codex/.review.lock true yes"
+}
+lock_dies() { # name script job-start now nfiles message
+	lockrun "$2" "$3" "$4" "$5"
+	check "$1" "${RC} $(yn contains "${OUT}" "DIE: $6") $(yn contains "${OUT}" DONE) $(flocked)" "7 yes no none"
+}
+# The refresh needs 130 + 360 + 2730 + 440 = 3660 s of the 4500 s after the lock.
+lock_ok "E refresh: 10 s in the lock waits 830 s, past the old 600" \
+	lock-refresh.sh "${S}" $((S + 10)) 5 830
+lock_ok "E refresh: 300 s in, 540 s" lock-refresh.sh "${S}" $((S + 300)) 5 540
+lock_ok "E refresh: 839 s in, the last second" lock-refresh.sh "${S}" $((S + 839)) 5 1
+lock_dies "E refresh: 840 s in, no time is left: dies before flock" lock-refresh.sh "${S}" $((S + 840)) 5 \
+	"no time is left in the job's 4500 s to wait for ${L}/codex/.review.lock (it needs 3660 s after the lock)"
+# A normal review (limit 1500) needs 1500 + 30 + 440 = 1970 s after the lock.
+lock_ok "E review: a normal review 10 s in waits 2520 s" lock-review.sh "${S}" $((S + 10)) 5 2520
+lock_ok "E review: a normal review 1000 s in waits 1530 s, past the old 600" \
+	lock-review.sh "${S}" $((S + 1000)) 5 1530
+lock_ok "E review: a normal review 2529 s in, the last second" lock-review.sh "${S}" $((S + 2529)) 5 1
+lock_dies "E review: a normal review 2530 s in, no time is left: dies before flock" \
+	lock-review.sh "${S}" $((S + 2530)) 5 \
+	"no time is left in the job's 4500 s to wait for ${L}/codex/.review.lock (it needs 1970 s after the lock)"
+# A large review (limit 2700) needs 2700 + 30 + 440 = 3170 s after the lock.
+lock_ok "E review: a large review 500 s in waits 830 s, past the old 600" \
+	lock-review.sh "${S}" $((S + 500)) 150 830
+lock_ok "E review: a large review 1329 s in, the last second" lock-review.sh "${S}" $((S + 1329)) 150 1
+lock_dies "E review: a large review 1330 s in, no time is left: dies before flock" \
+	lock-review.sh "${S}" $((S + 1330)) 150 \
+	"no time is left in the job's 4500 s to wait for ${L}/codex/.review.lock (it needs 3170 s after the lock)"
+for s in lock-refresh.sh lock-review.sh; do
+	lock_dies "E ${s%.sh}: an unreadable job-start dies before flock" "${s}" - "${S}" 5 \
+		"cannot read the job's start time (${L}/job-start)"
+	lock_dies "E ${s%.sh}: a non-numeric job-start dies before flock" "${s}" "${S}x" "${S}" 5 \
+		"the job's start time (${L}/job-start) is not a number"
+	lock_dies "E ${s%.sh}: an empty job-start dies before flock" "${s}" "" "${S}" 5 \
+		"the job's start time (${L}/job-start) is not a number"
 done
 
 check "nothing called curl" "$(yn [ ! -e "${T}/curl.log" ])" yes
