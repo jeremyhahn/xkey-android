@@ -76,7 +76,9 @@ class IncompleteRegistrationTest {
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } answers {
             generated += firstArg<String>(); byteArrayOf(0xA5.toByte())
         }
-        coEvery { keystore.signWithoutBiometric(any(), any()) } returns byteArrayOf(0x30)
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } returns byteArrayOf(0x30)
+        every { keystore.keyRowAlias(any(), any(), any()) } answers { "xkey_credential_" + firstArg<String>() }
+        every { keystore.publicKeyDERAt(any()) } returns byteArrayOf(0x30, 0x01)
         coEvery { sharePermission.canShare(any(), null) } answers {
             firstArg<KeyEntity>().sharingPolicy == SharingPolicyType.ALL_PEERS
         }
@@ -146,7 +148,7 @@ class IncompleteRegistrationTest {
             }
         }
         assertEquals(Ctap2.ERR_NO_CREDENTIALS, e.status)
-        coVerify(exactly = 0) { keystore.signWithoutBiometric(failed, any()) }
+        coVerify(exactly = 0) { keystore.signApproved(match { it.endsWith(failed) }, any(), any(), any()) }
     }
 
     @Test

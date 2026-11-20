@@ -125,7 +125,9 @@ class AndroidFidoCredentialBackendTest {
             firstArg<KeyEntity>().sharingPolicy == SharingPolicyType.ALL_PEERS
         }
         coEvery { signCounter.next(any()) } returns 5
-        coEvery { keystore.signWithoutBiometric(any(), any()) } returns byteArrayOf(0x30)
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } returns byteArrayOf(0x30)
+        every { keystore.keyRowAlias(any(), any(), any()) } answers { aliasOf(firstArg()) }
+        every { keystore.publicKeyDERAt(any()) } returns byteArrayOf(0x30, 0x01)
     }
 
     @After
@@ -145,7 +147,7 @@ class AndroidFidoCredentialBackendTest {
     fun `sign hashes authenticatorData and clientDataHash once inside the signature`() = runTest {
         val cred = backend().credentials("example.com").single()
         val input = slot<ByteArray>()
-        coEvery { keystore.signWithoutBiometric(shared.keyId, capture(input)) } returns byteArrayOf(0x31)
+        coEvery { keystore.signApproved(aliasOf(shared.keyId), any(), capture(input), "SHA256withECDSA") } returns byteArrayOf(0x31)
         val cdh = ByteArray(32) { 1 }
 
         val signed = backend().sign(cred, { count -> byteArrayOf(count.toByte()) }, cdh)
@@ -169,7 +171,7 @@ class AndroidFidoCredentialBackendTest {
 
         assertEquals(Ctap2.ERR_NO_CREDENTIALS, e.status)
         coVerify(exactly = 0) { signCounter.next(any()) }
-        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 0) { keystore.signApproved(any(), any(), any(), any()) }
     }
 
     @Test
@@ -193,7 +195,7 @@ class AndroidFidoCredentialBackendTest {
             val signed = backend().sign(credential, { byteArrayOf(5) }, ByteArray(32))
             assertArrayEquals(byteArrayOf(0x30), signed.signature)
             coVerify(exactly = 1) { signCounter.next(entity.keyId) }
-            coVerify(exactly = 1) { keystore.signWithoutBiometric(entity.keyId, any()) }
+            coVerify(exactly = 1) { keystore.signApproved(aliasOf(entity.keyId), any(), any(), "SHA256withECDSA") }
         }
     }
 
@@ -221,7 +223,7 @@ class AndroidFidoCredentialBackendTest {
             }
             assertEquals(Ctap2.ERR_NO_CREDENTIALS, e.status)
         }
-        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 0) { keystore.signApproved(any(), any(), any(), any()) }
         coVerify(exactly = 0) { signCounter.next(any()) }
     }
 
@@ -239,8 +241,8 @@ class AndroidFidoCredentialBackendTest {
         assertEquals(listOf(byteArrayOf(1, 2).toList()), candidates.map { it.id.toList() })
         val signed = backend().sign(candidates.first(), { byteArrayOf(5) }, ByteArray(32))
         assertArrayEquals(byteArrayOf(0x30), signed.signature)
-        coVerify(exactly = 1) { keystore.signWithoutBiometric(shared.keyId, any()) }
-        coVerify(exactly = 0) { keystore.signWithoutBiometric(es384.keyId, any()) }
+        coVerify(exactly = 1) { keystore.signApproved(aliasOf(shared.keyId), any(), any(), "SHA256withECDSA") }
+        coVerify(exactly = 0) { keystore.signApproved(aliasOf(es384.keyId), any(), any(), "SHA256withECDSA") }
     }
 
     @Test
@@ -796,7 +798,7 @@ class AndroidFidoCredentialBackendTest {
         assertArrayEquals(byteArrayOf(0x32), signed.signature)
         assertEquals(shared.keyId, prompt.signed.single().first)
         assertArrayEquals(byteArrayOf(5) + cdh, prompt.signed.single().second)
-        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 0) { keystore.signApproved(any(), any(), any(), any()) }
     }
 
     @Test
@@ -809,8 +811,8 @@ class AndroidFidoCredentialBackendTest {
         coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(general, credential)
         coEvery { keyDao.getByKeyId("gen1") } returns general
         coEvery { keyDao.getByKeyId("cred1") } returns credential
-        every { keystore.resolveKeystoreAlias("gen1") } returns "xkey_key_gen1"
-        every { keystore.resolveKeystoreAlias("cred1") } returns "xkey_credential_cred1"
+        every { keystore.keyRowAlias("gen1", any(), any()) } returns "xkey_key_gen1"
+        every { keystore.keyRowAlias("cred1", any(), any()) } returns "xkey_credential_cred1"
         val manager = mockk<BiometricManager>()
         every { manager.canAuthenticate(any()) } returns BiometricManager.BIOMETRIC_SUCCESS
         mockkStatic(BiometricManager::class)
@@ -886,7 +888,7 @@ class AndroidFidoCredentialBackendTest {
 
     @Test
     fun `a passkey Keystore will not sign silently signs through the bound prompt`() = runTest {
-        coEvery { keystore.signWithoutBiometric(any(), any()) } throws BiometricRequiredException()
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } throws BiometricRequiredException()
         val prompt = BoundPrompt { byteArrayOf(0x33) }
         val cred = backend(prompt).credentials("example.com").single()
 
@@ -936,7 +938,7 @@ class AndroidFidoCredentialBackendTest {
         }
 
         assertEquals(Ctap2.ERR_OPERATION_DENIED, e.status)
-        coVerify(exactly = 0) { keystore.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 0) { keystore.signApproved(any(), any(), any(), any()) }
     }
 
     @Test
@@ -962,7 +964,7 @@ class AndroidFidoCredentialBackendTest {
 
     @Test
     fun `a passkey deleted while it signed releases no signature`() = runTest {
-        coEvery { keystore.signWithoutBiometric(any(), any()) } answers {
+        coEvery { keystore.signApproved(any(), any(), any(), any()) } answers {
             coEvery { keyDao.getByKeyId(shared.keyId) } returns null
             byteArrayOf(0x35)
         }
@@ -977,5 +979,8 @@ class AndroidFidoCredentialBackendTest {
 
     private companion object {
         fun b64(b: ByteArray): String = Base64.getUrlEncoder().withoutPadding().encodeToString(b)
+
+        /** The Keystore alias the mocked Keystore holds passkey [keyId] under. */
+        fun aliasOf(keyId: String): String = "xkey_credential_$keyId"
     }
 }

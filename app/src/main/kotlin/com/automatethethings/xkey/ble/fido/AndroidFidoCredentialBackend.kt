@@ -17,13 +17,18 @@ package com.automatethethings.xkey.ble.fido
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.credential.PasskeySignCounter
+import com.automatethethings.xkey.crypto.ApprovedKeyChangedException
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.BiometricRequiredException
+import com.automatethethings.xkey.crypto.KeyNotFoundException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.protocol.KeyIdReservations
 import com.automatethethings.xkey.protocol.SharePermission
+import com.automatethethings.xkey.protocol.isSameKeyAs
+import com.automatethethings.xkey.protocol.storedKeyLockId
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -39,6 +44,18 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.SecureRandom
 import java.util.Base64
+
+/**
+ * A passkey as a BLE client chose it, read before any prompt or signing turn:
+ * its [row], the [rpId] asked for, the one Keystore [alias] every signature
+ * uses, and the public key under exactly that alias.
+ */
+private class SelectedPasskey(
+    val row: KeyEntity,
+    val rpId: String,
+    val alias: String,
+    val publicKeyDer: ByteArray
+)
 
 /** Raises the phone's user verification prompt for a BLE ceremony. */
 interface FidoUserPrompt {
@@ -155,18 +172,20 @@ class AndroidFidoCredentialBackend(
         if (keyId == null || entity == null || !usable(entity, credential.rpId) || !shared(entity)) {
             throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "Passkey is gone or no longer shared")
         }
+        // The passkey as chosen, read before any prompt or signing turn: only
+        // this key signs, and only while it is still this passkey.
+        val selected = select(entity, credential.rpId)
         // The counter is read and authenticatorData built only once this
         // assertion's signing turn has come, so no other assertion for the
         // passkey, over BLE or from the credential provider, signs a later
         // count before this one.
         var count = 0L
         var authData = ByteArray(0)
-        val signature = signInKeystore(entity, credential.rpId) {
+        val signature = signInKeystore(selected) {
             count = signCounter.next(keyId)
             authData = authenticatorData(count)
             authData + clientDataHash
         }
-        releasable(keyId, credential.rpId)
         Log.i(TAG, "Signed a CTAP2 assertion over BLE, rpId=${credential.rpId}, signCount=$count")
         runCatching {
             AuditLogger.logFido2Authentication(
@@ -319,6 +338,20 @@ class AndroidFidoCredentialBackend(
     }
 
     /**
+     * The passkey [entity] as the client chose it, read before any prompt or
+     * signing turn: its row, the one Keystore alias every signature of this
+     * assertion uses ([KeystoreManager.keyRowAlias], resolved once, here),
+     * and the public key under exactly that alias. [signSelected] signs only
+     * while all three still hold.
+     */
+    private fun select(entity: KeyEntity, rpId: String): SelectedPasskey {
+        val alias = keystoreManager.keyRowAlias(entity.keyId, KeyTypeFido2, entity.publicKeyDer)
+        val publicKeyDer = keystoreManager.publicKeyDERAt(alias)
+            ?: throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "The passkey's key is not in Keystore")
+        return SelectedPasskey(entity, rpId, alias, publicKeyDer)
+    }
+
+    /**
      * The one signing path for BLE assertions. [signedData] makes
      * `authenticatorData || clientDataHash`, unhashed: every Keystore signature
      * here is SHA256withECDSA, which hashes it once, as WebAuthn expects. It is
@@ -329,34 +362,46 @@ class AndroidFidoCredentialBackend(
      * A per-operation passkey (auth duration 0), or any key Keystore will not
      * use without fresh authentication, signs behind a prompt bound to this
      * signature, as the credential provider signs it. A declined or
-     * impossible prompt is a refusal, never a signature.
+     * impossible prompt is a refusal, never a signature. Both paths sign
+     * through [signSelected], with [selected]'s alias only.
      */
     private suspend fun signInKeystore(
-        entity: KeyEntity,
-        rpId: String,
+        selected: SelectedPasskey,
         signedData: suspend () -> ByteArray
     ): ByteArray {
-        if (entity.authDurationSeconds != PER_OPERATION) {
+        if (selected.row.authDurationSeconds != PER_OPERATION) {
             try {
-                return BiometricHelper.inOneTurn("fidoBleAssertion") {
-                    keystoreManager.signWithoutBiometric(credentialId = entity.keyId, dataHash = signedData())
+                return signSelected(selected, signedData) { checkedData ->
+                    BiometricHelper.inOneTurn("fidoBleAssertion") {
+                        keystoreManager.signApproved(
+                            alias = selected.alias,
+                            approvedPublicKeyDer = selected.publicKeyDer,
+                            data = checkedData(),
+                            jcaAlgorithm = SIGNING_JCA_ALGORITHM
+                        )
+                    }
                 }
             } catch (e: BiometricRequiredException) {
                 // Auth-bound after all: fall through to the key-bound prompt,
                 // which reads the next count (the one read here is a gap).
+            } catch (e: ApprovedKeyChangedException) {
+                throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey's key changed while it signed")
+            } catch (e: KeyNotFoundException) {
+                throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey's key went while it signed")
             } catch (e: BiometricException) {
                 throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "No signing turn came")
             }
         }
         val prompt = userPrompt?.takeIf { it.available }
             ?: throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "This passkey needs a prompt bound to its key")
-        // The alias the key really has: a passkey local.generateKey made lives
-        // under xkey_key_<id>, one the credential provider made under
-        // xkey_credential_<id>. The signing activity is told which.
-        val alias = keystoreManager.resolveKeystoreAlias(entity.keyId)
-            ?: throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "The passkey's key is not in Keystore")
         return try {
-            prompt.signWithKey(entity.keyId, alias, rpId, signedData)
+            // The signing activity is told the selected alias, the one whose
+            // public key was read: a passkey local.generateKey made lives under
+            // xkey_key_<id>, one the credential provider made under
+            // xkey_credential_<id>.
+            signSelected(selected, signedData) { checkedData ->
+                prompt.signWithKey(selected.row.keyId, selected.alias, selected.rpId, checkedData)
+            }
         } catch (e: CancellationException) {
             // The client went away or sent CANCEL: never a refusal (a
             // CancellationException is an IllegalStateException).
@@ -373,16 +418,49 @@ class AndroidFidoCredentialBackend(
     }
 
     /**
-     * The last check before a signature leaves the phone, run after every
-     * signature on either path: the prompt can stay up for as long as the
-     * user takes, and the passkey may have been made private, shared with
-     * selected peers only, or deleted meanwhile. Then the signature is
-     * dropped and the client gets CTAP2_ERR_OPERATION_DENIED.
+     * The one revalidate-and-sign step, for both signing paths. [sign] makes
+     * the signature from the data it is handed, which is [signedData] made
+     * only once [selected] is checked again ([stillSelected]); the signature
+     * is checked again after it, before it leaves the phone.
+     *
+     * All of it runs holding the stored key's lock ([storedKeyLockId]), the
+     * one local.deleteKey and the JSON-RPC approval path take, so no deletion
+     * there, and no key made again under the same id, lands between the check
+     * and the signature. The lock is taken before the prompt queue's turn,
+     * never inside it, on every path that holds both, so no two holders wait
+     * on each other. A passkey deleted and made again under its id by any
+     * transport while the prompt or the signing turn waits is a new row with
+     * a new key under the alias, and is refused.
      */
-    private suspend fun releasable(keyId: String, rpId: String) {
-        val now = keyDao.getByKeyId(keyId)
-        if (now == null || now.keyType != KeyTypeFido2 || now.rpId != rpId || !shared(now)) {
-            throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "Passkey sharing changed while it signed")
+    private suspend fun signSelected(
+        selected: SelectedPasskey,
+        signedData: suspend () -> ByteArray,
+        sign: suspend (checkedData: suspend () -> ByteArray) -> ByteArray
+    ): ByteArray = KeyIdReservations.process.withKeyLock(storedKeyLockId(selected.row.keyId)) {
+        val signature = sign {
+            stillSelected(selected)
+            signedData()
+        }
+        stillSelected(selected)
+        signature
+    }
+
+    /**
+     * Whether [selected] is still the passkey chosen and still offered: its
+     * row the same key ([isSameKeyAs]: same row, key material and sharing
+     * policy revision), an ES256 passkey for its RP, shared with a BLE client,
+     * and the key under its alias still the one read. The prompt can stay up
+     * for as long as the user takes, and the passkey may have been made
+     * private, deleted, or deleted and made again meanwhile. Then nothing is
+     * signed, or the signature is dropped, and the client gets
+     * CTAP2_ERR_OPERATION_DENIED.
+     */
+    private suspend fun stillSelected(selected: SelectedPasskey) {
+        val now = keyDao.getByKeyId(selected.row.keyId)
+        val same = now != null && now.isSameKeyAs(selected.row) && usable(now, selected.rpId) && shared(now) &&
+            keystoreManager.publicKeyDERAt(selected.alias)?.contentEquals(selected.publicKeyDer) == true
+        if (!same) {
+            throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The passkey changed or its sharing changed while it signed")
         }
     }
 
@@ -490,6 +568,9 @@ class AndroidFidoCredentialBackend(
 
         /** The one algorithm a BLE assertion signs with, on either signing path. */
         const val SIGNING_ALGORITHM = "ES256"
+
+        /** [SIGNING_ALGORITHM] as Keystore signs it. */
+        const val SIGNING_JCA_ALGORITHM = "SHA256withECDSA"
 
         /** The one lock every BLE registration in the process runs under. */
         val registration = Mutex()
