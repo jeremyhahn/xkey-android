@@ -16,9 +16,11 @@ package com.automatethethings.xkey.media
 
 import android.Manifest
 import android.app.PendingIntent
+import android.app.RecoverableSecurityException
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -189,14 +191,18 @@ object MediaPublisher {
 
     /**
      * How xKey may write the media at [target]. Before scoped storage
-     * (Android 10 and earlier) the file is xKey's to replace by path. From
-     * Android 11 only media whose owner is xKey is: anything else, a camera
-     * capture above all, needs the user's grant, and READ_MEDIA_* gives none.
+     * (Android 9 and earlier) the file is xKey's to replace by path. From
+     * Android 10 only media whose owner is xKey is: anything else, a camera
+     * capture above all, is written only through its content URI. Android 11
+     * asks the user first, in a write request (NEEDS_GRANT until granted);
+     * Android 10 has none and asks at the write itself, so it is GRANTED and
+     * the write throws [UserActionRequiredException] until the user allows it.
      */
     fun writeAccess(context: Context, target: Uri): MediaWriteAccess {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return MediaWriteAccess.OWNED
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return MediaWriteAccess.OWNED
         if (target.scheme != ContentResolver.SCHEME_CONTENT) return MediaWriteAccess.OWNED
         if (mediaStore.ownerPackage(context, target) == context.packageName) return MediaWriteAccess.OWNED
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return MediaWriteAccess.GRANTED
         return if (mediaStore.hasWriteGrant(context, target)) MediaWriteAccess.GRANTED else MediaWriteAccess.NEEDS_GRANT
     }
 
@@ -269,6 +275,15 @@ object MediaPublisher {
     /** Writing [target] needs a write grant the user has not given. */
     class WriteAuthorizationRequiredException(val target: Uri) :
         IOException("writing $target needs the user's write access")
+
+    /**
+     * Android 10 refused the write of [target], media another app owns,
+     * until the user allows it (a RecoverableSecurityException): nothing was
+     * written. An activity launches [intentSender], MediaStore's question,
+     * and writes again once the user allows it.
+     */
+    class UserActionRequiredException(val target: Uri, val intentSender: IntentSender) :
+        IOException("writing $target needs the user to allow it")
 
     /**
      * What a capture held when it was staged, before anything was embedded:
@@ -369,6 +384,11 @@ object MediaPublisher {
         var touched = false
         try {
             overwrite(resolver, target, staged) { touched = true }
+        } catch (e: UserActionRequiredException) {
+            // Refused before a byte changed: the capture is whole, and the
+            // caller asks the user and writes again.
+            journal.clear()
+            throw e
         } catch (e: Throwable) {
             val intact = !touched || restore(context, target, journal)
             // One that could not be put back keeps its record: the next start or retry restores it.
@@ -692,9 +712,16 @@ object MediaPublisher {
      * Write [source] over the content at [target] in place: opened "rw",
      * which never truncates on open, and cut to [source]'s length only after
      * every byte is written. [beforeWrite] runs before the first byte changes.
+     * Android 10's refusal of media another app owns, before the user allows
+     * it, throws [UserActionRequiredException] with nothing written.
      */
     private fun overwrite(resolver: ContentResolver, target: Uri, source: File, beforeWrite: () -> Unit) {
-        val descriptor = resolver.openFileDescriptor(target, "rw") ?: throw IOException("cannot write $target")
+        val descriptor = try {
+            resolver.openFileDescriptor(target, "rw")
+        } catch (e: SecurityException) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || e !is RecoverableSecurityException) throw e
+            throw UserActionRequiredException(target, e.userAction.actionIntent.intentSender)
+        } ?: throw IOException("cannot write $target")
         ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
             val channel = output.channel
             channel.position(0)

@@ -278,7 +278,13 @@ internal object AutoSigner {
         // app owns (the camera's) is written only through its content URI
         // once the user grants access: until then it is queued and the user
         // is asked, never renamed over by path.
-        val signed = XmpMetadataHelper.signMedia(context, uri, filePath, data)
+        // Android 10 has no write request: MediaStore asks at the write, and
+        // the write request screen launches that question, so it is queued too.
+        val signed = try {
+            XmpMetadataHelper.signMedia(context, uri, filePath, data)
+        } catch (_: MediaPublisher.UserActionRequiredException) {
+            XmpMetadataHelper.MediaSignResult.NeedsWriteAuthorization
+        }
         if (signed == XmpMetadataHelper.MediaSignResult.NeedsWriteAuthorization) {
             MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), filePath, keyId, keyLabel, data))
             MediaWriteAuthorizations.notifyPending(context)

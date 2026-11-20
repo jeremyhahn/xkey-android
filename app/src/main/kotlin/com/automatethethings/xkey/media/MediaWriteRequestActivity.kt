@@ -113,6 +113,9 @@ class MediaWriteRequestActivity : ComponentActivity() {
                 } else {
                     MediaWriteAuthorizations.deny(context, uris)
                 }
+            } catch (e: MediaPublisher.UserActionRequiredException) {
+                // Android 10 asks at the write: this screen launches the question.
+                userAction = e
             } catch (e: Exception) {
                 Log.e(TAG, "Publishing granted media failed", e)
             } finally {
@@ -123,11 +126,24 @@ class MediaWriteRequestActivity : ComponentActivity() {
         finishAfter(job)
     }
 
-    /** Finish once [job] has ended (at once when none runs, as after a process death). */
+    /**
+     * Finish once [job] has ended (at once when none runs, as after a process
+     * death), unless Android 10 refused a write until the user allows it:
+     * then its question is launched, and the answer publishes again or drops
+     * that capture, as a write request's does.
+     */
     private fun finishAfter(job: Job?) {
         lifecycleScope.launch {
             job?.join()
-            finish()
+            val action = userAction
+            if (action == null) {
+                finish()
+                return@launch
+            }
+            userAction = null
+            requested = arrayListOf(action.target.toString())
+            answered = false
+            launcher.launch(IntentSenderRequest.Builder(action.intentSender).build())
         }
     }
 
@@ -140,5 +156,9 @@ class MediaWriteRequestActivity : ComponentActivity() {
         /** The publication running for the last answered request. */
         @Volatile
         var publication: Job? = null
+
+        /** The Android 10 question the last publication stopped at, until launched. */
+        @Volatile
+        var userAction: MediaPublisher.UserActionRequiredException? = null
     }
 }

@@ -146,6 +146,10 @@ object MediaWriteAuthorizations {
                 // request stays queued so a later grant can restore and sign it.
                 Log.w(TAG, "${write.uri} is not restored yet; it stays queued", e)
                 continue
+            } catch (e: MediaPublisher.UserActionRequiredException) {
+                // Android 10 asks the user at the write: nothing was written,
+                // and the caller launches the question, then publishes again.
+                throw e
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Signing suspends: a cancelled publication ends here, the rest still queued.
                 throw e
@@ -204,13 +208,15 @@ object MediaWriteAuthorizations {
      * The user refused the write request for [requested]: those captures
      * stay unsigned and leave the queue. Any queued after the request was
      * shown are kept for the next one, and so is one a granted write left
-     * part-written: only a later grant can put it back.
+     * part-written: only a later grant can put it back. Android 10 has no
+     * grant to check: the user refused the write MediaStore asked about.
      */
     fun deny(context: Context, requested: Collection<String>) {
         val refused = pending(context).filter {
             it.uri in requested &&
                 !MediaPublisher.recoveryPending(context, Uri.parse(it.uri)) &&
-                MediaPublisher.writeAccess(context, Uri.parse(it.uri)) == MediaPublisher.MediaWriteAccess.NEEDS_GRANT
+                (Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
+                    MediaPublisher.writeAccess(context, Uri.parse(it.uri)) == MediaPublisher.MediaWriteAccess.NEEDS_GRANT)
         }
         refused.forEach { remove(context, it.uri) }
     }
