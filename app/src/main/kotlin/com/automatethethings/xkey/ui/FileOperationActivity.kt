@@ -116,6 +116,9 @@ class FileOperationActivity : AppCompatActivity() {
         private const val STATE_SIGNED_COPY_MIME = "pending_signed_copy_mime"
         private const val STATE_SIGNED_COPY_SIGNATURE = "pending_signed_copy_signature"
 
+        // Saved state: the operation waiting on the location-access answer
+        private const val STATE_ACCESS_OPERATION = "operation_awaiting_access"
+
         // Saved state: a save writing to the destination the user picked
         private const val STATE_RUNNING_ID = "running_save_id"
         private const val STATE_RUNNING_DESTINATION = "running_save_destination"
@@ -259,6 +262,9 @@ class FileOperationActivity : AppCompatActivity() {
     // Save running: the destination was picked and its write has not ended
     private var runningSave: RunningSave? = null
 
+    // The operation waiting on the location-access answer, or -1 for none
+    private var operationAwaitingAccess = -1
+
     // Staging files for sign, encrypt and decrypt (see FileOperationStaging)
     private lateinit var staging: FileOperationStaging
     private lateinit var pendingEncryptedSave: PendingStagedSave
@@ -312,6 +318,16 @@ class FileOperationActivity : AppCompatActivity() {
 
         // Load keys and contacts
         loadKeysAndContacts()
+
+        // An operation the instance before a recreation (a rotation while the
+        // location-access dialog was open) was waiting on joins that open
+        // request and runs once the user answers it.
+        val awaiting = savedInstanceState?.getInt(STATE_ACCESS_OPERATION, -1) ?: -1
+        if (awaiting >= 0) {
+            selectedOperation = awaiting
+            showProgress(true)
+            runWithOriginals(awaiting)
+        }
     }
 
     /**
@@ -325,6 +341,7 @@ class FileOperationActivity : AppCompatActivity() {
      */
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
+        if (operationAwaitingAccess >= 0) outState.putInt(STATE_ACCESS_OPERATION, operationAwaitingAccess)
         pendingSignatureJson?.let { outState.putString(STATE_SIGNATURE_JSON, it) }
         pendingSignedCopy?.let {
             outState.putString(STATE_SIGNED_COPY_SOURCE, it.source.toString())
@@ -1019,8 +1036,20 @@ class FileOperationActivity : AppCompatActivity() {
             performDecrypt()
             return
         }
+        runWithOriginals(selectedOperation)
+    }
+
+    /**
+     * Run [operation] once the shared files are readable whole, or the user
+     * has declined to make them so ([MediaLocationAccess.withOriginals]).
+     * While it waits on that answer it is kept in the saved state, so a
+     * recreation resumes it rather than dropping it.
+     */
+    private fun runWithOriginals(operation: Int) {
+        operationAwaitingAccess = operation
         locationAccess.withOriginals(fileUris) {
-            when (selectedOperation) {
+            operationAwaitingAccess = -1
+            when (operation) {
                 OP_SIGN -> performSign()
                 OP_VERIFY -> performVerify()
                 OP_ENCRYPT -> performEncrypt()
