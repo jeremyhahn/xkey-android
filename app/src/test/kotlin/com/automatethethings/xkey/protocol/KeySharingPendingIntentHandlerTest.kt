@@ -729,6 +729,31 @@ class KeySharingPendingIntentHandlerTest {
     }
 
     /**
+     * #270 review of 33427e39: a software symmetric key's row holds no
+     * public key. Beside a same-id credential, local.deleteKey removes the
+     * software key and its row; the credential's material stays.
+     */
+    @Test
+    fun anRpcDeleteOfASymmetricRowKeepsTheSameIdCredential() = runTest {
+        val id = "k-sym"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+        var held = mapOf("keystore:xkey_credential_$id" to "1")
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers { held }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { held = held - secondArg<Map<String, String>>().keys; emptyMap() }
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
+        val software = fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        software += id
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "symmetric")
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        assertFalse("the software key stayed", id in software)
+        assertEquals("the symmetric key's delete took the credential", mapOf("keystore:xkey_credential_$id" to "1"), held)
+        assertEquals("the symmetric key's row stayed", null, tables.key(id))
+    }
+
+    /**
      * #270 verify r2 (1): a passkey's row records its public key as COSE
      * only, as the credential provider writes it. Beside a general key of
      * its id, local.deleteKey reads the COSE key: the credential's material
