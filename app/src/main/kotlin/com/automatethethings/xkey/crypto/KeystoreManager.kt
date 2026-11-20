@@ -1121,8 +1121,8 @@ class KeystoreManager(private val context: Context) {
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     fun getEd25519PrivateKey(alias: String): PrivateKey? {
-        val prefs = ed25519Prefs() ?: return null
-        val encoded = prefs.getString(alias, null) ?: return null
+        val prefs = ed25519Read(alias) { ed25519Prefs() } ?: return null
+        val encoded = ed25519Read(alias) { prefs.getString(alias, null) } ?: return null
         val keyBytes = Base64.decode(encoded, Base64.NO_WRAP)
         val keyFactory = KeyFactory.getInstance("Ed25519")
         return keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
@@ -2010,8 +2010,22 @@ class KeystoreManager(private val context: Context) {
      * on a read failure (#255 review r5).
      */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
+        ed25519Read(alias) { ed25519Prefs()?.contains(alias) == true }
+
+    /**
+     * The one way an Ed25519 preference is read (#255 review round 2): the
+     * store can pass contains() while the read of the encrypted value fails
+     * (a SecurityException on corrupt ciphertext, a GeneralSecurityException,
+     * an I/O error), and a failure to open it fails the same way. Any such
+     * failure of [read] is [KeyPresenceUnreadableException] for [alias], so
+     * every caller, the key screens' refusal included, sees a store that
+     * cannot be read rather than an unchecked exception.
+     */
+    private inline fun <T> ed25519Read(alias: String, read: () -> T): T =
         try {
-            ed25519Prefs()?.contains(alias) == true
+            read()
+        } catch (e: KeyPresenceUnreadableException) {
+            throw e
         } catch (e: Exception) {
             throw KeyPresenceUnreadableException(alias, e)
         }
@@ -2040,15 +2054,17 @@ class KeystoreManager(private val context: Context) {
      * that changes when the material under that alias is replaced (the
      * entry's creation date and certificate digest, or the digest of the
      * stored key). Empty when no material is held. A backend that cannot be
-     * read throws: an unreadable Ed25519 store is never taken for an empty
-     * one, so a delete refuses before it removes any row (#255 review).
+     * read throws: an unreadable Ed25519 store, or a value in it that cannot
+     * be read, is [KeyPresenceUnreadableException] ([ed25519Read]), never
+     * taken for an empty one, so a delete refuses before it removes any row
+     * (#255 review).
      */
     fun userKeyGeneration(keyId: String): Map<String, String> {
         val generation = LinkedHashMap<String, String>()
-        val prefs = ed25519Prefs()
+        val prefs = ed25519Read(keyId) { ed25519Prefs() }
         for (alias in userKeyAliases(keyId)) {
             keystoreTag(alias)?.let { generation[KEYSTORE_ENTRY + alias] = it }
-            prefs?.getString(alias, null)?.let { generation[ED25519_ENTRY + alias] = digestHex(it.toByteArray()) }
+            ed25519Read(alias) { prefs?.getString(alias, null) }?.let { generation[ED25519_ENTRY + alias] = digestHex(it.toByteArray()) }
         }
         return generation
     }
@@ -2064,7 +2080,7 @@ class KeystoreManager(private val context: Context) {
      */
     fun deleteUserKeyGeneration(keyId: String, generation: Map<String, String>): Map<String, String> {
         val namespace = userKeyAliases(keyId)
-        val prefs = if (generation.keys.any { it.startsWith(ED25519_ENTRY) }) ed25519Prefs() else null
+        val prefs = if (generation.keys.any { it.startsWith(ED25519_ENTRY) }) ed25519Read(keyId) { ed25519Prefs() } else null
         val uncommitted = LinkedHashMap<String, String>()
         for ((entry, tag) in generation) {
             when {
@@ -2074,7 +2090,7 @@ class KeystoreManager(private val context: Context) {
                 }
                 entry.startsWith(ED25519_ENTRY) -> {
                     val alias = entry.removePrefix(ED25519_ENTRY)
-                    val stored = prefs?.getString(alias, null)
+                    val stored = ed25519Read(alias) { prefs?.getString(alias, null) }
                     // Absent from the cache is not absent from disk: a remove
                     // whose commit() failed already left the cache without it.
                     // So an absent entry is removed again, and only a commit()
