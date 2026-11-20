@@ -166,11 +166,12 @@ class Ctap2Authenticator(
     override suspend fun handle(request: ByteArray, onUserActionNeeded: () -> Unit): ByteArray {
         if (request.isEmpty()) return status(Ctap2.ERR_INVALID_COMMAND)
         return try {
-            val params by lazy { decodeParams(request) }
             when (request[0].toInt() and 0xFF) {
                 Ctap2.CMD_GET_INFO -> response(getInfo())
-                Ctap2.CMD_GET_ASSERTION -> response(getAssertion(params, onUserActionNeeded))
-                Ctap2.CMD_MAKE_CREDENTIAL -> response(makeCredential(params, onUserActionNeeded))
+                Ctap2.CMD_GET_ASSERTION ->
+                    response(getAssertion(decodeParams(request, GET_ASSERTION_OPTIONAL), onUserActionNeeded))
+                Ctap2.CMD_MAKE_CREDENTIAL ->
+                    response(makeCredential(decodeParams(request, MAKE_CREDENTIAL_OPTIONAL), onUserActionNeeded))
                 else -> status(Ctap2.ERR_INVALID_COMMAND)
             }
         } catch (e: CtapError) {
@@ -184,14 +185,25 @@ class Ctap2Authenticator(
         }
     }
 
-    private fun decodeParams(request: ByteArray): Map<*, *> {
+    /**
+     * The one place a request's parameters are decoded. An optional list or
+     * map parameter ([optional]: allowList, excludeList, extensions, options)
+     * that is present but empty means the same as an absent one, so it is
+     * dropped here: an empty allowList is discovery, never "no credential
+     * allowed", and an empty excludeList excludes nothing. Every command reads
+     * its parameters only from what this returns.
+     */
+    private fun decodeParams(request: ByteArray, optional: Set<Long>): Map<*, *> {
         if (request.size < 2) throw CtapError(Ctap2.ERR_MISSING_PARAMETER)
         val decoded = try {
             CborDecoder.decode(request.copyOfRange(1, request.size))
         } catch (e: CborDecodingException) {
             throw CtapError(Ctap2.ERR_INVALID_CBOR)
         }
-        return decoded as? Map<*, *> ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
+        val params = decoded as? Map<*, *> ?: throw CtapError(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
+        return params.filterNot { (key, value) ->
+            key is Long && key in optional && ((value is List<*> && value.isEmpty()) || (value is Map<*, *> && value.isEmpty()))
+        }
     }
 
     private fun getInfo(): Map<Any, Any?> = mapOf(
@@ -350,6 +362,12 @@ class Ctap2Authenticator(
     private fun status(code: Int): ByteArray = byteArrayOf(code.toByte())
 
     private companion object {
+        /** authenticatorGetAssertion's optional lists and maps: allowList, extensions, options. */
+        val GET_ASSERTION_OPTIONAL = setOf(3L, 4L, 5L)
+
+        /** authenticatorMakeCredential's optional lists and maps: excludeList, extensions, options. */
+        val MAKE_CREDENTIAL_OPTIONAL = setOf(5L, 6L, 7L)
+
         fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
 
         fun Long.toUInt32(): ByteArray = ByteBuffer.allocate(4).putInt(toInt()).array()
