@@ -81,8 +81,13 @@ class Ctap2AuthenticatorTest {
             return choice(candidates)
         }
 
-        override suspend fun credentials(rpId: String): List<FidoCredential> =
-            stored.filter { it.rpId == rpId && it.id.hex() !in hidden }
+        /** How many times the authenticator listed the stored credentials. */
+        var lookups = 0
+
+        override suspend fun credentials(rpId: String): List<FidoCredential> {
+            lookups++
+            return stored.filter { it.rpId == rpId && it.id.hex() !in hidden }
+        }
 
         override suspend fun checkUser(rpId: String, registering: Boolean): UserCheck {
             checks++
@@ -260,6 +265,34 @@ class Ctap2AuthenticatorTest {
         verifier.initVerify(backend.publicKey(byteArrayOf(2)))
         verifier.update((body[2L] as ByteArray) + clientDataHash)
         assertTrue(verifier.verify(body[3L] as ByteArray))
+    }
+
+    @Test
+    fun `an empty allow list is discovery and signs with the one resident account`() = runTest {
+        backend.add(byteArrayOf(5), rpId, user = byteArrayOf(55), name = "alice")
+        backend.add(byteArrayOf(6), rpId, discoverable = false)
+
+        val (status, body) = call(Ctap2.CMD_GET_ASSERTION, assertion(allow = emptyList()))
+
+        assertEquals(Ctap2.OK, status)
+        assertArrayEquals(byteArrayOf(5), (body!![1L] as Map<*, *>)["id"] as ByteArray)
+        assertArrayEquals(byteArrayOf(55), (body[4L] as Map<*, *>)["id"] as ByteArray)
+        assertTrue(backend.offered.isEmpty())
+    }
+
+    @Test
+    fun `an empty allow list with several resident accounts asks the owner to choose`() = runTest {
+        backend.add(byteArrayOf(1), rpId, user = byteArrayOf(41), name = "alice")
+        backend.add(byteArrayOf(2), rpId, user = byteArrayOf(42), name = "bob")
+        backend.add(byteArrayOf(3), rpId, discoverable = false)
+        backend.choice = { offered -> offered.single { it.userName == "bob" } }
+
+        val (status, body) = call(Ctap2.CMD_GET_ASSERTION, assertion(allow = emptyList()))
+
+        assertEquals(Ctap2.OK, status)
+        assertEquals(listOf(listOf("alice", "bob")), backend.offered.map { list -> list.map { it.userName } })
+        assertArrayEquals(byteArrayOf(2), (body!![1L] as Map<*, *>)["id"] as ByteArray)
+        assertArrayEquals(byteArrayOf(42), (body[4L] as Map<*, *>)["id"] as ByteArray)
     }
 
     @Test
@@ -459,6 +492,35 @@ class Ctap2AuthenticatorTest {
         assertEquals(Ctap2.ERR_CREDENTIAL_EXCLUDED, status)
         assertTrue(backend.created.isEmpty())
         assertEquals(1, backend.checks)
+    }
+
+    @Test
+    fun `an empty excludeList behaves as an absent one`() = runTest {
+        backend.add(byteArrayOf(3, 3), rpId)
+
+        val (status, _) = call(Ctap2.CMD_MAKE_CREDENTIAL, registration(exclude = emptyList()))
+
+        assertEquals(Ctap2.OK, status)
+        assertEquals(1, backend.created.size)
+        // Absent, the excludeList needs no lookup of stored credentials.
+        assertEquals(0, backend.lookups)
+    }
+
+    @Test
+    fun `empty extensions and options maps behave as absent ones`() = runTest {
+        backend.add(byteArrayOf(1), rpId)
+
+        val (assertStatus, _) = call(
+            Ctap2.CMD_GET_ASSERTION,
+            assertion(options = emptyMap(), extra = mapOf(4 to emptyMap<Any, Any?>()))
+        )
+        val registration = registration(options = emptyMap()).toMutableMap()
+        registration[6] = emptyMap<Any, Any?>()
+        val (makeStatus, _) = call(Ctap2.CMD_MAKE_CREDENTIAL, registration)
+
+        assertEquals(Ctap2.OK, assertStatus)
+        assertEquals(Ctap2.OK, makeStatus)
+        assertEquals(false, backend.created.single().discoverable)
     }
 
     @Test
