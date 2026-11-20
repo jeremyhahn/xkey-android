@@ -176,9 +176,24 @@ an embedded signature is refused, keeping that signature.
 
 ```
 Method:  Sidecar file (.xkeysig)
-Format:  JSON file alongside the media file
-Path:    <original_path>.xkeysig
+Format:  JSON file
+Path:    <original_path>.xkeysig                  (media xKey may write by path; Android 9)
+         Documents/xKey/<relative dir>/<name>.xkeysig  (Android 10+, granted capture)
 ```
+
+Where the sidecar lives depends on who may write beside the media. Media xKey
+owns, and every file on Android 9 (no scoped storage), keep it next to the
+file: `<original_path>.xkeysig`. A capture another app owns, written on the
+granted path on Android 10 and later, gets a sidecar file xKey owns instead,
+because the write grant covers the capture alone and scoped storage refuses a
+file created beside it: under `Documents/xKey/`, at the media's own relative
+directory under shared storage, named `<media name>.xkeysig`
+(`XmpMetadataHelper.ownedSidecarLocation`; `Documents/xKey/` alone when the
+media has no file or lies outside shared storage). For example, the sidecar of
+`DCIM/Camera/IMG_0101.jpg` is `Documents/xKey/DCIM/Camera/IMG_0101.jpg.xkeysig`.
+When the platform gives no owned file (Android 9), it falls back to the path
+beside the media. A sidecar is read, and rewritten on a co-sign, where it
+lives.
 
 A sidecar is written for HEIC, MKV and unknown types, and for an MP4/MOV, PNG
 or WebP the embed refuses: bytes that do not parse, a foreign XMP packet
