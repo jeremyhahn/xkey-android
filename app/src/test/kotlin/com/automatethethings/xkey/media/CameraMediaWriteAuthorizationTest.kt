@@ -559,6 +559,65 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
+    fun `a capture edited in a gallery after a crash keeps the edit and the backup, and is not signed`() {
+        killMidOverwrite(data())
+        val recovery = MediaPublisher.recoveryDirectory(context)
+        val backup = MediaPublisher.GrantedWriteJournal(recovery, uri).backup.readBytes()
+        // Before xKey runs again, the user saves an edit of the capture in a gallery.
+        val edited = XmpFixtures.png(XmpFixtures.bytes(0x78, 0x9C, 0x07, 0x08, 0x09))
+        media.writeBytes(edited)
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertArrayEquals("the gallery edit is never overwritten by the backup", edited, media.readBytes())
+        assertTrue("the edited capture is not signed", signed.isEmpty())
+        assertTrue("the record is settled", !MediaPublisher.recoveryPending(context, uri))
+        assertTrue(
+            "the version from before the write is kept as well",
+            recovery.listFiles()!!.any { it.isFile && it.readBytes().contentEquals(backup) }
+        )
+    }
+
+    @Test
+    fun `a queue that cannot be read is kept whole and add fails instead of replacing it`() {
+        queue(data())
+        val store = File(context.filesDir, "media-write-requests.json")
+        val before = store.readBytes()
+        val other = PendingMediaWrite("content://media/external/images/media/4343", null, "key-1", "Key", data())
+
+        MediaWriteAuthorizations.readStore = { throw IOException("the queue could not be read") }
+        try {
+            assertThrows(IOException::class.java) { MediaWriteAuthorizations.add(context, other) }
+        } finally {
+            MediaWriteAuthorizations.readStore = { it.readText() }
+        }
+        assertArrayEquals("the queue is untouched", before, store.readBytes())
+
+        store.writeText("{not a queue")
+        assertThrows(IOException::class.java) { MediaWriteAuthorizations.add(context, other) }
+        assertEquals("a queue that cannot be parsed is untouched", "{not a queue", store.readText())
+    }
+
+    @Test
+    fun `a queue read that fails while a request is removed keeps the queue whole`() {
+        queue(data())
+        val store = File(context.filesDir, "media-write-requests.json")
+        val before = store.readBytes()
+        granted = false
+        var reads = 0
+        // The listing reads the queue; the removal's own read fails.
+        MediaWriteAuthorizations.readStore = { if (++reads > 1) throw IOException("the queue could not be read") else it.readText() }
+        try {
+            assertThrows(IOException::class.java) { MediaWriteAuthorizations.deny(context, listOf(uri.toString())) }
+        } finally {
+            MediaWriteAuthorizations.readStore = { it.readText() }
+        }
+        assertArrayEquals("the queue is untouched", before, store.readBytes())
+        assertEquals(listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri })
+    }
+
+    @Test
     fun `a granted write called directly refuses without location access`() {
         val geotagged = useGeotaggedJpeg()
         shadowOf(context as Application).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)

@@ -56,6 +56,10 @@ object MediaWriteAuthorizations {
 
     private fun store(context: Context) = File(context.filesDir, FILE)
 
+    /** The one read of the queue's text; tests make it fail. */
+    @Volatile
+    internal var readStore: (File) -> String = { it.readText() }
+
     /** Every capture waiting for write access, oldest first. */
     fun pending(context: Context): List<PendingMediaWrite> = synchronized(lock) { read(context) }
 
@@ -162,7 +166,7 @@ object MediaWriteAuthorizations {
         val file = store(context)
         if (!file.exists()) return emptyList()
         return try {
-            val array = JSONArray(file.readText())
+            val array = JSONArray(readStore(file))
             (0 until array.length()).map { i ->
                 val o = array.getJSONObject(i)
                 PendingMediaWrite(
