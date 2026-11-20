@@ -292,4 +292,40 @@ class Android10ForeignCaptureTest {
         assertEquals("the capture stays queued for a later consent", 1, MediaWriteAuthorizations.pending(context).size)
         assertArrayEquals("nothing was written", mixed, provider.media.readBytes())
     }
+
+    @Test
+    fun `an unsigned retry waits for the restore's renewed consent and is signed once over the restored bytes`() {
+        val wholeHash = data().contentHash
+        val mixed = killMidAllowedWrite()
+        // A failed publication queued the capture unsigned for a retry.
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", null))
+        val signedHashes = mutableListOf<String>()
+        val previousSign = AutoSigner.sign
+        AutoSigner.sign = { _, _, hash -> signedHashes += hash; data().copy(contentHash = hash) }
+        try {
+            val refusal = runCatching { runBlocking { MediaWriteAuthorizations.publishGranted(context) {} } }.exceptionOrNull()
+
+            assertTrue(
+                "the restore asks for consent: ${refusal?.javaClass?.simpleName}",
+                refusal is MediaPublisher.UserActionRequiredException
+            )
+            assertTrue("nothing is hashed or signed before the restore: $signedHashes", signedHashes.isEmpty())
+            assertEquals(
+                "the request stays queued, unsigned",
+                listOf<ContentAuthenticityData?>(null), MediaWriteAuthorizations.pending(context).map { it.data }
+            )
+            assertArrayEquals(mixed, provider.media.readBytes())
+
+            allowed = true
+            val signed = mutableListOf<PendingMediaWrite>()
+            runBlocking { MediaWriteAuthorizations.publishGranted(context) { signed += it } }
+
+            assertEquals("signed once, over the restored bytes", listOf(wholeHash), signedHashes)
+            assertEquals(listOf(uri.toString()), signed.map { it.uri })
+            assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
+            assertTrue(!MediaPublisher.recoveryPending(context, uri))
+        } finally {
+            AutoSigner.sign = previousSign
+        }
+    }
 }

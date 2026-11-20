@@ -496,6 +496,48 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
+    fun `an unsigned retry is hashed and signed only once its capture is restored`() = runBlocking<Unit> {
+        val wholeHash = data().contentHash
+        killMidOverwrite(data())
+        val mixed = media.readBytes()
+        // A failed publication queued the capture unsigned for a retry.
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", null))
+        val signedHashes = mutableListOf<String>()
+        val previousSign = AutoSigner.sign
+        AutoSigner.sign = { _, _, hash -> signedHashes += hash; data(hash) }
+        try {
+            provider.failWrites = true
+            val signed = mutableListOf<PendingMediaWrite>()
+            MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+            assertTrue("nothing is hashed or signed over the part-written capture: $signedHashes", signedHashes.isEmpty())
+            assertTrue(signed.isEmpty())
+            assertEquals(
+                "the request stays queued, unsigned",
+                listOf<ContentAuthenticityData?>(null), MediaWriteAuthorizations.pending(context).map { it.data }
+            )
+            assertArrayEquals(mixed, media.readBytes())
+
+            // The auto-signer meeting the capture now hashes nothing either.
+            assertEquals(
+                AutoSigner.Outcome.QueuedForRetry,
+                AutoSigner.signCapture(context, uri, capture.path, "key-1", "Key")
+            )
+            assertTrue("the auto-signer signs nothing mid-recovery: $signedHashes", signedHashes.isEmpty())
+
+            provider.failWrites = false
+            MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+            assertEquals("signed once, over the restored bytes", listOf(wholeHash), signedHashes)
+            assertEquals(listOf(uri.toString()), signed.map { it.uri })
+            assertEquals(data(wholeHash).toJsonString(), embedded(media.readBytes()))
+            assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
+        } finally {
+            AutoSigner.sign = previousSign
+        }
+    }
+
+    @Test
     fun `a staging failure keeps the request queued and a later retry signs it, while a capture that is gone leaves the queue`() = runBlocking<Unit> {
         val data = data()
         queue(data)
