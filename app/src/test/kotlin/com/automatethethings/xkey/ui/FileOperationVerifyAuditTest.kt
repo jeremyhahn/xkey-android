@@ -25,9 +25,11 @@ import android.view.View
 import android.widget.TextView
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.media.AutoSignHash
+import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.FakeMediaProvider
 import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.XmpFixtures
+import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.google.android.material.button.MaterialButton
 import io.mockk.every
 import io.mockk.mockkObject
@@ -134,6 +136,27 @@ class FileOperationVerifyAuditTest {
         assertFalse(FileOperationActivity.verificationSucceeded(listOf("Signer" to "verified", "Other" to "failed")))
         assertFalse(FileOperationActivity.verificationSucceeded(listOf("Signer" to "unknown")))
         assertTrue(FileOperationActivity.verificationSucceeded(listOf("Signer" to "verified")))
+    }
+
+    @Test
+    fun `a declined verify of an embedded capture is audited as not verified`() {
+        // A PNG carries its signature in-band: reading it needs the original.
+        val signed = File(folder.root, "capture.png").apply {
+            writeBytes(XmpFixtures.png())
+            XmpMetadataHelper.writeSignature(path, ContentAuthenticityData.fromJsonString(XmpFixtures.json(originalHash)))
+        }
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            media = signed
+            mimeType = "image/png"
+            redact = { signed.readBytes() }
+        }
+
+        val activity = verifyDeclined()
+
+        assertShownUnavailable(activity)
+        idleUntil { fileVerified().isNotEmpty() }
+        assertEquals("one verification is audited", 1, fileVerified().size)
+        assertFalse("the signature was never read, so nothing is verified", fileVerified().single())
     }
 
     @Test
