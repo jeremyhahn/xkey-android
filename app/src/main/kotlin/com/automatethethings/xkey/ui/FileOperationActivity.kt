@@ -1313,6 +1313,7 @@ class FileOperationActivity : AppCompatActivity() {
                     showVerificationResult(result)
                 }
             } catch (e: Exception) {
+                auditVerificationError(uri)
                 withContext(Dispatchers.Main) { showError(e) }
             }
         }
@@ -1352,6 +1353,7 @@ class FileOperationActivity : AppCompatActivity() {
                     showVerificationResult(results)
                 }
             } catch (e: Exception) {
+                auditVerificationError(fileUri)
                 withContext(Dispatchers.Main) { showError(e) }
             }
         }
@@ -1368,6 +1370,20 @@ class FileOperationActivity : AppCompatActivity() {
             signerCount = signerCount,
             verified = verificationSucceeded(results)
         )
+    }
+
+    /**
+     * A verification of [uri] that ended in an error (an unreadable capture
+     * or sidecar, a malformed signature): no signature was checked, so no
+     * signer is counted and it is audited as not verified. A failure to
+     * audit never hides the error from the user.
+     */
+    private fun auditVerificationError(uri: Uri) {
+        try {
+            auditVerification(uri, 0, emptyList())
+        } catch (e: Exception) {
+            Log.e(TAG, "Verify error could not be audited", e)
+        }
     }
 
     /**
