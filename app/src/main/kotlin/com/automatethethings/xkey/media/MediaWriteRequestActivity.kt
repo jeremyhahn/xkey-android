@@ -18,6 +18,7 @@ import android.app.Activity
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.io.IOException
 
 /**
  * Asks the user, in one MediaStore write request, for write access to the
@@ -87,10 +89,19 @@ class MediaWriteRequestActivity : ComponentActivity() {
      * A capture is rewritten only from its original bytes, location included
      * (MediaPublisher.openOriginal): ask for that first, then launch the
      * write request. After a recreation this joins the location request the
-     * previous instance left open ([MediaLocationAccess]).
+     * previous instance left open ([MediaLocationAccess]). A queue that
+     * cannot be read or parsed is left as it is: the user is told the
+     * waiting captures cannot be loaded, and the screen ends.
      */
     private fun askLocationThenRequest() {
-        val queued = MediaWriteAuthorizations.pending(applicationContext).map { Uri.parse(it.uri) }
+        val queued = try {
+            MediaWriteAuthorizations.pending(applicationContext).map { Uri.parse(it.uri) }
+        } catch (e: IOException) {
+            Log.e(TAG, "Cannot read the write-request queue", e)
+            Toast.makeText(applicationContext, QUEUE_UNREADABLE_MESSAGE, Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
         locationAccess.withOriginals(queued) { launchWriteRequest() }
     }
 
@@ -173,6 +184,7 @@ class MediaWriteRequestActivity : ComponentActivity() {
 
     private companion object {
         const val TAG = "MediaWriteRequest"
+        const val QUEUE_UNREADABLE_MESSAGE = "Captures waiting for access cannot be loaded"
         const val KEY_REQUESTED = "requested"
         const val KEY_ANSWERED = "answered"
         const val KEY_WRITE_REQUEST_LAUNCHED = "write_request_launched"
