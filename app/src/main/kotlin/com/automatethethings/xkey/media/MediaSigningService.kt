@@ -48,7 +48,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import java.time.Instant
 
 /**
@@ -228,12 +227,10 @@ internal object AutoSigner {
      * replace it.
      */
     @Volatile
-    var sign: (Context, String, String) -> ContentAuthenticityData = { context, keyId, contentHash ->
-        // Off the main thread: the service's IO scope, or the request screen's publication.
-        runBlocking {
-            val key = XKeyDatabase.getInstance(context).keyDao().getByKeyId(keyId) ?: throw KeyNotFoundException(keyId)
-            signHash(KeystoreManager(context), key, contentHash)
-        }
+    var sign: suspend (Context, String, String) -> ContentAuthenticityData = { context, keyId, contentHash ->
+        // Suspends in its caller's coroutine: the service's IO scope, or the request screen's publication.
+        val key = XKeyDatabase.getInstance(context).keyDao().getByKeyId(keyId) ?: throw KeyNotFoundException(keyId)
+        signHash(KeystoreManager(context), key, contentHash)
     }
 
     /** [contentHash] signed with [key]: the signature data embedded in the capture. */
@@ -268,7 +265,7 @@ internal object AutoSigner {
      * access is queued with its signature. A JPEG too large to canonicalise
      * throws [AutoSignHash.TooLargeException].
      */
-    fun signCapture(context: Context, uri: Uri, filePath: String?, keyId: String, keyLabel: String): Outcome {
+    suspend fun signCapture(context: Context, uri: Uri, filePath: String?, keyId: String, keyLabel: String): Outcome {
         val contentHash = try {
             AutoSignHash.contentHashOriginal(context, uri)
         } catch (e: MediaPublisher.OriginalUnavailableException) {

@@ -32,6 +32,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -116,7 +117,7 @@ class CameraMediaWriteAuthorizationTest {
         XmpContainers.read(ByteArrayInputStream(bytes).buffered(), XmpContainers.Format.PNG)
 
     @Test
-    fun `camera-owned media asks for write access and is signed through its URI once granted`() {
+    fun `camera-owned media asks for write access and is signed through its URI once granted`() = runBlocking<Unit> {
         val data = data()
 
         val first = XmpMetadataHelper.signMedia(context, uri, capture.path, data)
@@ -141,7 +142,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a denied request drops its media unsigned`() {
+    fun `a denied request drops its media unsigned`() = runBlocking<Unit> {
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data()))
         val signed = mutableListOf<PendingMediaWrite>()
         MediaWriteAuthorizations.publishGranted(context) { signed += it }
@@ -156,7 +157,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `granted media that changed since it was hashed is refused`() {
+    fun `granted media that changed since it was hashed is refused`() = runBlocking<Unit> {
         granted = true
         val stale = data(hash = "0".repeat(64))
 
@@ -168,7 +169,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `media xKey owns keeps its path`() {
+    fun `media xKey owns keeps its path`() = runBlocking<Unit> {
         owner = context.packageName
         val data = data()
 
@@ -181,7 +182,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a granted write that fails mid-copy leaves the capture whole and its request queued`() {
+    fun `a granted write that fails mid-copy leaves the capture whole and its request queued`() = runBlocking<Unit> {
         val data = data()
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
         granted = true
@@ -203,7 +204,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a granted write interrupted at its final step leaves the capture byte-for-byte whole`() {
+    fun `a granted write interrupted at its final step leaves the capture byte-for-byte whole`() = runBlocking<Unit> {
         val data = data()
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
         granted = true
@@ -254,7 +255,7 @@ class CameraMediaWriteAuthorizationTest {
             }
         }
         try {
-            MediaWriteAuthorizations.publishGranted(context) {}
+            runBlocking { MediaWriteAuthorizations.publishGranted(context) {} }
         } finally {
             MediaPublisher.overwriteStep = {}
         }
@@ -264,7 +265,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a process killed part-way through the overwrite has its capture restored at the next start`() {
+    fun `a process killed part-way through the overwrite has its capture restored at the next start`() = runBlocking<Unit> {
         killMidOverwrite(data())
         assertTrue("the kill left the capture mixed", !media.readBytes().contentEquals(original))
 
@@ -278,7 +279,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a granted write called directly, past signMedia, still refuses an edited capture`() {
+    fun `a granted write called directly, past signMedia, still refuses an edited capture`() = runBlocking<Unit> {
         granted = true
         val hash = AutoSignHash.contentHashFile(capture, "image/png")
         val staged = folder.newFile("staged.png").apply { writeBytes(original) }
@@ -292,7 +293,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `only signMedia calls the granted write`() {
+    fun `only signMedia calls the granted write`() = runBlocking<Unit> {
         val rel = "src/main/kotlin"
         val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }
             ?: error("$rel not found from ${File(".").absolutePath}")
@@ -302,7 +303,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a process killed part-way through the overwrite has its capture restored before the retry`() {
+    fun `a process killed part-way through the overwrite has its capture restored before the retry`() = runBlocking<Unit> {
         val data = data()
         killMidOverwrite(data)
         assertEquals("the request is still queued", listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri })
@@ -316,7 +317,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a capture edited after it was staged is refused and keeps the edit`() {
+    fun `a capture edited after it was staged is refused and keeps the edit`() = runBlocking<Unit> {
         granted = true
         val data = data()
         val edited = XmpFixtures.png(byteArrayOf(0x78, 0x9C.toByte(), 0x09, 0x09, 0x09))
@@ -331,7 +332,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `the signing service signs captures only through signMedia`() {
+    fun `the signing service signs captures only through signMedia`() = runBlocking<Unit> {
         val rel = "src/main/kotlin"
         val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }
             ?: error("$rel not found from ${File(".").absolutePath}")
@@ -398,7 +399,7 @@ class CameraMediaWriteAuthorizationTest {
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
 
     @Test
-    fun `a foreign geotagged JPEG keeps its location when it is signed through its grant`() {
+    fun `a foreign geotagged JPEG keeps its location when it is signed through its grant`() = runBlocking<Unit> {
         useGeotaggedJpeg()
         val data = data(hash = AutoSignHash.contentHashFile(media, "image/jpeg"))
         queue(data)
@@ -414,7 +415,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `an interrupted write of a foreign geotagged JPEG puts back the capture with its location`() {
+    fun `an interrupted write of a foreign geotagged JPEG puts back the capture with its location`() = runBlocking<Unit> {
         val geotagged = useGeotaggedJpeg()
         queue(data(hash = AutoSignHash.contentHashFile(media, "image/jpeg")))
         granted = true
@@ -422,7 +423,7 @@ class CameraMediaWriteAuthorizationTest {
         MediaPublisher.overwriteStep = { if (it == "truncate" && interrupts-- > 0) Thread.currentThread().interrupt() }
 
         try {
-            MediaWriteAuthorizations.publishGranted(context) {}
+            runBlocking { MediaWriteAuthorizations.publishGranted(context) {} }
         } finally {
             MediaPublisher.overwriteStep = {}
             Thread.interrupted()
@@ -432,7 +433,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `without location access a foreign capture is never overwritten`() {
+    fun `without location access a foreign capture is never overwritten`() = runBlocking<Unit> {
         val geotagged = useGeotaggedJpeg()
         shadowOf(context as Application).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
         queue(data(hash = AutoSignHash.contentHashFile(media, "image/jpeg")))
@@ -446,7 +447,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a recovery that fails keeps the request queued, and a later one restores and signs the capture`() {
+    fun `a recovery that fails keeps the request queued, and a later one restores and signs the capture`() = runBlocking<Unit> {
         val data = data()
         killMidOverwrite(data)
         val mixed = media.readBytes()
@@ -471,7 +472,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a staging failure keeps the request queued and a later retry signs it, while a capture that is gone leaves the queue`() {
+    fun `a staging failure keeps the request queued and a later retry signs it, while a capture that is gone leaves the queue`() = runBlocking<Unit> {
         val data = data()
         queue(data)
         granted = true
@@ -506,7 +507,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `signMedia and a direct granted write both refuse while a recovery is pending`() {
+    fun `signMedia and a direct granted write both refuse while a recovery is pending`() = runBlocking<Unit> {
         val data = data()
         killMidOverwrite(data)
         val mixed = media.readBytes()
@@ -524,7 +525,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a denied request keeps a capture that is not restored yet`() {
+    fun `a denied request keeps a capture that is not restored yet`() = runBlocking<Unit> {
         killMidOverwrite(data())
         granted = false
 
@@ -545,7 +546,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a capture whose EXIF alone was edited after it was staged is refused and keeps the edit`() {
+    fun `a capture whose EXIF alone was edited after it was staged is refused and keeps the edit`() = runBlocking<Unit> {
         val geotagged = useGeotaggedJpeg()
         val edited = relocated(geotagged)
         check(!edited.contentEquals(geotagged)) { "the edit must change the file" }
@@ -566,7 +567,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a record that cannot be read leaves its recovery pending and keeps the backup`() {
+    fun `a record that cannot be read leaves its recovery pending and keeps the backup`() = runBlocking<Unit> {
         val data = data()
         killMidOverwrite(data)
         val mixed = media.readBytes()
@@ -594,7 +595,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a capture edited in a gallery after a crash keeps the edit and the backup, and is not signed`() {
+    fun `a capture edited in a gallery after a crash keeps the edit and the backup, and is not signed`() = runBlocking<Unit> {
         killMidOverwrite(data())
         val recovery = MediaPublisher.recoveryDirectory(context)
         val backup = MediaPublisher.GrantedWriteJournal(recovery, uri).backup.readBytes()
@@ -648,7 +649,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a restore interrupted part-way is finished by the next recovery and the request stays queued`() {
+    fun `a restore interrupted part-way is finished by the next recovery and the request stays queued`() = runBlocking<Unit> {
         val data = data()
         killMidRestore(data)
         assertTrue("the kill left the capture mixed", !media.readBytes().contentEquals(original))
@@ -669,7 +670,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a restore interrupted part-way, then a retry, finishes the restore before signing`() {
+    fun `a restore interrupted part-way, then a retry, finishes the restore before signing`() = runBlocking<Unit> {
         val data = data()
         killMidRestore(data)
 
@@ -682,7 +683,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a capture edited in a gallery after an interrupted restore keeps the edit and the backup`() {
+    fun `a capture edited in a gallery after an interrupted restore keeps the edit and the backup`() = runBlocking<Unit> {
         killMidRestore(data())
         val recovery = MediaPublisher.recoveryDirectory(context)
         val backup = MediaPublisher.GrantedWriteJournal(recovery, uri).backup.readBytes()
@@ -702,7 +703,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a queue that cannot be read is kept whole and add fails instead of replacing it`() {
+    fun `a queue that cannot be read is kept whole and add fails instead of replacing it`() = runBlocking<Unit> {
         queue(data())
         val store = File(context.filesDir, "media-write-requests.json")
         val before = store.readBytes()
@@ -722,7 +723,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a queue read that fails while a request is removed keeps the queue whole`() {
+    fun `a queue read that fails while a request is removed keeps the queue whole`() = runBlocking<Unit> {
         queue(data())
         val store = File(context.filesDir, "media-write-requests.json")
         val before = store.readBytes()
@@ -740,7 +741,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a granted write called directly refuses without location access`() {
+    fun `a granted write called directly refuses without location access`() = runBlocking<Unit> {
         val geotagged = useGeotaggedJpeg()
         shadowOf(context as Application).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
         granted = true
@@ -755,7 +756,7 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
-    fun `a capture is staged, backed up and checked only through its original`() {
+    fun `a capture is staged, backed up and checked only through its original`() = runBlocking<Unit> {
         val rel = "src/main/kotlin"
         val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }
             ?: error("$rel not found from ${File(".").absolutePath}")

@@ -216,17 +216,24 @@ object MediaPublisher {
      * The URI that reads [target] whole, its location metadata included: a
      * content URI's original ([MediaStore.setRequireOriginal]) from Android
      * 10, which needs ACCESS_MEDIA_LOCATION, or [target] itself where nothing
-     * is redacted (another scheme, or earlier Android). Null when that
-     * permission is missing.
+     * is redacted (another scheme or provider, or earlier Android). Only
+     * MediaStore redacts: its own URIs and the media documents it backs,
+     * which serve the original to a caller holding the permission. Null when
+     * that permission is missing for one of them.
      */
     fun originalUri(context: Context, target: Uri): Uri? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return target
         if (target.scheme != ContentResolver.SCHEME_CONTENT) return target
+        val authority = target.authority
+        if (authority != MediaStore.AUTHORITY && authority != MEDIA_DOCUMENTS_AUTHORITY) return target
         if (context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             return null
         }
-        return MediaStore.setRequireOriginal(target)
+        return if (authority == MediaStore.AUTHORITY) MediaStore.setRequireOriginal(target) else target
     }
+
+    /** The documents provider MediaStore backs (the system picker's Images, Videos and Audio roots). */
+    private const val MEDIA_DOCUMENTS_AUTHORITY = "com.android.providers.media.documents"
 
     /**
      * The one read of a capture xKey stages, backs up or checks before and

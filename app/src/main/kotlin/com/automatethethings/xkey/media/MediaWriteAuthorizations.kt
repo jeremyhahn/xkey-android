@@ -121,7 +121,7 @@ object MediaWriteAuthorizations {
      * ([signedOverRedactedView]) is no change: the capture is signed again
      * from its original.
      */
-    fun publishGranted(context: Context, onSigned: (PendingMediaWrite) -> Unit) {
+    suspend fun publishGranted(context: Context, onSigned: (PendingMediaWrite) -> Unit) {
         // A retry: captures an earlier write was interrupted in are whole first.
         MediaPublisher.recoverInterruptedWrites(context)
         for (queued in pending(context)) {
@@ -146,6 +146,9 @@ object MediaWriteAuthorizations {
                 // request stays queued so a later grant can restore and sign it.
                 Log.w(TAG, "${write.uri} is not restored yet; it stays queued", e)
                 continue
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Signing suspends: a cancelled publication ends here, the rest still queued.
+                throw e
             } catch (e: Exception) {
                 if (!permanentRefusal(e)) {
                     // A read, staging or embedding failure (a full disk, a
@@ -171,7 +174,7 @@ object MediaWriteAuthorizations {
      * signs it no second time. While only the redacted view is readable this
      * throws [MediaPublisher.OriginalUnavailableException] and hashes nothing.
      */
-    private fun signedFromOriginal(context: Context, write: PendingMediaWrite): PendingMediaWrite {
+    private suspend fun signedFromOriginal(context: Context, write: PendingMediaWrite): PendingMediaWrite {
         if (write.data != null) return write
         val contentHash = AutoSignHash.contentHashOriginal(context, Uri.parse(write.uri))
         val signed = write.copy(data = AutoSigner.sign(context, write.keyId, contentHash))

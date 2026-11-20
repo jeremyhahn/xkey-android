@@ -140,7 +140,7 @@ class GeotaggedVideoAutoSignTest {
     }
 
     @Test
-    fun `a geotagged video captured without location access is signed from its original once access is granted`() {
+    fun `a geotagged video captured without location access is signed from its original once access is granted`() = runBlocking<Unit> {
         val originalHash = AutoSignHash.contentHashFile(media, "video/mp4")
         assertNotEquals(
             "the fixture's redacted view must hash differently",
@@ -177,7 +177,7 @@ class GeotaggedVideoAutoSignTest {
     }
 
     @Test
-    fun `a queued video signed over its redacted view is signed again from its original, never dropped`() {
+    fun `a queued video signed over its redacted view is signed again from its original, never dropped`() = runBlocking<Unit> {
         val redactedHash = AutoSignHash.contentHashUri(context.contentResolver, uri)
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), null, "key-1", "Key", data(redactedHash)))
         shadowOf(context as Application).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
@@ -194,7 +194,7 @@ class GeotaggedVideoAutoSignTest {
     }
 
     @Test
-    fun `on Android 10 a capture queued for location access drains once access is granted, with no write request`() {
+    fun `on Android 10 a capture queued for location access drains once access is granted, with no write request`() = runBlocking<Unit> {
         // Before Android 11 xKey writes media by path and MediaStore has no
         // write request (createWriteRequest needs Android 11). The unit tests
         // run on the SDK 34 runtime alone, so Android 10 is reported for this
