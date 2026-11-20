@@ -23,7 +23,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -163,6 +165,70 @@ class MediaSaveRunsAbandonTest {
         MediaSaveRuns.sweep(dir)
 
         assertTrue("a copy saved state names again stays", held.exists())
+    }
+
+    @Test
+    fun `a signed-copy save's working file is a save's working file, kept while its process lives`() {
+        val dir = temp.newFolder("media-recovery-work")
+        val data = ContentAuthenticityData.fromJsonString(XmpFixtures.json())!!
+        val during = mutableListOf<String>()
+        val written = XmpMetadataHelper.replaceEmbeddedSignature(
+            open = { XmpFixtures.png().inputStream() },
+            openOutput = {
+                // Another screen starts while the copy is being published.
+                MediaSaveRuns.sweep(dir)
+                during += dir.list()!!
+                ByteArrayOutputStream()
+            },
+            format = XmpContainers.Format.PNG,
+            data = data,
+            workDir = dir,
+            destination = "content://test/${id()}"
+        )
+        assertTrue(written)
+        assertTrue("the working file outlives this process's sweep", during.isNotEmpty())
+        assertTrue(during.toString(), during.all { it.startsWith("work-") })
+        assertEquals("published, it is gone", 0, dir.list()!!.size)
+    }
+
+    @Test
+    fun `the start-up sweep reclaims every working file a killed save left`() {
+        val dir = temp.newFolder("media-recovery-killed")
+        // Fresh files of an earlier process: no saved state names a working
+        // file (a restored save makes a new one), so none waits for a window.
+        val left = listOf(
+            "work-0123456789abcdef-1.xkeytmp",
+            "work-0123456789abcdef-2.png.xkeysig",
+            ".work-0123456789abcdef-1.xkeytmp.3.xkeytmp",
+            ".cosign-0123456789abcdef-4.png.5.xkeytmp",
+            ".xkey-sign.6.xkeytmp",
+            "sign-7.jpg"
+        ).map { File(dir, it).apply { writeBytes(byteArrayOf(1)) } }
+        val unrestored = File(dir, "cosign-0123456789abcdef-saved.png").apply { writeBytes(byteArrayOf(2)) }
+
+        MediaSaveRuns.sweep(dir)
+
+        left.forEach { assertFalse("${it.name} is reclaimed", it.exists()) }
+        assertTrue("a staged copy saved state may name keeps its window", unrestored.exists())
+    }
+
+    @Test
+    fun `the sweep keeps a working file a pending publication recovery still names`() {
+        val dir = temp.newFolder("media-recovery-pending")
+        val referenced = File(dir, "work-0123456789abcdef-1.jpg").apply { writeBytes(byteArrayOf(1)) }
+        val orphan = File(dir, "work-0123456789abcdef-2.jpg").apply { writeBytes(byteArrayOf(2)) }
+        // An interrupted granted write: its record, its backup, and a link to the bytes it wrote.
+        val journal = listOf(
+            File(dir, "granted-abc.uri").apply { writeText("content://media/external/images/media/1") },
+            File(dir, "granted-abc.bak").apply { writeBytes(byteArrayOf(3)) },
+            File(dir, "granted-abc.new").also { Files.createLink(it.toPath(), referenced.toPath()) }
+        )
+
+        MediaSaveRuns.sweep(dir)
+
+        assertTrue("the bytes a pending recovery names stay", referenced.exists())
+        journal.forEach { assertTrue("${it.name} stays", it.exists()) }
+        assertFalse("a working file nothing names is gone", orphan.exists())
     }
 
     /** Dates this file past the window in which saved screen state could name it. */
