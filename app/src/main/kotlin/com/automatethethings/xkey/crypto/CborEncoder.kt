@@ -310,7 +310,17 @@ object CborEncoder {
         }
     }
 
+    /**
+     * CTAP2 canonical key order over encoded keys: major type first
+     * (unsigned, then negative integers, then text), then within a type the
+     * shorter encoding, then bytewise. Within a type this orders unsigned
+     * integers by value, negative integers by magnitude (-1 before -2) and
+     * text shorter first, then lexically.
+     */
     private fun compareCanonical(a: ByteArray, b: ByteArray): Int {
+        val majorA = (a[0].toInt() and 0xFF) shr 5
+        val majorB = (b[0].toInt() and 0xFF) shr 5
+        if (majorA != majorB) return majorA - majorB
         if (a.size != b.size) return a.size - b.size
         for (i in a.indices) {
             val d = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
