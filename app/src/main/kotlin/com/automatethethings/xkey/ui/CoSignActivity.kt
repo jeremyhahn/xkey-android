@@ -851,7 +851,7 @@ class CoSignActivity : AppCompatActivity() {
         mediaLoad = lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val mimeType = contentResolver.getType(uri)
-                val sigData = XmpMetadataHelper.readSignatureFromUri(contentResolver, uri, mimeType)
+                val sigData = XmpMetadataHelper.readSignatureFromUri(applicationContext, uri, mimeType)
                 currentSignatureData = sigData
 
                 withContext(Dispatchers.Main) {

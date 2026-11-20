@@ -48,7 +48,7 @@ class MediaSourceReadChokePointTest {
         "media/MediaSigningService.kt" to 1,
         // The resolver overloads instrumented tests call; app code takes the Context ones.
         "media/MediaHasher.kt" to 1,
-        "media/XmpMetadataHelper.kt" to 2,
+        "media/XmpMetadataHelper.kt" to 1,
         // The choke point itself.
         "media/MediaPublisher.kt" to 1,
     )

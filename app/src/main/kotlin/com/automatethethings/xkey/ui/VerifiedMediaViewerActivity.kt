@@ -41,6 +41,7 @@ import com.automatethethings.xkey.databinding.ActivityVerifiedViewerBinding
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.MediaLocationAccess
+import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerVerification
 import com.automatethethings.xkey.media.XmpMetadataHelper
@@ -254,7 +255,7 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Attempt to read signature directly from stream first (JPEG EXIF)
-                var sigData = XmpMetadataHelper.readSignatureFromUri(contentResolver, uri, mimeType)
+                var sigData = XmpMetadataHelper.readSignatureFromUri(applicationContext, uri, mimeType)
                 // Only the sidecar beside the real file counts as a sidecar; the
                 // temp-copy read below keeps the in-band (canonical-only) rule.
                 var source = MediaHasher.SignatureSource.IN_BAND
@@ -301,6 +302,10 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                     verified = allVerified
                 )
 
+            } catch (e: MediaPublisher.OriginalUnavailableException) {
+                // Only the redacted view is readable: nothing is verified, and it is no tampering.
+                Log.w(TAG, "The original is unreadable without location access", e)
+                withContext(Dispatchers.Main) { showAccessUnavailable() }
             } catch (e: Exception) {
                 Log.e(TAG, "Error verifying media", e)
                 withContext(Dispatchers.Main) { showNoSignatures() }
@@ -353,11 +358,11 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
 
         val tempFile = File(cacheDir, "verify_temp$extension")
         try {
-            contentResolver.openInputStream(uri)?.use { input ->
+            MediaPublisher.openOriginal(applicationContext, uri).use { input ->
                 tempFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
-            } ?: return null
+            }
 
             return XmpMetadataHelper.readSignature(tempFile.absolutePath)
         } finally {

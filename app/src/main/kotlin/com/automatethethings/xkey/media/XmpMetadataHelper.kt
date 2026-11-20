@@ -185,20 +185,38 @@ object XmpMetadataHelper {
      * EXIF for JPEG, the XMP box or chunk for MP4/MOV, PNG and WebP (read by
      * walking the container's headers, so a video is never loaded whole). A
      * URI has no sidecar beside it, so anything else reads as unsigned.
+     *
+     * Read as [contentResolver] serves it: for a MediaStore capture that is
+     * the redacted view. App code reads source media through the Context
+     * overload, which reads the original.
      */
-    fun readSignatureFromUri(contentResolver: ContentResolver, uri: Uri, mimeType: String?): ContentAuthenticityData? {
+    fun readSignatureFromUri(contentResolver: ContentResolver, uri: Uri, mimeType: String?): ContentAuthenticityData? =
+        readSignature(uri, mimeType) { contentResolver.openInputStream(uri) }
+
+    /**
+     * The signature embedded in the original bytes at [uri]
+     * ([MediaPublisher.openOriginal]), the ones its content hash covers.
+     * Without location access a MediaStore capture throws
+     * [MediaPublisher.OriginalUnavailableException]: unreadable is not unsigned.
+     */
+    fun readSignatureFromUri(context: Context, uri: Uri, mimeType: String?): ContentAuthenticityData? =
+        readSignature(uri, mimeType) { MediaPublisher.openOriginal(context, uri) }
+
+    private inline fun readSignature(uri: Uri, mimeType: String?, open: () -> InputStream?): ContentAuthenticityData? {
         val type = mimeType ?: ""
         if (type.startsWith("image/jpeg") || type.startsWith("image/jpg")) {
             try {
-                contentResolver.openInputStream(uri)?.use { inputStream ->
+                open()?.use { inputStream ->
                     return readExifSignatureFromStream(inputStream)
                 }
+            } catch (e: MediaPublisher.OriginalUnavailableException) {
+                throw e
             } catch (_: Exception) { }
             return null
         }
         val format = XmpContainers.formatOf(type) ?: return null
         // A failed open or read propagates: unreadable media is not unsigned media.
-        val input = contentResolver.openInputStream(uri) ?: throw IOException("cannot open $uri")
+        val input = open() ?: throw IOException("cannot open $uri")
         return input.use { readEmbeddedSignatureFromStream(it, format) }
     }
 

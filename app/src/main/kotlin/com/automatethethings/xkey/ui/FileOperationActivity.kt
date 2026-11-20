@@ -14,7 +14,7 @@
  */
 package com.automatethethings.xkey.ui
 
-import android.content.ContentResolver
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import androidx.core.content.ContextCompat
@@ -106,16 +106,19 @@ class FileOperationActivity : AppCompatActivity() {
 
         /**
          * Write [save] to its destination: the sidecar JSON, or a signed copy
-         * of its source. Static, over the application's resolver, so a write
-         * never holds the activity that started it.
+         * of its source, staged from its original bytes
+         * ([MediaPublisher.openOriginal]), the ones its signature covers.
+         * Static, over the application context, so a write never holds the
+         * activity that started it.
          */
-        private fun writeSave(resolver: ContentResolver, recovery: File, save: RunningSave) {
+        private fun writeSave(context: Context, recovery: File, save: RunningSave) {
+            val resolver = context.contentResolver
             save.signatureJson?.let { json ->
                 MediaPublisher.openCreated(resolver, save.destination).use { it.write(json.toByteArray(Charsets.UTF_8)) }
             }
             save.signedCopy?.let { copy ->
                 val written = XmpMetadataHelper.writeSignedCopy(
-                    open = { resolver.openInputStream(copy.source) ?: throw IOException("Cannot open ${copy.source}") },
+                    open = { MediaPublisher.openOriginal(context, copy.source) },
                     openOutput = { MediaPublisher.openCreated(resolver, save.destination) },
                     mimeType = copy.mimeType,
                     data = copy.data,
@@ -1184,7 +1187,7 @@ class FileOperationActivity : AppCompatActivity() {
      */
     private fun sharedSigning(uri: Uri, mimeType: String): XmpMetadataHelper.SharedSigning =
         XmpMetadataHelper.sharedSigning(
-            open = { contentResolver.openInputStream(uri) ?: throw IOException("Cannot open $uri") },
+            open = { MediaPublisher.openOriginal(applicationContext, uri) },
             format = XmpContainers.formatOf(mimeType)
         )
 
@@ -1219,9 +1222,9 @@ class FileOperationActivity : AppCompatActivity() {
     private fun runSave(save: RunningSave) {
         runningSave = save
         showProgress(true)
-        val resolver = applicationContext.contentResolver
-        val recovery = MediaPublisher.recoveryDirectory(applicationContext)
-        val run = MediaSaveRuns.attach(save.id) { writeSave(resolver, recovery, save) }
+        val context = applicationContext
+        val recovery = MediaPublisher.recoveryDirectory(context)
+        val run = MediaSaveRuns.attach(save.id) { writeSave(context, recovery, save) }
         lifecycleScope.launch {
             // Throws if this instance went away first, even after the write
             // ended, and waits while it is not resumed: the next instance, or
@@ -1257,7 +1260,7 @@ class FileOperationActivity : AppCompatActivity() {
                 // Try reading embedded signature
                 val mimeType = contentResolver.getType(uri)
                 val embeddedData = XmpMetadataHelper.readSignatureFromUri(
-                    contentResolver, uri, mimeType
+                    applicationContext, uri, mimeType
                 )
 
                 if (embeddedData != null) {
@@ -1294,6 +1297,11 @@ class FileOperationActivity : AppCompatActivity() {
                     withContext(Dispatchers.Main) {
                         pickSidecarLauncher.launch(arrayOf("application/json", "*/*"))
                     }
+                }
+            } catch (_: MediaPublisher.OriginalUnavailableException) {
+                // Only the redacted view is readable: nothing is verified, and it is no mismatch.
+                withContext(Dispatchers.Main) {
+                    showVerificationResult(listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable"))
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { showError(e) }
@@ -1455,7 +1463,8 @@ class FileOperationActivity : AppCompatActivity() {
                     staging,
                     "$fileName.xkeyenc",
                     write = { staged ->
-                        contentResolver.openInputStream(uri)?.use { input ->
+                        // The file whole: a capture's location is encrypted with it, never dropped.
+                        MediaPublisher.openOriginal(applicationContext, uri).use { input ->
                             FileOutputStream(staged).use { output ->
                                 fileEncryptor.encryptForRecipient(
                                     recipient.publicKeyDer,
@@ -1463,7 +1472,7 @@ class FileOperationActivity : AppCompatActivity() {
                                     output
                                 )
                             }
-                        } ?: throw IllegalStateException("Cannot open input file")
+                        }
                     },
                     prepare = {
                         AuditLogger.logFileEncrypted(
