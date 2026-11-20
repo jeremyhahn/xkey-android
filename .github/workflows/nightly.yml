@@ -173,9 +173,10 @@ jobs:
         run: trivy fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --format table --skip-dirs app/build --skip-dirs .gradle --skip-dirs .kotlin --ignorefile .trivyignore .
 
       # Misconfiguration scanning, advisory (exit code 0): findings surface
-      # daily without a new finding class blocking merges. Both forges run it.
+      # daily without a new finding class blocking merges. Both forges run it,
+      # under !cancelled(), so a failed Trivy gate above never skips it.
       - name: Trivy misconfiguration scan (advisory, GitHub)
-        if: github.server_url == 'https://github.com'
+        if: ${{ !cancelled() && github.server_url == 'https://github.com' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           version: v${{ steps.trivy_version.outputs.version }}
@@ -188,5 +189,5 @@ jobs:
           trivyignores: .trivyignore
 
       - name: Trivy misconfiguration scan (advisory, Gitea)
-        if: github.server_url != 'https://github.com'
+        if: ${{ !cancelled() && github.server_url != 'https://github.com' }}
         run: trivy fs --scanners misconfig --exit-code 0 --format table --skip-dirs app/build --skip-dirs .gradle --skip-dirs .kotlin --ignorefile .trivyignore .
