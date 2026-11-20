@@ -447,6 +447,43 @@ interface KeyDao {
     suspend fun insertMetadataRow(metadata: CredentialMetadataEntity): Long
 
     /**
+     * Complete a new passkey's registration in one transaction: insert its
+     * key row and its `credential_metadata` row and delete the passkeys it
+     * replaces ([replaced], each only while its row is still as read, as in
+     * [deletePasskeyRows]), all or none. Its commit is the one point the
+     * passkey becomes whole, so no reader of `keys` or `credential_metadata`
+     * (the credential provider, the local list, a BLE client) ever sees a
+     * registration that did not complete: one that fails, is cancelled or
+     * whose process dies leaves none of its rows. Every key is written as a
+     * revoke. Returns the key ids of the replaced passkeys removed: only their
+     * Keystore keys are the caller's to delete, after this returns.
+     */
+    suspend fun completePasskeyRegistration(
+        key: KeyEntity,
+        metadata: CredentialMetadataEntity,
+        replaced: List<KeyEntity>
+    ): List<String> {
+        val ids = listOf(key.keyId) + replaced.map { it.keyId }
+        suspend fun revokingAll(index: Int): List<String> =
+            if (index == ids.size) completePasskeyRegistrationInTransaction(key, metadata, replaced)
+            else SharePermissionLedger.revoking(ids[index]) { revokingAll(index + 1) }
+        return revokingAll(0)
+    }
+
+    /** Raw registration commit in one transaction; call [completePasskeyRegistration]. */
+    @RawKeyRowWrite
+    @Transaction
+    suspend fun completePasskeyRegistrationInTransaction(
+        key: KeyEntity,
+        metadata: CredentialMetadataEntity,
+        replaced: List<KeyEntity>
+    ): List<String> {
+        insertRow(key)
+        insertMetadataRow(metadata)
+        return deletePasskeyRowsInTransaction(replaced)
+    }
+
+    /**
      * Delete all FIDO2 keys for a relying party, each as a revoke of its key.
      *
      * @param rpId The relying party identifier.

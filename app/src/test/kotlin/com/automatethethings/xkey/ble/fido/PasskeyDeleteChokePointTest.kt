@@ -22,7 +22,8 @@ import java.io.File
 
 /**
  * Every passkey the FIDO BLE authenticator deletes goes through
- * `KeyDao.deletePasskeyRows`, which deletes a row only while its sharing
+ * `KeyDao.deletePasskeyRows` (inside `KeyDao.completePasskeyRegistration`
+ * for a registration's replacements), which deletes a row only while its sharing
  * policy is still the one the caller checked. No BLE code deletes a key row,
  * a metadata row or a Keystore key any other way, and nothing outside
  * `KeyDao` calls the raw deletes that path is built from.
@@ -43,7 +44,9 @@ class PasskeyDeleteChokePointTest {
                 .toList()
         }
         assertEquals(emptyList<String>(), offenders)
-        assertTrue(fido.any { it.readText().contains("keyDao.deletePasskeyRows(") })
+        // A registration deletes the passkeys it replaces inside its commit,
+        // KeyDao.completePasskeyRegistration, which uses the same guarded delete.
+        assertTrue(fido.any { it.readText().contains("keyDao.completePasskeyRegistration(") })
     }
 
     @Test

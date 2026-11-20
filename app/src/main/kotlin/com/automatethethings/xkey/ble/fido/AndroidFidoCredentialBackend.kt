@@ -83,7 +83,7 @@ interface FidoUserPrompt {
 class AndroidFidoCredentialBackend(
     private val keyDao: KeyDao,
     // Unused: a passkey's metadata row is written with its key row in one
-    // KeyDao transaction (insertPasskeyRows) and deleted with it.
+    // KeyDao transaction (completePasskeyRegistration) and deleted with it.
     @Suppress("UNUSED_PARAMETER") credentialDao: CredentialMetadataDao,
     private val sharePermission: SharePermission,
     private val signCounter: PasskeySignCounter,
@@ -118,14 +118,14 @@ class AndroidFidoCredentialBackend(
      * both go through here, so a wire ID always leads back to the key ID
      * exactly as the database and Keystore hold it. Two stored IDs that
      * would reach the client as the same bytes are both left out, and so is
-     * a registration not yet complete ([PendingKeyDeletions.registrations]):
-     * one that failed and whose rows could not yet be removed is never
-     * offered, listed or signed with.
+     * every passkey this backend cannot sign with ([usable]), so one never
+     * shadows a usable passkey in the same allowList. A registration that did
+     * not complete has no rows at all
+     * ([KeyDao.completePasskeyRegistration]), here or for any other reader.
      */
     private suspend fun offered(rpId: String): List<Pair<KeyEntity, ByteArray>> {
-        val incomplete = pendingKeyDeletions.registrations()
         val all = keyDao.getFido2ByRpId(rpId)
-            .filter { it.keyType == KeyTypeFido2 && it.rpId == rpId && it.keyId !in incomplete && shared(it) }
+            .filter { usable(it, rpId) && shared(it) }
             .map { it to wireId(it.keyId) }
         return all.filter { (_, id) -> all.count { it.second.contentEquals(id) } == 1 }
     }
@@ -152,9 +152,7 @@ class AndroidFidoCredentialBackend(
         // come padded, in standard base64 or not in base64 at all.
         val keyId = offered(credential.rpId).singleOrNull { it.second.contentEquals(credential.id) }?.first?.keyId
         val entity = keyId?.let { keyDao.getByKeyId(it) }
-        if (keyId == null || entity == null || entity.keyType != KeyTypeFido2 ||
-            entity.rpId != credential.rpId || !shared(entity)
-        ) {
+        if (keyId == null || entity == null || !usable(entity, credential.rpId) || !shared(entity)) {
             throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "Passkey is gone or no longer shared")
         }
         // The counter is read and authenticatorData built only once this
@@ -193,10 +191,10 @@ class AndroidFidoCredentialBackend(
         retryPendingKeyDeletions()
         val rawId = ByteArray(CREDENTIAL_ID_BYTES).also { SecureRandom().nextBytes(it) }
         val keyId = encodeId(rawId)
-        // Recorded before anything is made, and forgotten only once the new
-        // passkey is whole: until then it is never offered, and if this
-        // registration fails and its rollback cannot remove it, a later
-        // retry does. Without the record nothing is made.
+        // Recorded before its key is made, and forgotten once the passkey is
+        // whole: a registration that stops before then, a process death
+        // included, leaves a Keystore key no row owns, which a later retry
+        // deletes. Without the record nothing is made.
         pendingKeyDeletions.addRegistration(keyId)
         // Not auth-bound: the phone's prompt gates every use, as on the
         // JSON-RPC path, and an auth-bound key could not sign after it.
@@ -212,10 +210,10 @@ class AndroidFidoCredentialBackend(
         }
         val userId = encodeId(request.userHandle)
         val rpName = request.rpName ?: request.rpId
-        // The passkeys this one replaces, then its key row, then the metadata
-        // the credential provider lists. Any failure, a cancellation (the
-        // client disconnected or sent CANCEL) included, removes the new
-        // passkey and leaves the old ones untouched.
+        // The passkeys this one replaces, read and read again before anything
+        // is written. Any failure here, a cancellation (the client
+        // disconnected or sent CANCEL) included, removes the new key and
+        // leaves the old passkeys untouched.
         val replaced = try {
             // The discoverable passkeys this client could see for the same
             // account. One the sharing policy hides from BLE clients is never
@@ -225,36 +223,6 @@ class AndroidFidoCredentialBackend(
             } else {
                 emptyList()
             }
-            // Both rows in one transaction: never a key row without the
-            // metadata the credential provider lists, nor metadata alone.
-            keyDao.insertPasskeyRows(
-                // Made by a BLE client, which has no paired identity: shared
-                // with all peers so that client can use it again.
-                FidoKeyRows.passkey(
-                    keyId = keyId,
-                    label = rpName,
-                    publicKeyCose = cose,
-                    rpId = request.rpId,
-                    rpName = rpName,
-                    userId = userId,
-                    userName = request.userName,
-                    userDisplayName = request.userDisplayName,
-                    discoverable = request.discoverable,
-                    createdAt = System.currentTimeMillis(),
-                    policy = SharingPolicyType.ALL_PEERS
-                ),
-                CredentialMetadataEntity(
-                    credentialId = keyId,
-                    rpId = request.rpId,
-                    rpName = rpName,
-                    userId = userId,
-                    userName = request.userName ?: "",
-                    userDisplayName = request.userDisplayName ?: request.userName ?: "",
-                    publicKeyCose = cose,
-                    signCount = 0,
-                    isDiscoverable = request.discoverable
-                )
-            )
             // Read again right before they go: a passkey made private, shared
             // with selected peers only, or changed since the lookup is no
             // longer this client's to replace, and stays. The rows as read
@@ -263,31 +231,79 @@ class AndroidFidoCredentialBackend(
             val stillReplaceable = old.mapNotNull { candidate ->
                 keyDao.getByKeyId(candidate.keyId)?.takeIf { replaceable(it, request, keyId) }
             }
-            // The last point a cancellation (the client disconnected or sent
-            // CANCEL) stops the registration: the new passkey is removed and
-            // the old ones stay. Past here the old ones are deleted.
+            // The last point a cancellation stops the registration.
             currentCoroutineContext().ensureActive()
-            // The new passkey is whole: from here a client may be offered it.
-            // When that cannot be recorded the registration fails, and the
-            // new passkey goes while the old ones stay.
-            pendingKeyDeletions.remove(keyId)
+            // Their keys are recorded before their rows go, so a key whose
+            // deletion throws, or whose process dies first, is deleted by a
+            // later retry. Without the record no old passkey goes.
+            if (stillReplaceable.isNotEmpty()) pendingKeyDeletions.add(stillReplaceable.map { it.keyId })
             stillReplaceable
         } catch (e: Throwable) {
-            withContext(NonCancellable) { remove(keyId) }
+            withContext(NonCancellable) { dropNewKey(keyId) }
             throw e
         }
-        // Only now that the new passkey is whole are the old ones removed, all
-        // their rows in one transaction, each only while its sharing policy
-        // is still the one checked above. When those rows will not go, none
-        // does: the registration fails and the new passkey is removed, so the
-        // client and the credential provider see the passkeys they had.
-        withContext(NonCancellable) {
-            try {
-                delete(replaced)
-            } catch (e: Throwable) {
-                Log.w(TAG, "The replaced passkeys could not be removed; the registration fails, rpId=${request.rpId}", e)
-                remove(keyId)
+        // The one point the new passkey becomes whole: its key row and the
+        // metadata the credential provider lists are written, and the old
+        // passkeys' rows deleted (each only while its sharing policy is still
+        // the one read above), in one transaction. Until it commits no reader
+        // anywhere sees the new passkey; when it throws nothing was written
+        // and the old passkeys stay. It runs to its end once begun, and a
+        // cancellation that comes meanwhile never undoes a committed passkey.
+        var committed: List<String>? = null
+        try {
+            withContext(NonCancellable) {
+                committed = keyDao.completePasskeyRegistration(
+                    // Made by a BLE client, which has no paired identity:
+                    // shared with all peers so that client can use it again.
+                    FidoKeyRows.passkey(
+                        keyId = keyId,
+                        label = rpName,
+                        publicKeyCose = cose,
+                        rpId = request.rpId,
+                        rpName = rpName,
+                        userId = userId,
+                        userName = request.userName,
+                        userDisplayName = request.userDisplayName,
+                        discoverable = request.discoverable,
+                        createdAt = System.currentTimeMillis(),
+                        policy = SharingPolicyType.ALL_PEERS
+                    ),
+                    CredentialMetadataEntity(
+                        credentialId = keyId,
+                        rpId = request.rpId,
+                        rpName = rpName,
+                        userId = userId,
+                        userName = request.userName ?: "",
+                        userDisplayName = request.userDisplayName ?: request.userName ?: "",
+                        publicKeyCose = cose,
+                        signCount = 0,
+                        isDiscoverable = request.discoverable
+                    ),
+                    replaced
+                )
+            }
+        } catch (e: Throwable) {
+            // Thrown on the way out of a commit that succeeded: only a
+            // cancellation that came meanwhile, which a whole passkey outlives.
+            if (committed == null) {
+                Log.w(TAG, "The new passkey could not be stored; the registration fails, rpId=${request.rpId}", e)
+                // Their rows stay and own their keys.
+                replaced.forEach { forget(it.keyId) }
+                dropNewKey(keyId)
                 throw e
+            }
+        }
+        val removed = committed.orEmpty()
+        // Whole: its row owns its key now. The old passkeys whose rows went
+        // lose their keys; one whose policy changed since the read keeps its
+        // rows, and they own its key. None of this fails the registration.
+        forget(keyId)
+        (replaced.map { it.keyId } - removed.toSet()).forEach { forget(it) }
+        removed.forEach { id ->
+            try {
+                deleteKey(id)
+            } catch (e: Exception) {
+                Log.w(TAG, "A replaced passkey's Keystore key could not be deleted or recorded", e)
             }
         }
         Log.i(TAG, "Created a passkey over BLE, rpId=${request.rpId}")
@@ -376,60 +392,36 @@ class AndroidFidoCredentialBackend(
      * Whether [entity] is a discoverable passkey this BLE client could see
      * for [request]'s account, other than the new passkey [newKeyId], and so
      * one the registration replaces. One the sharing policy hides from BLE
-     * clients is never touched.
+     * clients, or one this backend cannot sign with, is never touched.
      */
     private suspend fun replaceable(entity: KeyEntity, request: CredentialRequest, newKeyId: String): Boolean =
-        entity.keyId != newKeyId && entity.keyType == KeyTypeFido2 && entity.rpId == request.rpId &&
+        entity.keyId != newKeyId && usable(entity, request.rpId) &&
             entity.isDiscoverable && sameUser(entity.userId, request.userHandle) && shared(entity)
 
     /**
-     * The one way this backend deletes passkeys. Deletes the passkeys [read]
-     * from all three places they live: their key rows and metadata rows
-     * (what the credential provider lists), all in one transaction, then
-     * their Keystore keys. Only a passkey whose row is still as read, its
-     * sharing policy unchanged, goes: one the owner made private or shared
-     * with selected peers only since then keeps its rows and its key, the
-     * check and the delete being one statement ([KeyDao.deletePasskeyRows]).
-     * A key goes only once its rows are gone, so no row ever points at a key
-     * that is gone. Throws when the rows will not go, and then every row and
-     * key stays. Returns the key ids removed.
-     *
-     * Each key is recorded in [pendingKeyDeletions] before its rows go and
-     * forgotten only once Keystore has deleted it, so a key whose deletion
-     * throws, or whose process dies before it, is deleted by a later
-     * [retryPendingKeyDeletions] and never left behind with no row and no
-     * record. A passkey whose rows stay is forgotten again: its row owns it.
-     *
-     * A [rollback] (a failed registration removing its own new passkey) never
-     * depends on that record: when it cannot be written (storage full, say),
-     * the rows and the key are deleted all the same, so a failed registration
-     * leaves nothing a client could be offered. A replacement without the
-     * record throws instead, and every old passkey stays.
-     *
-     * A rollback records its passkey as a registration not yet complete,
-     * and that record survives a delete that throws: the failed passkey is
-     * never offered, and [retryPendingKeyDeletions] removes its rows and key
-     * once storage lets it. A replacement whose rows will not go forgets its
-     * records instead: those passkeys stay, and their rows own their keys.
+     * Whether [entity] is a passkey for [rpId] this backend can sign with:
+     * a fido2 row whose algorithm is the one both signing paths use, ES256
+     * (SHA256withECDSA on a P-256 key). `local.generateKey` can store fido2
+     * rows of other algorithms (ES384, ES512, RSA); a BLE client is never
+     * offered one, so none can be signed with the wrong algorithm or shadow
+     * a usable passkey.
      */
-    private suspend fun delete(read: List<KeyEntity>, rollback: Boolean = false): List<String> {
-        if (read.isEmpty()) return emptyList()
-        val ids = read.map { it.keyId }
+    private fun usable(entity: KeyEntity, rpId: String): Boolean =
+        entity.keyType == KeyTypeFido2 && entity.rpId == rpId &&
+            entity.algorithm.equals(SIGNING_ALGORITHM, ignoreCase = true)
+
+    /**
+     * Drop the Keystore key of a registration that failed before its rows
+     * were written: no row owns it. [deleteKey] deletes it or keeps it
+     * recorded for a retry; when even the record fails it is logged, never
+     * thrown over the registration's own failure.
+     */
+    private fun dropNewKey(keyId: String) {
         try {
-            if (rollback) ids.forEach { pendingKeyDeletions.addRegistration(it) } else pendingKeyDeletions.add(ids)
+            deleteKey(keyId)
         } catch (e: Exception) {
-            if (!rollback) throw e
-            Log.w(TAG, "The deletion record could not be written; the failed passkey is removed without it", e)
+            Log.w(TAG, "A failed registration's Keystore key could not be deleted or recorded", e)
         }
-        val removed = try {
-            keyDao.deletePasskeyRows(read)
-        } catch (e: Throwable) {
-            if (!rollback) ids.forEach { forget(it) }
-            throw e
-        }
-        (ids - removed.toSet()).forEach { forget(it) }
-        removed.forEach { deleteKey(it) }
-        return removed
     }
 
     /**
@@ -450,43 +442,31 @@ class AndroidFidoCredentialBackend(
     }
 
     /**
-     * Retry every Keystore deletion [pendingKeyDeletions] records, and remove
-     * every registration it records as not yet complete. Runs under
-     * [registration], the lock every deletion and registration here runs
-     * under, so none is in flight meanwhile. A failed registration's rows go
-     * first, then its key, and its record stays until both are gone. For a
-     * plain deletion, a key a row still points at is never deleted: that row
-     * owns it, and its record is dropped. A retry that fails again stays
-     * recorded for the next registration, and never fails this one.
+     * Retry every Keystore deletion [pendingKeyDeletions] records, a
+     * registration's included. Runs under [registration], the lock every
+     * deletion and registration here runs under, so none is in flight
+     * meanwhile. A key a row still points at is never deleted: that row owns
+     * it, and its record is dropped. A registration's rows exist only once it
+     * is whole ([KeyDao.completePasskeyRegistration]), so a recorded
+     * registration with rows completed and is kept; one without lost only
+     * its key. A retry that fails again stays recorded for the next
+     * registration, and never fails this one.
      */
     private suspend fun retryPendingKeyDeletions() {
-        // Registrations that never completed: their rows, while any stay,
-        // then their keys. A row whose sharing policy the owner has changed
-        // since is the owner's, and keeps its key.
-        val incomplete = try {
-            pendingKeyDeletions.registrations()
+        val recorded = try {
+            pendingKeyDeletions.all() + pendingKeyDeletions.registrations()
         } catch (e: Exception) {
-            Log.w(TAG, "Incomplete registrations could not be read; they stay recorded", e)
+            Log.w(TAG, "Pending Keystore deletions could not be read; they stay recorded", e)
             emptySet()
         }
-        for (keyId in incomplete) {
+        for (keyId in recorded) {
             try {
-                val row = keyDao.getByKeyId(keyId)
-                if (row == null) deleteKey(keyId) else delete(listOf(row), rollback = true)
+                if (keyDao.getByKeyId(keyId) != null) forget(keyId) else deleteKey(keyId)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "An incomplete registration could not be removed; it stays recorded", e)
+                Log.w(TAG, "A pending Keystore deletion could not be retried; it stays recorded", e)
             }
-        }
-        try {
-            for (keyId in pendingKeyDeletions.all() - incomplete) {
-                if (keyDao.getByKeyId(keyId) != null) forget(keyId) else deleteKey(keyId)
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Pending Keystore deletions could not be retried; they stay recorded", e)
         }
     }
 
@@ -499,23 +479,6 @@ class AndroidFidoCredentialBackend(
         }
     }
 
-    /**
-     * Roll back the new passkey [keyId]: [delete] its row as it is now,
-     * logged rather than thrown when its rows stay. Before its key row was
-     * written there is only its Keystore key, which [deleteKey] deletes or
-     * keeps for a retry.
-     */
-    private suspend fun remove(keyId: String) {
-        try {
-            val row = keyDao.getByKeyId(keyId)
-            if (row == null) deleteKey(keyId) else delete(listOf(row), rollback = true)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "A passkey row could not be deleted; its Keystore key stays", e)
-        }
-    }
-
     /** A stored base64 user ID and a wire user handle name the same user when their bytes match. */
     private fun sameUser(storedUserId: String?, userHandle: ByteArray): Boolean =
         storedUserId?.let { decodeBase64(it) }?.contentEquals(userHandle) == true
@@ -524,6 +487,9 @@ class AndroidFidoCredentialBackend(
         const val TAG = "FidoBleBackend"
         const val KeyTypeFido2 = "fido2"
         const val CREDENTIAL_ID_BYTES = 32
+
+        /** The one algorithm a BLE assertion signs with, on either signing path. */
+        const val SIGNING_ALGORITHM = "ES256"
 
         /** The one lock every BLE registration in the process runs under. */
         val registration = Mutex()

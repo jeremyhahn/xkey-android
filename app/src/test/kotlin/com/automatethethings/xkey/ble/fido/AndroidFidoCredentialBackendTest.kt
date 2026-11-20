@@ -247,7 +247,7 @@ class AndroidFidoCredentialBackendTest {
     fun `create stores a passkey a BLE client can use again`() = runTest {
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } returns byteArrayOf(0xA5.toByte())
         val stored = slot<KeyEntity>()
-        coEvery { keyDao.insertPasskeyRows(capture(stored), any()) } returns Unit
+        coEvery { keyDao.completePasskeyRegistration(capture(stored), any(), any()) } returns emptyList()
 
         val made = backend().create(
             CredentialRequest("example.com", "Example", byteArrayOf(7), "alice", "Alice", discoverable = true)
@@ -259,7 +259,7 @@ class AndroidFidoCredentialBackendTest {
         assertEquals("example.com", stored.captured.rpId)
         assertEquals(b64(byteArrayOf(7)), stored.captured.userId)
         assertEquals(SharingPolicyType.ALL_PEERS, stored.captured.sharingPolicy)
-        coVerify { keyDao.insertPasskeyRows(any(), match { it.credentialId == b64(made.id) }) }
+        coVerify { keyDao.completePasskeyRegistration(any(), match { it.credentialId == b64(made.id) }, emptyList()) }
         assertTrue("a whole passkey is offered", pendingKeyDeletions.registrations().isEmpty())
     }
 
@@ -314,7 +314,29 @@ class AndroidFidoCredentialBackendTest {
                 throw e
             }
         }
+        stubCompletion(keyRows, metadataRows)
         return keyRows to metadataRows
+    }
+
+    /**
+     * A registration's commit as one transaction over both row stores: the
+     * new passkey's rows (stubbed by [KeyDao.insertPasskeyRows]) and the
+     * replaced passkeys' deletes (stubbed by [KeyDao.deletePasskeyRows]),
+     * all rolled back when any of them throws.
+     */
+    private fun stubCompletion(keyRows: MutableSet<String>, metadataRows: MutableSet<String>) {
+        coEvery { keyDao.completePasskeyRegistration(any(), any(), any()) } coAnswers {
+            val keysBefore = keyRows.toSet()
+            val metadataBefore = metadataRows.toSet()
+            try {
+                keyDao.insertPasskeyRows(firstArg(), secondArg())
+                keyDao.deletePasskeyRows(thirdArg())
+            } catch (e: Throwable) {
+                keyRows.clear(); keyRows += keysBefore
+                metadataRows.clear(); metadataRows += metadataBefore
+                throw e
+            }
+        }
     }
 
     private fun assertCreateLeavesNothing(failure: Throwable, failKeyRow: Boolean) {
@@ -582,6 +604,10 @@ class AndroidFidoCredentialBackendTest {
         }
         coEvery { keyDao.getFido2ByRpId("example.com") } coAnswers { yield(); rows.values.toList() }
         coEvery { keyDao.getByKeyId(any()) } answers { rows[firstArg()] }
+        coEvery { keyDao.completePasskeyRegistration(any(), any(), any()) } coAnswers {
+            keyDao.insertPasskeyRows(firstArg(), secondArg())
+            keyDao.deletePasskeyRows(thirdArg())
+        }
         return rows
     }
 
@@ -638,10 +664,11 @@ class AndroidFidoCredentialBackendTest {
     }
 
     @Test
-    fun `a registration cancelled once the new passkey is stored leaves the old passkey whole`() = runTest {
+    fun `a cancel during the registration's commit never undoes the committed passkey`() = runTest {
         val (keyRows, metadataRows) = storedResidents()
         lateinit var registering: kotlinx.coroutines.Job
-        // The client sends CANCEL while the new passkey's last row is written.
+        // The client sends CANCEL while the new passkey's last row is written:
+        // the commit runs to its end, so the passkey is whole.
         coEvery { credentialDao.insert(any()) } answers {
             metadataRows += firstArg<CredentialMetadataEntity>().credentialId
             registering.cancel()
@@ -653,10 +680,13 @@ class AndroidFidoCredentialBackendTest {
         }
         registering.join()
 
-        assertTrue(registering.isCancelled)
-        assertEquals(setOf(shared.keyId, private.keyId), keyRows)
-        assertEquals(setOf(shared.keyId, private.keyId), metadataRows)
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        val made = (keyRows - private.keyId).single()
+        assertTrue("the old passkey was replaced", made != shared.keyId)
+        assertEquals(setOf(private.keyId, made), metadataRows)
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(shared.keyId) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(made) }
+        assertTrue("a whole passkey has no record", pendingKeyDeletions.all().isEmpty())
+        assertTrue("a whole passkey has no record", pendingKeyDeletions.registrations().isEmpty())
     }
 
     @Test
