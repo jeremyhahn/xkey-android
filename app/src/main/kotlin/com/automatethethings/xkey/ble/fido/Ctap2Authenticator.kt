@@ -113,7 +113,11 @@ interface FidoCredentialBackend {
     /** The owner's strict user verification setting. */
     val strictUserVerification: Boolean
 
-    /** Passkeys for [rpId] the sharing policy shows a BLE client. */
+    /**
+     * Passkeys for [rpId] the sharing policy shows a BLE client and that can
+     * sign now: one that cannot is left out, never listed. Every candidate
+     * the authenticator considers comes from this one list.
+     */
     suspend fun credentials(rpId: String): List<FidoCredential>
 
     /** Prompt the user to approve a ceremony for [rpId]. */

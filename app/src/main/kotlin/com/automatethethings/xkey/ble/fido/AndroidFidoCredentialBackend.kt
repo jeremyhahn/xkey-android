@@ -118,16 +118,26 @@ class AndroidFidoCredentialBackend(
     override val strictUserVerification: Boolean
         get() = settings().strictUserVerification
 
+    /**
+     * The one list every candidate is built from: the allowList match, the
+     * discoverable list, the account chooser and the excludeList check in
+     * [Ctap2Authenticator] all read it. Each credential is snapshotted
+     * before it is built, and one without a snapshot (its row gone or no
+     * longer shared since [offered], or its key not in Keystore) is left
+     * out, so a passkey that cannot sign is never a candidate: it neither
+     * shadows a usable one in an allowList nor is offered on discovery.
+     */
     override suspend fun credentials(rpId: String): List<FidoCredential> =
-        offered(rpId).map { (entity, id) ->
+        offered(rpId).mapNotNull { (entity, id) ->
+            val selection = snapshot(entity.keyId, rpId) ?: return@mapNotNull null
             FidoCredential(
                 id = id,
                 rpId = rpId,
-                userHandle = entity.userId?.let { decodeBase64(it) },
-                userName = entity.userName,
-                userDisplayName = entity.userDisplayName,
-                discoverable = entity.isDiscoverable,
-                selection = snapshot(entity.keyId, rpId)
+                userHandle = selection.row.userId?.let { decodeBase64(it) },
+                userName = selection.row.userName,
+                userDisplayName = selection.row.userDisplayName,
+                discoverable = selection.row.isDiscoverable,
+                selection = selection
             )
         }
 
@@ -135,7 +145,8 @@ class AndroidFidoCredentialBackend(
      * The passkey [keyId] as it is now, read under its stored-key lock: its
      * row, alias and public key, the snapshot signing compares against. Null
      * when it is no longer an offered passkey or its key is not in Keystore;
-     * such a credential is refused when signed with.
+     * [credentials] then leaves it out, and [sign] refuses a credential
+     * without one.
      */
     private suspend fun snapshot(keyId: String, rpId: String): SelectedPasskey? = withStoredKey(keyId) {
         val row = keyDao.getByKeyId(keyId)?.takeIf { usable(it, rpId) && shared(it) }
