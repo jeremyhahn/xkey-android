@@ -90,6 +90,16 @@ class FileOperationActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "FileOperationActivity"
 
+        /**
+         * Whether verification [results] (signer line, status) are a positive
+         * result, the one test the audit log records as verified: at least one
+         * line, and every one verified. A mismatch, an unknown signer, nothing
+         * checked, or location access unavailable (only MediaStore's redacted
+         * view readable, so nothing was hashed or checked) is not verified.
+         */
+        internal fun verificationSucceeded(results: List<Pair<String, String>>): Boolean =
+            results.isNotEmpty() && results.all { it.second == "verified" }
+
         // Saved state: output waiting for a save picker
         private const val STATE_SIGNATURE_JSON = "pending_signature_json"
         private const val STATE_SIGNED_COPY_SOURCE = "pending_signed_copy_source"
@@ -1278,16 +1288,12 @@ class FileOperationActivity : AppCompatActivity() {
                         MediaHasher.ContentHashCheck.MATCHES -> verifySignatures(embeddedData, true)
                         MediaHasher.ContentHashCheck.MISMATCH ->
                             listOf("Content hash mismatch" to "failed") + verifySignatures(embeddedData, false)
+                        // Nothing was hashed or checked: audited as not verified.
                         MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE ->
                             listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable")
                     }
 
-                    val fileName = getFileName(uri)
-                    AuditLogger.logFileVerified(
-                        fileName = fileName,
-                        signerCount = embeddedData.signatures.size,
-                        verified = result.all { it.second != "failed" }
-                    )
+                    auditVerification(uri, embeddedData.signatures.size, result)
 
                     withContext(Dispatchers.Main) {
                         showVerificationResult(result)
@@ -1332,16 +1338,12 @@ class FileOperationActivity : AppCompatActivity() {
                 val results = when (check) {
                     MediaHasher.ContentHashCheck.MATCHES -> verifySignatures(cad, true)
                     MediaHasher.ContentHashCheck.MISMATCH -> listOf("Content hash mismatch" to "failed")
+                    // Nothing was hashed or checked: audited as not verified.
                     MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE ->
                         listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable")
                 }
 
-                val fileName = getFileName(fileUri)
-                AuditLogger.logFileVerified(
-                    fileName = fileName,
-                    signerCount = cad.signatures.size,
-                    verified = results.all { it.second != "failed" }
-                )
+                auditVerification(fileUri, cad.signatures.size, results)
 
                 withContext(Dispatchers.Main) {
                     showVerificationResult(results)
@@ -1350,6 +1352,19 @@ class FileOperationActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) { showError(e) }
             }
         }
+    }
+
+    /**
+     * The one audit record of a verification of [uri], for the embedded and
+     * the sidecar branch alike: verified only on a positive result
+     * ([verificationSucceeded]).
+     */
+    private fun auditVerification(uri: Uri, signerCount: Int, results: List<Pair<String, String>>) {
+        AuditLogger.logFileVerified(
+            fileName = getFileName(uri),
+            signerCount = signerCount,
+            verified = verificationSucceeded(results)
+        )
     }
 
     /**
