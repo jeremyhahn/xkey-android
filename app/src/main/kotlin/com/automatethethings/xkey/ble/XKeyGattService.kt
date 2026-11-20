@@ -122,6 +122,9 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     /** The standard FIDO BLE authenticator (service 0xFFFD), beside the xkey service. */
     private var fidoGattServer: FidoGattServer? = null
 
+    /** The advertising start job against stopAdvertising() and onDestroy(). */
+    private val advertisingGeneration = LifecycleGeneration()
+
     // Protocol handler
     private var requestHandler: RequestHandler? = null
     private var keystoreManager: KeystoreManager? = null
@@ -423,6 +426,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         stopTcpHsmServer()
         usbHsmSettingsRepository = null
 
+        advertisingGeneration.end()
         gattServer?.destroy()
         gattServer = null
         fidoGattServer?.destroy()
@@ -480,18 +484,28 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         // Acquire wake lock to keep BLE active while advertising
         acquireWakeLock()
 
+        // A stopAdvertising() while this start waits on the stack wins: the
+        // start then publishes nothing (no FIDO service, no advertising).
+        val token = advertisingGeneration.begin() ?: run {
+            isStartingAdvertising = false
+            return
+        }
+        val stale = { !advertisingGeneration.isCurrent(token) }
+
         // Start GATT server on background thread (start() blocks waiting for service to be added)
         serviceScope.launch(Dispatchers.IO) {
             try {
                 // Start GATT server
                 if (!server.isRunning()) {
                     var started = server.start()
-                    if (!started) {
+                    if (!started && !stale()) {
                         // Retry once after a short delay for transient Bluetooth failures
                         Log.w(TAG, "GATT server start failed, retrying after 500ms...")
                         kotlinx.coroutines.delay(500)
                         started = server.start()
                     }
+                    // Stopped meanwhile: the stop has set the state already.
+                    if (!started && stale()) return@launch
                     if (!started) {
                         Log.e(TAG, "Failed to start GATT server")
                         _serviceState.value = ServiceState.Error("Failed to start GATT server")
@@ -500,21 +514,35 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                     }
                 }
 
-                // The FIDO service is best effort: the xkey service runs without it.
-                fidoGattServer?.let { fido ->
-                    if (!fido.isRunning() && !fido.start()) Log.w(TAG, "FIDO GATT service did not start")
+                // Stopped before or while the server started: a stop that ran
+                // before it began found nothing to close, so close it here.
+                if (stale()) {
+                    server.stop()
+                    return@launch
                 }
 
-                // Start advertising (must be on main thread for BLE APIs)
-                launch(Dispatchers.Main) {
-                    val advStarted = adv.startAdvertising()
-                    if (!advStarted) {
-                        Log.e(TAG, "Failed to start advertising")
-                        // Don't return - GATT server is still running
-                    }
+                // The FIDO service is best effort: the xkey service runs without it.
+                val fido = fidoGattServer
+                if (fido != null && !fido.isRunning() && !fido.start()) Log.w(TAG, "FIDO GATT service did not start")
+                if (stale()) {
+                    server.stop()
+                    fido?.stop()
+                    return@launch
+                }
 
-                    _serviceState.value = ServiceState.Advertising
-                    updateNotification()
+                // Start advertising (must be on main thread for BLE APIs), only
+                // while no stop has run: a stop after this takes it down.
+                launch(Dispatchers.Main) {
+                    advertisingGeneration.publish(token) {
+                        val advStarted = adv.startAdvertising()
+                        if (!advStarted) {
+                            Log.e(TAG, "Failed to start advertising")
+                            // Don't return - GATT server is still running
+                        }
+
+                        _serviceState.value = ServiceState.Advertising
+                        updateNotification()
+                    }
                 }
             } finally {
                 isStartingAdvertising = false
@@ -528,6 +556,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     fun stopAdvertising() {
         Log.d(TAG, "Stopping advertising")
 
+        // First, so a start still waiting on the stack publishes nothing.
+        advertisingGeneration.advance()
         advertiser?.stopAdvertising()
         gattServer?.stop()
         fidoGattServer?.stop()

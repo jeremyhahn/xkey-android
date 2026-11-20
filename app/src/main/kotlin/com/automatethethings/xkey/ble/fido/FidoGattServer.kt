@@ -33,6 +33,7 @@ import android.util.Log
 import androidx.biometric.BiometricManager
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.BiometricNotificationHelper
+import com.automatethethings.xkey.ble.LifecycleGeneration
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.UserCancelledException
@@ -78,11 +79,18 @@ class FidoGattServer(
 
     fun isRunning(): Boolean = server != null
 
+    /** Start against stop and destroy: a start that finishes after either publishes nothing. */
+    private val generation = LifecycleGeneration()
+
     /**
      * Opens the server and adds the FIDO service. Blocks until the stack
-     * reports the service added, so call it off the main thread.
+     * reports the service added, so call it off the main thread. The server
+     * is published only once its service is added, through [generation]: a
+     * [stop] or [destroy] that ran meanwhile wins, and this start closes the
+     * server it opened and returns false.
      */
     fun start(): Boolean {
+        val token = generation.begin() ?: return false
         if (server != null) return true
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager ?: return false
         val added = CountDownLatch(1)
@@ -94,20 +102,33 @@ class FidoGattServer(
             Log.w(TAG, "No Bluetooth permission for the FIDO service", e)
             null
         } ?: return false
+        // Stopped while the stack opened it: add nothing to it.
+        if (!generation.isCurrent(token)) {
+            close(opened)
+            return false
+        }
         val service = buildService()
-        statusCharacteristic = service.getCharacteristic(FidoBle.STATUS_UUID)
-        server = opened
         if (!opened.addService(service) ||
             !added.await(SERVICE_ADD_TIMEOUT_SECONDS, TimeUnit.SECONDS) ||
             addStatus != BluetoothGatt.GATT_SUCCESS
         ) {
             Log.w(TAG, "FIDO service was not added, status=$addStatus")
-            stop()
+            close(opened)
             return false
         }
-        // A device connected before this server opened gets no connection
-        // callback here: admit it now. Its disconnect callback, which takes the
-        // same lock as the admission, removes it.
+        val published = generation.publish(token) {
+            synchronized(lifecycle) {
+                statusCharacteristic = service.getCharacteristic(FidoBle.STATUS_UUID)
+                server = opened
+            }
+        }
+        if (!published) {
+            close(opened)
+            return false
+        }
+        // A device connected before this server was published got no client
+        // from its connection callback: admit it now. Its disconnect
+        // callback, which takes the same lock as the admission, removes it.
         runCatching { manager.getConnectedDevices(BluetoothProfile.GATT_SERVER) }
             .getOrNull()
             ?.forEach { admit(it) }
@@ -116,11 +137,14 @@ class FidoGattServer(
     }
 
     /**
-     * Closes every client session and the server. Under [lifecycle], so once
-     * it has run [admit] admits nothing and [client] finds nothing: a callback already past [client]
-     * holds a closed client, whose session refuses every frame.
+     * Closes every client session and the server. Advances [generation]
+     * first, so a start still waiting on the stack publishes nothing. Under
+     * [lifecycle], so once it has run [admit] admits nothing and [client]
+     * finds nothing: a callback already past [client] holds a closed client,
+     * whose session refuses every frame.
      */
     fun stop() {
+        generation.advance()
         val (s, closing) = synchronized(lifecycle) {
             val s = server
             server = null
@@ -130,14 +154,17 @@ class FidoGattServer(
             s to closing
         }
         closing.forEach { it.close() }
-        s?.let {
-            runCatching { it.clearServices() }
-            runCatching { it.close() }
-        }
+        s?.let { close(it) }
     }
 
-    /** [stop], and no session can be started again. */
+    private fun close(s: BluetoothGattServer) {
+        runCatching { s.clearServices() }
+        runCatching { s.close() }
+    }
+
+    /** [stop], and no session can be started again: a start waiting on the stack publishes nothing. */
     fun destroy() {
+        generation.end()
         stop()
         scope.cancel()
     }
