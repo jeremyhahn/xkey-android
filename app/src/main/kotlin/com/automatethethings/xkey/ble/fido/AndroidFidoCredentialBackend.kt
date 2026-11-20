@@ -210,29 +210,20 @@ class AndroidFidoCredentialBackend(
                 emptyList()
             }
             keyDao.insert(
-                KeyEntity(
+                // Made by a BLE client, which has no paired identity: shared
+                // with all peers so that client can use it again.
+                FidoKeyRows.passkey(
                     keyId = keyId,
-                    keyType = KeyTypeFido2,
-                    algorithm = "ES256",
                     label = rpName,
                     publicKeyCose = cose,
-                    keySizeBits = 256,
-                    biometricRequired = false,
-                    authDurationSeconds = -1,
-                    exportable = false,
-                    shareable = false,
-                    source = "local",
-                    createdAt = System.currentTimeMillis(),
                     rpId = request.rpId,
                     rpName = rpName,
                     userId = userId,
                     userName = request.userName,
                     userDisplayName = request.userDisplayName,
-                    isDiscoverable = request.discoverable,
-                    signCount = 0,
-                    // Made by a BLE client, which has no paired identity: shared
-                    // with all peers so that client can use it again.
-                    sharingPolicy = SharingPolicyType.ALL_PEERS
+                    discoverable = request.discoverable,
+                    createdAt = System.currentTimeMillis(),
+                    policy = SharingPolicyType.ALL_PEERS
                 )
             )
             credentialDao.insert(
