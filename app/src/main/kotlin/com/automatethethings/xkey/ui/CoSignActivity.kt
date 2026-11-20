@@ -1220,9 +1220,10 @@ class CoSignActivity : AppCompatActivity() {
         val staged = MediaSaveRuns.stage(MediaPublisher.recoveryDirectory(context), suffix)
         var handed = false
         try {
-            val input = contentResolver.openInputStream(uri)
-                ?: throw IOException("cannot read the selected media")
-            input.use { src -> staged.outputStream().use { dst -> src.copyTo(dst) } }
+            // The original bytes, as the signer hashed them: MediaStore's
+            // redacted view (no location access) would hash as other media,
+            // so it is refused as unreadable, never as changed.
+            MediaPublisher.openOriginal(context, uri).use { src -> staged.outputStream().use { dst -> src.copyTo(dst) } }
 
             val existing = XmpMetadataHelper.readSignature(staged.absolutePath)
                 ?: throw IllegalStateException(context.getString(R.string.cosign_no_signature_data))

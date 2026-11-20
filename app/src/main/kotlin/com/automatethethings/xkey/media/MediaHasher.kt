@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.media
 
 import android.content.ContentResolver
+import android.content.Context
 import android.net.Uri
 import java.io.InputStream
 import java.io.OutputStream
@@ -38,10 +39,12 @@ object MediaHasher {
      * [hashCanonical] over the content at [uri], hashed streaming
      * ([hashStreamed]) so media of any size is signed. The mime type comes
      * from the resolver, so a JPEG is recognised whether it arrived as a file
-     * or a document URI.
+     * or a document URI. It reads the original bytes, as the capture signer
+     * does ([MediaPublisher.openOriginal]): without location access a
+     * MediaStore item throws [MediaPublisher.OriginalUnavailableException].
      */
-    fun hashCanonicalUri(contentResolver: ContentResolver, uri: Uri): String =
-        hashStreamedUri(contentResolver, uri).canonical
+    fun hashCanonicalUri(context: Context, uri: Uri): String =
+        hashStreamedUri(context, uri).canonical
 
     fun hashUri(contentResolver: ContentResolver, uri: Uri): String {
         val inputStream = contentResolver.openInputStream(uri)
@@ -131,12 +134,15 @@ object MediaHasher {
 
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 
-    /** [hashStreamed] over the content at [uri], typed by the resolver. */
-    private fun hashStreamedUri(contentResolver: ContentResolver, uri: Uri): StreamedHashes =
-        hashStreamed(
-            { contentResolver.openInputStream(uri) ?: throw IllegalArgumentException("Cannot open URI: $uri") },
-            contentResolver.getType(uri)
-        )
+    /**
+     * [hashStreamed] over the original bytes at [uri], typed by the resolver:
+     * the one read every verification and co-signing hash shares with the
+     * signer ([MediaPublisher.openOriginal]), never MediaStore's redacted view.
+     */
+    private fun hashStreamedUri(context: Context, uri: Uri): StreamedHashes {
+        if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
+        return hashStreamed({ MediaPublisher.openOriginal(context, uri) }, context.contentResolver.getType(uri))
+    }
 
     /**
      * Whether [hashCanonical] strips JPEG metadata for [mimeType]. Otherwise it
@@ -182,20 +188,45 @@ object MediaHasher {
         return source == SignatureSource.SIDECAR && storedContentHash == hashBytes(data)
     }
 
+    /** What [checkContentHashUri] found. */
+    enum class ContentHashCheck {
+        /** The stored hash covers the media. */
+        MATCHES,
+
+        /** The media is not what the stored hash covers: changed, or another file's signature. */
+        MISMATCH,
+
+        /**
+         * Only MediaStore's redacted view is readable (no location access):
+         * the original the signature covers cannot be read, which says
+         * nothing about tampering.
+         */
+        ACCESS_UNAVAILABLE
+    }
+
+    /** Shown where a verification or co-signing check met [ContentHashCheck.ACCESS_UNAVAILABLE]. */
+    const val ACCESS_UNAVAILABLE_MESSAGE =
+        "Media access unavailable: allow xKey to access photo and video locations to read the original"
+
     /**
-     * [contentHashMatches] over the content at [uri], typed by the resolver,
-     * hashed streaming ([hashStreamed]), so a video larger than the heap
-     * verifies.
+     * [contentHashMatches] over the original bytes at [uri] ([hashStreamedUri]),
+     * typed by the resolver and hashed streaming, so a video larger than the
+     * heap verifies. **Both verify screens use this.**
      */
-    fun contentHashMatchesUri(
-        contentResolver: ContentResolver,
+    fun checkContentHashUri(
+        context: Context,
         uri: Uri,
         storedContentHash: String,
         source: SignatureSource
-    ): Boolean {
-        val hashes = hashStreamedUri(contentResolver, uri)
-        if (storedContentHash == hashes.canonical) return true
-        return source == SignatureSource.SIDECAR && storedContentHash == hashes.whole
+    ): ContentHashCheck {
+        val hashes = try {
+            hashStreamedUri(context, uri)
+        } catch (_: MediaPublisher.OriginalUnavailableException) {
+            return ContentHashCheck.ACCESS_UNAVAILABLE
+        }
+        if (storedContentHash == hashes.canonical) return ContentHashCheck.MATCHES
+        if (source == SignatureSource.SIDECAR && storedContentHash == hashes.whole) return ContentHashCheck.MATCHES
+        return ContentHashCheck.MISMATCH
     }
 
     /**

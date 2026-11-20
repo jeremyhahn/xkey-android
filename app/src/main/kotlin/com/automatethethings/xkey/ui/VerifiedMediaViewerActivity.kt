@@ -271,9 +271,12 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
 
                 // The stored content hash must match the file before any
                 // signature over it is checked.
-                val contentHashMatches = MediaHasher.contentHashMatchesUri(
-                    contentResolver, uri, sigData.contentHash, source
-                )
+                val check = MediaHasher.checkContentHashUri(applicationContext, uri, sigData.contentHash, source)
+                if (check == MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE) {
+                    withContext(Dispatchers.Main) { showAccessUnavailable() }
+                    return@launch
+                }
+                val contentHashMatches = check == MediaHasher.ContentHashCheck.MATCHES
 
                 val results = sigData.signatures.map { entry ->
                     verifyEntry(entry, contentHashMatches, sigData.contentHash)
@@ -414,6 +417,16 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
      */
     private fun showNoSignatures() {
         binding.signerListContainer.visibility = View.GONE
+        binding.textNoSignatures.visibility = View.VISIBLE
+    }
+
+    /**
+     * The original the signatures cover is unreadable (no location access):
+     * nothing is verified, and it is not reported as tampering.
+     */
+    private fun showAccessUnavailable() {
+        binding.signerListContainer.visibility = View.GONE
+        binding.textNoSignatures.text = MediaHasher.ACCESS_UNAVAILABLE_MESSAGE
         binding.textNoSignatures.visibility = View.VISIBLE
     }
 

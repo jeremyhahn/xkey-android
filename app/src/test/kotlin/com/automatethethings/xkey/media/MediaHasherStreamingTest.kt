@@ -20,8 +20,6 @@ import com.automatethethings.xkey.media.MediaHasher.SignatureSource
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.InputStream
 
@@ -83,12 +81,15 @@ class MediaHasherStreamingTest {
         }
     }
 
-    private fun resolverFor(mime: String, open: () -> InputStream): Pair<ContentResolver, Uri> {
+    /** A context whose resolver serves [open] at a URI, typed [mime]. */
+    private fun resolverFor(mime: String, open: () -> InputStream): Pair<android.content.Context, Uri> {
         val uri = mockk<Uri>()
         val resolver = mockk<ContentResolver>()
         every { resolver.openInputStream(uri) } answers { open() }
         every { resolver.getType(uri) } returns mime
-        return resolver to uri
+        val context = mockk<android.content.Context>()
+        every { context.contentResolver } returns resolver
+        return context to uri
     }
 
     @Test
@@ -104,8 +105,14 @@ class MediaHasherStreamingTest {
 
         val (resolver, uri) = resolverFor("video/mp4") { SyntheticStream(head, mdatPayload, ours) }
 
-        assertTrue(MediaHasher.contentHashMatchesUri(resolver, uri, expected, SignatureSource.IN_BAND))
-        assertFalse(MediaHasher.contentHashMatchesUri(resolver, uri, "0".repeat(64), SignatureSource.IN_BAND))
+        assertEquals(
+            MediaHasher.ContentHashCheck.MATCHES,
+            MediaHasher.checkContentHashUri(resolver, uri, expected, SignatureSource.IN_BAND)
+        )
+        assertEquals(
+            MediaHasher.ContentHashCheck.MISMATCH,
+            MediaHasher.checkContentHashUri(resolver, uri, "0".repeat(64), SignatureSource.IN_BAND)
+        )
     }
 
     @Test

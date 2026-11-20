@@ -1061,7 +1061,7 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Hash the file content
-                val hashHex = MediaHasher.hashCanonicalUri(contentResolver, uri)
+                val hashHex = MediaHasher.hashCanonicalUri(applicationContext, uri)
                 val hashBytes = hexToBytes(hashHex)
 
                 // Sign the hash
@@ -1253,16 +1253,19 @@ class FileOperationActivity : AppCompatActivity() {
                     // The stored content hash must match this file before any
                     // signature over it counts: a copied in-band block covers
                     // another file's content.
-                    val hashMatches = MediaHasher.contentHashMatchesUri(
-                        contentResolver, uri, embeddedData.contentHash, MediaHasher.SignatureSource.IN_BAND
+                    val check = MediaHasher.checkContentHashUri(
+                        applicationContext, uri, embeddedData.contentHash, MediaHasher.SignatureSource.IN_BAND
                     )
                     // On a mismatch the block's own line says why, as the
                     // sidecar path does, so the result fails even with no
-                    // signature entries.
-                    val result = if (hashMatches) {
-                        verifySignatures(embeddedData, hashMatches)
-                    } else {
-                        listOf("Content hash mismatch" to "failed") + verifySignatures(embeddedData, hashMatches)
+                    // signature entries. An unreadable original is no
+                    // mismatch: nothing is verified and it says so.
+                    val result = when (check) {
+                        MediaHasher.ContentHashCheck.MATCHES -> verifySignatures(embeddedData, true)
+                        MediaHasher.ContentHashCheck.MISMATCH ->
+                            listOf("Content hash mismatch" to "failed") + verifySignatures(embeddedData, false)
+                        MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE ->
+                            listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable")
                     }
 
                     val fileName = getFileName(uri)
@@ -1304,13 +1307,14 @@ class FileOperationActivity : AppCompatActivity() {
                 val cad = ContentAuthenticityData.fromJsonString(sidecarJson)
 
                 // A sidecar may cover the canonical or the whole-file hash.
-                val hashMatches = MediaHasher.contentHashMatchesUri(
-                    contentResolver, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
+                val check = MediaHasher.checkContentHashUri(
+                    applicationContext, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
                 )
-                val results = if (hashMatches) {
-                    verifySignatures(cad, hashMatches)
-                } else {
-                    listOf("Content hash mismatch" to "failed")
+                val results = when (check) {
+                    MediaHasher.ContentHashCheck.MATCHES -> verifySignatures(cad, true)
+                    MediaHasher.ContentHashCheck.MISMATCH -> listOf("Content hash mismatch" to "failed")
+                    MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE ->
+                        listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable")
                 }
 
                 val fileName = getFileName(fileUri)

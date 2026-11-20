@@ -242,20 +242,25 @@ class MediaHasherCanonicalTest {
     }
 
     @Test
-    fun `contentHashMatchesUri reads the bytes and the mime type from the resolver`() {
+    fun `checkContentHashUri reads the bytes and the mime type from the resolver`() {
         val uri = mockk<Uri>()
         val resolver = mockk<ContentResolver>()
         every { resolver.openInputStream(uri) } answers { ByteArrayInputStream(file) }
         every { resolver.getType(uri) } returns "image/jpeg"
+        val context = mockk<android.content.Context>()
+        every { context.contentResolver } returns resolver
 
-        assertTrue(
-            MediaHasher.contentHashMatchesUri(resolver, uri, wholeFileHash, SignatureSource.SIDECAR)
+        assertEquals(
+            MediaHasher.ContentHashCheck.MATCHES,
+            MediaHasher.checkContentHashUri(context, uri, wholeFileHash, SignatureSource.SIDECAR)
         )
-        assertTrue(
-            MediaHasher.contentHashMatchesUri(resolver, uri, canonicalHash, SignatureSource.IN_BAND)
+        assertEquals(
+            MediaHasher.ContentHashCheck.MATCHES,
+            MediaHasher.checkContentHashUri(context, uri, canonicalHash, SignatureSource.IN_BAND)
         )
-        assertFalse(
-            MediaHasher.contentHashMatchesUri(resolver, uri, wholeFileHash, SignatureSource.IN_BAND)
+        assertEquals(
+            MediaHasher.ContentHashCheck.MISMATCH,
+            MediaHasher.checkContentHashUri(context, uri, wholeFileHash, SignatureSource.IN_BAND)
         )
     }
 }
