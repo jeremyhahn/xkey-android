@@ -280,6 +280,41 @@ class Ctap2AuthenticatorTest {
         assertTrue(backend.offered.isEmpty())
     }
 
+    /** Wrong-type values for an optional parameter: the other container, empty and not, and a scalar. */
+    private fun wrongTypes(expectList: Boolean): List<Any> =
+        if (expectList) listOf(emptyMap<String, Any>(), mapOf("id" to byteArrayOf(5)), "x")
+        else listOf(emptyList<Any>(), listOf(true), "x")
+
+    @Test
+    fun `getAssertion with an optional parameter of the wrong CBOR type answers CTAP2_ERR_CBOR_UNEXPECTED_TYPE and signs nothing`() = runTest {
+        backend.add(byteArrayOf(5), rpId, user = byteArrayOf(55), name = "alice")
+        // allowList is an array; extensions and options are maps.
+        for ((key, expectList) in listOf(3 to true, 4 to false, 5 to false)) {
+            for (value in wrongTypes(expectList)) {
+                val (status, body) = call(Ctap2.CMD_GET_ASSERTION, assertion(extra = mapOf(key to value)))
+                assertEquals("getAssertion param $key = $value", Ctap2.ERR_CBOR_UNEXPECTED_TYPE, status)
+                assertNull(body)
+            }
+        }
+        assertEquals(0L, backend.counter)
+        assertEquals(0, backend.checks)
+    }
+
+    @Test
+    fun `makeCredential with an optional parameter of the wrong CBOR type answers CTAP2_ERR_CBOR_UNEXPECTED_TYPE and creates nothing`() = runTest {
+        // excludeList is an array; extensions and options are maps.
+        for ((key, expectList) in listOf(5 to true, 6 to false, 7 to false)) {
+            for (value in wrongTypes(expectList)) {
+                val request = registration(options = null) + mapOf<Any, Any?>(key to value)
+                val (status, body) = call(Ctap2.CMD_MAKE_CREDENTIAL, request)
+                assertEquals("makeCredential param $key = $value", Ctap2.ERR_CBOR_UNEXPECTED_TYPE, status)
+                assertNull(body)
+            }
+        }
+        assertTrue(backend.created.isEmpty())
+        assertEquals(0, backend.checks)
+    }
+
     @Test
     fun `an empty allow list with several resident accounts asks the owner to choose`() = runTest {
         backend.add(byteArrayOf(1), rpId, user = byteArrayOf(41), name = "alice")
