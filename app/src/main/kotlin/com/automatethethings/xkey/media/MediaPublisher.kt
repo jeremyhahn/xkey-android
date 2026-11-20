@@ -222,20 +222,43 @@ object MediaPublisher {
      * The URI that reads [target] whole, its location metadata included: a
      * content URI's original ([MediaStore.setRequireOriginal]) from Android
      * 10, which needs ACCESS_MEDIA_LOCATION, or [target] itself where nothing
-     * is redacted (another scheme or provider, or earlier Android). Only
-     * MediaStore redacts: its own URIs and the media documents it backs,
-     * which serve the original to a caller holding the permission. Null when
-     * that permission is missing for one of them.
+     * is redacted (another scheme or provider, earlier Android, or an item
+     * that carries no location: see [carriesLocation]). Only MediaStore
+     * redacts, and only images and videos: its own URIs and the media
+     * documents it backs, which serve the original to a caller holding the
+     * permission. Null when that permission is missing for one of them.
      */
     fun originalUri(context: Context, target: Uri): Uri? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return target
         if (target.scheme != ContentResolver.SCHEME_CONTENT) return target
         val authority = target.authority
         if (authority != MediaStore.AUTHORITY && authority != MEDIA_DOCUMENTS_AUTHORITY) return target
+        if (!carriesLocation(context, target)) return target
         if (context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             return null
         }
         return if (authority == MediaStore.AUTHORITY) MediaStore.setRequireOriginal(target) else target
+    }
+
+    /**
+     * Whether MediaStore redacts [target]'s location: an image or a video,
+     * by the type the provider serves. Audio, PDFs and other documents read
+     * whole without location access. With no type served, the collection the
+     * URI names decides, and an unknown one is taken as one that may.
+     */
+    private fun carriesLocation(context: Context, target: Uri): Boolean {
+        val type = try {
+            context.contentResolver.getType(target)
+        } catch (_: Exception) {
+            null
+        }
+        if (type != null) return type.startsWith("image/") || type.startsWith("video/")
+        val segments = target.pathSegments
+        if (target.authority == MEDIA_DOCUMENTS_AUTHORITY) {
+            val id = segments.lastOrNull().orEmpty()
+            return !(id.startsWith("audio:") || id.startsWith("document:"))
+        }
+        return "audio" !in segments
     }
 
     /**
