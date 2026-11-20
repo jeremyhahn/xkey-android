@@ -36,6 +36,7 @@ import android.widget.RadioGroup
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.core.widget.NestedScrollView
@@ -64,6 +65,7 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.progressindicator.CircularProgressIndicator
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -99,6 +101,14 @@ class FileOperationActivity : AppCompatActivity() {
          */
         internal fun verificationSucceeded(results: List<Pair<String, String>>): Boolean =
             results.isNotEmpty() && results.all { it.second == "verified" }
+
+        /**
+         * Where Verify reads and checks off the main thread: [Dispatchers.IO].
+         * Tests run it on the main looper they idle, so a verification
+         * completes with no real-time wait.
+         */
+        @VisibleForTesting
+        internal var verifyDispatcher: CoroutineDispatcher = Dispatchers.IO
 
         // Saved state: output waiting for a save picker
         private const val STATE_SIGNATURE_JSON = "pending_signature_json"
@@ -1269,7 +1279,7 @@ class FileOperationActivity : AppCompatActivity() {
     private fun performVerify() {
         val uri = fileUris.first()
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        lifecycleScope.launch(verifyDispatcher) {
             try {
                 // Try reading embedded signature
                 val mimeType = contentResolver.getType(uri)
@@ -1332,7 +1342,7 @@ class FileOperationActivity : AppCompatActivity() {
     private fun verifySidecarSignature(sidecarUri: Uri) {
         val fileUri = fileUris.first()
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        lifecycleScope.launch(verifyDispatcher) {
             try {
                 val cad = contentResolver.openInputStream(sidecarUri)?.use { input ->
                     ContentAuthenticityData.fromJsonStream(input)

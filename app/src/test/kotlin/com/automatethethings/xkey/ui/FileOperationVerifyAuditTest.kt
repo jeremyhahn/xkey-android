@@ -34,6 +34,7 @@ import com.google.android.material.button.MaterialButton
 import io.mockk.every
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
+import kotlinx.coroutines.Dispatchers
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -82,10 +83,12 @@ class FileOperationVerifyAuditTest {
         mockkObject(AuditLogger)
         every { AuditLogger.logFileVerified(any(), any(), any()) } answers { audited += thirdArg<Boolean>() }
         shadowOf(RuntimeEnvironment.getApplication()).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        FileOperationActivity.verifyDispatcher = Dispatchers.Main
     }
 
     @After
     fun tearDown() {
+        FileOperationActivity.verifyDispatcher = Dispatchers.IO
         unmockkObject(AuditLogger)
         db.close()
     }
