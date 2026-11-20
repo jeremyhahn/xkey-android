@@ -579,6 +579,93 @@ class CameraMediaWriteAuthorizationTest {
         )
     }
 
+    /**
+     * [killMidOverwrite], then a recovery whose restore the process dies in
+     * after it has put back only part of the backup: the capture starts with
+     * the backup's bytes, then the signed bytes the write left, then the
+     * backup's again. The recovery directory is put back as it stood then.
+     */
+    private fun killMidRestore(data: ContentAuthenticityData) {
+        killMidOverwrite(data)
+        val mixed = media.readBytes()
+        val recovery = MediaPublisher.recoveryDirectory(context)
+        val atKill = folder.newFolder("recovery-at-restore-kill")
+        var mediaAtKill = ByteArray(0)
+        var kills = 1
+        MediaPublisher.overwriteStep = {
+            if (it == "truncate" && kills-- > 0) {
+                val firstDiff = mixed.indices.first { i -> mixed[i] != original[i] }
+                val restored = firstDiff + 1
+                mediaAtKill = original.copyOf(restored) + mixed.copyOfRange(restored, mixed.size)
+                check(!mediaAtKill.contentEquals(original)) { "the kill must leave signed bytes after the restored ones" }
+                recovery.listFiles()!!.forEach { f -> f.copyTo(File(atKill, f.name)) }
+                throw IllegalStateException("process killed")
+            }
+        }
+        try {
+            MediaPublisher.recoverInterruptedWrites(context)
+        } finally {
+            MediaPublisher.overwriteStep = {}
+        }
+        media.writeBytes(mediaAtKill)
+        recovery.listFiles()!!.forEach { it.deleteRecursively() }
+        atKill.listFiles()!!.forEach { f -> f.copyTo(File(recovery, f.name)) }
+    }
+
+    @Test
+    fun `a restore interrupted part-way is finished by the next recovery and the request stays queued`() {
+        val data = data()
+        killMidRestore(data)
+        assertTrue("the kill left the capture mixed", !media.readBytes().contentEquals(original))
+
+        MediaPublisher.recoverInterruptedWrites(context)
+
+        assertArrayEquals("the next recovery finishes the restore", original, media.readBytes())
+        assertTrue("the record is settled", !MediaPublisher.recoveryPending(context, uri))
+        assertEquals(
+            "the request stays queued",
+            listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri }
+        )
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+        assertEquals("the retry signs the restored capture", listOf(uri.toString()), signed.map { it.uri })
+        assertEquals(data.toJsonString(), embedded(media.readBytes()))
+    }
+
+    @Test
+    fun `a restore interrupted part-way, then a retry, finishes the restore before signing`() {
+        val data = data()
+        killMidRestore(data)
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertEquals("the queued request is not dropped", listOf(uri.toString()), signed.map { it.uri })
+        assertEquals(data.toJsonString(), embedded(media.readBytes()))
+        assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
+    }
+
+    @Test
+    fun `a capture edited in a gallery after an interrupted restore keeps the edit and the backup`() {
+        killMidRestore(data())
+        val recovery = MediaPublisher.recoveryDirectory(context)
+        val backup = MediaPublisher.GrantedWriteJournal(recovery, uri).backup.readBytes()
+        val edited = XmpFixtures.png(XmpFixtures.bytes(0x78, 0x9C, 0x07, 0x08, 0x09))
+        media.writeBytes(edited)
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertArrayEquals("the gallery edit is never overwritten by the backup", edited, media.readBytes())
+        assertTrue("the edited capture is not signed", signed.isEmpty())
+        assertTrue("the record is settled", !MediaPublisher.recoveryPending(context, uri))
+        assertTrue(
+            "the version from before the write is kept as well",
+            recovery.listFiles()!!.any { it.isFile && it.readBytes().contentEquals(backup) }
+        )
+    }
+
     @Test
     fun `a queue that cannot be read is kept whole and add fails instead of replacing it`() {
         queue(data())
