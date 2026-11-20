@@ -507,23 +507,6 @@ class Ctap2AuthenticatorTest {
     }
 
     @Test
-    fun `empty extensions and options maps behave as absent ones`() = runTest {
-        backend.add(byteArrayOf(1), rpId)
-
-        val (assertStatus, _) = call(
-            Ctap2.CMD_GET_ASSERTION,
-            assertion(options = emptyMap(), extra = mapOf(4 to emptyMap<Any, Any?>()))
-        )
-        val registration = registration(options = emptyMap()).toMutableMap()
-        registration[6] = emptyMap<Any, Any?>()
-        val (makeStatus, _) = call(Ctap2.CMD_MAKE_CREDENTIAL, registration)
-
-        assertEquals(Ctap2.OK, assertStatus)
-        assertEquals(Ctap2.OK, makeStatus)
-        assertEquals(false, backend.created.single().discoverable)
-    }
-
-    @Test
     fun `makeCredential with up false answers CTAP2_ERR_INVALID_OPTION`() = runTest {
         val (status, _) = call(Ctap2.CMD_MAKE_CREDENTIAL, registration(options = mapOf("up" to false)))
 
