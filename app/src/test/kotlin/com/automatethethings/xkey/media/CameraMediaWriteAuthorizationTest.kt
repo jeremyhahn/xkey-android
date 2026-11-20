@@ -279,6 +279,30 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
+    fun `a process killed before its write's record is committed leaves nothing after the next start`() = runBlocking<Unit> {
+        // An active journal: the record stays while it cannot be read yet.
+        killMidOverwrite(data())
+        val recovery = MediaPublisher.recoveryDirectory(context)
+        val active = MediaPublisher.GrantedWriteJournal(recovery, uri)
+        val activeFiles = recovery.listFiles()!!.filter { it.name.startsWith(MediaPublisher.GrantedWriteJournal.PREFIX) }
+        // Another capture's write, killed inside its commit before the record's rename.
+        val other = MediaPublisher.GrantedWriteJournal(recovery, Uri.parse("content://media/external/images/media/99"))
+        val stem = other.backup.name.removeSuffix(".bak")
+        val unrecorded = listOf(other.backup, other.written, File(recovery, "$stem.tmp")).onEach { it.writeBytes(byteArrayOf(1)) }
+
+        MediaPublisher.GrantedWriteJournal.readRecord = { throw IOException("the record could not be read") }
+        try {
+            MediaPublisher.recoverInterruptedWrites(context)
+        } finally {
+            MediaPublisher.GrantedWriteJournal.readRecord = { it.readText() }
+        }
+
+        unrecorded.forEach { assertTrue("${it.name} has no record: the start reclaims it", !it.exists()) }
+        assertTrue("the active journal stays", active.recorded())
+        activeFiles.forEach { assertTrue("${it.name} belongs to the active journal", it.exists()) }
+    }
+
+    @Test
     fun `a granted write called directly, past signMedia, still refuses an edited capture`() = runBlocking<Unit> {
         granted = true
         val hash = AutoSignHash.contentHashFile(capture, "image/png")

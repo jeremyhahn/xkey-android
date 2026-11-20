@@ -231,6 +231,26 @@ class MediaSaveRunsAbandonTest {
         assertFalse("a working file nothing names is gone", orphan.exists())
     }
 
+    @Test
+    fun `the sweep reclaims a granted write's files left before its record was committed`() {
+        val dir = temp.newFolder("media-recovery-unrecorded")
+        val key = "ab".repeat(32)
+        // A process killed inside the journal's commit, before the record's rename.
+        val left = listOf(".bak", ".new", ".tmp", ".restoring").map { File(dir, "granted-$key$it").apply { writeBytes(byteArrayOf(1)) } }
+        // A record whose name is all there is (it cannot be read) still holds its files.
+        val active = "cd".repeat(32)
+        val record = File(dir, "granted-$active.uri").apply { writeText("content://media/external/images/media/7") }
+        val journalled = listOf(".bak", ".new", ".restoring").map { File(dir, "granted-$active$it").apply { writeBytes(byteArrayOf(2)) } }
+        val keptBackup = File(dir, "kept-$key-1700000000000.bak").apply { writeBytes(byteArrayOf(3)) }
+
+        MediaSaveRuns.sweep(dir)
+
+        left.forEach { assertFalse("${it.name} has no record: it is reclaimed", it.exists()) }
+        assertTrue("an active journal's record stays", record.exists())
+        journalled.forEach { assertTrue("${it.name} belongs to an active journal", it.exists()) }
+        assertTrue("a backup kept on purpose stays", keptBackup.exists())
+    }
+
     /** Dates this file past the window in which saved screen state could name it. */
     private fun File.age() {
         assertTrue(setLastModified(System.currentTimeMillis() - MediaSaveRuns.STAGED_RETENTION_MS - 60_000))
