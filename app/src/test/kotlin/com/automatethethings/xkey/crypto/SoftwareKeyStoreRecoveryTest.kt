@@ -145,6 +145,8 @@ class SoftwareKeyStoreRecoveryTest {
         every { java.security.KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
         val keystore = mockk<KeystoreManager>(relaxed = true)
         every { keystore.userKeyGeneration(any()) } returns emptyMap()
+        // Each read of the keystore's store is a new instance, as at a restart.
+        every { keystore.softwareKeys() } answers { store(filesDir) }
         store(filesDir).put(key("k"))
 
         // The delete records its generation (its tombstone), then stops.

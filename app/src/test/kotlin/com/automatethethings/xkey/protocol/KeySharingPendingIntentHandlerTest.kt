@@ -140,6 +140,8 @@ class KeySharingPendingIntentHandlerTest {
         every { keystore.holdsAnyKey(any()) } returns false
         every { keystore.holdsInternalKey(any()) } returns false
         every { keystore.soleKind(any()) } returns null
+        // The software key store side of a key: the files under the context's.
+        every { keystore.softwareKeys() } answers { com.automatethethings.xkey.crypto.SoftwareKeyStore(context) }
         handler = newHandler()
     }
 
