@@ -281,9 +281,22 @@ object MediaPublisher {
      * The one read of a capture xKey stages, backs up or checks before and
      * after writing it in place: its original bytes ([originalUri]), never
      * the redacted view. Throws [OriginalUnavailableException] when only
-     * that view is readable.
+     * that view is readable, and [RecoveryPendingException] while a granted
+     * write of it is recorded and not put back ([recoveryPending]): its bytes
+     * may be part-written, so nothing hashes, signs, stages or shows them.
      */
     fun openOriginal(context: Context, target: Uri): InputStream {
+        val journal = GrantedWriteJournal(recoveryDirectory(context), target)
+        if (journal.recorded()) throw RecoveryPendingException(target, journal.backup)
+        return openOriginalUnchecked(context, target)
+    }
+
+    /**
+     * [openOriginal] without the recovery check: only the granted write and
+     * its recovery read a capture whose write is recorded, to back it up,
+     * check it and tell what an interrupted write left.
+     */
+    private fun openOriginalUnchecked(context: Context, target: Uri): InputStream {
         val original = originalUri(context, target) ?: throw OriginalUnavailableException(target)
         return context.contentResolver.openInputStream(original) ?: throw IOException("cannot read $target")
     }
