@@ -499,7 +499,7 @@ object XmpMetadataHelper {
         return try {
             val sidecarFile = File(getSidecarPath(filePath))
             if (!sidecarFile.exists()) return null
-            ContentAuthenticityData.fromJsonString(sidecarFile.readText())
+            sidecarFile.inputStream().use { ContentAuthenticityData.fromJsonStream(it) }
         } catch (_: Exception) {
             null
         }

@@ -81,5 +81,31 @@ data class ContentAuthenticityData(
 
         fun fromJsonString(jsonString: String): ContentAuthenticityData =
             fromJson(JSONObject(jsonString))
+
+        /**
+         * Most bytes a signature document read from a file (a sidecar) may
+         * hold: 1 MiB, far above any real one's few signatures. A sidecar is
+         * whatever file sits beside the media, so it is never read whole.
+         */
+        const val MAX_JSON_BYTES = 1024 * 1024
+
+        /**
+         * The one read of signature data from a file: [input] parsed while it
+         * stays within [limit] bytes; past that, [java.io.IOException] with
+         * no more than [limit] bytes held.
+         */
+        fun fromJsonStream(input: java.io.InputStream, limit: Int = MAX_JSON_BYTES): ContentAuthenticityData {
+            val out = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            var total = 0L
+            while (true) {
+                val n = input.read(buffer)
+                if (n == -1) break
+                total += n
+                if (total > limit) throw java.io.IOException("signature data is larger than $limit bytes")
+                out.write(buffer, 0, n)
+            }
+            return fromJsonString(out.toByteArray().decodeToString())
+        }
     }
 }

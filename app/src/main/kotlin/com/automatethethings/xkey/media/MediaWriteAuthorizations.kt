@@ -49,8 +49,8 @@ data class PendingMediaWrite(
  * from its original and signed once it is. They are kept under
  * the app's files, so a process death loses none; a notification, or the
  * media-signing settings entry when notifications are off ([settingsEntry]),
- * opens [MediaWriteRequestActivity], which asks for every one in one write request
- * ([request]) and then publishes the granted ones ([publishGranted]) or drops
+ * opens [MediaWriteRequestActivity], which asks for them in bounded write
+ * requests, one batch after another ([request]), and after each publishes the granted ones ([publishGranted]) or drops
  * them on a refusal ([deny]).
  */
 object MediaWriteAuthorizations {
@@ -89,21 +89,58 @@ object MediaWriteAuthorizations {
     /**
      * What publishing the queue needs: every queued capture ([uris]) and the
      * write request the user approves for those that need a grant ([intent],
-     * asking for [requested]). A null [intent] means none needs one (before
-     * Android 11 xKey writes media itself, and MediaStore has no write
-     * request there): the queue is published at once.
+     * asking for [requested]). A null [intent] means none needs one, or none
+     * not yet asked for (before Android 11 xKey writes media itself, and
+     * MediaStore has no write request there). [skipped] are captures whose
+     * request the platform would not build even alone: they stay queued.
      */
-    class WriteRequest(val uris: List<String>, val requested: List<String>, val intent: PendingIntent?)
+    class WriteRequest(
+        val uris: List<String>,
+        val requested: List<String>,
+        val intent: PendingIntent?,
+        val skipped: List<String> = emptyList()
+    )
 
-    /** The write request for every queued capture, or null when none waits. */
-    fun request(context: Context): WriteRequest? {
+    /**
+     * Most captures one write request asks for. MediaStore carries a
+     * request's URIs in one Binder transaction, whose size is limited, so a
+     * backlog is asked for in batches of this many, oldest first.
+     */
+    const val MAX_WRITE_REQUEST_URIS = 100
+
+    /**
+     * The write request for the next batch of queued captures that need a
+     * grant, leaving out [exclude] (those already asked for), or null when
+     * none waits. A batch is at most [MAX_WRITE_REQUEST_URIS], and the rest
+     * stays queued for the next request. A request the platform fails to
+     * build (one too large for its transaction) is built again for half as
+     * many; a capture whose request fails alone is [WriteRequest.skipped],
+     * kept queued, so the backlog is neither lost nor asked for forever.
+     */
+    fun request(context: Context, exclude: Set<String> = emptySet()): WriteRequest? {
         val uris = pending(context).map { it.uri }
         if (uris.isEmpty()) return null
-        val needGrant = uris.filter {
-            MediaPublisher.writeAccess(context, Uri.parse(it)) == MediaPublisher.MediaWriteAccess.NEEDS_GRANT
+        var candidates = uris.filter {
+            it !in exclude &&
+                MediaPublisher.writeAccess(context, Uri.parse(it)) == MediaPublisher.MediaWriteAccess.NEEDS_GRANT
         }
-        if (needGrant.isEmpty()) return WriteRequest(uris, emptyList(), null)
-        return WriteRequest(uris, needGrant, MediaPublisher.writeRequest(context, needGrant.map(Uri::parse)))
+        val skipped = mutableListOf<String>()
+        var size = MAX_WRITE_REQUEST_URIS
+        while (candidates.isNotEmpty()) {
+            val batch = candidates.take(size)
+            try {
+                return WriteRequest(uris, batch, MediaPublisher.writeRequest(context, batch.map(Uri::parse)), skipped)
+            } catch (e: Exception) {
+                Log.w(TAG, "Cannot build a write request for ${batch.size} captures", e)
+                if (batch.size == 1) {
+                    skipped += batch
+                    candidates = candidates.drop(1)
+                } else {
+                    size = batch.size / 2
+                }
+            }
+        }
+        return WriteRequest(uris, emptyList(), null, skipped)
     }
 
     /**

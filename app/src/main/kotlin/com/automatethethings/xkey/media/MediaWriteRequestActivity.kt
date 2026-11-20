@@ -55,6 +55,14 @@ class MediaWriteRequestActivity : ComponentActivity() {
      */
     private var writeRequestLaunched = false
 
+    /**
+     * Every capture a write request of this screen has asked for, or that
+     * the platform would not ask for: a backlog is asked for in bounded
+     * batches ([MediaWriteAuthorizations.request]), the next after each
+     * answer, and none is asked for twice. Kept in the saved state.
+     */
+    private var asked: ArrayList<String> = arrayListOf()
+
     private val launcher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         publish(result.resultCode == Activity.RESULT_OK, requested)
     }
@@ -70,6 +78,7 @@ class MediaWriteRequestActivity : ComponentActivity() {
             granted = savedInstanceState.getBoolean(KEY_GRANTED)
             publicationId = savedInstanceState.getString(KEY_PUBLICATION)
             writeRequestLaunched = savedInstanceState.getBoolean(KEY_WRITE_REQUEST_LAUNCHED)
+            asked = savedInstanceState.getStringArrayList(KEY_ASKED) ?: arrayListOf()
             // Recreated while the location dialog was open: wait on its answer again.
             if (!writeRequestLaunched) {
                 askLocationThenRequest()
@@ -103,11 +112,14 @@ class MediaWriteRequestActivity : ComponentActivity() {
         locationAccess.withOriginals(queued) { launchWriteRequest() }
     }
 
-    /** Ask, in one write request, for every queued capture; finish when none waits. */
+    /**
+     * Ask, in one bounded write request, for the next batch of queued
+     * captures not asked for yet; finish when none is left to ask for.
+     */
     private fun launchWriteRequest() {
         writeRequestLaunched = true
         val request = try {
-            MediaWriteAuthorizations.request(applicationContext)
+            MediaWriteAuthorizations.request(applicationContext, asked.toSet())
         } catch (e: Exception) {
             Log.e(TAG, "Cannot create the write request", e)
             null
@@ -116,13 +128,19 @@ class MediaWriteRequestActivity : ComponentActivity() {
             finish()
             return
         }
+        val firstRequest = asked.isEmpty()
+        asked.addAll(request.skipped)
         requested = ArrayList(request.requested)
         val intent = request.intent
         if (intent == null) {
             // No queued capture needs a grant (Android 10 has no write request): publish now.
-            publish(true, requested)
+            // After a batch, nothing is left to ask for: the answers are carried out.
+            if (firstRequest) publish(true, requested) else finish()
             return
         }
+        asked.addAll(request.requested)
+        // A new question: the earlier batch's answer is carried out and never applies to this one.
+        answered = false
         launcher.launch(IntentSenderRequest.Builder(intent.intentSender).build())
     }
 
@@ -133,6 +151,7 @@ class MediaWriteRequestActivity : ComponentActivity() {
         outState.putBoolean(KEY_GRANTED, granted)
         outState.putString(KEY_PUBLICATION, publicationId)
         outState.putBoolean(KEY_WRITE_REQUEST_LAUNCHED, writeRequestLaunched)
+        outState.putStringArrayList(KEY_ASKED, asked)
     }
 
     override fun onDestroy() {
@@ -176,7 +195,9 @@ class MediaWriteRequestActivity : ComponentActivity() {
                 publicationId = null
                 val action = outcome.getOrNull()
                 if (action == null) {
-                    finish()
+                    // A batch of the write request was answered: ask for the next one.
+                    val batchAnswered = uris.isNotEmpty() && asked.containsAll(uris)
+                    if (batchAnswered) launchWriteRequest() else finish()
                     return@outcome
                 }
                 // Android 10 asks at the write: this screen launches the question.
@@ -195,6 +216,7 @@ class MediaWriteRequestActivity : ComponentActivity() {
         const val KEY_GRANTED = "granted"
         const val KEY_PUBLICATION = "publication"
         const val KEY_WRITE_REQUEST_LAUNCHED = "write_request_launched"
+        const val KEY_ASKED = "asked"
 
         /**
          * Publish the granted captures, or drop the refused [uris]; the

@@ -1334,11 +1334,9 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val sidecarJson = contentResolver.openInputStream(sidecarUri)?.use { input ->
-                    input.bufferedReader().readText()
+                val cad = contentResolver.openInputStream(sidecarUri)?.use { input ->
+                    ContentAuthenticityData.fromJsonStream(input)
                 } ?: throw IllegalStateException("Cannot read sidecar file")
-
-                val cad = ContentAuthenticityData.fromJsonString(sidecarJson)
 
                 // A sidecar may cover the canonical or the whole-file hash.
                 val check = MediaHasher.checkContentHashUri(
