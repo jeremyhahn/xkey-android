@@ -390,7 +390,7 @@ object MediaPublisher {
 
         fun recorded() = record.isFile
 
-        fun target(): Uri? = runCatching { Uri.parse(record.readText()) }.getOrNull()
+        fun target(): Uri? = runCatching { Uri.parse(readRecord(record)) }.getOrNull()
 
         /** [whole] (synced) becomes the backup, then the record is written and synced. */
         fun commit(whole: File) {
@@ -413,9 +413,13 @@ object MediaPublisher {
             const val PREFIX = "granted-"
             private const val RECORD = ".uri"
 
+            /** The one read of a record's text; tests make it fail. */
+            @Volatile
+            internal var readRecord: (File) -> String = { it.readText() }
+
             fun all(directory: File): List<GrantedWriteJournal> =
                 directory.listFiles { f -> f.name.startsWith(PREFIX) && f.name.endsWith(RECORD) }.orEmpty()
-                    .mapNotNull { f -> runCatching { GrantedWriteJournal(directory, Uri.parse(f.readText())) }.getOrNull() }
+                    .mapNotNull { f -> runCatching { GrantedWriteJournal(directory, Uri.parse(readRecord(f))) }.getOrNull() }
         }
     }
 

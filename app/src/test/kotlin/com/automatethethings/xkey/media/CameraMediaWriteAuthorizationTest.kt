@@ -40,6 +40,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
 
 /**
  * A capture the camera app owns is not xKey's to rename over: READ_MEDIA_*
@@ -495,6 +496,66 @@ class CameraMediaWriteAuthorizationTest {
         MediaWriteAuthorizations.deny(context, listOf(uri.toString()))
 
         assertEquals(listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri })
+    }
+
+    /** [bytes] with only its EXIF location changed, as a gallery's "edit location" saves it. */
+    private fun relocated(bytes: ByteArray): ByteArray {
+        val file = File.createTempFile("relocated-", ".jpg", folder.root)
+        file.writeBytes(bytes)
+        ExifInterface(file.path).apply {
+            setLatLong(latitude + 1.0, longitude + 1.0)
+            saveAttributes()
+        }
+        return file.readBytes().also { file.delete() }
+    }
+
+    @Test
+    fun `a capture whose EXIF alone was edited after it was staged is refused and keeps the edit`() {
+        val geotagged = useGeotaggedJpeg()
+        val edited = relocated(geotagged)
+        check(!edited.contentEquals(geotagged)) { "the edit must change the file" }
+        check(AutoSignHash.contentHashFile(media, "image/jpeg") == run {
+            val f = File.createTempFile("edited-", ".jpg", folder.root).apply { writeBytes(edited) }
+            AutoSignHash.contentHashFile(f, "image/jpeg").also { f.delete() }
+        }) { "the edit must leave the signed content hash as it was" }
+        granted = true
+        val data = data(hash = AutoSignHash.contentHashFile(media, "image/jpeg"))
+        var reads = 0
+        // The first read stages the capture; the editor saves before the backup is read.
+        provider.onOpen = { mode -> if (mode == "r" && ++reads == 2) media.writeBytes(edited) }
+
+        assertThrows(XmpMetadataHelper.SourceChangedException::class.java) {
+            XmpMetadataHelper.signMedia(context, uri, capture.path, data)
+        }
+        assertArrayEquals("the EXIF edit is never overwritten by the older snapshot", edited, media.readBytes())
+    }
+
+    @Test
+    fun `a record that cannot be read leaves its recovery pending and keeps the backup`() {
+        val data = data()
+        killMidOverwrite(data)
+        val mixed = media.readBytes()
+        val journal = MediaPublisher.GrantedWriteJournal(MediaPublisher.recoveryDirectory(context), uri)
+        val backup = journal.backup.readBytes()
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaPublisher.GrantedWriteJournal.readRecord = { throw IOException("the record could not be read") }
+        try {
+            assertThrows(MediaPublisher.RecoveryPendingException::class.java) {
+                MediaPublisher.recoverInterruptedWrite(context, uri)
+            }
+            MediaPublisher.recoverInterruptedWrites(context)
+            MediaWriteAuthorizations.publishGranted(context) { signed += it }
+        } finally {
+            MediaPublisher.GrantedWriteJournal.readRecord = { it.readText() }
+        }
+
+        assertTrue("nothing is signed while the record is unreadable", signed.isEmpty())
+        assertArrayEquals("nothing is staged from or written over the half-written capture", mixed, media.readBytes())
+        assertTrue("the record stays", MediaPublisher.recoveryPending(context, uri))
+        assertArrayEquals("the backup stays", backup, journal.backup.readBytes())
+
+        MediaPublisher.recoverInterruptedWrites(context)
+        assertArrayEquals("a later recovery puts the capture back", original, media.readBytes())
     }
 
     @Test
