@@ -315,6 +315,73 @@ class AndroidFidoCredentialBackendTest {
         assertArrayEquals(byteArrayOf(0x30), signed.signature)
     }
 
+    /**
+     * Keystore as a set of key ids: [shared] and [private] to start, each new
+     * passkey's key once generated. Deleting a key in [failingOnce] throws the
+     * first time and succeeds after, as a Keystore that is briefly busy.
+     */
+    private fun keystoreKeys(failsOnce: (String) -> Boolean): MutableSet<String> {
+        val keys = mutableSetOf(shared.keyId, private.keyId)
+        val failed = mutableSetOf<String>()
+        coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } answers {
+            keys += firstArg<String>(); byteArrayOf(0xA5.toByte())
+        }
+        every { keystore.deleteKey(any()) } answers {
+            val id = firstArg<String>()
+            if (failsOnce(id) && failed.add(id)) throw IllegalStateException("Keystore busy")
+            keys.remove(id)
+        }
+        return keys
+    }
+
+    @Test
+    fun `a failed registration whose Keystore delete fails deletes the key on a later retry`() = runTest {
+        val (keyRows, metadataRows) = storedResidents()
+        // The first new passkey's rollback delete fails once.
+        var firstNewKey: String? = null
+        val keys = keystoreKeys { id -> id != shared.keyId && id != private.keyId && (firstNewKey ?: id) == id }
+        val generate = slot<String>()
+        coEvery { keystore.generateKeyWithAuthDuration(capture(generate), any(), any()) } answers {
+            if (firstNewKey == null) firstNewKey = generate.captured
+            keys += generate.captured; byteArrayOf(0xA5.toByte())
+        }
+        coEvery { credentialDao.insert(any()) } throws IllegalStateException("disk full") andThenAnswer {
+            metadataRows += firstArg<CredentialMetadataEntity>().credentialId; 1L
+        }
+
+        val thrown = runCatching {
+            backend().create(CredentialRequest("example.com", "Example", byteArrayOf(7), "alice", "Alice", true))
+        }.exceptionOrNull()
+        assertTrue("create must fail", thrown != null)
+        assertTrue("its key row is gone", firstNewKey !in keyRows)
+
+        // A later registration, on a fresh backend as after a restart, retries
+        // the delete that failed.
+        val made = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", true))
+
+        assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), keys)
+        io.mockk.verify(exactly = 2) { keystore.deleteKey(firstNewKey!!) }
+    }
+
+    @Test
+    fun `a resident replacement whose Keystore delete fails deletes the old key on a later retry`() = runTest {
+        val (keyRows, _) = storedResidents()
+        val keys = keystoreKeys { it == shared.keyId }
+
+        val made = backend().create(
+            CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", discoverable = true)
+        )
+        assertEquals(setOf(private.keyId, b64(made.id)), keyRows)
+
+        // A later registration, on a fresh backend as after a restart, retries
+        // the delete that failed; the private passkey's key is never touched.
+        val next = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", true))
+
+        assertEquals(setOf(private.keyId, b64(made.id), b64(next.id)), keys)
+        io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(private.keyId) }
+    }
+
     /** Key rows as one live store: what a registration inserts, the next one's lookup sees. */
     private fun liveKeyRows(): MutableMap<String, KeyEntity> {
         val rows = linkedMapOf<String, KeyEntity>()
