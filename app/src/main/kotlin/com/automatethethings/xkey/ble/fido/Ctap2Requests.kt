@@ -122,8 +122,19 @@ internal object Ctap2Requests {
 
     private fun fail(status: Int): Nothing = throw Ctap2RequestException(status)
 
-    private fun missingOrWrongType(value: Any?): Nothing =
-        fail(if (value == null) Ctap2.ERR_MISSING_PARAMETER else Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
+    /**
+     * The one read of a request field: null when [key] is absent. No CTAP2
+     * field this authenticator reads is nullable, so a field present as CBOR
+     * null is CTAP2_ERR_CBOR_UNEXPECTED_TYPE, never the same as an omitted
+     * one (a null allowList is not discovery).
+     */
+    private fun Map<*, *>.present(key: Any): Any? {
+        if (!containsKey(key)) return null
+        return this[key] ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
+    }
+
+    /** A required field: CTAP2_ERR_MISSING_PARAMETER when absent. */
+    private fun Map<*, *>.required(key: Any): Any = present(key) ?: fail(Ctap2.ERR_MISSING_PARAMETER)
 
     /** The command's parameter map; an empty optional container is dropped later, by type. */
     private fun decode(request: ByteArray): Map<*, *> {
@@ -145,25 +156,25 @@ internal object Ctap2Requests {
     private fun credentialParameter(entry: Any?): Pair<String, Long> {
         val map = entry as? Map<*, *> ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
         val type = map.text("type")
-        val alg = map["alg"] as? Long ?: missingOrWrongType(map["alg"])
+        val alg = map.required("alg") as? Long ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
         return type to alg
     }
 
-    private fun Map<*, *>.text(key: Any): String = this[key] as? String ?: missingOrWrongType(this[key])
+    private fun Map<*, *>.text(key: Any): String = required(key) as? String ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
 
-    private fun Map<*, *>.bytes(key: Any): ByteArray = this[key] as? ByteArray ?: missingOrWrongType(this[key])
+    private fun Map<*, *>.bytes(key: Any): ByteArray = required(key) as? ByteArray ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
 
-    private fun Map<*, *>.map(key: Any): Map<*, *> = this[key] as? Map<*, *> ?: missingOrWrongType(this[key])
+    private fun Map<*, *>.map(key: Any): Map<*, *> = required(key) as? Map<*, *> ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
 
-    private fun Map<*, *>.list(key: Any): List<*> = this[key] as? List<*> ?: missingOrWrongType(this[key])
+    private fun Map<*, *>.list(key: Any): List<*> = required(key) as? List<*> ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
 
     private fun Map<*, *>.optionalText(key: Any): String? {
-        val value = this[key] ?: return null
+        val value = present(key) ?: return null
         return value as? String ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
     }
 
     private fun Map<*, *>.optionalUnsigned(key: Any) {
-        val value = this[key] ?: return
+        val value = present(key) ?: return
         if (value !is Long || value < 0) fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
     }
 
@@ -175,7 +186,7 @@ internal object Ctap2Requests {
 
     /** An optional map whose keys are text; null when absent or empty. */
     private fun Map<*, *>.optionalTextKeyedMap(key: Any): Map<*, *>? {
-        val value = this[key] ?: return null
+        val value = present(key) ?: return null
         val map = value as? Map<*, *> ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
         if (map.keys.any { it !is String }) fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
         return map.takeIf { it.isNotEmpty() }
@@ -198,7 +209,7 @@ internal object Ctap2Requests {
      * checked, whatever its type.
      */
     private fun Map<*, *>.descriptors(key: Any): List<ByteArray>? {
-        val value = this[key] ?: return null
+        val value = present(key) ?: return null
         val list = value as? List<*> ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
         if (list.isEmpty()) return null
         return list.mapNotNull { entry ->
@@ -206,7 +217,7 @@ internal object Ctap2Requests {
             val type = descriptor.text("type")
             val id = descriptor.bytes("id")
             if (id.isEmpty() || id.size > MAX_CREDENTIAL_ID) fail(Ctap2.ERR_INVALID_LENGTH)
-            descriptor["transports"]?.let { transports ->
+            descriptor.present("transports")?.let { transports ->
                 val names = transports as? List<*> ?: fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
                 if (names.any { it !is String }) fail(Ctap2.ERR_CBOR_UNEXPECTED_TYPE)
             }
