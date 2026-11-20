@@ -303,6 +303,7 @@ class MediaWriteRequestActivityTest {
             granted = resultCode == Activity.RESULT_OK
             answer(screen, resultCode)
             screen.pause().saveInstanceState(saved).stop()
+            readsBeforeDeath = deadReads.get()
             // The publication and its notification update both read nothing.
             val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
             while (deadReads.get() < 2 && System.nanoTime() < end) Thread.sleep(20)
@@ -316,6 +317,9 @@ class MediaWriteRequestActivityTest {
         forgetProcessState()
         return Robolectric.buildActivity(MediaWriteRequestActivity::class.java).setup(saved)
     }
+
+    /** What the dead publication had read when the screen's state was saved: the process died before it, so nothing. */
+    private var readsBeforeDeath = -1
 
     /** What a process death takes: every running publication and question this process held. */
     private fun forgetProcessState() {
@@ -347,5 +351,19 @@ class MediaWriteRequestActivityTest {
         )
         assertTrue("the screen ends once it is", awaitMain { restored.get().isFinishing })
         assertArrayEquals("nothing was written", capture.readBytes(), media.readBytes())
+    }
+
+    /**
+     * The process death the two tests above stage comes before the
+     * publication does anything. A publication that ends first hands its
+     * outcome to the screen while it is still resumed, and the state saved
+     * after names nothing left to run: the restored screen would then have
+     * nothing to carry out, whichever way the dispatcher's timing goes.
+     */
+    @Test
+    fun `the publication a process death takes has done nothing when the screen state is saved`() {
+        answerThenDieBeforePublishing(Activity.RESULT_CANCELED)
+
+        assertEquals("the dead publication read nothing before the state was saved", 0, readsBeforeDeath)
     }
 }
