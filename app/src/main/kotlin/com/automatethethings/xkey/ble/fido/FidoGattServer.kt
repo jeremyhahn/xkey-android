@@ -109,16 +109,25 @@ class FidoGattServer(
         return true
     }
 
-    /** Closes every client session and the server. */
+    /**
+     * Closes every client session and the server. Under [lifecycle], so once
+     * it has run [client] admits nothing: a callback already past [client]
+     * holds a closed client, whose session refuses every frame.
+     */
     fun stop() {
-        clients.values.forEach { it.close() }
-        clients.clear()
-        server?.let { s ->
-            runCatching { s.clearServices() }
-            runCatching { s.close() }
+        val (s, closing) = synchronized(lifecycle) {
+            val s = server
+            server = null
+            statusCharacteristic = null
+            val closing = clients.values.toList()
+            clients.clear()
+            s to closing
         }
-        server = null
-        statusCharacteristic = null
+        closing.forEach { it.close() }
+        s?.let {
+            runCatching { it.clearServices() }
+            runCatching { it.close() }
+        }
     }
 
     /** [stop], and no session can be started again. */
@@ -167,8 +176,23 @@ class FidoGattServer(
         return service
     }
 
-    private fun client(device: BluetoothDevice): Client =
-        clients.getOrPut(device.address) { Client(device) }
+    /**
+     * Guards admission against [stop]: a client is created or looked up only
+     * while the server runs, and [stop] takes the server and its clients
+     * under the same lock.
+     */
+    private val lifecycle = Any()
+
+    /**
+     * The one lookup every GATT callback uses: this device's client on the
+     * current connection, created on its first callback, or null once the
+     * server has stopped. A callback looks it up once and keeps that client,
+     * so a stop or disconnect after the lookup leaves it holding a closed
+     * session, never a fresh one.
+     */
+    private fun client(device: BluetoothDevice): Client? = synchronized(lifecycle) {
+        if (server == null) null else clients.getOrPut(device.address) { Client(device) }
+    }
 
     /** Held from setting fidoStatus's shared value until the stack has taken it. */
     private val sharedValueLock = Any()
@@ -371,7 +395,7 @@ class FidoGattServer(
         }
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
-            client(device).mtu = mtu
+            client(device)?.mtu = mtu
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
@@ -385,7 +409,7 @@ class FidoGattServer(
             characteristic: BluetoothGattCharacteristic
         ) {
             val value = when (characteristic.uuid) {
-                FidoBle.CONTROL_POINT_LENGTH_UUID -> client(device).controlPointLength.let {
+                FidoBle.CONTROL_POINT_LENGTH_UUID -> client(device)?.controlPointLength?.let {
                     byteArrayOf((it shr 8).toByte(), it.toByte())
                 }
                 FidoBle.SERVICE_REVISION_BITFIELD_UUID -> byteArrayOf(FidoBle.SERVICE_REVISION_FIDO2)
@@ -408,10 +432,15 @@ class FidoGattServer(
             value: ByteArray?
         ) {
             val data = value ?: ByteArray(0)
+            // Looked up once: the frame is checked against, and dispatched to,
+            // the client of the connection that existed when it was admitted.
+            val target = if (characteristic.uuid == FidoBle.CONTROL_POINT_UUID) client(device) else null
             val status = when {
                 preparedWrite || offset != 0 -> BluetoothGatt.GATT_INVALID_OFFSET
                 characteristic.uuid == FidoBle.CONTROL_POINT_UUID ->
-                    if (data.size > client(device).controlPointLength) {
+                    if (target == null) {
+                        BluetoothGatt.GATT_FAILURE
+                    } else if (data.size > target.controlPointLength) {
                         BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH
                     } else {
                         BluetoothGatt.GATT_SUCCESS
@@ -426,9 +455,7 @@ class FidoGattServer(
                 else -> BluetoothGatt.GATT_WRITE_NOT_PERMITTED
             }
             if (responseNeeded) respond(device, requestId, status, null)
-            if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == FidoBle.CONTROL_POINT_UUID) {
-                client(device).onWrite(data)
-            }
+            if (status == BluetoothGatt.GATT_SUCCESS) target?.onWrite(data)
         }
 
         override fun onDescriptorReadRequest(
@@ -458,8 +485,10 @@ class FidoGattServer(
             offset: Int,
             value: ByteArray?
         ) {
-            val ok = descriptor.uuid == FidoBle.CCCD_UUID && !preparedWrite && offset == 0 && value?.size == 2
-            if (ok) client(device).onSubscription((value!![0].toInt() and 0x01) != 0)
+            val wellFormed = descriptor.uuid == FidoBle.CCCD_UUID && !preparedWrite && offset == 0 && value?.size == 2
+            val c = if (wellFormed) client(device) else null
+            c?.onSubscription((value!![0].toInt() and 0x01) != 0)
+            val ok = c != null
             if (responseNeeded) {
                 respond(device, requestId, if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_WRITE_NOT_PERMITTED, null)
             }
