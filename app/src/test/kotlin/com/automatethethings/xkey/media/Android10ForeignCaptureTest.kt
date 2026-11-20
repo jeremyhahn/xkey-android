@@ -25,8 +25,10 @@ import android.content.Intent
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -41,6 +43,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
+import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 import org.robolectric.util.ReflectionHelpers
 import java.io.File
@@ -169,6 +172,33 @@ class Android10ForeignCaptureTest {
             XmpMetadataHelper.readSignatureFromUri(context.contentResolver, Uri.fromFile(provider.media), "image/png")
         )
         assertArrayEquals("the file is never written by path", original, capture.readBytes())
+    }
+
+    @Test
+    fun `a user action a publication ends with while the screen is stopped is asked by the recreated screen`() {
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data()))
+        val saved = Bundle()
+        val first: ActivityController<MediaWriteRequestActivity>
+        // The publication waits on the granted-write lock until the screen
+        // has saved its state and stopped.
+        synchronized(MediaPublisher.grantedWrites) {
+            first = Robolectric.buildActivity(MediaWriteRequestActivity::class.java).setup()
+            first.pause().saveInstanceState(saved).stop()
+        }
+        val publication = { ReflectionHelpers.getStaticField<Job?>(MediaWriteRequestActivity::class.java, "publication") }
+        assertTrue("the publication ends with the user action", awaitMain { publication()?.isCompleted == true })
+        assertEquals("nothing is asked while stopped", null, shadowOf(first.get()).lastIntentSenderRequest)
+        first.destroy()
+
+        // Recreated from the state saved before the publication ended.
+        val second = Robolectric.buildActivity(MediaWriteRequestActivity::class.java).setup(saved)
+        val shadow = shadowOf(second.get())
+        assertTrue("the recreated screen asks", awaitMain { shadow.lastIntentSenderRequest != null })
+        assertTrue("and waits on the answer", !second.get().isFinishing)
+
+        allowed = true
+        shadow.callOnActivityResult(shadow.lastIntentSenderRequest!!.requestCode, Activity.RESULT_OK, Intent())
+        assertTrue("published once allowed", awaitMain { MediaWriteAuthorizations.pending(context).isEmpty() })
     }
 
     /**
