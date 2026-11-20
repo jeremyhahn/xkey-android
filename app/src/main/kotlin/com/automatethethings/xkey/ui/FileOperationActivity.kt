@@ -1306,8 +1306,11 @@ class FileOperationActivity : AppCompatActivity() {
                 }
             } catch (_: MediaPublisher.OriginalUnavailableException) {
                 // Only the redacted view is readable: nothing is verified, and it is no mismatch.
+                // No signature was read, so no signer is counted; it is audited as not verified.
+                val result = listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable")
+                auditVerification(uri, 0, result)
                 withContext(Dispatchers.Main) {
-                    showVerificationResult(listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable"))
+                    showVerificationResult(result)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { showError(e) }
