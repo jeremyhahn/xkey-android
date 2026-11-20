@@ -120,6 +120,31 @@ class FileOperationVerifyAuditTest {
 
     private fun fileVerified(): List<Boolean> = synchronized(audited) { audited.toList() }
 
+    /** The share screen on the capture, with location access granted, after Verify is pressed. */
+    private fun verifyGranted(): FileOperationActivity {
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        val intent = Intent(Intent.ACTION_SEND).setType(provider.mimeType).putExtra(Intent.EXTRA_STREAM, capture)
+        val activity = Robolectric.buildActivity(FileOperationActivity::class.java, intent).setup().get()
+        shadowOf(Looper.getMainLooper()).idle()
+        field("selectedOperation").setInt(activity, 1) // OP_VERIFY
+        (field("processButton").get(activity) as MaterialButton).performClick()
+        shadowOf(Looper.getMainLooper()).idle()
+        return activity
+    }
+
+    /** Waits for the error result, then expects exactly one not-verified audit record. */
+    private fun assertErrorAuditedOnce(activity: FileOperationActivity) {
+        val resultCard = field("resultCard").get(activity) as View
+        idleUntil { resultCard.visibility == View.VISIBLE }
+        val deadline = System.currentTimeMillis() + 2_000
+        while (fileVerified().isEmpty() && System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        assertEquals("one verification is audited", 1, fileVerified().size)
+        assertFalse("a verify that failed with an error verified nothing", fileVerified().single())
+    }
+
     private fun assertShownUnavailable(activity: FileOperationActivity) {
         val resultCard = field("resultCard").get(activity) as View
         idleUntil { resultCard.visibility == View.VISIBLE }
@@ -187,5 +212,42 @@ class FileOperationVerifyAuditTest {
         idleUntil { fileVerified().isNotEmpty() }
         assertEquals("one verification is audited", 1, fileVerified().size)
         assertFalse("nothing was hashed or checked, so nothing is verified", fileVerified().single())
+    }
+
+    @Test
+    fun `an embedded verify that fails with an error is audited as not verified`() {
+        // A PNG whose bytes cannot be opened: reading its in-band signature throws.
+        val missing = File(folder.root, "gone.png")
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            media = missing
+            mimeType = "image/png"
+        }
+
+        assertErrorAuditedOnce(verifyGranted())
+    }
+
+    @Test
+    fun `a sidecar that cannot be read is audited as not verified`() {
+        val unsigned = File(folder.root, "capture.gif").apply { writeBytes(XmpFixtures.png()) }
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            media = unsigned
+            mimeType = "image/gif"
+        }
+
+        val activity = verifyGranted()
+
+        var picker: ShadowActivity.IntentForResult? = null
+        idleUntil {
+            picker = generateSequence { shadowOf(activity).nextStartedActivityForResult }
+                .firstOrNull { it.intent.action == Intent.ACTION_OPEN_DOCUMENT }
+            picker != null
+        }
+        // The picked sidecar is gone by the time it is read.
+        val sidecar = File(folder.root, "missing.xkeysig")
+        activity.activityResultRegistry.dispatchResult(
+            picker!!.requestCode, Activity.RESULT_OK, Intent().setData(Uri.fromFile(sidecar))
+        )
+
+        assertErrorAuditedOnce(activity)
     }
 }
