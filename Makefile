@@ -140,7 +140,7 @@ closing-links-test: ## Test revert-red-main.yml's closing-link parse against fix
 revert-red-main-test: ## Test that revert-red-main.yml resumes a partial run, against a stubbed forge API and a local remote (bash + git + jq)
 	./scripts/revert-red-main-test.sh
 
-code-review-test: ## Test code-review.yml's twin filter, owner-resume freshness and reconcile, verdict marker and paginated history reads, read out of the workflow and run against stubbed forge reads (bash + jq, offline)
+code-review-test: ## Test code-review.yml's twin filter, owner-resume freshness and reconcile, verdict marker, paginated history reads and the review lock's budget-based waits, read out of the workflow and run against stubbed forge reads, clock and flock (bash + jq, offline)
 	./scripts/code-review-test.sh
 
 reaper-test: ## Test reap-stale-ci-stacks.sh's image and lease rules against a stubbed docker (bash)
