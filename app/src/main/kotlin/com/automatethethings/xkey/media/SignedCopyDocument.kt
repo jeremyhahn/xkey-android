@@ -235,8 +235,17 @@ object MediaSaveRuns {
      * holds (a copy whose picker was open when the process died): they are
      * adopted by this process, so neither this sweep nor a later one deletes
      * them; their screen releases them when its exchange ends.
+     *
+     * A granted write's files no committed record names go too
+     * ([MediaPublisher.GrantedWriteJournal.unrecorded]): a process killed
+     * inside its commit left them, and no recovery reads them. An active
+     * journal's files, and a backup set aside on purpose, stay. This is the
+     * one reclaim of every prefix the recovery directory holds; it runs
+     * under the granted-write lock, so no commit is part-way, at every start
+     * ([MediaPublisher.recoverInterruptedWrites]) and when a media screen opens.
      */
-    fun sweep(directory: File, keep: Collection<File> = emptyList()) {
+    fun sweep(directory: File, keep: Collection<File> = emptyList()): Unit = synchronized(MediaPublisher.grantedWrites) {
+        MediaPublisher.GrantedWriteJournal.unrecorded(directory).forEach { it.delete() }
         keep.forEach { adopted.add(it.absolutePath) }
         val staleBefore = System.currentTimeMillis() - STAGED_RETENTION_MS
         val recovering = MediaPublisher.GrantedWriteJournal.pendingFiles(directory)

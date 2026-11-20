@@ -458,6 +458,8 @@ object MediaPublisher {
      * that capture is written ([recoverInterruptedWrite]) raises the question.
      */
     fun recoverInterruptedWrites(context: Context) = synchronized(grantedWrites) {
+        // What an earlier process left without a record, or as a dead save's working file.
+        MediaSaveRuns.sweep(recoveryDirectory(context))
         GrantedWriteJournal.all(recoveryDirectory(context)).forEach {
             try {
                 recover(context, it)
@@ -622,14 +624,28 @@ object MediaPublisher {
         fun target(): Uri = Uri.parse(readRecord(record))
 
         /**
-         * [whole] (synced) becomes the backup, [staged] is linked (or copied
-         * and synced) as [written], then the record is written and synced.
+         * The record is written and synced first, then [staged] is linked (or
+         * copied and synced) as [written], then [whole] (synced) becomes the
+         * backup. No file of the write exists before its record, so a process
+         * death at any step leaves either nothing of it or a record a recovery
+         * finds ([recover]: a record whose backup is not there yet is
+         * cleared). Only the record's own temporary file precedes it, and
+         * [MediaSaveRuns.sweep] reclaims that ([unrecorded]).
          */
         fun commit(whole: File, staged: File) {
             // A new write starts in the write phase: no restore of it has begun.
             restoring.delete()
-            if (!whole.renameTo(backup)) throw IOException("cannot keep the capture's backup")
+            backup.delete()
             written.delete()
+            val temp = File(directory, "$PREFIX$key$TEMP")
+            FileOutputStream(temp).use { out ->
+                out.write(uri.toString().toByteArray())
+                out.fd.sync()
+            }
+            if (!temp.renameTo(record)) {
+                temp.delete()
+                throw IOException("cannot record the granted write")
+            }
             try {
                 java.nio.file.Files.createLink(written.toPath(), staged.toPath())
             } catch (_: Exception) {
@@ -638,12 +654,7 @@ object MediaPublisher {
                     out.fd.sync()
                 }
             }
-            val temp = File(directory, "$PREFIX$key.tmp")
-            FileOutputStream(temp).use { out ->
-                out.write(uri.toString().toByteArray())
-                out.fd.sync()
-            }
-            if (!temp.renameTo(record)) throw IOException("cannot record the granted write")
+            if (!whole.renameTo(backup)) throw IOException("cannot keep the capture's backup")
         }
 
         /**
@@ -669,6 +680,27 @@ object MediaPublisher {
             /** A backup set aside for a capture edited after an interrupted write. */
             const val KEPT_PREFIX = "kept-"
             private const val RECORD = ".uri"
+            private const val TEMP = ".tmp"
+
+            /**
+             * Every file under [PREFIX] in [directory] no record names: what a
+             * process killed before its record was committed left (an earlier
+             * build made the backup and the written link first), the record's
+             * own temporary file, or a file a cleared record left behind. A
+             * record that exists keeps its files even when it cannot be read;
+             * a backup set aside ([KEPT_PREFIX]) is never one. Read under the
+             * granted-write lock, so no commit is part-way.
+             */
+            fun unrecorded(directory: File): List<File> {
+                val files = directory.listFiles { f -> f.name.startsWith(PREFIX) }.orEmpty()
+                val recorded = files.filter { it.name.endsWith(RECORD) }
+                    .map { it.name.removePrefix(PREFIX).removeSuffix(RECORD) }
+                    .toSet()
+                return files.filter { f ->
+                    val key = f.name.removePrefix(PREFIX).substringBefore('.')
+                    f.name.endsWith(TEMP) || (key !in recorded)
+                }
+            }
 
             /** The one read of a record's text; tests make it fail. */
             @Volatile
