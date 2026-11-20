@@ -29,6 +29,7 @@ import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.testing.ReleaseMocks
+import io.mockk.clearAllMocks
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -355,6 +356,10 @@ class RemoteShareClientTest {
             val request = JSONObject().put("jsonrpc", "2.0").put("id", i).put("method", MethodNames.LOCAL_DELETE_KEY)
                 .put("params", JSONObject().put("keyId", "absent-$i"))
             handler.handleRawRequest(request.toString().toByteArray())
+            // Every call above is recorded with a stack trace; 10 000 rounds of
+            // them fill the test JVM's heap. Nothing here is verified, so drop
+            // the recordings as they come and keep the stubs.
+            if (i % 500 == 499) clearAllMocks(answers = false, childMocks = false)
         }
 
         val after = SharePermissionLedger.retainedKeyCount()
