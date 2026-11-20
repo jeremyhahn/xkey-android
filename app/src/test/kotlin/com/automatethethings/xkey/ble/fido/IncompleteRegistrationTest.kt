@@ -19,6 +19,7 @@ import android.app.Application
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.automatethethings.xkey.credential.PasskeySignCounter
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.settings.BiometricSettingsData
@@ -88,7 +89,8 @@ class IncompleteRegistrationTest {
                 FidoKeyRows.passkey(
                     keyId = oldId, label = "Example", publicKeyCose = byteArrayOf(1), rpId = RP,
                     rpName = "Example", userId = b64(USER), userName = "alice", userDisplayName = "Alice",
-                    discoverable = true, createdAt = 1, policy = SharingPolicyType.ALL_PEERS
+                    discoverable = true, createdAt = 1, policy = SharingPolicyType.ALL_PEERS,
+                    securityLevel = KeySecurityLevel.TEE
                 ),
                 metadata(oldId)
             )

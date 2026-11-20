@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.ble.fido
 
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 
@@ -34,6 +35,9 @@ internal object FidoKeyRows {
     /**
      * The key row of a passkey a BLE client registers: an ES256 Keystore key
      * that is not auth-bound and not exportable, shared under [policy].
+     * [securityLevel] is where the generated key really lives, read from its
+     * KeyInfo ([com.automatethethings.xkey.crypto.KeystoreManager.credentialSecurityLevel]):
+     * StrongBox is preferred, and a phone without it generates in the TEE.
      */
     fun passkey(
         keyId: String,
@@ -46,7 +50,8 @@ internal object FidoKeyRows {
         userDisplayName: String?,
         discoverable: Boolean,
         createdAt: Long,
-        policy: SharingPolicyType
+        policy: SharingPolicyType,
+        securityLevel: KeySecurityLevel
     ): KeyEntity = KeyEntity(
         keyId = keyId,
         keyType = "fido2",
@@ -54,6 +59,7 @@ internal object FidoKeyRows {
         label = label,
         publicKeyCose = publicKeyCose,
         keySizeBits = 256,
+        strongBoxBacked = securityLevel == KeySecurityLevel.STRONGBOX,
         biometricRequired = false,
         authDurationSeconds = -1,
         exportable = false,

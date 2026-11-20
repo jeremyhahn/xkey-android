@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.ble.fido
 
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -44,7 +45,8 @@ class FidoKeyRowsTest {
             val row = FidoKeyRows.passkey(
                 keyId = "k", label = "Example", publicKeyCose = byteArrayOf(1), rpId = "example.com",
                 rpName = "Example", userId = "dQ", userName = "alice", userDisplayName = "Alice",
-                discoverable = true, createdAt = 0L, policy = policy
+                discoverable = true, createdAt = 0L, policy = policy,
+                securityLevel = KeySecurityLevel.TEE
             )
             assertEquals(policy, row.sharingPolicy)
             assertEquals(policy.name, policy != SharingPolicyType.PRIVATE, row.shareable)

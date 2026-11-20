@@ -227,6 +227,16 @@ class AndroidFidoCredentialBackend(
             forget(keyId)
             throw e
         }
+        // StrongBox is preferred, with the TEE as the fallback; the row
+        // records the level the key was really made at, read from its
+        // KeyInfo. A level that cannot be read fails the registration and
+        // drops the new key: it is never guessed.
+        val securityLevel = try {
+            keystoreManager.credentialSecurityLevel(keyId) ?: throw KeyNotFoundException(keyId)
+        } catch (e: Throwable) {
+            withContext(NonCancellable) { dropNewKey(keyId) }
+            throw e
+        }
         val userId = encodeId(request.userHandle)
         val rpName = request.rpName ?: request.rpId
         // The passkeys this one replaces, read and read again before anything
@@ -285,7 +295,8 @@ class AndroidFidoCredentialBackend(
                         userDisplayName = request.userDisplayName,
                         discoverable = request.discoverable,
                         createdAt = System.currentTimeMillis(),
-                        policy = SharingPolicyType.ALL_PEERS
+                        policy = SharingPolicyType.ALL_PEERS,
+                        securityLevel = securityLevel
                     ),
                     CredentialMetadataEntity(
                         credentialId = keyId,
