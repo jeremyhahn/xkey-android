@@ -1603,7 +1603,9 @@ class KeystoreManager(private val context: Context) {
      * With a credential and a general key sharing the id, the type does
      * not (`local.generateKey` makes fido2 rows under the general alias):
      * the row's public key must be exactly one of the two keys', or
-     * [KeyOwnershipUnknownException] refuses the delete.
+     * [KeyOwnershipUnknownException] refuses the delete. A row with no public
+     * key while the software store holds the id is the software key's: it
+     * resolves to the general key (a symmetric key has no public key to match).
      *
      * The key is read from the material ([ownersOf]), never from the type
      * alone (#270 verify): with one key under the id, the row is that key's
@@ -1639,6 +1641,13 @@ class KeystoreManager(private val context: Context) {
             // the row's: only a public key that differs names another key.
             val own = row.isEmpty || rowPublicKeyMatch(only) != false
             return if (own) only else userKeyKindOf(keyType)
+        }
+        // A row with no public key beside a software store record is that
+        // software (symmetric) key's: a credential's row always records its
+        // public key, so the general namespace owns it, as [rowOwnerKind]
+        // reads it (#270 review of 33427e39).
+        if (row.isEmpty && com.automatethethings.xkey.storage.SOFTWARE_ENTRY in generation) {
+            return UserKeyKind.GENERAL
         }
         val owners = if (row.isEmpty) emptyList() else UserKeyKind.entries.filter {
             rowPublicKeyMatch(it) == true
