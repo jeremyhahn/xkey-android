@@ -471,6 +471,44 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
+    fun `a staging failure before the granted write keeps the request queued, and a later retry signs the capture`() {
+        val data = data()
+        queue(data)
+        granted = true
+        // Staging the capture fails as a full disk does: an ordinary IOException before writeGranted.
+        var full = true
+        provider.onOpen = { mode -> if (full && 'w' !in mode) throw IOException("No space left on device") }
+
+        val signed = mutableListOf<PendingMediaWrite>()
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertTrue("nothing is signed", signed.isEmpty())
+        assertArrayEquals("nothing is written over the capture", original, media.readBytes())
+        assertEquals(
+            "the request stays queued, so the capture is retried once space is free",
+            listOf(uri.toString()), MediaWriteAuthorizations.pending(context).map { it.uri }
+        )
+
+        full = false
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertEquals("the retry signs it", listOf(uri.toString()), signed.map { it.uri })
+        assertEquals(data.toJsonString(), embedded(media.readBytes()))
+        assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
+    }
+
+    @Test
+    fun `a capture that is gone leaves the queue`() {
+        queue(data())
+        granted = true
+        provider.onOpen = { mode -> if ('w' !in mode) throw java.io.FileNotFoundException("deleted") }
+
+        MediaWriteAuthorizations.publishGranted(context) { }
+
+        assertTrue("a capture that no longer exists is a permanent refusal", MediaWriteAuthorizations.pending(context).isEmpty())
+    }
+
+    @Test
     fun `signMedia and a direct granted write both refuse while a recovery is pending`() {
         val data = data()
         killMidOverwrite(data)
