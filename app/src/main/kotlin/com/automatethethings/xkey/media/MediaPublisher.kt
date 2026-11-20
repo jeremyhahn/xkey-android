@@ -25,6 +25,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.provider.MediaStore
+import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -315,7 +316,8 @@ object MediaPublisher {
      * byte is in. A write that fails or is interrupted part-way puts the
      * backup back ([restore]) and checks it byte for byte; one the process
      * dies in, or whose restore fails, keeps its record, and the next start
-     * or retry puts the backup back ([recoverInterruptedWrites]).
+     * or retry puts the backup back ([recoverInterruptedWrites]), unless the
+     * capture was edited since: then both versions are kept ([recover]).
      * [MediaPublishException.original] names the backup while it is needed.
      * [staged] is deleted only once the write and the close both succeeded.
      */
@@ -341,7 +343,7 @@ object MediaPublisher {
             // edit saved since, metadata alone included, is kept, not replaced
             // by the older snapshot.
             source.requireUnchanged(partial)
-            journal.commit(partial)
+            journal.commit(partial, staged)
         } catch (e: XmpMetadataHelper.SourceChangedException) {
             partial.delete()
             throw e
@@ -408,6 +410,14 @@ object MediaPublisher {
      * Put back what [journal] records; true once nothing is left to put back.
      * A record that cannot be read leaves the recovery pending (false), its
      * record and backup kept: only a restore that succeeded clears them.
+     *
+     * A capture edited since the write (in a gallery, after the process
+     * died) is never restored over: its content is not one the interrupted
+     * write can leave ([interruptedWriteExplains]). Its edit stays, the
+     * backup is set aside ([GrantedWriteJournal.keepBackup]) so both
+     * versions remain, and the record is cleared; signing it then meets the
+     * changed-source check and is refused. A record from before [written]
+     * was journalled cannot tell the two apart and is restored as before.
      */
     private fun recover(context: Context, journal: GrantedWriteJournal): Boolean {
         val target = try {
@@ -419,6 +429,22 @@ object MediaPublisher {
             journal.clear()
             return true
         }
+        if (journal.written.isFile) {
+            val explained = try {
+                openOriginal(context, target).buffered().use { content ->
+                    interruptedWriteExplains(content, journal.written, journal.backup)
+                }
+            } catch (_: Exception) {
+                // Not readable as it is now: nothing shows it unedited, so nothing is written.
+                return false
+            }
+            if (!explained) {
+                val kept = journal.keepBackup() ?: return false
+                Log.w(TAG, "$target was edited after an interrupted write; its earlier version is kept in ${kept.name}")
+                journal.clear()
+                return true
+            }
+        }
         if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) return false
         if (!restore(context, target, journal.backup)) return false
         journal.clear()
@@ -426,16 +452,44 @@ object MediaPublisher {
     }
 
     /**
+     * Whether [content] is what an in-place write of [written] over [backup]
+     * can leave when it stops at any point ([overwrite]): [written]'s bytes up
+     * to where it stopped, then [backup]'s from there, ending where [backup]
+     * ends or, past it, where the write stopped. [backup] and the whole of
+     * [written] are such states too. Anything else was saved since.
+     */
+    internal fun interruptedWriteExplains(content: java.io.InputStream, written: File, backup: File): Boolean {
+        written.inputStream().buffered().use { w ->
+            backup.inputStream().buffered().use { b ->
+                var diverged = false
+                var c: Int
+                do {
+                    c = content.read()
+                    val nw = w.read()
+                    val nb = b.read()
+                    if (!diverged && c != nw) diverged = true
+                    // Past where the write stopped, the capture holds the backup's bytes.
+                    if (diverged && c != nb) return false
+                } while (c >= 0)
+                return true
+            }
+        }
+    }
+
+    /**
      * The durable record of one granted write: the capture's prior bytes
-     * ([backup]) and, written and synced only once they are whole, a record
+     * ([backup]), the bytes written over them ([written], a link to the
+     * staged file) and, written and synced only once both are whole, a record
      * naming the capture's URI. A record present means the capture may be
-     * part-written and [backup] is what it must hold.
+     * part-written and [backup] is what it must hold; [written] tells a
+     * part-written capture from one edited since ([interruptedWriteExplains]).
      */
     class GrantedWriteJournal(private val directory: File, private val uri: Uri) {
         private val key = java.security.MessageDigest.getInstance("SHA-256")
             .digest(uri.toString().toByteArray()).joinToString("") { "%02x".format(it) }
 
         val backup = File(directory, "$PREFIX$key.bak")
+        val written = File(directory, "$PREFIX$key.new")
         private val record = File(directory, "$PREFIX$key$RECORD")
 
         fun recorded() = record.isFile
@@ -446,9 +500,21 @@ object MediaPublisher {
          */
         fun target(): Uri = Uri.parse(readRecord(record))
 
-        /** [whole] (synced) becomes the backup, then the record is written and synced. */
-        fun commit(whole: File) {
+        /**
+         * [whole] (synced) becomes the backup, [staged] is linked (or copied
+         * and synced) as [written], then the record is written and synced.
+         */
+        fun commit(whole: File, staged: File) {
             if (!whole.renameTo(backup)) throw IOException("cannot keep the capture's backup")
+            written.delete()
+            try {
+                java.nio.file.Files.createLink(written.toPath(), staged.toPath())
+            } catch (_: Exception) {
+                FileOutputStream(written).use { out ->
+                    staged.inputStream().use { it.copyTo(out) }
+                    out.fd.sync()
+                }
+            }
             val temp = File(directory, "$PREFIX$key.tmp")
             FileOutputStream(temp).use { out ->
                 out.write(uri.toString().toByteArray())
@@ -457,14 +523,27 @@ object MediaPublisher {
             if (!temp.renameTo(record)) throw IOException("cannot record the granted write")
         }
 
+        /**
+         * Set the backup aside under a name no recovery reads, so a capture
+         * edited since the write keeps its edit and the version before the
+         * write stays too. Null when it cannot be moved.
+         */
+        fun keepBackup(): File? {
+            val kept = File(directory, "$KEPT_PREFIX$key-${System.currentTimeMillis()}.bak")
+            return if (backup.renameTo(kept)) kept else null
+        }
+
         /** The record goes first: a backup with no record is only a leftover. */
         fun clear() {
             record.delete()
             backup.delete()
+            written.delete()
         }
 
         companion object {
             const val PREFIX = "granted-"
+            /** A backup set aside for a capture edited after an interrupted write. */
+            const val KEPT_PREFIX = "kept-"
             private const val RECORD = ".uri"
 
             /** The one read of a record's text; tests make it fail. */
@@ -528,6 +607,7 @@ object MediaPublisher {
     }
 
     private const val RESTORE_ATTEMPTS = 3
+    private const val TAG = "MediaPublisher"
 
     /** Runs at each named step of an in-place write; tests interrupt a write there. */
     @Volatile

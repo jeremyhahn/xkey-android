@@ -60,10 +60,17 @@ object MediaWriteAuthorizations {
     @Volatile
     internal var readStore: (File) -> String = { it.readText() }
 
-    /** Every capture waiting for write access, oldest first. */
+    /**
+     * Every capture waiting for write access, oldest first. A queue that
+     * cannot be read throws [java.io.IOException]; it is never taken as empty.
+     */
     fun pending(context: Context): List<PendingMediaWrite> = synchronized(lock) { read(context) }
 
-    /** Queue [write], replacing an earlier one for the same media. */
+    /**
+     * Queue [write], replacing an earlier one for the same media. When the
+     * queue cannot be read this throws [java.io.IOException] and changes
+     * nothing, so the caller reports [write] as not queued.
+     */
     fun add(context: Context, write: PendingMediaWrite): Unit = synchronized(lock) {
         save(context, read(context).filterNot { it.uri == write.uri } + write)
     }
@@ -131,7 +138,13 @@ object MediaWriteAuthorizations {
 
     /** Tell the user captures wait for write access; tapping it opens the request. */
     fun notifyPending(context: Context) {
-        val count = pending(context).size
+        val count = try {
+            pending(context).size
+        } catch (e: java.io.IOException) {
+            // The queue is kept; the notification stays as it was until it reads again.
+            Log.w(TAG, "Cannot read the write-request queue", e)
+            return
+        }
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         if (count == 0) {
             manager.cancel(NOTIFICATION_ID)
@@ -158,10 +171,17 @@ object MediaWriteAuthorizations {
         }
     }
 
+    /** Drop [uri] from the queue; a queue that cannot be read is left whole and this throws. */
     private fun remove(context: Context, uri: String): Unit = synchronized(lock) {
         save(context, read(context).filterNot { it.uri == uri })
     }
 
+    /**
+     * The queue as stored, or empty only when there is no store. A store
+     * that cannot be read or parsed throws [java.io.IOException] and is left
+     * as it is: treating it as empty would let [add] or [remove] replace it
+     * and lose every capture still waiting for write access.
+     */
     private fun read(context: Context): List<PendingMediaWrite> {
         val file = store(context)
         if (!file.exists()) return emptyList()
@@ -177,9 +197,10 @@ object MediaWriteAuthorizations {
                     data = ContentAuthenticityData.fromJsonString(o.getString("data"))
                 )
             }
+        } catch (e: java.io.IOException) {
+            throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Dropping an unreadable write-request queue", e)
-            emptyList()
+            throw java.io.IOException("the write-request queue cannot be parsed", e)
         }
     }
 
