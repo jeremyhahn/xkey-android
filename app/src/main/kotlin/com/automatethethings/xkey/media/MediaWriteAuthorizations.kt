@@ -28,18 +28,25 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-/** A signed capture waiting for the user's write access: the signature to embed and who signed it. */
+/**
+ * A capture waiting for the user's access: the signature to embed and who
+ * signs it. [data] is null while the capture is not hashed or signed yet,
+ * because only MediaStore's redacted view was readable (no location access):
+ * it is hashed from its original and signed by [MediaWriteAuthorizations.publishGranted].
+ */
 data class PendingMediaWrite(
     val uri: String,
     val filePath: String?,
     val keyId: String,
     val keyLabel: String,
-    val data: ContentAuthenticityData
+    val data: ContentAuthenticityData?
 )
 
 /**
  * The captures the auto-signer signed but may not write yet: another app
- * owns them, so the user grants write access first. They are kept under
+ * owns them, so the user grants write access first. A capture whose original
+ * was not readable (no location access) waits here unsigned, and is hashed
+ * from its original and signed once it is. They are kept under
  * the app's files, so a process death loses none; a notification, or the
  * media-signing settings entry when notifications are off ([settingsEntry]),
  * opens [MediaWriteRequestActivity], which asks for every one in one write request
@@ -93,17 +100,32 @@ object MediaWriteAuthorizations {
      * Sign every queued capture the user granted write access to, calling
      * [onSigned] for each; one still without a grant stays queued, and so
      * does one whose write failed ([MediaPublishException]): its media is
-     * whole again, so the next request retries it. Any other failure to read,
-     * stage or embed keeps it queued too; only a permanent refusal
-     * ([permanentRefusal]: it changed since it was signed, is gone, or cannot
-     * be hashed) drops it, as its signature matches nothing.
+     * whole again, so the next request retries it. A capture queued unsigned
+     * is hashed from its original and signed first ([signedFromOriginal]);
+     * while only the redacted view is readable (no location access) it stays
+     * queued, unsigned. Any other failure to read, stage or embed keeps it
+     * queued too; only a permanent refusal ([permanentRefusal]: it changed
+     * since it was signed, is gone, cannot be hashed, or its key is gone)
+     * drops it, as its signature matches nothing. A signature that differs
+     * from the capture only because it was made over the redacted view
+     * ([signedOverRedactedView]) is no change: the capture is signed again
+     * from its original.
      */
     fun publishGranted(context: Context, onSigned: (PendingMediaWrite) -> Unit) {
         // A retry: captures an earlier write was interrupted in are whole first.
         MediaPublisher.recoverInterruptedWrites(context)
-        for (write in pending(context)) {
+        for (queued in pending(context)) {
+            var write = queued
             val outcome = try {
-                XmpMetadataHelper.signMedia(context, Uri.parse(write.uri), write.filePath, write.data)
+                write = signedFromOriginal(context, write)
+                try {
+                    XmpMetadataHelper.signMedia(context, Uri.parse(write.uri), write.filePath, requireNotNull(write.data))
+                } catch (e: XmpMetadataHelper.SourceChangedException) {
+                    if (!signedOverRedactedView(context, write)) throw e
+                    Log.w(TAG, "${write.uri} was signed over its redacted view; it is signed again from its original")
+                    write = signedFromOriginal(context, write.copy(data = null))
+                    XmpMetadataHelper.signMedia(context, Uri.parse(write.uri), write.filePath, requireNotNull(write.data))
+                }
             } catch (e: MediaPublishException) {
                 Log.w(TAG, "Writing ${write.uri} failed; it stays queued", e)
                 // The capture is whole and the retry stages afresh; a copy that could not be put back is kept.
@@ -117,9 +139,9 @@ object MediaWriteAuthorizations {
             } catch (e: Exception) {
                 if (!permanentRefusal(e)) {
                     // A read, staging or embedding failure (a full disk, a
-                    // provider that is busy): nothing was signed, and the
-                    // auto-signer will not offer this capture again, so the
-                    // queue is its only retry.
+                    // provider that is busy), or an original not readable
+                    // yet: nothing was written, and the auto-signer will not
+                    // offer this capture again, so the queue is its only retry.
                     Log.w(TAG, "Signing ${write.uri} failed; it stays queued", e)
                     continue
                 }
@@ -130,6 +152,39 @@ object MediaWriteAuthorizations {
             remove(context, write.uri)
             if (outcome == XmpMetadataHelper.MediaSignResult.Signed) onSigned(write)
         }
+    }
+
+    /**
+     * [write] with its signature. One queued unsigned is hashed from its
+     * original ([AutoSignHash.contentHashOriginal]) and signed
+     * ([AutoSigner.sign]), and the queue keeps it signed so a later retry
+     * signs it no second time. While only the redacted view is readable this
+     * throws [MediaPublisher.OriginalUnavailableException] and hashes nothing.
+     */
+    private fun signedFromOriginal(context: Context, write: PendingMediaWrite): PendingMediaWrite {
+        if (write.data != null) return write
+        val contentHash = AutoSignHash.contentHashOriginal(context, Uri.parse(write.uri))
+        val signed = write.copy(data = AutoSigner.sign(context, write.keyId, contentHash))
+        add(context, signed)
+        return signed
+    }
+
+    /**
+     * Whether [write]'s signature covers MediaStore's redacted view of its
+     * capture (location left out) rather than the capture as it is: its hash
+     * is the redacted view's. That is no edit of the capture, so it is never
+     * a reason to drop it.
+     */
+    private fun signedOverRedactedView(context: Context, write: PendingMediaWrite): Boolean {
+        val uri = Uri.parse(write.uri)
+        val original = MediaPublisher.originalUri(context, uri) ?: return false
+        if (original == uri) return false
+        val redacted = try {
+            AutoSignHash.contentHashUri(context.contentResolver, uri)
+        } catch (e: Exception) {
+            return false
+        }
+        return write.data?.contentHash.equals(redacted, ignoreCase = true)
     }
 
     /**
@@ -149,13 +204,16 @@ object MediaWriteAuthorizations {
 
     /**
      * A failure no retry can mend: the capture changed since it was signed
-     * (its signature matches nothing), is gone, or cannot be hashed. Every
-     * other failure is retried from the queue.
+     * (its signature matches nothing), is gone, cannot be hashed, or the key
+     * it is to be signed with is gone. Every other failure, an original not
+     * readable yet included, is retried from the queue.
      */
     private fun permanentRefusal(e: Exception): Boolean =
         e is XmpMetadataHelper.SourceChangedException ||
             e is java.io.FileNotFoundException ||
-            e is MediaTooFragmentedException
+            e is MediaTooFragmentedException ||
+            e is AutoSignHash.TooLargeException ||
+            e is com.automatethethings.xkey.crypto.KeyNotFoundException
 
     /** The settings entry for captures waiting for write access: how many wait, and the [intent] that asks for them. */
     class SettingsEntry(val count: Int, val intent: Intent)
@@ -214,7 +272,7 @@ object MediaWriteAuthorizations {
         val open = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("Allow xKey to sign new media")
-            .setContentText("$count captured by another app wait for write access")
+            .setContentText("$count new captures wait for your access to be signed")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(open)
             .setAutoCancel(true)
@@ -249,7 +307,7 @@ object MediaWriteAuthorizations {
                     filePath = if (o.isNull("filePath")) null else o.getString("filePath"),
                     keyId = o.getString("keyId"),
                     keyLabel = o.getString("keyLabel"),
-                    data = ContentAuthenticityData.fromJsonString(o.getString("data"))
+                    data = if (o.isNull("data")) null else ContentAuthenticityData.fromJsonString(o.getString("data"))
                 )
             }
         } catch (e: java.io.IOException) {
@@ -273,7 +331,7 @@ object MediaWriteAuthorizations {
                     .put("filePath", w.filePath ?: JSONObject.NULL)
                     .put("keyId", w.keyId)
                     .put("keyLabel", w.keyLabel)
-                    .put("data", w.data.toJsonString())
+                    .put("data", w.data?.toJsonString() ?: JSONObject.NULL)
             )
         }
         val temp = File(file.path + ".tmp")

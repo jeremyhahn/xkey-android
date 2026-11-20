@@ -21,6 +21,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ContentResolver
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.database.ContentObserver
@@ -35,9 +36,11 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.KeyNotFoundException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.settings.MediaSigningSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.entity.KeyEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,6 +48,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.time.Instant
 
 /**
@@ -111,6 +115,26 @@ internal object AutoSignHash {
         embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
     ): String = contentHashOf(contentResolver.getType(uri), limit, embedLimit) {
         contentResolver.openInputStream(uri) ?: throw IllegalArgumentException("Cannot open URI: $uri")
+    }
+
+    /**
+     * The one hash of a capture xKey signs: [contentHashUri] over its
+     * original bytes, location included ([MediaPublisher.openOriginal]),
+     * never MediaStore's redacted view, whose hash the original read when it
+     * is written would not match. Without location access it throws
+     * [MediaPublisher.OriginalUnavailableException] and hashes nothing: the
+     * capture waits until the original is readable.
+     */
+    fun contentHashOriginal(
+        context: Context,
+        uri: Uri,
+        limit: Int = MAX_CANONICAL_JPEG_BYTES,
+        embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
+    ): String {
+        if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
+        return contentHashOf(context.contentResolver.getType(uri), limit, embedLimit) {
+            MediaPublisher.openOriginal(context, uri)
+        }
     }
 
     /**
@@ -186,6 +210,87 @@ internal object AutoSignHash {
     }
 }
 
+/**
+ * The automatic signer's handling of one capture, kept apart from the
+ * service so it can be tested on the JVM: hash its original
+ * ([AutoSignHash.contentHashOriginal]), sign that hash ([sign]) and write the
+ * signature ([XmpMetadataHelper.signMedia]). A capture whose original is not
+ * readable yet (no location access) or that needs the user's write access is
+ * queued ([MediaWriteAuthorizations]); the queue is its only retry.
+ */
+internal object AutoSigner {
+
+    enum class Outcome { Signed, AwaitingAccess }
+
+    /**
+     * Signs a content hash with the key [keyId]. The one signing step for
+     * captures, at capture time and for a queued capture hashed later; tests
+     * replace it.
+     */
+    @Volatile
+    var sign: (Context, String, String) -> ContentAuthenticityData = { context, keyId, contentHash ->
+        // Off the main thread: the service's IO scope, or the request screen's publication.
+        runBlocking {
+            val key = XKeyDatabase.getInstance(context).keyDao().getByKeyId(keyId) ?: throw KeyNotFoundException(keyId)
+            signHash(KeystoreManager(context), key, contentHash)
+        }
+    }
+
+    /** [contentHash] signed with [key]: the signature data embedded in the capture. */
+    suspend fun signHash(keystoreManager: KeystoreManager, key: KeyEntity, contentHash: String): ContentAuthenticityData {
+        val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        // The key fingerprinted and the key signed with are one lookup: the
+        // public key under the alias the signature is made with.
+        val alias = KeystoreManager.generalKeyAlias(key.keyId)
+        val pubKeyDer = keystoreManager.publicKeyDERAt(alias) ?: throw KeyNotFoundException(key.keyId)
+        val signature = keystoreManager.signApproved(
+            alias,
+            pubKeyDer,
+            hashBytes,
+            KeystoreManager.jcaSignatureAlgorithm(key.algorithm)
+        )
+        val entry = SignatureEntry(
+            keyFingerprint = MediaHasher.hashBytes(pubKeyDer),
+            signerName = key.label,
+            algorithm = key.algorithm,
+            value = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP),
+            timestamp = Instant.now().toString(),
+            role = SignerRole.CREATOR
+        )
+        return ContentAuthenticityData(contentHash = contentHash, signatures = listOf(entry))
+    }
+
+    /**
+     * Sign the capture at [uri] (its file [filePath] when MediaStore names
+     * one) with [keyId]. Its original is hashed, never the redacted view:
+     * without location access nothing is hashed or signed, and it is queued
+     * unsigned until the user grants that access. A capture that needs write
+     * access is queued with its signature. A JPEG too large to canonicalise
+     * throws [AutoSignHash.TooLargeException].
+     */
+    fun signCapture(context: Context, uri: Uri, filePath: String?, keyId: String, keyLabel: String): Outcome {
+        val contentHash = try {
+            AutoSignHash.contentHashOriginal(context, uri)
+        } catch (e: MediaPublisher.OriginalUnavailableException) {
+            MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), filePath, keyId, keyLabel, null))
+            MediaWriteAuthorizations.notifyPending(context)
+            return Outcome.AwaitingAccess
+        }
+        val data = sign(context, keyId, contentHash)
+        // The signature lives in the media's own metadata. A capture another
+        // app owns (the camera's) is written only through its content URI
+        // once the user grants access: until then it is queued and the user
+        // is asked, never renamed over by path.
+        val signed = XmpMetadataHelper.signMedia(context, uri, filePath, data)
+        if (signed == XmpMetadataHelper.MediaSignResult.NeedsWriteAuthorization) {
+            MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), filePath, keyId, keyLabel, data))
+            MediaWriteAuthorizations.notifyPending(context)
+            return Outcome.AwaitingAccess
+        }
+        return Outcome.Signed
+    }
+}
+
 class MediaSigningService : Service() {
 
     companion object {
@@ -196,7 +301,6 @@ class MediaSigningService : Service() {
         private const val SIGN_DELAY_MS = 500L
     }
 
-    private lateinit var keystoreManager: KeystoreManager
     private lateinit var settingsRepository: MediaSigningSettingsRepository
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var wakeLock: PowerManager.WakeLock? = null
@@ -220,7 +324,6 @@ class MediaSigningService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        keystoreManager = KeystoreManager(this)
         settingsRepository = MediaSigningSettingsRepository(this)
         createNotificationChannel()
         // A granted write an earlier process died in: its capture is put back.
@@ -321,11 +424,12 @@ class MediaSigningService : Service() {
                     return@launch
                 }
 
-                // Hash the media content
-                val contentHash = try {
-                    // The bytes signMedia stages and checks: the original,
-                    // location included, wherever it is readable.
-                    AutoSignHash.contentHashUri(contentResolver, MediaPublisher.originalUri(this@MediaSigningService, uri) ?: uri)
+                // Hash the original (never MediaStore's redacted view), sign
+                // and write; a capture still waiting for location or write
+                // access is queued, and the queue is its retry.
+                val filePath = getFilePathFromUri(uri)
+                val outcome = try {
+                    AutoSigner.signCapture(this@MediaSigningService, uri, filePath, keyId, keyEntity.label)
                 } catch (e: AutoSignHash.TooLargeException) {
                     // Refused, not failed: record it once so a repeated
                     // MediaStore event does not audit it again.
@@ -341,52 +445,9 @@ class MediaSigningService : Service() {
                     processedUris.add(uriString)
                     return@launch
                 }
-                val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-
-                // Sign with the configured key. The key fingerprinted and the
-                // key signed with are one lookup: the public key under the
-                // alias the signature is made with.
-                val alias = KeystoreManager.generalKeyAlias(keyId)
-                val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
-                    ?: throw com.automatethethings.xkey.crypto.KeyNotFoundException(keyId)
-                val signature = keystoreManager.signApproved(
-                    alias,
-                    pubKeyDer,
-                    hashBytes,
-                    KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
-                )
-                val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
-
-                val keyFingerprint = MediaHasher.hashBytes(pubKeyDer)
-
-                // Build signature data
-                val entry = SignatureEntry(
-                    keyFingerprint = keyFingerprint,
-                    signerName = keyEntity.label,
-                    algorithm = keyEntity.algorithm,
-                    value = signatureBase64,
-                    timestamp = Instant.now().toString(),
-                    role = SignerRole.CREATOR
-                )
-                val data = ContentAuthenticityData(
-                    contentHash = contentHash,
-                    signatures = listOf(entry)
-                )
-
-                // The signature lives in the media's own metadata. A capture
-                // another app owns (the camera's) is written only through its
-                // content URI once the user grants access: until then it is
-                // queued and the user is asked, never renamed over by path.
-                val filePath = getFilePathFromUri(uri)
-                val signed = XmpMetadataHelper.signMedia(this@MediaSigningService, uri, filePath, data)
-                if (signed == XmpMetadataHelper.MediaSignResult.NeedsWriteAuthorization) {
-                    MediaWriteAuthorizations.add(
-                        this@MediaSigningService,
-                        PendingMediaWrite(uriString, filePath, keyId, keyEntity.label, data)
-                    )
-                    MediaWriteAuthorizations.notifyPending(this@MediaSigningService)
+                if (outcome == AutoSigner.Outcome.AwaitingAccess) {
                     processedUris.add(uriString)
-                    Log.i(TAG, "Signed $mediaType $uri; its write waits for the user's access")
+                    Log.i(TAG, "Queued $mediaType $uri; it is signed once the user grants access")
                     return@launch
                 }
 
