@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.storage
 
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.ResolvedKey
 import com.automatethethings.xkey.crypto.UserKeyKind
@@ -732,6 +733,68 @@ class KeyPolicyStore(
             }
         } finally {
             releaseMaterialLock(keyId, lock)
+        }
+    }
+
+    /**
+     * The one acquisition order of a key use that waits for an approval
+     * prompt (#255 review r4): the process-wide prompt queue's turn first,
+     * then the key-use reservation ([withUsableKey]'s shared use), then the
+     * material mutex, which the reservation takes only briefly. [prompt]
+     * waits for its own turn on the queue and calls the `reserve` it is
+     * handed once that turn is held, before any crypto (the launcher's
+     * on-turn data, or inside [BiometricHelper.inOneTurn]); the use it
+     * reserves lasts until [prompt] returns. No reservation is ever held
+     * while waiting for the queue, so a delete waiting out the key's uses
+     * ([lockKeyMaterial], which takes the mutex only and never prompts) never
+     * waits on a request that waits for the turn, and a turn's holder waiting
+     * for the mutex waits only on such a delete. `reserve` refuses a deleted
+     * key ([requireUsable]) and runs at most once.
+     */
+    suspend fun <T> withKeyUseOnTurn(
+        keyId: String,
+        kind: UserKeyKind?,
+        prompt: suspend (reserve: suspend () -> Unit) -> T
+    ): T {
+        val held = java.util.concurrent.atomic.AtomicReference<MaterialLock?>()
+        try {
+            return prompt {
+                check(held.get() == null) { "A key use is reserved once per prompt" }
+                val lock = acquireMaterialLock(keyId)
+                try {
+                    lock.mutex.withLock {
+                        requireUsable(keyId, kind)
+                        lock.beginUse()
+                    }
+                } catch (e: Throwable) {
+                    releaseMaterialLock(keyId, lock)
+                    throw e
+                }
+                held.set(lock)
+            }
+        } finally {
+            held.getAndSet(null)?.let { lock ->
+                lock.endUse()
+                releaseMaterialLock(keyId, lock)
+            }
+        }
+    }
+
+    /**
+     * [block] as a use of [keyId] on one turn of the prompt queue
+     * ([withKeyUseOnTurn]'s order): the turn of [operation], or the one the
+     * caller already holds ([BiometricHelper.inOneTurn]), then the use.
+     * Every prompt [block] shows through [BiometricHelper] shows on that turn.
+     */
+    suspend fun <T> withKeyUseInOneTurn(
+        keyId: String,
+        kind: UserKeyKind?,
+        operation: String,
+        block: suspend () -> T
+    ): T = withKeyUseOnTurn(keyId, kind) { reserve ->
+        BiometricHelper.inOneTurn(operation) {
+            reserve()
+            block()
         }
     }
 

@@ -1625,7 +1625,7 @@ class KeyShareAuditTest {
         val credentialProvider = java.io.File(main, "com/automatethethings/xkey/credential/handler/GetCredentialHandler.kt").readText()
         for ((name, text) in listOf("Handler" to source, "GetCredentialHandler" to credentialProvider)) {
             val calls = Regex("keystoreManager\\.(sign|signWithoutBiometric)\\(").findAll(text).count()
-            val gated = Regex("withUsableKey\\(([\\w.]+), (\\w+)\\) \\{\\s*keystoreManager\\.(sign|signWithoutBiometric)\\(\\s*(credentialId = )?([\\w.]+),\\s*(kind = )?(\\w+)")
+            val gated = Regex("(?:withUsableKey|withKeyUseInOneTurn)\\(([\\w.]+), (\\w+)(?:, \"\\w+\")?\\) \\{\\s*keystoreManager\\.(sign|signWithoutBiometric)\\(\\s*(credentialId = )?([\\w.]+),\\s*(kind = )?(\\w+)")
                 .findAll(text).toList()
             assertTrue("$name signs a user key", calls > 0)
             assertEquals("$name: every sign runs in its gate", calls, gated.size)

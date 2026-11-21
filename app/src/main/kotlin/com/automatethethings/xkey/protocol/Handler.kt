@@ -956,15 +956,19 @@ class RequestHandler(
                     // This performs biometric auth and signing in a single activity
                     Log.d(TAG, "Using crypto-bound signing for PER_OPERATION mode")
                     // The alias of the passkey's own namespace (#255 review r3).
-                    val signature = keyPolicyStore.withUsableKey(signParams.credentialId, signKind) { biometricLauncher.requestCryptoSignature(
-                        credentialId = signParams.credentialId,
-                        dataHash = dataHash,
-                        title = "xKey Authentication",
-                        subtitle = "Verify your identity to sign",
-                        showOnLockScreen = keyguardManager.isKeyguardLocked,
-                        keyAlias = com.automatethethings.xkey.crypto.KeystoreManager.userKeyAlias(signParams.credentialId, signKind),
-                        onLaunch = notice.onLaunch
-                    ) }
+                    // The key's use is reserved only once the prompt's turn
+                    // has come (#255 review r4): never held while queued.
+                    val signature = keyPolicyStore.withKeyUseOnTurn(signParams.credentialId, signKind) { reserve ->
+                        biometricLauncher.requestCryptoSignatureOnTurn(
+                            credentialId = signParams.credentialId,
+                            signedData = { reserve(); dataHash },
+                            title = "xKey Authentication",
+                            subtitle = "Verify your identity to sign",
+                            showOnLockScreen = keyguardManager.isKeyguardLocked,
+                            keyAlias = com.automatethethings.xkey.crypto.KeystoreManager.userKeyAlias(signParams.credentialId, signKind),
+                            onLaunch = notice.onLaunch
+                        )
+                    }
 
                     // Record successful authentication for session tracking
                     sessionAuthManager?.recordAuthentication(requestSessionId())
@@ -1071,7 +1075,8 @@ class RequestHandler(
 
             // The activity's own prompt answers no launcher request; it takes
             // its queue turn, and the notification only wakes the phone for it.
-            val signature = keyPolicyStore.withUsableKey(signParams.credentialId, signKind) { keystoreManager.sign(
+            // Its turn first, then the key's use (#255 review r4).
+            val signature = keyPolicyStore.withKeyUseInOneTurn(signParams.credentialId, signKind, "sign") { keystoreManager.sign(
                 credentialId = signParams.credentialId,
                 kind = signKind,
                 dataHash = dataHash,

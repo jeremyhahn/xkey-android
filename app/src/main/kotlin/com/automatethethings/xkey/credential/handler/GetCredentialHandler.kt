@@ -347,8 +347,9 @@ class GetCredentialHandler(
                         // The material-use lock and its deleted-key recheck
                         // (#255 review): a delete acknowledged while the
                         // prompt waited signs nothing; one that comes later
-                        // waits for this signature.
-                        keyPolicyStore.withUsableKey(credentialId, passkeyKind) {
+                        // waits for this signature. On the turn held above,
+                        // then the key's use (#255 review r4).
+                        keyPolicyStore.withKeyUseInOneTurn(credentialId, passkeyKind, "passkeyAssertion") {
                             keystoreManager.sign(
                                 credentialId, passkeyKind, data, helper,
                                 title = "Sign In",

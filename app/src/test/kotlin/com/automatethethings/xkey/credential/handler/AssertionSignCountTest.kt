@@ -185,7 +185,9 @@ class AssertionSignCountTest {
         assertEquals("the file encryptor's ECDH calls", 2, call.findAll(encryptor).count())
         // Handler's general-key gate (#270 review r5) and its software-key
         // gate both end in withUsableKey: a use inside either is gated.
-        val gates = listOf("withUsableKey(", "withUsableGeneralKey(", "withUsableSoftwareKey(")
+        // withKeyUseOnTurn and withKeyUseInOneTurn reserve the same use once
+        // the prompt's turn is held (#255 review r4).
+        val gates = listOf("withUsableKey(", "withUsableGeneralKey(", "withUsableSoftwareKey(", "withKeyUseOnTurn(", "withKeyUseInOneTurn(")
         val handler = java.io.File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
         val general = handler.substring(handler.indexOf("fun <T> withUsableGeneralKey("))
         assertTrue(

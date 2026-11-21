@@ -166,8 +166,10 @@ class SignAfterDeleteTest {
         val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
         val crypto = Regex(
             """keystoreManager\.(sign|signWithoutBiometric|signWithAlgorithm|rsaDecrypt\w*|decrypt\w*|encrypt\w*|symmetric\w*|computeHMAC\w*|performECDH|ecdh\w*)\(""" +
-                """|requestCryptoSignature\(|approvals\.sign\(|SoftwareKeyOps\.(aesGcm\w*|hmac|sign\w*|ecdh\w*)\("""
+                """|requestCryptoSignature(OnTurn)?\(|approvals\.sign\(|SoftwareKeyOps\.(aesGcm\w*|hmac|sign\w*|ecdh\w*)\("""
         )
+        // The gates: the use gate, and its prompt-ordered forms (#255 review r4).
+        val gates = listOf("withUsableKey(", "withUsableGeneralKey(", "withKeyUseOnTurn(", "withKeyUseInOneTurn(")
         // CosignApprovalPrompts is the co-sign prompt itself: its caller's
         // `approvals.sign(` is swept here instead.
         val bypasses = File(root, "com/automatethethings/xkey/protocol").listFiles { f -> f.extension == "kt" && f.name != "CosignApprovalPrompts.kt" }!!
@@ -176,7 +178,9 @@ class SignAfterDeleteTest {
                 lines.mapIndexedNotNull { i, line ->
                     val code = line.substringBefore("//")
                     // withUsableGeneralKey is the key uses' gate: it runs withUsableKey (asserted below).
-                    if (!crypto.containsMatchIn(code) || "withUsableKey(" in code || "withUsableGeneralKey(" in code) return@mapIndexedNotNull null
+                    if (!crypto.containsMatchIn(code) || gates.any { it in code }) return@mapIndexedNotNull null
+                    // A prompt's call on the line after its withKeyUseOnTurn opens.
+                    if (lines.getOrNull(i - 1)?.contains("withKeyUseOnTurn(") == true) return@mapIndexedNotNull null
                     // A software key's crypto runs in the use block of
                     // withUsableSoftwareKey, the gate's software-key choke point.
                     if (lines.getOrNull(i - 1)?.trimEnd()?.endsWith("{ sw ->") == true &&
@@ -192,6 +196,37 @@ class SignAfterDeleteTest {
         val gate = handler.substringAfter("fun <T> withUsableGeneralKey(").substringBefore("\n    }\n")
         assertTrue("withUsableGeneralKey resolves the id's key", "ownedKeyKind(" in gate)
         assertTrue("withUsableGeneralKey runs inside withUsableKey", "keyPolicyStore.withUsableKey(" in gate)
+    }
+
+    /**
+     * No key use holds its reservation while it waits for the prompt queue
+     * (#255 review r4): a prompt that signs with a user key runs through
+     * withKeyUseOnTurn or withKeyUseInOneTurn, which reserve the use only
+     * once the turn is held, never inside withUsableKey.
+     */
+    @Test
+    fun `no prompt waits for the queue inside withUsableKey`() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val prompting = Regex("""requestCryptoSignature(OnTurn)?\(|requestAuthentication\(|inOneTurn\(|keystoreManager\.sign\(""")
+        val inside = root.walkTopDown().filter { it.extension == "kt" }.flatMap { file ->
+            val text = file.readText()
+            Regex("""withUsableKey\([^)]*\)\s*\{""").findAll(text).mapNotNull { open ->
+                // The block's body, up to its matching brace.
+                var depth = 0
+                var end = open.range.last
+                for (j in open.range.last until text.length) {
+                    when (text[j]) {
+                        '{' -> depth++
+                        '}' -> if (--depth == 0) { end = j; break }
+                    }
+                }
+                val body = text.substring(open.range.last, end)
+                if (prompting.containsMatchIn(body)) {
+                    "${file.name}:${text.substring(0, open.range.first).count { it == '\n' } + 1}"
+                } else null
+            }
+        }.toList()
+        assertEquals(emptyList<String>(), inside)
     }
 
     private suspend fun sign(): Response {
