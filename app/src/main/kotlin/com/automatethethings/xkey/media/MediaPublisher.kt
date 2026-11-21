@@ -151,9 +151,53 @@ object MediaPublisher {
      * Write [bytes] whole to [target], a file xKey itself owns in MediaStore
      * ([MediaStoreAccess.ownedFile]): a sidecar of media another app owns,
      * which the media's write grant does not cover. Never a capture.
+     *
+     * [target] may already hold a signature, so it is never truncated up
+     * front: as a granted write ([writeGranted]) does, its current bytes are
+     * journalled first ([GrantedWriteJournal]), then it is overwritten in
+     * place ([overwrite]) and cut to length once every new byte is in. A
+     * write that fails puts the earlier bytes back ([restore]); one that
+     * cannot be put back keeps its journal, and the next write of [target]
+     * restores it first ([recoverInterruptedWrite]).
      */
-    fun writeOwned(context: Context, target: Uri, bytes: ByteArray) {
-        openCreated(context.contentResolver, target).use { it.write(bytes) }
+    fun writeOwned(context: Context, target: Uri, bytes: ByteArray): Unit = synchronized(grantedWrites) {
+        recoverInterruptedWrite(context, target)
+        val resolver = context.contentResolver
+        val directory = recoveryDirectory(context)
+        val journal = GrantedWriteJournal.of(directory, target)
+        val staged = MediaSaveRuns.work(directory, ".new")
+        val previous = MediaSaveRuns.work(directory, ".part")
+        try {
+            try {
+                FileOutputStream(staged).use { out ->
+                    out.write(bytes)
+                    out.fd.sync()
+                }
+                FileOutputStream(previous).use { out ->
+                    try {
+                        openOriginalUnchecked(context, target).use { it.copyTo(out) }
+                    } catch (_: java.io.FileNotFoundException) {
+                        // A file not created yet holds no earlier signature: its backup is empty.
+                    }
+                    out.fd.sync()
+                }
+                journal.commit(previous, staged)
+            } catch (e: Throwable) {
+                previous.delete()
+                journal.clear()
+                throw e
+            }
+            try {
+                overwrite(resolver, target, staged) {}
+            } catch (e: Throwable) {
+                // One that could not be put back keeps its journal: the next write restores it.
+                if (restore(context, target, journal)) journal.clear()
+                throw e
+            }
+            journal.clear()
+        } finally {
+            staged.delete()
+        }
     }
 
     /** How xKey may write the MediaStore item at a content URI. */
