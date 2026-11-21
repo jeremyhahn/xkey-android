@@ -182,6 +182,24 @@ class CameraMediaWriteAuthorizationTest {
     }
 
     @Test
+    fun `a queued capture xKey owns, edited after it was signed, is not written with its old signature`() = runBlocking<Unit> {
+        owner = context.packageName
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data()))
+        // The user edits the capture before the queued write is retried.
+        val edited = XmpFixtures.png(byteArrayOf(0x78, 0x9C.toByte(), 0x09, 0x09, 0x09))
+        capture.writeBytes(edited)
+        media.writeBytes(edited)
+        val signed = mutableListOf<PendingMediaWrite>()
+
+        MediaWriteAuthorizations.publishGranted(context) { signed += it }
+
+        assertTrue("a signature the capture no longer matches is never published: $signed", signed.isEmpty())
+        assertArrayEquals("the edit is kept", edited, capture.readBytes())
+        assertNull("the edit carries no signature", embedded(capture.readBytes()))
+        assertTrue("the request is dropped: its signature matches nothing", MediaWriteAuthorizations.pending(context).isEmpty())
+    }
+
+    @Test
     fun `a granted write that fails mid-copy leaves the capture whole and its request queued`() = runBlocking<Unit> {
         val data = data()
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", data))
@@ -324,6 +342,56 @@ class CameraMediaWriteAuthorizationTest {
         val callers = dir.walkTopDown().filter { it.isFile && it.extension == "kt" }
             .filter { "MediaPublisher.writeGranted(" in it.readText() }.map { it.name }.toList()
         assertEquals(listOf("XmpMetadataHelper.kt"), callers)
+    }
+
+    @Test
+    fun `every publication in signMedia passes the current-hash check first`() = runBlocking<Unit> {
+        val rel = "src/main/kotlin"
+        val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }
+            ?: error("$rel not found from ${File(".").absolutePath}")
+        fun source(name: String): String =
+            (dir.walkTopDown().singleOrNull { it.name == name } ?: error("$name not found under ${dir.absolutePath}")).readText()
+        val helper = source("XmpMetadataHelper.kt")
+        val start = helper.indexOf("fun signMedia(")
+        assertTrue("signMedia is defined in XmpMetadataHelper.kt", start >= 0)
+        val end = listOf("\n    fun ", "\n    private fun ").map { helper.indexOf(it, start) }.filter { it >= 0 }.minOrNull()
+            ?: helper.length
+        val body = helper.substring(start, end).lines()
+        val writes = listOf("writeSignature(", "writeSignatureLocked(", "writeOwnedSidecar(", "MediaPublisher.writeGranted(")
+        val checks = listOf("requireCurrent(", "StagedSource.of(")
+        fun indent(line: String) = line.length - line.trimStart().length
+        var publications = 0
+        body.forEachIndexed { i, line ->
+            if (line.trimStart().startsWith("//")) return@forEachIndexed
+            for (write in writes) {
+                var at = line.indexOf(write)
+                while (at >= 0) {
+                    publications++
+                    // The path to this call starts after the last return that ends it, one at this
+                    // call's depth or shallower; a deeper one ends a nested branch, not this path.
+                    val from = (i - 1 downTo 0).firstOrNull { j -> "return " in body[j] && indent(body[j]) <= indent(line) }
+                    val path = body.subList((from ?: -1) + 1, i).joinToString("\n") + "\n" + line.substring(0, at)
+                    assertTrue(
+                        "signMedia line ${i + 1} calls $write with no current-hash check before it: ${line.trim()}",
+                        checks.any { it in path }
+                    )
+                    at = line.indexOf(write, at + write.length)
+                }
+            }
+        }
+        assertTrue("the scan found signMedia's publications: $publications", publications >= 4)
+        val outside = helper.removeRange(start, end)
+        assertEquals(
+            "writeOwnedSidecar is called only from signMedia",
+            1, Regex("writeOwnedSidecar\\(").findAll(outside).count()
+        )
+        assertTrue("the one other occurrence is its definition", "fun writeOwnedSidecar(" in outside)
+        for (name in listOf("MediaSigningService.kt", "MediaWriteAuthorizations.kt", "MediaWriteRequestActivity.kt")) {
+            val text = source(name)
+            for (write in listOf("XmpMetadataHelper.writeSignature(", "writeOwnedSidecar(", "MediaPublisher.writeOwned(")) {
+                assertTrue("$name publishes with $write instead of signMedia", write !in text)
+            }
+        }
     }
 
     @Test

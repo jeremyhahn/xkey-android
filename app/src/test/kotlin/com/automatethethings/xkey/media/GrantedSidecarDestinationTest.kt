@@ -36,6 +36,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.IOException
 
 /**
  * Scoped storage: a write grant for a camera capture covers that capture
@@ -60,6 +61,8 @@ class GrantedSidecarDestinationTest {
     private lateinit var original: ByteArray
     private lateinit var provider: FakeMediaProvider
     private val ownedRequests = mutableListOf<Pair<String, String>>()
+    /** When set, the next request for the owned sidecar fails once, as a busy provider does: a failure the queue retries. */
+    private var failOwnedFileOnce = false
     private val previousStore = MediaPublisher.mediaStore
 
     /** ftyp and moov, then an mdat of size 0: it runs to the end of the file, so no box may follow it. */
@@ -88,6 +91,10 @@ class GrantedSidecarDestinationTest {
                 PendingIntent.getActivity(context, 0, Intent(), PendingIntent.FLAG_IMMUTABLE)
             override fun ownedFile(context: Context, relativePath: String, displayName: String): MediaPublisher.OwnedFile {
                 ownedRequests += relativePath to displayName
+                if (failOwnedFileOnce) {
+                    failOwnedFileOnce = false
+                    throw IOException("the provider is busy")
+                }
                 // MediaStore inserts the entry when none of that name exists yet.
                 return MediaPublisher.OwnedFile(Uri.fromFile(owned), created = !owned.isFile)
             }
@@ -105,8 +112,11 @@ class GrantedSidecarDestinationTest {
         MediaWriteAuthorizations.clear(context)
     }
 
-    private fun data(key: String = "b") = ContentAuthenticityData(
-        contentHash = AutoSignHash.contentHashFile(capture, "video/mp4"),
+    private fun data(
+        key: String = "b",
+        hash: String = AutoSignHash.contentHashFile(capture, "video/mp4")
+    ) = ContentAuthenticityData(
+        contentHash = hash,
         signatures = listOf(
             SignatureEntry(
                 keyFingerprint = key.repeat(64),
@@ -167,6 +177,48 @@ class GrantedSidecarDestinationTest {
         assertEquals(listOf(uri.toString()), published.map { it.uri })
         assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
         assertEquals(data().toJsonString(), owned.readText())
+    }
+
+    @Test
+    fun `a queued sidecar-only capture edited after a failed sidecar write is not published with its old signature`() = runBlocking<Unit> {
+        // Matroska carries no in-band signature: signMedia writes only its sidecar.
+        provider.mimeType = "video/x-matroska"
+        val originalHash = AutoSignHash.contentHashFile(capture, "video/x-matroska")
+        // A failed publication queued the capture unsigned for a retry.
+        MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), capture.path, "key-1", "Key", null))
+        val signedHashes = mutableListOf<String>()
+        val previousSign = AutoSigner.sign
+        AutoSigner.sign = { _, _, hash -> signedHashes += hash; data(hash = hash) }
+        try {
+            failOwnedFileOnce = true
+            val published = mutableListOf<PendingMediaWrite>()
+            MediaWriteAuthorizations.publishGranted(context) { published += it }
+
+            assertTrue("a failed sidecar write publishes nothing: $published", published.isEmpty())
+            assertEquals(
+                "the request stays queued, signed over the original",
+                listOf(originalHash), MediaWriteAuthorizations.pending(context).map { it.data?.contentHash }
+            )
+            assertTrue("no sidecar is written", !owned.exists())
+
+            // The user edits the capture before the retry.
+            val edited = original + byteArrayOf(0x50, 0x60, 0x70)
+            media.writeBytes(edited)
+            capture.writeBytes(edited)
+            MediaWriteAuthorizations.publishGranted(context) { published += it }
+
+            assertTrue("a signature the capture no longer matches is never published: $published", published.isEmpty())
+            assertTrue("no sidecar is written", !owned.exists())
+            assertEquals("nothing is written beside the capture", listOf("VID_0001.mp4"), cameraDir.listFiles()!!.map { it.name })
+            assertEquals("the stale request is not signed again over the edit", listOf(originalHash), signedHashes)
+            assertTrue(
+                "the request is dropped: its signature matches nothing",
+                MediaWriteAuthorizations.pending(context).isEmpty()
+            )
+            assertArrayEquals("the edit is kept", edited, media.readBytes())
+        } finally {
+            AutoSigner.sign = previousSign
+        }
     }
 
     /** The sidecar beside the capture, written before the owned location existed. */
