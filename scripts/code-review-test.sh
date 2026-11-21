@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016,SC2154 # workflow text is matched literally; extract assigns by name
 # code-review-test.sh -- regression fixtures for .github/workflows/code-review.yml
-# (template v5.10.10, v5.10.11, v5.12.5, v5.12.6, v5.12.7 and v5.12.8).
+# (template v5.10.10, v5.10.11, v5.12.5, v5.12.6, v5.12.7, v5.12.8, v5.12.9
+# and v5.12.10).
 #
 # pull_request_target runs the base branch's copy of the workflow, so a change
 # to it is never exercised by its own pull request's review run. These
@@ -44,6 +45,13 @@
 #      nothing when the event's head is not the live head or the PR is
 #      closed. Its token is actions: write and pull-requests: read, its
 #      timeout 5 minutes. An API error is a warning and the step exits 0.
+#   I. Which jobs take a runner (v5.12.9, v5.12.10): each job's `if:` and the
+#      gate's name are read out of the workflow and evaluated with jq against
+#      event contexts. A draft takes no runner; scope and review run only on
+#      an event that requests a review (not `labeled`, or a code-review,
+#      task:ready, agent:*, model:* or effort:* label); the gate runs on every
+#      non-draft event, always as `Code Review (codex)`, and a skipped gate
+#      never carries that name; a fork's head starts no review.
 #
 # Needs bash and jq (the lint-gates job has no python3).
 # CODE_REVIEW_WORKFLOW overrides the workflow path (for a mutation check).
@@ -828,6 +836,121 @@ for broken in /pulls/12 /actions/runs/600 "$(sup_list pending)" "/actions/runs/5
 		"${RC} $(yn contains "${OUT}" "::warning::Cancel superseded runs: ") [$(cancels | jq -Rr --arg b "${broken}" 'split(" ") | map(select(. != $b and . != "")) | join(" ")')]" \
 		"0 yes []"
 done
+
+# ---- I: which jobs take a runner, and the gate's name (v5.12.9, v5.12.10) --
+# Each job's `if:` and the gate's `name:` are read from the workflow and
+# translated to jq: paths gain a leading dot, && and || become and/or,
+# contains(), !contains(), startsWith() and always() become jq, and the
+# name's `C && 'A' || 'B'` becomes `if C then "A" else "B" end`. Each is
+# then evaluated against an event context. The translator knows only these
+# forms: anything else left in the text fails jq, and the case with it.
+gh2jq() { # expression text on stdin -> jq program
+	jq -Rrs '
+		gsub("\\$\\{\\{|\\}\\}"; "")
+		| gsub("(?<![\\w./])(?<p>(github|needs)\\.)"; ".\(.p)")
+		| gsub("!contains\\((?<p>[a-z_.]+)\\.\\*\\.name, (?<v>\\x27[^\\x27]*\\x27)\\)"; "(any(\(.p)[]?; .name == \(.v)) | not)")
+		| gsub("contains\\((?<p>[a-z_.]+)\\.\\*\\.name, (?<v>\\x27[^\\x27]*\\x27)\\)"; "any(\(.p)[]?; .name == \(.v))")
+		| gsub("startsWith\\((?<p>[a-z_.]+), (?<v>\\x27[^\\x27]*\\x27)\\)"; "((\(.p) // \"\") | startswith(\(.v)))")
+		| gsub("always\\(\\)"; "true") | gsub("&&"; " and ") | gsub("\\|\\|"; " or ")
+		| gsub("\\x27"; "\"")'
+}
+# job_if JOB: the translated `if:` of JOB (folded or one line).
+job_if() {
+	jq -Rrs --arg j "$1" '
+		split("\n  \($j):\n") | if length != 2 then error("job \($j) not found once") else .[1] end
+		| capture("\n    if: (>-\n(?<f>(      [^\n]*\n)+)|(?<l>[^\n]*)\n)") | (.f // .l)' "${WORKFLOW}" | gh2jq
+}
+extract gname "${WORKFLOW}" $'\n    name: >-\n      ${{ ' $' }}\n    needs: [scope, review]\n' "the gate's name"
+gname_jq=$(jq -nr --arg n "${gname}" '$n | gsub("\n *"; " ") | capture("^(?<c>.*) && \\x27(?<a>[^\\x27]*)\\x27 \\|\\| \\x27(?<b>[^\\x27]*)\\x27$")
+	| "if \(.c) then \"\(.a)\" else \"\(.b)\" end"') || fatal "the gate's name is not C && 'A' || 'B'"
+gname_jq=$(gh2jq <<<"${gname_jq}")
+IF_SUP=$(job_if supersede) IF_SCOPE=$(job_if scope) IF_REVIEW=$(job_if review)
+IF_OPEN=$(job_if review-opencode) IF_GATE=$(job_if gate)
+check "I the gate's if: is the draft clause alone" \
+	"$(jq -Rrs --arg s $'\n    if: >-\n      always() && github.event.pull_request.draft != true\n    # v5.12.2' 'split($s) | length - 1' "${WORKFLOW}")" 1
+# ctx SERVER ACTION LABEL DRAFT: an event on PR 12 (labels code-review and
+# task:ready, plus LABEL when it is added), its head in this repository.
+ctx() {
+	jq -cn --arg srv "$1" --arg a "$2" --arg l "$3" --argjson d "$4" '{
+		github: {server_url: $srv, repository: "o/r", event: ({action: $a,
+			pull_request: {draft: $d, state: "open", head: {repo: {full_name: "o/r"}},
+				labels: ([{name: "code-review"}, {name: "task:ready"}] + (if $l == "" then [] else [{name: $l}] end) | unique)}}
+			+ (if $a == "labeled" then {label: {name: $l}} else {} end))},
+		needs: {scope: {outputs: {skip: "false"}}, review: {outputs: {agent: "opencode"}}}}'
+}
+b01() { if [ "$1" = true ]; then echo 1; else echo 0; fi; }
+# jobs_for SERVER ACTION LABEL DRAFT: "scope review opencode supersede gate:name"
+jobs_for() {
+	local c
+	c=$(ctx "$@")
+	printf '%s %s %s %s %s:%s' \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_SCOPE})")")" \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_REVIEW})")")" \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_OPEN})")")" \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_SUP})")")" \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_GATE})")")" \
+		"$(jq -nr --argjson x "$c" "\$x | (${gname_jq})")"
+}
+GH=https://github.com GT=https://gitea.example.org
+CX="Code Review (codex)" NR="Code Review (not requested)"
+dsfx() { if [ "$1" = true ]; then echo " (draft)"; fi; }
+# event (action/label/draft) -> want on github.com
+while IFS='|' read -r ev want; do
+	IFS=/ read -r a l d <<<"${ev}"
+	check "I github.com ${a}${l:+ ${l}}$(dsfx "${d}")" "$(jobs_for "${GH}" "${a}" "${l}" "${d}")" "${want}"
+done <<EOF
+opened//false|1 1 0 0 1:${CX}
+opened//true|0 0 0 0 0:${NR}
+ready_for_review//false|1 1 0 0 1:${CX}
+synchronize//false|1 1 0 1 1:${CX}
+synchronize//true|0 0 0 0 0:${NR}
+reopened//false|1 1 0 1 1:${CX}
+reopened//true|0 0 0 0 0:${NR}
+labeled/code-review/false|1 1 0 0 1:${CX}
+labeled/task:ready/false|1 1 0 0 1:${CX}
+labeled/agent:opencode/false|1 1 0 0 1:${CX}
+labeled/model:gpt-x/false|1 1 0 0 1:${CX}
+labeled/effort:high/false|1 1 0 0 1:${CX}
+labeled/dept:software/false|0 0 0 0 1:${CX}
+labeled/ci:full/false|0 0 0 0 1:${CX}
+labeled/task:in-progress/false|0 0 0 0 1:${CX}
+labeled/needs-owner/false|0 0 0 0 1:${CX}
+labeled/needs-coordinator/false|0 0 0 0 1:${CX}
+labeled/code-review/true|0 0 0 0 0:${NR}
+labeled/dept:software/true|0 0 0 0 0:${NR}
+EOF
+# The opencode job (Gitea only) keeps the shared condition; supersede never
+# runs off GitHub.
+while IFS='|' read -r ev want; do
+	IFS=/ read -r a l d <<<"${ev}"
+	check "I gitea ${a}${l:+ ${l}}$(dsfx "${d}")" "$(jobs_for "${GT}" "${a}" "${l}" "${d}")" "${want}"
+done <<EOF
+opened//false|1 1 1 0 1:${CX}
+synchronize//false|1 1 1 0 1:${CX}
+labeled/agent:opencode/false|1 1 1 0 1:${CX}
+labeled/dept:software/false|0 0 0 0 1:${CX}
+opened//true|0 0 0 0 0:${NR}
+EOF
+# Invariants over every action, label and draft state: the gate posts the
+# required name exactly when it runs, and every non-draft suite has it.
+bad=""
+for a in opened synchronize reopened ready_for_review edited labeled unlabeled; do
+	for l in "" code-review task:ready agent:opencode dept:software ci:full needs-owner; do
+		[ "${a}" = labeled ] || [ -z "${l}" ] || continue
+		for d in false true; do
+			got=$(jobs_for "${GH}" "${a}" "${l}" "${d}")
+			gate_bit=${got:8:1} name=${got:10}
+			if [ "${gate_bit}" = 1 ] && [ "${name}" != "${CX}" ]; then bad+=" ${a}/${l}/${d}:runs-as-${name}"; fi
+			if [ "${gate_bit}" = 0 ] && [ "${name}" = "${CX}" ]; then bad+=" ${a}/${l}/${d}:skipped-as-required"; fi
+			if [ "${d}" = false ] && [ "${gate_bit}${name}" != "1${CX}" ]; then bad+=" ${a}/${l}/${d}:no-required-context"; fi
+			if [ "${d}" = true ] && [ "${got:0:7}" != "0 0 0 0" ]; then bad+=" ${a}/${l}/${d}:draft-takes-a-runner"; fi
+		done
+	done
+done
+check "I a skipped gate never posts the required check; every non-draft suite carries it; a draft takes no runner" "[${bad}]" "[]"
+# A fork's head never takes the codex runner (v5.10.6), under the shared condition.
+fork_ctx=$(ctx "${GH}" opened "" false | jq -c '.github.event.pull_request.head.repo.full_name = "fork/r"')
+check "I a fork's head starts no review" "$(b01 "$(jq -n --argjson x "${fork_ctx}" "\$x | (${IF_REVIEW})")")" 0
 
 check "nothing called curl" "$(yn [ ! -e "${T}/curl.log" ])" yes
 echo "$((total - fails)) of ${total} passed"
