@@ -216,10 +216,16 @@ class LegacyRecordInvariantTest {
         val source = File(root, "com/automatethethings/xkey/crypto/SoftwareKeyStore.kt").readText()
         assertEquals("reads of a record's id", 1, Regex("""\.opt\w*\("keyId"""").findAll(source).count())
         // A name's shape never skips a record; it only keeps a record whose
-        // metadata contradicts its hex name from moving.
+        // metadata contradicts its hex name from moving or from being read
+        // as the id it names, through the one identity check.
         assertTrue("the store skips records by file-name shape", "DIGEST_NAME" !in source)
         assertEquals("the digest-name shape is declared and read once", 2, Regex("""\bHEX_64\b""").findAll(source).count())
-        assertTrue("the digest-name shape is read outside migratable", "!HEX_64.matches(stem))" in source)
+        assertTrue(
+            "the digest-name shape is read outside the one identity check",
+            "namesRecordOf(stem: String, id: String): Boolean =\n        stem == fileId(id) || stem == id || !HEX_64.matches(stem)" in source
+        )
+        assertTrue("the migration skips the one identity check", "stem != fileId(id) && namesRecordOf(stem, id)" in source)
+        assertTrue("the legacy index skips the one identity check", "if (namesRecordOf(stem, id)) named.getOrPut(id)" in source)
         val outside = root.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") && it.name != "SoftwareKeyStore.kt" }
             .filter { "\"software_keys\"" in it.readText() }.map { it.name }.toList()
         assertEquals("files outside the store read its records", emptyList<String>(), outside)

@@ -267,7 +267,12 @@ class SoftwareKeyStore(
             // any id's (#255 verify r2y, r4).
             val id = namedId(text)
             when {
-                id != null && isValidKeyId(id) -> named.getOrPut(id) { HashSet() } += stem
+                // A digest name whose metadata names another id is that
+                // digest's id's own record, which [recordOf] reads as
+                // unreadable for it: never indexed as the id it names, so
+                // no read or delete of that id takes its material (#255
+                // review r5).
+                id != null && isValidKeyId(id) -> if (namesRecordOf(stem, id)) named.getOrPut(id) { HashSet() } += stem
                 id != null && stem == fileId(id) -> {}
                 filePresence(File(dir, "$stem.key")) != KeyPresence.ABSENT -> unattributed += stem
             }
@@ -528,7 +533,20 @@ class SoftwareKeyStore(
      * ([recordOf]) and unread for [id], never moved out of the way.
      */
     private fun migratable(stem: String, id: String): Boolean =
-        stem != fileId(id) && (stem == id || !HEX_64.matches(stem))
+        stem != fileId(id) && namesRecordOf(stem, id)
+
+    /**
+     * Whether the record named [stem] can be [id]'s, as its metadata says:
+     * its digest name, an older build's name for it (the id itself, or a
+     * sanitised name, which is never 64 lowercase hex unless the id is). A
+     * 64-hex name that is neither is another id's digest name, whose
+     * metadata contradicts it. The one identity check of a record's name
+     * against its metadata, for the legacy index ([legacyIndex]: every
+     * read, generation and delete of an id's records) and the migration
+     * ([migratable]) alike (#255 review r5).
+     */
+    private fun namesRecordOf(stem: String, id: String): Boolean =
+        stem == fileId(id) || stem == id || !HEX_64.matches(stem)
 
     companion object {
         private const val KEY_ALIAS = "xkey_software_key_store"
@@ -536,7 +554,7 @@ class SoftwareKeyStore(
         /** Each store directory's write count, shared by every instance over it. */
         private val WRITES = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
 
-        /** The shape of a digest name, read only by [migratable]. */
+        /** The shape of a digest name, read only by [namesRecordOf]. */
         private val HEX_64 = Regex("[0-9a-f]{64}")
 
         /**
