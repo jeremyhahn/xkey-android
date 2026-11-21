@@ -31,6 +31,7 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import java.io.File
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -230,6 +231,83 @@ class Fido2WireEncodingTest {
         assertTrue(signed.isEmpty())
     }
 
+    @Test
+    fun `a passkey of another relying party answers KEY_NOT_FOUND`() = runTest {
+        // The DAO offers the RP_ID passkey for the other relying party too, so
+        // the refusal comes from the lookup's own rpId check, not an empty answer.
+        coEvery { keyDao.getFido2ByRpId(OTHER_RP_ID) } returns listOf(passkey(STORED_ID, STORED_USER_ID))
+        val listed = list().single { it.optString("rpName") == "passkey" }.getString("credentialId")
+
+        val response = sign(listed, forRpId = OTHER_RP_ID)
+
+        assertEquals(ErrorCodes.KEY_NOT_FOUND, response.error?.code)
+        assertTrue(response.error!!.message.contains("Credential not found"))
+        assertTrue(signed.isEmpty())
+    }
+
+    @Test
+    fun `a non-FIDO2 key with the same bytes answers KEY_NOT_FOUND`() = runTest {
+        val general = passkey(STORED_ID, STORED_USER_ID)
+        every { general.keyType } returns KeyTypes.SIGNING
+        coEvery { keyDao.getFido2ByRpId(RP_ID) } returns listOf(general)
+
+        val response = sign(Fido2WireIds.encode(STORED_ID))
+
+        assertEquals(ErrorCodes.KEY_NOT_FOUND, response.error?.code)
+        assertTrue(response.error!!.message.contains("Credential not found"))
+        assertTrue(signed.isEmpty())
+    }
+
+    /**
+     * The device tests compare listed credentials only through their two
+     * wire-ID helpers, which encode the stored ID; a test that reads a listed
+     * `credentialId` itself could compare it with a raw stored ID and pass
+     * vacuously on a negative assertion.
+     */
+    @Test
+    fun `the device tests read listed credential ids only through their wire-id helpers`() {
+        val file = File(DEVICE_TEST_PATH)
+        assertTrue(
+            "device test not found at ${file.absolutePath}; unit tests must run from the app module",
+            file.isFile
+        )
+        val source = file.readText()
+        val helpers = bodyRange(source, "private fun listsCredential(", "private fun listedEntry(")
+        val listingRefusal = bodyRange(source, "fun listFido2CredentialsRequiresAnRpId()", null)
+
+        for (index in occurrences(source, "getString(\"credentialId\")")) {
+            assertTrue(
+                "a listed credentialId is read outside listsCredential/listedEntry at offset $index",
+                index in helpers
+            )
+        }
+        for (index in occurrences(source, "\"local.listFido2Credentials\"")) {
+            assertTrue(
+                "local.listFido2Credentials is called outside the wire-id helpers at offset $index",
+                index in helpers || index in listingRefusal
+            )
+        }
+    }
+
+    /**
+     * From the line that holds [start] to the end of the function that
+     * begins at [last] (or at [start] when null), by the four-space closing brace.
+     */
+    private fun bodyRange(source: String, start: String, last: String?): IntRange {
+        val from = source.indexOf(start)
+        assertTrue("$start not found in the device test", from >= 0)
+        val lastFrom = if (last == null) from else source.indexOf(last, from)
+        assertTrue("$last not found after $start in the device test", lastFrom >= 0)
+        val end = source.indexOf("\n    }\n", lastFrom)
+        assertTrue("no end of the function at $lastFrom", end >= 0)
+        return from until end
+    }
+
+    private fun occurrences(source: String, needle: String): List<Int> =
+        generateSequence(source.indexOf(needle).takeIf { it >= 0 }) { previous ->
+            source.indexOf(needle, previous + 1).takeIf { it >= 0 }
+        }.toList()
+
     private suspend fun list(): List<JSONObject> {
         val request = Request(
             id = 1,
@@ -242,11 +320,11 @@ class Fido2WireEncodingTest {
         return (0 until credentials.length()).map { credentials.getJSONObject(it) }
     }
 
-    private suspend fun sign(credentialId: String): Response {
+    private suspend fun sign(credentialId: String, forRpId: String = RP_ID): Response {
         val params = JSONObject()
             .put("credentialId", credentialId)
             .put("clientDataHash", Base64.getEncoder().encodeToString(ByteArray(32) { 0x21 }))
-            .put("rpId", RP_ID)
+            .put("rpId", forRpId)
             .put("userVerificationRequired", false)
         val request = Request(id = 2, method = MethodNames.LOCAL_SIGN_FIDO2_ASSERTION, params = params)
         return Response.fromJson(handler.handleRawRequest(request.toJson()))
@@ -272,6 +350,9 @@ class Fido2WireEncodingTest {
 
     private companion object {
         const val RP_ID = "example.com"
+        const val OTHER_RP_ID = "other.example"
+        const val DEVICE_TEST_PATH =
+            "src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt"
 
         /** 0xfb and 0xff put '-' and '_' into the URL-safe form. */
         val ID_BYTES = ByteArray(32) { (0xF0 + it % 16).toByte() }

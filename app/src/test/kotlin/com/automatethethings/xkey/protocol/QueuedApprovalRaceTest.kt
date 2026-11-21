@@ -239,7 +239,7 @@ class QueuedApprovalRaceTest {
         id = id,
         method = MethodNames.LOCAL_SIGN_FIDO2_ASSERTION,
         params = JSONObject()
-            .put("credentialId", credentialId)
+            .put("credentialId", Fido2WireIds.encode(credentialId))
             .put("clientDataHash", Base64.getEncoder().encodeToString(ByteArray(32) { id.toByte() }))
             .put("rpId", "example.com")
             .put("userVerificationRequired", true)
