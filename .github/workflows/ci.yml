@@ -1,5 +1,13 @@
-# ci-template: v1.51 — CI for a Kotlin/Gradle Android app, kept in step with a
+# ci-template: v1.52 — CI for a Kotlin/Gradle Android app, kept in step with a
 # shared template; change both together.
+# v1.52: a pull request whose head repository is not this repository (a fork)
+# runs every job on ubuntu-latest: preflight's runs-on and the runner
+# selection never pick a self-hosted runner for a fork's head.
+# (adapted: already so here, no job change. preflight's runs-on is
+# ubuntu-latest on every event, and `Runner (GitHub-hosted only)` outputs
+# ubuntu-latest for every run with no API call, so every job reading it is
+# GitHub-hosted on github.com, a fork's pull request included. No `Runner
+# labels` step to extend, see below.)
 # v1.51: `Runner labels` also checks every runs-on under pull_request_target,
 # where a fork's head never reaches a self-hosted runner.
 # (adapted: no `Runner labels` step here, see below. Every runs-on in
