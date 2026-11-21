@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016,SC2154 # workflow text is matched literally; extract assigns by name
 # code-review-test.sh -- regression fixtures for .github/workflows/code-review.yml
-# (template v5.10.10, v5.10.11 and v5.12.5).
+# (template v5.10.10, v5.10.11, v5.12.5 and v5.12.6).
 #
 # pull_request_target runs the base branch's copy of the workflow, so a change
 # to it is never exercised by its own pull request's review run. These
@@ -25,6 +25,12 @@
 #      and large reviews, a wait past 600 s), and dies when no time is left or
 #      the start time is unreadable or not a number. The clock (date +%s) and
 #      flock are stubbed.
+#   F. The gate (v5.12.6) reads the twins once and never waits: an APPROVED
+#      head passes with a twin queued; otherwise a twin whose `Codex review`
+#      is queued or in progress fails it at once (exit 3), naming the run; no
+#      twin and no approval fails as before; a failed or unreadable list of
+#      runs or jobs fails closed. Its timeout is 10 minutes. The gate's own
+#      get() runs against a stub curl that answers from fixtures.
 #
 # Needs bash and jq (the lint-gates job has no python3).
 # CODE_REVIEW_WORKFLOW overrides the workflow path (for a mutation check).
@@ -471,6 +477,163 @@ for s in lock-refresh.sh lock-review.sh; do
 	lock_dies "E ${s%.sh}: an empty job-start dies before flock" "${s}" "" "${S}" 5 \
 		"the job's start time (${L}/job-start) is not a number"
 done
+
+# ---- F: the gate reads the twins once and never waits (v5.12.6) -----------
+# The gate's whole run script runs under bash, its own get() talking to a
+# stub curl (first on PATH for these runs only) that answers each API path
+# from a fixture file, HTTP 404 for a path with none and HTTP 500 for a path
+# marked to fail. sleep is a function that stops the run: the gate waits for
+# nothing.
+extract gjob "${WORKFLOW}" $'\n  gate:\n' $'\n    steps:\n' "the gate job"
+check "F the gate's timeout is 10 minutes" "$(yn contains "${gjob}" $'\n    timeout-minutes: 10\n')" yes
+GATE_START=$'\n      - name: Require a Codex approval of the head, or a no-review change\n        run: |\n'
+GATE_END=$'(ruling 589)" ;;\n          esac\n'
+extract gate "${WORKFLOW}" "${GATE_START}" "${GATE_END}" "the gate step"
+G="${T}/g"
+GAPI=https://api.example.invalid/repos/o/r
+mkdir -p "${T}/gbin"
+printf '%s\n' '#!/usr/bin/env bash' \
+	'out="" url=""' \
+	'while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; *) url=$1; shift ;; esac; done' \
+	'p=${url#"$REPO_API"}' \
+	'printf "%s\n" "$p" >> "$G/urls"' \
+	'k=${p//[^A-Za-z0-9]/_}' \
+	'if [ -e "$G/fail-$k" ]; then : > "$out"; printf 500; exit 0; fi' \
+	'if [ -e "$G/$k.json" ]; then cp "$G/$k.json" "$out"; printf 200; else echo "{\"message\": \"Not Found\"}" > "$out"; printf 404; fi' \
+	> "${T}/gbin/curl"
+chmod +x "${T}/gbin/curl"
+{
+	printf '%s\n' 'set -euo pipefail' 'sleep() { echo "SLEPT $*"; exit 8; }'
+	printf '%s' "${gate}${GATE_END}"
+} > "${T}/gate.sh"
+gkey() { printf '%s' "${1//[^A-Za-z0-9]/_}"; }
+gput() { printf '%s\n' "$2" > "${G}/$(gkey "$1").json"; } # path body
+gfail() { : > "${G}/fail-$(gkey "$1")"; }                  # path
+RUNS_Q="/actions/workflows/3/runs?head_sha=${SHA}&status=queued&per_page=100"
+RUNS_P="/actions/workflows/3/runs?head_sha=${SHA}&status=in_progress&per_page=100"
+REVIEWS="/pulls/12/reviews?&per_page=100&page=1"
+gate_setup() { # a code change, no twin, no verdict
+	rm -rf "${G}"
+	mkdir -p "${G}"
+	gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "app/src/main/kotlin/A.kt"}]}'
+	gput /actions/runs/500 '{"id": 500, "workflow_id": 3}'
+	gput "${RUNS_Q}" '{"workflow_runs": []}'
+	gput "${RUNS_P}" '{"workflow_runs": []}'
+	gput /pulls/12 '{"labels": [{"name": "code-review"}, {"name": "task:ready"}]}'
+	gput "${REVIEWS}" '[]'
+	gput "/pulls/12/reviews?&per_page=100&page=2" '[]'
+}
+grun() { gruns "$1" "$2:$3"; } # list-path run-id title
+gruns() { # list-path id:title...
+	local path=$1 spec
+	shift
+	gput "${path}" "$(for spec in "$@"; do jq -cn --argjson id "${spec%%:*}" --arg t "${spec#*:}" '{id: $id, display_title: $t}'; done | jq -cs '{workflow_runs: .}')"
+}
+gjobs() { gput "/actions/runs/$1/jobs?per_page=100" "$(jq -cn --arg s "$2" '{jobs: [{name: "scope", status: "completed"}, {name: "Codex review", status: $s}]}')"; }
+gverdict() { gput "${REVIEWS}" "$(arr "$(review 7 2026-11-09T10:00:00Z 1 "" "$1")")"; }
+gate_run() {
+	RC=0
+	OUT=$(cd "${G}" && PATH="${T}/gbin:${PATH}" G="${G}" GH_API_TOKEN=t FORGE=github REVIEWER="${REVIEWER}" \
+		REPO_API="${GAPI}" PR_NUM=12 EVENT_SHA="${SHA}" BASE_SHA="${OTHER_SHA}" BASE_REF=main \
+		NO_REVIEW_PATHS='^docs/.+$' DOCS_PATHS='^docs/.+$' SCOPE_SKIP=false SCOPE_RESULT=success \
+		REVIEW_RESULT=skipped GITHUB_RUN_ID=500 bash "${T}/gate.sh" 2>&1) || RC=$?
+}
+reads() { jq -Rrs --arg p "$1" 'split("\n") | map(select(. == $p)) | length' "${G}/urls"; }
+twin_msg() { echo "the Codex review of ${SHA} runs in run $1; that run's gate posts this head's check (verdict here: $2;"; }
+
+# (a) An APPROVED head passes, a twin queued or not.
+gate_setup
+grun "${RUNS_Q}" 501 "${mine}"
+gjobs 501 queued
+gverdict APPROVED
+gate_run
+check "F an approved head passes with a twin's review queued" \
+	"${RC} $(yn contains "${OUT}" "${REVIEWER} approved ${SHA}.") $(yn contains "${OUT}" SLEPT)" "0 yes no"
+
+# (b) Not approved while a twin's review of the head is queued or in progress:
+# the gate fails at once (exit 3, no sleep), naming the twin.
+gate_setup
+grun "${RUNS_Q}" 501 "${mine}"
+gjobs 501 queued
+gate_run
+check "F a twin's queued review fails the gate at once, naming the twin" \
+	"${RC} $(yn contains "${OUT}" "$(twin_msg 501 NONE)") $(yn contains "${OUT}" SLEPT)" "3 yes no"
+check "F ... each twin list is read once" "$(reads "${RUNS_Q}") $(reads "${RUNS_P}")" "1 1"
+gate_setup
+gruns "${RUNS_P}" "500:${mine}" "504:Code Review: PR #120 into main at ${SHA}" "502:${mine}"
+gjobs 504 in_progress
+gjobs 502 in_progress
+gverdict REQUEST_CHANGES
+gate_run
+check "F a twin's review in progress fails the gate at once, naming that twin (not self, not another PR)" \
+	"${RC} $(yn contains "${OUT}" "$(twin_msg 502 REQUEST_CHANGES)") $(yn contains "${OUT}" SLEPT)" "3 yes no"
+gate_setup
+grun "${RUNS_Q}" 501 "${mine}"
+gjobs 501 queued
+grun "${RUNS_P}" 502 "${mine}"
+gjobs 502 in_progress
+gate_run
+check "F two twins: the gate names the first" "${RC} $(yn contains "${OUT}" "$(twin_msg 501 NONE)")" "3 yes"
+gate_setup
+grun "${RUNS_P}" 502 "${mine}"
+gjobs 502 completed
+gate_run
+check "F a twin whose review has ended is no twin: no approval fails as before" \
+	"${RC} $(yn contains "${OUT}" "no ${REVIEWER} approval of ${SHA}.") $(yn contains "${OUT}" "runs in run")" "3 yes no"
+
+# (c) No twin and no approval fails as before.
+gate_setup
+gate_run
+check "F no twin, no approval: the gate fails as before" \
+	"${RC} $(yn contains "${OUT}" "no ${REVIEWER} approval of ${SHA}.") $(yn contains "${OUT}" "runs in run") $(yn contains "${OUT}" SLEPT)" \
+	"3 yes no no"
+gate_setup
+gverdict REQUEST_CHANGES
+gate_run
+check "F no twin, changes requested: the gate fails as before" \
+	"${RC} $(yn contains "${OUT}" "${REVIEWER} requested changes on ${SHA}")" "3 yes"
+
+# (d) An API error listing runs or jobs fails closed, an approval or not.
+for st in queued in_progress; do
+	gate_setup
+	gverdict APPROVED
+	if [ "${st}" = queued ]; then gfail "${RUNS_Q}"; else gfail "${RUNS_P}"; fi
+	gate_run
+	check "F a failed list of the ${st} runs fails closed over an approval" \
+		"${RC} $(yn contains "${OUT}" "cannot list the ${st} runs on ${SHA}") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+done
+gate_setup
+gverdict APPROVED
+gput "${RUNS_Q}" '<html>502 Bad Gateway</html>'
+gate_run
+check "F an unreadable list of runs fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot list the queued runs on ${SHA}") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+grun "${RUNS_Q}" 501 "${mine}"
+gfail "/actions/runs/501/jobs?per_page=100"
+gate_run
+check "F a failed read of a twin's jobs fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read the jobs of run 501") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+grun "${RUNS_P}" 501 "${mine}"
+gput "/actions/runs/501/jobs?per_page=100" '<html>502 Bad Gateway</html>'
+gate_run
+check "F an unreadable list of a twin's jobs fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read the jobs of run 501") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gfail /actions/runs/500
+gate_run
+check "F a failed read of its own run fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "GET /actions/runs/500 answered HTTP 500") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gput /actions/runs/500 '{"id": 500}'
+gate_run
+check "F an own run with no workflow fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read this run's workflow") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
 
 check "nothing called curl" "$(yn [ ! -e "${T}/curl.log" ])" yes
 echo "$((total - fails)) of ${total} passed"
