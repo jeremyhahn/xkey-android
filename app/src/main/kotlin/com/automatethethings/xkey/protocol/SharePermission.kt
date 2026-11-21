@@ -22,9 +22,10 @@ import com.automatethethings.xkey.storage.entity.SharingPolicyType
  *    cleanup deletes them; while that revocation is pending those rows must
  *    not authorize it (fail closed, #174).
  *
- * With a [KeyPolicyStore] (#193), the policy decided on is the one the store
- * enforces: a narrowing whose write failed stays denied, a restart included.
- * A peer whose withdrawal is still being retried is refused, and a
+ * The policy decided on is the one the [KeyPolicyStore] enforces (#193): a
+ * narrowing whose write failed stays denied, a restart included. The store
+ * is mandatory, so no transport (BLE included) can decide from the key row
+ * alone. A peer whose withdrawal is still being retried is refused, and a
  * SELECTED_PEERS grant is read from its row alone, never from the stored
  * policy, which may still be All Peers while a Selected Peers change is
  * pending (#174).
@@ -32,20 +33,18 @@ import com.automatethethings.xkey.storage.entity.SharingPolicyType
 class SharePermission(
     private val grants: KeySharingPolicyDao,
     private val pairedDevices: PairedDeviceRepository?,
-    private val policies: KeyPolicyStore? = null
+    private val policies: KeyPolicyStore
 ) {
 
     suspend fun canShare(entity: KeyEntity, peerPublicKeyHex: String?): Boolean {
         if (KeySharingPeers.isWithdrawalPending(entity.keyId, entity.id, peerPublicKeyHex)) return false
-        val policy = policies?.enforcedPolicy(entity) ?: entity.sharingPolicy
-        return when (policy) {
+        return when (policies.enforcedPolicy(entity)) {
             SharingPolicyType.PRIVATE -> false
             SharingPolicyType.ALL_PEERS -> true
             SharingPolicyType.SELECTED_PEERS -> when {
                 peerPublicKeyHex.isNullOrEmpty() -> false
                 pairedDevices?.isRevocationPending(peerPublicKeyHex) == true -> false
-                policies != null -> grants.isPeerGranted(entity.keyId, peerPublicKeyHex)
-                else -> grants.isKeySharedWithPeer(entity.keyId, peerPublicKeyHex)
+                else -> grants.isPeerGranted(entity.keyId, peerPublicKeyHex)
             }
         }
     }

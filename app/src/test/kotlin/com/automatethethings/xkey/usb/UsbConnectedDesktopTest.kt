@@ -232,7 +232,11 @@ class UsbConnectedDesktopTest {
                 keyId = "k", keyType = "signing", algorithm = "EC", label = "label", keySizeBits = 256,
                 sharingPolicy = SharingPolicyType.ALL_PEERS, source = "local"
             )
-            val permission = SharePermission(mockk<KeySharingPolicyDao>(relaxed = true), harness.repo)
+            val permission = SharePermission(
+                mockk<KeySharingPolicyDao>(relaxed = true),
+                harness.repo,
+                com.automatethethings.xkey.storage.FakeKeyPolicyTables().store()
+            )
             val outcome = async {
                 DesktopKeyShare(session, 10_000).send(
                     SharePermissionLedger.baselineForTest(key.keyId), key, null, PEM, null, permission

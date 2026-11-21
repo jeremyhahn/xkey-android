@@ -61,8 +61,8 @@ class SharePermissionChokePointTest {
     @Test
     fun onlySharePermissionReadsAPeerGrant() {
         assertEquals(
-            "a share decision outside SharePermission reads key_sharing_policies",
-            setOf("SharePermission.kt"),
+            "a share decision reads the stored policy's grant query, not the grant row",
+            emptySet<String>(),
             filesCalling(".isKeySharedWithPeer(")
         )
         assertEquals(
