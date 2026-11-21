@@ -237,4 +237,21 @@ class GrantedSidecarDestinationTest {
         assertEquals("a".repeat(64), XmpMetadataHelper.readSignature(capture.path)?.signatures?.single()?.keyFingerprint)
         assertEquals("a".repeat(64), XmpMetadataHelper.readSidecar(context, uri)?.signatures?.single()?.keyFingerprint)
     }
+
+    @Test
+    fun `no function but the one choke point derives a capture's sidecar file`() {
+        val source = File("src/main/kotlin/com/automatethethings/xkey/media/XmpMetadataHelper.kt").readText()
+        val functions = Regex("""\bfun\s+(?:<[^>]*>\s*)?(\w+)\s*\(""").findAll(source).toList()
+        fun enclosing(index: Int): String = functions.last { it.range.first < index }.groupValues[1]
+        val derivations = Regex("""(?<!fun )\bownedSidecarFile\(|File\(getSidecarPath\(""").findAll(source)
+            .map { enclosing(it.range.first) to it.value }
+            .toList()
+
+        assertTrue("the choke point derives the sidecar", derivations.any { it.first == "authoritativeSidecar" })
+        // The two staged-copy uses in signMedia name the private copy's own sidecar, never the capture's.
+        val stagedCopy = derivations.filter { it.first == "signMedia" }
+        assertEquals(listOf("File(getSidecarPath(", "File(getSidecarPath("), stagedCopy.map { it.second })
+        val bypasses = derivations.filter { it.first != "authoritativeSidecar" && it.first != "signMedia" }
+        assertEquals("every sidecar read and write asks authoritativeSidecar", emptyList<Pair<String, String>>(), bypasses)
+    }
 }

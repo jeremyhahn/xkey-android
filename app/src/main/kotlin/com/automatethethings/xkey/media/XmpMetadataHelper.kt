@@ -507,26 +507,43 @@ object XmpMetadataHelper {
         }
     }
 
-    /** The sidecar beside [filePath], replaced atomically ([MediaPublisher.replaceFile]). */
     /**
-     * The sidecar of [filePath] as it stands: the one beside it, else the
-     * one xKey owns for media another app owns ([ownedSidecarLocation]) when
-     * that exists, else the one beside it. Reads and the path writes
-     * ([writeSidecarSignature], so [appendSignature]) both go through here,
-     * so a signature is written back where it was read from.
+     * The one authoritative sidecar of the media at [filePath] (or at [uri]
+     * when no file is named). Every sidecar read and every sidecar write
+     * derives its file from here, with one precedence:
+     * 1. the file xKey owns for it ([ownedSidecarLocation]) when it exists:
+     *    the writer for media another app owns ([writeOwnedSidecar]) only
+     *    ever writes there, so when it exists it is the newer one. It is
+     *    named for the file, or for [uri] when the writer had no file; when
+     *    both exist, the one written last;
+     * 2. else the legacy sidecar beside [filePath] when it exists, so a
+     *    capture signed before the owned location still reads and an append
+     *    to xKey's own media stays in it;
+     * 3. else where a new write by path goes: beside [filePath] (xKey's own
+     *    media, or media another app owns before Android 10), else the owned
+     *    one named for [uri]. Media another app owns takes its first sidecar
+     *    through [writeOwnedSidecar], at the owned location, and from then on
+     *    reads and appends find it at step 1.
+     * Null only when no file is named and there is no shared storage root.
      */
-    private fun sidecarFileOf(filePath: String): File {
-        val beside = File(getSidecarPath(filePath))
-        if (beside.exists()) return beside
-        return ownedSidecarFile(filePath, null)?.takeIf { it.exists() } ?: beside
+    private fun authoritativeSidecar(filePath: String?, uri: Uri?): File? {
+        val owned = listOfNotNull(
+            filePath?.let { ownedSidecarFile(it, uri) },
+            uri?.let { ownedSidecarFile(null, it) }
+        ).distinct().filter { it.isFile }
+        owned.maxByOrNull { it.lastModified() }?.let { return it }
+        val beside = filePath?.let { File(getSidecarPath(it)) }
+        if (beside != null && beside.exists()) return beside
+        return beside ?: uri?.let { ownedSidecarFile(null, it) }
     }
 
     /**
      * The sidecar signature of the media at [uri], read where the signer
      * wrote it: the viewer's one sidecar lookup. A file, or a MediaStore
-     * item whose file MediaStore names, reads through [sidecarFileOf]:
-     * beside it, else the file xKey owns for it under `Documents/xKey/`
-     * ([ownedSidecarLocation]). A MediaStore item with no file reads the
+     * item with the file MediaStore names for it, reads the one
+     * [authoritativeSidecar] picks: the file xKey owns for it under
+     * `Documents/xKey/` ([ownedSidecarLocation]) when it exists, else the
+     * legacy one beside the file. A MediaStore item with no file reads the
      * owned one named for the URI. Every spelling of a MediaStore item, its
      * media document URI included, reads as the item itself
      * ([MediaPublisher.canonicalMediaUri]), as the writer names it; another
@@ -537,16 +554,14 @@ object XmpMetadataHelper {
         val item = MediaPublisher.canonicalMediaUri(uri)
         when {
             uri.scheme == ContentResolver.SCHEME_FILE -> uri.path?.let(::readSidecarSignature)
-            item.authority == MediaStore.AUTHORITY -> mediaFilePath(context, item)?.let(::readSidecarSignature)
-                ?: readSidecarFile(ownedSidecarFile(null, item))
+            item.authority == MediaStore.AUTHORITY -> readSidecarFile(authoritativeSidecar(mediaFilePath(context, item), item))
             DocumentsContract.isDocumentUri(context, uri) -> {
                 val sidecar = DocumentsContract.buildDocumentUriUsingTree(
                     uri, DocumentsContract.getDocumentId(uri) + SIDECAR_SUFFIX
                 )
                 context.contentResolver.openInputStream(sidecar)?.use { ContentAuthenticityData.fromJsonStream(it) }
             }
-            else -> mediaFilePath(context, uri)?.let(::readSidecarSignature)
-                ?: readSidecarFile(ownedSidecarFile(null, uri))
+            else -> readSidecarFile(authoritativeSidecar(mediaFilePath(context, uri), uri))
         }
     } catch (_: Exception) {
         null
@@ -563,15 +578,18 @@ object XmpMetadataHelper {
         null
     }
 
+    /** Write [data] to the sidecar of [filePath] ([authoritativeSidecar]), replaced atomically ([MediaPublisher.replaceFile]). */
     private fun writeSidecarSignature(filePath: String, data: ContentAuthenticityData) {
-        MediaPublisher.replaceFile(sidecarFileOf(filePath)) { temp -> temp.writeText(data.toJsonString()); true }
+        val sidecar = checkNotNull(authoritativeSidecar(filePath, null)) { "a named file always has a sidecar" }
+        MediaPublisher.replaceFile(sidecar) { temp -> temp.writeText(data.toJsonString()); true }
     }
 
     /**
      * Where the sidecar of [filePath] (or of [uri] when no file is named)
      * goes when the media is not xKey's own: the one sidecar identity, which
-     * the writer ([writeOwnedSidecar]) and every reader ([sidecarFileOf],
-     * [readSidecar]) derive the owned sidecar from. A file xKey owns under
+     * the writer ([writeOwnedSidecar]) publishes to and [authoritativeSidecar],
+     * which every read and every later write asks, prefers over the legacy
+     * sidecar beside the media when it exists. A file xKey owns under
      * `Documents/xKey/`, at the media's own directory (under `volumes/` with
      * its full path when it is not on primary storage, so captures sharing a
      * name in different directories or volumes never share a sidecar), named
@@ -641,8 +659,9 @@ object XmpMetadataHelper {
         MediaPublisher.writeOwned(context, target.uri, data.toJsonString().toByteArray(Charsets.UTF_8), target.created)
     }
 
-    // Beside the media, or, for media another app owns, the sidecar xKey owns for it.
-    private fun readSidecarSignature(filePath: String): ContentAuthenticityData? = readSidecarFile(sidecarFileOf(filePath))
+    // The sidecar xKey owns for the media when it exists, else the legacy one beside it ([authoritativeSidecar]).
+    private fun readSidecarSignature(filePath: String): ContentAuthenticityData? =
+        readSidecarFile(authoritativeSidecar(filePath, null))
 
     private fun readSidecarFile(sidecarFile: File?): ContentAuthenticityData? {
         return try {
