@@ -416,20 +416,57 @@ class BiometricActivityLauncher(
         keyAlias: String? = null,
         signatureAlgorithm: String? = null,
         onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> }
+    ): ByteArray = cryptoSignature(
+        credentialId, title, subtitle, showOnLockScreen, keyAlias, onLaunch,
+        eager = dataHash, signatureAlgorithm = signatureAlgorithm
+    )
+
+    /**
+     * As [requestCryptoSignature], but what is signed comes from
+     * [signedData], called once this request's turn on screen has come and
+     * before its prompt starts: a passkey's counter is read then, so no other
+     * approval can sign a later count for that passkey in between. A
+     * [signedData] that throws fails the request with that exception and
+     * nothing is shown.
+     */
+    suspend fun requestCryptoSignatureOnTurn(
+        credentialId: String,
+        signedData: suspend () -> ByteArray,
+        title: String,
+        subtitle: String,
+        showOnLockScreen: Boolean = false,
+        keyAlias: String? = null,
+        onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> }
+    ): ByteArray =
+        cryptoSignature(credentialId, title, subtitle, showOnLockScreen, keyAlias, onLaunch, signedData = signedData)
+
+    private suspend fun cryptoSignature(
+        credentialId: String,
+        title: String,
+        subtitle: String,
+        showOnLockScreen: Boolean,
+        keyAlias: String?,
+        onLaunch: (requestId: String, prompt: Intent) -> Unit,
+        eager: ByteArray? = null,
+        signedData: (suspend () -> ByteArray)? = null,
+        signatureAlgorithm: String? = null
     ): ByteArray {
         check(isRegistered) {
             "BiometricActivityLauncher must be registered before requesting crypto signature"
         }
 
-        val dataHashBase64 = Base64.getEncoder().encodeToString(dataHash)
+        var dataHashBase64 = eager?.let { Base64.getEncoder().encodeToString(it) }
+        val prepare: (suspend () -> Unit)? = signedData?.let { data ->
+            { dataHashBase64 = Base64.getEncoder().encodeToString(data()) }
+        }
 
         // Cancelling this coroutine dismisses the prompt and signs nothing.
-        val result = pendingCryptoRequests.await { requestId ->
+        val result = pendingCryptoRequests.await(prepare) { requestId ->
             val intent = CryptoSigningActivity.createIntent(
                 context = context,
                 requestId = requestId,
                 credentialId = credentialId,
-                dataHashBase64 = dataHashBase64,
+                dataHashBase64 = checkNotNull(dataHashBase64),
                 title = title,
                 subtitle = subtitle,
                 showOnLockScreen = showOnLockScreen,
