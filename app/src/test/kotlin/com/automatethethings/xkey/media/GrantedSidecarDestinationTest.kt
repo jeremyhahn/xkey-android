@@ -85,9 +85,10 @@ class GrantedSidecarDestinationTest {
             override fun hasWriteGrant(context: Context, uri: Uri): Boolean = true
             override fun createWriteRequest(context: Context, uris: List<Uri>): PendingIntent =
                 PendingIntent.getActivity(context, 0, Intent(), PendingIntent.FLAG_IMMUTABLE)
-            override fun ownedFile(context: Context, relativePath: String, displayName: String): Uri {
+            override fun ownedFile(context: Context, relativePath: String, displayName: String): MediaPublisher.OwnedFile {
                 ownedRequests += relativePath to displayName
-                return Uri.fromFile(owned)
+                // MediaStore inserts the entry when none of that name exists yet.
+                return MediaPublisher.OwnedFile(Uri.fromFile(owned), created = !owned.isFile)
             }
         }
         MediaWriteAuthorizations.clear(context)

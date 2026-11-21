@@ -32,6 +32,7 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -159,8 +160,13 @@ object MediaPublisher {
      * write that fails puts the earlier bytes back ([restore]); one that
      * cannot be put back keeps its journal, and the next write of [target]
      * restores it first ([recoverInterruptedWrite]).
+     *
+     * Only a file this publish [created] ([OwnedFile.created]) is backed up
+     * as empty. An existing one is read whole first: a read that fails, for
+     * any reason, ends the update before anything is recorded or written, so
+     * no empty or partial backup can stand in for its signature.
      */
-    fun writeOwned(context: Context, target: Uri, bytes: ByteArray): Unit = synchronized(grantedWrites) {
+    fun writeOwned(context: Context, target: Uri, bytes: ByteArray, created: Boolean = false): Unit = synchronized(grantedWrites) {
         recoverInterruptedWrite(context, target)
         val resolver = context.contentResolver
         val directory = recoveryDirectory(context)
@@ -174,11 +180,8 @@ object MediaPublisher {
                     out.fd.sync()
                 }
                 FileOutputStream(previous).use { out ->
-                    try {
-                        openOriginalUnchecked(context, target).use { it.copyTo(out) }
-                    } catch (_: java.io.FileNotFoundException) {
-                        // A file not created yet holds no earlier signature: its backup is empty.
-                    }
+                    // A file this publish inserted holds no earlier signature: its backup is empty.
+                    if (!created) openOriginalUnchecked(context, target).use { it.copyTo(out) }
                     out.fd.sync()
                 }
                 journal.commit(previous, staged)
@@ -232,9 +235,17 @@ object MediaPublisher {
          * before Android 10, which has no scoped storage to refuse a file
          * beside the capture.
          */
-        fun ownedFile(context: Context, relativePath: String, displayName: String): Uri? =
+        fun ownedFile(context: Context, relativePath: String, displayName: String): OwnedFile? =
             PlatformMediaStore.ownedFile(context, relativePath, displayName)
     }
+
+    /**
+     * A file xKey owns in MediaStore ([MediaStoreAccess.ownedFile]) at [uri]:
+     * [created] when this call inserted it, so it holds nothing yet; else an
+     * existing entry, whose bytes (an earlier signature) [writeOwned] must
+     * back up whole before it writes.
+     */
+    data class OwnedFile(val uri: Uri, val created: Boolean)
 
     /** The platform's MediaStore. */
     object PlatformMediaStore : MediaStoreAccess {
@@ -253,7 +264,7 @@ object MediaPublisher {
             return MediaStore.createWriteRequest(context.contentResolver, uris)
         }
 
-        override fun ownedFile(context: Context, relativePath: String, displayName: String): Uri? {
+        override fun ownedFile(context: Context, relativePath: String, displayName: String): OwnedFile? {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
             val files = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val resolver = context.contentResolver
@@ -263,14 +274,17 @@ object MediaPublisher {
                 "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
                 arrayOf(relativePath, displayName),
                 null
-            )?.use { cursor -> if (cursor.moveToFirst()) return ContentUris.withAppendedId(files, cursor.getLong(0)) }
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) return OwnedFile(ContentUris.withAppendedId(files, cursor.getLong(0)), created = false)
+            }
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
                 // A generic type, so MediaStore keeps the .xkeysig suffix as named.
                 put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
                 put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
             }
-            return resolver.insert(files, values) ?: throw IOException("MediaStore refused $relativePath$displayName")
+            val inserted = resolver.insert(files, values) ?: throw IOException("MediaStore refused $relativePath$displayName")
+            return OwnedFile(inserted, created = true)
         }
     }
 
@@ -320,8 +334,8 @@ object MediaPublisher {
      * require-original all name the same external item, since MediaStore
      * numbers every external volume's items in one table; the internal volume
      * stays its own. Any other URI is its own identity. Every granted-write
-     * journal is keyed on it ([GrantedWriteJournal.of]). A URI whose parts
-     * cannot be read is its own identity.
+     * journal is keyed on the item it names ([mediaItemIdentity]). A URI
+     * whose parts cannot be read is its own identity.
      */
     fun canonicalMediaUri(target: Uri): Uri =
         try {
@@ -355,6 +369,38 @@ object MediaPublisher {
             else -> return target
         }
     }
+
+    /**
+     * [target]'s one MediaStore item identity, its volume and item ID: the
+     * key of every granted-write journal ([GrantedWriteJournal.of]), so the
+     * writer, [openOriginal] and every recovery find the same record. An
+     * item's images, video or audio URI, its Files and Downloads URIs and its
+     * media document ([canonicalMediaUri]) all name one row of MediaStore's
+     * files table, so they share it. Any other URI, or one whose parts
+     * cannot be read, is its own identity.
+     */
+    fun mediaItemIdentity(target: Uri): String =
+        try {
+            mediaItemIdentityOf(target)
+        } catch (_: RuntimeException) {
+            target.toString()
+        }
+
+    private fun mediaItemIdentityOf(target: Uri): String {
+        val item = canonicalMediaUri(target)
+        if (item.scheme != ContentResolver.SCHEME_CONTENT || item.authority != MediaStore.AUTHORITY) return item.toString()
+        val segments = item.pathSegments
+        val id = when {
+            segments.size == 4 && segments[2] == "media" && segments[1] in MEDIA_TYPES -> segments[3]
+            segments.size == 3 && segments[1] in FILES_COLLECTIONS -> segments[2]
+            else -> null
+        }?.toLongOrNull() ?: return item.toString()
+        val volume = if (segments[0] == MediaStore.VOLUME_INTERNAL) MediaStore.VOLUME_INTERNAL else "external"
+        return "${ContentResolver.SCHEME_CONTENT}://${MediaStore.AUTHORITY}/$volume/item/$id"
+    }
+
+    private val MEDIA_TYPES = setOf("images", "video", "audio")
+    private val FILES_COLLECTIONS = setOf("file", "downloads")
 
     private fun mediaItemUri(volume: String, type: String, id: Long): Uri =
         Uri.Builder().scheme(ContentResolver.SCHEME_CONTENT).authority(MediaStore.AUTHORITY)
@@ -420,11 +466,28 @@ object MediaPublisher {
      * that view is readable, and [RecoveryPendingException] while a granted
      * write of it is recorded and not put back ([recoveryPending]): its bytes
      * may be part-written, so nothing hashes, signs, stages or shows them.
+     *
+     * The capture is read whole into a private snapshot while the
+     * granted-write lock is held, and the stream returned reads that
+     * snapshot: a granted write ([writeGranted]) overwrites in place under
+     * the same lock, so a reader gets the capture as it was before the write
+     * or after it, never bytes of both. The snapshot is unlinked once open,
+     * so nothing of it outlives the stream; one a process died copying is a
+     * dead save's working file ([MediaSaveRuns.sweep]).
      */
-    fun openOriginal(context: Context, target: Uri): InputStream {
-        val journal = GrantedWriteJournal.of(recoveryDirectory(context), target)
+    fun openOriginal(context: Context, target: Uri): InputStream = synchronized(grantedWrites) {
+        val directory = recoveryDirectory(context)
+        val journal = GrantedWriteJournal.of(directory, target)
         if (journal.recorded()) throw RecoveryPendingException(target, journal.backup)
-        return openOriginalUnchecked(context, target)
+        val snapshot = MediaSaveRuns.work(directory, ".read")
+        try {
+            openOriginalUnchecked(context, target).use { input ->
+                FileOutputStream(snapshot).use { input.copyTo(it) }
+            }
+            FileInputStream(snapshot)
+        } finally {
+            snapshot.delete()
+        }
     }
 
     /**
@@ -741,10 +804,10 @@ object MediaPublisher {
      * part-restored capture from one edited since ([explains]).
      */
     class GrantedWriteJournal private constructor(private val directory: File, private val uri: Uri) {
-        // Keyed on the capture's one media identity, so every spelling of it
-        // finds this journal; the record keeps the URI the write was made through.
+        // Keyed on the capture's one MediaStore item identity, so every spelling
+        // of it finds this journal; the record keeps the URI the write was made through.
         private val key = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(canonicalMediaUri(uri).toString().toByteArray()).joinToString("") { "%02x".format(it) }
+            .digest(mediaItemIdentity(uri).toByteArray()).joinToString("") { "%02x".format(it) }
 
         val backup = File(directory, "$PREFIX$key.bak")
         val written = File(directory, "$PREFIX$key.new")
@@ -837,7 +900,7 @@ object MediaPublisher {
 
             /**
              * The journal of [uri]'s granted write in [directory]: the only way
-             * one is made, keyed on [canonicalMediaUri], so a capture written
+             * one is made, keyed on [mediaItemIdentity], so a capture written
              * through one spelling is found through any other.
              */
             fun of(directory: File, uri: Uri): GrantedWriteJournal = GrantedWriteJournal(directory, uri)

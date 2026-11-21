@@ -630,7 +630,7 @@ object XmpMetadataHelper {
             writeSidecarSignature(path, data)
             return
         }
-        MediaPublisher.writeOwned(context, target, data.toJsonString().toByteArray(Charsets.UTF_8))
+        MediaPublisher.writeOwned(context, target.uri, data.toJsonString().toByteArray(Charsets.UTF_8), target.created)
     }
 
     // Beside the media, or, for media another app owns, the sidecar xKey owns for it.
