@@ -368,6 +368,9 @@ class GattServer(
     @Volatile
     private var isStarting = false
 
+    /** Start against stop and destroy: a start that finishes after either publishes nothing. */
+    private val startGeneration = LifecycleGeneration()
+
     // Latch to wait for service to be added
     @Volatile
     private var serviceAddedLatch: CountDownLatch? = null
@@ -381,6 +384,8 @@ class GattServer(
     @Synchronized
     fun start(): Boolean {
         Log.i(TAG, "start() called")
+        // Destroyed: nothing starts again.
+        val token = startGeneration.begin() ?: return false
         if (isRunning) {
             Log.w(TAG, "GATT server already running")
             return true
@@ -421,8 +426,14 @@ class GattServer(
 
         try {
             Log.d(TAG, "Opening GATT server...")
-            gattServer = bluetoothManager?.openGattServer(context, gattCallback)
-            Log.d(TAG, "openGattServer result: ${gattServer != null}")
+            val opened = bluetoothManager?.openGattServer(context, gattCallback)
+            Log.d(TAG, "openGattServer result: ${opened != null}")
+            // Stopped while the stack opened it: close it and add nothing.
+            if (opened != null && !startGeneration.publish(token) { gattServer = opened }) {
+                runCatching { opened.close() }
+                isStarting = false
+                return false
+            }
         } catch (e: SecurityException) {
             Log.e(TAG, "SecurityException opening GATT server - check BLUETOOTH_CONNECT permission", e)
             isStarting = false
@@ -462,7 +473,13 @@ class GattServer(
             Thread.sleep(100)
         }
 
-        isRunning = true
+        // A stop that ran while the service was added closed the server it
+        // published; this start reports nothing running.
+        if (!startGeneration.publish(token) { isRunning = true }) {
+            Log.w(TAG, "GATT server stopped while it started")
+            isStarting = false
+            return false
+        }
         isStarting = false
 
         // Log all registered services for debugging
@@ -479,6 +496,8 @@ class GattServer(
      */
     @SuppressLint("MissingPermission")
     fun stop() {
+        // First, so a start still waiting on the stack publishes nothing.
+        startGeneration.advance()
         isRunning = false
 
         // Synchronous cleanup to prevent race conditions with subsequent start() calls.
@@ -519,6 +538,7 @@ class GattServer(
      * Releases all resources.
      */
     fun destroy() {
+        startGeneration.end()
         PairedDeviceRepository.removeRemovalListener(removalListener)
         stop()
         scope.cancel()

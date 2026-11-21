@@ -1,6 +1,6 @@
 # BLE transport architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
+> **Status: REFERENCE** · Last verified: 2026-11-17
 > As-built description of the BLE transport in xKey. The wire contract is `go-xkms/xkey/pkg/pairing`.
 
 This document describes the BLE communication protocol used between xKey
@@ -79,6 +79,47 @@ Fragment 0: flags=0x01 seq=0 total=3 len=237 [237 bytes payload]
 Fragment 1: flags=0x00 seq=1 total=3 len=237 [237 bytes payload]
 Fragment 2: flags=0x02 seq=2 total=3 len=126 [126 bytes payload]
 ```
+
+## FIDO GATT service (0xFFFD)
+
+Beside the xkey service, the phone is a standard CTAP2 BLE authenticator
+(CTAP 2.1, Bluetooth transport). It has its own `BluetoothGattServer`
+(`ble/fido/FidoGattServer.kt`), so the xkey service's table, callbacks,
+queues and framing above do not change. `XKeyGattService` starts it after the
+xkey GATT server (best effort: the xkey service runs without it) and stops and
+destroys it with that server. `Advertiser` adds the 16-bit UUID 0xFFFD to the
+advertisement: flags (3), the 128-bit xkey list (18) and the 16-bit list (4)
+fit the 31-byte PDU.
+
+| Characteristic | UUID | Properties | Permissions | Value |
+|----------------|------|------------|-------------|-------|
+| fidoControlPoint | `F1D0FFF1-DEAF-ADDA-1234-56789ABCDEF0` | write | write, encrypted MITM | request frames, at most 512 bytes |
+| fidoStatus | `F1D0FFF2-DEAF-ADDA-1234-56789ABCDEF0` | notify (CCCD read/write, encrypted MITM) | none | response frames |
+| fidoControlPointLength | `F1D0FFF3-DEAF-ADDA-1234-56789ABCDEF0` | read | read, encrypted MITM | 512, 2 bytes big-endian |
+| fidoServiceRevisionBitfield | `F1D0FFF4-DEAF-ADDA-1234-56789ABCDEF0` | read, write | read/write, encrypted MITM | 0x20 (FIDO2 only); a write of anything else is refused |
+
+The MITM permissions make the stack require an authenticated, encrypted bond
+before a client reads or writes, so a client pairs with the phone first.
+
+Framing (`ble/fido/FidoBleFraming.kt`) is the CTAP one, not the 7-byte xkey
+header: a CMD frame `CMD | HLEN | LLEN | DATA`, then CONT frames `SEQ | DATA`
+with SEQ 0..0x7F wrapping. Commands are PING 0x81 (echoed), KEEPALIVE 0x82,
+MSG 0x83, CANCEL 0xBE and ERROR 0xBF. `FidoBleReassembler` answers framing
+faults with an ERROR frame: a CONT without a CMD, a wrong SEQ, or a new CMD
+mid-message gives INVALID_SEQ; a message over 1024 bytes, or a frame
+carrying more than its CMD declared, gives INVALID_LEN. An unknown command
+gives INVALID_CMD.
+
+Each connected client gets one `FidoBleSession`. A MSG goes to
+`Ctap2Authenticator` (see
+[fido2-phone-backend](../fido2-phone-backend/architecture.md)); while it
+runs a KEEPALIVE goes out every 400 ms, PROCESSING, then UP_NEEDED once the
+phone prompts the user. CANCEL stops the request, which then answers
+CTAP2_ERR_KEEPALIVE_CANCEL. A second MSG while one runs answers ERROR BUSY.
+Replies are fragmented to the ATT MTU less 3 (20 bytes until the MTU changes)
+and notified one at a time: the next frame goes out on `onNotificationSent`.
+Frames are sent only while the client has notifications enabled. A
+disconnect closes the session and cancels its request.
 
 ## Service Configuration
 

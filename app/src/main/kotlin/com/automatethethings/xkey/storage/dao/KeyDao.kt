@@ -19,8 +19,10 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.flow.Flow
@@ -372,6 +374,114 @@ interface KeyDao {
     @RawKeyRowWrite
     @Query("DELETE FROM keys WHERE key_id = :keyId")
     suspend fun deleteRowByKeyId(keyId: String): Int
+
+    /**
+     * Delete the passkeys [read], each its key row and its
+     * `credential_metadata` row, in one transaction and as a revoke of each
+     * key, but only a passkey whose row is still the one the caller read and
+     * decided on: the same row ([KeyEntity.id]), at the same
+     * [KeyEntity.policyRevision], with the same sharing policy. A passkey the
+     * owner made private, shared with selected peers only, or otherwise
+     * changed the policy of since that read keeps both its rows; the check
+     * and the delete are one statement, so no policy write lands between them.
+     *
+     * Either every matching passkey's rows go or, when any delete throws,
+     * none does. Returns the key ids of the passkeys removed: only their
+     * Keystore keys are the caller's to delete, after this returns.
+     */
+    suspend fun deletePasskeyRows(read: List<KeyEntity>): List<String> {
+        suspend fun revokingAll(index: Int): List<String> =
+            if (index == read.size) deletePasskeyRowsInTransaction(read)
+            else SharePermissionLedger.revoking(read[index].keyId) { revokingAll(index + 1) }
+        return revokingAll(0)
+    }
+
+    /** Raw passkey rows delete in one transaction; call [deletePasskeyRows]. */
+    @RawKeyRowWrite
+    @Transaction
+    suspend fun deletePasskeyRowsInTransaction(read: List<KeyEntity>): List<String> =
+        read.filter { deletePasskeyRowIfUnchanged(it.id, it.keyId, it.policyRevision, it.sharingPolicy) == 1 }
+            .onEach { deleteMetadataRowByCredentialId(it.keyId) }
+            .map { it.keyId }
+
+    /**
+     * Raw conditional key row delete: 1 when that row still has that policy
+     * at that revision, else 0; call [deletePasskeyRows].
+     */
+    @RawKeyRowWrite
+    @Query(
+        """
+        DELETE FROM keys
+        WHERE id = :id AND key_id = :keyId AND policy_revision = :policyRevision
+            AND sharing_policy = :policy
+        """
+    )
+    suspend fun deletePasskeyRowIfUnchanged(id: Long, keyId: String, policyRevision: Long, policy: SharingPolicyType): Int
+
+    /** Raw `credential_metadata` delete; call [deletePasskeyRows]. */
+    @RawKeyRowWrite
+    @Query("DELETE FROM credential_metadata WHERE credential_id = :credentialId")
+    suspend fun deleteMetadataRowByCredentialId(credentialId: String): Int
+
+    /**
+     * Insert a new passkey's key row and its `credential_metadata` row in one
+     * transaction, as a revoke of its key: both rows are written or, when
+     * either insert throws, neither is. So no key row is ever left without
+     * the metadata the credential provider lists, nor metadata without its
+     * key row.
+     */
+    suspend fun insertPasskeyRows(key: KeyEntity, metadata: CredentialMetadataEntity) =
+        SharePermissionLedger.revoking(key.keyId) { insertPasskeyRowsInTransaction(key, metadata) }
+
+    /** Raw passkey rows insert in one transaction; call [insertPasskeyRows]. */
+    @RawKeyRowWrite
+    @Transaction
+    suspend fun insertPasskeyRowsInTransaction(key: KeyEntity, metadata: CredentialMetadataEntity) {
+        insertRow(key)
+        insertMetadataRow(metadata)
+    }
+
+    /** Raw `credential_metadata` insert-or-replace; call [insertPasskeyRows]. */
+    @RawKeyRowWrite
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMetadataRow(metadata: CredentialMetadataEntity): Long
+
+    /**
+     * Complete a new passkey's registration in one transaction: insert its
+     * key row and its `credential_metadata` row and delete the passkeys it
+     * replaces ([replaced], each only while its row is still as read, as in
+     * [deletePasskeyRows]), all or none. Its commit is the one point the
+     * passkey becomes whole, so no reader of `keys` or `credential_metadata`
+     * (the credential provider, the local list, a BLE client) ever sees a
+     * registration that did not complete: one that fails, is cancelled or
+     * whose process dies leaves none of its rows. Every key is written as a
+     * revoke. Returns the key ids of the replaced passkeys removed: only their
+     * Keystore keys are the caller's to delete, after this returns.
+     */
+    suspend fun completePasskeyRegistration(
+        key: KeyEntity,
+        metadata: CredentialMetadataEntity,
+        replaced: List<KeyEntity>
+    ): List<String> {
+        val ids = listOf(key.keyId) + replaced.map { it.keyId }
+        suspend fun revokingAll(index: Int): List<String> =
+            if (index == ids.size) completePasskeyRegistrationInTransaction(key, metadata, replaced)
+            else SharePermissionLedger.revoking(ids[index]) { revokingAll(index + 1) }
+        return revokingAll(0)
+    }
+
+    /** Raw registration commit in one transaction; call [completePasskeyRegistration]. */
+    @RawKeyRowWrite
+    @Transaction
+    suspend fun completePasskeyRegistrationInTransaction(
+        key: KeyEntity,
+        metadata: CredentialMetadataEntity,
+        replaced: List<KeyEntity>
+    ): List<String> {
+        insertRow(key)
+        insertMetadataRow(metadata)
+        return deletePasskeyRowsInTransaction(replaced)
+    }
 
     /**
      * Delete all FIDO2 keys for a relying party, each as a revoke of its key.

@@ -4394,8 +4394,9 @@ class RequestHandler(
      * approved uses. `generateKey` and `local.generateKey` reserve an id
      * under this one name too (#255 review r4), so two creations of one id
      * through the two methods never pass their existence checks together.
+     * The FIDO backend shares this lock through [storedKeyLockId].
      */
-    private fun keyLockId(keyId: String) = "key:$keyId"
+    private fun keyLockId(keyId: String) = storedKeyLockId(keyId)
 
     /**
      * Whether [signature] is one the key whose X.509 [publicKeyDer] this is
@@ -5344,11 +5345,21 @@ private class ApprovedKey(
 }
 
 /**
+ * The [KeyIdReservations.process] lock of stored key [keyId], which its
+ * deletion (local.deleteKey) and every approved use of it take: the JSON-RPC
+ * approval path here, and the BLE authenticator's signature. Held from an
+ * approved key's recheck through its signature, so no deletion, and so no
+ * new key under the same id, lands between the two.
+ */
+internal fun storedKeyLockId(keyId: String) = "key:$keyId"
+
+/**
  * Whether this row is still the key [other] was: the same row, type,
  * algorithm, key material, relying party, origin and sharing policy
- * revision. Use counters and the label may move on.
+ * revision. Use counters and the label may move on. A key deleted and made
+ * again under the same id is a new row, so it is never the same key.
  */
-private fun KeyEntity.isSameKeyAs(other: KeyEntity): Boolean =
+internal fun KeyEntity.isSameKeyAs(other: KeyEntity): Boolean =
     id == other.id &&
         keyId == other.keyId &&
         keyType == other.keyType &&
