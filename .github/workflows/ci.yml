@@ -1,5 +1,13 @@
-# ci-template: v1.49 — CI for a Kotlin/Gradle Android app, kept in step with a
+# ci-template: v1.51 — CI for a Kotlin/Gradle Android app, kept in step with a
 # shared template; change both together.
+# v1.51: `Runner labels` also checks every runs-on under pull_request_target,
+# where a fork's head never reaches a self-hosted runner.
+# (adapted: no `Runner labels` step here, see below. Every runs-on in
+# code-review.yml and signatures.yml, the pull_request_target workflows,
+# resolves to ubuntu-latest on github.com, so no change.)
+# v1.50: `Hosted or overflow runner` treats a queued list short of its
+# total_count as a lower bound that may still overflow.
+# (adapted: no overflow step here, see v1.48, so no short-list handling.)
 # v1.49: preflight runs on the bigdisk pool on github.com; CI_PREFLIGHT_RUNS_ON (runs-on JSON) switches it back.
 # (adapted, a repo line kept on every later adoption: preflight stays on
 # GitHub-hosted ubuntu-latest with no variable. This public repository has no
