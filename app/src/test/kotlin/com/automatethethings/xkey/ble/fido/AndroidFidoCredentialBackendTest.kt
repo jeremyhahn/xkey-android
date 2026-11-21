@@ -602,6 +602,37 @@ class AndroidFidoCredentialBackendTest {
         io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
     }
 
+    /**
+     * A replaced passkey's key goes from the namespace its row's key lives
+     * in, [kind]: a credential the phone registered, or a general key
+     * local.generateKey made for a fido2 row. Its first delete fails, and
+     * the next registration, as after a restart, retries it in the same
+     * namespace; the other namespace's key under the id is never touched.
+     */
+    private fun assertReplacedKeyDeletedIn(kind: com.automatethethings.xkey.crypto.UserKeyKind) = runTest {
+        val (keyRows, _) = storedResidents()
+        val other = com.automatethethings.xkey.crypto.UserKeyKind.entries.single { it != kind }
+        every { keystore.keyRowAlias(shared.keyId, any(), any()) } returns KeystoreManager.userKeyAlias(shared.keyId, kind)
+        every { keystore.deleteKey(shared.keyId, kind) } returns
+            com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED andThen
+            com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED
+
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", discoverable = true))
+        assertTrue("the old passkey's rows are gone", shared.keyId !in keyRows)
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", discoverable = false))
+
+        io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId, kind) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId, other) }
+    }
+
+    @Test
+    fun `a replaced passkey made by local generateKey loses its general key, on a retry too`() =
+        assertReplacedKeyDeletedIn(com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+
+    @Test
+    fun `a replaced passkey registered on the phone loses its credential key, on a retry too`() =
+        assertReplacedKeyDeletedIn(com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
+
     @Test
     fun `a failed resident registration leaves the old passkey usable`() = runTest {
         val (keyRows, metadataRows) = storedResidents()
