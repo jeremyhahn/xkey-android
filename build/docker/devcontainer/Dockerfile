@@ -234,6 +234,36 @@ RUN . /tmp/tool-pins.sh; \
       echo "lz4-java ${v} -> ${LZ4_JAVA_VERSION} in ${j##*/}"; \
     done; \
     rm -rf lz4 lz4.jar
+# lint's kotlin-compiler jar shades jline 3.24.1 for the Kotlin REPL:
+# jline-builtins (CVE-2026-77422) and jline-remote-telnet (CVE-2026-56740,
+# CVE-2026-56741, the last with no fixed release). No newer lint ships other
+# copies. lint never starts the REPL, and in the jar only jline's own console
+# and widget packages refer to builtins (telnet and ssh live under it); the
+# REPL's line reader needs only jline's reader and terminal, which stay. So
+# the builtins, console and widget packages and the Maven metadata of
+# jline-builtins, -remote-telnet and -remote-ssh leave the jar, which is
+# repacked in place; nothing left in it refers to them. A jar without
+# jline-builtins is left alone. The proof below runs lint on the stripped jar.
+RUN cd /tmp; \
+    pom=META-INF/maven/org.jline/jline-builtins/pom.properties; \
+    find /opt/gradle-ro-cache -name 'kotlin-compiler-*.jar' -print0 | while IFS= read -r -d '' j; do \
+      unzip -l "$j" "$pom" > /dev/null 2>&1 || continue; \
+      rm -rf kc kc.jar; \
+      mkdir kc; \
+      unzip -q "$j" -d kc; \
+      rm -rf kc/org/jline/builtins kc/org/jline/console kc/org/jline/widget \
+        kc/META-INF/maven/org.jline/jline-builtins kc/META-INF/maven/org.jline/jline-remote-telnet \
+        kc/META-INF/maven/org.jline/jline-remote-ssh; \
+      jar --create --file kc.jar --manifest kc/META-INF/MANIFEST.MF -C kc .; \
+      cp kc.jar "$j"; \
+      if unzip -l "$j" 'org/jline/builtins/*' 'org/jline/console/*' 'org/jline/widget/*' \
+           'META-INF/maven/org.jline/jline-builtins/*' 'META-INF/maven/org.jline/jline-remote-*' > /dev/null 2>&1; then \
+        echo "jline REPL packages still in ${j##*/}" >&2; \
+        exit 1; \
+      fi; \
+      echo "jline builtins, console and widget stripped from ${j##*/}"; \
+    done; \
+    rm -rf kc kc.jar
 # The proof: the same tasks again, --offline, from clean outputs and a fresh
 # writable GRADLE_USER_HOME holding only a copy of that cache (no build cache,
 # no configuration cache, so every task resolves its dependencies again). A
