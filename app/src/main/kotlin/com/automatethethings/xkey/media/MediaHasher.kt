@@ -192,10 +192,14 @@ object MediaHasher {
      * The signature embedded in the original bytes at [uri], typed
      * [mimeType], and the check of its content hash, both read from one
      * snapshot of the original ([withSnapshot]): the signature checked is the
-     * one in the bytes hashed. Null when the media carries none. Without
-     * location access it throws [MediaPublisher.OriginalUnavailableException].
+     * one in the bytes hashed. Null when the media carries none, and without
+     * a read for a type that carries no in-band signature. Without location
+     * access it throws [MediaPublisher.OriginalUnavailableException].
      */
     fun checkInBandUri(context: Context, uri: Uri, mimeType: String?): InBandCheck? {
+        val type = mimeType ?: ""
+        val jpeg = type.startsWith("image/jpeg") || type.startsWith("image/jpg")
+        if (!jpeg && XmpContainers.formatOf(type) == null) return null
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
         return withSnapshot({ MediaPublisher.openOriginal(context, uri) }, MediaPublisher.recoveryDirectory(context)) { snapshot, whole ->
             val data = XmpMetadataHelper.readSignatureFromSnapshot(snapshot, mimeType) ?: return@withSnapshot null

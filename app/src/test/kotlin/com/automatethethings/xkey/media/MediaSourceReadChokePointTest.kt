@@ -75,7 +75,8 @@ class MediaSourceReadChokePointTest {
             .filter { it.relativeTo(root).path.startsWith("ui/") }
             .associate { it.relativeTo(root).path to count(it.readText(), resolverCalls) }
             .filterValues { it > 0 }
-        // copyInPlace checks the document xKey wrote, through its resolver.
-        assertEquals("resolver reads of source media in ui/", mapOf("ui/CoSignActivity.kt" to 1), found)
+        // copyInPlace checks the document xKey wrote from one snapshot of it
+        // (MediaHasher.withSnapshot), so no resolver signature read is left.
+        assertEquals("resolver reads of source media in ui/", emptyMap<String, Int>(), found)
     }
 }
