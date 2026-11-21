@@ -83,6 +83,11 @@ class SoftwareKeyStore(
     cipher: KeystoreAeadCipher? = null,
     /** Moves a file, true when it was moved: a test fails it as a failed rename would. */
     private val rename: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
+    /**
+     * Writes a file's bytes: a test pauses it between a record's two files.
+     * Before [unlink], so a trailing lambda still names the unlink.
+     */
+    private val writeFile: (File, ByteArray) -> Unit = { file, bytes -> file.writeBytes(bytes) },
     /** Removes a file, true when it was removed: a test fails it as an I/O error would. */
     private val unlink: (File) -> Boolean = { it.delete() }
 ) {
@@ -100,6 +105,14 @@ class SoftwareKeyStore(
     private val writes: java.util.concurrent.atomic.AtomicLong =
         WRITES.computeIfAbsent(dir.absolutePath) { java.util.concurrent.atomic.AtomicLong() }
 
+    /**
+     * [dir]'s lock, shared by every instance over it: a record change's file
+     * steps ([recordChange]) and every scan or record read ([recordRead])
+     * never interleave.
+     */
+    private val lock: java.util.concurrent.locks.ReentrantReadWriteLock =
+        LOCKS.computeIfAbsent(dir.absolutePath) { java.util.concurrent.locks.ReentrantReadWriteLock() }
+
     /** The kept metadata scan of [legacyIndex], valid while [writes] is at its version. */
     @Volatile
     private var index: LegacyIndex? = null
@@ -116,25 +129,30 @@ class SoftwareKeyStore(
         val named: Map<String, Set<String>>
     )
 
-    /** Store (or replace) a software key, encrypting its material at rest. */
+    /**
+     * Store (or replace) a software key, encrypting its material at rest.
+     * The material is written first, then the metadata; both writes are one
+     * [recordChange], so no scan or read from any instance over this
+     * directory runs between them and sees the material without metadata.
+     */
     fun put(key: SoftwareKey) {
         requireValidKeyId(key.keyId)
         migrateLegacyRecords()
         val id = fileId(key.keyId)
-        try {
-            File(dir, "$id.key").writeBytes(cipher.encrypt(key.material))
-            File(dir, "$id.meta").writeText(
-            JSONObject().apply {
-                put("keyId", key.keyId)
-                put("algorithm", key.algorithm)
-                put("keyType", key.keyType)
-                put("keySize", key.keySize)
-                put("exportable", key.exportable)
-                put("shareable", key.shareable)
-            }.toString()
+        val sealed = cipher.encrypt(key.material)
+        recordChange {
+            writeFile(File(dir, "$id.key"), sealed)
+            writeFile(
+                File(dir, "$id.meta"),
+                JSONObject().apply {
+                    put("keyId", key.keyId)
+                    put("algorithm", key.algorithm)
+                    put("keyType", key.keyType)
+                    put("keySize", key.keySize)
+                    put("exportable", key.exportable)
+                    put("shareable", key.shareable)
+                }.toString().toByteArray(Charsets.UTF_8)
             )
-        } finally {
-            wrote()
         }
     }
 
@@ -144,24 +162,27 @@ class SoftwareKeyStore(
         val id = fileId(keyId)
         val keyFile = File(dir, "$id.key")
         val metaFile = File(dir, "$id.meta")
-        // The one presence probe (#255 review r8): a file whose lookup fails
-        // is unreadable, never a key that is not there; and material whose
-        // metadata does not name [keyId] is unreadable (#255 verify r4).
-        when (recordOf(keyId)) {
-            KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(keyId, null)
-            // An older build's record this id could be (one that names no
-            // id beside material, or one of this id left under its old
-            // name) is never read as no key.
-            KeyPresence.ABSENT -> if (legacyRecordOf(keyId) == KeyPresence.ABSENT) return null else
-                throw KeyPresenceUnreadableException(keyId, null)
-            KeyPresence.PRESENT -> {
-                if (filePresence(keyFile) != KeyPresence.PRESENT) return null
-                // Material whose metadata is gone (a put or an older build's
-                // delete stopped short) is this id's, but cannot be read.
-                if (filePresence(metaFile) != KeyPresence.PRESENT) throw KeyPresenceUnreadableException(keyId, null)
+        // Both files are read as one record: no change of it runs between.
+        val (meta, sealed) = recordRead {
+            // The one presence probe (#255 review r8): a file whose lookup fails
+            // is unreadable, never a key that is not there; and material whose
+            // metadata does not name [keyId] is unreadable (#255 verify r4).
+            when (recordOf(keyId)) {
+                KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(keyId, null)
+                // An older build's record this id could be (one that names no
+                // id beside material, or one of this id left under its old
+                // name) is never read as no key.
+                KeyPresence.ABSENT -> if (legacyRecordOf(keyId) == KeyPresence.ABSENT) return null else
+                    throw KeyPresenceUnreadableException(keyId, null)
+                KeyPresence.PRESENT -> {
+                    if (filePresence(keyFile) != KeyPresence.PRESENT) return null
+                    // Material whose metadata is gone (a put or an older build's
+                    // delete stopped short) is this id's, but cannot be read.
+                    if (filePresence(metaFile) != KeyPresence.PRESENT) throw KeyPresenceUnreadableException(keyId, null)
+                }
             }
+            readMetadata(metaFile, keyId) to readRecordFile(keyFile, keyId)
         }
-        val meta = readMetadata(metaFile, keyId)
         return SoftwareKey(
             keyId = keyId,
             algorithm = meta.optString("algorithm", ""),
@@ -169,7 +190,7 @@ class SoftwareKeyStore(
             keySize = meta.optInt("keySize", 0),
             exportable = meta.optBoolean("exportable", false),
             shareable = meta.optBoolean("shareable", false),
-            material = cipher.decrypt(readRecordFile(keyFile, keyId))
+            material = cipher.decrypt(sealed)
         )
     }
 
@@ -204,9 +225,13 @@ class SoftwareKeyStore(
                     KeyPresence.UNREADABLE
                 } else {
                     migrateLegacyRecords()
-                    when (val own = recordOf(keyId)) {
-                        KeyPresence.ABSENT -> legacyRecordOf(keyId)
-                        else -> own
+                    // The own record and the scan are read as one: no
+                    // record change runs between their files.
+                    recordRead {
+                        when (val own = recordOf(keyId)) {
+                            KeyPresence.ABSENT -> legacyRecordOf(keyId)
+                            else -> own
+                        }
                     }
                 }
             }
@@ -234,10 +259,17 @@ class SoftwareKeyStore(
      * The one scan of every record's metadata, read by [legacyRecordOf]:
      * kept until a write or delete of this store's directory, through any
      * instance ([writes]), so repeated presence checks read the metadata
-     * once (#255). A scan that a write overlaps carries the count from
-     * before it, so the next check scans again.
+     * once (#255). The scan runs under the read side of the directory's
+     * [lock] ([recordRead]) and every record change under its write side
+     * ([recordChange]), so no scan lists a record between a change's two
+     * file steps (material without its metadata reads as no id's, which
+     * would make every other id unreadable). The count is read under the
+     * same lock, so a kept scan is never one a write has since changed.
      */
-    private fun legacyIndex(keyId: String): LegacyIndex {
+    private fun legacyIndex(keyId: String): LegacyIndex = recordRead { scanIndex(keyId) }
+
+    /** The scan of [legacyIndex], under its read lock. */
+    private fun scanIndex(keyId: String): LegacyIndex {
         val version = writes.get()
         index?.takeIf { it.version == version }?.let { return it }
         val unreadable = HashSet<String>()
@@ -283,6 +315,41 @@ class SoftwareKeyStore(
     /** Counts a write or delete of this store's directory, invalidating every instance's [index]. */
     private fun wrote() {
         writes.incrementAndGet()
+    }
+
+    /**
+     * Runs one record change (its file steps together) under the write side
+     * of this directory's [lock], counting it ([wrote]) before the lock is
+     * let go, so no scan or record read from any instance overlaps it. The
+     * caller holds no KeyPolicyStore lock taken after this one: that
+     * store's per-id lock is always taken first.
+     */
+    private inline fun <T> recordChange(change: () -> T): T {
+        lock.writeLock().lock()
+        try {
+            return change()
+        } finally {
+            try {
+                wrote()
+            } finally {
+                lock.writeLock().unlock()
+            }
+        }
+    }
+
+    /**
+     * Runs a scan or record read under the read side of this directory's
+     * [lock]: never between a change's file steps. A record change of this
+     * thread may hold it already ([migrateLegacyRecords] reads under its
+     * write side); a read never takes the write side.
+     */
+    private inline fun <T> recordRead(read: () -> T): T {
+        lock.readLock().lock()
+        try {
+            return read()
+        } finally {
+            lock.readLock().unlock()
+        }
     }
 
     /**
@@ -421,7 +488,15 @@ class SoftwareKeyStore(
      * where [presence] reads [KeyPresence.UNREADABLE], so the two never
      * disagree on whether the id holds material.
      */
-    private fun records(keyId: String): Map<String, String> {
+    private fun records(keyId: String): Map<String, String> = recordRead { readRecords(keyId) }
+
+    /**
+     * The read of [records], under its read lock: [recordOf] and
+     * [recordGeneration] each read both files of a record, which a change
+     * from another instance would otherwise split (a delete between its
+     * unlinks reads as a metadata-only generation).
+     */
+    private fun readRecords(keyId: String): Map<String, String> {
         val own = fileId(keyId)
         when (recordOf(keyId)) {
             KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(keyId, null)
@@ -453,14 +528,13 @@ class SoftwareKeyStore(
      * Unlinks the record named [stem]: the material first, and the metadata
      * only once it is gone (#255 verify r5), so a failed material unlink
      * leaves the record whole and the delete's replay reads it as this id's
-     * key and retries.
+     * key and retries. Both unlinks are one [recordChange]: no scan or read
+     * from any instance sees the metadata without its material between them.
      */
     private fun deleteRecord(stem: String) {
         val material = File(dir, "$stem.key")
-        try {
+        recordChange {
             if (unlink(material) || filePresence(material) == KeyPresence.ABSENT) unlink(File(dir, "$stem.meta"))
-        } finally {
-            wrote()
         }
     }
 
@@ -491,11 +565,18 @@ class SoftwareKeyStore(
     /**
      * Renames key/metadata pairs written by older builds under the old
      * sanitised filename onto their digest name, taking the true id from the
-     * metadata.
+     * metadata. The listing and every move run under the write side of the
+     * directory's [lock], each move's two renames one [recordChange], so no
+     * scan from any instance sees material moved without its metadata.
      */
     private fun migrateLegacyRecords() {
         if (migrated) return
         migrated = true
+        recordChange { moveLegacyRecords() }
+    }
+
+    /** The moves of [migrateLegacyRecords], under its write lock. */
+    private fun moveLegacyRecords() {
         val files = dir.listFiles() ?: return
         for (meta in files) {
             if (!meta.name.endsWith(".meta")) continue
@@ -514,11 +595,11 @@ class SoftwareKeyStore(
             // never split between two names.
             val material = File(dir, "$stem.key")
             // A move is a write of the store: every instance's scan is redone.
-            wrote()
-            if (rename(material, File(dir, "$target.key")) || filePresence(material) == KeyPresence.ABSENT) {
-                rename(meta, File(dir, "$target.meta"))
+            recordChange {
+                if (rename(material, File(dir, "$target.key")) || filePresence(material) == KeyPresence.ABSENT) {
+                    rename(meta, File(dir, "$target.meta"))
+                }
             }
-            wrote()
         }
     }
 
@@ -553,6 +634,12 @@ class SoftwareKeyStore(
 
         /** Each store directory's write count, shared by every instance over it. */
         private val WRITES = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
+
+        /**
+         * Each store directory's record lock, shared by every instance over
+         * it. Taken after any KeyPolicyStore per-id lock, never before one.
+         */
+        private val LOCKS = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantReadWriteLock>()
 
         /** The shape of a digest name, read only by [namesRecordOf]. */
         private val HEX_64 = Regex("[0-9a-f]{64}")
