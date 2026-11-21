@@ -134,7 +134,7 @@ sequenceDiagram
 |-----------|---------|
 | Missing params, `rpId`, `credentialId` or `clientDataHash` | `ProtocolException`, `ErrorCodes.INVALID_PARAMS` |
 | Unknown credential | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` |
-| Key is not `KeyTypes.FIDO2`; stored `rpId` differs from the request | `ProtocolException`, `ErrorCodes.INVALID_PARAMS` |
+| Key is not `KeyTypes.FIDO2`; stored `rpId` differs from the request | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` ("Credential not found"): the lookup offers only FIDO2 passkeys of the requested `rpId`, so such a key cannot be named |
 | Sharing policy refuses this peer | `ProtocolException`, `ErrorCodes.OPERATION_DENIED` (list omits the credential instead) |
 | UV required but not performed, with strict user verification on | `UserVerificationRequiredException` from `UserVerificationCompliance.enforce`; `RequestHandler.dispatch` answers `ErrorCodes.BIOMETRIC_FAILED` (-32003) with the exception's message |
 
@@ -269,11 +269,11 @@ Left: verification on a device against a CTAP2 BLE client and
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric; both prompts over the lock screen with their own notification; the account chooser as one list call |
 | `app/src/test/kotlin/com/automatethethings/xkey/ui/TransparentBiometricActivityAccountChoiceTest.kt` | The account list: every account in order as plain text under the RP, a tap answers its index, Cancel and back answer none, over the lock screen, taken down when its caller is cancelled |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoGattServerTest.kt` | Control point write to fidoStatus notification, permissions, revision, MTU, subscription, the bounded queue, no cross-client frame below API 33, a refused or failed notification sent again and the connection ended after three attempts |
-| `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal |
+| `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal; every listing assertion goes through one wire-ID helper (`listsCredential`/`listedEntry`) that encodes the stored id |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/ProtocolConstantsTest.kt` | Method name constants |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/UserVerificationWireErrorTest.kt` | Missing user verification answers `BIOMETRIC_FAILED` on both methods |
-| `app/src/test/kotlin/com/automatethethings/xkey/protocol/Fido2WireEncodingTest.kt` | Listed `credentialId` and `userId` decode as standard padded base64 to the stored bytes, a non-base64 stored id as its UTF-8 bytes; the listed id signs and `userHandle` decodes the same way; a non-standard id answers `INVALID_PARAMS`, an unknown one `KEY_NOT_FOUND`; the raw stored id and an id two passkeys share do not sign |
+| `app/src/test/kotlin/com/automatethethings/xkey/protocol/Fido2WireEncodingTest.kt` | Listed `credentialId` and `userId` decode as standard padded base64 to the stored bytes, a non-base64 stored id as its UTF-8 bytes; the listed id signs and `userHandle` decodes the same way; a non-standard id answers `INVALID_PARAMS`, an unknown one `KEY_NOT_FOUND`; the raw stored id and an id two passkeys share do not sign; a passkey of another `rpId` and a non-FIDO2 key with the same bytes answer `KEY_NOT_FOUND`; a source scan keeps the device test's listing reads in its wire-ID helpers |
 
 ## Related features
 
