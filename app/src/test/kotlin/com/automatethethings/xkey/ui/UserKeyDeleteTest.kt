@@ -29,6 +29,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -93,6 +94,59 @@ class UserKeyDeleteTest {
         }
         coVerify(exactly = 0) { dao.putDeletion(any<KeyDeletionEntity>()) }
         coVerify(exactly = 0) { dao.deleteKey(any()) }
+    }
+
+    /**
+     * #270 review: a general key whose same-id credential's material delete
+     * is still owed is not deleted (the owed delete is settled first), and
+     * the screens are told so: a refusal they show, never the "already
+     * gone" outcome that reads as a delete and closes the key's screen.
+     */
+    @Test
+    fun aDeleteBlockedByAnUnsettledEarlierDeleteIsRefusedNotGone() = runTest {
+        val tables = com.automatethethings.xkey.storage.FakeKeyPolicyTables()
+        val store = tables.store()
+        val instance = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.SELECTED_PEERS)
+        assertEquals(
+            KeyPolicyStore.MaterialDelete.DELETED,
+            store.deleteMaterial("k", owing("credential"), besideRow = instance)
+        )
+
+        val outcome = deleteUserKey(tables.key("k")!!, store, owing("general"))
+
+        assertTrue("a blocked delete was reported as a gone key", outcome != UserKeyDelete.GONE && outcome != UserKeyDelete.DELETED)
+        assertNotNull("a blocked delete shows no refusal", outcome.refusal)
+        assertEquals("the general key's row was deleted", instance, store.instance("k"))
+        val owed = mutableListOf<String?>()
+        store.replayDeletions(com.automatethethings.xkey.storage.tombstoneDelete { _, tombstone -> owed += tombstone.generation; false })
+        assertEquals("the owed material was dropped", listOf<String?>("credential"), owed)
+    }
+
+    /** A [KeyMaterial] of generation [generation] whose every delete fails, so its tombstone stays owed. */
+    private fun owing(generation: String): KeyMaterial = object : KeyMaterial {
+        override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String = generation
+
+        override suspend fun delete(held: KeyPolicyStore.KeyMaterialHeld, tombstone: KeyDeletionEntity): Boolean = false
+    }
+
+    /**
+     * Bypass guard (#270 review): no caller reads a key delete's result as a
+     * Boolean, which cannot tell a blocked delete from a gone key. The
+     * result's type makes such a read a compile error too.
+     */
+    @Test
+    fun noKeyDeleteResultIsReadAsABoolean() {
+        val root = listOf(File("src"), File("app/src")).first { it.isDirectory }
+        val boolean = Regex("""(!\s*(KeySharingPeers\.)?forgetKey\(|!\s*\w+\.deleteKey\(\w+, \w+(\.id)?, |(forgetKey|store\(?\)?\.deleteKey)\([^)]*\)\)?\s*(==|!=)\s*(true|false)|assert(True|False)\([^\n]*(forgetKey|store\(?\)?\.deleteKey)\()""")
+        val hits = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && "/androidTest/" !in it.path }
+            .flatMap { file ->
+                file.readLines().mapIndexedNotNull { i, line ->
+                    if (boolean.containsMatchIn(line.substringBefore("//"))) "${file.name}:${i + 1}" else null
+                }
+            }
+            .toList()
+        assertEquals("a key delete's result read as a Boolean", emptyList<String>(), hits)
     }
 
     @Test
