@@ -32,6 +32,9 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import java.io.File
+import java.security.KeyPairGenerator
+import java.security.Signature
+import java.security.spec.ECGenParameterSpec
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -184,6 +187,48 @@ class Fido2WireEncodingTest {
         assertArrayEquals(SIGNATURE, strict(response.result!!.getString("signature")))
     }
 
+    /**
+     * A relying party verifies the assertion signature over
+     * `authenticatorData || clientDataHash` with SHA256withECDSA, so the
+     * signer must get those bytes unhashed: a pre-hash here would make the
+     * signature cover SHA-256 of SHA-256 of them.
+     */
+    @Test
+    fun `the assertion signature verifies over authenticatorData and clientDataHash with the passkey's real key`() = runTest {
+        val pair = KeyPairGenerator.getInstance("EC").apply {
+            initialize(ECGenParameterSpec("secp256r1"))
+        }.generateKeyPair()
+        coEvery {
+            keystoreManager.signApproved("xkey_credential_$STORED_ID", APPROVED_DER, any(), any())
+        } answers {
+            signed += thirdArg<ByteArray>()
+            Signature.getInstance(arg<String>(3)).apply {
+                initSign(pair.private)
+                update(arg<ByteArray>(2))
+            }.sign()
+        }
+        val listed = list().single { it.optString("rpName") == "passkey" }.getString("credentialId")
+
+        val response = sign(listed)
+
+        assertNull("no error expected: ${response.error?.message}", response.error)
+        val authenticatorData = strict(response.result!!.getString("authenticatorData"))
+        val signature = strict(response.result!!.getString("signature"))
+        assertArrayEquals(
+            "the signer must get authenticatorData || clientDataHash unhashed",
+            authenticatorData + CLIENT_DATA_HASH,
+            signed.last()
+        )
+        val verifier = Signature.getInstance("SHA256withECDSA").apply {
+            initVerify(pair.public)
+            update(authenticatorData + CLIENT_DATA_HASH)
+        }
+        assertTrue(
+            "the signature must verify over authenticatorData || clientDataHash",
+            verifier.verify(signature)
+        )
+    }
+
     @Test
     fun `a listed id of a non-base64 stored id signs that passkey`() = runTest {
         val listed = list().single { it.optString("rpName") == "plain" }.getString("credentialId")
@@ -323,7 +368,7 @@ class Fido2WireEncodingTest {
     private suspend fun sign(credentialId: String, forRpId: String = RP_ID): Response {
         val params = JSONObject()
             .put("credentialId", credentialId)
-            .put("clientDataHash", Base64.getEncoder().encodeToString(ByteArray(32) { 0x21 }))
+            .put("clientDataHash", Base64.getEncoder().encodeToString(CLIENT_DATA_HASH))
             .put("rpId", forRpId)
             .put("userVerificationRequired", false)
         val request = Request(id = 2, method = MethodNames.LOCAL_SIGN_FIDO2_ASSERTION, params = params)
@@ -362,6 +407,9 @@ class Fido2WireEncodingTest {
 
         /** A stored id that is not base64 in either alphabet (13 characters). */
         const val PLAIN_ID = "list-shared-1"
+
+        /** The clientDataHash every assertion request sends. */
+        val CLIENT_DATA_HASH = ByteArray(32) { 0x21 }
 
         val SIGNATURE = byteArrayOf(0x30, 0x00)
         val APPROVED_DER = ByteArray(91) { 3 }

@@ -296,12 +296,11 @@ class RequestHandlerFido2AndCosignTest {
         )
 
         val signedData = authData + clientDataHash
-        val dataHash = MessageDigest.getInstance("SHA-256").digest(signedData)
         val publicKey = keystoreManager.getPublicKey(credentialId)
             ?: throw AssertionError("the credential has no public key")
         val verifier = Signature.getInstance("SHA256withECDSA")
         verifier.initVerify(publicKey)
-        verifier.update(dataHash)
+        verifier.update(signedData)
         assertTrue(
             "the assertion signature must verify over authenticatorData || clientDataHash",
             verifier.verify(Base64.getDecoder().decode(result.getString("signature")))
