@@ -116,6 +116,7 @@ class QueuedApprovalRaceTest {
 
         keyDao = mockk(relaxed = true)
         coEvery { keyDao.getByKeyId(credentialId) } answers { passkey(storedSignCount) }
+        coEvery { keyDao.getFido2ByRpId("example.com") } answers { listOf(passkey(storedSignCount)) }
         coEvery { keyDao.updateSignCount(credentialId, any(), any()) } answers {
             storedSignCount = secondArg()
         }

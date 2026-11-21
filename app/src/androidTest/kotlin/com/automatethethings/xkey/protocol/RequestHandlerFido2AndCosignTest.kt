@@ -175,7 +175,7 @@ class RequestHandlerFido2AndCosignTest {
 
         val listed = (0 until credentials.length())
             .map { credentials.getJSONObject(it) }
-            .single { it.getString("credentialId") == credentialId }
+            .single { it.getString("credentialId") == Fido2WireIds.encode(credentialId) }
 
         assertEquals(rpId, listed.getString("rpId"))
         assertEquals("Fido2 Test RP", listed.getString("rpName"))
@@ -208,19 +208,19 @@ class RequestHandlerFido2AndCosignTest {
 
         assertTrue(
             "the peer named in the policy must see the credential",
-            listedCredentialIds().contains(credentialId)
+            listedCredentialIds().contains(Fido2WireIds.encode(credentialId))
         )
 
         servedPeer = otherPeerHex
         assertFalse(
             "a peer with no policy row must not see the credential",
-            listedCredentialIds().contains(credentialId)
+            listedCredentialIds().contains(Fido2WireIds.encode(credentialId))
         )
 
         servedPeer = null
         assertFalse(
             "an anonymous session cannot satisfy a SELECTED_PEERS policy",
-            listedCredentialIds().contains(credentialId)
+            listedCredentialIds().contains(Fido2WireIds.encode(credentialId))
         )
     }
 
@@ -236,7 +236,7 @@ class RequestHandlerFido2AndCosignTest {
         val ids = (0 until otherRp.length()).map { otherRp.getJSONObject(it).getString("credentialId") }
         assertFalse(
             "a credential must not be offered to a relying party it was not created for",
-            ids.contains(credentialId)
+            ids.contains(Fido2WireIds.encode(credentialId))
         )
     }
 
@@ -271,7 +271,7 @@ class RequestHandlerFido2AndCosignTest {
         val result = call(
             "local.signFido2Assertion",
             JSONObject()
-                .put("credentialId", credentialId)
+                .put("credentialId", Fido2WireIds.encode(credentialId))
                 .put("clientDataHash", b64(clientDataHash))
                 .put("rpId", rpId)
                 .put("userVerificationRequired", false)
@@ -388,7 +388,7 @@ class RequestHandlerFido2AndCosignTest {
         servedPeer = otherPeerHex
         assertFalse(
             "the handler-wide grant must not list the credential for another caller",
-            listedCredentialIds().contains(credentialId)
+            listedCredentialIds().contains(Fido2WireIds.encode(credentialId))
         )
         assertEquals(
             ErrorCodes.OPERATION_DENIED,
@@ -399,7 +399,7 @@ class RequestHandlerFido2AndCosignTest {
         servedPeer = peerKeyHex
         assertTrue(
             "the granted caller must see the credential whatever the handler-wide peer",
-            listedCredentialIds().contains(credentialId)
+            listedCredentialIds().contains(Fido2WireIds.encode(credentialId))
         )
         assertTrue(signAssertion(credentialId, rpId).isSuccess())
     }
@@ -581,7 +581,7 @@ class RequestHandlerFido2AndCosignTest {
     private fun signAssertion(credentialId: String, forRpId: String): Response = call(
         "local.signFido2Assertion",
         JSONObject()
-            .put("credentialId", credentialId)
+            .put("credentialId", Fido2WireIds.encode(credentialId))
             .put("clientDataHash", b64(MessageDigest.getInstance("SHA-256").digest(ByteArray(8))))
             .put("rpId", forRpId)
             .put("userVerificationRequired", false)

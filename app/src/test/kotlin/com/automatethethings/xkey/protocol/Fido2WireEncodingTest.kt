@@ -253,7 +253,11 @@ class Fido2WireEncodingTest {
     }
 
     /** Go's `encoding/json` []byte rule: standard alphabet, padded, nothing else. */
-    private fun strict(text: String): ByteArray = Base64.getDecoder().decode(text)
+    private fun strict(text: String): ByteArray {
+        // java.util.Base64 tolerates missing padding; Go does not.
+        assertEquals("not padded: $text", 0, text.length % 4)
+        return Base64.getDecoder().decode(text)
+    }
 
     private fun passkey(stored: String, user: String?): KeyEntity = mockk(relaxed = true) {
         every { keyId } returns stored

@@ -28,6 +28,7 @@ import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.protocol.ErrorCodes
+import com.automatethethings.xkey.protocol.Fido2WireIds
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -328,7 +329,7 @@ class PasskeySignCounterHandlerTest {
             sessionAuthManager = null
         )
         val params = JSONObject()
-            .put("credentialId", ID)
+            .put("credentialId", Fido2WireIds.encode(ID))
             .put("clientDataHash", Base64.getEncoder().encodeToString(CLIENT_DATA_HASH))
             .put("rpId", RP_ID)
             .put("userVerificationRequired", userVerificationRequired)
@@ -371,6 +372,7 @@ class PasskeySignCounterHandlerTest {
         }
         return mockk(relaxed = true) {
             coEvery { getByKeyId(ID) } returns entity
+            coEvery { getFido2ByRpId(RP_ID) } returns listOf(entity)
             coEvery { updateSignCount(ID, any(), any()) } answers {
                 if (failCounterWrite) throw IllegalStateException("key store unavailable")
                 keyCount = secondArg()
