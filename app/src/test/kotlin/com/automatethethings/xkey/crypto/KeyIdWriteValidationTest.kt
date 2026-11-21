@@ -110,10 +110,13 @@ class KeyIdWriteValidationTest {
     fun noWritePathTakesAnIdTheReaderRejects() {
         val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
         val source = File(root, "com/automatethethings/xkey/crypto/SoftwareKeyStore.kt").readText()
-        assertEquals("record writes in the store", 2, Regex("""\.write(Bytes|Text)\(""").findAll(source).count())
+        // The one file write is the writeFile parameter's default; every
+        // record write goes through writeFile.
+        assertEquals("record writes in the store", 1, Regex("""\.write(Bytes|Text)\(""").findAll(source).count())
+        assertEquals("writeFile calls in the store", 2, Regex("""\bwriteFile\(""").findAll(source).count())
         val put = source.substringAfter("fun put(key: SoftwareKey) {").substringBefore("\n    }\n")
         assertTrue("put writes before checking its id", put.trimStart().startsWith("requireValidKeyId(key.keyId)"))
-        assertEquals("both writes are put's", 2, Regex("""\.write(Bytes|Text)\(""").findAll(put).count())
+        assertEquals("both writes are put's", 2, Regex("""\bwriteFile\(""").findAll(put).count())
         assertTrue("the reader does not use the writer's validator", "?.takeIf(::isValidKeyId)" in source)
         val handler = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
         val generate = handler.substringAfter("private suspend fun handleLocalGenerateKey(").substringBefore("private ")
