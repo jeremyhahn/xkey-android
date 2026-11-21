@@ -49,7 +49,7 @@ class GrantedWriteJournalIdentityTest {
         recovery = MediaPublisher.recoveryDirectory(context)
         val whole = File(recovery, "whole").apply { writeBytes(byteArrayOf(1, 2, 3)) }
         val staged = File(recovery, "staged").apply { writeBytes(byteArrayOf(4, 5, 6)) }
-        MediaPublisher.GrantedWriteJournal(recovery, capture).commit(whole, staged)
+        MediaPublisher.GrantedWriteJournal.of(recovery, capture).commit(whole, staged)
         staged.delete()
     }
 

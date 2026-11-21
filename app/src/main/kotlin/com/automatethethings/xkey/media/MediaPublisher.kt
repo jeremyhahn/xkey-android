@@ -28,6 +28,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
 import java.io.File
@@ -267,6 +268,54 @@ object MediaPublisher {
     class OriginalUnavailableException(val target: Uri) :
         IOException("$target can be read only without its location; rewriting it needs location access")
 
+/**
+     * [target]'s one media identity: every spelling of a MediaStore item maps
+     * to content://media/<volume>/<type>/media/<id>. A media document
+     * ("image:7", "video:7", "audio:7"), any external volume name
+     * (external_primary, a removable volume) and a query such as
+     * require-original all name the same external item, since MediaStore
+     * numbers every external volume's items in one table; the internal volume
+     * stays its own. Any other URI is its own identity. Every granted-write
+     * journal is keyed on it ([GrantedWriteJournal.of]). A URI whose parts
+     * cannot be read is its own identity.
+     */
+    fun canonicalMediaUri(target: Uri): Uri =
+        try {
+            canonicalMediaUriOf(target)
+        } catch (_: RuntimeException) {
+            target
+        }
+
+    private fun canonicalMediaUriOf(target: Uri): Uri {
+        if (target.scheme != ContentResolver.SCHEME_CONTENT) return target
+        when (target.authority) {
+            MEDIA_DOCUMENTS_AUTHORITY -> {
+                val documentId = runCatching { DocumentsContract.getDocumentId(target) }.getOrNull() ?: return target
+                val type = when (documentId.substringBefore(':')) {
+                    "image" -> "images"
+                    "video" -> "video"
+                    "audio" -> "audio"
+                    else -> return target
+                }
+                val id = documentId.substringAfter(':', "").toLongOrNull() ?: return target
+                return mediaItemUri("external", type, id)
+            }
+            MediaStore.AUTHORITY -> {
+                val segments = target.pathSegments
+                if (segments.size != 4 || segments[2] != "media") return target
+                val type = segments[1].takeIf { it == "images" || it == "video" || it == "audio" } ?: return target
+                val id = segments[3].toLongOrNull() ?: return target
+                val volume = if (segments[0] == MediaStore.VOLUME_INTERNAL) MediaStore.VOLUME_INTERNAL else "external"
+                return mediaItemUri(volume, type, id)
+            }
+            else -> return target
+        }
+    }
+
+    private fun mediaItemUri(volume: String, type: String, id: Long): Uri =
+        Uri.Builder().scheme(ContentResolver.SCHEME_CONTENT).authority(MediaStore.AUTHORITY)
+            .appendPath(volume).appendPath(type).appendPath("media").appendPath(id.toString()).build()
+
     /**
      * The URI that reads [target] whole, its location metadata included: a
      * content URI's original ([MediaStore.setRequireOriginal]) from Android
@@ -329,7 +378,7 @@ object MediaPublisher {
      * may be part-written, so nothing hashes, signs, stages or shows them.
      */
     fun openOriginal(context: Context, target: Uri): InputStream {
-        val journal = GrantedWriteJournal(recoveryDirectory(context), target)
+        val journal = GrantedWriteJournal.of(recoveryDirectory(context), target)
         if (journal.recorded()) throw RecoveryPendingException(target, journal.backup)
         return openOriginalUnchecked(context, target)
     }
@@ -355,7 +404,7 @@ object MediaPublisher {
 
     /** Whether [target] has a granted write recorded that is not yet put back. */
     fun recoveryPending(context: Context, target: Uri): Boolean =
-        GrantedWriteJournal(recoveryDirectory(context), target).recorded()
+        GrantedWriteJournal.of(recoveryDirectory(context), target).recorded()
 
     /** Writing [target] needs a write grant the user has not given. */
     class WriteAuthorizationRequiredException(val target: Uri) :
@@ -444,7 +493,7 @@ object MediaPublisher {
         // A write of this capture an earlier process died in is put back
         // first; one that cannot be yet throws RecoveryPendingException.
         recoverInterruptedWrite(context, target)
-        val journal = GrantedWriteJournal(recoveryDirectory(context), target)
+        val journal = GrantedWriteJournal.of(recoveryDirectory(context), target)
         val partial = MediaSaveRuns.work(recoveryDirectory(context), ".part")
         try {
             openOriginalUnchecked(context, target).use { input ->
@@ -540,7 +589,7 @@ object MediaPublisher {
      * record and backup kept, so the write request screen asks.
      */
     fun recoverInterruptedWrite(context: Context, target: Uri) = synchronized(grantedWrites) {
-        val journal = GrantedWriteJournal(recoveryDirectory(context), target)
+        val journal = GrantedWriteJournal.of(recoveryDirectory(context), target)
         if (journal.recorded() && !recover(context, journal)) throw RecoveryPendingException(target, journal.backup)
     }
 
@@ -647,9 +696,11 @@ object MediaPublisher {
      * phase ([restoring], once a restore began), tells a part-written or
      * part-restored capture from one edited since ([explains]).
      */
-    class GrantedWriteJournal(private val directory: File, private val uri: Uri) {
+    class GrantedWriteJournal private constructor(private val directory: File, private val uri: Uri) {
+        // Keyed on the capture's one media identity, so every spelling of it
+        // finds this journal; the record keeps the URI the write was made through.
         private val key = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(uri.toString().toByteArray()).joinToString("") { "%02x".format(it) }
+            .digest(canonicalMediaUri(uri).toString().toByteArray()).joinToString("") { "%02x".format(it) }
 
         val backup = File(directory, "$PREFIX$key.bak")
         val written = File(directory, "$PREFIX$key.new")
@@ -739,6 +790,13 @@ object MediaPublisher {
 
         companion object {
             const val PREFIX = "granted-"
+
+            /**
+             * The journal of [uri]'s granted write in [directory]: the only way
+             * one is made, keyed on [canonicalMediaUri], so a capture written
+             * through one spelling is found through any other.
+             */
+            fun of(directory: File, uri: Uri): GrantedWriteJournal = GrantedWriteJournal(directory, uri)
             /** A backup set aside for a capture edited after an interrupted write. */
             const val KEPT_PREFIX = "kept-"
             private const val RECORD = ".uri"
@@ -789,7 +847,7 @@ object MediaPublisher {
                 directory.listFiles { f -> f.name.startsWith(PREFIX) && f.name.endsWith(RECORD) }.orEmpty()
                     .mapNotNull { f ->
                         try {
-                            GrantedWriteJournal(directory, Uri.parse(readRecord(f)))
+                            of(directory, Uri.parse(readRecord(f)))
                         } catch (_: IOException) {
                             null
                         }

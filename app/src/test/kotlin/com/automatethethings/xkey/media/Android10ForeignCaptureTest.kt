@@ -236,7 +236,7 @@ class Android10ForeignCaptureTest {
         return mediaAtKill
     }
 
-    private fun journal() = MediaPublisher.GrantedWriteJournal(MediaPublisher.recoveryDirectory(context), uri)
+    private fun journal() = MediaPublisher.GrantedWriteJournal.of(MediaPublisher.recoveryDirectory(context), uri)
 
     @Test
     fun `an interrupted write whose restore needs renewed consent asks for it and keeps its journal`() {

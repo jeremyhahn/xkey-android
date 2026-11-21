@@ -283,10 +283,10 @@ class CameraMediaWriteAuthorizationTest {
         // An active journal: the record stays while it cannot be read yet.
         killMidOverwrite(data())
         val recovery = MediaPublisher.recoveryDirectory(context)
-        val active = MediaPublisher.GrantedWriteJournal(recovery, uri)
+        val active = MediaPublisher.GrantedWriteJournal.of(recovery, uri)
         val activeFiles = recovery.listFiles()!!.filter { it.name.startsWith(MediaPublisher.GrantedWriteJournal.PREFIX) }
         // Another capture's write, killed inside its commit before the record's rename.
-        val other = MediaPublisher.GrantedWriteJournal(recovery, Uri.parse("content://media/external/images/media/99"))
+        val other = MediaPublisher.GrantedWriteJournal.of(recovery, Uri.parse("content://media/external/images/media/99"))
         val stem = other.backup.name.removeSuffix(".bak")
         val unrecorded = listOf(other.backup, other.written, File(recovery, "$stem.tmp")).onEach { it.writeBytes(byteArrayOf(1)) }
 
@@ -637,7 +637,7 @@ class CameraMediaWriteAuthorizationTest {
         val data = data()
         killMidOverwrite(data)
         val mixed = media.readBytes()
-        val journal = MediaPublisher.GrantedWriteJournal(MediaPublisher.recoveryDirectory(context), uri)
+        val journal = MediaPublisher.GrantedWriteJournal.of(MediaPublisher.recoveryDirectory(context), uri)
         val backup = journal.backup.readBytes()
         val signed = mutableListOf<PendingMediaWrite>()
         MediaPublisher.GrantedWriteJournal.readRecord = { throw IOException("the record could not be read") }
@@ -664,7 +664,7 @@ class CameraMediaWriteAuthorizationTest {
     fun `a capture edited in a gallery after a crash keeps the edit and the backup, and is not signed`() = runBlocking<Unit> {
         killMidOverwrite(data())
         val recovery = MediaPublisher.recoveryDirectory(context)
-        val backup = MediaPublisher.GrantedWriteJournal(recovery, uri).backup.readBytes()
+        val backup = MediaPublisher.GrantedWriteJournal.of(recovery, uri).backup.readBytes()
         // Before xKey runs again, the user saves an edit of the capture in a gallery.
         val edited = XmpFixtures.png(XmpFixtures.bytes(0x78, 0x9C, 0x07, 0x08, 0x09))
         media.writeBytes(edited)
@@ -752,7 +752,7 @@ class CameraMediaWriteAuthorizationTest {
     fun `a capture edited in a gallery after an interrupted restore keeps the edit and the backup`() = runBlocking<Unit> {
         killMidRestore(data())
         val recovery = MediaPublisher.recoveryDirectory(context)
-        val backup = MediaPublisher.GrantedWriteJournal(recovery, uri).backup.readBytes()
+        val backup = MediaPublisher.GrantedWriteJournal.of(recovery, uri).backup.readBytes()
         val edited = XmpFixtures.png(XmpFixtures.bytes(0x78, 0x9C, 0x07, 0x08, 0x09))
         media.writeBytes(edited)
 
