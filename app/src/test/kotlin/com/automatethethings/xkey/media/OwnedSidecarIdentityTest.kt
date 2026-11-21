@@ -19,6 +19,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Rule
@@ -83,6 +84,25 @@ class OwnedSidecarIdentityTest {
         }
 
         assertEquals("the earlier signature stays", old, sidecar.readText())
+    }
+
+    @Test
+    fun `an existing owned sidecar whose backup cannot be read is not updated`() {
+        val old = XmpFixtures.json("a".repeat(64))
+        val sidecar = folder.newFile("clip.mkv.xkeysig").apply { writeText(old) }
+        Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            media = sidecar
+            mimeType = "application/octet-stream"
+            onOpen = { mode -> if ('w' !in mode) throw java.io.FileNotFoundException("the sidecar cannot be read") }
+        }
+        val target = Uri.parse("content://media/external_primary/file/99")
+
+        assertThrows(Exception::class.java) {
+            MediaPublisher.writeOwned(context, target, XmpFixtures.json("b".repeat(64)).toByteArray())
+        }
+
+        assertEquals("the earlier signature stays", old, sidecar.readText())
+        assertFalse("no backup was recorded", MediaPublisher.recoveryPending(context, target))
     }
 
     @Test
