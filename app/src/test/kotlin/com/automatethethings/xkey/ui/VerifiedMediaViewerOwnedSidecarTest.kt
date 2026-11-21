@@ -110,4 +110,41 @@ class VerifiedMediaViewerOwnedSidecarTest {
         idleUntil { signers.childCount > 0 || none.visibility == View.VISIBLE }
         assertTrue("the owned sidecar's signers are shown, not 'no signatures'", signers.childCount > 0)
     }
+
+    @Test
+    fun `the viewer reads the owned sidecar of a capture opened through its media document URI`() {
+        @Suppress("DEPRECATION")
+        val root = Environment.getExternalStorageDirectory()
+        val media = File(root, "DCIM/Camera/IMG_0102.gif").apply {
+            parentFile!!.mkdirs()
+            writeBytes(XmpFixtures.png())
+            created += this
+        }
+        // MediaStore names the capture's file; the media documents provider names none.
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            this.media = media
+            mimeType = "image/gif"
+            dataPath = media.path
+        }
+        Robolectric.setupContentProvider(FakeMediaProvider::class.java, "com.android.providers.media.documents").apply {
+            this.media = media
+            mimeType = "image/gif"
+        }
+        // Where the signer put it: the owned sidecar of the MediaStore item.
+        val (relativePath, name) = XmpMetadataHelper.ownedSidecarLocation(media.path, capture)
+        File(File(root, relativePath), name).apply {
+            parentFile!!.mkdirs()
+            writeText(XmpFixtures.json(AutoSignHash.contentHash(media.readBytes(), "image/gif")))
+            created += this
+        }
+        val document = Uri.parse("content://com.android.providers.media.documents/document/image%3A7")
+
+        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(document, "image/gif")
+        val activity = Robolectric.buildActivity(VerifiedMediaViewerActivity::class.java, intent).setup().get()
+
+        val signers = activity.findViewById<ViewGroup>(R.id.signerListContainer)
+        val none = activity.findViewById<TextView>(R.id.textNoSignatures)
+        idleUntil { signers.childCount > 0 || none.visibility == View.VISIBLE }
+        assertTrue("the owned sidecar's signers are shown, not 'no signatures'", signers.childCount > 0)
+    }
 }
