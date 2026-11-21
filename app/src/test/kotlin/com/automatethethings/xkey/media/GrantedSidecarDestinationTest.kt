@@ -58,6 +58,7 @@ class GrantedSidecarDestinationTest {
     private lateinit var media: File
     private lateinit var owned: File
     private lateinit var original: ByteArray
+    private lateinit var provider: FakeMediaProvider
     private val ownedRequests = mutableListOf<Pair<String, String>>()
     private val previousStore = MediaPublisher.mediaStore
 
@@ -77,7 +78,7 @@ class GrantedSidecarDestinationTest {
         capture.writeBytes(original)
         media = folder.newFile("media-5151.mp4").apply { writeBytes(original) }
         owned = File(folder.newFolder("owned"), "sidecar.xkeysig")
-        val provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media")
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media")
         provider.media = media
         provider.mimeType = "video/mp4"
         MediaPublisher.mediaStore = object : MediaPublisher.MediaStoreAccess {
@@ -104,11 +105,11 @@ class GrantedSidecarDestinationTest {
         MediaWriteAuthorizations.clear(context)
     }
 
-    private fun data() = ContentAuthenticityData(
+    private fun data(key: String = "b") = ContentAuthenticityData(
         contentHash = AutoSignHash.contentHashFile(capture, "video/mp4"),
         signatures = listOf(
             SignatureEntry(
-                keyFingerprint = "b".repeat(64),
+                keyFingerprint = key.repeat(64),
                 signerName = "Test Signer",
                 algorithm = "ES256",
                 value = "c2lnbmF0dXJl",
@@ -166,5 +167,74 @@ class GrantedSidecarDestinationTest {
         assertEquals(listOf(uri.toString()), published.map { it.uri })
         assertTrue(MediaWriteAuthorizations.pending(context).isEmpty())
         assertEquals(data().toJsonString(), owned.readText())
+    }
+
+    /** The sidecar beside the capture, written before the owned location existed. */
+    private val legacy: File get() = File(XmpMetadataHelper.getSidecarPath(capture.path))
+
+    /** Write [data] beside the capture: DCIM is writable for that one write only. */
+    private fun writeLegacy(data: ContentAuthenticityData) {
+        cameraDir.setWritable(true)
+        try {
+            legacy.writeText(data.toJsonString())
+        } finally {
+            cameraDir.setWritable(false)
+        }
+    }
+
+    /** Place [owned] where MediaStore keeps the file it inserts: the external root and its relative path. */
+    private fun ownedAtExternalRoot() {
+        @Suppress("DEPRECATION")
+        val root = android.os.Environment.getExternalStorageDirectory()
+        val (relativePath, name) = XmpMetadataHelper.ownedSidecarLocation(capture.path, uri)
+        owned = File(File(root, relativePath).apply { mkdirs() }, name)
+    }
+
+    @Test
+    fun `a re-sign beside a legacy sidecar reads back the new signature by path and by URI`() {
+        ownedAtExternalRoot()
+        provider.dataPath = capture.path
+        val stale = data("a")
+        writeLegacy(stale)
+        try {
+            val result = XmpMetadataHelper.signMedia(context, uri, capture.path, data("b"))
+
+            assertEquals(XmpMetadataHelper.MediaSignResult.Signed, result)
+            assertEquals("b".repeat(64), XmpMetadataHelper.readSignature(capture.path)?.signatures?.single()?.keyFingerprint)
+            assertEquals("b".repeat(64), XmpMetadataHelper.readSidecar(context, uri)?.signatures?.single()?.keyFingerprint)
+            assertEquals("the legacy sidecar is untouched", stale.toJsonString(), legacy.readText())
+        } finally {
+            owned.delete()
+        }
+    }
+
+    @Test
+    fun `with both sidecars an added signature lands in the one xKey owns`() {
+        ownedAtExternalRoot()
+        val stale = data("a")
+        writeLegacy(stale)
+        try {
+            XmpMetadataHelper.signMedia(context, uri, capture.path, data("b"))
+            val cosigner = data("b").signatures.single().copy(keyFingerprint = "d".repeat(64), role = SignerRole.WITNESS)
+
+            XmpMetadataHelper.appendSignature(capture.path, cosigner)
+
+            val written = ContentAuthenticityData.fromJsonString(owned.readText())
+            assertEquals(listOf("b".repeat(64), "d".repeat(64)), written.signatures.map { it.keyFingerprint })
+            assertEquals("the legacy sidecar is untouched", stale.toJsonString(), legacy.readText())
+        } finally {
+            owned.delete()
+        }
+    }
+
+    @Test
+    fun `a legacy sidecar alone still reads back by path and by URI`() {
+        ownedAtExternalRoot()
+        provider.dataPath = capture.path
+        writeLegacy(data("a"))
+
+        assertTrue("no owned sidecar", !owned.exists())
+        assertEquals("a".repeat(64), XmpMetadataHelper.readSignature(capture.path)?.signatures?.single()?.keyFingerprint)
+        assertEquals("a".repeat(64), XmpMetadataHelper.readSidecar(context, uri)?.signatures?.single()?.keyFingerprint)
     }
 }
