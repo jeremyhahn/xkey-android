@@ -35,7 +35,8 @@ class PendingKeyDeletionsTest {
         val keys = listOf(
             PendingKey("AQI", UserKeyKind.CREDENTIAL),
             PendingKey("padded==", UserKeyKind.GENERAL),
-            PendingKey("not base64\nat all", UserKeyKind.CREDENTIAL)
+            PendingKey("not base64\nat all", UserKeyKind.CREDENTIAL),
+            PendingKey("either", null)
         )
         FilePendingKeyDeletions(file()).add(keys)
 
@@ -43,7 +44,7 @@ class PendingKeyDeletionsTest {
         assertEquals(keys.toSet(), reopened.all())
 
         reopened.remove("padded==")
-        assertEquals(setOf(keys[0], keys[2]), FilePendingKeyDeletions(file()).all())
+        assertEquals(setOf(keys[0], keys[2], keys[3]), FilePendingKeyDeletions(file()).all())
     }
 
     @Test
@@ -64,11 +65,12 @@ class PendingKeyDeletionsTest {
     }
 
     @Test
-    fun `a record written before namespaces were recorded reads as credential keys`() {
+    fun `a record written before namespaces were recorded names either namespace`() {
         file().writeText("QVFJ\nr QlFJ\n", Charsets.US_ASCII)
 
         val pending = FilePendingKeyDeletions(file())
-        assertEquals(setOf(PendingKey("AQI", UserKeyKind.CREDENTIAL)), pending.all())
+        assertEquals(setOf(PendingKey("AQI", null)), pending.all())
+        assertEquals(UserKeyKind.entries, pending.all().single().candidates)
         assertEquals(setOf("BQI"), pending.registrations())
     }
 

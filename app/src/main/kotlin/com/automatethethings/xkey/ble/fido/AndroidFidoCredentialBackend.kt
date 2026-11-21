@@ -677,16 +677,20 @@ class AndroidFidoCredentialBackend(
      * [GeneratedKeyDiscard.FAILED] is kept in [pendingKeyDeletions] for
      * [retryPendingKeyDeletions], never discarded; one whose key is now gone
      * (deleted, or absent already) is forgotten. Throws only when a failed
-     * deletion cannot be recorded.
+     * deletion cannot be recorded. A record whose namespace is not known
+     * deletes the key under its ID in every namespace
+     * ([PendingKey.candidates]) and is forgotten only once none failed.
      */
     private fun deleteKey(key: PendingKey) {
-        val outcome = try {
-            keystoreManager.deleteKey(key.keyId, key.kind)
-        } catch (e: Exception) {
-            Log.w(TAG, "A passkey's Keystore key could not be deleted", e)
-            GeneratedKeyDiscard.FAILED
+        val outcomes = key.candidates.map { kind ->
+            try {
+                keystoreManager.deleteKey(key.keyId, kind)
+            } catch (e: Exception) {
+                Log.w(TAG, "A passkey's Keystore key could not be deleted", e)
+                GeneratedKeyDiscard.FAILED
+            }
         }
-        if (outcome == GeneratedKeyDiscard.FAILED) {
+        if (GeneratedKeyDiscard.FAILED in outcomes) {
             Log.w(TAG, "A passkey's Keystore key is still there; it is kept for a later retry")
             pendingKeyDeletions.add(listOf(key))
             return

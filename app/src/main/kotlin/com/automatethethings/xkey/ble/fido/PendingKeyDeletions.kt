@@ -25,8 +25,15 @@ import java.util.Base64
  * in. A fido2 row's key is a credential when the phone registered it and a
  * general key when local.generateKey made it, so the namespace is recorded
  * with the ID: a retry deletes the very alias the row's key was under.
+ *
+ * A null [kind] is a record whose namespace is not known: one written before
+ * namespaces were recorded, when a replaced passkey's key could be either.
+ * Its deletion tries every namespace ([candidates]).
  */
-data class PendingKey(val keyId: String, val kind: UserKeyKind)
+data class PendingKey(val keyId: String, val kind: UserKeyKind?) {
+    /** The namespaces whose key under [keyId] this record deletes. */
+    val candidates: List<UserKeyKind> get() = kind?.let { listOf(it) } ?: UserKeyKind.entries
+}
 
 /**
  * The Keystore keys of passkeys whose rows are gone, or going, but whose
@@ -56,8 +63,9 @@ interface PendingKeyDeletions {
 
     /**
      * Forget [key], now deleted: its deletion, and the registration of its
-     * ID when it is the credential key a registration makes. A key of the
-     * other namespace under the same ID stays recorded.
+     * ID when its deletion covered the credential key a registration makes
+     * (a credential, or a key of either namespace). A key of the other
+     * namespace under the same ID stays recorded.
      */
     fun remove(key: PendingKey)
 
@@ -70,9 +78,11 @@ interface PendingKeyDeletions {
 
 /**
  * [PendingKeyDeletions] in one file, so the record survives a restart. Each
- * line is one key ID in base64, whatever characters the stored ID holds: bare
- * for a credential key to delete, after "g " for a general key to delete, and
- * after "r " for a registration not yet complete. Every change writes a new
+ * line is one key ID in base64, whatever characters the stored ID holds:
+ * after "c " for a credential key to delete, after "g " for a general key to
+ * delete, bare for a key to delete in either namespace (every record written
+ * before namespaces were recorded), and after "r " for a registration not
+ * yet complete. Every change writes a new
  * file, synced, and renames it over the old one, so the file is always
  * either the old record or the new one.
  */
@@ -99,7 +109,7 @@ class FilePendingKeyDeletions(private val file: File) : PendingKeyDeletions {
     override fun remove(key: PendingKey) = synchronized(lock) {
         val now = read()
         val registrations =
-            if (key.kind == UserKeyKind.CREDENTIAL) now.registrations - key.keyId else now.registrations
+            if (UserKeyKind.CREDENTIAL in key.candidates) now.registrations - key.keyId else now.registrations
         val next = Record(now.deletions - key, registrations)
         if (next != now) write(next)
     }
@@ -120,7 +130,9 @@ class FilePendingKeyDeletions(private val file: File) : PendingKeyDeletions {
             when {
                 line.startsWith(REGISTRATION) -> registrations += decode(line.removePrefix(REGISTRATION))
                 line.startsWith(GENERAL) -> deletions += PendingKey(decode(line.removePrefix(GENERAL)), UserKeyKind.GENERAL)
-                else -> deletions += PendingKey(decode(line), UserKeyKind.CREDENTIAL)
+                line.startsWith(CREDENTIAL) -> deletions += PendingKey(decode(line.removePrefix(CREDENTIAL)), UserKeyKind.CREDENTIAL)
+                // Written before namespaces were recorded: either namespace.
+                else -> deletions += PendingKey(decode(line), null)
             }
         }
         return Record(deletions, registrations)
@@ -130,7 +142,11 @@ class FilePendingKeyDeletions(private val file: File) : PendingKeyDeletions {
         file.parentFile?.mkdirs()
         fun encode(id: String) = Base64.getEncoder().encodeToString(id.toByteArray(Charsets.UTF_8))
         val text = record.deletions.joinToString("") {
-            (if (it.kind == UserKeyKind.GENERAL) GENERAL else "") + encode(it.keyId) + "\n"
+            when (it.kind) {
+                UserKeyKind.GENERAL -> GENERAL
+                UserKeyKind.CREDENTIAL -> CREDENTIAL
+                null -> ""
+            } + encode(it.keyId) + "\n"
         } + record.registrations.joinToString("") { REGISTRATION + encode(it) + "\n" }
         val next = File(file.path + ".new")
         FileOutputStream(next).use { out ->
@@ -145,13 +161,16 @@ class FilePendingKeyDeletions(private val file: File) : PendingKeyDeletions {
         val lock = Any()
 
         /**
-         * A registration's line starts with this; a credential key to delete
-         * is bare base64, which never holds a space, as records written
-         * before general keys were recorded are.
+         * A registration's line starts with this; a key to delete in either
+         * namespace is bare base64, which never holds a space, as records
+         * written before namespaces were recorded are.
          */
         const val REGISTRATION = "r "
 
         /** A general key to delete: its line starts with this. */
         const val GENERAL = "g "
+
+        /** A credential key to delete: its line starts with this. */
+        const val CREDENTIAL = "c "
     }
 }
