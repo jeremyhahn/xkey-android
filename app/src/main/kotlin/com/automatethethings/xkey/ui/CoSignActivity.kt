@@ -55,6 +55,8 @@ import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.qr.QrCodeGenerator
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.orRefuse
+import com.automatethethings.xkey.storage.readOwnPublicKeyDer
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
@@ -269,6 +271,12 @@ class CoSignActivity : AppCompatActivity() {
         contentPadding.addView(keyLabel)
 
         keySpinner = Spinner(this)
+        keySpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) =
+                clearInitiatorQR()
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = clearInitiatorQR()
+        }
         contentPadding.addView(keySpinner)
         loadSigningKeys()
 
@@ -588,7 +596,19 @@ class CoSignActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Takes down the initiator QR (#255 verify r4): before every generate
+     * attempt and on every key change, so a refused attempt, or another
+     * selected key, never leaves an earlier key's QR on screen.
+     */
+    private fun clearInitiatorQR() {
+        if (!::qrImageView.isInitialized) return
+        qrImageView.setImageDrawable(null)
+        qrImageView.visibility = View.GONE
+    }
+
     private fun generateInitiatorQR() {
+        clearInitiatorQR()
         val data = currentSignatureData
         if (data == null) {
             val message = if (selectedUri == null) R.string.cosign_select_media_first else R.string.cosign_no_signature_data
@@ -602,12 +622,21 @@ class CoSignActivity : AppCompatActivity() {
             return
         }
         val keyId = signingKeyIds[selectedKeyIndex]
-        val fingerprint = initiatorFingerprint(
-            keystoreManager,
-            keyId,
-            signingKeyTypes[selectedKeyIndex],
-            signingKeyMaterials[selectedKeyIndex]
-        )
+        // Through the screens' refusal choke point (#255 review r7, verify
+        // r3): a key store that cannot be read, or a public key that cannot
+        // be read, is a refusal shown here and no QR, never an exception out
+        // of the Generate QR listener and never the key id in the owner's
+        // place.
+        // The key is read under the namespace its row really lives in
+        // (a phone-registered FIDO2 row is a credential, every other row a
+        // general key: [initiatorKeyKind]).
+        val kind = initiatorKeyKind(keystoreManager, keyId, signingKeyTypes[selectedKeyIndex], signingKeyMaterials[selectedKeyIndex])
+        val pubKeyDer = keystoreManager
+            .readOwnPublicKeyDer(keyId, kind)
+            .orRefuse(R.string.cosign_owner_key_unavailable) { refusal ->
+                Snackbar.make(rootLayout, getString(refusal), Snackbar.LENGTH_SHORT).show()
+            } ?: return
+        val fingerprint = MediaHasher.hashBytes(pubKeyDer)
 
         val qrPayload = CoSignRequest.of(data, fingerprint).toJsonString()
 
@@ -625,20 +654,35 @@ class CoSignActivity : AppCompatActivity() {
                 val keyEntity = db.keyDao().getByKeyId(keyId)
                     ?: throw Exception("Key not found")
 
-                // The key named and the key signed with are one lookup: the
-                // public key under the alias the signature is made with.
-                val alias = KeystoreManager.generalKeyAlias(keyId)
-                val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
-                    ?: throw Exception("Key not found")
-                val signature = keystoreManager.signApproved(
-                    alias,
-                    pubKeyDer,
-                    request.hashBytes(),
-                    KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
-                )
-                val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
-
+                // The witness's owner identity, read before signing through the
+                // screens' refusal choke point (#255 verify r3): no response
+                // is made without it, and the key id never stands in for it.
+                var refusal = R.string.cosign_owner_key_unavailable
+                val pubKeyDer = keystoreManager
+                    .readOwnPublicKeyDer(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+                    .orRefuse(R.string.cosign_owner_key_unavailable) { refusal = it }
+                if (pubKeyDer == null) {
+                    withContext(Dispatchers.Main) {
+                        Snackbar.make(rootLayout, getString(refusal), Snackbar.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
                 val fingerprint = MediaHasher.hashBytes(pubKeyDer)
+
+                // Under the material-use lock and its deleted-key recheck (#255 review).
+                val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
+                    .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+                        // The key named and the key signed with are one: the
+                        // signature is made only by the key under the general
+                        // alias whose public key the fingerprint names.
+                        keystoreManager.signApproved(
+                            KeystoreManager.generalKeyAlias(keyId),
+                            pubKeyDer,
+                            request.hashBytes(),
+                            KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
+                        )
+                    }
+                val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
                 val responsePayload = CoSignResponse(
                     signature = signatureBase64,
@@ -871,8 +915,8 @@ class CoSignActivity : AppCompatActivity() {
 }
 
 /**
- * The fingerprint an initiator QR names its key by: the hash of the public key
- * the selected row holds, or [keyId] itself when no public key is found.
+ * The namespace of the key the selected row holds: a credential when the
+ * row's alias is the credential alias, else a general key.
  *
  * The row's key is read under the alias it really lives under
  * ([KeystoreManager.keyRowAlias], from the row's [keyType] and its
@@ -880,13 +924,14 @@ class CoSignActivity : AppCompatActivity() {
  * desktop-created one a general key, every other row a general key. This only
  * names the key; nothing is signed here, so it needs no approved-key lookup.
  */
-internal fun initiatorFingerprint(
+internal fun initiatorKeyKind(
     keystoreManager: KeystoreManager,
     keyId: String,
     keyType: String,
     storedPublicKeyDer: ByteArray?
-): String {
-    val alias = keystoreManager.keyRowAlias(keyId, keyType, storedPublicKeyDer)
-    val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
-    return if (pubKeyDer != null) MediaHasher.hashBytes(pubKeyDer) else keyId
-}
+): com.automatethethings.xkey.crypto.UserKeyKind =
+    if (keystoreManager.keyRowAlias(keyId, keyType, storedPublicKeyDer) == KeystoreManager.credentialAlias(keyId)) {
+        com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+    } else {
+        com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+    }

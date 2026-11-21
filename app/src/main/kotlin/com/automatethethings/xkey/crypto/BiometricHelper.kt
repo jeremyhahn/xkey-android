@@ -294,11 +294,13 @@ class BiometricHelper(
          * and [authenticateWithoutCrypto] show inside it shows on that turn,
          * so whatever [block] does after the first prompt (a passkey's
          * counter, then its signature) happens while no other approval holds
-         * the screen.
+         * the screen. Inside a turn its caller already holds, [block] runs
+         * on that turn: a second turn would wait behind its own holder.
          *
          * @throws BiometricException [BiometricPrompt.ERROR_TIMEOUT] when the turn never came.
          */
         suspend fun <T> inOneTurn(operation: String, block: suspend () -> T): T {
+            if (currentCoroutineContext()[HeldTurn] != null) return block()
             val key = NotificationKeys.wakeOnly(operation)
             var ran = false
             val result = PromptOwnership.process.turn(key) {

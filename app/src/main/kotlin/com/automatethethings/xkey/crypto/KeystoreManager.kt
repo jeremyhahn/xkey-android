@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
@@ -72,6 +73,54 @@ enum class KeySecurityLevel(val wire: String) {
 class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
     KeyStoreException("Cannot read the KeyInfo of $alias", cause)
 
+/**
+ * What a key-presence probe of one namespace found (#255 review r5): the key
+ * is there, is not there, or the store holding it cannot be read. An
+ * unreadable store is never absent.
+ */
+enum class KeyPresence { PRESENT, ABSENT, UNREADABLE }
+
+/**
+ * What [KeystoreManager.discardGeneratedKey] did with a generated key (#255
+ * review r8): deleted it, found it already absent, or failed, leaving it
+ * possibly still held.
+ */
+enum class GeneratedKeyDiscard { DELETED, ABSENT, FAILED }
+
+/**
+ * A store a user key's material can live in (#255 review r6): the Android
+ * Keystore, the Ed25519 preferences (legacy general Ed25519 keys) and the
+ * [SoftwareKeyStore] (exportable general keys). A credential lives only in
+ * the Keystore; a general key in any of the three
+ * ([KeystoreManager.backendsOf]).
+ */
+enum class KeyBackend { KEYSTORE, ED25519, SOFTWARE }
+
+/**
+ * The store that would hold [alias] cannot be read, so whether a key is there
+ * is unknown. A resolution that meets it refuses: it never falls back to
+ * another namespace, and nothing is used or exported through it.
+ */
+class KeyPresenceUnreadableException(val alias: String, cause: Throwable?) :
+    KeyStoreException("Cannot read whether a key is stored under $alias", cause)
+
+/**
+ * A credential and a general key share [keyId] and a key row's public key
+ * names neither, or both: which of them the row describes is unknown, and
+ * a delete of the row is refused with nothing removed (#270 review).
+ */
+class KeyOwnershipUnknownException(val keyId: String) :
+    java.security.GeneralSecurityException("Cannot tell which key under $keyId its row describes")
+
+/**
+ * A key row's public key as the row records it ([KeystoreManager.rowKeyKind]):
+ * SPKI [der], [cose] or both. A passkey's row holds COSE only, as the
+ * credential provider and the sync write it (#270 verify r2).
+ */
+class RowPublicKey(val der: ByteArray?, val cose: ByteArray?) {
+    val isEmpty: Boolean get() = der == null && cose == null
+}
+
 /** A MAC and the algorithm that computed it ("HMAC-SHA256" or "HMAC-SHA512"). */
 class HmacResult(val mac: ByteArray, val algorithm: String)
 
@@ -104,7 +153,7 @@ class DecryptResult(val plaintext: ByteArray, val algorithm: String)
  * val cosePublicKey = manager.generateKey("credential-id-base64", requireBiometric = true)
  *
  * // Sign data with biometric verification
- * val signature = manager.sign("credential-id-base64", dataHash, biometricHelper)
+ * val signature = manager.sign("credential-id-base64", UserKeyKind.CREDENTIAL, dataHash, biometricHelper)
  * ```
  *
  * @param context Application context for checking device capabilities.
@@ -483,16 +532,17 @@ class KeystoreManager(private val context: Context) {
      */
     suspend fun sign(
         credentialId: String,
+        kind: UserKeyKind,
         dataHash: ByteArray,
         biometricHelper: BiometricHelper,
         title: String = "xKey Authentication",
         subtitle: String = "Verify your identity to sign",
         onTurn: (key: String) -> Unit = {}
     ): ByteArray {
-        // Resolve across both alias namespaces, as signWithoutBiometric does.
-        // With the FIDO2-only alias, a passkey the desktop created through
-        // local.generateKey could never be signed with a prompt either.
-        val alias = resolveKeystoreAlias(credentialId) ?: throw KeyNotFoundException(credentialId)
+        // The key of [kind] only (#255 review r3): a passkey the desktop made
+        // through local.generateKey is a general key, one the FIDO2 RPCs made
+        // a credential, and the caller names which ([soleKind]).
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: throw KeyNotFoundException(credentialId)
 
         val privateKey = keyStore.getKey(alias, null) as? PrivateKey
             ?: throw KeyNotFoundException(credentialId)
@@ -564,12 +614,13 @@ class KeystoreManager(private val context: Context) {
      */
     suspend fun signWithoutBiometric(
         credentialId: String,
+        kind: UserKeyKind,
         dataHash: ByteArray
     ): ByteArray {
-        // Resolve across BOTH alias namespaces, as the DER/PEM/SSH/COSE exports do.
-        // The FIDO2-only alias alone means a passkey created through the general
-        // key path — which is how the desktop creates one — can never be signed.
-        val alias = resolveKeystoreAlias(credentialId) ?: throw KeyNotFoundException(credentialId)
+        // The key of [kind] only (#255 review r3), the one whose public key
+        // the caller was given: never a key of the other namespace sharing
+        // the id.
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: throw KeyNotFoundException(credentialId)
 
         val privateKey = keyStore.getKey(alias, null) as? PrivateKey
             ?: throw KeyNotFoundException(credentialId)
@@ -592,8 +643,8 @@ class KeystoreManager(private val context: Context) {
      * @param credentialId Base64-encoded credential ID.
      * @return true if a key exists for this credential.
      */
-    fun keyExists(credentialId: String): Boolean {
-        val alias = resolveKeystoreAlias(credentialId) ?: return false
+    fun keyExists(credentialId: String, kind: UserKeyKind): Boolean {
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: return false
         return keyStore.containsAlias(alias)
     }
 
@@ -601,14 +652,20 @@ class KeystoreManager(private val context: Context) {
      * Delete a credential key from the keystore.
      *
      * @param credentialId Base64-encoded credential ID.
-     * @return true if the key was deleted, false if it didn't exist.
+     * @return [GeneratedKeyDiscard.DELETED] for a key now gone,
+     *   [GeneratedKeyDiscard.ABSENT] when there was none, and
+     *   [GeneratedKeyDiscard.FAILED] when the key may still be there: a
+     *   caller keeps whatever retries the delete on FAILED, never treating
+     *   it as gone.
      */
-    fun deleteKey(credentialId: String): Boolean {
-        // Resolving here also means a key created in the general namespace is
-        // actually removed; callers that deleted through the FIDO2-only alias
-        // were silently leaking those entries.
-        val alias = resolveKeystoreAlias(credentialId) ?: return false
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
+    fun deleteKey(credentialId: String, kind: UserKeyKind): GeneratedKeyDiscard {
+        // The key of [kind] only: a delete of one key never removes the
+        // other key sharing its id. The Keystore entry is the only backend
+        // this deletes, so it reads that alias alone and never the
+        // cross-backend presence guard (#255 review r7): an unreadable
+        // Ed25519 or software store never stops the delete of a Keystore key.
+        val outcome = discardGeneratedKey(userKeyAlias(credentialId, kind))
+        if (outcome != GeneratedKeyDiscard.DELETED) return outcome
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
@@ -617,7 +674,7 @@ class KeystoreManager(private val context: Context) {
             keyType = "fido2"
         )
 
-        return true
+        return outcome
     }
 
     /**
@@ -626,8 +683,8 @@ class KeystoreManager(private val context: Context) {
      * @param credentialId Base64-encoded credential ID.
      * @return The public key, or null if not found.
      */
-    fun getPublicKey(credentialId: String): PublicKey? {
-        val alias = resolveKeystoreAlias(credentialId) ?: return null
+    fun getPublicKey(credentialId: String, kind: UserKeyKind): PublicKey? {
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: return null
         return keyStore.getCertificate(alias)?.publicKey
     }
 
@@ -637,11 +694,9 @@ class KeystoreManager(private val context: Context) {
      * @param credentialId Base64-encoded credential ID.
      * @return COSE-encoded public key bytes, or null if not found.
      */
-    fun getCOSEPublicKey(credentialId: String): ByteArray? {
-        // Resolve across BOTH alias namespaces, as the DER/PEM/SSH exports do.
-        // Using the FIDO2-only alias here made `local.getPublicKey` with
-        // format=cose fail for every key created through local.generateKey.
-        val alias = resolveKeystoreAlias(credentialId) ?: return null
+    fun getCOSEPublicKey(credentialId: String, kind: UserKeyKind): ByteArray? {
+        // The key of [kind] only, as every export reads (#255 review r3).
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: return null
         val publicKey = runCatching { keyStore.getCertificate(alias)?.publicKey }.getOrNull()
             ?: return null
         return encodeCOSEPublicKey(publicKey)
@@ -657,9 +712,9 @@ class KeystoreManager(private val context: Context) {
      * @param credentialId Base64-encoded credential ID.
      * @return Certificate chain, or null if not available.
      */
-    fun getAttestationChain(credentialId: String): List<Certificate>? {
-        // Resolve across both alias namespaces, as the export and signing paths do.
-        val alias = resolveKeystoreAlias(credentialId) ?: return null
+    fun getAttestationChain(credentialId: String, kind: UserKeyKind): List<Certificate>? {
+        // The key of [kind] only, as the export and signing paths read.
+        val alias = resolveKeystoreAlias(credentialId, kind) ?: return null
         return keyStore.getCertificateChain(alias)?.toList()
     }
 
@@ -684,16 +739,14 @@ class KeystoreManager(private val context: Context) {
      * @param credentialId Credential ID or general key ID.
      * @return true if the key is StrongBox-backed, false otherwise or if missing.
      */
-    fun isKeyStrongBoxBacked(credentialId: String): Boolean =
-        keySecurityLevel(credentialId) == KeySecurityLevel.STRONGBOX
+    fun isKeyStrongBoxBacked(credentialId: String, kind: UserKeyKind): Boolean =
+        keySecurityLevel(credentialId, kind) == KeySecurityLevel.STRONGBOX
 
     /**
      * The security level of a key, read from its [KeyInfo].
      *
-     * Resolves [keyId] as [resolveKeystoreAlias] does, so a credential wins
-     * over a general key of the same id: callers that know which namespace
-     * they generated in use [credentialSecurityLevel] or
-     * [generalKeySecurityLevel]. A key with no Keystore entry (an Ed25519 key
+     * Resolves [keyId]'s key of [kind] ([resolveKey]), never the other
+     * key sharing its id. A key with no Keystore entry (an Ed25519 key
      * in EncryptedSharedPreferences) is [KeySecurityLevel.SOFTWARE].
      *
      * @param keyId Credential ID, general key ID or raw alias.
@@ -701,8 +754,8 @@ class KeystoreManager(private val context: Context) {
      * @throws KeyInfoUnavailableException if a Keystore entry exists but its
      *         KeyInfo cannot be read.
      */
-    fun keySecurityLevel(keyId: String): KeySecurityLevel? {
-        val alias = resolveKeystoreAlias(keyId) ?: return null
+    fun keySecurityLevel(keyId: String, kind: UserKeyKind): KeySecurityLevel? {
+        val alias = resolveKeystoreAlias(keyId, kind) ?: return null
         if (!keyStore.containsAlias(alias)) return KeySecurityLevel.SOFTWARE
         return aliasSecurityLevel(alias)
     }
@@ -729,7 +782,7 @@ class KeystoreManager(private val context: Context) {
     fun generalKeySecurityLevel(keyId: String): KeySecurityLevel? {
         val alias = buildGeneralAlias(keyId)
         if (keyStore.containsAlias(alias)) return aliasSecurityLevel(alias)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)) {
+        if (hasSoftwareEd25519Key(alias)) {
             return KeySecurityLevel.SOFTWARE
         }
         return null
@@ -1048,55 +1101,35 @@ class KeystoreManager(private val context: Context) {
 
         // Store private key in EncryptedSharedPreferences since Android Keystore
         // does not support Ed25519
-        val prefs = EncryptedSharedPreferences.create(
-            context,
-            ED25519_PREFS_NAME,
-            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-        prefs.edit()
+        val prefs = checkNotNull(ed25519Prefs())
+        // commit(), not apply(): a key is generated only once its write is
+        // durable; cached presence never stands in for it (#255 review).
+        val stored = prefs.edit()
             .putString(alias, Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP))
-            .apply()
+            .commit()
+        if (!stored) throw KeyGenerationException("Could not store the Ed25519 key $alias")
 
         return keyPair
     }
+
+    /**
+     * Whether this device can hold Ed25519 keys at all: they are generated
+     * and read only from API 33 ([getEd25519PrivateKey]), so below it no
+     * key under any id is one.
+     */
+    @androidx.annotation.ChecksSdkIntAtLeast(api = Build.VERSION_CODES.TIRAMISU)
+    fun holdsEd25519Keys(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
 
     /**
      * Retrieve an Ed25519 private key from EncryptedSharedPreferences.
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     fun getEd25519PrivateKey(alias: String): PrivateKey? {
-        val prefs = EncryptedSharedPreferences.create(
-            context,
-            ED25519_PREFS_NAME,
-            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-        val encoded = prefs.getString(alias, null) ?: return null
+        val prefs = ed25519Read(alias) { ed25519Prefs() } ?: return null
+        val encoded = ed25519Read(alias) { prefs.getString(alias, null) } ?: return null
         val keyBytes = Base64.decode(encoded, Base64.NO_WRAP)
         val keyFactory = KeyFactory.getInstance("Ed25519")
         return keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
-    }
-
-    /**
-     * Check if an Ed25519 key exists in EncryptedSharedPreferences.
-     */
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-    private fun hasEd25519Key(alias: String): Boolean {
-        return try {
-            val prefs = EncryptedSharedPreferences.create(
-                context,
-                ED25519_PREFS_NAME,
-                MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-            prefs.contains(alias)
-        } catch (e: Exception) {
-            false
-        }
     }
 
     /**
@@ -1560,11 +1593,72 @@ class KeystoreManager(private val context: Context) {
      * @param keyId Key identifier.
      * @return DER-encoded public key bytes, or null if the key does not exist.
      */
-    fun getPublicKeyDER(keyId: String): ByteArray? {
-        val alias = resolveKeystoreAlias(keyId) ?: return null
+    fun getPublicKeyDER(keyId: String, kind: UserKeyKind): ByteArray? {
+        val alias = resolveKeystoreAlias(keyId, kind) ?: return null
         val cert = keyStore.getCertificate(alias) ?: return null
         return cert.publicKey.encoded
     }
+
+    /**
+     * The user key a key row under [keyId] of [keyType] and
+     * public key ([publicKey], DER or COSE, read only when it is needed) describes, given the id's material [generation]
+     * entries: every delete of a key row resolves its key here (#270
+     * review). With at most one key under the id, the row's type says it.
+     * With a credential and a general key sharing the id, the type does
+     * not (`local.generateKey` makes fido2 rows under the general alias):
+     * the row's public key must be exactly one of the two keys', or
+     * [KeyOwnershipUnknownException] refuses the delete. A row with no public
+     * key while the software store holds the id is the software key's: it
+     * resolves to the general key (a symmetric key has no public key to match).
+     *
+     * The key is read from the material ([ownersOf]), never from the type
+     * alone (#270 verify): with one key under the id, the row is that key's
+     * (a fido2 row's key can be under the general alias), unless the row's
+     * public key names another key, when the row's own key is gone and the
+     * type names it. Only with no material under the id does the type say.
+     * So a retry, which never switches kind, still deletes the row's key.
+     */
+    fun rowKeyKind(keyId: String, keyType: String, publicKey: () -> RowPublicKey, generation: Set<String>): UserKeyKind {
+        val held = ownersOf(keyId, generation)
+        if (held.isEmpty()) return userKeyKindOf(keyType)
+        val row = publicKey()
+        // The row's key read in each encoding it holds ([matchRowPublicKey]).
+        // Each key's public half is read from the backend that stores it: a
+        // Keystore certificate, or an Ed25519 key's preferences entry, which
+        // has no certificate (#270 verify r3).
+        val rowPublicKeyMatch = { kind: UserKeyKind ->
+            matchRowPublicKey(
+                row,
+                {
+                    runCatching { getPublicKeyDER(keyId, kind) }.getOrNull()
+                        ?: if (holdsEd25519Keys()) {
+                            getEd25519PrivateKey(userKeyAlias(keyId, kind))?.let { ed25519PublicKeyDer(it) }
+                        } else {
+                            null
+                        }
+                },
+                { getCOSEPublicKey(keyId, kind) }
+            )
+        }
+        held.singleOrNull()?.let { only ->
+            // A key with no readable public half (symmetric, software) is
+            // the row's: only a public key that differs names another key.
+            val own = row.isEmpty || rowPublicKeyMatch(only) != false
+            return if (own) only else userKeyKindOf(keyType)
+        }
+        // A row with no public key beside a software store record is that
+        // software (symmetric) key's: a credential's row always records its
+        // public key, so the general namespace owns it, as [rowOwnerKind]
+        // reads it (#270 review of 33427e39).
+        if (row.isEmpty && com.automatethethings.xkey.storage.SOFTWARE_ENTRY in generation) {
+            return UserKeyKind.GENERAL
+        }
+        val owners = if (row.isEmpty) emptyList() else UserKeyKind.entries.filter {
+            rowPublicKeyMatch(it) == true
+        }
+        return owners.singleOrNull() ?: throw KeyOwnershipUnknownException(keyId)
+    }
+
 
     /**
      * Get a general key's public key in PEM format.
@@ -1575,8 +1669,8 @@ class KeystoreManager(private val context: Context) {
      * @param keyId Key identifier.
      * @return PEM-encoded public key string, or null if the key does not exist.
      */
-    fun getPublicKeyPEM(keyId: String): String? {
-        val der = getPublicKeyDER(keyId) ?: return null
+    fun getPublicKeyPEM(keyId: String, kind: UserKeyKind): String? {
+        val der = getPublicKeyDER(keyId, kind) ?: return null
         val base64 = Base64.encodeToString(der, Base64.NO_WRAP)
 
         val sb = StringBuilder()
@@ -1606,8 +1700,8 @@ class KeystoreManager(private val context: Context) {
      * @param keyId Key identifier.
      * @return OpenSSH public key string, or null if the key does not exist or type is unsupported.
      */
-    fun getPublicKeySSH(keyId: String): String? {
-        val alias = resolveKeystoreAlias(keyId) ?: return null
+    fun getPublicKeySSH(keyId: String, kind: UserKeyKind): String? {
+        val alias = resolveKeystoreAlias(keyId, kind) ?: return null
         val cert = keyStore.getCertificate(alias) ?: return null
         val publicKey = cert.publicKey
 
@@ -1715,39 +1809,327 @@ class KeystoreManager(private val context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Resolves a key identifier to its actual Android Keystore alias.
-     *
-     * Tries the following patterns in order:
-     * 1. FIDO2 credential alias: xkey_credential_ + keyId
-     * 2. General key alias: xkey_key_ + keyId
-     * 3. Raw alias: keyId itself (for non-xKey keys)
-     *
-     * @param keyId The key identifier to resolve.
-     * @return The Keystore alias, or null if no matching entry exists.
+     * The Keystore alias of [keyId]'s user key of [kind] ([resolveKey]), or
+     * null if that key does not exist.
      */
-    fun resolveKeystoreAlias(keyId: String): String? {
-        val credentialAlias = KEY_ALIAS_PREFIX + keyId
-        if (keyStore.containsAlias(credentialAlias)) return credentialAlias
+    fun resolveKeystoreAlias(keyId: String, kind: UserKeyKind): String? = resolveKey(keyId, kind)?.alias
 
-        val generalAlias = KEY_ALIAS_PREFIX_GENERAL + keyId
-        if (keyStore.containsAlias(generalAlias)) return generalAlias
-
-        // A PIV slot key is reached only through PivKeyManager, which keeps
-        // its piv_slots row in step; a raw alias must not resolve to it.
-        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return keyId
-
-        // Check Ed25519 software-backed keys. Callers use the result as a
-        // Keystore alias, so a key stored under the general alias resolves to
-        // that alias, never to keyId: keyId may be a PIV slot's raw alias.
-        if (hasSoftwareEd25519Key(generalAlias)) return generalAlias
-        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && hasSoftwareEd25519Key(keyId)) return keyId
-
-        return null
+    /**
+     * The one resolver of a key id (#255 review r2, r3): the Keystore alias
+     * a lookup of [keyId]'s user key of [kind] reads. Every resolution names
+     * its namespace, and reads that namespace's own alias only (a general key
+     * also as its Ed25519 entry): a credential and a general key sharing an
+     * id are never read as one another, so the key a caller signs with is the
+     * one whose public key it was given. The deleted-key gate
+     * ([com.automatethethings.xkey.storage.KeyPolicyStore.requireUsable])
+     * asks this same resolver which key a use reaches.
+     *
+     * A caller that does not know which namespace holds an id asks
+     * [soleKind] first, which names none when both do.
+     *
+     * A namespace whose store cannot be read is never taken for an empty one
+     * (#255 review r5): its probe throws [KeyPresenceUnreadableException], so
+     * [soleKind], [exportKind] and [userKeyIdInUse] refuse rather than fall
+     * back to the other namespace.
+     *
+     * Presence is decided by [holdsUserKey] alone, over every backend of
+     * [kind] (#255 review r6): a general key kept in the [SoftwareKeyStore]
+     * holds its id like any other, and resolves to no Keystore alias, so a
+     * Keystore read of it finds nothing rather than another key.
+     *
+     * @return The resolved alias, or null if no Keystore or Ed25519 key of [kind] holds the id.
+     * @throws KeyPresenceUnreadableException if a backend of the namespace cannot be read.
+     */
+    fun resolveKey(keyId: String, kind: UserKeyKind): ResolvedKey? {
+        if (!holdsUserKey(keyId, kind)) return null
+        val own = userKeyAlias(keyId, kind)
+        return when {
+            presenceIn(KeyBackend.KEYSTORE, keyId, kind) == KeyPresence.PRESENT -> ResolvedKey(own, kind)
+            kind == UserKeyKind.GENERAL && presenceIn(KeyBackend.ED25519, keyId, kind) == KeyPresence.PRESENT ->
+                ResolvedKey(own, kind)
+            else -> null
+        }
     }
 
-    /** True if an Ed25519 software key is stored under [alias] (API 33+ only). */
+    /** The backends a user key of [kind] can live in: a credential only in the Keystore, a general key in any. */
+    fun backendsOf(kind: UserKeyKind): List<KeyBackend> = when (kind) {
+        UserKeyKind.CREDENTIAL -> listOf(KeyBackend.KEYSTORE)
+        UserKeyKind.GENERAL -> KeyBackend.entries
+    }
+
+    /**
+     * The one presence probe of a user-key namespace (#255 review r6):
+     * whether [keyId] holds a key of [kind] in any of its backends
+     * ([backendsOf]). [KeyPresence.UNREADABLE] when any backend cannot be
+     * read, even if another holds the key, since which key the id names is
+     * then unknown; [KeyPresence.PRESENT] when one holds it; otherwise
+     * [KeyPresence.ABSENT]. Every resolver path ([resolveKey], [soleKind],
+     * [exportKind], [userKeyIdInUse] and both generators' checks through it)
+     * asks this, so none skips a backend.
+     */
+    fun userKeyPresence(keyId: String, kind: UserKeyKind): KeyPresence {
+        val found = backendsOf(kind).map { presenceIn(it, keyId, kind) }
+        return when {
+            KeyPresence.UNREADABLE in found -> KeyPresence.UNREADABLE
+            KeyPresence.PRESENT in found -> KeyPresence.PRESENT
+            else -> KeyPresence.ABSENT
+        }
+    }
+
+    /**
+     * Whether [keyId] holds a key of [kind] ([userKeyPresence]).
+     *
+     * @throws KeyPresenceUnreadableException if a backend of the namespace cannot be read.
+     */
+    fun holdsUserKey(keyId: String, kind: UserKeyKind): Boolean = when (userKeyPresence(keyId, kind)) {
+        KeyPresence.PRESENT -> true
+        KeyPresence.ABSENT -> false
+        KeyPresence.UNREADABLE -> throw KeyPresenceUnreadableException(userKeyAlias(keyId, kind), null)
+    }
+
+    /** What [backend] holds for [keyId]'s user key of [kind]; a store that cannot be read is UNREADABLE. */
+    internal fun presenceIn(backend: KeyBackend, keyId: String, kind: UserKeyKind): KeyPresence = when (backend) {
+        KeyBackend.KEYSTORE -> try {
+            if (keyStore.containsAlias(userKeyAlias(keyId, kind))) KeyPresence.PRESENT else KeyPresence.ABSENT
+        } catch (e: Exception) {
+            KeyPresence.UNREADABLE
+        }
+        KeyBackend.ED25519 -> ed25519Presence(userKeyAlias(keyId, kind))
+        KeyBackend.SOFTWARE -> softwareKeyPresence(keyId)
+    }
+
+    /** What the [SoftwareKeyStore] holds for [keyId]; a store that cannot be read is UNREADABLE. */
+    internal fun softwareKeyPresence(keyId: String): KeyPresence =
+        try {
+            softwareKeys().presence(keyId)
+        } catch (e: Exception) {
+            KeyPresence.UNREADABLE
+        }
+
+    /**
+     * The store of exportable general keys, read by [softwareKeyPresence]:
+     * one store, so its migration and its kept metadata scan serve every
+     * resolver call (#255).
+     */
+    private val softwareKeyStore: SoftwareKeyStore by lazy { SoftwareKeyStore(context) }
+
+    /** The store of exportable general keys, read by [softwareKeyPresence]. */
+    internal fun softwareKeys(): SoftwareKeyStore = softwareKeyStore
+
+    /**
+     * The one user-key namespace holding [keyId] (#255 review r3): the
+     * credential or the general key, or null when neither exists or both do.
+     * A path that serves a key from either namespace (a passkey made by the
+     * FIDO2 RPCs is a credential, one made through `local.generateKey` a
+     * general key) resolves, gates and reads with the kind named here, and an
+     * id held in both namespaces is refused, never read as either.
+     */
+    fun soleKind(keyId: String): UserKeyKind? {
+        val credential = holdsUserKey(keyId, UserKeyKind.CREDENTIAL)
+        val general = holdsUserKey(keyId, UserKeyKind.GENERAL)
+        return when {
+            credential && !general -> UserKeyKind.CREDENTIAL
+            general && !credential -> UserKeyKind.GENERAL
+            else -> null
+        }
+    }
+
+    /**
+     * The namespace a public-key share or export of [keyId] reads (#255
+     * review r4): the credential namespace when only a credential holds the
+     * id, so a credential that lives only under its credential alias shares
+     * and exports like a general key (SPEC key-sharing allows hardware
+     * public-key sharing in either namespace); otherwise the general
+     * namespace, where the general key, a software key or no key is found.
+     * A general key beside a credential of its id exports its own key, never
+     * the credential's (#255 review r2). A caller resolves this once, then
+     * gates and reads with the same kind. The general namespace counts every
+     * backend ([userKeyPresence]): a software key beside a credential of its
+     * id exports as the general key it is, never as the credential (#255
+     * review r6).
+     */
+    fun exportKind(keyId: String): UserKeyKind =
+        if (!holdsUserKey(keyId, UserKeyKind.GENERAL) && holdsUserKey(keyId, UserKeyKind.CREDENTIAL)) {
+            UserKeyKind.CREDENTIAL
+        } else {
+            UserKeyKind.GENERAL
+        }
+
+    /**
+     * Whether [keyId] is in use in either user-key namespace: a key is
+     * created under an id only when this is false (#255 review r3), so a
+     * credential and a general key never come to share an id. Every
+     * namespace is probed, so one that cannot be read refuses
+     * ([KeyPresenceUnreadableException]) even when another holds the id
+     * (#255 review r5).
+     */
+    fun userKeyIdInUse(keyId: String): Boolean =
+        UserKeyKind.entries.map { holdsUserKey(keyId, it) }.any { it }
+
+    /**
+     * The alias a raw [keyId] names outside the user-key namespaces: the
+     * raw alias itself (never a PIV slot's, which only PivKeyManager
+     * reaches), as a Keystore entry or an Ed25519 entry; null if none.
+     */
+    private fun rawAlias(keyId: String): String? = when {
+        keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) -> null
+        keyStore.containsAlias(keyId) || hasSoftwareEd25519Key(keyId) -> keyId
+        else -> null
+    }
+
+    /**
+     * Whether any key is stored under [keyId]: a user key of either kind or
+     * a raw alias. A presence check only; nothing is read through it.
+     */
+    fun holdsAnyKey(keyId: String): Boolean = userKeyIdInUse(keyId) || rawAlias(keyId) != null
+
+    /**
+     * Whether [keyId] names an internal key of the app (a CA, the
+     * attestation, sealing or encryption keys) or a foreign one: a raw alias
+     * with no user key under the id. A presence check only.
+     */
+    fun holdsInternalKey(keyId: String): Boolean = !userKeyIdInUse(keyId) && rawAlias(keyId) != null
+
+    /**
+     * The user keys that own [keyId] ([ownersOf]), from the material stored
+     * under it in every backend: the Keystore and Ed25519 entries of its
+     * user-key namespace ([userKeyGeneration]) and its software store record
+     * (#270 verify). Empty when no user key holds the id. A backend that
+     * cannot be read throws, never reads as "no owner".
+     */
+    fun userKeyOwners(keyId: String): Set<UserKeyKind> {
+        val material = userKeyGeneration(keyId).keys.toMutableSet()
+        if (softwareKeys().generation(keyId) != null) material += com.automatethethings.xkey.storage.SOFTWARE_ENTRY
+        return ownersOf(keyId, material)
+    }
+
+    /**
+     * Whether an Ed25519 software key is stored under [alias] (API 33+ only),
+     * three-way (#255 review r5): a store that cannot be read is
+     * [KeyPresence.UNREADABLE], never [KeyPresence.ABSENT].
+     */
+    internal fun ed25519Presence(alias: String): KeyPresence =
+        try {
+            if (hasSoftwareEd25519Key(alias)) KeyPresence.PRESENT else KeyPresence.ABSENT
+        } catch (e: KeyPresenceUnreadableException) {
+            KeyPresence.UNREADABLE
+        }
+
+    /**
+     * True if an Ed25519 software key is stored under [alias] (API 33+ only).
+     * A store that cannot be read throws [KeyPresenceUnreadableException],
+     * never reads as absent, so no resolver path (an id's namespace, its
+     * export kind, whether it is in use) falls through to another namespace
+     * on a read failure (#255 review r5).
+     */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)
+        ed25519Read(alias) { ed25519Prefs()?.contains(alias) == true }
+
+    /**
+     * The one way an Ed25519 preference is read (#255 review round 2): the
+     * store can pass contains() while the read of the encrypted value fails
+     * (a SecurityException on corrupt ciphertext, a GeneralSecurityException,
+     * an I/O error), and a failure to open it fails the same way. Any such
+     * failure of [read] is [KeyPresenceUnreadableException] for [alias], so
+     * every caller, the key screens' refusal included, sees a store that
+     * cannot be read rather than an unchecked exception.
+     */
+    private inline fun <T> ed25519Read(alias: String, read: () -> T): T =
+        try {
+            read()
+        } catch (e: KeyPresenceUnreadableException) {
+            throw e
+        } catch (e: Exception) {
+            throw KeyPresenceUnreadableException(alias, e)
+        }
+
+    /**
+     * The EncryptedSharedPreferences holding Ed25519 software keys, or null
+     * below API 33, where none are generated. Every Ed25519 read, write and
+     * delete goes through it.
+     */
+    internal fun ed25519Prefs(): SharedPreferences? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
+        return EncryptedSharedPreferences.create(
+            context,
+            ED25519_PREFS_NAME,
+            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    /**
+     * The generation of the user key [keyId] held in this manager's backends:
+     * one entry per piece of material in its user-key namespace
+     * ([userKeyAliases]), `keystore:<alias>` for an Android Keystore entry
+     * and `ed25519:<alias>` for an Ed25519 software key, each mapped to a tag
+     * that changes when the material under that alias is replaced (the
+     * entry's creation date and certificate digest, or the digest of the
+     * stored key). Empty when no material is held. A backend that cannot be
+     * read throws: an unreadable Ed25519 store, or a value in it that cannot
+     * be read, is [KeyPresenceUnreadableException] ([ed25519Read]), never
+     * taken for an empty one, so a delete refuses before it removes any row
+     * (#255 review).
+     */
+    fun userKeyGeneration(keyId: String): Map<String, String> {
+        val generation = LinkedHashMap<String, String>()
+        val prefs = ed25519Read(keyId) { ed25519Prefs() }
+        for (alias in userKeyAliases(keyId)) {
+            keystoreTag(alias)?.let { generation[KEYSTORE_ENTRY + alias] = it }
+            ed25519Read(alias) { prefs?.getString(alias, null) }?.let { generation[ED25519_ENTRY + alias] = digestHex(it.toByteArray()) }
+        }
+        return generation
+    }
+
+    /**
+     * Delete the material of [generation] (from [userKeyGeneration]) that is
+     * still in place: an entry whose alias now holds material with another
+     * tag was replaced by a later write and is left alone. Returns the
+     * entries of [generation] still held after the delete; empty means the
+     * generation is gone. An Ed25519 remove whose commit() fails is still
+     * held: the preferences' in-memory cache already shows it absent, but
+     * nothing durable says so, so only a commit that returned true counts.
+     */
+    fun deleteUserKeyGeneration(keyId: String, generation: Map<String, String>): Map<String, String> {
+        val namespace = userKeyAliases(keyId)
+        val prefs = if (generation.keys.any { it.startsWith(ED25519_ENTRY) }) ed25519Read(keyId) { ed25519Prefs() } else null
+        val uncommitted = LinkedHashMap<String, String>()
+        for ((entry, tag) in generation) {
+            when {
+                entry.startsWith(KEYSTORE_ENTRY) -> {
+                    val alias = entry.removePrefix(KEYSTORE_ENTRY)
+                    if (alias in namespace) withAliasGate(alias) { if (keystoreTag(alias) == tag) keyStore.deleteEntry(alias) }
+                }
+                entry.startsWith(ED25519_ENTRY) -> {
+                    val alias = entry.removePrefix(ED25519_ENTRY)
+                    val stored = ed25519Read(alias) { prefs?.getString(alias, null) }
+                    // Absent from the cache is not absent from disk: a remove
+                    // whose commit() failed already left the cache without it.
+                    // So an absent entry is removed again, and only a commit()
+                    // that returns true counts (a commit after a failed one
+                    // writes the file again); replaced material is left.
+                    val ours = stored == null || digestHex(stored.toByteArray()) == tag
+                    if (alias in namespace && prefs != null && ours) {
+                        if (!prefs.edit().remove(alias).commit()) uncommitted[entry] = tag
+                    }
+                }
+            }
+        }
+        val left = userKeyGeneration(keyId)
+        return generation.filter { (entry, tag) -> left[entry] == tag } + uncommitted
+    }
+
+    /** The tag of the Keystore entry at [alias], or null if there is none. */
+    private fun keystoreTag(alias: String): String? {
+        if (!keyStore.containsAlias(alias)) return null
+        val created = keyStore.getCreationDate(alias)?.time ?: 0L
+        val certificate = keyStore.getCertificate(alias)?.encoded ?: ByteArray(0)
+        return "$created:${digestHex(certificate)}"
+    }
+
+    private fun digestHex(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     /**
      * List all key aliases managed by xKey.
@@ -1795,6 +2177,35 @@ class KeystoreManager(private val context: Context) {
         if (!keyStore.containsAlias(alias)) return false
         withAliasGate(alias) { keyStore.deleteEntry(alias) }
         return true
+    }
+
+    /**
+     * The one cleanup of a Keystore key this code just generated (#255
+     * review r7): deletes exactly [alias] from the Android Keystore, its own
+     * backend, and consults no other. It never goes through the
+     * cross-backend presence guard ([holdsUserKey]), so an unreadable Ed25519
+     * or software key store cannot leave a generated private key behind (an
+     * ephemeral ECDH key, or a key whose generation failed half-way). PIV
+     * slot aliases are never touched. A failed delete is reported, never
+     * thrown, so a cleanup in a finally block never replaces the failure
+     * that brought it there; it is never reported as an absent key (#255
+     * review r8), so a caller cannot take a key left behind for one deleted.
+     *
+     * @return [GeneratedKeyDiscard.DELETED] if [alias] was held and is now
+     *   gone, [GeneratedKeyDiscard.ABSENT] if it was not held, and
+     *   [GeneratedKeyDiscard.FAILED] if it may still be held: the delete
+     *   failed, the alias is still there after it, or a PIV alias was named.
+     */
+    fun discardGeneratedKey(alias: String): GeneratedKeyDiscard {
+        if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return GeneratedKeyDiscard.FAILED
+        return try {
+            // A presence read that fails is taken as held: the delete is tried.
+            if (!runCatching { keyStore.containsAlias(alias) }.getOrDefault(true)) return GeneratedKeyDiscard.ABSENT
+            withAliasGate(alias) { keyStore.deleteEntry(alias) }
+            if (keyStore.containsAlias(alias)) GeneratedKeyDiscard.FAILED else GeneratedKeyDiscard.DELETED
+        } catch (e: Exception) {
+            GeneratedKeyDiscard.FAILED
+        }
     }
 
     /**
@@ -2218,8 +2629,135 @@ class KeystoreManager(private val context: Context) {
         /** A FIDO2 key row's type (protocol KeyTypes.FIDO2; crypto does not import protocol). */
         private const val FIDO2_KEY_TYPE = "fido2"
 
+        /**
+         * The user-key namespace of [keyId]: the only Keystore aliases a
+         * delete of a user's key may touch, its credential and general
+         * aliases. An id that resolves to any other alias
+         * ([holdsInternalKey]) names an internal key (a CA, the
+         * attestation, sealing or encryption keys) or a foreign one.
+         */
+        fun userKeyAliases(keyId: String): List<String> =
+            listOf(credentialAlias(keyId), generalKeyAlias(keyId))
+
+        /** The one alias of [keyId]'s user key of [kind]. */
+        fun userKeyAlias(keyId: String, kind: UserKeyKind): String = when (kind) {
+            UserKeyKind.CREDENTIAL -> credentialAlias(keyId)
+            UserKeyKind.GENERAL -> generalKeyAlias(keyId)
+        }
+
+        /**
+         * Whether the [userKeyGeneration] entry [entry] is material of
+         * [keyId]'s user key of [kind]: a credential and a general key can
+         * share an id, and a delete of one never reaches the other's.
+         */
+        fun isEntryOf(entry: String, keyId: String, kind: UserKeyKind): Boolean {
+            val alias = when {
+                entry.startsWith(KEYSTORE_ENTRY) -> entry.removePrefix(KEYSTORE_ENTRY)
+                entry.startsWith(ED25519_ENTRY) -> entry.removePrefix(ED25519_ENTRY)
+                else -> return false
+            }
+            return alias == userKeyAlias(keyId, kind)
+        }
+
+        /** The kind of user key a key row of [keyType] describes. */
+        fun userKeyKindOf(keyType: String): UserKeyKind =
+            if (keyType == "fido2") UserKeyKind.CREDENTIAL else UserKeyKind.GENERAL
+
+        /**
+         * Which of the keys under [keyId] an RPC delete removes (#255
+         * review), given the kind of the id's key row ([rowKind], resolved
+         * by [rowKeyKind]; with no row, the kind the method names: the
+         * credential for the legacy `deleteKey`, else the general key) and
+         * its material [generation] entries. With one key under the
+         * id, that key (its row, if any, is its own). With a credential and
+         * a general key sharing the id, the legacy `deleteKey` names the
+         * credential and `local.deleteKey` the row's key, or with no row the
+         * general key. With no material under the id, still one kind (the
+         * row's, else the one the method names), never every alias: a key
+         * written under the id meanwhile in the other namespace stays
+         * (#270 round 4).
+         */
+        fun deleteTarget(keyId: String, rowKind: UserKeyKind, generation: Set<String>, legacy: Boolean): UserKeyKind {
+            val owners = ownersOf(keyId, generation)
+            val credential = UserKeyKind.CREDENTIAL in owners
+            val general = UserKeyKind.GENERAL in owners
+            return when {
+                credential && !general -> UserKeyKind.CREDENTIAL
+                general && !credential -> UserKeyKind.GENERAL
+                !credential -> rowKind
+                legacy -> UserKeyKind.CREDENTIAL
+                else -> rowKind
+            }
+        }
+
+        /**
+         * The user key a delete naming [kind] removes, given the id's
+         * material [generation] entries: [kind], unless only the other kind
+         * holds material under the id. A key row's type does not say where
+         * its material is: `local.generateKey` makes a fido2-typed key under
+         * the general alias (#255 verify), and its delete must reach it.
+         */
+        fun presentKind(keyId: String, generation: Set<String>, kind: UserKeyKind): UserKeyKind {
+            val other = if (kind == UserKeyKind.CREDENTIAL) UserKeyKind.GENERAL else UserKeyKind.CREDENTIAL
+            val owners = ownersOf(keyId, generation)
+            return if (kind !in owners && other in owners) other else kind
+        }
+
+        /**
+         * The one reading of which user keys own [keyId] (#270 verify): the
+         * kinds whose material [material] (entries of [userKeyGeneration],
+         * [com.automatethethings.xkey.storage.keyMaterialGeneration] or a
+         * tombstone's recorded generation) shows under the id, in every
+         * backend: Keystore and Ed25519 entries of the kind's alias, and a
+         * software store record for the general key. Every delete, replay,
+         * settle and sync decides a key's namespace here, from its stored
+         * material, never from a row's type or a presence probe's cache.
+         */
+        fun ownersOf(keyId: String, material: Set<String>): Set<UserKeyKind> =
+            UserKeyKind.entries.filterTo(LinkedHashSet()) { holdsKind(keyId, material, it) }
+
+        /**
+         * Whether a key is the one [row] records, read in each encoding the
+         * row holds ([der], [cose]; #270 verify r2: a passkey row's key is
+         * COSE only): true if one matches, false if one differs and none
+         * matches, null if the key's public half cannot be read in either
+         * (a symmetric or non-EC key has none to compare).
+         */
+        fun matchRowPublicKey(row: RowPublicKey, der: () -> ByteArray?, cose: () -> ByteArray?): Boolean? {
+            val byDer = row.der?.let { d -> runCatching(der).getOrNull()?.contentEquals(d) }
+            val byCose = row.cose?.let { c -> runCatching(cose).getOrNull()?.contentEquals(c) }
+            return when {
+                byDer == true || byCose == true -> true
+                byDer == false || byCose == false -> false
+                else -> null
+            }
+        }
+
+        /**
+         * The SubjectPublicKeyInfo DER of an Ed25519 [privateKey]'s public
+         * half, derived from the PKCS#8 key the Ed25519 preferences store
+         * (they keep no public key or certificate).
+         */
+        fun ed25519PublicKeyDer(privateKey: java.security.PrivateKey): ByteArray {
+            val params = org.bouncycastle.crypto.util.PrivateKeyFactory.createKey(privateKey.encoded)
+                as org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
+            return org.bouncycastle.crypto.util.SubjectPublicKeyInfoFactory
+                .createSubjectPublicKeyInfo(params.generatePublicKey()).encoded
+        }
+
+        /** Whether [generation] holds material of [keyId]'s [kind] key; a software key is a general key. */
+        fun holdsKind(keyId: String, generation: Set<String>, kind: UserKeyKind): Boolean = generation.any {
+            isEntryOf(it, keyId, kind) || kind == UserKeyKind.GENERAL && it == com.automatethethings.xkey.storage.SOFTWARE_ENTRY
+        }
+
         /** EncryptedSharedPreferences file for Ed25519 software-backed keys. */
         private const val ED25519_PREFS_NAME = "xkey_ed25519_keys"
+
+        /** [userKeyGeneration] entry prefix of an Android Keystore entry. */
+        const val KEYSTORE_ENTRY = "keystore:"
+
+        /** [userKeyGeneration] entry prefix of an Ed25519 software key. */
+        const val ED25519_ENTRY = "ed25519:"
 
         /** EC curve for FIDO2 (NIST P-256). */
         private const val EC_CURVE = "secp256r1"
@@ -2382,3 +2920,16 @@ class KeystoreManager(private val context: Context) {
         }
     }
 }
+
+/**
+ * Which of the two user keys that can share an id a delete is for
+ * (#255 review): a FIDO2 credential (`xkey_credential_<id>`) or a general
+ * key (`xkey_key_<id>`, with its Ed25519 and software key store material).
+ */
+enum class UserKeyKind { CREDENTIAL, GENERAL }
+
+/**
+ * A key id resolved by [KeystoreManager.resolveKey]: the Keystore [alias] a
+ * lookup reads, and the user key it is ([kind]).
+ */
+data class ResolvedKey(val alias: String, val kind: UserKeyKind)

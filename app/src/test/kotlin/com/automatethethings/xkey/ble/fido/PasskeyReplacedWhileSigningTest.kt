@@ -111,10 +111,10 @@ class PasskeyReplacedWhileSigningTest {
         coEvery { sharePermission.canShare(any(), null) } returns true
         coEvery { signCounter.next(any()) } returns 5
         every { keystore.keyRowAlias(keyId, any(), any()) } returns alias
-        every { keystore.resolveKeystoreAlias(keyId) } returns alias
+        every { keystore.resolveKeystoreAlias(keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns alias
         every { keystore.publicKeyDERAt(any()) } answers { keys[firstArg()] }
         // Signs with whatever key the alias holds now.
-        coEvery { keystore.signWithoutBiometric(keyId, any()) } answers { signatureBy(keys.getValue(alias)) }
+        coEvery { keystore.signWithoutBiometric(keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL, any()) } answers { signatureBy(keys.getValue(alias)) }
         // Signs only while the alias holds the approved key, as Keystore's
         // signApproved does.
         coEvery { keystore.signApproved(any(), any(), any(), any()) } answers {

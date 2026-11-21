@@ -79,6 +79,7 @@ import java.util.Base64
 class QueuedApprovalRaceTest {
 
     private lateinit var keyDao: KeyDao
+    private lateinit var policies: com.automatethethings.xkey.storage.dao.KeyPolicyDao
     private lateinit var keystore: KeystoreManager
     private lateinit var context: Context
     private lateinit var launcher: BiometricActivityLauncher
@@ -121,6 +122,22 @@ class QueuedApprovalRaceTest {
         }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No earlier delete under any id is owed.
+        policies = mockk(relaxed = true)
+        coEvery { policies.deletion(any()) } returns null
+        every { database.keyPolicyDao() } returns policies
+        // The store's transaction runs inline: a mock database has no Room
+        // transaction executor, so withTransaction would never return (#193).
+        mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any(), any()) } answers {
+            com.automatethethings.xkey.storage.KeyPolicyStore(
+                policies,
+                object : com.automatethethings.xkey.storage.KeyPolicyStore.Transactor {
+                    override suspend fun <T> run(block: suspend () -> T): T = block()
+                },
+                java.util.concurrent.ConcurrentHashMap()
+            )
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -129,8 +146,8 @@ class QueuedApprovalRaceTest {
         every { AuditLogger.logFido2Authentication(any(), any(), any()) } just runs
 
         keystore = mockk(relaxed = true)
-        coEvery { keystore.generalKeyExists(any()) } answers { firstArg<String>() in aliases }
-        coEvery { keystore.keyExists(any()) } answers { firstArg<String>() in aliases }
+        coEvery { keystore.userKeyIdInUse(any()) } answers { firstArg<String>() in aliases }
+        coEvery { keystore.soleKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
         coEvery { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) } answers {
             create(firstArg())
             ByteArray(91) { 1 }
@@ -140,7 +157,7 @@ class QueuedApprovalRaceTest {
             ByteArray(77) { 2 }
         }
         // The passkey is approved and signed with under the one alias it resolves to.
-        every { keystore.resolveKeystoreAlias(credentialId) } returns "xkey_credential_$credentialId"
+        every { keystore.resolveKeystoreAlias(credentialId, any()) } returns "xkey_credential_$credentialId"
         every { keystore.publicKeyDERAt("xkey_credential_$credentialId") } returns ByteArray(91) { 4 }
         coEvery { keystore.signApproved("xkey_credential_$credentialId", any(), any(), any()) } returns ByteArray(70) { 3 }
 
@@ -260,7 +277,8 @@ class QueuedApprovalRaceTest {
         )
         assertEquals("the first key is never replaced", 0, replaced)
         coVerify(exactly = 1) { keystore.generateKeyForAlgorithm("key-178", any(), any(), any()) }
-        coVerify(exactly = 1) { keyDao.insert(any()) }
+        // Through the store, which inserts the key row with its policy row (#193).
+        coVerify(exactly = 1) { policies.insertKey(any()) }
     }
 
     @Test

@@ -55,10 +55,10 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
-import com.automatethethings.xkey.crypto.SoftwareKeyStore
-import com.automatethethings.xkey.storage.deleteKeyRow
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.orRefuse
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.google.android.material.card.MaterialCardView
@@ -121,9 +121,12 @@ class KeyManagementActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     private val keyDao by lazy { XKeyDatabase.getInstance(this).keyDao() }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this), keystoreManager) }
     private val credentialDao by lazy { XKeyDatabase.getInstance(this).credentialMetadataDao() }
     private val keystoreManager by lazy { KeystoreManager(this) }
-    private val syncManager by lazy { KeyStoreSyncManager(keystoreManager, credentialDao, keyDao) }
+    private val syncManager by lazy {
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, keyPolicyStore)
+    }
 
     // -------------------------------------------------------------------------
     // UI Components
@@ -703,6 +706,8 @@ class KeyManagementActivity : AppCompatActivity() {
     private fun observeKeys() {
         lifecycleScope.launch {
             try {
+                // Owed material deletes first: a tombstoned key is never rediscovered (#193 r9).
+                com.automatethethings.xkey.storage.replayKeyDeletions(this@KeyManagementActivity, keyPolicyStore)
                 syncManager.syncAll()
             } catch (e: Exception) {
                 android.util.Log.w("KeyManagementActivity", "Key sync failed", e)
@@ -713,6 +718,32 @@ class KeyManagementActivity : AppCompatActivity() {
                     allKeys = keys
                     applyFilter()
                     updateSummaryCard()
+                }
+            }
+        }
+        observeUnsavedWithdrawals()
+    }
+
+    /**
+     * Shows, for as long as one stands, that a withdrawal is held only in
+     * the process: a sheet dismissed before its withdrawal was saved leaves
+     * it here (#193 r8).
+     */
+    private fun observeUnsavedWithdrawals() {
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                var shown: com.google.android.material.snackbar.Snackbar? = null
+                try {
+                    KeySharingPeers.unsavedKeys.collectLatest { keys ->
+                        shown?.dismiss()
+                        shown = if (keys.isEmpty()) null else com.google.android.material.snackbar.Snackbar.make(
+                            findViewById(android.R.id.content),
+                            getString(R.string.key_sharing_denial_not_saved),
+                            com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE,
+                        ).also { it.show() }
+                    }
+                } finally {
+                    shown?.dismiss()
                 }
             }
         }
@@ -1127,50 +1158,54 @@ class KeyManagementActivity : AppCompatActivity() {
                 var publicKeyDer: ByteArray? = null
                 var keySizeBits = 0
 
-                when (keyType) {
-                    "signing", "tls", "ssh" -> {
-                        publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
-                        keySizeBits = actualKeySizeBits(publicKeyDer)
-                            ?: nominalKeySizeBits(algorithm)
-                    }
-                    "encryption" -> {
-                        // Generated at the requested modulus size. The size is
-                        // still read back off the key rather than assumed, so a
-                        // row can never describe something that was not produced.
-                        val requestedBits = if (algorithm == "RSA-OAEP-4096") 4096 else 2048
-                        publicKeyDer = keystoreManager.generateRSAEncryptionKey(
-                            keyId,
-                            requestedBits,
-                            authDuration
-                        )
-                        keySizeBits = actualKeySizeBits(publicKeyDer) ?: requestedBits
-                    }
-                    "secret" -> {
-                        keySizeBits = when (algorithm) {
-                            "AES-128" -> 128
-                            "AES-256" -> 256
-                            else -> 256
+                // The material write and its row insert in the store's one
+                // serialisation of this id's key material (#193 r8).
+                keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyManagementActivity, keystoreManager)) {
+                    when (keyType) {
+                        "signing", "tls", "ssh" -> {
+                            publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
+                            keySizeBits = actualKeySizeBits(publicKeyDer)
+                                ?: nominalKeySizeBits(algorithm)
                         }
-                        keystoreManager.generateSymmetricKey(keyId, keySizeBits, authDuration)
+                        "encryption" -> {
+                            // Generated at the requested modulus size. The size is
+                            // still read back off the key rather than assumed, so a
+                            // row can never describe something that was not produced.
+                            val requestedBits = if (algorithm == "RSA-OAEP-4096") 4096 else 2048
+                            publicKeyDer = keystoreManager.generateRSAEncryptionKey(
+                                keyId,
+                                requestedBits,
+                                authDuration
+                            )
+                            keySizeBits = actualKeySizeBits(publicKeyDer) ?: requestedBits
+                        }
+                        "secret" -> {
+                            keySizeBits = when (algorithm) {
+                                "AES-128" -> 128
+                                "AES-256" -> 256
+                                else -> 256
+                            }
+                            keystoreManager.generateSymmetricKey(keyId, keySizeBits, authDuration)
+                        }
+                        "hmac" -> {
+                            keySizeBits = if (algorithm.contains("512")) 512 else 256
+                            keystoreManager.generateHMACKey(keyId, algorithm)
+                        }
                     }
-                    "hmac" -> {
-                        keySizeBits = if (algorithm.contains("512")) 512 else 256
-                        keystoreManager.generateHMACKey(keyId, algorithm)
-                    }
-                }
 
-                val entity = KeyEntity(
-                    keyId = keyId,
-                    keyType = keyType,
-                    algorithm = algorithm,
-                    label = label,
-                    publicKeyDer = publicKeyDer,
-                    keySizeBits = keySizeBits,
-                    biometricRequired = biometric,
-                    source = "local",
-                    createdAt = System.currentTimeMillis()
-                )
-                keyDao.insert(entity)
+                    val entity = KeyEntity(
+                        keyId = keyId,
+                        keyType = keyType,
+                        algorithm = algorithm,
+                        label = label,
+                        publicKeyDer = publicKeyDer,
+                        keySizeBits = keySizeBits,
+                        biometricRequired = biometric,
+                        source = "local",
+                        createdAt = System.currentTimeMillis()
+                    )
+                    keyPolicyStore.insertKey(entity)
+                }
                 Snackbar.make(rootLayout, getString(R.string.key_create_success), Snackbar.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 android.util.Log.e("KeyManagement", "Key creation failed", e)
@@ -1259,8 +1294,13 @@ class KeyManagementActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyManagementActivity))
-            Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
+            // With its policy row and grant rows, in one transaction (#193);
+            // the material only once the rows of this key row are deleted,
+            // in the store's serialisation of its material (#193 r8).
+            val outcome = deleteUserKey(key, keyPolicyStore,
+                com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyManagementActivity, row = key))
+            val shown = outcome.refusal ?: R.string.key_deleted
+            Snackbar.make(rootLayout, getString(shown), Snackbar.LENGTH_SHORT).show()
         }
     }
 
@@ -1761,3 +1801,60 @@ class KeyManagementActivity : AppCompatActivity() {
         }
     }
 }
+
+/**
+ * What a key delete the user asked for did. [Refused]: the delete could not
+ * run (an unreadable key store, a failed key-store read), nothing deleted,
+ * and the screen shows [Refused.message] (#255 verify r3).
+ */
+internal sealed interface UserKeyDelete {
+    object DELETED : UserKeyDelete
+    object GONE : UserKeyDelete
+    object PROTECTED : UserKeyDelete
+    class Refused(@androidx.annotation.StringRes val message: Int) : UserKeyDelete
+}
+
+/**
+ * The UI's one key delete (#255 review): every delete screen goes through
+ * here. A system key, or a key whose material is the app's own
+ * ([com.automatethethings.xkey.storage.InternalKeyException]), is refused
+ * with nothing deleted and reported as [UserKeyDelete.PROTECTED], never a
+ * crash. [UserKeyDelete.GONE]: the key was deleted or generated again
+ * meanwhile, nothing deleted. A delete that cannot read the key store runs
+ * through the screens' one refusal choke point
+ * ([com.automatethethings.xkey.storage.readRefusingUnreadable] and
+ * [com.automatethethings.xkey.storage.orRefuse]) and is
+ * [UserKeyDelete.Refused], never an exception out of the screen's coroutine.
+ */
+internal suspend fun deleteUserKey(
+    key: KeyEntity,
+    store: KeyPolicyStore,
+    material: com.automatethethings.xkey.storage.KeyMaterial
+): UserKeyDelete {
+    if (key.isSystemKey) return UserKeyDelete.PROTECTED
+    var refusal = R.string.key_delete_failed
+    val deleted = try {
+        com.automatethethings.xkey.storage.readRefusingUnreadable {
+            KeySharingPeers.forgetKey(key.keyId, key.id, store, material)
+        }.orRefuse(R.string.key_delete_failed) { refusal = it }
+    } catch (e: com.automatethethings.xkey.storage.InternalKeyException) {
+        return UserKeyDelete.PROTECTED
+    }
+    return when (deleted) {
+        true -> UserKeyDelete.DELETED
+        false -> UserKeyDelete.GONE
+        null -> UserKeyDelete.Refused(refusal)
+    }
+}
+
+/**
+ * The message a delete screen shows for a delete that deleted nothing
+ * because it was refused; null when the key was deleted or already gone.
+ */
+@get:androidx.annotation.StringRes
+internal val UserKeyDelete.refusal: Int?
+    get() = when (this) {
+        UserKeyDelete.PROTECTED -> R.string.key_system_explanation
+        is UserKeyDelete.Refused -> message
+        UserKeyDelete.DELETED, UserKeyDelete.GONE -> null
+    }

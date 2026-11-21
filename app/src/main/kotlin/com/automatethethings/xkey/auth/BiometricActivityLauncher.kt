@@ -436,9 +436,13 @@ class BiometricActivityLauncher(
         subtitle: String,
         showOnLockScreen: Boolean = false,
         keyAlias: String? = null,
-        onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> }
+        onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> },
+        signatureAlgorithm: String? = null
     ): ByteArray =
-        cryptoSignature(credentialId, title, subtitle, showOnLockScreen, keyAlias, onLaunch, signedData = signedData)
+        cryptoSignature(
+            credentialId, title, subtitle, showOnLockScreen, keyAlias, onLaunch,
+            signedData = signedData, signatureAlgorithm = signatureAlgorithm
+        )
 
     private suspend fun cryptoSignature(
         credentialId: String,

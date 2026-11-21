@@ -79,6 +79,8 @@ class GenerationEchoTest {
 
         keyDao = mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
+        // No key has a pending deletion.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) { io.mockk.coEvery { deletion(any()) } returns null }
         every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
@@ -122,7 +124,11 @@ class GenerationEchoTest {
     @Test
     fun `a local method echoes the generation on success`() = runTest {
         coEvery { keyDao.getByKeyId("k1") } returns mockk<KeyEntity>(relaxed = true)
-        every { keystoreManager.getPublicKeyPEM("k1") } returns "PEM"
+        every { keystoreManager.getPublicKeyPEM("k1", any()) } returns "PEM"
+        // The export places the key through its row and material (#270 review r4).
+        mockkStatic("com.automatethethings.xkey.storage.KeyDeletionReplayKt")
+        every { com.automatethethings.xkey.storage.keyMaterialGeneration(any(), "k1", any(), any(), any()) } returns emptyMap()
+        every { keystoreManager.rowKeyKind("k1", any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
 
         val response = answer(
             """{"id":2,"generation":43,"method":"local.getPublicKey","params":{"keyId":"k1","format":"${ExportFormats.PEM}"}}"""

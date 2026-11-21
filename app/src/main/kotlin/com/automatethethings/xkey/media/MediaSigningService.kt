@@ -269,12 +269,16 @@ class MediaSigningService : Service() {
                 val alias = KeystoreManager.generalKeyAlias(keyId)
                 val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
                     ?: throw com.automatethethings.xkey.crypto.KeyNotFoundException(keyId)
-                val signature = keystoreManager.signApproved(
-                    alias,
-                    pubKeyDer,
-                    hashBytes,
-                    KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
-                )
+                // Under the material-use lock and its deleted-key recheck (#255 review).
+                val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
+                    .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+                        keystoreManager.signApproved(
+                            alias,
+                            pubKeyDer,
+                            hashBytes,
+                            KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
+                        )
+                    }
                 val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
 
                 val keyFingerprint = MediaHasher.hashBytes(pubKeyDer)

@@ -118,6 +118,10 @@ class CosignRequestHandlerTest {
         keyDao = mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No key has a pending deletion.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            io.mockk.coEvery { deletion(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -138,6 +142,10 @@ class CosignRequestHandlerTest {
         every { BiometricNotificationHelper.intentData(any()) } returns mockk(relaxed = true)
 
         keystoreManager = mockk(relaxed = true)
+        // Each key here is a general key: the use gate resolves the id's key
+        // from its row and material (#270 verify r4).
+        every { keystoreManager.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystoreManager.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } returns signature
         every { keystoreManager.publicKeyDERAt(any()) } returns publicKeyDer
 
@@ -867,7 +875,7 @@ class CosignRequestHandlerTest {
     private fun servedByRealKeystore(entries: MutableMap<String, java.security.KeyPair>): KeystoreManager {
         val real = realKeystoreOver(entries)
         every { keystoreManager.publicKeyDERAt(any()) } answers { real.publicKeyDERAt(firstArg()) }
-        every { keystoreManager.getPublicKeyDER(any()) } answers { real.getPublicKeyDER(firstArg()) }
+        every { keystoreManager.getPublicKeyDER(any(), any()) } answers { real.getPublicKeyDER(firstArg(), secondArg()) }
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } coAnswers {
             real.signApproved(arg(0), arg(1), arg(2), arg(3))
         }
@@ -949,7 +957,7 @@ class CosignRequestHandlerTest {
                 if (alias == signingAlias && ++signerAliasReads == 2) entries[signingAlias] = swapped
             }
         }
-        every { keystoreManager.getPublicKeyDER(any()) } answers { real.getPublicKeyDER(firstArg()) }
+        every { keystoreManager.getPublicKeyDER(any(), any()) } answers { real.getPublicKeyDER(firstArg(), secondArg()) }
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } coAnswers {
             real.signApproved(arg(0), arg(1), arg(2), arg(3))
         }

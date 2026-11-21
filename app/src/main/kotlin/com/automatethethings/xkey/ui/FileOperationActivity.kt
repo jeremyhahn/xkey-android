@@ -913,12 +913,14 @@ class FileOperationActivity : AppCompatActivity() {
                 val hashHex = MediaHasher.hashCanonicalUri(contentResolver, uri)
                 val hashBytes = hexToBytes(hashHex)
 
-                // Sign the hash
-                val signatureBytes = keystoreManager.signWithAlgorithm(
+                // Sign the hash, under the material-use lock and its
+                // deleted-key recheck (#255 review).
+                val store = com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
+                val signatureBytes = store.withUsableKey(key.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(
                     key.keyId,
                     hashBytes,
                     key.algorithm
-                )
+                ) }
 
                 val signatureBase64 = android.util.Base64.encodeToString(
                     signatureBytes, android.util.Base64.NO_WRAP
@@ -1221,7 +1223,10 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Encrypt to a staging file
-                val fileEncryptor = FileEncryptor(keystoreManager)
+                val fileEncryptor = FileEncryptor(
+                    keystoreManager,
+                    com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
+                )
                 stageForSave(
                     staging,
                     "$fileName.xkeyenc",
@@ -1311,7 +1316,10 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Decrypt to a staging file
-                val fileEncryptor = FileEncryptor(keystoreManager)
+                val fileEncryptor = FileEncryptor(
+                    keystoreManager,
+                    com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
+                )
                 stageForSave(
                     staging,
                     outputName,
