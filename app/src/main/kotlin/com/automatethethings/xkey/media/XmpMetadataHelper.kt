@@ -113,11 +113,19 @@ object XmpMetadataHelper {
      * or a container that refuses the packet, takes a sidecar: for media
      * another app owns a file xKey owns ([writeOwnedSidecar]), never one
      * beside the capture, which the grant does not cover.
+     *
+     * Every branch checks that the media still has [data]'s content hash
+     * before it publishes anything ([requireCurrent], or the staged snapshot
+     * on the granted path): a signature kept on the retry queue across an
+     * edit throws [SourceChangedException] and is never published.
      */
     fun signMedia(context: Context, uri: Uri, filePath: String?, data: ContentAuthenticityData): MediaSignResult {
         val access = MediaPublisher.writeAccess(context, uri)
         if (access == MediaPublisher.MediaWriteAccess.OWNED && filePath != null) {
-            writeSignature(filePath, data)
+            synchronized(lockFor(filePath)) {
+                requireCurrent(context, uri, filePath, getMimeType(filePath), data)
+                writeSignatureLocked(filePath, data)
+            }
             return MediaSignResult.Signed
         }
         // A provider that cannot type the item falls back to its file's suffix.
@@ -130,7 +138,10 @@ object XmpMetadataHelper {
         if (!isJpeg(mimeType) && XmpContainers.formatOf(mimeType) == null) {
             // Not xKey's file: its sidecar is one xKey owns, never a file beside it.
             val lock = if (filePath != null) lockFor(filePath) else lockForKey(uri.toString())
-            synchronized(lock) { writeOwnedSidecar(context, uri, filePath, data) }
+            synchronized(lock) {
+                requireCurrent(context, uri, null, mimeType, data)
+                writeOwnedSidecar(context, uri, filePath, data)
+            }
             return MediaSignResult.Signed
         }
         if (access == MediaPublisher.MediaWriteAccess.NEEDS_GRANT) return MediaSignResult.NeedsWriteAuthorization
@@ -166,6 +177,26 @@ object XmpMetadataHelper {
                 if (!kept) staged.delete()
             }
         } }
+    }
+
+    /**
+     * The one check before [signMedia] publishes: the media still has
+     * [data]'s content hash. Media xKey writes by path ([ownedPath]) is
+     * hashed as it is written; any other is hashed from its original, as
+     * the signer hashed it ([AutoSignHash.contentHashOriginal]). The granted
+     * embedded branch makes the same comparison over its staged snapshot
+     * ([MediaPublisher.StagedSource.of], which [MediaPublisher.writeGranted]
+     * checks again), so it does not hash twice. A signature made before an
+     * edit, kept on the retry queue, throws [SourceChangedException] and is
+     * refused, never published.
+     */
+    private fun requireCurrent(context: Context, uri: Uri, ownedPath: String?, mimeType: String, data: ContentAuthenticityData) {
+        val current = if (ownedPath != null) {
+            AutoSignHash.contentHashFile(File(ownedPath), mimeType)
+        } else {
+            AutoSignHash.contentHashOriginal(context, uri)
+        }
+        if (!current.equals(data.contentHash, ignoreCase = true)) throw SourceChangedException()
     }
 
     fun readSignature(filePath: String): ContentAuthenticityData? {
