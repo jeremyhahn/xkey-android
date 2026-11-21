@@ -126,7 +126,9 @@ class GrantedSidecarDestinationTest {
         assertEquals(XmpMetadataHelper.MediaSignResult.Signed, result)
         assertTrue("nothing is created beside the capture", cameraDir.listFiles()!!.map { it.name } == listOf("VID_0001.mp4"))
         assertArrayEquals("the capture is untouched", original, media.readBytes())
-        assertEquals(listOf("Documents/xKey/" to "VID_0001.mp4.xkeysig"), ownedRequests)
+        // Off primary storage: under volumes/, at the capture's full directory.
+        val directory = cameraDir.canonicalFile.invariantSeparatorsPath.trim('/')
+        assertEquals(listOf("Documents/xKey/volumes/$directory/" to "VID_0001.mp4.xkeysig"), ownedRequests)
         assertEquals(signed.toJsonString(), owned.readText())
     }
 

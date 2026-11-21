@@ -519,12 +519,18 @@ object XmpMetadataHelper {
      * item whose file MediaStore names, reads through [sidecarFileOf]:
      * beside it, else the file xKey owns for it under `Documents/xKey/`
      * ([ownedSidecarLocation]). A MediaStore item with no file reads the
-     * owned one named for the URI; a document reads the one beside it in
-     * its tree. Null when there is none or it cannot be read.
+     * owned one named for the URI. Every spelling of a MediaStore item, its
+     * media document URI included, reads as the item itself
+     * ([MediaPublisher.canonicalMediaUri]), as the writer names it; another
+     * document reads the one beside it in its tree. Null when there is none
+     * or it cannot be read.
      */
     fun readSidecar(context: Context, uri: Uri): ContentAuthenticityData? = try {
+        val item = MediaPublisher.canonicalMediaUri(uri)
         when {
             uri.scheme == ContentResolver.SCHEME_FILE -> uri.path?.let(::readSidecarSignature)
+            item.authority == MediaStore.AUTHORITY -> mediaFilePath(context, item)?.let(::readSidecarSignature)
+                ?: readSidecarFile(ownedSidecarFile(null, item))
             DocumentsContract.isDocumentUri(context, uri) -> {
                 val sidecar = DocumentsContract.buildDocumentUriUsingTree(
                     uri, DocumentsContract.getDocumentId(uri) + SIDECAR_SUFFIX
@@ -555,28 +561,43 @@ object XmpMetadataHelper {
 
     /**
      * Where the sidecar of [filePath] (or of [uri] when no file is named)
-     * goes when the media is not xKey's own: a file xKey owns under
-     * `Documents/xKey/`, at the media's own relative directory, named
-     * `<media name>.xkeysig`. The relative path ends in a slash.
+     * goes when the media is not xKey's own: the one sidecar identity, which
+     * the writer ([writeOwnedSidecar]) and every reader ([sidecarFileOf],
+     * [readSidecar]) derive the owned sidecar from. A file xKey owns under
+     * `Documents/xKey/`, at the media's own directory (under `volumes/` with
+     * its full path when it is not on primary storage, so captures sharing a
+     * name in different directories or volumes never share a sidecar), named
+     * `<media name>.xkeysig`; with no file, named for the item's one media
+     * identity ([MediaPublisher.canonicalMediaUri]), so every spelling of it
+     * names the same sidecar. The relative path ends in a slash.
      */
     internal fun ownedSidecarLocation(filePath: String?, uri: Uri?): Pair<String, String> {
-        val name = (filePath?.let { File(it).name } ?: uri?.lastPathSegment ?: "media") + SIDECAR_SUFFIX
+        val item = uri?.let { MediaPublisher.canonicalMediaUri(it).lastPathSegment }
+        val name = (filePath?.let { File(it).name } ?: item ?: "media") + SIDECAR_SUFFIX
         return ownedSidecarDirectory(filePath) to name
     }
 
     /** The MediaStore relative path, ending in a slash, of the owned sidecar of [filePath]. */
     private fun ownedSidecarDirectory(filePath: String?): String {
-        val root = externalRoot()
-        val directory = filePath?.let { File(it).parentFile }?.let { parent ->
-            if (root == null) return@let null
-            try {
-                parent.canonicalFile.relativeToOrNull(root.canonicalFile)?.invariantSeparatorsPath
-            } catch (_: IOException) {
-                null
-            }
-        }?.takeIf { it.isNotEmpty() && !it.startsWith("..") }
-        return if (directory == null) "$OWNED_SIDECAR_ROOT/" else "$OWNED_SIDECAR_ROOT/$directory/"
+        val parent = filePath?.let { File(it).absoluteFile.parentFile } ?: return "$OWNED_SIDECAR_ROOT/"
+        val directory = canonical(parent)
+        val primary = externalRoot()?.let { root ->
+            directory.relativeToOrNull(canonical(root))?.invariantSeparatorsPath?.takeIf { !it.startsWith("..") }
+        }
+        if (primary != null) return if (primary.isEmpty()) "$OWNED_SIDECAR_ROOT/" else "$OWNED_SIDECAR_ROOT/$primary/"
+        // Not on primary storage: the full path, so the volume and directory stay part of it.
+        val path = directory.invariantSeparatorsPath.trim('/')
+        return if (path.isEmpty()) "$OWNED_SIDECAR_ROOT/$OTHER_VOLUMES/" else "$OWNED_SIDECAR_ROOT/$OTHER_VOLUMES/$path/"
     }
+
+    private fun canonical(file: File): File = try {
+        file.canonicalFile
+    } catch (_: IOException) {
+        file.absoluteFile
+    }
+
+    /** The directory under `Documents/xKey/` holding owned sidecars of media off primary storage. */
+    private const val OTHER_VOLUMES = "volumes"
 
     /** The shared storage root MediaStore relative paths start from, or null where there is none. */
     private fun externalRoot(): File? = try {
