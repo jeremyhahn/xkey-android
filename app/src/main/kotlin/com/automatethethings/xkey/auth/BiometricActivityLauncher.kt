@@ -155,6 +155,9 @@ class BiometricActivityLauncher(
      */
     private val chosenIndexes = ConcurrentHashMap<String, Int>()
 
+    /** The ids of the account-choice requests waiting for an answer. */
+    private val choiceRequests: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /**
      * Whether the receiver is currently registered.
      */
@@ -193,9 +196,10 @@ class BiometricActivityLauncher(
                 BiometricResult.Error(errorCode, errorMessage)
             }
 
-            // An account list's pick, kept for its request before the
-            // request resumes, and dropped when the result is refused.
-            val chosen = success && intent.hasExtra(TransparentBiometricActivity.EXTRA_CHOSEN_INDEX)
+            // An account list's pick, read only for an account-choice
+            // request, kept for it before it resumes, and dropped when the
+            // result is refused.
+            val chosen = success && requestId in choiceRequests
             if (chosen) {
                 chosenIndexes[requestId] = intent.getIntExtra(TransparentBiometricActivity.EXTRA_CHOSEN_INDEX, -1)
             }
@@ -354,16 +358,10 @@ class BiometricActivityLauncher(
             "BiometricActivityLauncher must be registered before requesting authentication"
         }
 
-        val (result, chosen) = awaitPrompt(title, subtitle, description, showOnLockScreen, accounts = null, onLaunch)
+        val (result, _) = awaitPrompt(title, subtitle, description, showOnLockScreen, accounts = null, onLaunch)
 
         when (result) {
             is BiometricResult.Success -> {
-                if (chosen != null) {
-                    // Only an account list answers with a choice, and this
-                    // request never shows one: it is not an authentication.
-                    AuditLogger.logBiometricFailure(purpose = "authentication", errorCode = BiometricPrompt.ERROR_VENDOR)
-                    throw BiometricException(BiometricPrompt.ERROR_VENDOR, "An authentication was answered with a choice")
-                }
                 // Log successful biometric authentication
                 AuditLogger.logBiometricSuccess(purpose = "authentication")
                 // Authentication succeeded, return normally
@@ -436,13 +434,18 @@ class BiometricActivityLauncher(
         onLaunch: (requestId: String, prompt: Intent) -> Unit
     ): Pair<BiometricResult, Int?> {
         var issued: String? = null
-        val result = try {
-            awaitTurn(title, subtitle, description, showOnLockScreen, accounts, onLaunch) { issued = it }
-        } catch (e: Throwable) {
-            issued?.let { chosenIndexes.remove(it) }
-            throw e
+        try {
+            val result = awaitTurn(title, subtitle, description, showOnLockScreen, accounts, onLaunch) { id ->
+                issued = id
+                if (accounts != null) choiceRequests.add(id)
+            }
+            return result to issued?.let { chosenIndexes[it] }
+        } finally {
+            issued?.let {
+                choiceRequests.remove(it)
+                chosenIndexes.remove(it)
+            }
         }
-        return result to issued?.let { chosenIndexes.remove(it) }
     }
 
     private suspend fun awaitTurn(
