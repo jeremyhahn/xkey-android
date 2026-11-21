@@ -3553,18 +3553,10 @@ class RequestHandler(
             authData[35] = ((newSignCount shr 8) and 0xFF).toByte()
             authData[36] = (newSignCount and 0xFF).toByte()
 
-            // Sign: authenticatorData || clientDataHash
-            val clientDataHash = assertionParams.getClientDataHashBytes()
-            val signedData = ByteArray(authData.size + clientDataHash.size)
-            System.arraycopy(authData, 0, signedData, 0, authData.size)
-            System.arraycopy(clientDataHash, 0, signedData, authData.size, clientDataHash.size)
-
-            // Hash the signed data for ECDSA (sign expects a hash)
-            val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
-
-            // Sign with the credential key the owner approved, under the
-            // alias its approval read.
-            val signature = current.sign(dataHash, KeystoreManager.PASSKEY_SIGNATURE_ALGORITHM)
+            // Sign authenticatorData || clientDataHash, unhashed, with the
+            // credential key the owner approved, under the alias its
+            // approval read.
+            val signature = current.signWebAuthn(authData, assertionParams.getClientDataHashBytes())
 
             Triple(newSignCount, authData, signature)
         }
@@ -5135,6 +5127,18 @@ private class ApprovedKey(
             )
         }
     }
+
+    /**
+     * Signs a WebAuthn assertion: `authenticatorData || clientDataHash`
+     * under [alias], through [sign].
+     *
+     * The data goes to the signer unhashed: SHA256withECDSA
+     * ([KeystoreManager.PASSKEY_SIGNATURE_ALGORITHM]) hashes it once, which
+     * is the signature a relying party verifies. This is the only place a
+     * WebAuthn assertion is signed in this file.
+     */
+    suspend fun signWebAuthn(authenticatorData: ByteArray, clientDataHash: ByteArray): ByteArray =
+        sign(authenticatorData + clientDataHash, KeystoreManager.PASSKEY_SIGNATURE_ALGORITHM)
 }
 
 /**

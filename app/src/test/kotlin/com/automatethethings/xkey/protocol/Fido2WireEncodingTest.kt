@@ -335,14 +335,54 @@ class Fido2WireEncodingTest {
     }
 
     /**
+     * The assertion path signs only through `ApprovedKey.signWebAuthn`, which
+     * passes `authenticatorData || clientDataHash` to SHA256withECDSA
+     * unhashed. A digest or a direct `.sign(` call there would sign a hash
+     * of the WebAuthn data, which no relying party verifies.
+     */
+    @Test
+    fun `the phone assertion signs only through signWebAuthn and never pre-hashes`() {
+        val file = File(HANDLER_PATH)
+        assertTrue(
+            "Handler.kt not found at ${file.absolutePath}; unit tests must run from the app module",
+            file.isFile
+        )
+        val source = file.readText()
+        val assertion = bodyRange(source, "private suspend fun handleLocalSignFido2Assertion(", null)
+        val text = source.substring(assertion)
+
+        val digests = occurrences(text, "MessageDigest")
+        assertEquals("the assertion path may digest only the rpId: $digests", 1, digests.size)
+        assertTrue(
+            "the assertion path's one digest must be the rpIdHash",
+            text.startsWith("MessageDigest.getInstance(\"SHA-256\")\n", digests.single()) &&
+                text.indexOf(".digest(assertionParams.rpId.toByteArray(", digests.single()) in
+                digests.single()..digests.single() + 120
+        )
+        assertTrue("the assertion path calls .sign( directly", occurrences(text, ".sign(").isEmpty())
+        assertEquals("the assertion path must sign through signWebAuthn", 1, occurrences(text, ".signWebAuthn(").size)
+
+        val webAuthnFrom = source.indexOf("Signs a WebAuthn assertion")
+        assertTrue("signWebAuthn's KDoc not found in Handler.kt", webAuthnFrom >= 0)
+        val webAuthn = webAuthnFrom until source.indexOf("\n}", webAuthnFrom)
+        val legacy = bodyRange(source, "private suspend fun signWithBiometric(", null)
+        for (index in occurrences(source, "PASSKEY_SIGNATURE_ALGORITHM")) {
+            assertTrue(
+                "PASSKEY_SIGNATURE_ALGORITHM is used outside signWebAuthn and signWithBiometric at offset $index",
+                index in webAuthn || index in legacy
+            )
+        }
+    }
+
+    /**
      * From the line that holds [start] to the end of the function that
      * begins at [last] (or at [start] when null), by the four-space closing brace.
      */
     private fun bodyRange(source: String, start: String, last: String?): IntRange {
         val from = source.indexOf(start)
-        assertTrue("$start not found in the device test", from >= 0)
+        assertTrue("$start not found in the scanned source", from >= 0)
         val lastFrom = if (last == null) from else source.indexOf(last, from)
-        assertTrue("$last not found after $start in the device test", lastFrom >= 0)
+        assertTrue("$last not found after $start in the scanned source", lastFrom >= 0)
         val end = source.indexOf("\n    }\n", lastFrom)
         assertTrue("no end of the function at $lastFrom", end >= 0)
         return from until end
@@ -398,6 +438,7 @@ class Fido2WireEncodingTest {
         const val OTHER_RP_ID = "other.example"
         const val DEVICE_TEST_PATH =
             "src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt"
+        const val HANDLER_PATH = "src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt"
 
         /** 0xfb and 0xff put '-' and '_' into the URL-safe form. */
         val ID_BYTES = ByteArray(32) { (0xF0 + it % 16).toByte() }
