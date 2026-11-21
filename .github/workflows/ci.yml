@@ -1,5 +1,6 @@
-# ci-template: v1.48 — CI for a Kotlin/Gradle Android app, kept in step with a
+# ci-template: v1.49 — CI for a Kotlin/Gradle Android app, kept in step with a
 # shared template; change both together.
+# v1.49: preflight runs on the bigdisk pool on github.com; CI_PREFLIGHT_RUNS_ON (runs-on JSON) switches it back.
 # v1.48: preflight outputs `runner` and `runner_docker` as runs-on JSON; image,
 # lint-gates, integration and soak read runner_docker, CI Gate reads runner,
 # and `Free runner disk` runs only on a GitHub-hosted runner.
@@ -175,7 +176,7 @@ jobs:
   # so the job stays on the PR tier.
   preflight:
     name: Preflight [changed files, architecture gates]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}   # v1.49
     timeout-minutes: 10
     permissions:
       contents: read
