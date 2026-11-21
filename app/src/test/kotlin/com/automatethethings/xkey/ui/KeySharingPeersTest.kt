@@ -733,7 +733,7 @@ class KeySharingPeersTest {
     @Test
     fun aPolicyChangeForAReplacedKeyIsRefused() = runTest {
         val peers = peersOf()
-        assertTrue(KeySharingPeers.forgetKey(KEY, instance, store))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, KeySharingPeers.forgetKey(KEY, instance, store))
         val recreated = tables.addKey(KEY, StoredPolicy.SELECTED_PEERS)
         rows(KEY to PEER_A)
 
@@ -976,7 +976,7 @@ class KeySharingPeersTest {
         val sheet = peersOf()
         assertFalse(sheet.stale.first())
 
-        assertTrue(store.deleteKey(KEY, instance))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey(KEY, instance))
         val replaced = store.withKeyMaterial(KEY, tombstoneDelete { _, _ -> true }) { store.insertKey(FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS)) }
         tables.grant(KEY, PEER_A)
 

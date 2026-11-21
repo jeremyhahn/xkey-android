@@ -40,7 +40,7 @@ class FileDecryptDeletedKeyTest {
         val store = tables.store()
         val row = tables.addKey(KEY_ID, SharingPolicyType.PRIVATE)
         // The delete is acknowledged; its material delete fails and is owed.
-        assertTrue(store.deleteKey(KEY_ID, row, materialDelete { false }))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey(KEY_ID, row, materialDelete { false }))
         assertTrue("the material delete is owed", store.isDeletionPending(KEY_ID))
         val keystore = mockk<KeystoreManager>(relaxed = true)
         val output = ByteArrayOutputStream()

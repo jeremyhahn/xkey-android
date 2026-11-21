@@ -443,8 +443,11 @@ class KeyPolicyStore(
 
     /**
      * Deletes [keyId]'s grant rows, policy row and key row in one
-     * transaction, if its key row is still [instance]. Returns false, with
-     * nothing deleted, if the key is gone or was generated again under its id.
+     * transaction, if its key row is still [instance]: [KeyDelete.DELETED].
+     * Returns [KeyDelete.GONE], with nothing deleted, if the key is gone or
+     * was generated again under its id, and [KeyDelete.BLOCKED], with
+     * nothing deleted, if an earlier delete beside its row (the same-id
+     * key's material) is owed and cannot be settled first (#270 review).
      * Once the rows are deleted, [material] deletes the key's material (the
      * generation read before the row delete, recorded in its tombstone) in
      * the same call: a caller that queues this and is cancelled meanwhile
@@ -453,12 +456,13 @@ class KeyPolicyStore(
      * serialisation every generation takes: material is deleted only for
      * the key row [instance] whose rows were just deleted (#193 r8).
      */
-    suspend fun deleteKey(keyId: String, instance: Long, material: KeyMaterial = KeyMaterial.NONE): Boolean = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(keyId) {
+    suspend fun deleteKey(keyId: String, instance: Long, material: KeyMaterial = KeyMaterial.NONE): KeyDelete = com.automatethethings.xkey.remote.SharePermissionLedger.revoking(keyId) {
         lockKeyMaterial(keyId) { held ->
-            if (dao.keyInstance(keyId) != instance) return@lockKeyMaterial false
+            if (dao.keyInstance(keyId) != instance) return@lockKeyMaterial KeyDelete.GONE
             // An earlier delete beside this row still owing material is
-            // settled first: this tombstone never replaces it (#255 verify).
-            val retry = noTombstoneOwed(held, material) ?: return@lockKeyMaterial false
+            // settled first: this tombstone never replaces it (#255 verify),
+            // and the key, still there, is not reported gone (#270 review).
+            val retry = noTombstoneOwed(held, material) ?: return@lockKeyMaterial KeyDelete.BLOCKED
             val source = dao.keySource(keyId)
             val keyType = dao.keyType(keyId)
             // Under the lock every write of the id's material takes, so this
@@ -477,8 +481,24 @@ class KeyPolicyStore(
                 audited(tombstone, keyType, material)
                 deleteMaterialOf(held, tombstone, material)
             }
-            deleted
+            if (deleted) KeyDelete.DELETED else KeyDelete.GONE
         }
+    }
+
+    /** What [deleteKey] did. */
+    enum class KeyDelete {
+        /** The key's rows are deleted, and its material, or its tombstone for a replay. */
+        DELETED,
+
+        /** The key row is gone or was generated again under its id: nothing was deleted. */
+        GONE,
+
+        /**
+         * An earlier delete beside the key's row (the same-id key's material)
+         * is owed and could not be settled first: the key, its rows and its
+         * material are still there, nothing was deleted (#270 review).
+         */
+        BLOCKED
     }
 
     /**

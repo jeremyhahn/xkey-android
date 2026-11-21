@@ -116,6 +116,8 @@ class UserKeyDeleteTest {
 
         assertTrue("a blocked delete was reported as a gone key", outcome != UserKeyDelete.GONE && outcome != UserKeyDelete.DELETED)
         assertNotNull("a blocked delete shows no refusal", outcome.refusal)
+        assertEquals(UserKeyDelete.PENDING, outcome)
+        assertEquals(com.automatethethings.xkey.R.string.key_delete_pending, outcome.refusal)
         assertEquals("the general key's row was deleted", instance, store.instance("k"))
         val owed = mutableListOf<String?>()
         store.replayDeletions(com.automatethethings.xkey.storage.tombstoneDelete { _, tombstone -> owed += tombstone.generation; false })
@@ -137,7 +139,7 @@ class UserKeyDeleteTest {
     @Test
     fun noKeyDeleteResultIsReadAsABoolean() {
         val root = listOf(File("src"), File("app/src")).first { it.isDirectory }
-        val boolean = Regex("""(!\s*(KeySharingPeers\.)?forgetKey\(|!\s*\w+\.deleteKey\(\w+, \w+(\.id)?, |(forgetKey|store\(?\)?\.deleteKey)\([^)]*\)\)?\s*(==|!=)\s*(true|false)|assert(True|False)\([^\n]*(forgetKey|store\(?\)?\.deleteKey)\()""")
+        val boolean = Regex("""(!\s*(KeySharingPeers\.)?forgetKey\(|!\s*\w+\.deleteKey\(\w+, \w+(\.id)?, |(forgetKey|store\(?\)?\.deleteKey)\([^)]*\)\)?\s*(==|!=)\s*(true|false)|assert(True|False)\(("[^"]*",\s*)?((KeySharingPeers\.)?forgetKey|store\(?\)?\.deleteKey)\()""")
         val hits = root.walkTopDown()
             .filter { it.isFile && it.extension == "kt" && "/androidTest/" !in it.path }
             .flatMap { file ->

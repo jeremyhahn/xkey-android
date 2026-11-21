@@ -2525,9 +2525,7 @@ class RequestHandler(
         val entity = keyDao.getByKeyId(keyId)
         if (entity?.source == "xkmsd") {
             val reference = com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager, row = entity)
-            if (!KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = reference)) {
-                return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
-            }
+            keyDeleteRefusal(request, KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = reference))?.let { return it }
             Log.i(TAG, "Deleted key reference: $keyId")
             return Response.success(request.id, JSONObject().put("deleted", true))
         }
@@ -2557,12 +2555,26 @@ class RequestHandler(
                 KeyPolicyStore.MaterialDelete.CHANGED ->
                     return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
             }
-        } else if (!KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = material)) {
-            return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
+        } else {
+            keyDeleteRefusal(request, KeySharingPeers.forgetKey(keyId, entity.id, keyPolicyStore, material = material))?.let { return it }
         }
 
         Log.i(TAG, "Deleted key: $keyId")
         return Response.success(request.id, JSONObject().put("deleted", true))
+    }
+
+    /**
+     * The answer to a key row delete that deleted nothing, or null once it
+     * is deleted (#270 review): a key gone or generated again since the
+     * request is KEY_NOT_FOUND; a key still there because an earlier delete
+     * beside its row is not finished is INTERNAL_ERROR, never "not found".
+     */
+    private fun keyDeleteRefusal(request: Request, deleted: KeyPolicyStore.KeyDelete): Response? = when (deleted) {
+        KeyPolicyStore.KeyDelete.DELETED -> null
+        KeyPolicyStore.KeyDelete.GONE ->
+            Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key changed since the request; not deleted")
+        KeyPolicyStore.KeyDelete.BLOCKED ->
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "An earlier delete of this key is not finished; not deleted, try again")
     }
 
     /**

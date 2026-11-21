@@ -89,7 +89,7 @@ class KeyPolicyStoreTest {
     fun anEditBoundToAReplacedKeyRefusesAndLeavesTheNewKeysGrants() = runBlocking {
         val old = tables.addKey("k", SELECTED_PEERS)
         val store = store()
-        assertTrue(store.deleteKey("k", old))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", old))
         val recreated = tables.addKey("k", SELECTED_PEERS)
         tables.grant("k", PEER)
         assertTrue(recreated != old)
@@ -141,7 +141,7 @@ class KeyPolicyStoreTest {
         store.grant("k", instance, PEER)
         assertEquals(setOf(PEER), tables.grantsOf("k"))
 
-        assertTrue(store.deleteKey("k", instance))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", instance))
         assertEquals(null, store.policy("k"))
         assertEquals(emptySet<String>(), tables.grantsOf("k"))
         assertEquals(null, tables.keyInstance("k"))
@@ -369,7 +369,7 @@ class KeyPolicyStoreTest {
         yield()
         release.complete(Unit)
 
-        assertTrue(delete.await())
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, delete.await())
         val recreated = regenerate.await()
         assertEquals(recreated, tables.keyInstance("k"))
         assertTrue("the new key's material was deleted by the old key's delete", "k" in material)
@@ -387,7 +387,7 @@ class KeyPolicyStoreTest {
         val material = mutableSetOf("k")
         val store = store()
 
-        assertTrue(store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
         assertEquals(null, tables.keyInstance("k"))
         assertTrue("the material lost its record", store.isDeletionPending("k"))
 
@@ -421,7 +421,7 @@ class KeyPolicyStoreTest {
         val key = tables.addKey("k", SELECTED_PEERS)
         val material = mutableSetOf("k")
         val store = store()
-        assertTrue(store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
         // The write settles the owed delete first, then writes its own material.
         store.withKeyMaterial("k", tombstoneDelete { held, _ -> material -= held.keyId; true }) {
             material += "k"
@@ -455,7 +455,7 @@ class KeyPolicyStoreTest {
             }
         }
         val store = store()
-        assertTrue(store.deleteKey("k", key, generations))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", key, generations))
         assertTrue(store.isDeletionPending("k"))
 
         // A credential generated again under the alias, outside the store.
@@ -466,7 +466,7 @@ class KeyPolicyStoreTest {
 
         // The generation it did tombstone is deleted.
         material["k"] = "first"
-        tables.addKey("j", SELECTED_PEERS).let { reachable = false; material["j"] = "j1"; assertTrue(store.deleteKey("j", it, generations)) }
+        tables.addKey("j", SELECTED_PEERS).let { reachable = false; material["j"] = "j1"; assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("j", it, generations)) }
         reachable = true
         store.replayDeletions(generations)
         assertTrue("the replay left the tombstoned generation", "j" !in material)
@@ -483,10 +483,10 @@ class KeyPolicyStoreTest {
         val store = KeyPolicyStore(tables, tables, tables.unrecordedDenials, audit = { tombstone, _ -> audited += tombstone.keyId })
         val key = tables.addKey("k", SELECTED_PEERS)
 
-        assertFalse(store.deleteKey("k", key + 1, materialDelete { true }))
+        assertEquals(KeyPolicyStore.KeyDelete.GONE, store.deleteKey("k", key + 1, materialDelete { true }))
         assertEquals("a stale delete was audited", emptyList<String>(), audited)
 
-        assertTrue(store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", key, materialDelete { throw IOException("keystore busy") }))
         assertEquals(listOf("k"), audited)
         store.replayDeletions(materialDelete { true })
         assertEquals("the replay audited the delete again", listOf("k"), audited)
@@ -531,7 +531,7 @@ class KeyPolicyStoreTest {
         val store = store()
         store.requireUsable("k")
 
-        assertTrue(store.deleteKey("k", key, materialDelete { false }))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", key, materialDelete { false }))
         try {
             store.requireUsable("k")
             fail("a key with a pending deletion was usable")
@@ -602,7 +602,7 @@ class KeyPolicyStoreTest {
         val store = store()
 
         // The Keystore delete is refused; the software key is deleted.
-        assertTrue(store.deleteKey("k", key, materialDelete { held -> software -= held.keyId; held.keyId !in keystore }))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", key, materialDelete { held -> software -= held.keyId; held.keyId !in keystore }))
         assertTrue("a tombstone dropped while the Keystore still holds the key", store.isDeletionPending("k"))
 
         assertEquals(0, store.replayDeletions(tombstoneDelete { held, _ -> keystore -= held.keyId; held.keyId !in keystore }))
@@ -719,7 +719,7 @@ class KeyPolicyStoreTest {
         val store = store()
         assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial("k", generationDelete("credential") { false }, besideRow = key))
 
-        assertFalse("a row delete replaced an owed tombstone", store.deleteKey("k", key, generationDelete("general") { false }))
+        assertEquals("a row delete replaced an owed tombstone", KeyPolicyStore.KeyDelete.BLOCKED, store.deleteKey("k", key, generationDelete("general") { false }))
         assertEquals(key, store.instance("k"))
         val owed = mutableListOf<String?>()
         store.replayDeletions(tombstoneDelete { _, tombstone -> owed += tombstone.generation; false })
@@ -782,7 +782,7 @@ class KeyPolicyStoreTest {
     fun aWithdrawalBoundToAReplacedKeyIsStale() = runBlocking {
         val old = tables.addKey("k", SELECTED_PEERS)
         val store = store()
-        assertTrue(store.deleteKey("k", old))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey("k", old))
         tables.addKey("k", SELECTED_PEERS)
         tables.grant("k", PEER)
 

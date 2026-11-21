@@ -1805,11 +1805,14 @@ class KeyManagementActivity : AppCompatActivity() {
 /**
  * What a key delete the user asked for did. [Refused]: the delete could not
  * run (an unreadable key store, a failed key-store read), nothing deleted,
- * and the screen shows [Refused.message] (#255 verify r3).
+ * and the screen shows [Refused.message] (#255 verify r3). [PENDING]: an
+ * earlier delete beside the key's row is not finished, nothing deleted,
+ * and the screen shows that, never "deleted" (#270 review).
  */
 internal sealed interface UserKeyDelete {
     object DELETED : UserKeyDelete
     object GONE : UserKeyDelete
+    object PENDING : UserKeyDelete
     object PROTECTED : UserKeyDelete
     class Refused(@androidx.annotation.StringRes val message: Int) : UserKeyDelete
 }
@@ -1820,7 +1823,9 @@ internal sealed interface UserKeyDelete {
  * ([com.automatethethings.xkey.storage.InternalKeyException]), is refused
  * with nothing deleted and reported as [UserKeyDelete.PROTECTED], never a
  * crash. [UserKeyDelete.GONE]: the key was deleted or generated again
- * meanwhile, nothing deleted. A delete that cannot read the key store runs
+ * meanwhile, nothing deleted. [UserKeyDelete.PENDING]: an earlier delete
+ * beside the key's row (the same-id key's material) is owed and could not
+ * be settled, so the key is still there, nothing deleted. A delete that cannot read the key store runs
  * through the screens' one refusal choke point
  * ([com.automatethethings.xkey.storage.readRefusingUnreadable] and
  * [com.automatethethings.xkey.storage.orRefuse]) and is
@@ -1841,20 +1846,23 @@ internal suspend fun deleteUserKey(
         return UserKeyDelete.PROTECTED
     }
     return when (deleted) {
-        true -> UserKeyDelete.DELETED
-        false -> UserKeyDelete.GONE
+        KeyPolicyStore.KeyDelete.DELETED -> UserKeyDelete.DELETED
+        KeyPolicyStore.KeyDelete.GONE -> UserKeyDelete.GONE
+        KeyPolicyStore.KeyDelete.BLOCKED -> UserKeyDelete.PENDING
         null -> UserKeyDelete.Refused(refusal)
     }
 }
 
 /**
  * The message a delete screen shows for a delete that deleted nothing
- * because it was refused; null when the key was deleted or already gone.
+ * because it was refused or an earlier delete is not finished; null when
+ * the key was deleted or already gone.
  */
 @get:androidx.annotation.StringRes
 internal val UserKeyDelete.refusal: Int?
     get() = when (this) {
         UserKeyDelete.PROTECTED -> R.string.key_system_explanation
         is UserKeyDelete.Refused -> message
+        UserKeyDelete.PENDING -> R.string.key_delete_pending
         UserKeyDelete.DELETED, UserKeyDelete.GONE -> null
     }

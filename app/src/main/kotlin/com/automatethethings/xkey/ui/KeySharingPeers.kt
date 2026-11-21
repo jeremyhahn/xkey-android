@@ -423,9 +423,12 @@ class KeySharingPeers(
          * ([KeyPolicyStore.deleteKey]) under the edits lock, and drops its
          * pending withdrawals: no retry of an edit of the deleted key lands
          * on one generated again under its id (#193). Only the key row
-         * [instance] the delete was approved for is deleted: false, with
-         * nothing deleted, if the key is gone or was generated again under
-         * its id meanwhile. Throws if the delete failed.
+         * [instance] the delete was approved for is deleted: the store's
+         * result is returned unchanged, [KeyPolicyStore.KeyDelete.GONE],
+         * with nothing deleted, if the key is gone or was generated again
+         * under its id meanwhile, [KeyPolicyStore.KeyDelete.BLOCKED], with
+         * nothing deleted, if an earlier delete beside its row is not
+         * settled (#270 review). Throws if the delete failed.
          * [material], the delete of the key's material, runs in the same
          * queued edit once the rows are deleted ([KeyPolicyStore.deleteKey]):
          * a caller cancelled while the delete waits never leaves it behind.
@@ -435,9 +438,11 @@ class KeySharingPeers(
             instance: Long,
             store: KeyPolicyStore,
             material: com.automatethethings.xkey.storage.KeyMaterial = com.automatethethings.xkey.storage.KeyMaterial.NONE
-        ): Boolean =
+        ): KeyPolicyStore.KeyDelete =
             accepted(acceptedEdits) {
-                store.deleteKey(keyId, instance, material).also { if (it) settle { it.keyId == keyId } }
+                store.deleteKey(keyId, instance, material).also { deleted ->
+                    if (deleted == KeyPolicyStore.KeyDelete.DELETED) settle { it.keyId == keyId }
+                }
             }
 
         /**

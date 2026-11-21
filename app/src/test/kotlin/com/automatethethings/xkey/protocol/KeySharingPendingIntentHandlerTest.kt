@@ -435,7 +435,7 @@ class KeySharingPendingIntentHandlerTest {
 
         // The key is deleted (as the key screens do) and generated again
         // under its id, not shareable, and granted to a peer.
-        assertTrue(KeySharingPeers.forgetKey(key, first, store))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, KeySharingPeers.forgetKey(key, first, store))
         val second = tables.addKey(key, SharingPolicyType.PRIVATE)
         tables.grant(key, PEER_A)
         advanceUntilIdle()
@@ -946,7 +946,7 @@ class KeySharingPendingIntentHandlerTest {
         every { keystore.userKeyGeneration(id) } returns mapOf("keystore:xkey_key_$id" to "1")
         val instance = tables.addKey(id, SharingPolicyType.SELECTED_PEERS)
 
-        assertTrue(store.deleteKey(id, instance, owedDelete()))
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey(id, instance, owedDelete()))
         assertTrue("the delete's material is not owed", store.isDeletionPending(id))
 
         val data = java.util.Base64.getEncoder().encodeToString(ByteArray(32))
