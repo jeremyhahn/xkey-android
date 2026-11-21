@@ -708,6 +708,22 @@ class KeyPolicyStore(
         }
 
     /**
+     * Settles a delete still owed under [keyId] with [settle], under
+     * [keyId]'s lock, the same way [withKeyMaterial] does before its block.
+     * A caller that refuses a key that already exists calls this first, so
+     * the leftover material of an acknowledged delete is removed rather
+     * than answered as a live key. Throws [DeletionPendingException] if the
+     * material still cannot be deleted. Not reentrant: never call it from
+     * inside a [withKeyMaterial] block for the same id.
+     */
+    suspend fun settleOwedDeletion(keyId: String, settle: KeyMaterial) {
+        lockKeyMaterial(keyId) { held ->
+            settleDeletion(held, settle)
+            if (isDeletionPending(keyId)) throw DeletionPendingException(keyId)
+        }
+    }
+
+    /**
      * The one gate every crypto use of a user key passes (#255 review,
      * ruling 554): [requireUsable] rechecks the key under [keyId]'s material
      * lock, the lock every delete takes, and [block] runs as a shared use of

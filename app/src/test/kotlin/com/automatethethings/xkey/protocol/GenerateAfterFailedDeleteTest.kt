@@ -175,7 +175,8 @@ class GenerateAfterFailedDeleteTest {
         .also { it.setConnectedDevicePublicKeyHex(peer) }
 
     private suspend fun localGenerate(keyId: String): JSONObject = call(
-        Request(1L, MethodNames.LOCAL_GENERATE_KEY, JSONObject().put("keyId", keyId).put("algorithm", "ES256"))
+        Request(1L, MethodNames.LOCAL_GENERATE_KEY, JSONObject().put("keyId", keyId).put("algorithm", "ES256")
+            .put("requireUserVerification", false))
     )
 
     private suspend fun legacyGenerate(credentialId: String): JSONObject = call(

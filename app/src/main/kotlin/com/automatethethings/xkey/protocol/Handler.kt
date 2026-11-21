@@ -729,6 +729,7 @@ class RequestHandler(
         // Both generators reserve the id under one name (#255 review r4), so a
         // concurrent local.generateKey of this id is refused, never run beside it.
         val reservation = keyLockId(generateParams.credentialId)
+        settleOwedDeletion(generateParams.credentialId)
         if (keystoreManager.userKeyIdInUse(generateParams.credentialId) || !keyIds.tryReserve(reservation)) {
             throw credentialExists()
         }
@@ -1436,6 +1437,7 @@ class RequestHandler(
         // review r3): a general key beside it would share its id, and a
         // passkey use would sign with a key other than the one returned here.
         val reservation = keyLockId(keyId)
+        settleOwedDeletion(keyId)
         refuseExistingKey(keyId)
         if (keystoreManager.userKeyIdInUse(keyId) || !keyIds.tryReserve(reservation)) {
             throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
@@ -1503,6 +1505,15 @@ class RequestHandler(
             }
         }
     }
+
+    /**
+     * Settles a delete of [keyId] still owed (its material delete failed)
+     * before a generator's existence checks, so that material left behind is
+     * deleted rather than refused as a live key. Never called inside a
+     * withKeyMaterial block: the lock is not reentrant.
+     */
+    private suspend fun settleOwedDeletion(keyId: String) =
+        keyPolicyStore.settleOwedDeletion(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystoreManager))
 
     /**
      * Refuses an ID that exists in any key store: the general and credential
