@@ -19,8 +19,10 @@ import android.net.Uri
 import com.automatethethings.xkey.media.MediaHasher.SignatureSource
 import io.mockk.every
 import io.mockk.mockk
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import java.io.File
 import java.io.InputStream
 
 /**
@@ -29,6 +31,22 @@ import java.io.InputStream
  * the in-memory hash gives, and it hashes a video larger than the heap.
  */
 class MediaHasherStreamingTest {
+
+    /**
+     * Where the hasher puts its one snapshot of the media. A video larger
+     * than the heap is a snapshot of more than 2 GiB, more than a small
+     * /tmp tmpfs holds, so it goes under the module's build directory, on
+     * the disk the build itself uses, and is removed after each test.
+     */
+    private val workRoot: File = File("build/tmp/media-hasher-streaming-test").absoluteFile
+
+    private fun workDir(name: String): File =
+        kotlin.io.path.createTempDirectory(workRoot.apply { mkdirs() }.toPath(), name).toFile()
+
+    @After
+    fun tearDown() {
+        workRoot.deleteRecursively()
+    }
 
     private fun bytes(vararg values: Int) = ByteArray(values.size) { values[it].toByte() }
 
@@ -90,7 +108,7 @@ class MediaHasherStreamingTest {
         val context = mockk<android.content.Context>()
         every { context.contentResolver } returns resolver
         // The original is read only once no granted write of it is pending recovery.
-        every { context.filesDir } returns kotlin.io.path.createTempDirectory("files").toFile()
+        every { context.filesDir } returns workDir("files")
         return context to uri
     }
 
@@ -156,7 +174,7 @@ class MediaHasherStreamingTest {
     @Test
     fun `streamed hashes equal the in-memory hashes for every type`() {
         for ((mime, data) in cases()) {
-            val streamed = MediaHasher.hashStreamed({ data.inputStream() }, mime, kotlin.io.path.createTempDirectory("hash").toFile())
+            val streamed = MediaHasher.hashStreamed({ data.inputStream() }, mime, workDir("hash"))
             assertEquals(mime, MediaHasher.hashCanonical(data, mime), streamed.canonical)
             assertEquals(mime, MediaHasher.hashBytes(data), streamed.whole)
         }
@@ -166,7 +184,7 @@ class MediaHasherStreamingTest {
     fun `a signed container's streamed canonical hash is the hash of the file before signing`() {
         for ((mime, raw) in XmpFixtures.all) {
             val signed = XmpContainers.embed(raw, XmpContainers.formatOf(mime)!!, XmpFixtures.json())!!
-            val streamed = MediaHasher.hashStreamed({ signed.inputStream() }, mime, kotlin.io.path.createTempDirectory("hash").toFile())
+            val streamed = MediaHasher.hashStreamed({ signed.inputStream() }, mime, workDir("hash"))
             assertEquals(mime, MediaHasher.hashBytes(raw), streamed.canonical)
         }
     }
