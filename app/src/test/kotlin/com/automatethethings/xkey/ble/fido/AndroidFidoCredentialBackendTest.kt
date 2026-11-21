@@ -457,10 +457,11 @@ class AndroidFidoCredentialBackendTest {
         }
         // Storage is full: the deletion record cannot be written either.
         val unwritable = object : PendingKeyDeletions {
-            override fun add(keyIds: Collection<String>) = throw java.io.IOException("disk full")
+            override fun add(keys: Collection<PendingKey>) = throw java.io.IOException("disk full")
             override fun addRegistration(keyId: String) = Unit
             override fun remove(keyId: String) = Unit
-            override fun all(): Set<String> = emptySet()
+            override fun remove(key: PendingKey) = Unit
+            override fun all(): Set<PendingKey> = emptySet()
             override fun registrations(): Set<String> = emptySet()
         }
 
