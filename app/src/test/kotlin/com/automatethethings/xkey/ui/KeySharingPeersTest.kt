@@ -581,6 +581,75 @@ class KeySharingPeersTest {
     }
 
     /**
+     * A withdrawal held in the process (its grant delete and its denial
+     * write both failed) whose retry later deletes the grant: the retry is
+     * not done until the held denial is written to the key's policy row, so
+     * this process and a fresh one agree on what is authorized and whether a
+     * grant is taken, before and after a restart (#270 review).
+     */
+    @Test
+    fun aWithdrawalRetryThatLandsSavesTheHeldDenial() = runTest {
+        rows(KEY to PEER_A, KEY to PEER_B)
+        tables.failing += setOf("deleteGrant", "putPolicyRow")
+        val peers = peersOf()
+
+        assertFalse(peers.setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A)))
+        runCurrent()
+        assertTrue(store.isHeld(KEY, instance))
+
+        // Storage recovers: the retry deletes A's grant.
+        tables.failing.clear()
+        advanceUntilIdle()
+        assertTrue(table.none { it == (KEY to PEER_A) })
+        assertEquals(emptySet<String>(), KeySharingPeers.unsavedKeys.first())
+
+        assertFalse("a landed retry left the denial held in the process only", store.isHeld(KEY, instance))
+        val key = FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS, id = instance)
+        val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
+        assertEquals(
+            "this process and a restart disagree on what the key authorizes",
+            restarted.enforcedPolicy(key),
+            store.enforcedPolicy(key)
+        )
+        assertEquals("the denial was not saved", StoredPolicy.PRIVATE, restarted.enforcedPolicy(key))
+        assertFalse("the sheet shows a peer allowed while every peer is denied", peers.peers().first().of(PEER_B).allowed)
+        assertFalse(hasAccess(PEER_B))
+        assertEquals(
+            "this process and a restart disagree on whether a grant is taken",
+            runCatching { restarted.grant(KEY, instance, PEER_C) }.isSuccess,
+            runCatching { store.grant(KEY, instance, PEER_C) }.isSuccess
+        )
+
+        // The user's next choice lifts the denial, in this process and after a restart.
+        assertTrue(peers.setKeyPolicy(SharingPolicyType.SELECTED_PEERS, instance))
+        assertTrue(peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)))
+        assertTrue(hasAccess(PEER_B))
+        val again = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
+        assertEquals(StoredPolicy.SELECTED_PEERS, again.enforcedPolicy(key))
+        assertEquals(StoredPolicy.SELECTED_PEERS, store.enforcedPolicy(key))
+    }
+
+    /**
+     * Bypass guard (#270 review): every obligation retry is accepted as done
+     * only through the one helper that saves the key row's held denial
+     * first; no attempt returns [KeySharingPeers]' done result itself.
+     */
+    @Test
+    fun noObligationRetryIsDoneOutsideTheHeldDenialCheck() {
+        val root = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
+        val source = java.io.File(root, "com/automatethethings/xkey/ui/KeySharingPeers.kt").readText()
+        val helper = source.substringAfter("private suspend fun reconciled(", "").substringBefore("\n\n")
+        assertTrue("the held-denial check is missing", "recordHeld(" in helper)
+        val outside = source.replace(helper, "").lines().mapIndexedNotNull { i, line ->
+            val code = line.substringBefore("//")
+            if ("Attempt.DONE" in code && "== Attempt.DONE" !in code) "KeySharingPeers.kt:${i + 1}: ${line.trim()}" else null
+        }
+        assertEquals("a retry is done without saving the held denial", emptyList<String>(), outside)
+        val owe = source.substringAfter("private fun owe(").substringBefore("\n        }\n")
+        assertTrue("an obligation retry skips the held-denial check", "reconciled(" in owe)
+    }
+
+    /**
      * The Private write fails while the stored policy stays Selected Peers,
      * so the reopened sheet shows Selected Peers. A grant then is refused
      * while the failed change's clear is owed, so no approved grant is ever
