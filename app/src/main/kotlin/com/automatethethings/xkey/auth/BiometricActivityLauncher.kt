@@ -150,6 +150,15 @@ class BiometricActivityLauncher(
     private val pendingCryptoRequests = PendingCryptoSignatures()
 
     /**
+     * The index an account list answered, by request id, from its result
+     * broadcast until [requestAccountChoice] reads it.
+     */
+    private val chosenIndexes = ConcurrentHashMap<String, Int>()
+
+    /** The ids of the account-choice requests waiting for an answer. */
+    private val choiceRequests: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
      * Whether the receiver is currently registered.
      */
     @Volatile
@@ -187,8 +196,18 @@ class BiometricActivityLauncher(
                 BiometricResult.Error(errorCode, errorMessage)
             }
 
+            // An account list's pick, read only for an account-choice
+            // request, kept for it before it resumes, and dropped when the
+            // result is refused.
+            val chosen = success && requestId in choiceRequests
+            if (chosen) {
+                chosenIndexes[requestId] = intent.getIntExtra(TransparentBiometricActivity.EXTRA_CHOSEN_INDEX, -1)
+            }
+
             // An id this launcher never issued answers nothing.
-            pendingRequests.complete(requestId, result)
+            if (!pendingRequests.complete(requestId, result) && chosen) {
+                chosenIndexes.remove(requestId)
+            }
         }
     }
 
@@ -339,24 +358,7 @@ class BiometricActivityLauncher(
             "BiometricActivityLauncher must be registered before requesting authentication"
         }
 
-        val result = pendingRequests.await { requestId ->
-            val intent = TransparentBiometricActivity.createIntent(
-                context = context,
-                requestId = requestId,
-                title = title,
-                subtitle = subtitle,
-                description = description,
-                showOnLockScreen = showOnLockScreen
-            )
-            val key = NotificationKeys.approval(requestId)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            // The notification's data on the direct start too, so a
-            // notification launch is the same intent and reaches this prompt.
-            intent.data = BiometricNotificationHelper.intentData(key)
-
-            onLaunch(key, intent)
-            context.startActivity(intent)
-        }
+        val (result, _) = awaitPrompt(title, subtitle, description, showOnLockScreen, accounts = null, onLaunch)
 
         when (result) {
             is BiometricResult.Success -> {
@@ -371,6 +373,108 @@ class BiometricActivityLauncher(
                 throw mapErrorToException(result.code, result.message)
             }
         }
+    }
+
+    /**
+     * Shows the owner [accounts] as one list on [TransparentBiometricActivity]
+     * and waits for a pick. It takes its turn on screen in the same
+     * process-wide queue as [requestAuthentication], and is answered by the
+     * same result broadcast.
+     *
+     * The list shows the accounts in the order given, as plain text, under
+     * [title] with [subtitle] (the relying party) and a Cancel button. It
+     * verifies nobody: a caller that needs the user verified asks for that
+     * after the choice. Cancelling this coroutine takes the list down.
+     *
+     * @param onLaunch As for [requestAuthentication].
+     * @return The chosen account's index in [accounts], or null when the owner
+     *   cancels or dismisses the list, the list is empty, or the answer names
+     *   no entry of [accounts].
+     *
+     * @throws BiometricException When the list could not be shown or timed
+     *   out waiting for its turn.
+     * @throws IllegalStateException If the receiver is not registered.
+     */
+    suspend fun requestAccountChoice(
+        title: String,
+        subtitle: String,
+        accounts: List<String>,
+        showOnLockScreen: Boolean = false,
+        onLaunch: (requestId: String, prompt: Intent) -> Unit = { _, _ -> }
+    ): Int? {
+        check(isRegistered) {
+            "BiometricActivityLauncher must be registered before requesting an account choice"
+        }
+        if (accounts.isEmpty()) return null
+
+        val (result, chosen) = awaitPrompt(title, subtitle, null, showOnLockScreen, accounts, onLaunch)
+        return when (result) {
+            is BiometricResult.Success -> chosen?.takeIf { it in accounts.indices }
+            is BiometricResult.Error -> when (result.code) {
+                BiometricPrompt.ERROR_USER_CANCELED,
+                BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+                BiometricPrompt.ERROR_CANCELED -> null
+                else -> throw mapErrorToException(result.code, result.message)
+            }
+        }
+    }
+
+    /**
+     * Starts [TransparentBiometricActivity] for one request on its turn on
+     * screen and waits for its result: a biometric prompt, or the account
+     * list when [accounts] is given. Answers the result with the index an
+     * account list picked, null for any other answer.
+     */
+    private suspend fun awaitPrompt(
+        title: String,
+        subtitle: String,
+        description: String?,
+        showOnLockScreen: Boolean,
+        accounts: List<String>?,
+        onLaunch: (requestId: String, prompt: Intent) -> Unit
+    ): Pair<BiometricResult, Int?> {
+        var issued: String? = null
+        try {
+            val result = awaitTurn(title, subtitle, description, showOnLockScreen, accounts, onLaunch) { id ->
+                issued = id
+                if (accounts != null) choiceRequests.add(id)
+            }
+            return result to issued?.let { chosenIndexes[it] }
+        } finally {
+            issued?.let {
+                choiceRequests.remove(it)
+                chosenIndexes.remove(it)
+            }
+        }
+    }
+
+    private suspend fun awaitTurn(
+        title: String,
+        subtitle: String,
+        description: String?,
+        showOnLockScreen: Boolean,
+        accounts: List<String>?,
+        onLaunch: (requestId: String, prompt: Intent) -> Unit,
+        onIssued: (requestId: String) -> Unit
+    ): BiometricResult = pendingRequests.await { requestId ->
+        onIssued(requestId)
+        val intent = TransparentBiometricActivity.createIntent(
+            context = context,
+            requestId = requestId,
+            title = title,
+            subtitle = subtitle,
+            description = description,
+            showOnLockScreen = showOnLockScreen,
+            accounts = accounts
+        )
+        val key = NotificationKeys.approval(requestId)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // The notification's data on the direct start too, so a
+        // notification launch is the same intent and reaches this prompt.
+        intent.data = BiometricNotificationHelper.intentData(key)
+
+        onLaunch(key, intent)
+        context.startActivity(intent)
     }
 
     /**
