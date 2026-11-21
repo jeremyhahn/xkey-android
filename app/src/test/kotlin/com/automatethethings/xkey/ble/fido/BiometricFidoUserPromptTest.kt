@@ -20,10 +20,13 @@ import android.content.Intent
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+import androidx.biometric.BiometricPrompt
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.testing.ReleaseMocks
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -176,42 +179,78 @@ class BiometricFidoUserPromptTest {
         assertEquals(listOf("approval-3"), lockScreen.cancelled)
     }
 
-    /** The chooser's prompts answer in turn: true approves, false cancels. */
-    private fun answer(vararg approvals: Boolean): MutableList<String> {
-        val titles = mutableListOf<String>()
-        val next = approvals.iterator()
-        coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } coAnswers {
-            titles += firstArg<String>()
-            if (!next.next()) throw UserCancelledException()
+    /** The account list answers [index]; records the accounts it was shown. */
+    private fun choose(index: Int?): MutableList<List<String>> {
+        val shown = mutableListOf<List<String>>()
+        coEvery { launcher.requestAccountChoice(any(), any(), any(), any(), any()) } coAnswers {
+            shown += thirdArg<List<String>>()
+            arg<(String, Intent) -> Unit>(4)("approval-4", promptIntent)
+            index
         }
-        return titles
+        return shown
     }
 
     @Test
-    fun `the account chooser names each account in turn until the owner approves one`() = runTest {
-        val titles = answer(false, true)
+    fun `the account chooser is one list screen and answers the account picked`() = runTest {
+        val lockScreen = FakeLockScreen(locked = true)
+        val shown = choose(2)
+        val accounts = listOf("Alice (alice)", "Bob (bob)", "Carol (carol)")
 
-        val chosen = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { launcher }
-            .chooseAccount("example.com", listOf("Alice (alice)", "Bob (bob)", "Carol (carol)"))
+        val chosen = BiometricFidoUserPrompt(context, lockScreen) { launcher }.chooseAccount("example.com", accounts)
 
-        assertEquals(1, chosen)
-        assertEquals(listOf("Sign in as Alice (alice)?", "Sign in as Bob (bob)?"), titles)
+        assertEquals(2, chosen)
+        assertEquals("one list, every account in order", listOf(accounts), shown)
+        coVerify(exactly = 1) { launcher.requestAccountChoice(any(), "example.com", accounts, true, any()) }
+        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any(), any()) }
+        assertEquals(listOf("approval-4" to promptIntent), lockScreen.posted)
+        assertEquals("taken down once answered", listOf("approval-4"), lockScreen.cancelled)
     }
 
     @Test
-    fun `cancelling every account declines the choice`() = runTest {
-        val titles = answer(false, false)
+    fun `declining the list declines the choice`() = runTest {
+        choose(null)
 
         val chosen = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { launcher }
             .chooseAccount("example.com", listOf("alice", "bob"))
 
         assertEquals(null, chosen)
-        assertEquals(2, titles.size)
+    }
+
+    @Test
+    fun `an index outside the list declines the choice`() = runTest {
+        val prompt = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { launcher }
+
+        choose(3)
+        assertEquals(null, prompt.chooseAccount("example.com", listOf("alice", "bob", "carol")))
+        choose(-1)
+        assertEquals(null, prompt.chooseAccount("example.com", listOf("alice", "bob", "carol")))
+    }
+
+    @Test
+    fun `no launcher means no account choice`() = runTest {
+        val chosen = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { null }
+            .chooseAccount("example.com", listOf("alice", "bob"))
+
+        assertEquals(null, chosen)
+    }
+
+    @Test
+    fun `a failed or unregistered list declines the choice`() = runTest {
+        val prompt = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { launcher }
+
+        coEvery { launcher.requestAccountChoice(any(), any(), any(), any(), any()) } throws
+            BiometricException(BiometricPrompt.ERROR_TIMEOUT, "timed out")
+        assertEquals(null, prompt.chooseAccount("example.com", listOf("alice", "bob")))
+        coEvery { launcher.requestAccountChoice(any(), any(), any(), any(), any()) } throws
+            IllegalStateException("not registered")
+        assertEquals(null, prompt.chooseAccount("example.com", listOf("alice", "bob")))
     }
 
     @Test
     fun `a cancelled user check or account choice propagates the cancellation, not a refusal`() = runTest {
         coEvery { launcher.requestAuthentication(any(), any(), any(), any(), any()) } throws
+            kotlinx.coroutines.CancellationException("the client went away")
+        coEvery { launcher.requestAccountChoice(any(), any(), any(), any(), any()) } throws
             kotlinx.coroutines.CancellationException("the client went away")
         val prompt = BiometricFidoUserPrompt(context, FakeLockScreen(locked = false)) { launcher }
 

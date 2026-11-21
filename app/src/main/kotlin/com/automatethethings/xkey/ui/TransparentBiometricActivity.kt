@@ -14,11 +14,14 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricManager
@@ -44,6 +47,8 @@ import java.util.concurrent.TimeUnit
  * - Support for showing over the lock screen (when requested)
  * - Broadcasts authentication results via local broadcast
  * - Properly handles user cancellation and back press
+ * - An account-choice mode ([EXTRA_ACCOUNTS]): one list of accounts, as
+ *   plain text, in place of the biometric prompt, answering the index picked
  * - Answers every request it was started for exactly once, including one
  *   it gives way to and one whose activity goes away unanswered
  *
@@ -76,6 +81,9 @@ class TransparentBiometricActivity : FragmentActivity() {
     private var requestId: String = ""
     private var biometricPrompt: BiometricPrompt? = null
     private var hasFinished = false
+
+    /** The account list on screen, in account-choice mode. */
+    private var accountList: AlertDialog? = null
 
     /** Whether this instance counts as its request's prompt being up. */
     private var claimed = false
@@ -137,8 +145,14 @@ class TransparentBiometricActivity : FragmentActivity() {
             }
         })
 
-        // Show biometric prompt immediately
-        showBiometricPrompt(title, subtitle, description)
+        // An account list in place of the prompt when the request names
+        // accounts; the biometric prompt otherwise.
+        val accounts = intent.getStringArrayListExtra(EXTRA_ACCOUNTS)
+        if (accounts != null) {
+            showAccountChoice(title, subtitle, accounts)
+        } else {
+            showBiometricPrompt(title, subtitle, description)
+        }
     }
 
     /**
@@ -184,6 +198,11 @@ class TransparentBiometricActivity : FragmentActivity() {
             release(requestId)
             claimed = false
         }
+        // Answered above (or recreated for a configuration change): the
+        // list going with the activity answers nothing more.
+        accountList?.setOnDismissListener(null)
+        accountList?.dismiss()
+        accountList = null
         super.onDestroy()
         biometricPrompt?.cancelAuthentication()
         biometricPrompt = null
@@ -274,6 +293,55 @@ class TransparentBiometricActivity : FragmentActivity() {
     }
 
     /**
+     * Shows [accounts] as one list, in the order given, under [title] with
+     * [subtitle] (the relying party) and a Cancel button. Each account is set
+     * as plain text, never parsed as markup. A tap answers success with that
+     * account's index; Cancel, back, a touch outside or any other dismissal
+     * answers user-cancelled. Nothing is verified here: the caller asks for
+     * that after the choice.
+     */
+    private fun showAccountChoice(title: String, subtitle: String, accounts: List<String>) {
+        val padding = (24 * resources.displayMetrics.density).toInt()
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding, padding, 0)
+            addView(TextView(this@TransparentBiometricActivity).apply {
+                setTextAppearance(android.R.style.TextAppearance_Material_Title)
+                text = title
+            })
+            addView(TextView(this@TransparentBiometricActivity).apply {
+                setTextAppearance(android.R.style.TextAppearance_Material_Subhead)
+                text = subtitle
+            })
+        }
+        val items: Array<CharSequence> = accounts.map { it as CharSequence }.toTypedArray()
+        val dialog = AlertDialog.Builder(this)
+            .setCustomTitle(header)
+            .setItems(items) { _, which ->
+                if (hasFinished) return@setItems
+                sendSuccessResult(chosenIndex = which)
+                finishWithResult()
+            }
+            .setNegativeButton(R.string.button_cancel) { _, _ -> handleCancellation() }
+            .create()
+        // Cancel and back dismiss it too; a dismissal after an answer
+        // (a tap, a withdrawal) finds the request answered.
+        dialog.setOnDismissListener { handleCancellation() }
+        accountList = dialog
+        try {
+            dialog.show()
+        } catch (e: Exception) {
+            dialog.setOnDismissListener(null)
+            accountList = null
+            sendErrorResult(
+                errorCode = ERROR_CODE_PROMPT_FAILED,
+                errorMessage = "Failed to show the account list: ${e.message}"
+            )
+            finishWithResult()
+        }
+    }
+
+    /**
      * Handles user cancellation (back press or negative button).
      */
     private fun handleCancellation() {
@@ -287,13 +355,15 @@ class TransparentBiometricActivity : FragmentActivity() {
     }
 
     /**
-     * Sends a success result broadcast.
+     * Sends a success result broadcast, with the account picked in
+     * account-choice mode.
      */
-    private fun sendSuccessResult() {
+    private fun sendSuccessResult(chosenIndex: Int? = null) {
         val intent = Intent(ACTION_BIOMETRIC_RESULT).apply {
             setPackage(packageName)
             putExtra(EXTRA_REQUEST_ID, requestId)
             putExtra(EXTRA_SUCCESS, true)
+            if (chosenIndex != null) putExtra(EXTRA_CHOSEN_INDEX, chosenIndex)
         }
         sendBroadcast(intent)
     }
@@ -321,6 +391,7 @@ class TransparentBiometricActivity : FragmentActivity() {
     private fun finishWithResult() {
         if (!hasFinished) {
             hasFinished = true
+            accountList?.dismiss()
             finish()
             // No animation for transparent activity
             @Suppress("DEPRECATION")
@@ -504,6 +575,21 @@ class TransparentBiometricActivity : FragmentActivity() {
         const val EXTRA_SHOW_ON_LOCK_SCREEN = "com.automatethethings.xkey.extra.SHOW_ON_LOCK_SCREEN"
 
         /**
+         * Extra key for the accounts of an account choice; present only in
+         * account-choice mode, which shows them as one list in place of the
+         * biometric prompt.
+         * Type: ArrayList<String>
+         */
+        const val EXTRA_ACCOUNTS = "com.automatethethings.xkey.extra.ACCOUNTS"
+
+        /**
+         * Extra key for the index of the account picked, on a success result
+         * in account-choice mode.
+         * Type: Int
+         */
+        const val EXTRA_CHOSEN_INDEX = "com.automatethethings.xkey.extra.CHOSEN_INDEX"
+
+        /**
          * Custom error code indicating an invalid request (missing required extras).
          */
         const val ERROR_CODE_INVALID_REQUEST = -1000
@@ -526,6 +612,9 @@ class TransparentBiometricActivity : FragmentActivity() {
          * @param subtitle The subtitle providing context (e.g., relying party name).
          * @param description Optional additional description text.
          * @param showOnLockScreen Whether to show the prompt over the lock screen.
+         * @param accounts The accounts to choose from: given, the activity
+         *   shows them as one list in place of the biometric prompt, and
+         *   answers the index picked.
          * @return An intent configured to launch the activity.
          *
          * Note: The caller should add FLAG_ACTIVITY_NEW_TASK if launching from a service.
@@ -536,7 +625,8 @@ class TransparentBiometricActivity : FragmentActivity() {
             title: String = DEFAULT_TITLE,
             subtitle: String = DEFAULT_SUBTITLE,
             description: String? = null,
-            showOnLockScreen: Boolean = false
+            showOnLockScreen: Boolean = false,
+            accounts: List<String>? = null
         ): Intent {
             return Intent(context, TransparentBiometricActivity::class.java).apply {
                 putExtra(EXTRA_REQUEST_ID, requestId)
@@ -546,6 +636,9 @@ class TransparentBiometricActivity : FragmentActivity() {
                     putExtra(EXTRA_DESCRIPTION, description)
                 }
                 putExtra(EXTRA_SHOW_ON_LOCK_SCREEN, showOnLockScreen)
+                if (accounts != null) {
+                    putStringArrayListExtra(EXTRA_ACCOUNTS, ArrayList(accounts))
+                }
             }
         }
     }
