@@ -82,7 +82,9 @@ both methods:
 
 The authenticator data is 37 bytes: `SHA-256(rpId)` (32) `|| flags` (1)
 `|| signCount` (4, big-endian). The signature is over
-`SHA-256(authenticatorData || clientDataHash)`. UP is always set, AT never.
+`authenticatorData || clientDataHash`, made with SHA256withECDSA, which
+hashes it once (`ApprovedKey.signWebAuthn` passes it unhashed). UP is always
+set, AT never.
 
 The passkey provider serves the same passkeys, so both paths take the
 counter from one `PasskeySignCounter`
@@ -123,7 +125,7 @@ sequenceDiagram
     H->>H: UserVerificationCompliance.enforce
     H->>DB: PasskeySignCounter.next (both stores)
     H->>H: authData = rpIdHash || flags || signCount
-    H->>KM: signWithoutBiometric(SHA-256(authData || clientDataHash))
+    H->>KM: signApproved(authData || clientDataHash) via ApprovedKey.signWebAuthn
     H->>H: AuditLogger.logFido2Authentication
     H-->>Desk: {authenticatorData, signature, userHandle, signCount}
 ```
