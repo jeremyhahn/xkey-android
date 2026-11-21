@@ -728,12 +728,14 @@ class RequestHandler(
         // until the creation ends, and the creation rechecks after the approval.
         // Both generators reserve the id under one name (#255 review r4), so a
         // concurrent local.generateKey of this id is refused, never run beside it.
+        // The id is reserved before the owed delete is settled, so a
+        // concurrent generator is refused at once, never let in while this
+        // one waits on the settle.
         val reservation = keyLockId(generateParams.credentialId)
-        settleOwedDeletion(generateParams.credentialId)
-        if (keystoreManager.userKeyIdInUse(generateParams.credentialId) || !keyIds.tryReserve(reservation)) {
-            throw credentialExists()
-        }
+        if (!keyIds.tryReserve(reservation)) throw credentialExists()
         try {
+            settleOwedDeletion(generateParams.credentialId)
+            if (keystoreManager.userKeyIdInUse(generateParams.credentialId)) throw credentialExists()
             // Determine authentication duration based on settings
             val authDurationSeconds = calculateAuthDuration(currentSettings)
             approveRegistration(generateParams)
@@ -1436,13 +1438,19 @@ class RequestHandler(
         // this creation ends. An id a credential holds is refused too (#255
         // review r3): a general key beside it would share its id, and a
         // passkey use would sign with a key other than the one returned here.
+        // The id is reserved before the owed delete is settled, so a
+        // concurrent generator is refused at once, never let in while this
+        // one waits on the settle.
         val reservation = keyLockId(keyId)
-        settleOwedDeletion(keyId)
-        refuseExistingKey(keyId)
-        if (keystoreManager.userKeyIdInUse(keyId) || !keyIds.tryReserve(reservation)) {
+        if (!keyIds.tryReserve(reservation)) {
             throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
         }
         try {
+            settleOwedDeletion(keyId)
+            refuseExistingKey(keyId)
+            if (keystoreManager.userKeyIdInUse(keyId)) {
+                throw ProtocolException("Key already exists: $keyId", errorCode = ErrorCodes.KEY_EXISTS)
+            }
             val authDurationSeconds = calculateAuthDuration(currentSettings)
             approveLocalKeyGeneration(genParams)
             // The approval waited: recheck under the id's lock, since every
