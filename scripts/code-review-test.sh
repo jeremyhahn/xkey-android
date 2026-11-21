@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016,SC2154 # workflow text is matched literally; extract assigns by name
 # code-review-test.sh -- regression fixtures for .github/workflows/code-review.yml
-# (template v5.10.10, v5.10.11, v5.12.5 and v5.12.6).
+# (template v5.10.10, v5.10.11, v5.12.5, v5.12.6, v5.12.7 and v5.12.8).
 #
 # pull_request_target runs the base branch's copy of the workflow, so a change
 # to it is never exercised by its own pull request's review run. These
@@ -31,6 +31,19 @@
 #      twin and no approval fails as before; a failed or unreadable list of
 #      runs or jobs fails closed. Its timeout is 10 minutes. The gate's own
 #      get() runs against a stub curl that answers from fixtures.
+#   G. The gate's handoff (v5.12.7): after a pass, the gate job of every newer
+#      run of the PR on the head (higher check suite) whose gate ended failure
+#      or cancelled is re-run; an older run, a run on another head, another
+#      PR's run and a newer green gate are left alone; a red gate in a run
+#      not yet ended is a warning. The gate's actions: is write. An API error
+#      is a warning and the step exits 0.
+#   H. supersede (v5.12.8) cancels this PR's queued or running runs on an
+#      older head, each once; never a same-head run (by head_sha or by
+#      run-name), another PR's run, this run or a newer one, or a run whose
+#      `Codex review` or `Code Review (opencode)` job is in progress. It does
+#      nothing when the event's head is not the live head or the PR is
+#      closed. Its token is actions: write and pull-requests: read, its
+#      timeout 5 minutes. An API error is a warning and the step exits 0.
 #
 # Needs bash and jq (the lint-gates job has no python3).
 # CODE_REVIEW_WORKFLOW overrides the workflow path (for a mutation check).
@@ -634,6 +647,187 @@ gput /actions/runs/500 '{"id": 500}'
 gate_run
 check "F an own run with no workflow fails closed over an approval" \
 	"${RC} $(yn contains "${OUT}" "cannot read this run's workflow") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+
+# ---- G: a passing gate re-runs a newer twin's red gate (v5.12.7) ----------
+# The gate's second step runs under bash against the same stub curl. A run
+# list entry is "id:suite:status:title"; a run's gate is job <id>0 of it.
+gjob_rr=$'\n      - name: Re-run a newer twin\'s failed gate on this head\n        if: success() && env.FORGE == \'github\'\n        run: |\n'
+RR_END=$'done <<<"$newer"\n'
+extract rerun "${WORKFLOW}" "${gjob_rr}" "${RR_END}" "the gate's handoff step"
+check "G the gate's actions: is write, for the handoff" \
+	"$(yn contains "${gjob}" $'\n    permissions:\n      contents: read\n      # v5.12.7: write, for the re-run of a newer twin\'s gate only.\n      actions: write\n      pull-requests: read\n    env:\n')" yes
+check "G the handoff follows the gate step" \
+	"$(yn before "$(pos "${WORKFLOW}" "${GATE_END}")" "$(pos "${WORKFLOW}" "${gjob_rr}")")" yes
+printf '%s' "${rerun}${RR_END}" > "${T}/rerun.sh"
+RR_LIST="/actions/workflows/3/runs?head_sha=${SHA}&per_page=100"
+rr_setup() { # this run is 500 in suite 900; no other run
+	rm -rf "${G}"
+	mkdir -p "${G}"
+	gput /actions/runs/500 '{"id": 500, "workflow_id": 3, "check_suite_id": 900}'
+	gput "${RR_LIST}" '{"workflow_runs": []}'
+}
+rr_runs() { # id:suite:status:title...
+	local spec
+	gput "${RR_LIST}" "$(for spec in "$@"; do
+		IFS=: read -r id suite status title <<<"${spec}"
+		jq -cn --argjson id "${id}" --argjson s "${suite}" --arg st "${status}" --arg t "${title}" \
+			'{id: $id, check_suite_id: $s, status: $st, display_title: $t}'
+	done | jq -cs '{workflow_runs: .}')"
+}
+rr_gate() { # run-id status conclusion: that run's jobs, its gate job <id>0
+	gput "/actions/runs/$1/jobs?per_page=100" "$(jq -cn --argjson id "$1" --arg s "$2" --arg c "$3" \
+		'{jobs: [{id: ($id * 10 + 1), name: "Codex review", status: "completed", conclusion: "skipped"},
+		         {id: ($id * 10), name: "Code Review (codex)", status: $s, conclusion: $c}]}')"
+	gput "/actions/jobs/$1""0/rerun" '{}'
+}
+rr_run() {
+	RC=0
+	OUT=$(cd "${G}" && PATH="${T}/gbin:${PATH}" G="${G}" GH_API_TOKEN=t REPO_API="${GAPI}" \
+		PR_NUM=12 EVENT_SHA="${SHA}" BASE_REF=main GITHUB_RUN_ID=500 bash "${T}/rerun.sh" 2>&1) || RC=$?
+}
+reruns() { jq -Rrs 'split("\n") | map(select(endswith("/rerun"))) | sort | join(" ")' "${G}/urls"; }
+rr_other="Code Review: PR #12 into main at ${OTHER_SHA}"
+rr_pr120="Code Review: PR #120 into main at ${SHA}"
+
+# (a) A newer same-head run whose gate failed or was cancelled is re-run; an
+# older run, another head's, another PR's and a newer green gate are not.
+rr_setup
+rr_runs "510:910:completed:${mine}" "511:911:completed:${mine}" "490:890:completed:${mine}" \
+	"512:912:completed:${rr_other}" "513:913:completed:${rr_pr120}" "514:914:completed:${mine}"
+rr_gate 510 completed failure
+rr_gate 511 completed cancelled
+rr_gate 490 completed failure
+rr_gate 512 completed failure
+rr_gate 513 completed failure
+rr_gate 514 completed success
+rr_run
+check "G a pass re-runs only the newer same-head runs' red gates" \
+	"${RC} $(reruns)" "0 /actions/jobs/5100/rerun /actions/jobs/5110/rerun"
+check "G ... and says so" "$(yn contains "${OUT}" "Run 510 is newer on ${SHA} and its gate (job 5100) ended red: re-run")" yes
+check "G ... a newer green gate is left alone" "$(yn contains "${OUT}" "Run 514: its gate did not end red; nothing to re-run.")" yes
+# (b) A newer red gate whose run has not ended is a warning, not a re-run.
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_gate 510 completed failure
+rr_run
+check "G a newer red gate in a running run is a warning, not a re-run" \
+	"${RC} $(yn contains "${OUT}" "::warning::Code Review (codex): run 510's gate ended red but the run is in_progress") [$(reruns)]" "0 yes []"
+# (c) No newer run: nothing to do.
+rr_setup
+rr_runs "490:890:completed:${mine}"
+rr_gate 490 completed failure
+rr_run
+check "G no newer run: the check stands" \
+	"${RC} $(yn contains "${OUT}" "No newer run of PR 12 on ${SHA}; this gate's check stands.") [$(reruns)]" "0 yes []"
+# (d) An API error is a warning and exits 0.
+for broken in /actions/runs/500 "${RR_LIST}" "/actions/runs/510/jobs?per_page=100" /actions/jobs/5100/rerun; do
+	rr_setup
+	rr_runs "510:910:completed:${mine}"
+	rr_gate 510 completed failure
+	gfail "${broken}"
+	rr_run
+	check "G a failed ${broken%%\?*} is a warning, exit 0" \
+		"${RC} $(yn contains "${OUT}" "::warning::Code Review (codex): GET ${broken} answered HTTP 500")$(yn contains "${OUT}" "::warning::Code Review (codex): POST ${broken} answered HTTP 500")" \
+		"0 $(if [ "${broken}" = /actions/jobs/5100/rerun ]; then echo noyes; else echo yesno; fi)"
+done
+rr_setup
+gput /actions/runs/500 '{"id": 500}'
+rr_run
+check "G an own run with no check suite is a warning, exit 0" \
+	"${RC} $(yn contains "${OUT}" "::warning::Code Review (codex): cannot read this run's workflow and check suite")" "0 yes"
+
+# ---- H: a new head cancels this PR's runs on an older head (v5.12.8) ------
+# The supersede job's step runs under bash against the same stub curl. This
+# run is 600 on ${SHA}; a run list entry is "id:head_sha:title".
+extract sjob "${WORKFLOW}" $'\n  supersede:\n' $'\n    steps:\n' "the supersede job"
+check "H supersede's token: actions: write and pull-requests: read only" \
+	"$(yn contains "${sjob}" $'\n    permissions:\n      # The cancel only. No contents: nothing is checked out.\n      actions: write\n      pull-requests: read\n    env:\n')" yes
+check "H supersede's timeout is 5 minutes" "$(yn contains "${sjob}" $'\n    timeout-minutes: 5\n')" yes
+check "H supersede runs on GitHub for synchronize or reopened on an open PR" \
+	"$(yn contains "${sjob}" $'\n    if: >-\n      github.server_url == \'https://github.com\' &&\n      github.event.pull_request.state == \'open\' &&\n      (github.event.action == \'synchronize\' || github.event.action == \'reopened\')\n')" yes
+SUP_START=$'\n      - name: Cancel this PR\'s runs on an older head\n        run: |\n'
+SUP_END=$'done <<<"$older"\n'
+extract sup "${WORKFLOW}" "${SUP_START}" "${SUP_END}" "the supersede step"
+printf '%s' "${sup}${SUP_END}" > "${T}/sup.sh"
+sup_list() { printf '/actions/workflows/3/runs?event=pull_request_target&status=%s&per_page=100' "$1"; }
+sup_setup() { # PR 12 open at ${SHA}; no run listed
+	rm -rf "${G}"
+	mkdir -p "${G}"
+	gput /pulls/12 "$(jq -cn --arg s "${SHA}" '{state: "open", head: {sha: $s}}')"
+	gput /actions/runs/600 '{"id": 600, "workflow_id": 3}'
+	local st
+	for st in queued in_progress waiting pending requested; do gput "$(sup_list "${st}")" '{"workflow_runs": []}'; done
+}
+sup_runs() { # status id:head_sha:title...
+	local st=$1 spec
+	shift
+	gput "$(sup_list "${st}")" "$(for spec in "$@"; do
+		IFS=: read -r id head title <<<"${spec}"
+		jq -cn --argjson id "${id}" --arg h "${head}" --arg t "${title}" '{id: $id, head_sha: $h, display_title: $t}'
+	done | jq -cs '{workflow_runs: .}')"
+}
+sup_jobs() { # run-id review-job-name status
+	gput "/actions/runs/$1/jobs?per_page=100" "$(jq -cn --arg n "$2" --arg s "$3" \
+		'{jobs: [{name: "Review scope", status: "completed"}, {name: $n, status: $s}]}')"
+	gput "/actions/runs/$1/cancel" '{}'
+}
+sup_run() {
+	RC=0
+	OUT=$(cd "${G}" && PATH="${T}/gbin:${PATH}" G="${G}" GH_API_TOKEN=t REPO_API="${GAPI}" \
+		PR_NUM=12 EVENT_SHA="${SHA}" GITHUB_RUN_ID=600 bash "${T}/sup.sh" 2>&1) || RC=$?
+}
+cancels() { [ -e "${G}/urls" ] || return 0; jq -Rrs 'split("\n") | map(select(endswith("/cancel"))) | join(" ")' "${G}/urls"; }
+old="Code Review: PR #12 into main at ${OTHER_SHA}"
+
+# (a) Queued or running runs of this PR on an older head are cancelled, each
+# once; a same-head run (by head_sha or by run-name), another PR's run, this
+# run, a newer run and a run whose review is in progress are not.
+sup_setup
+sup_runs queued "590:${OTHER_SHA}:${old}" "593:${SHA}:${old}" "595:${OTHER_SHA}:Code Review: PR #120 into main at ${OTHER_SHA}"
+sup_runs in_progress "591:${OTHER_SHA}:${old}" "594:${OTHER_SHA}:${mine}" "596:${OTHER_SHA}:${old}" \
+	"597:${OTHER_SHA}:${old}" "600:${OTHER_SHA}:${old}" "605:${OTHER_SHA}:${old}"
+sup_runs waiting "590:${OTHER_SHA}:${old}" "598:${OTHER_SHA}:${old}"
+sup_jobs 590 "Codex review" completed
+sup_jobs 591 "Codex review" queued
+sup_jobs 596 "Codex review" in_progress
+sup_jobs 597 "Code Review (opencode)" in_progress
+sup_jobs 598 "Code Review (opencode)" completed
+for id in 593 594 595 600 605; do sup_jobs "${id}" "Codex review" queued; done
+sup_run
+check "H older-head runs of this PR are cancelled, each once" \
+	"${RC} $(cancels)" "0 /actions/runs/590/cancel /actions/runs/591/cancel /actions/runs/598/cancel"
+check "H ... a run whose review is in progress is left" \
+	"$(yn contains "${OUT}" "Run 596: its review is in progress")$(yn contains "${OUT}" "Run 597: its review is in progress")" yesyes
+check "H ... and each cancel is said" "$(yn contains "${OUT}" "Run 590 is on an older head of PR 12 than ${SHA}: cancelled.")" yes
+# (b) Nothing to cancel.
+sup_setup
+sup_runs queued "593:${SHA}:${mine}"
+sup_jobs 593 "Codex review" queued
+sup_run
+check "H a same-head run only: nothing is cancelled" \
+	"${RC} [$(cancels)] $(yn contains "${OUT}" "No run of PR 12 on an older head is queued or running.")" "0 [] yes"
+# (c) Not the live head, or the PR is closed: nothing is read or cancelled.
+for pr in "{\"state\": \"open\", \"head\": {\"sha\": \"${OTHER_SHA}\"}}" "{\"state\": \"closed\", \"head\": {\"sha\": \"${SHA}\"}}"; do
+	sup_setup
+	sup_runs queued "590:${OTHER_SHA}:${old}"
+	sup_jobs 590 "Codex review" queued
+	gput /pulls/12 "${pr}"
+	sup_run
+	check "H $(jq -r '.state' <<<"${pr}") PR at $(jq -r '.head.sha[:4]' <<<"${pr}"): nothing to cancel" \
+		"${RC} [$(cancels)] $(yn contains "${OUT}" "nothing to cancel.") $(reads "$(sup_list queued)")" "0 [] yes 0"
+done
+# (d) An API error is a warning and exits 0.
+for broken in /pulls/12 /actions/runs/600 "$(sup_list pending)" "/actions/runs/590/jobs?per_page=100" /actions/runs/590/cancel; do
+	sup_setup
+	sup_runs queued "590:${OTHER_SHA}:${old}" "591:${OTHER_SHA}:${old}"
+	sup_jobs 590 "Codex review" queued
+	sup_jobs 591 "Codex review" queued
+	gfail "${broken}"
+	sup_run
+	check "H a failed ${broken%%\?*} is a warning, exit 0, nothing cancelled past it" \
+		"${RC} $(yn contains "${OUT}" "::warning::Cancel superseded runs: ") [$(cancels | jq -Rr --arg b "${broken}" 'split(" ") | map(select(. != $b and . != "")) | join(" ")')]" \
+		"0 yes []"
+done
 
 check "nothing called curl" "$(yn [ ! -e "${T}/curl.log" ])" yes
 echo "$((total - fails)) of ${total} passed"
