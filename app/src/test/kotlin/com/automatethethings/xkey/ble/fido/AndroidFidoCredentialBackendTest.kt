@@ -634,6 +634,46 @@ class AndroidFidoCredentialBackendTest {
     fun `a replaced passkey registered on the phone loses its credential key, on a retry too`() =
         assertReplacedKeyDeletedIn(com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
 
+    /**
+     * A record the base version wrote: a bare line naming a replaced
+     * passkey's ID, whose key may be a general key local.generateKey made,
+     * never a credential only. Its namespace is not known, so the replay a
+     * registration runs tries both; [generalOutcome] is how deleting the
+     * general key goes, while no credential key is there.
+     */
+    private fun replayUpgradedRecord(
+        generalOutcome: com.automatethethings.xkey.crypto.GeneratedKeyDiscard
+    ): PendingKeyDeletions {
+        storedResidents()
+        val file = java.io.File.createTempFile("pending-key-deletions", "").also { it.deleteOnExit() }
+        file.writeText(java.util.Base64.getEncoder().encodeToString("legacy-key".toByteArray()) + "\n")
+        val pending = FilePendingKeyDeletions(file)
+        every { keystore.deleteKey("legacy-key", com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns generalOutcome
+        every { keystore.deleteKey("legacy-key", com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns
+            com.automatethethings.xkey.crypto.GeneratedKeyDiscard.ABSENT
+        kotlinx.coroutines.runBlocking {
+            backend(pending = pending).create(
+                CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", discoverable = false)
+            )
+        }
+        return pending
+    }
+
+    @Test
+    fun `an upgraded record of a general key is deleted on replay`() {
+        val pending = replayUpgradedRecord(com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED)
+
+        io.mockk.verify(exactly = 1) { keystore.deleteKey("legacy-key", com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) }
+        assertTrue("the record is forgotten", pending.all().none { it.keyId == "legacy-key" })
+    }
+
+    @Test
+    fun `an upgraded record survives a failed delete of its general key`() {
+        val pending = replayUpgradedRecord(com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED)
+
+        assertTrue("the record stays for a later retry", pending.all().any { it.keyId == "legacy-key" })
+    }
+
     @Test
     fun `a failed resident registration leaves the old passkey usable`() = runTest {
         val (keyRows, metadataRows) = storedResidents()
