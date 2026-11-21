@@ -1,0 +1,193 @@
+# nightly-template: v1.12 — the known-red and long-horizon jobs, off the push path.
+# v1.12: a timeout-minutes on every job, so a hung run ends itself.
+# v1.10: CI_IMAGE_NAMESPACE is the repository Actions variable of that name.
+# v1.9: a `lint-sweeps` job runs the repository's `make -k lint-sweeps` in its
+# toolchain image, nightly and on dispatch only, when the Makefile (or a
+# tracked *.mk) defines the target; without one it prints OK and passes.
+# This file is kept in step with a shared template; change both together.
+# (adapted: no fips job, which builds and tests Go under GODEBUG=fips140=only;
+# this repository has no Go code, so there is nothing for it to run.)
+# (adapted: no GO_VERSION env, which only the fips job read.)
+# (adapted: lint-sweeps builds the toolchain image with this repository's
+# `make docker-build-toolchain` and runs it by ID, as ci.yml does; there is no
+# registry-cache pull or Go module credential file. The Makefile defines no
+# lint-sweeps target today, so the job prints OK and passes.)
+# (adapted: the trivy version comes from TRIVY_VERSION in scripts/tool-pins.sh,
+# the one pin the Makefile and scripts/install-trivy.sh read, in place of a
+# .trivy-version file; skip-dirs are the generated Gradle output, as in
+# `make trivy-fs`.)
+#
+# Jobs that are known-red with tracked issues, or that verify a slow-moving
+# property, do not run per push. They run here nightly, plus on demand via
+# workflow_dispatch, and are not in any merge gate.
+#
+# Companion files: .trivyignore at the repository root (a missing ignore file
+# is a fatal trivy flag error) and scripts/install-trivy.sh (pinned and
+# checksum-verified; also what `make install-tools` runs).
+
+name: Nightly
+
+permissions:
+  contents: read
+  # upload-sarif needs this; without it the upload fails under read-only
+  # default token permissions.
+  security-events: write
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  # The repository's lint sweeps (whole-tree, slow lint passes beside
+  # `make lint`), off every push and PR path.
+  lint-sweeps:
+    name: Lint sweeps [toolchain image]
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    timeout-minutes: 120      # CUSTOMIZE (xkey-android): ci.yml's lint-gates job's 75 minutes for a cold toolchain image build, plus the sweeps
+    env:
+      CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      CI_CACHE_CLASS: main
+      CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      - name: Does the Makefile define lint-sweeps?
+        id: probe
+        run: |
+          mapfile -t mk < <(git ls-files -- Makefile '*.mk')
+          if [ "${#mk[@]}" -gt 0 ] && grep -qE '^lint-sweeps[[:space:]]*:([^=]|$)' "${mk[@]}"; then
+            echo "has_target=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "OK: no lint-sweeps target in the Makefile; nothing to run"
+            echo "has_target=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # CUSTOMIZE (xkey-android): the toolchain image as ci.yml's lint-gates
+      # job builds it, run by the ID its build wrote.
+      - name: Build the toolchain image
+        if: ${{ steps.probe.outputs.has_target == 'true' }}
+        env:
+          IMAGE_ID_DIR: ${{ runner.temp }}/image-ids
+        run: |
+          make docker-build-toolchain
+          tc=$(make -s toolchain-image-id)
+          echo "toolchain image $(make -s toolchain-image) = $tc"
+          echo "TOOLCHAIN_IMAGE=$tc" >> "$GITHUB_ENV"
+
+      - name: Trim the CI caches
+        if: ${{ !cancelled() && steps.probe.outputs.has_target == 'true' && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
+
+      # -k: a sweep reports every finding in one run; it gates no merge.
+      - name: make lint-sweeps
+        if: ${{ !cancelled() && steps.probe.outputs.has_target == 'true' && env.TOOLCHAIN_IMAGE != '' }}
+        env:
+          IN_IMAGE_NETWORK: none   # CUSTOMIZE (xkey-android): the sweeps would be offline, as the lint-gates are
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make -k lint-sweeps"
+
+  trivy:
+    timeout-minutes: 60
+    name: Trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      # One declaration of the trivy version, shared by both paths below and by
+      # the Makefile, so the scanner in CI and on a developer's machine are the
+      # same build. CUSTOMIZE (xkey-android): read as ONE bare token from
+      # scripts/tool-pins.sh's TRIVY_VERSION line; fail on anything else.
+      - name: Resolve pinned trivy version
+        id: trivy_version
+        run: |
+          version=$(awk -F= '$1 == "TRIVY_VERSION" {n++; v=$2} END {if (n == 1 && v ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print v}' scripts/tool-pins.sh)
+          if [ -z "$version" ]; then
+            echo "::error::scripts/tool-pins.sh has no single well-formed TRIVY_VERSION; refusing to resolve a version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # CUSTOMIZE (xkey-android): skip-dirs are the generated Gradle output and
+      # caches; nothing that ships in a release is skipped. The tracked
+      # build/docker (the devcontainer images) is scanned.
+      #
+      # trivy-action is pinned to a full commit SHA; the trailing comment names
+      # the tag. When bumping it, take the peeled `<tag>^{}` entry of
+      # `git ls-remote --tags`: an annotated tag's bare ref is the tag object,
+      # which does not resolve as an action ref.
+      - name: Trivy scan (SARIF for code scanning)
+        # trivy-action's setup checks out aquasecurity/trivy from github.com
+        # with the runner token, which another forge's token cannot authenticate.
+        if: github.server_url == 'https://github.com'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          version: v${{ steps.trivy_version.outputs.version }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: 0
+          skip-dirs: app/build,.gradle,.kotlin
+          trivyignores: .trivyignore
+
+      - name: Upload Trivy SARIF
+        if: always() && github.server_url == 'https://github.com'
+        uses: github/codeql-action/upload-sarif@9f759ee644a3e7c15c1390abf49868036c00067b # v3.38.3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs
+
+      - name: Trivy gate (fail on CRITICAL/HIGH)
+        if: github.server_url == 'https://github.com'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          version: v${{ steps.trivy_version.outputs.version }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          format: table
+          skip-dirs: app/build,.gradle,.kotlin
+          trivyignores: .trivyignore
+
+      # Same gate on another forge, via the trivy CLI that
+      # scripts/install-trivy.sh downloads and checks against its pinned
+      # SHA-256 before anything executes.
+      - name: Install Trivy (Gitea)
+        if: github.server_url != 'https://github.com'
+        run: ./scripts/install-trivy.sh /usr/local/bin
+
+      - name: Trivy gate (Gitea)
+        if: github.server_url != 'https://github.com'
+        run: trivy fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --format table --skip-dirs app/build --skip-dirs .gradle --skip-dirs .kotlin --ignorefile .trivyignore .
+
+      # Misconfiguration scanning, advisory (exit code 0): findings surface
+      # daily without a new finding class blocking merges. Both forges run it,
+      # under !cancelled(), so a failed Trivy gate above never skips it.
+      - name: Trivy misconfiguration scan (advisory, GitHub)
+        if: ${{ !cancelled() && github.server_url == 'https://github.com' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          version: v${{ steps.trivy_version.outputs.version }}
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig
+          exit-code: 0
+          format: table
+          skip-dirs: app/build,.gradle,.kotlin
+          trivyignores: .trivyignore
+
+      - name: Trivy misconfiguration scan (advisory, Gitea)
+        if: ${{ !cancelled() && github.server_url != 'https://github.com' }}
+        run: trivy fs --scanners misconfig --exit-code 0 --format table --skip-dirs app/build --skip-dirs .gradle --skip-dirs .kotlin --ignorefile .trivyignore .

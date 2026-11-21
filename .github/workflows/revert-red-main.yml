@@ -1,5 +1,11 @@
-# revert-red-main v1: red on main reverts the merge and puts the PR back up.
+# revert-red-main v1.3: a timeout-minutes on its job, so a hung run ends itself.
+# v1.2: AGENT_DOMAIN and AGENT_LOGIN are repository Actions variables; no
+# login or domain is written here.
+# v1.1: REVERT_STEPS names ci.yml's `make lint-gates` step.
+# v1: red on main reverts the merge and puts the PR back up.
 # This file is kept in step with a shared template; change both together.
+# (adapted: the CUSTOMIZE (xkey-android) blocks below make every recovery
+# step resumable and idempotent, and REVERT_STEPS names the Android stages.)
 #
 # A PR merges on the PR tier (lint, build, unit test, race); main then runs
 # the full tier. When main's full tier goes red because
@@ -73,7 +79,8 @@ jobs:
           SERVER: ${{ github.server_url }}
           REPOSITORY: ${{ github.repository }}
           RED_RUN: ${{ github.event.workflow_run.id }}
-          AGENT_DOMAIN: example.com
+          AGENT_LOGIN: ${{ vars.AGENT_LOGIN }}
+          AGENT_DOMAIN: ${{ vars.AGENT_DOMAIN }}
           GATE_CONTEXT: 'CI / CI Gate (push)'
           # CUSTOMIZE: the step names of the repo's deterministic stages, an
           # extended regex over ci.yml's step names. Add the repo's CUSTOMIZE
@@ -99,9 +106,8 @@ jobs:
           set -euo pipefail
           shopt -s inherit_errexit
           [ -n "${BOT:-}" ] || { echo "::error::AGENT_TOKEN is not set on this repository"; exit 1; }
-          case "$REPOSITORY" in
-            *) me="agent-${REPOSITORY#*/}" ;;
-          esac
+          [ -n "${AGENT_DOMAIN:-}" ] || { echo "::error::AGENT_DOMAIN is not set as a repository variable"; exit 1; }
+          me="${AGENT_LOGIN:-agent-${REPOSITORY#*/}}"
           me_email="$me@$AGENT_DOMAIN"
           # The token reaches curl as a header from a file descriptor, never
           # on its command line.

@@ -257,7 +257,7 @@ FROM base AS toolchain
 ARG APT_PROXY=
 USER root
 RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \
- && apt-get update && apt-get install -y --no-install-recommends bash curl git jq make shellcheck \
+ && apt-get update && apt-get install -y --no-install-recommends bash curl git jq make openssh-client shellcheck \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy
 COPY --from=fetch /opt/tools/trivy /opt/tools/actionlint /usr/local/bin/
 USER 1000
