@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016,SC2154 # workflow text is matched literally; extract assigns by name
 # code-review-test.sh -- regression fixtures for .github/workflows/code-review.yml
-# (template v5.10.10, v5.10.11, v5.12.5, v5.12.6, v5.12.7, v5.12.8, v5.12.9
-# and v5.12.10).
+# (template v5.10.10, v5.10.11, v5.12.5, v5.12.6, v5.12.7, v5.12.8, v5.12.9,
+# v5.12.10 and v5.12.11).
 #
 # pull_request_target runs the base branch's copy of the workflow, so a change
 # to it is never exercised by its own pull request's review run. These
@@ -31,13 +31,20 @@
 #      is queued or in progress fails it at once (exit 3), naming the run; no
 #      twin and no approval fails as before; a failed or unreadable list of
 #      runs or jobs fails closed. Its timeout is 10 minutes. The gate's own
-#      get() runs against a stub curl that answers from fixtures.
+#      get() runs against a stub curl that answers from fixtures. v5.12.11:
+#      a live PR base other than BASE_REF fails; the live hold is read before
+#      the exemption exit and a PR that answers no label list fails closed;
+#      get_all fails on a failed page or a page count that is not a number.
 #   G. The gate's handoff (v5.12.7): after a pass, the gate job of every newer
 #      run of the PR on the head (higher check suite) whose gate ended failure
 #      or cancelled is re-run; an older run, a run on another head, another
-#      PR's run and a newer green gate are left alone; a red gate in a run
-#      not yet ended is a warning. The gate's actions: is write. An API error
-#      is a warning and the step exits 0.
+#      PR's run and a newer green gate are left alone. v5.12.11: a newer run
+#      not yet ended is polled (HANDOFF_POLL_S) until it ends, then its red
+#      gate is re-run; when HANDOFF_WAIT_S expires on a red gate the step
+#      fails with ::error:: (exit 5), on a gate still running it warns; a run
+#      whose `Codex review` is queued or in progress, or whose gate has not
+#      started, is left to its own gate at once. The gate's actions: is
+#      write. An API error is a warning and the step exits 0.
 #   H. supersede (v5.12.8) cancels this PR's queued or running runs on an
 #      older head, each once; never a same-head run (by head_sha or by
 #      run-name), another PR's run, this run or a newer one, or a run whose
@@ -45,13 +52,14 @@
 #      nothing when the event's head is not the live head or the PR is
 #      closed. Its token is actions: write and pull-requests: read, its
 #      timeout 5 minutes. An API error is a warning and the step exits 0.
-#   I. Which jobs take a runner (v5.12.9, v5.12.10): each job's `if:` and the
-#      gate's name are read out of the workflow and evaluated with jq against
-#      event contexts. A draft takes no runner; scope and review run only on
-#      an event that requests a review (not `labeled`, or a code-review,
-#      task:ready, agent:*, model:* or effort:* label); the gate runs on every
-#      non-draft event, always as `Code Review (codex)`, and a skipped gate
-#      never carries that name; a fork's head starts no review.
+#   I. Which jobs take a runner (v5.12.9, v5.12.10, v5.12.11): each job's
+#      `if:` and the gate's name are read out of the workflow and evaluated
+#      with jq against event contexts. A draft takes no runner; review runs
+#      only on an event that requests a review (not `labeled`, or a
+#      code-review, task:ready, agent:*, model:* or effort:* label); scope
+#      (v5.12.11) runs on every non-draft event of an open PR; the gate runs
+#      on every non-draft event, always as `Code Review (codex)`, and a
+#      skipped gate never carries that name; a fork's head starts no review.
 #
 # Needs bash and jq (the lint-gates job has no python3).
 # CODE_REVIEW_WORKFLOW overrides the workflow path (for a mutation check).
@@ -540,7 +548,7 @@ gate_setup() { # a code change, no twin, no verdict
 	gput /actions/runs/500 '{"id": 500, "workflow_id": 3}'
 	gput "${RUNS_Q}" '{"workflow_runs": []}'
 	gput "${RUNS_P}" '{"workflow_runs": []}'
-	gput /pulls/12 '{"labels": [{"name": "code-review"}, {"name": "task:ready"}]}'
+	gput /pulls/12 '{"base": {"ref": "main"}, "labels": [{"name": "code-review"}, {"name": "task:ready"}]}'
 	gput "${REVIEWS}" '[]'
 	gput "/pulls/12/reviews?&per_page=100&page=2" '[]'
 }
@@ -656,6 +664,86 @@ gate_run
 check "F an own run with no workflow fails closed over an approval" \
 	"${RC} $(yn contains "${OUT}" "cannot read this run's workflow") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
 
+# (e) v5.12.11: the live PR's base, read first and again with the holds.
+gate_setup
+gverdict APPROVED
+gate_run
+check "F an approved head reads the live PR three times (base, holds before the exemption, holds after the twins)" \
+	"${RC} $(reads /pulls/12)" "0 3"
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"base": {"ref": "dev"}, "labels": [{"name": "code-review"}]}'
+gate_run
+check "F a PR retargeted off BASE_REF fails over an approval" \
+	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to dev;") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"labels": []}'
+gate_run
+check "F a live PR with no base fails over an approval" \
+	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to no base;")" "3 yes"
+gate_setup
+gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
+gput /pulls/12 '{"base": {"ref": "dev"}, "labels": []}'
+gate_run
+check "F a PR retargeted off BASE_REF fails a docs-only change too" \
+	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to dev;") $(yn contains "${OUT}" "no review is required")" "3 yes no"
+
+# (f) v5.12.11: the live hold fails closed and is read before the exemption.
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"base": {"ref": "main"}}'
+gate_run
+check "F a live PR with no label list fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read the labels of PR 12") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"base": {"ref": "main"}, "labels": null}'
+gate_run
+check "F a live PR whose labels are null fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read the labels of PR 12")" "3 yes"
+gate_setup
+gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
+gate_run
+check "F a docs-only change with no hold passes with no review" \
+	"${RC} $(yn contains "${OUT}" "no review is required")" "0 yes"
+for hold in needs-owner needs-coordinator; do
+	gate_setup
+	gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
+	gput /pulls/12 "$(jq -cn --arg h "${hold}" '{base: {ref: "main"}, labels: [{name: "code-review"}, {name: $h}]}')"
+	gate_run
+	check "F a hold (${hold}) refuses an exempt change" \
+		"${RC} $(yn contains "${OUT}" "PR 12 is on hold (${hold})") $(yn contains "${OUT}" "no review is required")" "3 yes no"
+done
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"base": {"ref": "main"}, "labels": [{"name": "needs-owner"}]}'
+gate_run
+check "F a hold refuses an approval of the head" \
+	"${RC} $(yn contains "${OUT}" "PR 12 is on hold (needs-owner)") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+check "F the live hold is read before the exemption exit" \
+	"$(yn before "$(pos <(printf '%s' "${gate}") $'\n          holds\n          n=$(jq \'length\' <<<"$files")\n')" \
+		"$(pos <(printf '%s' "${gate}") 'no review is required.')")" yes
+
+# (g) v5.12.11: get_all fails on a failed page, never a partial list.
+gate_setup
+gverdict APPROVED
+gput "/pulls/12/reviews?&per_page=100&page=2" '[{"id": 99}]'
+gfail "/pulls/12/reviews?&per_page=100&page=3"
+gate_run
+check "F a failed later page of reviews fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "GET /pulls/12/reviews?&per_page=100&page=3 answered HTTP 500") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gfail "/pulls/12/reviews?&per_page=100&page=2"
+gate_run
+check "F a failed second page of reviews fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "approved ${SHA}.")" "3 no"
+check "F get_all returns 3 on a failed page" \
+	"$(yn contains "${gate}" $'got=$(get "$1&$size&page=$page") || return 3\n')" yes
+check "F get_all fails on a page count that is not a number" \
+	"$(yn contains "${gate}" $'[[ $n =~ ^[0-9]+$ ]] || fail "GET $1 answered no page count"\n')" yes
+
 # ---- G: a passing gate re-runs a newer twin's red gate (v5.12.7) ----------
 # The gate's second step runs under bash against the same stub curl. A run
 # list entry is "id:suite:status:title"; a run's gate is job <id>0 of it.
@@ -666,7 +754,12 @@ check "G the gate's actions: is write, for the handoff" \
 	"$(yn contains "${gjob}" $'\n    permissions:\n      contents: read\n      # v5.12.7: write, for the re-run of a newer twin\'s gate only.\n      actions: write\n      pull-requests: read\n    env:\n')" yes
 check "G the handoff follows the gate step" \
 	"$(yn before "$(pos "${WORKFLOW}" "${GATE_END}")" "$(pos "${WORKFLOW}" "${gjob_rr}")")" yes
-printf '%s' "${rerun}${RR_END}" > "${T}/rerun.sh"
+# sleep moves the clock on (SECONDS) and, on its first call, puts the
+# fixtures in ${G}/next in place: a run that ends while the handoff waits.
+{
+	printf '%s\n' 'sleep() { echo "SLEPT $*"; SECONDS=$((SECONDS + $1)); if [ -d "$G/next" ]; then cp "$G"/next/* "$G"/; rm -rf "$G/next"; fi; }'
+	printf '%s' "${rerun}${RR_END}"
+} > "${T}/rerun.sh"
 RR_LIST="/actions/workflows/3/runs?head_sha=${SHA}&per_page=100"
 rr_setup() { # this run is 500 in suite 900; no other run
 	rm -rf "${G}"
@@ -691,8 +784,16 @@ rr_gate() { # run-id status conclusion: that run's jobs, its gate job <id>0
 rr_run() {
 	RC=0
 	OUT=$(cd "${G}" && PATH="${T}/gbin:${PATH}" G="${G}" GH_API_TOKEN=t REPO_API="${GAPI}" \
-		PR_NUM=12 EVENT_SHA="${SHA}" BASE_REF=main GITHUB_RUN_ID=500 bash "${T}/rerun.sh" 2>&1) || RC=$?
+		PR_NUM=12 EVENT_SHA="${SHA}" BASE_REF=main GITHUB_RUN_ID=500 HANDOFF_POLL_S=7 HANDOFF_WAIT_S="${RR_WAIT:-20}" \
+		bash "${T}/rerun.sh" 2>&1) || RC=$?
 }
+rr_next() { mkdir -p "${G}/next"; printf '%s\n' "$2" > "${G}/next/$(gkey "$1").json"; } # path body, after the first sleep
+rr_jobs() { # run-id review-status gate-status gate-conclusion
+	gput "/actions/runs/$1/jobs?per_page=100" "$(jq -cn --argjson id "$1" --arg r "$2" --arg s "$3" --arg c "$4" \
+		'{jobs: [{id: ($id * 10 + 1), name: "Codex review", status: $r, conclusion: null},
+		         {id: ($id * 10), name: "Code Review (codex)", status: $s, conclusion: (if $c == "" then null else $c end)}]}')"
+}
+slept() { jq -Rn '[inputs | select(startswith("SLEPT "))] | length' <<<"${OUT}"; }
 reruns() { jq -Rrs 'split("\n") | map(select(endswith("/rerun"))) | sort | join(" ")' "${G}/urls"; }
 rr_other="Code Review: PR #12 into main at ${OTHER_SHA}"
 rr_pr120="Code Review: PR #120 into main at ${SHA}"
@@ -713,13 +814,89 @@ check "G a pass re-runs only the newer same-head runs' red gates" \
 	"${RC} $(reruns)" "0 /actions/jobs/5100/rerun /actions/jobs/5110/rerun"
 check "G ... and says so" "$(yn contains "${OUT}" "Run 510 is newer on ${SHA} and its gate (job 5100) ended red: re-run")" yes
 check "G ... a newer green gate is left alone" "$(yn contains "${OUT}" "Run 514: its gate did not end red; nothing to re-run.")" yes
-# (b) A newer red gate whose run has not ended is a warning, not a re-run.
+# (b) v5.12.11: a newer red gate whose run has not ended is waited for, polled
+# every HANDOFF_POLL_S, and re-run once the run ends; past HANDOFF_WAIT_S the
+# step fails with an ::error:: (exit 5), never a warning.
+check "G the handoff's bound is 300 s and its poll 15 s by default" \
+	"$(yn contains "${rerun}" $'HANDOFF_POLL_S=${HANDOFF_POLL_S:-15}\n          HANDOFF_WAIT_S=${HANDOFF_WAIT_S:-300}\n')" yes
 rr_setup
 rr_runs "510:910:in_progress:${mine}"
 rr_gate 510 completed failure
+rr_next /actions/runs/510 '{"id": 510, "status": "completed"}'
 rr_run
-check "G a newer red gate in a running run is a warning, not a re-run" \
-	"${RC} $(yn contains "${OUT}" "::warning::Code Review (codex): run 510's gate ended red but the run is in_progress") [$(reruns)]" "0 yes []"
+check "G a newer red gate in a running run is re-run once the run ends" \
+	"${RC} $(slept) [$(reruns)]" "0 1 [/actions/jobs/5100/rerun]"
+check "G ... the wait says so and reads the run again" \
+	"$(yn contains "${OUT}" "Run 510 is in_progress; reading it again in 7 s.") $(reads /actions/runs/510)" "yes 1"
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_gate 510 completed failure
+gput /actions/runs/510 '{"id": 510, "status": "in_progress"}'
+rr_run
+check "G a newer red gate whose run never ends fails the step at the bound" \
+	"${RC} $(slept) [$(reruns)] $(yn contains "${OUT}" "::error::Code Review (codex): run 510 on ${SHA} is still in_progress after the handoff's 20 s bound, so its gate (job 5100, red) is not re-run")" \
+	"5 3 [] yes"
+check "G ... and that is no warning" "$(yn contains "${OUT}" "::warning::")" no
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_gate 510 completed failure
+gput /actions/runs/510 '{"id": 510, "status": "in_progress"}'
+RR_WAIT=0 rr_run
+check "G a zero bound fails at once on a red gate in a running run" "${RC} $(slept) [$(reruns)]" "5 0 []"
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_gate 510 completed failure
+gfail /actions/runs/510
+rr_run
+check "G a failed read of the waited run is a warning, exit 0" \
+	"${RC} $(yn contains "${OUT}" "::warning::Code Review (codex): GET /actions/runs/510 answered HTTP 500") [$(reruns)]" "0 yes []"
+# A gate still running is read again until it ends; past the bound, a warning.
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_jobs 510 completed in_progress ""
+rr_next /actions/runs/510 '{"id": 510, "status": "completed"}'
+rr_next "/actions/runs/510/jobs?per_page=100" "$(jq -cn '{jobs: [{id: 5101, name: "Codex review", status: "completed", conclusion: "skipped"},
+	{id: 5100, name: "Code Review (codex)", status: "completed", conclusion: "failure"}]}')"
+rr_run
+check "G a newer gate still running is waited for and re-run when it ends red" \
+	"${RC} $(slept) [$(reruns)]" "0 1 [/actions/jobs/5100/rerun]"
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_jobs 510 completed in_progress ""
+gput /actions/runs/510 '{"id": 510, "status": "in_progress"}'
+rr_run
+check "G a newer gate still running past the bound is a warning, exit 0" \
+	"${RC} [$(reruns)] $(yn contains "${OUT}" "::warning::Code Review (codex): run 510's gate on ${SHA} is still running after the handoff's 20 s bound; it reads the verdict itself") $(yn contains "${OUT}" "::error::")" \
+	"0 [] yes no"
+# A newer run that reviews the head itself, or whose gate has not started, is
+# left to its own gate at once: no wait, no re-run.
+for rv in queued in_progress; do
+	rr_setup
+	rr_runs "510:910:in_progress:${mine}"
+	rr_jobs 510 "${rv}" queued ""
+	rr_run
+	check "G a newer run whose Codex review is ${rv} is left to its own gate" \
+		"${RC} $(slept) [$(reruns)] $(yn contains "${OUT}" "Run 510 reviews ${SHA} itself; its own gate reads that verdict.")" "0 0 [] yes"
+done
+for gs in queued waiting; do
+	rr_setup
+	rr_runs "510:910:in_progress:${mine}"
+	rr_jobs 510 completed "${gs}" ""
+	rr_run
+	check "G a newer run whose gate is ${gs} is left to its own gate" \
+		"${RC} $(slept) [$(reruns)] $(yn contains "${OUT}" "Run 510 has not run its gate yet; that gate reads this approval itself.")" "0 0 [] yes"
+done
+rr_setup
+rr_runs "510:910:queued:${mine}"
+gput "/actions/runs/510/jobs?per_page=100" '{"jobs": []}'
+rr_run
+check "G a queued newer run with no jobs yet is left to its own gate" \
+	"${RC} $(slept) [$(reruns)] $(yn contains "${OUT}" "Run 510 has not run its gate yet;")" "0 0 [] yes"
+rr_setup
+rr_runs "510:910:completed:${mine}"
+rr_gate 510 completed failure
+rr_run
+check "G a completed newer run is re-run with no wait" "${RC} $(slept) [$(reruns)]" "0 0 [/actions/jobs/5100/rerun]"
 # (c) No newer run: nothing to do.
 rr_setup
 rr_runs "490:890:completed:${mine}"
@@ -837,7 +1014,7 @@ for broken in /pulls/12 /actions/runs/600 "$(sup_list pending)" "/actions/runs/5
 		"0 yes []"
 done
 
-# ---- I: which jobs take a runner, and the gate's name (v5.12.9, v5.12.10) --
+# ---- I: which jobs take a runner, and the gate's name (v5.12.9 - v5.12.11) -
 # Each job's `if:` and the gate's `name:` are read from the workflow and
 # translated to jq: paths gain a leading dot, && and || become and/or,
 # contains(), !contains(), startsWith() and always() become jq, and the
@@ -911,11 +1088,11 @@ labeled/task:ready/false|1 1 0 0 1:${CX}
 labeled/agent:opencode/false|1 1 0 0 1:${CX}
 labeled/model:gpt-x/false|1 1 0 0 1:${CX}
 labeled/effort:high/false|1 1 0 0 1:${CX}
-labeled/dept:software/false|0 0 0 0 1:${CX}
-labeled/ci:full/false|0 0 0 0 1:${CX}
-labeled/task:in-progress/false|0 0 0 0 1:${CX}
-labeled/needs-owner/false|0 0 0 0 1:${CX}
-labeled/needs-coordinator/false|0 0 0 0 1:${CX}
+labeled/dept:software/false|1 0 0 0 1:${CX}
+labeled/ci:full/false|1 0 0 0 1:${CX}
+labeled/task:in-progress/false|1 0 0 0 1:${CX}
+labeled/needs-owner/false|1 0 0 0 1:${CX}
+labeled/needs-coordinator/false|1 0 0 0 1:${CX}
 labeled/code-review/true|0 0 0 0 0:${NR}
 labeled/dept:software/true|0 0 0 0 0:${NR}
 EOF
@@ -928,7 +1105,7 @@ done <<EOF
 opened//false|1 1 1 0 1:${CX}
 synchronize//false|1 1 1 0 1:${CX}
 labeled/agent:opencode/false|1 1 1 0 1:${CX}
-labeled/dept:software/false|0 0 0 0 1:${CX}
+labeled/dept:software/false|1 0 0 0 1:${CX}
 opened//true|0 0 0 0 0:${NR}
 EOF
 # Invariants over every action, label and draft state: the gate posts the
@@ -944,10 +1121,19 @@ for a in opened synchronize reopened ready_for_review edited labeled unlabeled; 
 			if [ "${gate_bit}" = 0 ] && [ "${name}" = "${CX}" ]; then bad+=" ${a}/${l}/${d}:skipped-as-required"; fi
 			if [ "${d}" = false ] && [ "${gate_bit}${name}" != "1${CX}" ]; then bad+=" ${a}/${l}/${d}:no-required-context"; fi
 			if [ "${d}" = true ] && [ "${got:0:7}" != "0 0 0 0" ]; then bad+=" ${a}/${l}/${d}:draft-takes-a-runner"; fi
+			if [ "${d}" = false ] && [ "${got:0:1}" != 1 ]; then bad+=" ${a}/${l}/${d}:no-guard-for-the-gate"; fi
 		done
 	done
 done
-check "I a skipped gate never posts the required check; every non-draft suite carries it; a draft takes no runner" "[${bad}]" "[]"
+check "I a skipped gate never posts the required check; every non-draft suite carries it and its guard; a draft takes no runner" "[${bad}]" "[]"
+# v5.12.11: scope's if: is the draft clause and the open state alone, so the
+# guard runs wherever the gate runs on an open PR; never on a closed one.
+check "I scope's if: is the draft clause and the open state" \
+	"$(jq -Rrs --arg s $'\n  scope:\n' 'split($s) | .[1] // ""' "${WORKFLOW}" | jq -Rrs --arg s $'\n    if: >-\n      github.event.pull_request.draft != true\n      && github.event.pull_request.state == \'open\'\n    # v5.12.3' 'split($s) | length - 1')" 1
+closed_ctx=$(ctx "${GH}" labeled dept:software false | jq -c '.github.event.pull_request.state = "closed"')
+check "I scope skips a closed PR" "$(b01 "$(jq -n --argjson x "${closed_ctx}" "\$x | (${IF_SCOPE})")")" 0
+check "I review and review-opencode keep the shared condition (an unrelated label starts neither)" \
+	"$(jobs_for "${GT}" labeled ci:full false | cut -c3-5)" "0 0"
 # A fork's head never takes the codex runner (v5.10.6), under the shared condition.
 fork_ctx=$(ctx "${GH}" opened "" false | jq -c '.github.event.pull_request.head.repo.full_name = "fork/r"')
 check "I a fork's head starts no review" "$(b01 "$(jq -n --argjson x "${fork_ctx}" "\$x | (${IF_REVIEW})")")" 0
