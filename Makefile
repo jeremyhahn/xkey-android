@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test code-review-test build-image-test image-tag-test fetch-test apt-retry-test release-check
+	reaper-test revert-red-main-test code-review-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test ci-verify-signatures-test release-check
 
 .DEFAULT_GOAL := help
 
@@ -119,7 +119,7 @@ lint: android-lint ## Android lint on the debug variant (the repository's own ga
 # of lint: CI's lint-gates job runs `make lint-gates` in parallel with the
 # image job's `make lint`, so nothing runs twice there. It runs without -k,
 # so the first failing gate ends the run.
-lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test fetch-test apt-retry-test deps-check-test code-review-test ## actionlint over .github/workflows + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures + the image builds' apt retries
+lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test deps-check-test code-review-test ci-verify-signatures-test ## actionlint over .github/workflows + the signature check's fixtures + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures + the image builds' apt retries + the toolchain image's Gradle download retry
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -143,6 +143,9 @@ revert-red-main-test: ## Test that revert-red-main.yml resumes a partial run, ag
 code-review-test: ## Test code-review.yml's twin filter, owner-resume freshness and reconcile, verdict marker, paginated history reads and the review lock's budget-based waits, read out of the workflow and run against stubbed forge reads, clock and flock (bash + jq, offline)
 	./scripts/code-review-test.sh
 
+ci-verify-signatures-test: ## Test scripts/ci-verify-signatures.sh (signatures.yml's check) against offline git fixtures: fork head, head moved after the event, missing base or head object, registry only on the head; no file from the head ever runs (bash + git + ssh-keygen, offline)
+	./scripts/tests/ci-verify-signatures-test.sh
+
 reaper-test: ## Test reap-stale-ci-stacks.sh's image and lease rules against a stubbed docker (bash)
 	./scripts/reap-stale-ci-stacks-test.sh
 
@@ -157,6 +160,9 @@ fetch-test: ## Test build/docker/devcontainer/fetch.sh, the image download helpe
 
 apt-retry-test: ## Test that every Dockerfile stage running apt-get has build/docker/devcontainer/apt-retries.conf, and that apt-get update with it recovers from HTTP 500s of a loopback stub mirror and still fails on one that always fails (bash, apt-get, java; offline, unprivileged)
 	./scripts/apt-retry-test.sh
+
+gradle-retry-test: ## Test that the toolchain image's warm stage runs its Gradle dependency download through gradle-retry, and that the script, extracted from the Dockerfile, retries a resolution failure a bounded number of times against a stubbed gradle and still fails closed (bash, offline)
+	./scripts/gradle-retry-test.sh
 
 security: tools-check-trivy trivy-fs ## Security suite: trivy fs (vuln + secret, CRITICAL/HIGH blocking)
 

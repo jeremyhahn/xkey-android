@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016,SC2154 # workflow text is matched literally; extract assigns by name
 # code-review-test.sh -- regression fixtures for .github/workflows/code-review.yml
-# (template v5.10.10, v5.10.11 and v5.12.5).
+# (template v5.10.10, v5.10.11, v5.12.5, v5.12.6, v5.12.7, v5.12.8, v5.12.9,
+# v5.12.10 and v5.12.11).
 #
 # pull_request_target runs the base branch's copy of the workflow, so a change
 # to it is never exercised by its own pull request's review run. These
@@ -25,6 +26,40 @@
 #      and large reviews, a wait past 600 s), and dies when no time is left or
 #      the start time is unreadable or not a number. The clock (date +%s) and
 #      flock are stubbed.
+#   F. The gate (v5.12.6) reads the twins once and never waits: an APPROVED
+#      head passes with a twin queued; otherwise a twin whose `Codex review`
+#      is queued or in progress fails it at once (exit 3), naming the run; no
+#      twin and no approval fails as before; a failed or unreadable list of
+#      runs or jobs fails closed. Its timeout is 10 minutes. The gate's own
+#      get() runs against a stub curl that answers from fixtures. v5.12.11:
+#      a live PR base other than BASE_REF fails; the live hold is read before
+#      the exemption exit and a PR that answers no label list fails closed;
+#      get_all fails on a failed page or a page count that is not a number.
+#   G. The gate's handoff (v5.12.7): after a pass, the gate job of every newer
+#      run of the PR on the head (higher check suite) whose gate ended failure
+#      or cancelled is re-run; an older run, a run on another head, another
+#      PR's run and a newer green gate are left alone. v5.12.11: a newer run
+#      not yet ended is polled (HANDOFF_POLL_S) until it ends, then its red
+#      gate is re-run; when HANDOFF_WAIT_S expires on a red gate the step
+#      fails with ::error:: (exit 5), on a gate still running it warns; a run
+#      whose `Codex review` is queued or in progress, or whose gate has not
+#      started, is left to its own gate at once. The gate's actions: is
+#      write. An API error is a warning and the step exits 0.
+#   H. supersede (v5.12.8) cancels this PR's queued or running runs on an
+#      older head, each once; never a same-head run (by head_sha or by
+#      run-name), another PR's run, this run or a newer one, or a run whose
+#      `Codex review` or `Code Review (opencode)` job is in progress. It does
+#      nothing when the event's head is not the live head or the PR is
+#      closed. Its token is actions: write and pull-requests: read, its
+#      timeout 5 minutes. An API error is a warning and the step exits 0.
+#   I. Which jobs take a runner (v5.12.9, v5.12.10, v5.12.11): each job's
+#      `if:` and the gate's name are read out of the workflow and evaluated
+#      with jq against event contexts. A draft takes no runner; review runs
+#      only on an event that requests a review (not `labeled`, or a
+#      code-review, task:ready, agent:*, model:* or effort:* label); scope
+#      (v5.12.11) runs on every non-draft event of an open PR; the gate runs
+#      on every non-draft event, always as `Code Review (codex)`, and a
+#      skipped gate never carries that name; a fork's head starts no review.
 #
 # Needs bash and jq (the lint-gates job has no python3).
 # CODE_REVIEW_WORKFLOW overrides the workflow path (for a mutation check).
@@ -471,6 +506,637 @@ for s in lock-refresh.sh lock-review.sh; do
 	lock_dies "E ${s%.sh}: an empty job-start dies before flock" "${s}" "" "${S}" 5 \
 		"the job's start time (${L}/job-start) is not a number"
 done
+
+# ---- F: the gate reads the twins once and never waits (v5.12.6) -----------
+# The gate's whole run script runs under bash, its own get() talking to a
+# stub curl (first on PATH for these runs only) that answers each API path
+# from a fixture file, HTTP 404 for a path with none and HTTP 500 for a path
+# marked to fail. sleep is a function that stops the run: the gate waits for
+# nothing.
+extract gjob "${WORKFLOW}" $'\n  gate:\n' $'\n    steps:\n' "the gate job"
+check "F the gate's timeout is 10 minutes" "$(yn contains "${gjob}" $'\n    timeout-minutes: 10\n')" yes
+GATE_START=$'\n      - name: Require a Codex approval of the head, or a no-review change\n        run: |\n'
+GATE_END=$'(ruling 589)" ;;\n          esac\n'
+extract gate "${WORKFLOW}" "${GATE_START}" "${GATE_END}" "the gate step"
+G="${T}/g"
+GAPI=https://api.example.invalid/repos/o/r
+mkdir -p "${T}/gbin"
+printf '%s\n' '#!/usr/bin/env bash' \
+	'out="" url=""' \
+	'while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; *) url=$1; shift ;; esac; done' \
+	'p=${url#"$REPO_API"}' \
+	'printf "%s\n" "$p" >> "$G/urls"' \
+	'k=${p//[^A-Za-z0-9]/_}' \
+	'if [ -e "$G/fail-$k" ]; then : > "$out"; printf 500; exit 0; fi' \
+	'if [ -e "$G/$k.json" ]; then cp "$G/$k.json" "$out"; printf 200; else echo "{\"message\": \"Not Found\"}" > "$out"; printf 404; fi' \
+	> "${T}/gbin/curl"
+chmod +x "${T}/gbin/curl"
+{
+	printf '%s\n' 'set -euo pipefail' 'sleep() { echo "SLEPT $*"; exit 8; }'
+	printf '%s' "${gate}${GATE_END}"
+} > "${T}/gate.sh"
+gkey() { printf '%s' "${1//[^A-Za-z0-9]/_}"; }
+gput() { printf '%s\n' "$2" > "${G}/$(gkey "$1").json"; } # path body
+gfail() { : > "${G}/fail-$(gkey "$1")"; }                  # path
+RUNS_Q="/actions/workflows/3/runs?head_sha=${SHA}&status=queued&per_page=100"
+RUNS_P="/actions/workflows/3/runs?head_sha=${SHA}&status=in_progress&per_page=100"
+REVIEWS="/pulls/12/reviews?&per_page=100&page=1"
+gate_setup() { # a code change, no twin, no verdict
+	rm -rf "${G}"
+	mkdir -p "${G}"
+	gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "app/src/main/kotlin/A.kt"}]}'
+	gput /actions/runs/500 '{"id": 500, "workflow_id": 3}'
+	gput "${RUNS_Q}" '{"workflow_runs": []}'
+	gput "${RUNS_P}" '{"workflow_runs": []}'
+	gput /pulls/12 '{"base": {"ref": "main"}, "labels": [{"name": "code-review"}, {"name": "task:ready"}]}'
+	gput "${REVIEWS}" '[]'
+	gput "/pulls/12/reviews?&per_page=100&page=2" '[]'
+}
+grun() { gruns "$1" "$2:$3"; } # list-path run-id title
+gruns() { # list-path id:title...
+	local path=$1 spec
+	shift
+	gput "${path}" "$(for spec in "$@"; do jq -cn --argjson id "${spec%%:*}" --arg t "${spec#*:}" '{id: $id, display_title: $t}'; done | jq -cs '{workflow_runs: .}')"
+}
+gjobs() { gput "/actions/runs/$1/jobs?per_page=100" "$(jq -cn --arg s "$2" '{jobs: [{name: "scope", status: "completed"}, {name: "Codex review", status: $s}]}')"; }
+gverdict() { gput "${REVIEWS}" "$(arr "$(review 7 2026-11-09T10:00:00Z 1 "" "$1")")"; }
+gate_run() {
+	RC=0
+	OUT=$(cd "${G}" && PATH="${T}/gbin:${PATH}" G="${G}" GH_API_TOKEN=t FORGE=github REVIEWER="${REVIEWER}" \
+		REPO_API="${GAPI}" PR_NUM=12 EVENT_SHA="${SHA}" BASE_SHA="${OTHER_SHA}" BASE_REF=main \
+		NO_REVIEW_PATHS='^docs/.+$' DOCS_PATHS='^docs/.+$' SCOPE_SKIP=false SCOPE_RESULT=success \
+		REVIEW_RESULT=skipped GITHUB_RUN_ID=500 bash "${T}/gate.sh" 2>&1) || RC=$?
+}
+reads() { jq -Rrs --arg p "$1" 'split("\n") | map(select(. == $p)) | length' "${G}/urls"; }
+twin_msg() { echo "the Codex review of ${SHA} runs in run $1; that run's gate posts this head's check (verdict here: $2;"; }
+
+# (a) An APPROVED head passes, a twin queued or not.
+gate_setup
+grun "${RUNS_Q}" 501 "${mine}"
+gjobs 501 queued
+gverdict APPROVED
+gate_run
+check "F an approved head passes with a twin's review queued" \
+	"${RC} $(yn contains "${OUT}" "${REVIEWER} approved ${SHA}.") $(yn contains "${OUT}" SLEPT)" "0 yes no"
+
+# (b) Not approved while a twin's review of the head is queued or in progress:
+# the gate fails at once (exit 3, no sleep), naming the twin.
+gate_setup
+grun "${RUNS_Q}" 501 "${mine}"
+gjobs 501 queued
+gate_run
+check "F a twin's queued review fails the gate at once, naming the twin" \
+	"${RC} $(yn contains "${OUT}" "$(twin_msg 501 NONE)") $(yn contains "${OUT}" SLEPT)" "3 yes no"
+check "F ... each twin list is read once" "$(reads "${RUNS_Q}") $(reads "${RUNS_P}")" "1 1"
+gate_setup
+gruns "${RUNS_P}" "500:${mine}" "504:Code Review: PR #120 into main at ${SHA}" "502:${mine}"
+gjobs 504 in_progress
+gjobs 502 in_progress
+gverdict REQUEST_CHANGES
+gate_run
+check "F a twin's review in progress fails the gate at once, naming that twin (not self, not another PR)" \
+	"${RC} $(yn contains "${OUT}" "$(twin_msg 502 REQUEST_CHANGES)") $(yn contains "${OUT}" SLEPT)" "3 yes no"
+gate_setup
+grun "${RUNS_Q}" 501 "${mine}"
+gjobs 501 queued
+grun "${RUNS_P}" 502 "${mine}"
+gjobs 502 in_progress
+gate_run
+check "F two twins: the gate names the first" "${RC} $(yn contains "${OUT}" "$(twin_msg 501 NONE)")" "3 yes"
+gate_setup
+grun "${RUNS_P}" 502 "${mine}"
+gjobs 502 completed
+gate_run
+check "F a twin whose review has ended is no twin: no approval fails as before" \
+	"${RC} $(yn contains "${OUT}" "no ${REVIEWER} approval of ${SHA}.") $(yn contains "${OUT}" "runs in run")" "3 yes no"
+
+# (c) No twin and no approval fails as before.
+gate_setup
+gate_run
+check "F no twin, no approval: the gate fails as before" \
+	"${RC} $(yn contains "${OUT}" "no ${REVIEWER} approval of ${SHA}.") $(yn contains "${OUT}" "runs in run") $(yn contains "${OUT}" SLEPT)" \
+	"3 yes no no"
+gate_setup
+gverdict REQUEST_CHANGES
+gate_run
+check "F no twin, changes requested: the gate fails as before" \
+	"${RC} $(yn contains "${OUT}" "${REVIEWER} requested changes on ${SHA}")" "3 yes"
+
+# (d) An API error listing runs or jobs fails closed, an approval or not.
+for st in queued in_progress; do
+	gate_setup
+	gverdict APPROVED
+	if [ "${st}" = queued ]; then gfail "${RUNS_Q}"; else gfail "${RUNS_P}"; fi
+	gate_run
+	check "F a failed list of the ${st} runs fails closed over an approval" \
+		"${RC} $(yn contains "${OUT}" "cannot list the ${st} runs on ${SHA}") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+done
+gate_setup
+gverdict APPROVED
+gput "${RUNS_Q}" '<html>502 Bad Gateway</html>'
+gate_run
+check "F an unreadable list of runs fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot list the queued runs on ${SHA}") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+grun "${RUNS_Q}" 501 "${mine}"
+gfail "/actions/runs/501/jobs?per_page=100"
+gate_run
+check "F a failed read of a twin's jobs fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read the jobs of run 501") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+grun "${RUNS_P}" 501 "${mine}"
+gput "/actions/runs/501/jobs?per_page=100" '<html>502 Bad Gateway</html>'
+gate_run
+check "F an unreadable list of a twin's jobs fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read the jobs of run 501") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gfail /actions/runs/500
+gate_run
+check "F a failed read of its own run fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "GET /actions/runs/500 answered HTTP 500") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gput /actions/runs/500 '{"id": 500}'
+gate_run
+check "F an own run with no workflow fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read this run's workflow") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+
+# (e) v5.12.11: the live PR's base, read first and again with the holds.
+gate_setup
+gverdict APPROVED
+gate_run
+check "F an approved head reads the live PR three times (base, holds before the exemption, holds after the twins)" \
+	"${RC} $(reads /pulls/12)" "0 3"
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"base": {"ref": "dev"}, "labels": [{"name": "code-review"}]}'
+gate_run
+check "F a PR retargeted off BASE_REF fails over an approval" \
+	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to dev;") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"labels": []}'
+gate_run
+check "F a live PR with no base fails over an approval" \
+	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to no base;")" "3 yes"
+gate_setup
+gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
+gput /pulls/12 '{"base": {"ref": "dev"}, "labels": []}'
+gate_run
+check "F a PR retargeted off BASE_REF fails a docs-only change too" \
+	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to dev;") $(yn contains "${OUT}" "no review is required")" "3 yes no"
+
+# (f) v5.12.11: the live hold fails closed and is read before the exemption.
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"base": {"ref": "main"}}'
+gate_run
+check "F a live PR with no label list fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read the labels of PR 12") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"base": {"ref": "main"}, "labels": null}'
+gate_run
+check "F a live PR whose labels are null fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "cannot read the labels of PR 12")" "3 yes"
+gate_setup
+gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
+gate_run
+check "F a docs-only change with no hold passes with no review" \
+	"${RC} $(yn contains "${OUT}" "no review is required")" "0 yes"
+for hold in needs-owner needs-coordinator; do
+	gate_setup
+	gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
+	gput /pulls/12 "$(jq -cn --arg h "${hold}" '{base: {ref: "main"}, labels: [{name: "code-review"}, {name: $h}]}')"
+	gate_run
+	check "F a hold (${hold}) refuses an exempt change" \
+		"${RC} $(yn contains "${OUT}" "PR 12 is on hold (${hold})") $(yn contains "${OUT}" "no review is required")" "3 yes no"
+done
+gate_setup
+gverdict APPROVED
+gput /pulls/12 '{"base": {"ref": "main"}, "labels": [{"name": "needs-owner"}]}'
+gate_run
+check "F a hold refuses an approval of the head" \
+	"${RC} $(yn contains "${OUT}" "PR 12 is on hold (needs-owner)") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+check "F the live hold is read before the exemption exit" \
+	"$(yn before "$(pos <(printf '%s' "${gate}") $'\n          holds\n          n=$(jq \'length\' <<<"$files")\n')" \
+		"$(pos <(printf '%s' "${gate}") 'no review is required.')")" yes
+
+# (g) v5.12.11: get_all fails on a failed page, never a partial list.
+gate_setup
+gverdict APPROVED
+gput "/pulls/12/reviews?&per_page=100&page=2" '[{"id": 99}]'
+gfail "/pulls/12/reviews?&per_page=100&page=3"
+gate_run
+check "F a failed later page of reviews fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "GET /pulls/12/reviews?&per_page=100&page=3 answered HTTP 500") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
+gate_setup
+gverdict APPROVED
+gfail "/pulls/12/reviews?&per_page=100&page=2"
+gate_run
+check "F a failed second page of reviews fails closed over an approval" \
+	"${RC} $(yn contains "${OUT}" "approved ${SHA}.")" "3 no"
+check "F get_all returns 3 on a failed page" \
+	"$(yn contains "${gate}" $'got=$(get "$1&$size&page=$page") || return 3\n')" yes
+check "F get_all fails on a page count that is not a number" \
+	"$(yn contains "${gate}" $'[[ $n =~ ^[0-9]+$ ]] || fail "GET $1 answered no page count"\n')" yes
+
+# ---- G: a passing gate re-runs a newer twin's red gate (v5.12.7) ----------
+# The gate's second step runs under bash against the same stub curl. A run
+# list entry is "id:suite:status:title"; a run's gate is job <id>0 of it.
+gjob_rr=$'\n      - name: Re-run a newer twin\'s failed gate on this head\n        if: success() && env.FORGE == \'github\'\n        run: |\n'
+RR_END=$'done <<<"$newer"\n'
+extract rerun "${WORKFLOW}" "${gjob_rr}" "${RR_END}" "the gate's handoff step"
+check "G the gate's actions: is write, for the handoff" \
+	"$(yn contains "${gjob}" $'\n    permissions:\n      contents: read\n      # v5.12.7: write, for the re-run of a newer twin\'s gate only.\n      actions: write\n      pull-requests: read\n    env:\n')" yes
+check "G the handoff follows the gate step" \
+	"$(yn before "$(pos "${WORKFLOW}" "${GATE_END}")" "$(pos "${WORKFLOW}" "${gjob_rr}")")" yes
+# sleep moves the clock on (SECONDS) and, on its first call, puts the
+# fixtures in ${G}/next in place: a run that ends while the handoff waits.
+{
+	printf '%s\n' 'sleep() { echo "SLEPT $*"; SECONDS=$((SECONDS + $1)); if [ -d "$G/next" ]; then cp "$G"/next/* "$G"/; rm -rf "$G/next"; fi; }'
+	printf '%s' "${rerun}${RR_END}"
+} > "${T}/rerun.sh"
+RR_LIST="/actions/workflows/3/runs?head_sha=${SHA}&per_page=100"
+rr_setup() { # this run is 500 in suite 900; no other run
+	rm -rf "${G}"
+	mkdir -p "${G}"
+	gput /actions/runs/500 '{"id": 500, "workflow_id": 3, "check_suite_id": 900}'
+	gput "${RR_LIST}" '{"workflow_runs": []}'
+}
+rr_runs() { # id:suite:status:title...
+	local spec
+	gput "${RR_LIST}" "$(for spec in "$@"; do
+		IFS=: read -r id suite status title <<<"${spec}"
+		jq -cn --argjson id "${id}" --argjson s "${suite}" --arg st "${status}" --arg t "${title}" \
+			'{id: $id, check_suite_id: $s, status: $st, display_title: $t}'
+	done | jq -cs '{workflow_runs: .}')"
+}
+rr_gate() { # run-id status conclusion: that run's jobs, its gate job <id>0
+	gput "/actions/runs/$1/jobs?per_page=100" "$(jq -cn --argjson id "$1" --arg s "$2" --arg c "$3" \
+		'{jobs: [{id: ($id * 10 + 1), name: "Codex review", status: "completed", conclusion: "skipped"},
+		         {id: ($id * 10), name: "Code Review (codex)", status: $s, conclusion: $c}]}')"
+	gput "/actions/jobs/$1""0/rerun" '{}'
+}
+rr_run() {
+	RC=0
+	OUT=$(cd "${G}" && PATH="${T}/gbin:${PATH}" G="${G}" GH_API_TOKEN=t REPO_API="${GAPI}" \
+		PR_NUM=12 EVENT_SHA="${SHA}" BASE_REF=main GITHUB_RUN_ID=500 HANDOFF_POLL_S=7 HANDOFF_WAIT_S="${RR_WAIT:-20}" \
+		bash "${T}/rerun.sh" 2>&1) || RC=$?
+}
+rr_next() { mkdir -p "${G}/next"; printf '%s\n' "$2" > "${G}/next/$(gkey "$1").json"; } # path body, after the first sleep
+rr_jobs() { # run-id review-status gate-status gate-conclusion
+	gput "/actions/runs/$1/jobs?per_page=100" "$(jq -cn --argjson id "$1" --arg r "$2" --arg s "$3" --arg c "$4" \
+		'{jobs: [{id: ($id * 10 + 1), name: "Codex review", status: $r, conclusion: null},
+		         {id: ($id * 10), name: "Code Review (codex)", status: $s, conclusion: (if $c == "" then null else $c end)}]}')"
+}
+slept() { jq -Rn '[inputs | select(startswith("SLEPT "))] | length' <<<"${OUT}"; }
+reruns() { jq -Rrs 'split("\n") | map(select(endswith("/rerun"))) | sort | join(" ")' "${G}/urls"; }
+rr_other="Code Review: PR #12 into main at ${OTHER_SHA}"
+rr_pr120="Code Review: PR #120 into main at ${SHA}"
+
+# (a) A newer same-head run whose gate failed or was cancelled is re-run; an
+# older run, another head's, another PR's and a newer green gate are not.
+rr_setup
+rr_runs "510:910:completed:${mine}" "511:911:completed:${mine}" "490:890:completed:${mine}" \
+	"512:912:completed:${rr_other}" "513:913:completed:${rr_pr120}" "514:914:completed:${mine}"
+rr_gate 510 completed failure
+rr_gate 511 completed cancelled
+rr_gate 490 completed failure
+rr_gate 512 completed failure
+rr_gate 513 completed failure
+rr_gate 514 completed success
+rr_run
+check "G a pass re-runs only the newer same-head runs' red gates" \
+	"${RC} $(reruns)" "0 /actions/jobs/5100/rerun /actions/jobs/5110/rerun"
+check "G ... and says so" "$(yn contains "${OUT}" "Run 510 is newer on ${SHA} and its gate (job 5100) ended red: re-run")" yes
+check "G ... a newer green gate is left alone" "$(yn contains "${OUT}" "Run 514: its gate did not end red; nothing to re-run.")" yes
+# (b) v5.12.11: a newer red gate whose run has not ended is waited for, polled
+# every HANDOFF_POLL_S, and re-run once the run ends; past HANDOFF_WAIT_S the
+# step fails with an ::error:: (exit 5), never a warning.
+check "G the handoff's bound is 300 s and its poll 15 s by default" \
+	"$(yn contains "${rerun}" $'HANDOFF_POLL_S=${HANDOFF_POLL_S:-15}\n          HANDOFF_WAIT_S=${HANDOFF_WAIT_S:-300}\n')" yes
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_gate 510 completed failure
+rr_next /actions/runs/510 '{"id": 510, "status": "completed"}'
+rr_run
+check "G a newer red gate in a running run is re-run once the run ends" \
+	"${RC} $(slept) [$(reruns)]" "0 1 [/actions/jobs/5100/rerun]"
+check "G ... the wait says so and reads the run again" \
+	"$(yn contains "${OUT}" "Run 510 is in_progress; reading it again in 7 s.") $(reads /actions/runs/510)" "yes 1"
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_gate 510 completed failure
+gput /actions/runs/510 '{"id": 510, "status": "in_progress"}'
+rr_run
+check "G a newer red gate whose run never ends fails the step at the bound" \
+	"${RC} $(slept) [$(reruns)] $(yn contains "${OUT}" "::error::Code Review (codex): run 510 on ${SHA} is still in_progress after the handoff's 20 s bound, so its gate (job 5100, red) is not re-run")" \
+	"5 3 [] yes"
+check "G ... and that is no warning" "$(yn contains "${OUT}" "::warning::")" no
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_gate 510 completed failure
+gput /actions/runs/510 '{"id": 510, "status": "in_progress"}'
+RR_WAIT=0 rr_run
+check "G a zero bound fails at once on a red gate in a running run" "${RC} $(slept) [$(reruns)]" "5 0 []"
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_gate 510 completed failure
+gfail /actions/runs/510
+rr_run
+check "G a failed read of the waited run is a warning, exit 0" \
+	"${RC} $(yn contains "${OUT}" "::warning::Code Review (codex): GET /actions/runs/510 answered HTTP 500") [$(reruns)]" "0 yes []"
+# A gate still running is read again until it ends; past the bound, a warning.
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_jobs 510 completed in_progress ""
+rr_next /actions/runs/510 '{"id": 510, "status": "completed"}'
+rr_next "/actions/runs/510/jobs?per_page=100" "$(jq -cn '{jobs: [{id: 5101, name: "Codex review", status: "completed", conclusion: "skipped"},
+	{id: 5100, name: "Code Review (codex)", status: "completed", conclusion: "failure"}]}')"
+rr_run
+check "G a newer gate still running is waited for and re-run when it ends red" \
+	"${RC} $(slept) [$(reruns)]" "0 1 [/actions/jobs/5100/rerun]"
+rr_setup
+rr_runs "510:910:in_progress:${mine}"
+rr_jobs 510 completed in_progress ""
+gput /actions/runs/510 '{"id": 510, "status": "in_progress"}'
+rr_run
+check "G a newer gate still running past the bound is a warning, exit 0" \
+	"${RC} [$(reruns)] $(yn contains "${OUT}" "::warning::Code Review (codex): run 510's gate on ${SHA} is still running after the handoff's 20 s bound; it reads the verdict itself") $(yn contains "${OUT}" "::error::")" \
+	"0 [] yes no"
+# A newer run that reviews the head itself, or whose gate has not started, is
+# left to its own gate at once: no wait, no re-run.
+for rv in queued in_progress; do
+	rr_setup
+	rr_runs "510:910:in_progress:${mine}"
+	rr_jobs 510 "${rv}" queued ""
+	rr_run
+	check "G a newer run whose Codex review is ${rv} is left to its own gate" \
+		"${RC} $(slept) [$(reruns)] $(yn contains "${OUT}" "Run 510 reviews ${SHA} itself; its own gate reads that verdict.")" "0 0 [] yes"
+done
+for gs in queued waiting; do
+	rr_setup
+	rr_runs "510:910:in_progress:${mine}"
+	rr_jobs 510 completed "${gs}" ""
+	rr_run
+	check "G a newer run whose gate is ${gs} is left to its own gate" \
+		"${RC} $(slept) [$(reruns)] $(yn contains "${OUT}" "Run 510 has not run its gate yet; that gate reads this approval itself.")" "0 0 [] yes"
+done
+rr_setup
+rr_runs "510:910:queued:${mine}"
+gput "/actions/runs/510/jobs?per_page=100" '{"jobs": []}'
+rr_run
+check "G a queued newer run with no jobs yet is left to its own gate" \
+	"${RC} $(slept) [$(reruns)] $(yn contains "${OUT}" "Run 510 has not run its gate yet;")" "0 0 [] yes"
+rr_setup
+rr_runs "510:910:completed:${mine}"
+rr_gate 510 completed failure
+rr_run
+check "G a completed newer run is re-run with no wait" "${RC} $(slept) [$(reruns)]" "0 0 [/actions/jobs/5100/rerun]"
+# (c) No newer run: nothing to do.
+rr_setup
+rr_runs "490:890:completed:${mine}"
+rr_gate 490 completed failure
+rr_run
+check "G no newer run: the check stands" \
+	"${RC} $(yn contains "${OUT}" "No newer run of PR 12 on ${SHA}; this gate's check stands.") [$(reruns)]" "0 yes []"
+# (d) An API error is a warning and exits 0.
+for broken in /actions/runs/500 "${RR_LIST}" "/actions/runs/510/jobs?per_page=100" /actions/jobs/5100/rerun; do
+	rr_setup
+	rr_runs "510:910:completed:${mine}"
+	rr_gate 510 completed failure
+	gfail "${broken}"
+	rr_run
+	check "G a failed ${broken%%\?*} is a warning, exit 0" \
+		"${RC} $(yn contains "${OUT}" "::warning::Code Review (codex): GET ${broken} answered HTTP 500")$(yn contains "${OUT}" "::warning::Code Review (codex): POST ${broken} answered HTTP 500")" \
+		"0 $(if [ "${broken}" = /actions/jobs/5100/rerun ]; then echo noyes; else echo yesno; fi)"
+done
+rr_setup
+gput /actions/runs/500 '{"id": 500}'
+rr_run
+check "G an own run with no check suite is a warning, exit 0" \
+	"${RC} $(yn contains "${OUT}" "::warning::Code Review (codex): cannot read this run's workflow and check suite")" "0 yes"
+
+# ---- H: a new head cancels this PR's runs on an older head (v5.12.8) ------
+# The supersede job's step runs under bash against the same stub curl. This
+# run is 600 on ${SHA}; a run list entry is "id:head_sha:title".
+extract sjob "${WORKFLOW}" $'\n  supersede:\n' $'\n    steps:\n' "the supersede job"
+check "H supersede's token: actions: write and pull-requests: read only" \
+	"$(yn contains "${sjob}" $'\n    permissions:\n      # The cancel only. No contents: nothing is checked out.\n      actions: write\n      pull-requests: read\n    env:\n')" yes
+check "H supersede's timeout is 5 minutes" "$(yn contains "${sjob}" $'\n    timeout-minutes: 5\n')" yes
+check "H supersede runs on GitHub for synchronize or reopened on an open PR" \
+	"$(yn contains "${sjob}" $'\n    if: >-\n      github.server_url == \'https://github.com\' &&\n      github.event.pull_request.state == \'open\' &&\n      (github.event.action == \'synchronize\' || github.event.action == \'reopened\')\n')" yes
+SUP_START=$'\n      - name: Cancel this PR\'s runs on an older head\n        run: |\n'
+SUP_END=$'done <<<"$older"\n'
+extract sup "${WORKFLOW}" "${SUP_START}" "${SUP_END}" "the supersede step"
+printf '%s' "${sup}${SUP_END}" > "${T}/sup.sh"
+sup_list() { printf '/actions/workflows/3/runs?event=pull_request_target&status=%s&per_page=100' "$1"; }
+sup_setup() { # PR 12 open at ${SHA}; no run listed
+	rm -rf "${G}"
+	mkdir -p "${G}"
+	gput /pulls/12 "$(jq -cn --arg s "${SHA}" '{state: "open", head: {sha: $s}}')"
+	gput /actions/runs/600 '{"id": 600, "workflow_id": 3}'
+	local st
+	for st in queued in_progress waiting pending requested; do gput "$(sup_list "${st}")" '{"workflow_runs": []}'; done
+}
+sup_runs() { # status id:head_sha:title...
+	local st=$1 spec
+	shift
+	gput "$(sup_list "${st}")" "$(for spec in "$@"; do
+		IFS=: read -r id head title <<<"${spec}"
+		jq -cn --argjson id "${id}" --arg h "${head}" --arg t "${title}" '{id: $id, head_sha: $h, display_title: $t}'
+	done | jq -cs '{workflow_runs: .}')"
+}
+sup_jobs() { # run-id review-job-name status
+	gput "/actions/runs/$1/jobs?per_page=100" "$(jq -cn --arg n "$2" --arg s "$3" \
+		'{jobs: [{name: "Review scope", status: "completed"}, {name: $n, status: $s}]}')"
+	gput "/actions/runs/$1/cancel" '{}'
+}
+sup_run() {
+	RC=0
+	OUT=$(cd "${G}" && PATH="${T}/gbin:${PATH}" G="${G}" GH_API_TOKEN=t REPO_API="${GAPI}" \
+		PR_NUM=12 EVENT_SHA="${SHA}" GITHUB_RUN_ID=600 bash "${T}/sup.sh" 2>&1) || RC=$?
+}
+cancels() { [ -e "${G}/urls" ] || return 0; jq -Rrs 'split("\n") | map(select(endswith("/cancel"))) | join(" ")' "${G}/urls"; }
+old="Code Review: PR #12 into main at ${OTHER_SHA}"
+
+# (a) Queued or running runs of this PR on an older head are cancelled, each
+# once; a same-head run (by head_sha or by run-name), another PR's run, this
+# run, a newer run and a run whose review is in progress are not.
+sup_setup
+sup_runs queued "590:${OTHER_SHA}:${old}" "593:${SHA}:${old}" "595:${OTHER_SHA}:Code Review: PR #120 into main at ${OTHER_SHA}"
+sup_runs in_progress "591:${OTHER_SHA}:${old}" "594:${OTHER_SHA}:${mine}" "596:${OTHER_SHA}:${old}" \
+	"597:${OTHER_SHA}:${old}" "600:${OTHER_SHA}:${old}" "605:${OTHER_SHA}:${old}"
+sup_runs waiting "590:${OTHER_SHA}:${old}" "598:${OTHER_SHA}:${old}"
+sup_jobs 590 "Codex review" completed
+sup_jobs 591 "Codex review" queued
+sup_jobs 596 "Codex review" in_progress
+sup_jobs 597 "Code Review (opencode)" in_progress
+sup_jobs 598 "Code Review (opencode)" completed
+for id in 593 594 595 600 605; do sup_jobs "${id}" "Codex review" queued; done
+sup_run
+check "H older-head runs of this PR are cancelled, each once" \
+	"${RC} $(cancels)" "0 /actions/runs/590/cancel /actions/runs/591/cancel /actions/runs/598/cancel"
+check "H ... a run whose review is in progress is left" \
+	"$(yn contains "${OUT}" "Run 596: its review is in progress")$(yn contains "${OUT}" "Run 597: its review is in progress")" yesyes
+check "H ... and each cancel is said" "$(yn contains "${OUT}" "Run 590 is on an older head of PR 12 than ${SHA}: cancelled.")" yes
+# (b) Nothing to cancel.
+sup_setup
+sup_runs queued "593:${SHA}:${mine}"
+sup_jobs 593 "Codex review" queued
+sup_run
+check "H a same-head run only: nothing is cancelled" \
+	"${RC} [$(cancels)] $(yn contains "${OUT}" "No run of PR 12 on an older head is queued or running.")" "0 [] yes"
+# (c) Not the live head, or the PR is closed: nothing is read or cancelled.
+for pr in "{\"state\": \"open\", \"head\": {\"sha\": \"${OTHER_SHA}\"}}" "{\"state\": \"closed\", \"head\": {\"sha\": \"${SHA}\"}}"; do
+	sup_setup
+	sup_runs queued "590:${OTHER_SHA}:${old}"
+	sup_jobs 590 "Codex review" queued
+	gput /pulls/12 "${pr}"
+	sup_run
+	check "H $(jq -r '.state' <<<"${pr}") PR at $(jq -r '.head.sha[:4]' <<<"${pr}"): nothing to cancel" \
+		"${RC} [$(cancels)] $(yn contains "${OUT}" "nothing to cancel.") $(reads "$(sup_list queued)")" "0 [] yes 0"
+done
+# (d) An API error is a warning and exits 0.
+for broken in /pulls/12 /actions/runs/600 "$(sup_list pending)" "/actions/runs/590/jobs?per_page=100" /actions/runs/590/cancel; do
+	sup_setup
+	sup_runs queued "590:${OTHER_SHA}:${old}" "591:${OTHER_SHA}:${old}"
+	sup_jobs 590 "Codex review" queued
+	sup_jobs 591 "Codex review" queued
+	gfail "${broken}"
+	sup_run
+	check "H a failed ${broken%%\?*} is a warning, exit 0, nothing cancelled past it" \
+		"${RC} $(yn contains "${OUT}" "::warning::Cancel superseded runs: ") [$(cancels | jq -Rr --arg b "${broken}" 'split(" ") | map(select(. != $b and . != "")) | join(" ")')]" \
+		"0 yes []"
+done
+
+# ---- I: which jobs take a runner, and the gate's name (v5.12.9 - v5.12.11) -
+# Each job's `if:` and the gate's `name:` are read from the workflow and
+# translated to jq: paths gain a leading dot, && and || become and/or,
+# contains(), !contains(), startsWith() and always() become jq, and the
+# name's `C && 'A' || 'B'` becomes `if C then "A" else "B" end`. Each is
+# then evaluated against an event context. The translator knows only these
+# forms: anything else left in the text fails jq, and the case with it.
+gh2jq() { # expression text on stdin -> jq program
+	jq -Rrs '
+		gsub("\\$\\{\\{|\\}\\}"; "")
+		| gsub("(?<![\\w./])(?<p>(github|needs)\\.)"; ".\(.p)")
+		| gsub("!contains\\((?<p>[a-z_.]+)\\.\\*\\.name, (?<v>\\x27[^\\x27]*\\x27)\\)"; "(any(\(.p)[]?; .name == \(.v)) | not)")
+		| gsub("contains\\((?<p>[a-z_.]+)\\.\\*\\.name, (?<v>\\x27[^\\x27]*\\x27)\\)"; "any(\(.p)[]?; .name == \(.v))")
+		| gsub("startsWith\\((?<p>[a-z_.]+), (?<v>\\x27[^\\x27]*\\x27)\\)"; "((\(.p) // \"\") | startswith(\(.v)))")
+		| gsub("always\\(\\)"; "true") | gsub("&&"; " and ") | gsub("\\|\\|"; " or ")
+		| gsub("\\x27"; "\"")'
+}
+# job_if JOB: the translated `if:` of JOB (folded or one line).
+job_if() {
+	jq -Rrs --arg j "$1" '
+		split("\n  \($j):\n") | if length != 2 then error("job \($j) not found once") else .[1] end
+		| capture("\n    if: (>-\n(?<f>(      [^\n]*\n)+)|(?<l>[^\n]*)\n)") | (.f // .l)' "${WORKFLOW}" | gh2jq
+}
+extract gname "${WORKFLOW}" $'\n    name: >-\n      ${{ ' $' }}\n    needs: [scope, review]\n' "the gate's name"
+gname_jq=$(jq -nr --arg n "${gname}" '$n | gsub("\n *"; " ") | capture("^(?<c>.*) && \\x27(?<a>[^\\x27]*)\\x27 \\|\\| \\x27(?<b>[^\\x27]*)\\x27$")
+	| "if \(.c) then \"\(.a)\" else \"\(.b)\" end"') || fatal "the gate's name is not C && 'A' || 'B'"
+gname_jq=$(gh2jq <<<"${gname_jq}")
+IF_SUP=$(job_if supersede) IF_SCOPE=$(job_if scope) IF_REVIEW=$(job_if review)
+IF_OPEN=$(job_if review-opencode) IF_GATE=$(job_if gate)
+check "I the gate's if: is the draft clause alone" \
+	"$(jq -Rrs --arg s $'\n    if: >-\n      always() && github.event.pull_request.draft != true\n    # v5.12.2' 'split($s) | length - 1' "${WORKFLOW}")" 1
+# ctx SERVER ACTION LABEL DRAFT: an event on PR 12 (labels code-review and
+# task:ready, plus LABEL when it is added), its head in this repository.
+ctx() {
+	jq -cn --arg srv "$1" --arg a "$2" --arg l "$3" --argjson d "$4" '{
+		github: {server_url: $srv, repository: "o/r", event: ({action: $a,
+			pull_request: {draft: $d, state: "open", head: {repo: {full_name: "o/r"}},
+				labels: ([{name: "code-review"}, {name: "task:ready"}] + (if $l == "" then [] else [{name: $l}] end) | unique)}}
+			+ (if $a == "labeled" then {label: {name: $l}} else {} end))},
+		needs: {scope: {outputs: {skip: "false"}}, review: {outputs: {agent: "opencode"}}}}'
+}
+b01() { if [ "$1" = true ]; then echo 1; else echo 0; fi; }
+# jobs_for SERVER ACTION LABEL DRAFT: "scope review opencode supersede gate:name"
+jobs_for() {
+	local c
+	c=$(ctx "$@")
+	printf '%s %s %s %s %s:%s' \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_SCOPE})")")" \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_REVIEW})")")" \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_OPEN})")")" \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_SUP})")")" \
+		"$(b01 "$(jq -n --argjson x "$c" "\$x | (${IF_GATE})")")" \
+		"$(jq -nr --argjson x "$c" "\$x | (${gname_jq})")"
+}
+GH=https://github.com GT=https://gitea.example.org
+CX="Code Review (codex)" NR="Code Review (not requested)"
+dsfx() { if [ "$1" = true ]; then echo " (draft)"; fi; }
+# event (action/label/draft) -> want on github.com
+while IFS='|' read -r ev want; do
+	IFS=/ read -r a l d <<<"${ev}"
+	check "I github.com ${a}${l:+ ${l}}$(dsfx "${d}")" "$(jobs_for "${GH}" "${a}" "${l}" "${d}")" "${want}"
+done <<EOF
+opened//false|1 1 0 0 1:${CX}
+opened//true|0 0 0 0 0:${NR}
+ready_for_review//false|1 1 0 0 1:${CX}
+synchronize//false|1 1 0 1 1:${CX}
+synchronize//true|0 0 0 0 0:${NR}
+reopened//false|1 1 0 1 1:${CX}
+reopened//true|0 0 0 0 0:${NR}
+labeled/code-review/false|1 1 0 0 1:${CX}
+labeled/task:ready/false|1 1 0 0 1:${CX}
+labeled/agent:opencode/false|1 1 0 0 1:${CX}
+labeled/model:gpt-x/false|1 1 0 0 1:${CX}
+labeled/effort:high/false|1 1 0 0 1:${CX}
+labeled/dept:software/false|1 0 0 0 1:${CX}
+labeled/ci:full/false|1 0 0 0 1:${CX}
+labeled/task:in-progress/false|1 0 0 0 1:${CX}
+labeled/needs-owner/false|1 0 0 0 1:${CX}
+labeled/needs-coordinator/false|1 0 0 0 1:${CX}
+labeled/code-review/true|0 0 0 0 0:${NR}
+labeled/dept:software/true|0 0 0 0 0:${NR}
+EOF
+# The opencode job (Gitea only) keeps the shared condition; supersede never
+# runs off GitHub.
+while IFS='|' read -r ev want; do
+	IFS=/ read -r a l d <<<"${ev}"
+	check "I gitea ${a}${l:+ ${l}}$(dsfx "${d}")" "$(jobs_for "${GT}" "${a}" "${l}" "${d}")" "${want}"
+done <<EOF
+opened//false|1 1 1 0 1:${CX}
+synchronize//false|1 1 1 0 1:${CX}
+labeled/agent:opencode/false|1 1 1 0 1:${CX}
+labeled/dept:software/false|1 0 0 0 1:${CX}
+opened//true|0 0 0 0 0:${NR}
+EOF
+# Invariants over every action, label and draft state: the gate posts the
+# required name exactly when it runs, and every non-draft suite has it.
+bad=""
+for a in opened synchronize reopened ready_for_review edited labeled unlabeled; do
+	for l in "" code-review task:ready agent:opencode dept:software ci:full needs-owner; do
+		[ "${a}" = labeled ] || [ -z "${l}" ] || continue
+		for d in false true; do
+			got=$(jobs_for "${GH}" "${a}" "${l}" "${d}")
+			gate_bit=${got:8:1} name=${got:10}
+			if [ "${gate_bit}" = 1 ] && [ "${name}" != "${CX}" ]; then bad+=" ${a}/${l}/${d}:runs-as-${name}"; fi
+			if [ "${gate_bit}" = 0 ] && [ "${name}" = "${CX}" ]; then bad+=" ${a}/${l}/${d}:skipped-as-required"; fi
+			if [ "${d}" = false ] && [ "${gate_bit}${name}" != "1${CX}" ]; then bad+=" ${a}/${l}/${d}:no-required-context"; fi
+			if [ "${d}" = true ] && [ "${got:0:7}" != "0 0 0 0" ]; then bad+=" ${a}/${l}/${d}:draft-takes-a-runner"; fi
+			if [ "${d}" = false ] && [ "${got:0:1}" != 1 ]; then bad+=" ${a}/${l}/${d}:no-guard-for-the-gate"; fi
+		done
+	done
+done
+check "I a skipped gate never posts the required check; every non-draft suite carries it and its guard; a draft takes no runner" "[${bad}]" "[]"
+# v5.12.11: scope's if: is the draft clause and the open state alone, so the
+# guard runs wherever the gate runs on an open PR; never on a closed one.
+check "I scope's if: is the draft clause and the open state" \
+	"$(jq -Rrs --arg s $'\n  scope:\n' 'split($s) | .[1] // ""' "${WORKFLOW}" | jq -Rrs --arg s $'\n    if: >-\n      github.event.pull_request.draft != true\n      && github.event.pull_request.state == \'open\'\n    # v5.12.3' 'split($s) | length - 1')" 1
+closed_ctx=$(ctx "${GH}" labeled dept:software false | jq -c '.github.event.pull_request.state = "closed"')
+check "I scope skips a closed PR" "$(b01 "$(jq -n --argjson x "${closed_ctx}" "\$x | (${IF_SCOPE})")")" 0
+check "I review and review-opencode keep the shared condition (an unrelated label starts neither)" \
+	"$(jobs_for "${GT}" labeled ci:full false | cut -c3-5)" "0 0"
+# A fork's head never takes the codex runner (v5.10.6), under the shared condition.
+fork_ctx=$(ctx "${GH}" opened "" false | jq -c '.github.event.pull_request.head.repo.full_name = "fork/r"')
+check "I a fork's head starts no review" "$(b01 "$(jq -n --argjson x "${fork_ctx}" "\$x | (${IF_REVIEW})")")" 0
 
 check "nothing called curl" "$(yn [ ! -e "${T}/curl.log" ])" yes
 echo "$((total - fails)) of ${total} passed"

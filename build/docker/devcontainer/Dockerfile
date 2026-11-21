@@ -169,16 +169,46 @@ done
 echo "gradle-quiesce: JVMs outlived the build: $(jvms | tr '\n' ' ')" >&2
 exit 1
 EOF
+# gradle-retry <log> <gradle args...>: the online run below, its output to
+# log, retried while a failed attempt's log says Gradle could not download a
+# dependency: a repository's transient error must not fail the image. Three
+# attempts, 15 s then 30 s apart, gradle-quiesce between them so no JVM of
+# the failed attempt still writes the cache. Any other failure, or the third
+# download failure, prints the log's tail and exits with gradle's status.
+COPY --chmod=0755 <<'EOF' /usr/local/bin/gradle-retry
+#!/bin/bash
+set -uo pipefail
+log=$1
+shift
+attempts=3
+delay=${GRADLE_RETRY_DELAY:-15}
+n=1
+while :; do
+  gradle "$@" > "${log}" 2>&1
+  rc=$?
+  [ "${rc}" -ne 0 ] || exit 0
+  if [ "${n}" -ge "${attempts}" ] || ! grep -Eq 'Could not (resolve|GET|HEAD|download)' "${log}"; then
+    tail -n 60 "${log}"
+    echo "gradle-retry: gradle failed (exit ${rc}) on attempt ${n} of ${attempts}" >&2
+    exit "${rc}"
+  fi
+  echo "gradle-retry: attempt ${n} of ${attempts} could not download a dependency; retrying in ${delay} s" >&2
+  gradle-quiesce || exit 1
+  sleep "${delay}"
+  delay=$((delay * 2))
+  n=$((n + 1))
+done
+EOF
 COPY --chown=1000:1000 settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY --chown=1000:1000 gradle/libs.versions.toml gradle/gradle-daemon-jvm.properties gradle/
 COPY --chown=1000:1000 gradle/wrapper/gradle-wrapper.properties gradle/wrapper/
 COPY --chown=1000:1000 app/build.gradle.kts app/
-# The gates' tasks, online, download every dependency they use. Any failure
-# fails the image build: a dependency that cannot be resolved, or the stub
-# failing its own test or lint.
-RUN gradle --no-daemon --console=plain -Pkotlin.compiler.execution.strategy=in-process \
-      assembleDebug testDebugUnitTest coverageReport lintDebug > /tmp/warm.log 2>&1 \
-      || { tail -n 60 /tmp/warm.log; exit 1; }; \
+# The gates' tasks, online, download every dependency they use. A run that
+# could not download a dependency is retried (gradle-retry, above); the build
+# still fails closed: a dependency still unresolved after the last attempt,
+# or the stub failing its own test or lint, fails the image build.
+RUN gradle-retry /tmp/warm.log --no-daemon --console=plain -Pkotlin.compiler.execution.strategy=in-process \
+      assembleDebug testDebugUnitTest coverageReport lintDebug; \
     gradle-quiesce; \
     cp -a "${GRADLE_USER_HOME}/caches/modules-2" /opt/gradle-ro-cache/; \
     find /opt/gradle-ro-cache -name '*.lock' -delete; \
@@ -257,7 +287,7 @@ FROM base AS toolchain
 ARG APT_PROXY=
 USER root
 RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \
- && apt-get update && apt-get install -y --no-install-recommends bash curl git jq make shellcheck \
+ && apt-get update && apt-get install -y --no-install-recommends bash curl git jq make openssh-client shellcheck \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy
 COPY --from=fetch /opt/tools/trivy /opt/tools/actionlint /usr/local/bin/
 USER 1000

@@ -40,6 +40,7 @@ import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
@@ -61,6 +62,7 @@ import org.junit.Test
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /**
@@ -220,13 +222,31 @@ class UsbAccessoryServerSlotTest {
         )
     }
 
+    /**
+     * A slot whose open waits for the retiring session without a time limit,
+     * and hands that session to [waiting] when it starts to wait, so a test
+     * decides when the teardown ends and no clock does.
+     */
+    private fun slotDrivenBy(waiting: CompletableDeferred<Job>) = UsbAccessoryServerSlot(
+        newDetachWatcher = { BroadcastAccessoryDetachWatcher { _, receiver -> receivers += receiver } },
+        awaitTeardown = { previous ->
+            waiting.complete(previous)
+            previous.join()
+        },
+    )
+
     @Test
     fun `a slow teardown of the detached session keeps the new peer identity`() {
+        val waiting = CompletableDeferred<Job>()
+        slot = slotDrivenBy(waiting)
+        val oldPeerSet = CompletableDeferred<Unit>()
+        val newPeerSet = CompletableDeferred<Unit>()
         val oldTeardown = CompletableDeferred<Unit>()
         val sessions = AtomicInteger()
         coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers {
             if (sessions.incrementAndGet() == 1) {
                 handler.setConnectedDevicePublicKeyHex("old-peer")
+                oldPeerSet.complete(Unit)
                 try {
                     awaitCancellation()
                 } finally {
@@ -238,27 +258,32 @@ class UsbAccessoryServerSlotTest {
                 }
             } else {
                 handler.setConnectedDevicePublicKeyHex("new-peer")
+                newPeerSet.complete(Unit)
                 awaitCancellation()
             }
         }
 
         val first = attach()
         assertNotNull(first)
-        assertTrue(waitFor(5_000) { peerKeyHex == "old-peer" })
+        runBlocking { oldPeerSet.await() }
 
         broadcastDetach(accessory)
-        var second: UsbAccessoryServer? = null
-        val reattach = thread { second = attach() }
-        waitFor(1_000) { peerKeyHex == "new-peer" }
+        val second = AtomicReference<UsbAccessoryServer?>()
+        val reattach = thread { second.set(attach()) }
+
+        // The reattach waits on the old session's teardown, which has not ended.
+        assertSame(first!!.sessionJob, runBlocking { waiting.await() })
+        assertNull("the reattach opened before the old teardown ended", slot.current())
+        assertEquals("old-peer", peerKeyHex)
 
         oldTeardown.complete(Unit)
-        reattach.join(5_000)
-        runBlocking { withTimeout(5_000) { first!!.sessionJob?.join() } }
-        assertNotNull("the reattach was ignored", second)
-        assertTrue(waitFor(5_000) { sessions.get() == 2 })
-        waitFor(2_000) { peerKeyHex == "new-peer" }
+        reattach.join()
 
+        assertNotNull("the reattach was ignored", second.get())
+        assertSame(second.get(), slot.current()?.first)
+        runBlocking { newPeerSet.await() }
         assertEquals("the old session's teardown cleared the new peer", "new-peer", peerKeyHex)
+        assertEquals(2, sessions.get())
     }
 
     @Test
@@ -331,10 +356,14 @@ class UsbAccessoryServerSlotTest {
 
     @Test
     fun `a clear while a reattach waits for the old teardown publishes nothing`() {
+        val waiting = CompletableDeferred<Job>()
+        slot = slotDrivenBy(waiting)
+        val oldStarted = CompletableDeferred<Unit>()
         val oldTeardown = CompletableDeferred<Unit>()
         val sessions = AtomicInteger()
         coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers {
             if (sessions.incrementAndGet() == 1) {
+                oldStarted.complete(Unit)
                 try {
                     awaitCancellation()
                 } finally {
@@ -346,23 +375,20 @@ class UsbAccessoryServerSlotTest {
         }
 
         assertNotNull(attach())
-        assertTrue(waitFor(5_000) { sessions.get() == 1 })
+        runBlocking { oldStarted.await() }
         broadcastDetach(accessory)
-        assertTrue(waitFor(5_000) { !slot.isActive })
+        assertFalse(slot.isActive)
 
         // The reattach waits in the old session's teardown; the service shuts
         // down (clear) before that teardown ends.
-        var second: UsbAccessoryServer? = null
-        val reattach = thread { second = attach() }
-        assertTrue("the reattach never waited for the teardown", waitFor(5_000) {
-            reattach.state == Thread.State.WAITING || reattach.state == Thread.State.TIMED_WAITING
-        })
+        val second = AtomicReference<UsbAccessoryServer?>()
+        val reattach = thread { second.set(attach()) }
+        runBlocking { waiting.await() }
         slot.clear()
         oldTeardown.complete(Unit)
-        reattach.join(10_000)
+        reattach.join()
 
-        assertFalse(reattach.isAlive)
-        assertNull("an open pending across the clear published its server", second)
+        assertNull("an open pending across the clear published its server", second.get())
         assertNull(slot.current())
         verify(exactly = 1) { usbManager.openAccessory(any()) }
         assertEquals("a session started after the clear", 1, sessions.get())
