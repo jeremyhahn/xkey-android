@@ -66,7 +66,7 @@ class AutoSignHashTest {
 
         assertEquals(
             MediaHasher.hashStream(ZeroStream(size)),
-            AutoSignHash.contentHashUri(resolver, uri)
+            AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile())
         )
     }
 
@@ -75,7 +75,7 @@ class AutoSignHashTest {
         val (resolver, uri) = resolverFor("image/jpeg", 1025)
 
         val refused = assertThrows(AutoSignHash.TooLargeException::class.java) {
-            AutoSignHash.contentHashUri(resolver, uri, limit = 1024)
+            AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile(), limit = 1024)
         }
         assertEquals(1024, refused.limit)
     }
@@ -86,7 +86,7 @@ class AutoSignHashTest {
 
         assertEquals(
             MediaHasher.hashCanonical(ByteArray(1024), "image/jpeg"),
-            AutoSignHash.contentHashUri(resolver, uri, limit = 1024)
+            AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile(), limit = 1024)
         )
     }
 
@@ -129,7 +129,7 @@ class AutoSignHashTest {
             val file = tempFolder.newFile(name).apply { writeBytes(earlier) }
             val (resolver, uri) = resolverFor(mime, file)
 
-            val hash = AutoSignHash.contentHashUri(resolver, uri)
+            val hash = AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile())
             XmpMetadataHelper.writeSignature(file.path, signatureOver(hash))
 
             val read = XmpMetadataHelper.readSignature(file.path)!!
@@ -151,7 +151,7 @@ class AutoSignHashTest {
             val file = tempFolder.newFile("long.mp4").apply { writeBytes(original) }
             val (resolver, uri) = resolverFor(mime, file)
 
-            val hash = AutoSignHash.contentHashUri(resolver, uri)
+            val hash = AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile())
             assertEquals(MediaHasher.hashBytes(original), hash)
             XmpMetadataHelper.writeSignature(file.path, signatureOver(hash))
 
@@ -170,7 +170,7 @@ class AutoSignHashTest {
             val carried = tempFolder.newFile("carried.mp4").apply { writeBytes(signed) }
             val (signedResolver, signedUri) = resolverFor(mime, carried)
             assertThrows(AutoSignHash.TooLargeException::class.java) {
-                AutoSignHash.contentHashUri(signedResolver, signedUri)
+                AutoSignHash.contentHashUri(signedResolver, signedUri, kotlin.io.path.createTempDirectory("hash").toFile())
             }
             XmpMetadataHelper.writeSignature(carried.path, signatureOver(hash))
             assertEquals(signatureOver(hash), XmpMetadataHelper.readSignature(carried.path))

@@ -145,7 +145,7 @@ class GeotaggedVideoAutoSignTest {
         assertNotEquals(
             "the fixture's redacted view must hash differently",
             originalHash,
-            AutoSignHash.contentHashUri(context.contentResolver, uri)
+            AutoSignHash.contentHashUri(context.contentResolver, uri, kotlin.io.path.createTempDirectory("hash").toFile())
         )
 
         val outcome = AutoSigner.signCapture(context, uri, null, "key-1", "Key")
@@ -178,7 +178,7 @@ class GeotaggedVideoAutoSignTest {
 
     @Test
     fun `a queued video signed over its redacted view is signed again from its original, never dropped`() = runBlocking<Unit> {
-        val redactedHash = AutoSignHash.contentHashUri(context.contentResolver, uri)
+        val redactedHash = AutoSignHash.contentHashUri(context.contentResolver, uri, kotlin.io.path.createTempDirectory("hash").toFile())
         MediaWriteAuthorizations.add(context, PendingMediaWrite(uri.toString(), null, "key-1", "Key", data(redactedHash)))
         shadowOf(context as Application).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
         granted = true

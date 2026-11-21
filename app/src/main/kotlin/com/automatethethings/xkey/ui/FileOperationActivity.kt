@@ -1351,8 +1351,8 @@ class FileOperationActivity : AppCompatActivity() {
      * Verify signatures on the first shared file.
      *
      * Flow:
-     * 1. Hash the file content.
-     * 2. Try reading an embedded signature via [XmpMetadataHelper.readSignatureFromUri].
+     * 1-2. Read an embedded signature and hash the content from one read of
+     *    the original ([MediaHasher.checkInBandUri]).
      * 3. If none found, prompt user to pick a `.xkeysig` sidecar file.
      * 4. For each [SignatureEntry], look up the signer by key fingerprint.
      * 5. Show verification results.
@@ -1364,17 +1364,17 @@ class FileOperationActivity : AppCompatActivity() {
             try {
                 // Try reading embedded signature
                 val mimeType = contentResolver.getType(uri)
-                val embeddedData = XmpMetadataHelper.readSignatureFromUri(
-                    applicationContext, uri, mimeType
-                )
+                // The signature and the hash of its content come from one read
+                // of the original: the signature checked is the one in the
+                // bytes hashed.
+                val inBand = MediaHasher.checkInBandUri(applicationContext, uri, mimeType)
 
-                if (embeddedData != null) {
+                if (inBand != null) {
+                    val embeddedData = inBand.data
                     // The stored content hash must match this file before any
                     // signature over it counts: a copied in-band block covers
                     // another file's content.
-                    val check = MediaHasher.checkContentHashUri(
-                        applicationContext, uri, embeddedData.contentHash, MediaHasher.SignatureSource.IN_BAND
-                    )
+                    val check = inBand.check
                     // On a mismatch the block's own line says why, as the
                     // sidecar path does, so the result fails even with no
                     // signature entries. An unreadable original is no

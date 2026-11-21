@@ -114,9 +114,9 @@ class CoSignAppendChokePointTest {
     fun `the append checks the payload's own hash, as the signer computes it`() {
         val guard = body("appendToMedia")
         // Streamed, as the Share-sheet signer hashes: no size cap signing does not apply.
-        assertEquals(1, count("MediaHasher.hashStreamed(", guard))
+        assertEquals(1, count("MediaHasher.hashStreamedFile(", guard))
         assertEquals(0, count("AutoSignHash.contentHash", guard))
-        assertTrue("checked before anything is appended", guard.indexOf("MediaHasher.hashStreamed(") < guard.indexOf("appendSignature("))
+        assertTrue("checked before anything is appended", guard.indexOf("MediaHasher.hashStreamedFile(") < guard.indexOf("appendSignature("))
     }
 
     /**

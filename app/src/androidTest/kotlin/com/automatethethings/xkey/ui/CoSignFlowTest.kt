@@ -172,7 +172,7 @@ class CoSignFlowTest {
         plainJpeg = writeJpeg("plain")
         signedJpeg = writeJpeg("signed").also { file ->
             // The canonical hash leaves signature metadata out, so it is the same after the write.
-            contentHash = MediaHasher.hashStreamed({ file.inputStream() }, "image/jpeg").canonical
+            contentHash = MediaHasher.hashStreamedFile(file, "image/jpeg").canonical
             XmpMetadataHelper.writeSignature(
                 file.path,
                 ContentAuthenticityData(

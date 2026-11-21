@@ -17,7 +17,10 @@ package com.automatethethings.xkey.media
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.RandomAccessFile
 import java.io.OutputStream
 import java.security.DigestInputStream
 import java.security.MessageDigest
@@ -101,29 +104,63 @@ object MediaHasher {
 
     /**
      * [hashCanonical] and [hashBytes] of the media [open] streams, without
-     * holding it in memory: a video of any size is hashed. One pass hashes the
-     * whole file and counts it; when the canonical form leaves anything out,
-     * a second walks only the headers ([canonicalPlan]) and a third hashes
-     * the pieces it keeps. [open] returns a new stream from the start each
-     * time; an [java.io.IOException], a file that shrank included, propagates.
+     * holding it in memory: a video of any size is hashed. The media is read
+     * once ([withSnapshot]): that one read hashes the whole file and copies it
+     * into a private snapshot under [workDir], and every canonical pass
+     * ([hashStreamedFile]) reads that snapshot, so media that changes while
+     * it is hashed is hashed as the one read saw it, never as a mix of two
+     * versions. [open] is called exactly once; an [java.io.IOException]
+     * propagates.
      */
-    fun hashStreamed(open: () -> InputStream, mimeType: String?): StreamedHashes {
-        val digest = MessageDigest.getInstance("SHA-256")
-        var length = 0L
-        open().use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                val n = input.read(buffer)
-                if (n < 0) break
-                digest.update(buffer, 0, n)
-                length += n
+    fun hashStreamed(open: () -> InputStream, mimeType: String?, workDir: File): StreamedHashes =
+        withSnapshot(open, workDir) { snapshot, whole -> canonicalOf(snapshot, mimeType, whole) }
+
+    /**
+     * [hashStreamed] over [file], a private copy the caller owns and nothing
+     * else writes: every pass reads it, with no further copy.
+     */
+    internal fun hashStreamedFile(file: File, mimeType: String?): StreamedHashes =
+        canonicalOf(file, mimeType, file.inputStream().use { hashStream(it) })
+
+    /**
+     * The one read of mutable media: [open] is called once, its bytes are
+     * hashed whole and copied, with one constant-size buffer, into a private
+     * snapshot under [workDir] ([MediaSaveRuns.work], so a process death
+     * leaves a file the sweep reclaims), and [use] gets that snapshot and
+     * the whole-file hash. Every check and hash of one decision reads the
+     * snapshot, never the media again. The snapshot is deleted after [use].
+     */
+    internal fun <T> withSnapshot(open: () -> InputStream, workDir: File, use: (File, String) -> T): T {
+        val snapshot = MediaSaveRuns.work(workDir, ".hash")
+        try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            open().use { input ->
+                FileOutputStream(snapshot).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        digest.update(buffer, 0, n)
+                        output.write(buffer, 0, n)
+                    }
+                }
             }
+            return use(snapshot, hex(digest.digest()))
+        } finally {
+            snapshot.delete()
         }
-        val whole = hex(digest.digest())
-        val plan = open().use { canonicalPlan(StreamByteSource(it, length), mimeType) }
+    }
+
+    /**
+     * The canonical passes over [file], whose whole-file hash is [whole]: one
+     * walks only the headers ([canonicalPlan]) and one hashes the pieces it
+     * keeps, both over the same private file.
+     */
+    private fun canonicalOf(file: File, mimeType: String?, whole: String): StreamedHashes {
+        val plan = RandomAccessFile(file, "r").use { canonicalPlan(FileByteSource(it), mimeType) }
             ?: return StreamedHashes(whole, whole)
         val canonical = MessageDigest.getInstance("SHA-256")
-        open().use { input ->
+        file.inputStream().use { input ->
             Pieces.write(plan, input, object : OutputStream() {
                 override fun write(b: Int) = canonical.update(b.toByte())
                 override fun write(b: ByteArray, off: Int, len: Int) = canonical.update(b, off, len)
@@ -141,7 +178,29 @@ object MediaHasher {
      */
     private fun hashStreamedUri(context: Context, uri: Uri): StreamedHashes {
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
-        return hashStreamed({ MediaPublisher.openOriginal(context, uri) }, context.contentResolver.getType(uri))
+        return hashStreamed(
+            { MediaPublisher.openOriginal(context, uri) },
+            context.contentResolver.getType(uri),
+            MediaPublisher.recoveryDirectory(context)
+        )
+    }
+
+    /** A signature embedded in media and the check of its content hash, both from one read. */
+    class InBandCheck(val data: ContentAuthenticityData, val check: ContentHashCheck)
+
+    /**
+     * The signature embedded in the original bytes at [uri], typed
+     * [mimeType], and the check of its content hash, both read from one
+     * snapshot of the original ([withSnapshot]): the signature checked is the
+     * one in the bytes hashed. Null when the media carries none. Without
+     * location access it throws [MediaPublisher.OriginalUnavailableException].
+     */
+    fun checkInBandUri(context: Context, uri: Uri, mimeType: String?): InBandCheck? {
+        if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
+        return withSnapshot({ MediaPublisher.openOriginal(context, uri) }, MediaPublisher.recoveryDirectory(context)) { snapshot, whole ->
+            val data = XmpMetadataHelper.readSignatureFromSnapshot(snapshot, mimeType) ?: return@withSnapshot null
+            InBandCheck(data, contentHashCheck(canonicalOf(snapshot, mimeType, whole), data.contentHash, SignatureSource.IN_BAND))
+        }
     }
 
     /**
@@ -224,6 +283,11 @@ object MediaHasher {
         } catch (_: MediaPublisher.OriginalUnavailableException) {
             return ContentHashCheck.ACCESS_UNAVAILABLE
         }
+        return contentHashCheck(hashes, storedContentHash, source)
+    }
+
+    /** Whether [storedContentHash] is the hash [hashes] give for a signature read from [source]. */
+    private fun contentHashCheck(hashes: StreamedHashes, storedContentHash: String, source: SignatureSource): ContentHashCheck {
         if (storedContentHash == hashes.canonical) return ContentHashCheck.MATCHES
         if (source == SignatureSource.SIDECAR && storedContentHash == hashes.whole) return ContentHashCheck.MATCHES
         return ContentHashCheck.MISMATCH

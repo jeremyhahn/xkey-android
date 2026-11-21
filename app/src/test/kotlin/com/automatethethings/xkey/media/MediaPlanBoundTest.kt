@@ -48,7 +48,7 @@ class MediaPlanBoundTest {
         val data = jpegOf(tem, 2_000_000)
         // Every byte is kept, so the canonical hash is the plain one.
         assertEquals(MediaHasher.hashBytes(data), MediaHasher.hashCanonical(data, jpeg))
-        val streamed = MediaHasher.hashStreamed({ data.inputStream() }, jpeg)
+        val streamed = MediaHasher.hashStreamed({ data.inputStream() }, jpeg, kotlin.io.path.createTempDirectory("hash").toFile())
         assertEquals(MediaHasher.hashBytes(data), streamed.canonical)
     }
 
@@ -58,7 +58,7 @@ class MediaPlanBoundTest {
         val data = jpegOf(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0x01), MediaPlan.MAX_PIECES + 10)
         for (hash in listOf<() -> Unit>(
             { MediaHasher.hashCanonical(data, jpeg) },
-            { MediaHasher.hashStreamed({ data.inputStream() }, jpeg) },
+            { MediaHasher.hashStreamed({ data.inputStream() }, jpeg, kotlin.io.path.createTempDirectory("hash").toFile()) },
             { MediaHasher.contentHashMatches("0".repeat(64), data, jpeg, MediaHasher.SignatureSource.IN_BAND) }
         )) {
             try {

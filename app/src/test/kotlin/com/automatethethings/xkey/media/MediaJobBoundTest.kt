@@ -81,7 +81,7 @@ class MediaJobBoundTest {
         val hash = AutoSignHash.contentHashFile(video, "video/mp4", embedLimit = embedLimit)
         val used = allocated() - before
 
-        assertEquals(MediaHasher.hashStreamed({ video.inputStream() }, "video/mp4").canonical, hash)
+        assertEquals(MediaHasher.hashStreamedFile(video, "video/mp4").canonical, hash)
         assertTrue("hashing allocated $used bytes for a $size-byte video", used < 4L * 1024 * 1024)
     }
 

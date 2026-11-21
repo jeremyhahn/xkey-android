@@ -65,14 +65,14 @@ class MediaHasherSnapshotTest {
     private fun assertHashedFromOneRead(changed: ByteArray) {
         val source = ChangingSource(original, changed)
 
-        val hashes = MediaHasher.hashStreamed(source::open, jpeg)
+        val hashes = MediaHasher.hashStreamed(source::open, jpeg, kotlin.io.path.createTempDirectory("hash").toFile())
 
         assertEquals("the media is read once", 1, source.calls)
         assertEquals(MediaHasher.hashCanonical(original, jpeg), hashes.canonical)
         assertEquals(MediaHasher.hashBytes(original), hashes.whole)
         // A hash stored for the original no longer matches the changed media.
         val stored = hashes.canonical
-        val changedHashes = MediaHasher.hashStreamed({ changed.inputStream() }, jpeg)
+        val changedHashes = MediaHasher.hashStreamed({ changed.inputStream() }, jpeg, kotlin.io.path.createTempDirectory("hash").toFile())
         assertNotEquals(stored, changedHashes.canonical)
         assertNotEquals(stored, changedHashes.whole)
     }
@@ -100,7 +100,7 @@ class MediaHasherSnapshotTest {
         val source = ChangingSource(original, rescanned)
         val (resolver, uri) = resolverFor(jpeg, source)
 
-        val hash = AutoSignHash.contentHashUri(resolver, uri)
+        val hash = AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile())
 
         assertEquals("the capture is read once", 1, source.calls)
         assertEquals(MediaHasher.hashCanonical(original, jpeg), hash)
@@ -116,7 +116,7 @@ class MediaHasherSnapshotTest {
         val (resolver, uri) = resolverFor(png, source)
 
         assertThrows(AutoSignHash.TooLargeException::class.java) {
-            AutoSignHash.contentHashUri(resolver, uri, embedLimit = 1)
+            AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile(), embedLimit = 1)
         }
         assertEquals("the capture is read once", 1, source.calls)
     }

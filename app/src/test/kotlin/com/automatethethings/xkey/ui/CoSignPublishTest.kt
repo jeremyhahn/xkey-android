@@ -584,7 +584,7 @@ class CoSignPublishTest {
     ): Pair<File, String> {
         val file = File(folder.root, name).apply { writeBytes(if (pixels == null) XmpFixtures.png() else XmpFixtures.png(pixels)) }
         // The canonical hash leaves signature metadata out, so it is the same after the write.
-        val payload = MediaHasher.hashStreamed({ file.inputStream() }, "image/png").canonical
+        val payload = MediaHasher.hashStreamedFile(file, "image/png").canonical
         val recorded = recordedHash(payload)
         val value = java.security.Signature.getInstance("SHA256withECDSA").run {
             initSign(key.private)
@@ -907,7 +907,7 @@ class CoSignPublishTest {
             out.write(bytes(0xFF, 0xD9))
         }
         // The canonical hash leaves the EXIF out, so it is the same before and after signing.
-        val own = MediaHasher.hashStreamed({ file.inputStream() }, "image/jpeg").canonical
+        val own = MediaHasher.hashStreamedFile(file, "image/jpeg").canonical
         XmpMetadataHelper.writeSignature(file.path, ContentAuthenticityData.fromJsonString(XmpFixtures.json(hash ?: own)))
         return file to own
     }

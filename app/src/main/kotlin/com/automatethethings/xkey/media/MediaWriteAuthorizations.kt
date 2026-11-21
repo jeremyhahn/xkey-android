@@ -234,7 +234,7 @@ object MediaWriteAuthorizations {
         val original = MediaPublisher.originalUri(context, uri) ?: return false
         if (original == uri) return false
         val redacted = try {
-            AutoSignHash.contentHashUri(context.contentResolver, uri)
+            AutoSignHash.contentHashUri(context.contentResolver, uri, MediaPublisher.recoveryDirectory(context))
         } catch (e: Exception) {
             return false
         }

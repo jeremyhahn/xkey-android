@@ -38,7 +38,7 @@ class SignedCopySourceChangedTest {
     val temp = TemporaryFolder()
 
     private fun hashOf(bytes: ByteArray, mime: String): String =
-        MediaHasher.hashStreamed({ bytes.inputStream() }, mime).canonical
+        MediaHasher.hashStreamed({ bytes.inputStream() }, mime, kotlin.io.path.createTempDirectory("hash").toFile()).canonical
 
     private class Output : ByteArrayOutputStream() {
         var opened = false

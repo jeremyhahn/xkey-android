@@ -206,7 +206,15 @@ object XmpMetadataHelper {
     fun readSignatureFromUri(context: Context, uri: Uri, mimeType: String?): ContentAuthenticityData? =
         readSignature(uri, mimeType) { MediaPublisher.openOriginal(context, uri) }
 
-    private inline fun readSignature(uri: Uri, mimeType: String?, open: () -> InputStream?): ContentAuthenticityData? {
+    /**
+     * [readSignatureFromUri] over [snapshot], a private copy of the media
+     * read once ([MediaHasher.withSnapshot]), typed [mimeType]: the signature
+     * is read from the bytes that are hashed.
+     */
+    internal fun readSignatureFromSnapshot(snapshot: File, mimeType: String?): ContentAuthenticityData? =
+        readSignature(snapshot, mimeType) { snapshot.inputStream() }
+
+    private inline fun readSignature(uri: Any, mimeType: String?, open: () -> InputStream?): ContentAuthenticityData? {
         val type = mimeType ?: ""
         if (type.startsWith("image/jpeg") || type.startsWith("image/jpg")) {
             try {
@@ -297,7 +305,7 @@ object XmpMetadataHelper {
      * PNG and WebP their XMP. False, with nothing written, for any other type.
      *
      * The one signed-copy write. The bytes read from [open] are hashed as
-     * the signer hashes them ([MediaHasher.hashStreamed]) before anything is
+     * the signer hashes them ([MediaHasher.hashStreamedFile], over the working copy) before anything is
      * embedded or written: media edited or replaced since [data] was made
      * throws [SourceChangedException], with nothing written to [openOutput],
      * so a copy is never published under a signature that fails on it.
@@ -315,7 +323,7 @@ object XmpMetadataHelper {
         return signedCopy(open, openOutput, workDir, destination) { path ->
             // The source is read again only now, maybe long after it was
             // signed: publish only bytes that are still what was signed.
-            val payload = MediaHasher.hashStreamed({ File(path).inputStream() }, mimeType).canonical
+            val payload = MediaHasher.hashStreamedFile(File(path), mimeType).canonical
             if (!payload.equals(data.contentHash, ignoreCase = true)) throw SourceChangedException()
             if (format == null) {
                 writeExifSignature(path, data)

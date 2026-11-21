@@ -91,7 +91,7 @@ class FileOperationSavePickerTest {
 
     /** A signature over what [source] holds now, as performSign makes it: the copy written from it verifies. */
     private fun sourceSignature(): ContentAuthenticityData =
-        signature(com.automatethethings.xkey.media.MediaHasher.hashStreamed({ source.inputStream() }, "image/png").canonical)
+        signature(com.automatethethings.xkey.media.MediaHasher.hashStreamedFile(source, "image/png").canonical)
 
     /** The signed copy [performSign] leaves waiting for the user's document. */
     private fun pendSignedCopy(activity: FileOperationActivity, data: ContentAuthenticityData) {

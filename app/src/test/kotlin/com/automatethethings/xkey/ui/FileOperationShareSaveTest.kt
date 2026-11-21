@@ -98,7 +98,7 @@ class FileOperationShareSaveTest {
         shadowOf(Looper.getMainLooper()).idle()
 
         // performSign signed the original's bytes and left the copy waiting for a document.
-        val originalHash = MediaHasher.hashStreamed({ provider.media.inputStream() }, "image/png").canonical
+        val originalHash = MediaHasher.hashStreamedFile(provider.media, "image/png").canonical
         val signature = ContentAuthenticityData.fromJsonString(XmpFixtures.json(originalHash))
         val type = Class.forName(FileOperationActivity::class.java.name + "\$PendingSignedCopy")
         val pending = type.getDeclaredConstructor(Uri::class.java, String::class.java, ContentAuthenticityData::class.java)
@@ -126,7 +126,7 @@ class FileOperationShareSaveTest {
         assertEquals(
             "the copy holds the original's content",
             originalHash,
-            MediaHasher.hashStreamed({ output.inputStream() }, "image/png").canonical
+            MediaHasher.hashStreamedFile(output, "image/png").canonical
         )
         assertTrue(
             "the capture was read whole",

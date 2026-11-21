@@ -108,9 +108,10 @@ internal object AutoSignHash {
     fun contentHashUri(
         contentResolver: ContentResolver,
         uri: Uri,
+        workDir: java.io.File,
         limit: Int = MAX_CANONICAL_JPEG_BYTES,
         embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
-    ): String = contentHashOf(contentResolver.getType(uri), limit, embedLimit) {
+    ): String = contentHashOf(contentResolver.getType(uri), limit, embedLimit, workDir) {
         contentResolver.openInputStream(uri) ?: throw IllegalArgumentException("Cannot open URI: $uri")
     }
 
@@ -138,7 +139,7 @@ internal object AutoSignHash {
     ): String {
         MediaPublisher.recoverInterruptedWrite(context, uri)
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
-        return contentHashOf(context.contentResolver.getType(uri), limit, embedLimit) {
+        return contentHashOf(context.contentResolver.getType(uri), limit, embedLimit, MediaPublisher.recoveryDirectory(context)) {
             MediaPublisher.openOriginal(context, uri)
         }
     }
@@ -154,7 +155,7 @@ internal object AutoSignHash {
         mimeType: String?,
         limit: Int = MAX_CANONICAL_JPEG_BYTES,
         embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
-    ): String = contentHashOf(mimeType, limit, embedLimit) { file.inputStream() }
+    ): String = contentHashOfFile(mimeType, limit, embedLimit, file)
 
     /**
      * The one place the signer's content hash is computed, over the media
@@ -166,19 +167,34 @@ internal object AutoSignHash {
      * MP4/MOV, PNG or WebP above [embedLimit] that already carries an
      * embedded signature, which only an in-memory rewrite replaces.
      */
-    private fun contentHashOf(
+    internal fun contentHashOf(
         mimeType: String?,
         limit: Int,
         embedLimit: Int,
+        workDir: java.io.File,
         open: () -> java.io.InputStream
     ): String {
-        if (MediaHasher.isCanonicalisedJpeg(mimeType)) {
-            if (open().use { lengthBeyond(it, limit.toLong()) }) throw TooLargeException(limit)
-            return MediaHasher.hashStreamed(open, mimeType).canonical
+        // Hashed whole: one read, no snapshot needed.
+        if (!MediaHasher.isCanonicalisedJpeg(mimeType) && XmpContainers.formatOf(mimeType) == null) {
+            return open().use { MediaHasher.hashStream(it) }
         }
-        val format = XmpContainers.formatOf(mimeType) ?: return open().use { MediaHasher.hashStream(it) }
-        if (open().use { lengthBeyond(it, embedLimit.toLong()) }) {
-            val carried = open().use { XmpContainers.read(it.buffered(), format) }
+        // One read: the size bound, the carried signature and the hash all
+        // come from the same snapshot, never from separate reads of media
+        // that may change between them.
+        return MediaHasher.withSnapshot(open, workDir) { snapshot, _ ->
+            contentHashOfFile(mimeType, limit, embedLimit, snapshot)
+        }
+    }
+
+    /** [contentHashOf] over [file], a private copy nothing else writes: every check and pass reads it. */
+    private fun contentHashOfFile(mimeType: String?, limit: Int, embedLimit: Int, file: java.io.File): String {
+        if (MediaHasher.isCanonicalisedJpeg(mimeType)) {
+            if (file.length() > limit.toLong()) throw TooLargeException(limit)
+            return MediaHasher.hashStreamedFile(file, mimeType).canonical
+        }
+        val format = XmpContainers.formatOf(mimeType) ?: return file.inputStream().use { MediaHasher.hashStream(it) }
+        if (file.length() > embedLimit.toLong()) {
+            val carried = file.inputStream().use { XmpContainers.read(it.buffered(), format) }
             if (carried != null) {
                 throw TooLargeException(
                     embedLimit,
@@ -186,20 +202,9 @@ internal object AutoSignHash {
                 )
             }
         }
-        return MediaHasher.hashStreamed(open, mimeType).canonical
+        return MediaHasher.hashStreamedFile(file, mimeType).canonical
     }
 
-    /** Whether [input] holds more than [limit] bytes, read with one constant-size buffer and stopping past it. */
-    private fun lengthBeyond(input: java.io.InputStream, limit: Long): Boolean {
-        val buffer = ByteArray(8192)
-        var total = 0L
-        while (true) {
-            val n = input.read(buffer)
-            if (n == -1) return false
-            total += n
-            if (total > limit) return true
-        }
-    }
 }
 
 /**

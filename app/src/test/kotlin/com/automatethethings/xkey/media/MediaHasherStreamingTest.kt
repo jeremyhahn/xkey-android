@@ -156,7 +156,7 @@ class MediaHasherStreamingTest {
     @Test
     fun `streamed hashes equal the in-memory hashes for every type`() {
         for ((mime, data) in cases()) {
-            val streamed = MediaHasher.hashStreamed({ data.inputStream() }, mime)
+            val streamed = MediaHasher.hashStreamed({ data.inputStream() }, mime, kotlin.io.path.createTempDirectory("hash").toFile())
             assertEquals(mime, MediaHasher.hashCanonical(data, mime), streamed.canonical)
             assertEquals(mime, MediaHasher.hashBytes(data), streamed.whole)
         }
@@ -166,7 +166,7 @@ class MediaHasherStreamingTest {
     fun `a signed container's streamed canonical hash is the hash of the file before signing`() {
         for ((mime, raw) in XmpFixtures.all) {
             val signed = XmpContainers.embed(raw, XmpContainers.formatOf(mime)!!, XmpFixtures.json())!!
-            val streamed = MediaHasher.hashStreamed({ signed.inputStream() }, mime)
+            val streamed = MediaHasher.hashStreamed({ signed.inputStream() }, mime, kotlin.io.path.createTempDirectory("hash").toFile())
             assertEquals(mime, MediaHasher.hashBytes(raw), streamed.canonical)
         }
     }

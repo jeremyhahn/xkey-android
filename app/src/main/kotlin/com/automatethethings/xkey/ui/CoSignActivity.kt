@@ -131,21 +131,26 @@ internal fun copyInPlace(
     publicKeyFor: (fingerprint: String) -> ByteArray?
 ): Boolean = try {
     val mimeType = resolver.getType(target)
-    val carried = XmpMetadataHelper.readSignatureFromUri(resolver, target, mimeType)
-    carried != null &&
-        // Every entry the copy was written with is still there, unchanged:
-        // an earlier signer's dropped or altered entry is not this copy.
-        copy.data.signatures.all { it in carried.signatures } &&
-        SignatureVerifier.verifyCarried(
-            carried,
-            MediaHasher.hashStreamed(
-                { resolver.openInputStream(target) ?: throw IOException("cannot read $target") },
-                mimeType
-            ).canonical,
-            copy.data.contentHash,
-            copy.fingerprint,
-            publicKeyFor(copy.fingerprint)
-        )
+    // The document is read once, into a snapshot beside the staged copy (the
+    // recovery directory, which the sweep reclaims): the signatures checked
+    // are the ones in the bytes hashed.
+    MediaHasher.withSnapshot(
+        { resolver.openInputStream(target) ?: throw IOException("cannot read $target") },
+        copy.staged.absoluteFile.parentFile ?: throw IOException("no directory for ${copy.staged}")
+    ) { snapshot, _ ->
+        val carried = XmpMetadataHelper.readSignatureFromSnapshot(snapshot, mimeType)
+        carried != null &&
+            // Every entry the copy was written with is still there, unchanged:
+            // an earlier signer's dropped or altered entry is not this copy.
+            copy.data.signatures.all { it in carried.signatures } &&
+            SignatureVerifier.verifyCarried(
+                carried,
+                MediaHasher.hashStreamedFile(snapshot, mimeType).canonical,
+                copy.data.contentHash,
+                copy.fingerprint,
+                publicKeyFor(copy.fingerprint)
+            )
+    }
 } catch (e: Exception) {
     false
 }
@@ -1234,7 +1239,7 @@ class CoSignActivity : AppCompatActivity() {
 
             val existing = XmpMetadataHelper.readSignature(staged.absolutePath)
                 ?: throw IllegalStateException(context.getString(R.string.cosign_no_signature_data))
-            val payloadHash = MediaHasher.hashStreamed({ staged.inputStream() }, mimeType).canonical
+            val payloadHash = MediaHasher.hashStreamedFile(staged, mimeType).canonical
             if (!payloadHash.equals(expectedHash, ignoreCase = true) ||
                 !existing.contentHash.equals(expectedHash, ignoreCase = true)
             ) {
