@@ -132,7 +132,7 @@ class KeystoreManagerTest {
 
         val deleted = keystoreManager.deleteKey(credentialId, UserKeyKind.CREDENTIAL)
 
-        assertFalse("Deleting non-existent key should return false", deleted)
+        assertEquals("Deleting a non-existent key reports it absent", GeneratedKeyDiscard.ABSENT, deleted)
     }
 
     @Test
@@ -147,7 +147,7 @@ class KeystoreManagerTest {
 
         val deleted = keystoreManager.deleteKey(credentialId, UserKeyKind.CREDENTIAL)
 
-        assertTrue("Delete should return true", deleted)
+        assertEquals("Delete reports the key deleted", GeneratedKeyDiscard.DELETED, deleted)
         assertFalse("Key should not exist after deletion", keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL))
 
         // Remove from cleanup list since it's already deleted

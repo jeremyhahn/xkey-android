@@ -652,16 +652,20 @@ class KeystoreManager(private val context: Context) {
      * Delete a credential key from the keystore.
      *
      * @param credentialId Base64-encoded credential ID.
-     * @return true if the key was deleted, false if it didn't exist.
+     * @return [GeneratedKeyDiscard.DELETED] for a key now gone,
+     *   [GeneratedKeyDiscard.ABSENT] when there was none, and
+     *   [GeneratedKeyDiscard.FAILED] when the key may still be there: a
+     *   caller keeps whatever retries the delete on FAILED, never treating
+     *   it as gone.
      */
-    fun deleteKey(credentialId: String, kind: UserKeyKind): Boolean {
+    fun deleteKey(credentialId: String, kind: UserKeyKind): GeneratedKeyDiscard {
         // The key of [kind] only: a delete of one key never removes the
         // other key sharing its id. The Keystore entry is the only backend
         // this deletes, so it reads that alias alone and never the
         // cross-backend presence guard (#255 review r7): an unreadable
         // Ed25519 or software store never stops the delete of a Keystore key.
-        // True only for a key now gone: a failed delete is not a deleted key.
-        if (discardGeneratedKey(userKeyAlias(credentialId, kind)) != GeneratedKeyDiscard.DELETED) return false
+        val outcome = discardGeneratedKey(userKeyAlias(credentialId, kind))
+        if (outcome != GeneratedKeyDiscard.DELETED) return outcome
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
@@ -670,7 +674,7 @@ class KeystoreManager(private val context: Context) {
             keyType = "fido2"
         )
 
-        return true
+        return outcome
     }
 
     /**

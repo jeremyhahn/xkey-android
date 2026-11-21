@@ -94,7 +94,7 @@ class KeystoreManagerPivAliasTest {
 
     @Test
     fun `deleteKey of a raw PIV slot alias leaves the slot key`() {
-        assertFalse(keystoreManager.deleteKey(pivAlias, UserKeyKind.GENERAL))
+        assertNotEquals(GeneratedKeyDiscard.DELETED, keystoreManager.deleteKey(pivAlias, UserKeyKind.GENERAL))
         assertNotNull(fake.live)
         verify(exactly = 0) { fake.keyStore.deleteEntry(pivAlias) }
     }
@@ -109,7 +109,7 @@ class KeystoreManagerPivAliasTest {
     @Test
     fun `a general key whose id starts with the PIV prefix resolves and deletes`() {
         assertEquals(generalAlias, keystoreManager.resolveKeystoreAlias(generalId, UserKeyKind.GENERAL))
-        assertTrue(keystoreManager.deleteKey(generalId, UserKeyKind.GENERAL))
+        assertEquals(GeneratedKeyDiscard.DELETED, keystoreManager.deleteKey(generalId, UserKeyKind.GENERAL))
         verify { fake.keyStore.deleteEntry(generalAlias) }
         assertNull(keystoreManager.resolveKeystoreAlias(generalId, UserKeyKind.GENERAL))
     }
@@ -149,7 +149,7 @@ class KeystoreManagerPivAliasTest {
 
         assertNull(manager.resolveKeystoreAlias(pivAlias, UserKeyKind.GENERAL))
         assertFalse(manager.holdsAnyKey(pivAlias))
-        assertFalse(manager.deleteKey(pivAlias, UserKeyKind.GENERAL))
+        assertNotEquals(GeneratedKeyDiscard.DELETED, manager.deleteKey(pivAlias, UserKeyKind.GENERAL))
         assertNotNull(fake.live)
         verify(exactly = 0) { fake.keyStore.deleteEntry(pivAlias) }
     }

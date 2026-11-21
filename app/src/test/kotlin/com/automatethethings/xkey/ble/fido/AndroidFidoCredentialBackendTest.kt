@@ -135,6 +135,7 @@ class AndroidFidoCredentialBackendTest {
         coEvery { keystore.signApproved(any(), any(), any(), any()) } returns byteArrayOf(0x30)
         every { keystore.keyRowAlias(any(), any(), any()) } answers { aliasOf(firstArg()) }
         every { keystore.publicKeyDERAt(any()) } returns byteArrayOf(0x30, 0x01)
+        every { keystore.deleteKey(any(), any()) } returns com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED
     }
 
     @After
@@ -589,7 +590,8 @@ class AndroidFidoCredentialBackendTest {
         val (keyRows, _) = storedResidents()
         // Keystore reports the old key's delete failed, without throwing:
         // the key is still there, so its record must stay.
-        every { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns false
+        every { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns
+            com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED
 
         backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", discoverable = true))
         assertTrue("the old passkey's rows are gone", shared.keyId !in keyRows)
@@ -630,8 +632,9 @@ class AndroidFidoCredentialBackendTest {
         }
         every { keystore.deleteKey(any(), com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } answers {
             val id = firstArg<String>()
-            if (failsOnce(id) && failed.add(id)) throw IllegalStateException("Keystore busy")
-            keys.remove(id)
+            if (failsOnce(id) && failed.add(id)) return@answers com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED
+            if (keys.remove(id)) com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED
+            else com.automatethethings.xkey.crypto.GeneratedKeyDiscard.ABSENT
         }
         return keys
     }

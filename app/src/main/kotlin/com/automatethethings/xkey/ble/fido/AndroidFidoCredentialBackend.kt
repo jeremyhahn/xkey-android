@@ -25,6 +25,7 @@ import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeyNotFoundException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.crypto.GeneratedKeyDiscard
 import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.protocol.KeyIdReservations
 import com.automatethethings.xkey.protocol.SharePermission
@@ -654,15 +655,21 @@ class AndroidFidoCredentialBackend(
 
     /**
      * Deletes a Keystore key, for a passkey with no row left; called only
-     * from [deleteUnownedKey]. A deletion that throws is kept in [pendingKeyDeletions] for
-     * [retryPendingKeyDeletions], never discarded; one that succeeds is
-     * forgotten. Throws only when a failed deletion cannot be recorded.
+     * from [deleteUnownedKey]. A deletion that throws or reports
+     * [GeneratedKeyDiscard.FAILED] is kept in [pendingKeyDeletions] for
+     * [retryPendingKeyDeletions], never discarded; one whose key is now gone
+     * (deleted, or absent already) is forgotten. Throws only when a failed
+     * deletion cannot be recorded.
      */
     private fun deleteKey(keyId: String) {
-        try {
+        val outcome = try {
             keystoreManager.deleteKey(keyId, UserKeyKind.CREDENTIAL)
         } catch (e: Exception) {
-            Log.w(TAG, "A passkey's Keystore key could not be deleted; it is kept for a later retry", e)
+            Log.w(TAG, "A passkey's Keystore key could not be deleted", e)
+            GeneratedKeyDiscard.FAILED
+        }
+        if (outcome == GeneratedKeyDiscard.FAILED) {
+            Log.w(TAG, "A passkey's Keystore key is still there; it is kept for a later retry")
             pendingKeyDeletions.add(listOf(keyId))
             return
         }

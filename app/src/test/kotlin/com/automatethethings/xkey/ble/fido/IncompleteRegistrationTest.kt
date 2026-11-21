@@ -80,6 +80,7 @@ class IncompleteRegistrationTest {
         coEvery { keystore.signApproved(any(), any(), any(), any()) } returns byteArrayOf(0x30)
         every { keystore.keyRowAlias(any(), any(), any()) } answers { "xkey_credential_" + firstArg<String>() }
         every { keystore.publicKeyDERAt(any()) } returns byteArrayOf(0x30, 0x01)
+        every { keystore.deleteKey(any(), any()) } returns com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED
         coEvery { sharePermission.canShare(any(), null) } answers {
             firstArg<KeyEntity>().sharingPolicy == SharingPolicyType.ALL_PEERS
         }
@@ -169,7 +170,8 @@ class IncompleteRegistrationTest {
             // As at a process death: nothing the registration set up can be
             // undone, neither its rows nor its Keystore key.
             refuseRowDeletes()
-            every { keystore.deleteKey(any(), com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } throws IllegalStateException("process gone")
+            every { keystore.deleteKey(any(), com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns
+                com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED
             // The registration stops at its last step before it is whole: its
             // second look at the passkey it replaces.
             lateinit var job: Job
