@@ -18,9 +18,7 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.content.ContentResolver
 import android.net.Uri
-import android.provider.DocumentsContract
 import android.os.Bundle
 import android.util.Log
 import android.util.TypedValue
@@ -40,6 +38,8 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.databinding.ActivityVerifiedViewerBinding
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
+import com.automatethethings.xkey.media.MediaLocationAccess
+import com.automatethethings.xkey.media.MediaPublisher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerVerification
 import com.automatethethings.xkey.media.XmpMetadataHelper
@@ -72,8 +72,6 @@ import java.util.Locale
  * verifies each signature, and renders a colour-coded badge overlay at the bottom
  * of the screen.
  */
-private const val SIDECAR_SUFFIX = ".xkeysig"
-
 class VerifiedMediaViewerActivity : AppCompatActivity() {
 
     private companion object {
@@ -82,6 +80,9 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
     }
 
     private lateinit var binding: ActivityVerifiedViewerBinding
+
+    /** Asks for location access before the media's original is read. */
+    private val locationAccess = MediaLocationAccess(this)
     private lateinit var keyDao: KeyDao
     private lateinit var contactDao: ContactDao
 
@@ -126,7 +127,8 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
             else -> showImage(mediaUri)
         }
 
-        verifyMedia(mediaUri, mimeType)
+        // Verifying reads the media whole: a fresh install is asked for location access first.
+        locationAccess.withOriginals(listOf(mediaUri)) { verifyMedia(mediaUri, mimeType) }
     }
 
     override fun onDestroy() {
@@ -249,15 +251,16 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Attempt to read signature directly from stream first (JPEG EXIF)
-                var sigData = XmpMetadataHelper.readSignatureFromUri(contentResolver, uri, mimeType)
+                var sigData = XmpMetadataHelper.readSignatureFromUri(applicationContext, uri, mimeType)
                 // Only the sidecar beside the real file counts as a sidecar; the
                 // temp-copy read below keeps the in-band (canonical-only) rule.
                 var source = MediaHasher.SignatureSource.IN_BAND
 
-                // A sidecar written beside the real file, then the in-band read
-                // via a temp copy for formats that carry the signature inside.
+                // The sidecar where the signer wrote it (beside the real file,
+                // or the one xKey owns under Documents/xKey/), then the in-band
+                // read via a temp copy for formats that carry the signature inside.
                 if (sigData == null) {
-                    sigData = readSidecarBesideMedia(uri)
+                    sigData = XmpMetadataHelper.readSidecar(applicationContext, uri)
                     if (sigData != null) source = MediaHasher.SignatureSource.SIDECAR
                 }
                 if (sigData == null) {
@@ -271,9 +274,12 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
 
                 // The stored content hash must match the file before any
                 // signature over it is checked.
-                val contentHashMatches = MediaHasher.contentHashMatchesUri(
-                    contentResolver, uri, sigData.contentHash, source
-                )
+                val check = MediaHasher.checkContentHashUri(applicationContext, uri, sigData.contentHash, source)
+                if (check == MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE) {
+                    withContext(Dispatchers.Main) { showAccessUnavailable() }
+                    return@launch
+                }
+                val contentHashMatches = check == MediaHasher.ContentHashCheck.MATCHES
 
                 val results = sigData.signatures.map { entry ->
                     verifyEntry(entry, contentHashMatches, sigData.contentHash)
@@ -293,6 +299,10 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                     verified = allVerified
                 )
 
+            } catch (e: MediaPublisher.OriginalUnavailableException) {
+                // Only the redacted view is readable: nothing is verified, and it is no tampering.
+                Log.w(TAG, "The original is unreadable without location access", e)
+                withContext(Dispatchers.Main) { showAccessUnavailable() }
             } catch (e: Exception) {
                 Log.e(TAG, "Error verifying media", e)
                 withContext(Dispatchers.Main) { showNoSignatures() }
@@ -301,36 +311,12 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
     }
 
     /**
-     * Reads the sidecar that sits beside [uri] in its own document tree.
-     *
-     * The copy-to-cache route below cannot find it: `readSignature` derives the
-     * sidecar path from the file it is given, so pointing it at
-     * `cacheDir/verify_temp.<ext>` makes it look for
-     * `verify_temp.<ext>.xkeysig` and never consult the real one. Sidecar-signed
-     * media therefore always read as unsigned.
-     */
-    private fun readSidecarBesideMedia(uri: Uri): ContentAuthenticityData? = runCatching {
-        val sidecarUri = when {
-            uri.scheme == ContentResolver.SCHEME_FILE ->
-                Uri.fromFile(File(uri.path + SIDECAR_SUFFIX))
-            DocumentsContract.isDocumentUri(this, uri) ->
-                DocumentsContract.buildDocumentUriUsingTree(
-                    uri, DocumentsContract.getDocumentId(uri) + SIDECAR_SUFFIX
-                )
-            else -> return@runCatching null
-        }
-        contentResolver.openInputStream(sidecarUri)?.use { input ->
-            ContentAuthenticityData.fromJsonString(input.readBytes().decodeToString())
-        }
-    }.getOrNull()
-
-    /**
      * Copy the content URI to a temporary file so that sidecar-based
      * signature reading works (for non-JPEG formats like video).
      *
      * Kept for the in-band read, which genuinely needs a real file path. It can
      * only ever find a sidecar the caller planted beside the temp copy, so
-     * [readSidecarBesideMedia] is tried first.
+     * [XmpMetadataHelper.readSidecar] is tried first.
      */
     private fun readSignatureViaTempFile(uri: Uri, mimeType: String): ContentAuthenticityData? {
         val extension = when {
@@ -345,11 +331,11 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
 
         val tempFile = File(cacheDir, "verify_temp$extension")
         try {
-            contentResolver.openInputStream(uri)?.use { input ->
+            MediaPublisher.openOriginal(applicationContext, uri).use { input ->
                 tempFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
-            } ?: return null
+            }
 
             return XmpMetadataHelper.readSignature(tempFile.absolutePath)
         } finally {
@@ -414,6 +400,16 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
      */
     private fun showNoSignatures() {
         binding.signerListContainer.visibility = View.GONE
+        binding.textNoSignatures.visibility = View.VISIBLE
+    }
+
+    /**
+     * The original the signatures cover is unreadable (no location access):
+     * nothing is verified, and it is not reported as tampering.
+     */
+    private fun showAccessUnavailable() {
+        binding.signerListContainer.visibility = View.GONE
+        binding.textNoSignatures.text = MediaHasher.ACCESS_UNAVAILABLE_MESSAGE
         binding.textNoSignatures.visibility = View.VISIBLE
     }
 

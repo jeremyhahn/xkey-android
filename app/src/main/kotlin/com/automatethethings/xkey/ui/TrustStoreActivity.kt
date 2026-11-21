@@ -44,6 +44,7 @@ import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.withResumed
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
@@ -1829,7 +1830,8 @@ class TrustStoreActivity : AppCompatActivity() {
             val installIntent = KeyChain.createInstallIntent()
             installIntent.putExtra(KeyChain.EXTRA_CERTIFICATE, certDER)
             cert.label?.let { installIntent.putExtra(KeyChain.EXTRA_NAME, it) }
-            systemCertInstallLauncher.launch(installIntent)
+            // Launched only while resumed: never after the state was saved
+            withResumed { systemCertInstallLauncher.launch(installIntent) }
         }
     }
 

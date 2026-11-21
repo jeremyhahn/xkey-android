@@ -33,6 +33,8 @@
     <!-- Media access for auto-signing -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Media signing rewrites a camera capture only from its original bytes, location included -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -215,6 +217,15 @@
             android:taskAffinity=""
             android:showWhenLocked="true"
             android:turnScreenOn="true" />
+
+        <!-- Asks for write access to captures another app owns, so the
+             auto-signer can embed their signature (MediaStore write request). -->
+        <activity
+            android:name=".media.MediaWriteRequestActivity"
+            android:exported="false"
+            android:theme="@style/Theme.xKey.Transparent"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
 
         <!-- BLE GATT Server Service for FIDO2 -->
         <service

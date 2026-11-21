@@ -15,8 +15,10 @@
 package com.automatethethings.xkey.media
 
 import android.content.ContentResolver
+import android.content.Context
 import android.net.Uri
 import java.io.InputStream
+import java.io.OutputStream
 import java.security.DigestInputStream
 import java.security.MessageDigest
 
@@ -34,15 +36,15 @@ object MediaHasher {
     }
 
     /**
-     * [hashCanonical] over the content at [uri]. The mime type comes from the
-     * resolver, so a JPEG is recognised whether it arrived as a file or a
-     * document URI.
+     * [hashCanonical] over the content at [uri], hashed streaming
+     * ([hashStreamed]) so media of any size is signed. The mime type comes
+     * from the resolver, so a JPEG is recognised whether it arrived as a file
+     * or a document URI. It reads the original bytes, as the capture signer
+     * does ([MediaPublisher.openOriginal]): without location access a
+     * MediaStore item throws [MediaPublisher.OriginalUnavailableException].
      */
-    fun hashCanonicalUri(contentResolver: ContentResolver, uri: Uri): String {
-        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        return hashCanonical(bytes, contentResolver.getType(uri))
-    }
+    fun hashCanonicalUri(context: Context, uri: Uri): String =
+        hashStreamedUri(context, uri).canonical
 
     fun hashUri(contentResolver: ContentResolver, uri: Uri): String {
         val inputStream = contentResolver.openInputStream(uri)
@@ -68,18 +70,84 @@ object MediaHasher {
      *
      * The domain is therefore chosen to be metadata-independent by construction:
      * for JPEG, every `APPn` and `COM` segment is skipped and the remaining
-     * structure plus the entropy-coded scan is hashed. Anything else is hashed
-     * whole, which is already stable because its signature lives in a sidecar.
+     * structure plus the entropy-coded scan is hashed. For MP4/MOV, PNG and
+     * WebP, exactly the XMP box or chunk [XmpContainers.embed] writes is left
+     * out ([XmpContainers.strip]), so the hash is the file's own as it was
+     * before signing; an unsigned file is hashed whole. Anything else is
+     * hashed whole, which is already stable because its signature lives in a
+     * sidecar.
      */
     fun hashCanonical(data: ByteArray, mimeType: String?): String =
         hashBytes(canonicalContent(data, mimeType))
 
-    /** The bytes [hashCanonical] covers. Exposed for tests and diagnostics. */
-    fun canonicalContent(data: ByteArray, mimeType: String?): ByteArray {
-        return if (isCanonicalisedJpeg(mimeType)) jpegWithoutMetadata(data) else data
+    fun canonicalContent(data: ByteArray, mimeType: String?): ByteArray =
+        canonicalPlan(ArrayByteSource(data), mimeType)?.let { Pieces.bytes(it, data) } ?: data
+
+    /**
+     * The one place the canonical domain is decided, for bytes in memory and
+     * streamed media alike: the pieces of [source] the canonical hash covers,
+     * or null when it covers the media whole. Every format plans through
+     * [MediaPlan.Builder], so media that would need more than
+     * [MediaPlan.MAX_PIECES] pieces throws [MediaTooFragmentedException].
+     */
+    private fun canonicalPlan(source: ByteSource, mimeType: String?): MediaPlan? {
+        if (isCanonicalisedJpeg(mimeType)) return jpegPlan(source)
+        val format = XmpContainers.formatOf(mimeType) ?: return null
+        return XmpContainers.stripPlan(source, format)
     }
 
-    /** Whether [hashCanonical] strips metadata for [mimeType]; otherwise it hashes the file whole. */
+    /** The whole-file and canonical SHA-256 of streamed media. */
+    class StreamedHashes(val whole: String, val canonical: String)
+
+    /**
+     * [hashCanonical] and [hashBytes] of the media [open] streams, without
+     * holding it in memory: a video of any size is hashed. One pass hashes the
+     * whole file and counts it; when the canonical form leaves anything out,
+     * a second walks only the headers ([canonicalPlan]) and a third hashes
+     * the pieces it keeps. [open] returns a new stream from the start each
+     * time; an [java.io.IOException], a file that shrank included, propagates.
+     */
+    fun hashStreamed(open: () -> InputStream, mimeType: String?): StreamedHashes {
+        val digest = MessageDigest.getInstance("SHA-256")
+        var length = 0L
+        open().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                digest.update(buffer, 0, n)
+                length += n
+            }
+        }
+        val whole = hex(digest.digest())
+        val plan = open().use { canonicalPlan(StreamByteSource(it, length), mimeType) }
+            ?: return StreamedHashes(whole, whole)
+        val canonical = MessageDigest.getInstance("SHA-256")
+        open().use { input ->
+            Pieces.write(plan, input, object : OutputStream() {
+                override fun write(b: Int) = canonical.update(b.toByte())
+                override fun write(b: ByteArray, off: Int, len: Int) = canonical.update(b, off, len)
+            })
+        }
+        return StreamedHashes(whole, hex(canonical.digest()))
+    }
+
+    private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+    /**
+     * [hashStreamed] over the original bytes at [uri], typed by the resolver:
+     * the one read every verification and co-signing hash shares with the
+     * signer ([MediaPublisher.openOriginal]), never MediaStore's redacted view.
+     */
+    private fun hashStreamedUri(context: Context, uri: Uri): StreamedHashes {
+        if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
+        return hashStreamed({ MediaPublisher.openOriginal(context, uri) }, context.contentResolver.getType(uri))
+    }
+
+    /**
+     * Whether [hashCanonical] strips JPEG metadata for [mimeType]. Otherwise it
+     * hashes the file whole, less only an embedded xKey XMP box or chunk.
+     */
     fun isCanonicalisedJpeg(mimeType: String?): Boolean {
         val type = mimeType.orEmpty().lowercase()
         return type.startsWith("image/jpeg") || type.startsWith("image/jpg")
@@ -120,23 +188,52 @@ object MediaHasher {
         return source == SignatureSource.SIDECAR && storedContentHash == hashBytes(data)
     }
 
-    /** [contentHashMatches] over the content at [uri], typed by the resolver. */
-    fun contentHashMatchesUri(
-        contentResolver: ContentResolver,
+    /** What [checkContentHashUri] found. */
+    enum class ContentHashCheck {
+        /** The stored hash covers the media. */
+        MATCHES,
+
+        /** The media is not what the stored hash covers: changed, or another file's signature. */
+        MISMATCH,
+
+        /**
+         * Only MediaStore's redacted view is readable (no location access):
+         * the original the signature covers cannot be read, which says
+         * nothing about tampering.
+         */
+        ACCESS_UNAVAILABLE
+    }
+
+    /** Shown where a verification or co-signing check met [ContentHashCheck.ACCESS_UNAVAILABLE]. */
+    const val ACCESS_UNAVAILABLE_MESSAGE =
+        "Media access unavailable: allow xKey to access photo and video locations to read the original"
+
+    /**
+     * [contentHashMatches] over the original bytes at [uri] ([hashStreamedUri]),
+     * typed by the resolver and hashed streaming, so a video larger than the
+     * heap verifies. **Both verify screens use this.**
+     */
+    fun checkContentHashUri(
+        context: Context,
         uri: Uri,
         storedContentHash: String,
         source: SignatureSource
-    ): Boolean {
-        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        return contentHashMatches(storedContentHash, bytes, contentResolver.getType(uri), source)
+    ): ContentHashCheck {
+        val hashes = try {
+            hashStreamedUri(context, uri)
+        } catch (_: MediaPublisher.OriginalUnavailableException) {
+            return ContentHashCheck.ACCESS_UNAVAILABLE
+        }
+        if (storedContentHash == hashes.canonical) return ContentHashCheck.MATCHES
+        if (source == SignatureSource.SIDECAR && storedContentHash == hashes.whole) return ContentHashCheck.MATCHES
+        return ContentHashCheck.MISMATCH
     }
 
     /**
-     * Strips `APPn` (0xE0-0xEF) and `COM` (0xFE) segments from a JPEG, keeping
-     * SOI, the quantisation/frame/Huffman tables, the scan header and all
-     * entropy-coded data. Returns [data] unchanged if it is not a JPEG or is
-     * malformed — a hash over slightly more than intended is safe, whereas
+     * The JPEG [source] holds without its `APPn` (0xE0-0xEF) and `COM` (0xFE)
+     * segments, as a plan: SOI, the quantisation/frame/Huffman tables, the scan
+     * header and all entropy-coded data. Null, the file hashed unchanged, if it
+     * is not a JPEG or is malformed — a hash over slightly more than intended is safe, whereas
      * throwing here would break signing on an unexpected encoder.
      *
      * A marker may be preceded by any number of `0xFF` fill bytes (ITU T.81
@@ -147,51 +244,52 @@ object MediaHasher {
      * skip, a fill byte also reads as a marker with a bogus length and the whole
      * file falls back to being hashed raw. A file without fill bytes gives the
      * same output as before.
+     *
+     * Adjacent kept segments coalesce into one piece, so a run of standalone
+     * markers costs nothing; a file whose kept segments are split apart more
+     * than [MediaPlan.MAX_PIECES] times throws [MediaTooFragmentedException].
      */
-    private fun jpegWithoutMetadata(data: ByteArray): ByteArray {
-        if (data.size < 4 || byteAt(data, 0) != 0xFF || byteAt(data, 1) != 0xD8) return data
+    private fun jpegPlan(source: ByteSource): MediaPlan? {
+        val n = source.length
+        fun byteAt(index: Long): Int = source.readAt(index, 1)[0].toInt() and 0xFF
+        if (n < 4 || byteAt(0) != 0xFF || byteAt(1) != 0xD8) return null
 
-        val out = java.io.ByteArrayOutputStream(data.size)
-        out.write(data, 0, 2) // SOI
-        var i = 2
+        val plan = MediaPlan.Builder().range(0, 2) // SOI
+        var i = 2L
 
-        while (i + 1 < data.size) {
-            if (byteAt(data, i) != 0xFF) return data // not marker-aligned; bail out safely
+        while (i + 1 < n) {
+            if (byteAt(i) != 0xFF) return null // not marker-aligned; bail out safely
             // Fill bytes: advance to the last 0xFF before the marker code.
-            while (i + 1 < data.size && byteAt(data, i + 1) == 0xFF) i++
-            if (i + 1 >= data.size) return data // fill runs to the end; no marker
-            val marker = byteAt(data, i + 1)
+            while (i + 1 < n && byteAt(i + 1) == 0xFF) i++
+            if (i + 1 >= n) return null // fill runs to the end; no marker
+            val marker = byteAt(i + 1)
 
             // Standalone markers carry no length field.
             if (marker == 0xD8 || marker in 0xD0..0xD7 || marker == 0x01) {
-                out.write(data, i, 2)
+                plan.range(i, i + 2)
                 i += 2
                 continue
             }
             if (marker == 0xD9) { // EOI
-                out.write(data, i, 2)
-                return out.toByteArray()
+                return plan.range(i, i + 2).build()
             }
-            if (i + 3 >= data.size) return data
+            if (i + 3 >= n) return null
 
-            val segmentLength = (byteAt(data, i + 2) shl 8) or byteAt(data, i + 3)
-            if (segmentLength < 2) return data
+            val segmentLength = (byteAt(i + 2) shl 8) or byteAt(i + 3)
+            if (segmentLength < 2) return null
             val segmentEnd = i + 2 + segmentLength
-            if (segmentEnd > data.size) return data
+            if (segmentEnd > n) return null
 
             val isMetadata = marker in 0xE0..0xEF || marker == 0xFE
-            if (!isMetadata) out.write(data, i, segmentEnd - i)
+            if (!isMetadata) plan.range(i, segmentEnd)
 
             i = segmentEnd
 
             if (marker == 0xDA) {
                 // Entropy-coded data runs from here to the end, EOI included.
-                out.write(data, i, data.size - i)
-                return out.toByteArray()
+                return plan.range(i, n).build()
             }
         }
-        return out.toByteArray()
+        return plan.build()
     }
-
-    private fun byteAt(data: ByteArray, index: Int): Int = data[index].toInt() and 0xFF
 }

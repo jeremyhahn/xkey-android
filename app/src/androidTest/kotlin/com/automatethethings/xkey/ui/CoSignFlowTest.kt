@@ -36,6 +36,7 @@ import androidx.test.espresso.intent.Intents.intending
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasAction
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasComponent
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasExtra
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasType
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withText
@@ -51,6 +52,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.CoSignRequest
 import com.automatethethings.xkey.media.CoSignResponse
+import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.XmpMetadataHelper
@@ -112,13 +114,12 @@ class CoSignFlowTest {
     private val signerName = "UITestSigner$runId"
 
     /**
-     * Even-length, all-hex, and unique to this run.
-     *
-     * The run id leads so the 16-character preview the signature card renders
-     * is distinctive too; the padding only fills the tail out to a SHA-256
-     * sized string.
+     * [signedJpeg]'s real canonical content hash, as the co-sign flow hashes
+     * its payload before it appends. The JPEG's colour comes from the run id,
+     * so the hash (and the 16-character preview the signature card renders)
+     * is unique to this run.
      */
-    private val contentHash = runId.toString(16).padEnd(64, '0')
+    private lateinit var contentHash: String
 
     private lateinit var context: Context
     private lateinit var keystoreManager: KeystoreManager
@@ -127,6 +128,16 @@ class CoSignFlowTest {
 
     private lateinit var plainJpeg: File
     private lateinit var signedJpeg: File
+
+    /**
+     * Where the owner's co-signed copy goes: a shared JPEG is never written
+     * over (its provider offers no atomic replace), so the co-signed media is
+     * a separate document the user creates, stubbed with this file.
+     */
+    private lateinit var coSignedCopy: File
+
+    /** [signedJpeg]'s bytes as set up, which co-signing must leave alone. */
+    private lateinit var signedOriginal: ByteArray
 
     @Before
     fun setUp() {
@@ -160,6 +171,8 @@ class CoSignFlowTest {
 
         plainJpeg = writeJpeg("plain")
         signedJpeg = writeJpeg("signed").also { file ->
+            // The canonical hash leaves signature metadata out, so it is the same after the write.
+            contentHash = MediaHasher.hashStreamed({ file.inputStream() }, "image/jpeg").canonical
             XmpMetadataHelper.writeSignature(
                 file.path,
                 ContentAuthenticityData(
@@ -177,6 +190,8 @@ class CoSignFlowTest {
                 )
             )
         }
+        signedOriginal = signedJpeg.readBytes()
+        coSignedCopy = File(context.cacheDir, "ui-test-cosign-signed-$runId-cosigned.jpg")
     }
 
     @After
@@ -187,7 +202,7 @@ class CoSignFlowTest {
         keystoreManager.deleteGeneralKey(keyId)
         runBlocking { auditLogDao.deleteByKeyId(keyId) }
 
-        listOf(plainJpeg, signedJpeg).forEach { file ->
+        listOf(plainJpeg, signedJpeg, coSignedCopy).forEach { file ->
             File(XmpMetadataHelper.getSidecarPath(file.path)).delete()
             file.delete()
         }
@@ -328,9 +343,14 @@ class CoSignFlowTest {
     // Owner: the witness's response
     // -----------------------------------------------------------------
 
-    /** A scanned response is appended to the picked media as an ATTESTOR entry. */
+    /**
+     * A scanned response is appended as an ATTESTOR entry to a co-signed
+     * copy of the picked media, created as the media's type and named after
+     * it; the picked media is left unchanged.
+     */
     @Test
-    fun ownerScan_ofAResponse_appendsTheAttestorToTheSavedMedia() {
+    fun ownerScan_ofAResponse_appendsTheAttestorToACoSignedCopy() {
+        stubCoSignedCopy()
         val scenario = launch()
         pickMedia(scenario, signedJpeg)
         assertShownTextInTree(scenario, "Hash: ${contentHash.take(HASH_PREVIEW_LENGTH)}...")
@@ -340,6 +360,13 @@ class CoSignFlowTest {
         assertCoSignScannerLaunched()
 
         assertShownTextInTree(scenario, context.getString(R.string.cosign_appended, witnessName))
+        intended(
+            allOf(
+                hasAction(Intent.ACTION_CREATE_DOCUMENT),
+                hasType("image/jpeg"),
+                hasExtra(Intent.EXTRA_TITLE, coSignedCopy.name)
+            )
+        )
         assertAttestorSaved()
         assertShownTextInTree(scenario, "${SignerRole.ATTESTOR.name}: $witnessName... ($KEY_ALGORITHM)")
     }
@@ -398,6 +425,7 @@ class CoSignFlowTest {
      */
     @Test
     fun aResponseScan_survivesRecreationWhileTheScannerIsOpen() {
+        stubCoSignedCopy()
         val scenario = launch()
         pickMedia(scenario, signedJpeg)
         assertShownTextInTree(scenario, "Hash: ${contentHash.take(HASH_PREVIEW_LENGTH)}...")
@@ -476,15 +504,31 @@ class CoSignFlowTest {
         waitForIdle()
     }
 
-    /** Polls until the media file itself carries the witness's ATTESTOR entry. */
+    /** Answers the co-signed copy's create-document request with [coSignedCopy]. */
+    private fun stubCoSignedCopy() {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", coSignedCopy)
+        intending(hasAction(Intent.ACTION_CREATE_DOCUMENT)).respondWith(
+            Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(uri))
+        )
+    }
+
+    /**
+     * Polls until the co-signed copy carries the creator's entry and the
+     * witness's ATTESTOR entry over the original's content hash, then checks
+     * the picked media is byte for byte as it was, with its one signature.
+     */
     private fun assertAttestorSaved() {
-        awaitCondition("Expected the saved media to carry the witness's ATTESTOR entry") {
-            val saved = XmpMetadataHelper.readSignature(signedJpeg.path)?.signatures.orEmpty()
-            saved.size == 2 && saved.any {
-                it.role == SignerRole.ATTESTOR && it.keyFingerprint == witnessFingerprint &&
-                    it.signerName == witnessName
-            }
+        awaitCondition("Expected the co-signed copy to carry the witness's ATTESTOR entry") {
+            val saved = XmpMetadataHelper.readSignature(coSignedCopy.path)
+            saved?.contentHash == contentHash && saved.signatures.size == 2 &&
+                saved.signatures.any { it.role == SignerRole.CREATOR && it.keyFingerprint == creatorFingerprint } &&
+                saved.signatures.any {
+                    it.role == SignerRole.ATTESTOR && it.keyFingerprint == witnessFingerprint &&
+                        it.signerName == witnessName
+                }
         }
+        assertTrue("co-signing must leave the picked media unchanged", signedOriginal.contentEquals(signedJpeg.readBytes()))
+        assertEquals(1, XmpMetadataHelper.readSignature(signedJpeg.path)?.signatures?.size)
     }
 
     /** The real scanner, once it is in front (CAMERA is granted by the rule). */
@@ -639,11 +683,14 @@ class CoSignFlowTest {
     // Helpers: fixtures
     // -----------------------------------------------------------------
 
-    /** Writes a small real JPEG so `ExifInterface` has something it can edit. */
+    /**
+     * Writes a small real JPEG so `ExifInterface` has something it can edit;
+     * its colour comes from the run id, so its payload is this run's own.
+     */
     private fun writeJpeg(suffix: String): File {
         val file = File(context.cacheDir, "ui-test-cosign-$suffix-$runId.jpg")
         val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
-        bitmap.eraseColor(Color.rgb(0x11, 0x55, 0x99))
+        bitmap.eraseColor(Color.rgb((runId and 0xFF).toInt(), (runId shr 8 and 0xFF).toInt(), (runId shr 16 and 0xFF).toInt()))
         FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
         bitmap.recycle()
         return file

@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import androidx.core.content.ContextCompat
@@ -35,19 +36,26 @@ import android.widget.RadioGroup
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.withResumed
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
+import com.automatethethings.xkey.media.MediaLocationAccess
+import com.automatethethings.xkey.media.MediaPublisher
+import com.automatethethings.xkey.media.MediaSaveRuns
+import com.automatethethings.xkey.media.SignedCopyDocument
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerRole
 import com.automatethethings.xkey.media.SignerVerification
+import com.automatethethings.xkey.media.XmpContainers
 import com.automatethethings.xkey.media.XmpMetadataHelper
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.ContactDao
@@ -57,12 +65,15 @@ import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.progressindicator.CircularProgressIndicator
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.time.Instant
+import java.util.UUID
 
 /**
  * Activity that handles file operations received via the Android Share sheet.
@@ -80,6 +91,68 @@ class FileOperationActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "FileOperationActivity"
+
+        /**
+         * Whether verification [results] (signer line, status) are a positive
+         * result, the one test the audit log records as verified: at least one
+         * line, and every one verified. A mismatch, an unknown signer, nothing
+         * checked, or location access unavailable (only MediaStore's redacted
+         * view readable, so nothing was hashed or checked) is not verified.
+         */
+        internal fun verificationSucceeded(results: List<Pair<String, String>>): Boolean =
+            results.isNotEmpty() && results.all { it.second == "verified" }
+
+        /**
+         * Where Verify reads and checks off the main thread: [Dispatchers.IO].
+         * Tests run it on the main looper they idle, so a verification
+         * completes with no real-time wait.
+         */
+        @VisibleForTesting
+        internal var verifyDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+        // Saved state: output waiting for a save picker
+        private const val STATE_SIGNATURE_JSON = "pending_signature_json"
+        private const val STATE_SIGNED_COPY_SOURCE = "pending_signed_copy_source"
+        private const val STATE_SIGNED_COPY_MIME = "pending_signed_copy_mime"
+        private const val STATE_SIGNED_COPY_SIGNATURE = "pending_signed_copy_signature"
+
+        // Saved state: the operation waiting on the location-access answer
+        private const val STATE_ACCESS_OPERATION = "operation_awaiting_access"
+        private const val STATE_ACCESS_KEY_ID = "operation_awaiting_access_key_id"
+        private const val STATE_ACCESS_RECIPIENT_ID = "operation_awaiting_access_recipient_id"
+
+        // Saved state: a save writing to the destination the user picked
+        private const val STATE_RUNNING_ID = "running_save_id"
+        private const val STATE_RUNNING_DESTINATION = "running_save_destination"
+        private const val STATE_RUNNING_JSON = "running_save_json"
+        private const val STATE_RUNNING_SOURCE = "running_save_source"
+        private const val STATE_RUNNING_MIME = "running_save_mime"
+        private const val STATE_RUNNING_SIGNATURE = "running_save_signature"
+
+        /**
+         * Write [save] to its destination: the sidecar JSON, or a signed copy
+         * of its source, staged from its original bytes
+         * ([MediaPublisher.openOriginal]), the ones its signature covers.
+         * Static, over the application context, so a write never holds the
+         * activity that started it.
+         */
+        private fun writeSave(context: Context, recovery: File, save: RunningSave) {
+            val resolver = context.contentResolver
+            save.signatureJson?.let { json ->
+                MediaPublisher.openCreated(resolver, save.destination).use { it.write(json.toByteArray(Charsets.UTF_8)) }
+            }
+            save.signedCopy?.let { copy ->
+                val written = XmpMetadataHelper.writeSignedCopy(
+                    open = { MediaPublisher.openOriginal(context, copy.source) },
+                    openOutput = { MediaPublisher.openCreated(resolver, save.destination) },
+                    mimeType = copy.mimeType,
+                    data = copy.data,
+                    workDir = recovery,
+                    destination = save.destination.toString()
+                )
+                if (!written) throw IOException("${copy.source} cannot carry a new embedded signature")
+            }
+        }
 
         // UI colors
 
@@ -121,31 +194,89 @@ class FileOperationActivity : AppCompatActivity() {
     private lateinit var resultText: TextView
     private lateinit var resultCard: MaterialCardView
 
-    // Activity result launchers
+    // Activity result launchers. Every save picker's result goes through
+    // onSavePicked, so a cancel always drops its pending output and frees
+    // the screen.
+    /** Asks for location access before a capture's original is read. */
+    private val locationAccess = MediaLocationAccess(this)
+
     private val createSignatureFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        if (uri != null) {
-            saveSignatureToUri(uri)
-        } else {
-            pendingSignatureJson = null
-        }
-    }
+    ) { uri -> onSavePicked(uri, { pendingSignatureJson = null }, ::saveSignatureToUri) }
 
     private val createEncryptedFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri -> pendingEncryptedSave.onResult(uri, ::saveEncryptedToUri) }
+    ) { uri -> onSavePicked(uri, pendingEncryptedSave::cancel, ::saveEncryptedToUri) }
 
     private val createDecryptedFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("*/*")
-    ) { uri -> pendingDecryptedSave.onResult(uri, ::saveDecryptedToUri) }
+    ) { uri -> onSavePicked(uri, pendingDecryptedSave::cancel, ::saveDecryptedToUri) }
 
     private val pickSidecarLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { verifySidecarSignature(it) } }
 
-    // Deferred writes: the sidecar JSON, or staged files awaiting a save location
+    // Typed per launch: the copy is created as the source's own type and suffix.
+    private val createSignedCopyLauncher = registerForActivityResult(
+        SignedCopyDocument.Create()
+    ) { uri -> onSavePicked(uri, { pendingSignedCopy = null }, ::saveSignedCopyToUri) }
+
+    /**
+     * A save picker's result: a destination goes to [save]; null is a cancel,
+     * which runs [clear] to drop the output waiting for it and ends the
+     * operation, so the screen is not left busy.
+     */
+    private fun onSavePicked(uri: Uri?, clear: () -> Unit, save: (Uri) -> Unit) {
+        if (uri != null) {
+            save(uri)
+        } else {
+            clear()
+            showProgress(false)
+        }
+    }
+
+    /** A signed copy of [source], of [mimeType], waiting for the document the user picks. */
+    private class PendingSignedCopy(
+        val source: Uri,
+        val mimeType: String,
+        val data: ContentAuthenticityData
+    )
+
+    /**
+     * A save whose destination the user picked, writing now: the sidecar
+     * JSON or a signed copy. It is a separate state from a pending picker.
+     * Its write runs in [MediaSaveRuns], not in an instance's scope, and the save
+     * is kept in the saved state, so the instance after a recreation waits
+     * on the same write (after process death it writes again, to the same
+     * destination) and frees the screen when it ends.
+     */
+    private class RunningSave(
+        val id: String,
+        val destination: Uri,
+        val signatureJson: String?,
+        val signedCopy: PendingSignedCopy?
+    )
+
+    // Picker pending: the sidecar JSON or a signed copy, waiting for a save location
     private var pendingSignatureJson: String? = null
+    private var pendingSignedCopy: PendingSignedCopy? = null
+
+    // Save running: the destination was picked and its write has not ended
+    private var runningSave: RunningSave? = null
+
+    // The operation waiting on the location-access answer, or -1 for none
+    private var operationAwaitingAccess = -1
+
+    // The key and recipient chosen when Process was pressed, by identity:
+    // an operation resumed after a recreation runs with them, never with
+    // whatever the rebuilt spinners show first.
+    private var chosenKeyId: String? = null
+    private var chosenRecipientId: Long = -1
+
+    // Whether the key and contact lists are loaded, and an operation whose
+    // access answer came before they were.
+    private var keysLoaded = false
+    private var runAfterLoad = -1
 
     // Staging files for sign, encrypt and decrypt (see FileOperationStaging)
     private lateinit var staging: FileOperationStaging
@@ -166,6 +297,9 @@ class FileOperationActivity : AppCompatActivity() {
         contactDao = db.contactDao()
         keystoreManager = KeystoreManager(this)
 
+        // A save picker may outlive this instance: its pending output comes back
+        restorePendingSaves(savedInstanceState)
+
         // Extract file URIs from intent
         fileUris = extractFileUris(intent)
         if (fileUris.isEmpty()) {
@@ -177,15 +311,96 @@ class FileOperationActivity : AppCompatActivity() {
         // Only a valid share sweeps: it removes what a dead process or a
         // shut-down instance left, never a live instance's staged output
         staging.sweep()
+        // A signed-copy save an earlier process died in left its working file
+        // Off the main thread: the sweep waits on any granted write in progress.
+        val recovery = MediaPublisher.recoveryDirectory(applicationContext)
+        lifecycleScope.launch(Dispatchers.IO) { MediaSaveRuns.sweep(recovery) }
 
         // Build and set the programmatic UI
         setContentView(buildUI())
+
+        // A restored save is still this screen's operation: Process stays
+        // disabled until its picker returns and its write ends (showResult)
+        // or the picker is cancelled (onSavePicked). A save that was writing
+        // is waited on again; it frees the screen when it ends.
+        if (pendingSignatureJson != null || pendingSignedCopy != null) showProgress(true)
+        runningSave?.let { runSave(it) }
 
         // Populate file info
         populateFileInfo()
 
         // Load keys and contacts
         loadKeysAndContacts()
+
+        // An operation the instance before a recreation (a rotation while the
+        // location-access dialog was open) was waiting on joins that open
+        // request and runs once the user answers it.
+        val awaiting = savedInstanceState?.getInt(STATE_ACCESS_OPERATION, -1) ?: -1
+        if (awaiting >= 0) {
+            selectedOperation = awaiting
+            chosenKeyId = savedInstanceState?.getString(STATE_ACCESS_KEY_ID)
+            chosenRecipientId = savedInstanceState?.getLong(STATE_ACCESS_RECIPIENT_ID, -1L) ?: -1L
+            showProgress(true)
+            runWithOriginals(awaiting)
+        }
+    }
+
+    /**
+     * Keep the saves this screen has open, as two separate states: what an
+     * open save picker writes when it returns (the sidecar JSON, the signed
+     * copy's source, type and signature), and a save already writing to the
+     * destination the user picked. A configuration change or process death
+     * then neither loses the signature nor mistakes a running write for a
+     * picker still open. Staged files are this instance's and are dropped
+     * with it (onDestroy).
+     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        val awaiting = if (operationAwaitingAccess >= 0) operationAwaitingAccess else runAfterLoad
+        if (awaiting >= 0) {
+            outState.putInt(STATE_ACCESS_OPERATION, awaiting)
+            chosenKeyId?.let { outState.putString(STATE_ACCESS_KEY_ID, it) }
+            outState.putLong(STATE_ACCESS_RECIPIENT_ID, chosenRecipientId)
+        }
+        pendingSignatureJson?.let { outState.putString(STATE_SIGNATURE_JSON, it) }
+        pendingSignedCopy?.let {
+            outState.putString(STATE_SIGNED_COPY_SOURCE, it.source.toString())
+            outState.putString(STATE_SIGNED_COPY_MIME, it.mimeType)
+            outState.putString(STATE_SIGNED_COPY_SIGNATURE, it.data.toJsonString())
+        }
+        runningSave?.let { save ->
+            outState.putString(STATE_RUNNING_ID, save.id)
+            outState.putString(STATE_RUNNING_DESTINATION, save.destination.toString())
+            save.signatureJson?.let { outState.putString(STATE_RUNNING_JSON, it) }
+            save.signedCopy?.let {
+                outState.putString(STATE_RUNNING_SOURCE, it.source.toString())
+                outState.putString(STATE_RUNNING_MIME, it.mimeType)
+                outState.putString(STATE_RUNNING_SIGNATURE, it.data.toJsonString())
+            }
+        }
+    }
+
+    private fun restorePendingSaves(state: Bundle?) {
+        if (state == null) return
+        pendingSignatureJson = state.getString(STATE_SIGNATURE_JSON)
+        pendingSignedCopy = restoreSignedCopy(state, STATE_SIGNED_COPY_SOURCE, STATE_SIGNED_COPY_MIME, STATE_SIGNED_COPY_SIGNATURE)
+        val id = state.getString(STATE_RUNNING_ID) ?: return
+        val destination = state.getString(STATE_RUNNING_DESTINATION) ?: return
+        val json = state.getString(STATE_RUNNING_JSON)
+        val copy = restoreSignedCopy(state, STATE_RUNNING_SOURCE, STATE_RUNNING_MIME, STATE_RUNNING_SIGNATURE)
+        if (json != null || copy != null) runningSave = RunningSave(id, Uri.parse(destination), json, copy)
+    }
+
+    private fun restoreSignedCopy(state: Bundle, sourceKey: String, mimeKey: String, signatureKey: String): PendingSignedCopy? {
+        val source = state.getString(sourceKey) ?: return null
+        val mimeType = state.getString(mimeKey) ?: return null
+        val signature = state.getString(signatureKey) ?: return null
+        return try {
+            PendingSignedCopy(Uri.parse(source), mimeType, ContentAuthenticityData.fromJsonString(signature))
+        } catch (e: Exception) {
+            Log.w(TAG, "Dropping an unreadable signed copy", e)
+            null
+        }
     }
 
     override fun onDestroy() {
@@ -195,6 +410,10 @@ class FileOperationActivity : AppCompatActivity() {
         pendingEncryptedSave.take()
         pendingDecryptedSave.take()
         staging.shutdown()
+        // Gone for good, not recreated: no instance takes the save's outcome,
+        // so it is forgotten once its write ends (which keeps its own bytes
+        // on a failure, MediaPublisher).
+        if (isFinishing && !isChangingConfigurations) runningSave?.let { MediaSaveRuns.abandon<Unit>(it.id) }
         super.onDestroy()
     }
 
@@ -719,6 +938,10 @@ class FileOperationActivity : AppCompatActivity() {
                 populateKeySpinner()
                 populateRecipientSpinner()
                 onOperationChanged()
+                keysLoaded = true
+                val resumed = runAfterLoad
+                runAfterLoad = -1
+                if (resumed >= 0) runChosen(resumed)
             }
         }
     }
@@ -831,11 +1054,58 @@ class FileOperationActivity : AppCompatActivity() {
         showProgress(true)
         resultCard.visibility = View.GONE
 
-        when (selectedOperation) {
-            OP_SIGN -> performSign()
+        // Decrypting reads ciphertext; every other operation reads the
+        // media whole, so a fresh install is asked for location access first.
+        if (selectedOperation == OP_DECRYPT) {
+            performDecrypt()
+            return
+        }
+        chosenKeyId = signingKeys.getOrNull(keySpinner.selectedItemPosition)?.keyId
+        chosenRecipientId = contacts.getOrNull(recipientSpinner.selectedItemPosition)?.id ?: -1L
+        runWithOriginals(selectedOperation)
+    }
+
+    private fun runWithOriginals(operation: Int) {
+        operationAwaitingAccess = operation
+        locationAccess.withOriginals(fileUris) {
+            operationAwaitingAccess = -1
+            runChosen(operation)
+        }
+    }
+
+    /**
+     * The one way an operation that went through [runWithOriginals] runs:
+     * with the key and recipient chosen when Process was pressed
+     * ([chosenKeyId], [chosenRecipientId]), selected by identity in the
+     * spinners, which a recreation rebuilds at their first entries. It waits
+     * for the key and contact lists if they are still loading. If the chosen
+     * key or recipient is gone, nothing runs: the screen shows why.
+     */
+    private fun runChosen(operation: Int) {
+        if (!keysLoaded) {
+            runAfterLoad = operation
+            return
+        }
+        when (operation) {
+            OP_SIGN -> {
+                val index = signingKeys.indexOfFirst { it.keyId == chosenKeyId }
+                if (index < 0) {
+                    showResult(getString(R.string.file_operation_no_keys), isError = true)
+                    return
+                }
+                keySpinner.setSelection(index)
+                performSign()
+            }
             OP_VERIFY -> performVerify()
-            OP_ENCRYPT -> performEncrypt()
-            OP_DECRYPT -> performDecrypt()
+            OP_ENCRYPT -> {
+                val index = contacts.indexOfFirst { it.id == chosenRecipientId }
+                if (index < 0) {
+                    showResult(getString(R.string.file_operation_no_contacts), isError = true)
+                    return
+                }
+                recipientSpinner.setSelection(index)
+                performEncrypt()
+            }
         }
     }
 
@@ -910,7 +1180,7 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Hash the file content
-                val hashHex = MediaHasher.hashCanonicalUri(contentResolver, uri)
+                val hashHex = MediaHasher.hashCanonicalUri(applicationContext, uri)
                 val hashBytes = hexToBytes(hashHex)
 
                 // Sign the hash
@@ -950,36 +1220,43 @@ class FileOperationActivity : AppCompatActivity() {
                 val mimeType = contentResolver.getType(uri) ?: ""
                 val fileName = getFileName(uri) ?: "file"
 
-                if (mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg")) {
-                    // Copy to a staging file, write EXIF, then copy back. The MIME
-                    // type makes it a .jpg, so the EXIF write lands in it.
-                    val tempFile = staging.stage(fileName, mimeType) { staged ->
-                        contentResolver.openInputStream(uri)?.use { input ->
-                            FileOutputStream(staged).use { output ->
-                                input.copyTo(output)
-                            }
-                        } ?: throw IllegalStateException("Cannot open input file")
-                        XmpMetadataHelper.writeSignature(staged.absolutePath, cad)
-                    }
+                val jpeg = MediaHasher.isCanonicalisedJpeg(mimeType)
+                if (jpeg || sharedSigning(uri, mimeType) == XmpMetadataHelper.SharedSigning.SIGNED_COPY) {
+                    // An embedded signature: EXIF for a JPEG, XMP replacing the
+                    // one a PNG, WebP or video carries (readers prefer it to a
+                    // sidecar). The shared original is never truncated: a file
+                    // is replaced atomically (MediaPublisher), any other
+                    // provider gets a signed copy at a document the user picks.
+                    val path = MediaPublisher.replaceableFile(uri)?.path
+                    if (path != null) {
+                        XmpMetadataHelper.writeSignature(path, cad)
+                        keyDao.recordUsage(key.keyId)
+                        AuditLogger.logFileSigned(key.keyId, key.label, fileName)
 
-                    // Copy the signed staging file back to the original URI
-                    staging.deliverTo(tempFile) { contentResolver.openOutputStream(uri) }
+                        withContext(Dispatchers.Main) {
+                            showResult(getString(R.string.file_operation_sign_success))
+                        }
+                    } else {
+                        keyDao.recordUsage(key.keyId)
+                        AuditLogger.logFileSigned(key.keyId, key.label, fileName)
 
-                    // Record usage and audit
-                    keyDao.recordUsage(key.keyId)
-                    AuditLogger.logFileSigned(key.keyId, key.label, fileName)
-
-                    withContext(Dispatchers.Main) {
-                        showResult(getString(R.string.file_operation_sign_success))
+                        openSavePicker(
+                            pend = { pendingSignedCopy = PendingSignedCopy(uri, mimeType, cad) },
+                            clear = { pendingSignedCopy = null }
+                        ) {
+                            createSignedCopyLauncher.launch(SignedCopyDocument.named(fileName, mimeType.ifBlank { null }, "signed"))
+                        }
                     }
                 } else {
                     // Save as sidecar: prompt user for output location
-                    pendingSignatureJson = cad.toJsonString()
-
                     keyDao.recordUsage(key.keyId)
                     AuditLogger.logFileSigned(key.keyId, key.label, fileName)
 
-                    withContext(Dispatchers.Main) {
+                    val json = cad.toJsonString()
+                    openSavePicker(
+                        pend = { pendingSignatureJson = json },
+                        clear = { pendingSignatureJson = null }
+                    ) {
                         createSignatureFileLauncher.launch("$fileName.xkeysig")
                     }
                 }
@@ -990,22 +1267,78 @@ class FileOperationActivity : AppCompatActivity() {
     }
 
     /**
+     * Hand an output to its save picker: [pend] sets the pending state and
+     * [launch] opens the picker together, on the main thread while the screen
+     * is resumed, so no recreation falls between them (the saved state never
+     * holds a pending save whose picker was not opened). A launch that throws
+     * runs [clear]; a screen destroyed first cancels the handoff, leaving
+     * nothing pending.
+     */
+    private suspend fun openSavePicker(pend: () -> Unit, clear: () -> Unit, launch: () -> Unit) {
+        withResumed {
+            pend()
+            try {
+                launch()
+            } catch (e: RuntimeException) {
+                clear()
+                throw e
+            }
+        }
+    }
+
+    /**
+     * How the shared media at [uri] is signed, reading it only, so media
+     * shared with read access alone keeps the sidecar path.
+     */
+    private fun sharedSigning(uri: Uri, mimeType: String): XmpMetadataHelper.SharedSigning =
+        XmpMetadataHelper.sharedSigning(
+            open = { MediaPublisher.openOriginal(applicationContext, uri) },
+            format = XmpContainers.formatOf(mimeType)
+        )
+
+    /**
+     * Write the pending signed copy to the user-selected URI. The shared
+     * original is only read; if the write fails, the complete signed copy
+     * is kept for recovery and the error names it (MediaPublisher).
+     */
+    private fun saveSignedCopyToUri(outputUri: Uri) {
+        val pending = pendingSignedCopy ?: return showProgress(false)
+        pendingSignedCopy = null
+        runSave(RunningSave(UUID.randomUUID().toString(), outputUri, null, pending))
+    }
+
+    /**
      * Save the pending signature JSON to the user-selected URI.
      */
     private fun saveSignatureToUri(outputUri: Uri) {
-        val json = pendingSignatureJson ?: return
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                contentResolver.openOutputStream(outputUri)?.use { output ->
-                    output.write(json.toByteArray(Charsets.UTF_8))
-                }
-                withContext(Dispatchers.Main) {
-                    showResult(getString(R.string.file_operation_sign_success))
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) { showError(e) }
-            } finally {
-                pendingSignatureJson = null
+        val json = pendingSignatureJson ?: return showProgress(false)
+        pendingSignatureJson = null
+        runSave(RunningSave(UUID.randomUUID().toString(), outputUri, json, null))
+    }
+
+    /**
+     * Run [save], or wait on it when it already runs (this instance restored
+     * it after a recreation), with the screen busy until it ends. The picker
+     * state was cleared when the save started, so a recreation meanwhile
+     * restores it as running, never as a picker still open. Whether it
+     * succeeds or fails, its end frees the screen; an instance that goes
+     * first leaves the write to the next.
+     */
+    private fun runSave(save: RunningSave) {
+        runningSave = save
+        showProgress(true)
+        val context = applicationContext
+        val recovery = MediaPublisher.recoveryDirectory(context)
+        val run = MediaSaveRuns.attach(save.id) { writeSave(context, recovery, save) }
+        lifecycleScope.launch {
+            // Throws if this instance went away first, even after the write
+            // ended, and waits while it is not resumed: the next instance, or
+            // this one once it is back, waits on the write and shows its end.
+            MediaSaveRuns.outcome(run, lifecycle) { outcome ->
+                val failure = outcome.exceptionOrNull() as Exception?
+                MediaSaveRuns.finished(save.id)
+                runningSave = null
+                if (failure == null) showResult(getString(R.string.file_operation_sign_success)) else showError(failure)
             }
         }
     }
@@ -1027,47 +1360,56 @@ class FileOperationActivity : AppCompatActivity() {
     private fun performVerify() {
         val uri = fileUris.first()
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        lifecycleScope.launch(verifyDispatcher) {
             try {
                 // Try reading embedded signature
                 val mimeType = contentResolver.getType(uri)
                 val embeddedData = XmpMetadataHelper.readSignatureFromUri(
-                    contentResolver, uri, mimeType
+                    applicationContext, uri, mimeType
                 )
 
                 if (embeddedData != null) {
                     // The stored content hash must match this file before any
                     // signature over it counts: a copied in-band block covers
                     // another file's content.
-                    val hashMatches = MediaHasher.contentHashMatchesUri(
-                        contentResolver, uri, embeddedData.contentHash, MediaHasher.SignatureSource.IN_BAND
+                    val check = MediaHasher.checkContentHashUri(
+                        applicationContext, uri, embeddedData.contentHash, MediaHasher.SignatureSource.IN_BAND
                     )
                     // On a mismatch the block's own line says why, as the
                     // sidecar path does, so the result fails even with no
-                    // signature entries.
-                    val result = if (hashMatches) {
-                        verifySignatures(embeddedData, hashMatches)
-                    } else {
-                        listOf("Content hash mismatch" to "failed") + verifySignatures(embeddedData, hashMatches)
+                    // signature entries. An unreadable original is no
+                    // mismatch: nothing is verified and it says so.
+                    val result = when (check) {
+                        MediaHasher.ContentHashCheck.MATCHES -> verifySignatures(embeddedData, true)
+                        MediaHasher.ContentHashCheck.MISMATCH ->
+                            listOf("Content hash mismatch" to "failed") + verifySignatures(embeddedData, false)
+                        // Nothing was hashed or checked: audited as not verified.
+                        MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE ->
+                            listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable")
                     }
 
-                    val fileName = getFileName(uri)
-                    AuditLogger.logFileVerified(
-                        fileName = fileName,
-                        signerCount = embeddedData.signatures.size,
-                        verified = result.all { it.second != "failed" }
-                    )
+                    auditVerification(uri, embeddedData.signatures.size, result)
 
                     withContext(Dispatchers.Main) {
                         showVerificationResult(result)
                     }
                 } else {
                     // No embedded signature, prompt user to pick sidecar
-                    withContext(Dispatchers.Main) {
+                    // Launched only while resumed: never after the state was saved
+                    withResumed {
                         pickSidecarLauncher.launch(arrayOf("application/json", "*/*"))
                     }
                 }
+            } catch (_: MediaPublisher.OriginalUnavailableException) {
+                // Only the redacted view is readable: nothing is verified, and it is no mismatch.
+                // No signature was read, so no signer is counted; it is audited as not verified.
+                val result = listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable")
+                auditVerification(uri, 0, result)
+                withContext(Dispatchers.Main) {
+                    showVerificationResult(result)
+                }
             } catch (e: Exception) {
+                auditVerificationError(uri)
                 withContext(Dispatchers.Main) { showError(e) }
             }
         }
@@ -1081,37 +1423,60 @@ class FileOperationActivity : AppCompatActivity() {
     private fun verifySidecarSignature(sidecarUri: Uri) {
         val fileUri = fileUris.first()
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        lifecycleScope.launch(verifyDispatcher) {
             try {
-                val sidecarJson = contentResolver.openInputStream(sidecarUri)?.use { input ->
-                    input.bufferedReader().readText()
+                val cad = contentResolver.openInputStream(sidecarUri)?.use { input ->
+                    ContentAuthenticityData.fromJsonStream(input)
                 } ?: throw IllegalStateException("Cannot read sidecar file")
 
-                val cad = ContentAuthenticityData.fromJsonString(sidecarJson)
-
                 // A sidecar may cover the canonical or the whole-file hash.
-                val hashMatches = MediaHasher.contentHashMatchesUri(
-                    contentResolver, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
+                val check = MediaHasher.checkContentHashUri(
+                    applicationContext, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
                 )
-                val results = if (hashMatches) {
-                    verifySignatures(cad, hashMatches)
-                } else {
-                    listOf("Content hash mismatch" to "failed")
+                val results = when (check) {
+                    MediaHasher.ContentHashCheck.MATCHES -> verifySignatures(cad, true)
+                    MediaHasher.ContentHashCheck.MISMATCH -> listOf("Content hash mismatch" to "failed")
+                    // Nothing was hashed or checked: audited as not verified.
+                    MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE ->
+                        listOf(MediaHasher.ACCESS_UNAVAILABLE_MESSAGE to "unavailable")
                 }
 
-                val fileName = getFileName(fileUri)
-                AuditLogger.logFileVerified(
-                    fileName = fileName,
-                    signerCount = cad.signatures.size,
-                    verified = results.all { it.second != "failed" }
-                )
+                auditVerification(fileUri, cad.signatures.size, results)
 
                 withContext(Dispatchers.Main) {
                     showVerificationResult(results)
                 }
             } catch (e: Exception) {
+                auditVerificationError(fileUri)
                 withContext(Dispatchers.Main) { showError(e) }
             }
+        }
+    }
+
+    /**
+     * The one audit record of a verification of [uri], for the embedded and
+     * the sidecar branch alike: verified only on a positive result
+     * ([verificationSucceeded]).
+     */
+    private fun auditVerification(uri: Uri, signerCount: Int, results: List<Pair<String, String>>) {
+        AuditLogger.logFileVerified(
+            fileName = getFileName(uri),
+            signerCount = signerCount,
+            verified = verificationSucceeded(results)
+        )
+    }
+
+    /**
+     * A verification of [uri] that ended in an error (an unreadable capture
+     * or sidecar, a malformed signature): no signature was checked, so no
+     * signer is counted and it is audited as not verified. A failure to
+     * audit never hides the error from the user.
+     */
+    private fun auditVerificationError(uri: Uri) {
+        try {
+            auditVerification(uri, 0, emptyList())
+        } catch (e: Exception) {
+            Log.e(TAG, "Verify error could not be audited", e)
         }
     }
 
@@ -1226,7 +1591,8 @@ class FileOperationActivity : AppCompatActivity() {
                     staging,
                     "$fileName.xkeyenc",
                     write = { staged ->
-                        contentResolver.openInputStream(uri)?.use { input ->
+                        // The file whole: a capture's location is encrypted with it, never dropped.
+                        MediaPublisher.openOriginal(applicationContext, uri).use { input ->
                             FileOutputStream(staged).use { output ->
                                 fileEncryptor.encryptForRecipient(
                                     recipient.publicKeyDer,
@@ -1234,7 +1600,7 @@ class FileOperationActivity : AppCompatActivity() {
                                     output
                                 )
                             }
-                        } ?: throw IllegalStateException("Cannot open input file")
+                        }
                     },
                     prepare = {
                         AuditLogger.logFileEncrypted(
@@ -1243,7 +1609,8 @@ class FileOperationActivity : AppCompatActivity() {
                         )
                     },
                     handOff = { tempFile ->
-                        withContext(Dispatchers.Main) {
+                        // Handed off only while resumed: never after the state was saved
+                        withResumed {
                             // Keep the staging file for the launcher callback
                             pendingEncryptedSave.handOff(tempFile) {
                                 createEncryptedFileLauncher.launch("$fileName.xkeyenc")
@@ -1262,7 +1629,7 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                staging.deliverTo(tempFile) { contentResolver.openOutputStream(outputUri) }
+                staging.deliverTo(tempFile) { MediaPublisher.openCreated(contentResolver, outputUri) }
 
                 withContext(Dispatchers.Main) {
                     showResult(getString(R.string.file_operation_encrypt_success))
@@ -1327,7 +1694,8 @@ class FileOperationActivity : AppCompatActivity() {
                         AuditLogger.logFileDecrypted(key.keyId, originalName)
                     },
                     handOff = { tempFile ->
-                        withContext(Dispatchers.Main) {
+                        // Handed off only while resumed: never after the state was saved
+                        withResumed {
                             pendingDecryptedSave.handOff(tempFile) {
                                 createDecryptedFileLauncher.launch(outputName)
                             }
@@ -1345,7 +1713,7 @@ class FileOperationActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                staging.deliverTo(tempFile) { contentResolver.openOutputStream(outputUri) }
+                staging.deliverTo(tempFile) { MediaPublisher.openCreated(contentResolver, outputUri) }
 
                 withContext(Dispatchers.Main) {
                     showResult(getString(R.string.file_operation_decrypt_success))

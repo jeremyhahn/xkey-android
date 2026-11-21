@@ -1043,6 +1043,10 @@
     <string name="settings_media_signing_key">Signing Key</string>
     <string name="settings_media_signing_photos">Sign Photos</string>
     <string name="settings_media_signing_videos">Sign Videos</string>
+    <plurals name="settings_media_signing_pending">
+        <item quantity="one">Allow signing of %d pending capture</item>
+        <item quantity="other">Allow signing of %d pending captures</item>
+    </plurals>
     <string name="media_signing_channel_name">xKey Media Signing</string>
     <string name="media_signing_channel_description">Notifications for auto-signing media files</string>
     <string name="media_signing_notification_title">Media Signing Active</string>
