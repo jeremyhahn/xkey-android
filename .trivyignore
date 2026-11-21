@@ -13,35 +13,25 @@
 #   # 2026-01-01 <who>: <why this finding does not apply here>
 #   CVE-XXXX-NNNNN
 
-# 2026-10-22: protobuf-java 2.6.1, shaded in AGP 9.4.1
-# lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
-# build-only, in the image's Gradle cache, not in the APK. Remove with the bump
-# to the first stable AGP 9.5, or by 2026-11-21.
-CVE-2021-22569 exp:2026-11-21
+# 2026-11-21: protobuf-java 2.6.1, shaded (as org.jetbrains.kotlin.protobuf)
+# in lint's com.android.tools.external.com-intellij:kotlin-compiler:32.5.1
+# (AGP 9.5.1); build-only, in the image's Gradle cache, not in the APK. The
+# compiler reads Kotlin metadata of this build's own classpath with it, not
+# untrusted input, and needs the classes, so they cannot be stripped like the
+# jline ones. No lint release ships a fixed copy as of 2026-11-21 (32.5.2's
+# jar is the same file). Remove with the first stable AGP whose
+# kotlin-compiler drops it, or by 2026-12-21.
+CVE-2021-22569 exp:2026-12-21
 
-# 2026-10-22: protobuf-java 2.6.1, shaded in AGP 9.4.1
-# lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
-# build-only, in the image's Gradle cache, not in the APK. Remove with the bump
-# to the first stable AGP 9.5, or by 2026-11-21.
-CVE-2024-7254 exp:2026-11-21
-
-# 2026-10-22: jline-builtins 3.24.1, shaded in AGP 9.4.1
-# lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
-# build-only, in the image's Gradle cache, not in the APK. Remove with the bump
-# to the first stable AGP 9.5, or by 2026-11-21.
-CVE-2026-77422 exp:2026-11-21
-
-# 2026-10-22: jline-remote-telnet 3.24.1, shaded in AGP
-# 9.4.1 lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
-# build-only, in the image's Gradle cache, not in the APK. Remove with the bump
-# to the first stable AGP 9.5, or by 2026-11-21.
-CVE-2026-56740 exp:2026-11-21
-
-# 2026-10-22: jline-remote-telnet 3.24.1, shaded in AGP
-# 9.4.1 lint's com.android.tools.external.com-intellij:kotlin-compiler:32.4.1;
-# build-only, in the image's Gradle cache, not in the APK. Remove with the bump
-# to the first stable AGP 9.5, or by 2026-11-21.
-CVE-2026-56741 exp:2026-11-21
+# 2026-11-21: protobuf-java 2.6.1, shaded (as org.jetbrains.kotlin.protobuf)
+# in lint's com.android.tools.external.com-intellij:kotlin-compiler:32.5.1
+# (AGP 9.5.1); build-only, in the image's Gradle cache, not in the APK. The
+# compiler reads Kotlin metadata of this build's own classpath with it, not
+# untrusted input, and needs the classes, so they cannot be stripped like the
+# jline ones. No lint release ships a fixed copy as of 2026-11-21 (32.5.2's
+# jar is the same file). Remove with the first stable AGP whose
+# kotlin-compiler drops it, or by 2026-12-21.
+CVE-2024-7254 exp:2026-12-21
 
 # 2026-10-27: guava 33.4.6-jre in Gradle 9.8.1's own lib/
 # (still 33.4.6-jre in the current stable, 9.8.2) and guava 33.3.1-jre shaded
