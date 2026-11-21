@@ -693,37 +693,30 @@ class BiometricFidoUserPrompt(
     }
 
     /**
-     * The account chooser: one prompt per account, in order, each naming
-     * the account it signs in as. Approving a prompt picks its account;
-     * cancelling it shows the next, and cancelling the last declines. Any
-     * other failure declines at once.
+     * The account chooser: one list screen with every account, in order, as
+     * plain text, under the RP. A tap picks its account; Cancel, back or an
+     * answer outside the list declines, as does any other failure. The user
+     * check prompt follows the choice.
      */
     override suspend fun chooseAccount(rpId: String, accounts: List<String>): Int? {
         val l = launcher() ?: return null
-        accounts.forEachIndexed { i, account ->
-            try {
-                onLockScreen("getAssertion", rpId) { locked, onLaunch ->
-                    l.requestAuthentication(
-                        title = "Sign in as $account?",
-                        subtitle = rpId,
-                        description = "Account ${i + 1} of ${accounts.size} for a Bluetooth security key client. " +
-                            if (i + 1 < accounts.size) "Cancel to see the next account." else "Cancel to decline.",
-                        showOnLockScreen = locked,
-                        onLaunch = onLaunch
-                    )
-                }
-                return i
-            } catch (e: UserCancelledException) {
-                // The next account.
-            } catch (e: XKeyCryptoException) {
-                return null
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: IllegalStateException) {
-                return null
-            }
+        return try {
+            onLockScreen("getAssertion", rpId) { locked, onLaunch ->
+                l.requestAccountChoice(
+                    title = "Choose an account to sign in with",
+                    subtitle = rpId,
+                    accounts = accounts,
+                    showOnLockScreen = locked,
+                    onLaunch = onLaunch
+                )
+            }?.takeIf { it in accounts.indices }
+        } catch (e: XKeyCryptoException) {
+            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IllegalStateException) {
+            null
         }
-        return null
     }
 
     /**
