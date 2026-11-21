@@ -118,6 +118,8 @@ class FileOperationActivity : AppCompatActivity() {
 
         // Saved state: the operation waiting on the location-access answer
         private const val STATE_ACCESS_OPERATION = "operation_awaiting_access"
+        private const val STATE_ACCESS_KEY_ID = "operation_awaiting_access_key_id"
+        private const val STATE_ACCESS_RECIPIENT_ID = "operation_awaiting_access_recipient_id"
 
         // Saved state: a save writing to the destination the user picked
         private const val STATE_RUNNING_ID = "running_save_id"
@@ -265,6 +267,17 @@ class FileOperationActivity : AppCompatActivity() {
     // The operation waiting on the location-access answer, or -1 for none
     private var operationAwaitingAccess = -1
 
+    // The key and recipient chosen when Process was pressed, by identity:
+    // an operation resumed after a recreation runs with them, never with
+    // whatever the rebuilt spinners show first.
+    private var chosenKeyId: String? = null
+    private var chosenRecipientId: Long = -1
+
+    // Whether the key and contact lists are loaded, and an operation whose
+    // access answer came before they were.
+    private var keysLoaded = false
+    private var runAfterLoad = -1
+
     // Staging files for sign, encrypt and decrypt (see FileOperationStaging)
     private lateinit var staging: FileOperationStaging
     private lateinit var pendingEncryptedSave: PendingStagedSave
@@ -325,6 +338,8 @@ class FileOperationActivity : AppCompatActivity() {
         val awaiting = savedInstanceState?.getInt(STATE_ACCESS_OPERATION, -1) ?: -1
         if (awaiting >= 0) {
             selectedOperation = awaiting
+            chosenKeyId = savedInstanceState?.getString(STATE_ACCESS_KEY_ID)
+            chosenRecipientId = savedInstanceState?.getLong(STATE_ACCESS_RECIPIENT_ID, -1L) ?: -1L
             showProgress(true)
             runWithOriginals(awaiting)
         }
@@ -341,7 +356,12 @@ class FileOperationActivity : AppCompatActivity() {
      */
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        if (operationAwaitingAccess >= 0) outState.putInt(STATE_ACCESS_OPERATION, operationAwaitingAccess)
+        val awaiting = if (operationAwaitingAccess >= 0) operationAwaitingAccess else runAfterLoad
+        if (awaiting >= 0) {
+            outState.putInt(STATE_ACCESS_OPERATION, awaiting)
+            chosenKeyId?.let { outState.putString(STATE_ACCESS_KEY_ID, it) }
+            outState.putLong(STATE_ACCESS_RECIPIENT_ID, chosenRecipientId)
+        }
         pendingSignatureJson?.let { outState.putString(STATE_SIGNATURE_JSON, it) }
         pendingSignedCopy?.let {
             outState.putString(STATE_SIGNED_COPY_SOURCE, it.source.toString())
@@ -918,6 +938,10 @@ class FileOperationActivity : AppCompatActivity() {
                 populateKeySpinner()
                 populateRecipientSpinner()
                 onOperationChanged()
+                keysLoaded = true
+                val resumed = runAfterLoad
+                runAfterLoad = -1
+                if (resumed >= 0) runChosen(resumed)
             }
         }
     }
@@ -1036,23 +1060,51 @@ class FileOperationActivity : AppCompatActivity() {
             performDecrypt()
             return
         }
+        chosenKeyId = signingKeys.getOrNull(keySpinner.selectedItemPosition)?.keyId
+        chosenRecipientId = contacts.getOrNull(recipientSpinner.selectedItemPosition)?.id ?: -1L
         runWithOriginals(selectedOperation)
     }
 
-    /**
-     * Run [operation] once the shared files are readable whole, or the user
-     * has declined to make them so ([MediaLocationAccess.withOriginals]).
-     * While it waits on that answer it is kept in the saved state, so a
-     * recreation resumes it rather than dropping it.
-     */
     private fun runWithOriginals(operation: Int) {
         operationAwaitingAccess = operation
         locationAccess.withOriginals(fileUris) {
             operationAwaitingAccess = -1
-            when (operation) {
-                OP_SIGN -> performSign()
-                OP_VERIFY -> performVerify()
-                OP_ENCRYPT -> performEncrypt()
+            runChosen(operation)
+        }
+    }
+
+    /**
+     * The one way an operation that went through [runWithOriginals] runs:
+     * with the key and recipient chosen when Process was pressed
+     * ([chosenKeyId], [chosenRecipientId]), selected by identity in the
+     * spinners, which a recreation rebuilds at their first entries. It waits
+     * for the key and contact lists if they are still loading. If the chosen
+     * key or recipient is gone, nothing runs: the screen shows why.
+     */
+    private fun runChosen(operation: Int) {
+        if (!keysLoaded) {
+            runAfterLoad = operation
+            return
+        }
+        when (operation) {
+            OP_SIGN -> {
+                val index = signingKeys.indexOfFirst { it.keyId == chosenKeyId }
+                if (index < 0) {
+                    showResult(getString(R.string.file_operation_no_keys), isError = true)
+                    return
+                }
+                keySpinner.setSelection(index)
+                performSign()
+            }
+            OP_VERIFY -> performVerify()
+            OP_ENCRYPT -> {
+                val index = contacts.indexOfFirst { it.id == chosenRecipientId }
+                if (index < 0) {
+                    showResult(getString(R.string.file_operation_no_contacts), isError = true)
+                    return
+                }
+                recipientSpinner.setSelection(index)
+                performEncrypt()
             }
         }
     }
