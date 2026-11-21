@@ -248,9 +248,9 @@ class KeySharingPeers(
         Log.e(TAG, "Withdrawing key access failed ($result); every peer is denied until the key's next policy write")
         // Whether it is saved is app state, not the tapping sheet's: a sheet
         // opened later, or the key list, shows it unsaved (#193 r8).
-        owe(entry, saved = result == KeyPolicyStore.Withdrawal.OWED, editScope) {
+        owe(entry, saved = result == KeyPolicyStore.Withdrawal.OWED, store, editScope) {
             when (store.withdraw(keyId, instance, peer)) {
-                KeyPolicyStore.Withdrawal.REMOVED, KeyPolicyStore.Withdrawal.STALE -> Attempt.DONE
+                KeyPolicyStore.Withdrawal.REMOVED, KeyPolicyStore.Withdrawal.STALE -> Attempt.LANDED
                 KeyPolicyStore.Withdrawal.OWED -> Attempt.SAVED
                 KeyPolicyStore.Withdrawal.HELD -> Attempt.HELD
             }
@@ -268,8 +268,13 @@ class KeySharingPeers(
     /** A pending obligation's retry token (by identity), and whether its denial is durable. */
     private class Pending(val saved: Boolean)
 
-    /** One retry's result: its write landed, only its denial is durable, or it is still held in the process. */
-    private enum class Attempt { DONE, SAVED, HELD }
+    /**
+     * One retry's result: its write landed ([LANDED], not yet [DONE]: the
+     * key row's denial held in the process may still be unsaved), it is done
+     * ([DONE], only from [reconciled]), only its denial is durable, or it is
+     * still held in the process.
+     */
+    private enum class Attempt { LANDED, DONE, SAVED, HELD }
 
     companion object {
         private const val TAG = "KeySharingPeers"
@@ -299,15 +304,15 @@ class KeySharingPeers(
 
         /**
          * Records [entry] as pending ([saved]: its denial is durable) and
-         * retries [attempt] in [scope] until it is [Attempt.DONE] or a later
-         * edit settles it. The one place an obligation is tracked.
+         * retries [attempt] in [scope] until it is done ([reconciled]) or a
+         * later edit settles it. The one place an obligation is tracked.
          */
-        private fun owe(entry: Owed, saved: Boolean, scope: CoroutineScope, attempt: suspend () -> Attempt) {
+        private fun owe(entry: Owed, saved: Boolean, store: KeyPolicyStore, scope: CoroutineScope, attempt: suspend () -> Attempt) {
             var token = Pending(saved)
             pendingObligations.update { it + (entry to token) }
             scope.launch {
                 retry({ pendingObligations.value[entry] === token }) {
-                    val again = attempt()
+                    val again = reconciled(store, entry, attempt())
                     if (again == Attempt.DONE) {
                         pendingObligations.update { if (it[entry] === token) it - entry else it }
                         return@retry
@@ -321,6 +326,21 @@ class KeySharingPeers(
                     throw java.io.IOException("A sharing obligation failed to store again")
                 }
             }
+        }
+
+        /**
+         * The one place a retry is accepted as done (#270 review): a landed
+         * [attempt] is done only once the denial [entry]'s key row
+         * holds in the process, if any, is written to its policy row
+         * ([KeyPolicyStore.recordHeld]); until then it is [Attempt.HELD] and
+         * retried. A grant delete that lands after its denial write failed
+         * never drops that denial unsaved, which would deny every peer in
+         * this process alone and authorize them again after a restart.
+         */
+        private suspend fun reconciled(store: KeyPolicyStore, entry: Owed, attempt: Attempt): Attempt = when {
+            attempt != Attempt.LANDED -> attempt
+            store.recordHeld(entry.keyId, entry.instance) -> Attempt.DONE
+            else -> Attempt.HELD
         }
 
         /**
@@ -391,9 +411,8 @@ class KeySharingPeers(
                     if (decision != null && e is KeyPolicyStore.KeyChangedException) throw e
                     Log.e(TAG, "Storing the key's sharing policy failed; it was refused", e)
                     if (store.isHeld(keyId, instance)) {
-                        owe(Owed(keyId, instance, null), saved = false, editScope) {
-                            if (store.recordHeld(keyId, instance)) Attempt.DONE else Attempt.HELD
-                        }
+                        // Its retry is the held denial's write alone, which [reconciled] makes.
+                        owe(Owed(keyId, instance, null), saved = false, store, editScope) { Attempt.LANDED }
                     }
                     false
                 }
