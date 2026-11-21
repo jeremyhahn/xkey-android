@@ -166,11 +166,14 @@ up answers CTAP2_ERR_OPERATION_DENIED.
 
 With no allowList and more than one discoverable passkey the policy shows
 for the RP, the owner picks the account on the phone before anything signs:
-one prompt per account in turn, each named by display name and user name
-("Sign in as Alice (alice)?"). Approving one picks it; cancelling shows the
-next, and cancelling the last declines (CTAP2_ERR_OPERATION_DENIED). The
-usual user check prompt follows the choice. A single passkey, or an
-allowList, needs no choice.
+one list screen shows every account in order, each named by display name
+and user name ("Alice (alice)") as plain text, with the RP as subtitle and a
+Cancel button. Tapping one picks it; Cancel, back or dismissing the list
+declines (CTAP2_ERR_OPERATION_DENIED). The list takes its turn in the same
+prompt queue as every approval, shows over the lock screen with its own
+notification on a locked phone, and goes away if the client cancels. It
+verifies nobody: the usual user check prompt follows the choice. A single
+passkey, or an allowList, needs no choice.
 
 The 0xFFFD service sits beside the xkey service. Every FIDO characteristic
 needs an encrypted, MITM-protected link, and fidoServiceRevisionBitfield
@@ -226,8 +229,7 @@ credential management, extensions, U2F, and silent (`up` false)
 assertions.
 
 Left: verification on a device against a CTAP2 BLE client and
-`xkey fido2 --backend phone`, and a list screen for the account choice in
-place of successive prompts.
+`xkey fido2 --backend phone`.
 
 ## Tests
 
@@ -238,7 +240,8 @@ place of successive prompts.
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/Ctap2AuthenticatorTest.kt` | The three commands end to end over CBOR bytes with a fake backend, signature verified, counter, the owner's account choice, every refusal including UV |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSessionTest.kt` | PING, MSG, keepalive, CANCEL (also before start), handler failure, BUSY, framing errors, the reassembly timeout and the command after it, close |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/AndroidFidoCredentialBackendTest.kt` | Sharing policy on list and sign, shared counter, one Keystore signature over unhashed data, per-operation passkeys, account names in the chooser, rollback of a failed MakeCredential |
-| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric; both prompts over the lock screen with their own notification; the account chooser |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric; both prompts over the lock screen with their own notification; the account chooser as one list call |
+| `app/src/test/kotlin/com/automatethethings/xkey/ui/TransparentBiometricActivityAccountChoiceTest.kt` | The account list: every account in order as plain text under the RP, a tap answers its index, Cancel and back answer none, over the lock screen, taken down when its caller is cancelled |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoGattServerTest.kt` | Control point write to fidoStatus notification, permissions, revision, MTU, subscription, the bounded queue, no cross-client frame below API 33, a refused or failed notification sent again and the connection ended after three attempts |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
