@@ -585,6 +585,22 @@ class AndroidFidoCredentialBackendTest {
     }
 
     @Test
+    fun `a replaced passkey whose Keystore delete reports a failure is deleted on a later retry`() = runTest {
+        val (keyRows, _) = storedResidents()
+        // Keystore reports the old key's delete failed, without throwing:
+        // the key is still there, so its record must stay.
+        every { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns false
+
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", discoverable = true))
+        assertTrue("the old passkey's rows are gone", shared.keyId !in keyRows)
+
+        // The next registration, on a fresh backend as after a restart,
+        // retries the delete the record kept.
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", discoverable = false))
+        io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+    }
+
+    @Test
     fun `a failed resident registration leaves the old passkey usable`() = runTest {
         val (keyRows, metadataRows) = storedResidents()
         coEvery { credentialDao.insert(any()) } throws IllegalStateException("disk full")
