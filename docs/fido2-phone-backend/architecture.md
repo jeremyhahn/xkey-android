@@ -43,7 +43,33 @@ against a CTAP2 BLE client.
 | Method | Params | Result |
 |--------|--------|--------|
 | `local.listFido2Credentials` | `rpId` | `credentials[]`: `credentialId`, `rpId`, `rpName`?, `userId`?, `userName`?, `userDisplayName`?, `isDiscoverable`, `createdAt` |
-| `local.signFido2Assertion` | `credentialId`, `clientDataHash` (base64), `rpId`, `userVerificationRequired` (default `true`) | `authenticatorData` (base64), `signature` (base64), `userHandle`?, `signCount` |
+| `local.signFido2Assertion` | `credentialId`, `clientDataHash`, `rpId`, `userVerificationRequired` (default `true`) | `authenticatorData`, `signature`, `userHandle`?, `signCount` |
+
+Byte fields. `credentialId`, `userId`, `clientDataHash`, `authenticatorData`,
+`signature` and `userHandle` are bytes, sent as standard-alphabet, padded
+base64 (RFC 4648 section 4). The desktop reads them as Go `[]byte` with
+`encoding/json`, which accepts nothing else: a URL-safe or unpadded value
+fails the whole result. The phone refuses a `credentialId` that is not
+standard padded base64 with `INVALID_PARAMS`.
+
+Stored ids to bytes. The phone stores a passkey's id (`KeyEntity.keyId`) and
+user id (`KeyEntity.userId`) as strings, URL-safe unpadded base64 for every
+passkey it makes. `Fido2WireIds`
+(`app/src/main/kotlin/com/automatethethings/xkey/protocol/Fido2WireIds.kt`)
+is the one place the two methods convert them: a stored string that is
+base64 in either alphabet, padded or not, maps to its decoded bytes, and any
+other string to its UTF-8 bytes. The CTAP2 BLE path uses the same rule
+(`Fido2WireIds.wireId`), so a passkey has one credential ID on every
+transport. `local.signFido2Assertion` resolves the request's `credentialId`
+once, to the single FIDO2 passkey for `rpId` with those bytes; every later
+step (Keystore alias, counter, audit, log) uses the stored id. Two stored
+passkeys with the same bytes answer `KEY_NOT_FOUND`, as neither is offered
+over BLE.
+
+`userVerificationRequired`. The desktop omits the field when it is false
+(`omitempty`). The phone reads a missing field as `true`, the stricter
+reading, so a desktop that wants no verification is still verified when the
+owner's settings require it.
 
 Sharing policy (`KeyEntity.sharingPolicy`), applied by `canShareKeyWithPeer` to
 both methods:
@@ -247,6 +273,7 @@ Left: verification on a device against a CTAP2 BLE client and
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/ProtocolConstantsTest.kt` | Method name constants |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/UserVerificationWireErrorTest.kt` | Missing user verification answers `BIOMETRIC_FAILED` on both methods |
+| `app/src/test/kotlin/com/automatethethings/xkey/protocol/Fido2WireEncodingTest.kt` | Listed `credentialId` and `userId` decode as standard padded base64 to the stored bytes, a non-base64 stored id as its UTF-8 bytes; the listed id signs and `userHandle` decodes the same way; a non-standard id answers `INVALID_PARAMS`, an unknown one `KEY_NOT_FOUND`; the raw stored id and an id two passkeys share do not sign |
 
 ## Related features
 
