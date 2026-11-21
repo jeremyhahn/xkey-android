@@ -138,7 +138,7 @@ class CosignKeyUseOrderTest {
                 ?: error("The co-sign's turn never came")
         }
         coEvery {
-            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), any(), any())
+            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), any(), any(), any())
         } coAnswers {
             val signedData = arg<suspend () -> ByteArray>(1)
             cosignWaitsForItsPrompt.complete(Unit)

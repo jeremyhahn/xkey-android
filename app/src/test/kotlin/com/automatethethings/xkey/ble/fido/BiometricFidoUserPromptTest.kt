@@ -131,7 +131,7 @@ class BiometricFidoUserPromptTest {
         val lockScreen = FakeLockScreen(locked = true)
         val overLockScreen = slot<Boolean>()
         coEvery {
-            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), capture(overLockScreen), any(), any())
+            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), capture(overLockScreen), any(), any(), any())
         } coAnswers {
             arg<(String, Intent) -> Unit>(6)("signature-1", promptIntent)
             byteArrayOf(0x30)

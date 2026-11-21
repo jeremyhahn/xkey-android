@@ -98,24 +98,48 @@ class CosignApprovalPrompts(
      * nothing without that prompt, so no approval of another payload, and no
      * approval given apart from the signature, can make it sign. Refusals and
      * deadlines are as for [approve].
+     *
+     * @param onTurn Called once this prompt's turn on screen has come and
+     *   before it starts (the caller reserves the key's use there, #255
+     *   review r5); one that throws fails the co-sign and nothing is shown.
      */
     suspend fun sign(
         operation: CosignOperation,
         title: String,
         subtitle: String,
         locked: Boolean,
-        onLaunch: (key: String, prompt: Intent) -> Unit = { _, _ -> }
-    ): ByteArray = answered(onLaunch) { onTurn ->
-        launcher.requestCryptoSignature(
-            credentialId = operation.keyId,
-            dataHash = operation.digest.copyOf(),
-            title = title,
-            subtitle = subtitle,
-            showOnLockScreen = locked,
-            keyAlias = operation.keyAlias,
-            signatureAlgorithm = operation.signatureAlgorithm,
-            onLaunch = onTurn
-        )
+        onLaunch: (key: String, prompt: Intent) -> Unit = { _, _ -> },
+        onTurn: suspend () -> Unit = {}
+    ): ByteArray {
+        // The caller's own refusal on the turn (a deleted key) is its own
+        // answer, never read as the owner's.
+        val refused = java.util.concurrent.atomic.AtomicReference<Exception?>()
+        try {
+            return answered(onLaunch) { launched ->
+                launcher.requestCryptoSignatureOnTurn(
+                    credentialId = operation.keyId,
+                    signedData = {
+                        try {
+                            onTurn()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            refused.set(e)
+                            throw e
+                        }
+                        operation.digest.copyOf()
+                    },
+                    title = title,
+                    subtitle = subtitle,
+                    showOnLockScreen = locked,
+                    keyAlias = operation.keyAlias,
+                    onLaunch = launched,
+                    signatureAlgorithm = operation.signatureAlgorithm
+                )
+            }
+        } catch (e: CosignNotApprovedException) {
+            throw refused.get() ?: e
+        }
     }
 
     /**

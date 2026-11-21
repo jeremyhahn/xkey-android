@@ -1999,6 +1999,21 @@ class RequestHandler(
     }
 
     /**
+     * [withUsableGeneralKey] for a use that waits for an approval prompt
+     * (#255 review r5): the same general-key check, then the key's use is
+     * reserved only once the prompt's turn has come
+     * ([KeyPolicyStore.withKeyUseOnTurn]), so nothing of the key is held
+     * while the prompt waits for the queue.
+     */
+    private suspend fun <T> withGeneralKeyUseOnTurn(keyId: String, prompt: suspend (reserve: suspend () -> Unit) -> T): T {
+        val kind = ownedKeyKind(keyId, keyDao.getByKeyId(keyId), ErrorCodes.OPERATION_DENIED)
+        if (kind != com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+            throw ProtocolException("Key $keyId names a credential, not a general key", errorCode = ErrorCodes.OPERATION_DENIED)
+        }
+        return keyPolicyStore.withKeyUseOnTurn(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL, prompt)
+    }
+
+    /**
      * Handles local.symmetricEncrypt - AES-GCM encryption.
      */
     private suspend fun handleLocalSymmetricEncrypt(request: Request): Response {
@@ -4831,19 +4846,24 @@ class RequestHandler(
             if (perOperation) {
                 // The prompt's signature is a use of the key: under its use
                 // gate, so a key deleted before the prompt signs nothing and
-                // a delete waits out the prompt (#255 review, ruling 554).
-                withUsableGeneralKey(signingKey.keyId) { approvals.sign(
-                    CosignOperation(
-                        keyId = signingKey.keyId,
-                        keyAlias = asApproved.alias,
-                        digest = hashBytes,
-                        signatureAlgorithm = jcaAlgorithm!!
-                    ),
-                    title = title,
-                    subtitle = subtitle,
-                    locked = keyguardManager.isKeyguardLocked,
-                    onLaunch = notice.onLaunch
-                ) }
+                // a delete waits out the prompt (#255 review). The use is
+                // reserved once the prompt's turn has come, never while it
+                // waits for the queue (#255 review r5).
+                withGeneralKeyUseOnTurn(signingKey.keyId) { reserve ->
+                    approvals.sign(
+                        CosignOperation(
+                            keyId = signingKey.keyId,
+                            keyAlias = asApproved.alias,
+                            digest = hashBytes,
+                            signatureAlgorithm = jcaAlgorithm!!
+                        ),
+                        title = title,
+                        subtitle = subtitle,
+                        locked = keyguardManager.isKeyguardLocked,
+                        onLaunch = notice.onLaunch,
+                        onTurn = reserve
+                    )
+                }
             } else {
                 approvals.approve(
                     title = title,

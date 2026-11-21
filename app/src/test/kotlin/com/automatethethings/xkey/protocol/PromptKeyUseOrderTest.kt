@@ -124,7 +124,7 @@ class PromptKeyUseOrderTest {
                 ?: error("The RPC sign's turn never came")
         }
         coEvery {
-            biometricLauncher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), any(), any())
+            biometricLauncher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), any(), any(), any())
         } coAnswers {
             val signedData = arg<suspend () -> ByteArray>(1)
             rpcWaitsForItsPrompt.complete(Unit)

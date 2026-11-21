@@ -1056,7 +1056,7 @@ class AndroidFidoCredentialBackendTest {
         val launcher = mockk<BiometricActivityLauncher>(relaxed = true)
         val aliases = mutableListOf<String?>()
         coEvery {
-            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), captureNullable(aliases), any())
+            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), captureNullable(aliases), any(), any())
         } returns byteArrayOf(0x36)
         val unlocked = object : FidoLockScreen {
             override val locked = false
