@@ -114,4 +114,28 @@ class SharePermissionChokePointTest {
             "pairedDeviceRepository,\n            keyPolicyStore\n        )" in sheet
         )
     }
+
+    /**
+     * #270 review r3: every SharePermission a production path builds is
+     * given the KeyPolicyStore, so a narrowing whose write failed stays
+     * denied on that path too (the BLE authenticator's included).
+     */
+    @Test
+    fun everySharePermissionIsBuiltWithThePolicyStore() {
+        val offenders = sources.flatMap { (path, text) ->
+            Regex("""(?<!class )\bSharePermission\(""").findAll(text).mapNotNull { match ->
+                var depth = 0
+                var commas = 0
+                for (c in text.substring(match.range.last)) {
+                    when (c) {
+                        '(' -> depth++
+                        ')' -> if (--depth == 0) break
+                        ',' -> if (depth == 1) commas++
+                    }
+                }
+                path.takeIf { commas < 2 }
+            }.toList()
+        }
+        assertEquals("SharePermission built without the policy store", emptyList<String>(), offenders)
+    }
 }
