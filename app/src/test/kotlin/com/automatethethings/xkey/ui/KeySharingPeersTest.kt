@@ -694,14 +694,15 @@ class KeySharingPeersTest {
         )
         assertEquals(setOf(KEY), KeySharingPeers.unsavedKeys.first())
         assertTrue(store.isHeld(KEY, instance))
-        assertFalse(hasAccess(PEER_B))
+        // B is denied in this process, by the denial held there alone.
+        val key = FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS, id = instance)
+        assertEquals(StoredPolicy.PRIVATE, store.enforcedPolicy(key))
 
         // The denial's write recovers: the retry saves it.
         tables.failing.clear()
         advanceUntilIdle()
         assertFalse(store.isHeld(KEY, instance))
         assertEquals(emptySet<String>(), KeySharingPeers.unsavedKeys.first())
-        val key = FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS, id = instance)
         val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
         assertEquals(StoredPolicy.PRIVATE, restarted.enforcedPolicy(key))
         assertFalse(hasAccess(PEER_B))

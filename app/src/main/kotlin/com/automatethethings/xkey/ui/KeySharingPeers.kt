@@ -174,6 +174,9 @@ class KeySharingPeers(
          * The withdrawal's delete and the denial it then owes both failed to
          * write: the peer is denied in this process and the delete is
          * retried, but a restart would lose that, so it is not saved (#193 r7).
+         * So is a withdrawal whose delete lands while the key row's denial
+         * is held in the process alone and still fails to be written: it
+         * stays unsaved until that denial is written.
          */
         UNSAVED,
 
@@ -237,12 +240,16 @@ class KeySharingPeers(
      * Returns [Outcome.STOOD] only once the withdrawal is durable, its delete
      * or its owed clear stored: one whose denial is held in the process
      * alone, which a restart loses, is [Outcome.UNSAVED] (#193 r6, r7, ruling 554).
+     * A delete that lands settles [entry] only through [settleLanded]: while
+     * the key row's denial, held in the process by an earlier failed write,
+     * still fails to be written, the withdrawal is [Outcome.UNSAVED] too,
+     * and that denial's write is retried.
      */
     private suspend fun withdraw(entry: Owed): Outcome {
         val peer = checkNotNull(entry.peer)
         val result = store.withdraw(keyId, instance, peer)
         if (result == KeyPolicyStore.Withdrawal.REMOVED || result == KeyPolicyStore.Withdrawal.STALE) {
-            settle { it == entry }
+            if (!settleLanded(store, entry, editScope)) return Outcome.UNSAVED
             return if (result == KeyPolicyStore.Withdrawal.STALE) Outcome.STALE else Outcome.STOOD
         }
         Log.e(TAG, "Withdrawing key access failed ($result); every peer is denied until the key's next policy write")
@@ -341,6 +348,28 @@ class KeySharingPeers(
             attempt != Attempt.LANDED -> attempt
             store.recordHeld(entry.keyId, entry.instance) -> Attempt.DONE
             else -> Attempt.HELD
+        }
+
+        /**
+         * The one place a foreground write that landed settles [entry]'s
+         * pending obligation, through [reconciled] as a retry does: it is
+         * settled only once the denial its key row holds in the process, if
+         * any, is written ([KeyPolicyStore.recordHeld]), and true is
+         * returned. Otherwise the obligation stays tracked and unsaved, its
+         * held denial's write retried in [scope], and false is returned: a
+         * landed write never drops a denial that a restart would lose.
+         */
+        private suspend fun settleLanded(store: KeyPolicyStore, entry: Owed, scope: CoroutineScope): Boolean {
+            if (reconciled(store, entry, Attempt.LANDED) == Attempt.DONE) {
+                settle { it == entry }
+                return true
+            }
+            // An unsaved obligation already tracked keeps its retry; any
+            // other is tracked unsaved, retrying the held denial's write alone.
+            if (pendingObligations.value[entry]?.saved != false) {
+                owe(entry, saved = false, store, scope) { Attempt.LANDED }
+            }
+            return false
         }
 
         /**
