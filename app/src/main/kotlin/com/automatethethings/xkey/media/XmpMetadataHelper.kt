@@ -24,6 +24,8 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 
 /**
  * Where a media file's signature lives:
@@ -238,9 +240,21 @@ object XmpMetadataHelper {
      * ([MediaPublisher.openOriginal]), the ones its content hash covers.
      * Without location access a MediaStore capture throws
      * [MediaPublisher.OriginalUnavailableException]: unreadable is not unsigned.
+     * It blocks for the whole copy of the original: a screen reads through
+     * [readOriginalSignature] instead.
      */
     fun readSignatureFromUri(context: Context, uri: Uri, mimeType: String?): ContentAuthenticityData? =
         readSignature(uri, mimeType) { MediaPublisher.openOriginal(context, uri) }
+
+    /**
+     * [readSignatureFromUri] as a screen reads it: on [Dispatchers.IO], its
+     * thread interrupted when the caller is cancelled. A cancel alone does not
+     * end synchronous IO; the interrupt ends [MediaPublisher.openOriginal]'s
+     * chunked copy of the original and deletes its snapshot, so leaving or
+     * recreating the screen never leaves a full copy running.
+     */
+    suspend fun readOriginalSignature(context: Context, uri: Uri, mimeType: String?): ContentAuthenticityData? =
+        runInterruptible(Dispatchers.IO) { readSignatureFromUri(context, uri, mimeType) }
 
     /**
      * [readSignatureFromUri] over [snapshot], a private copy of the media

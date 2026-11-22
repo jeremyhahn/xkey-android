@@ -66,6 +66,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -858,7 +859,8 @@ class CoSignActivity : AppCompatActivity() {
         mediaLoad = lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val mimeType = contentResolver.getType(uri)
-                val sigData = XmpMetadataHelper.readSignatureFromUri(applicationContext, uri, mimeType)
+                // Interruptible: leaving or recreating the screen ends the copy of the original.
+                val sigData = XmpMetadataHelper.readOriginalSignature(applicationContext, uri, mimeType)
                 currentSignatureData = sigData
 
                 withContext(Dispatchers.Main) {
@@ -867,6 +869,8 @@ class CoSignActivity : AppCompatActivity() {
                         Snackbar.make(rootLayout, getString(R.string.cosign_no_signature_data), Snackbar.LENGTH_LONG).show()
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     Snackbar.make(

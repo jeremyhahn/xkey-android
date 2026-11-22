@@ -1184,7 +1184,7 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Hash the file content
-                val hashHex = MediaHasher.hashCanonicalUri(applicationContext, uri)
+                val hashHex = runInterruptible { MediaHasher.hashCanonicalUri(applicationContext, uri) }
                 val hashBytes = hexToBytes(hashHex)
 
                 // Sign the hash
@@ -1292,13 +1292,16 @@ class FileOperationActivity : AppCompatActivity() {
 
     /**
      * How the shared media at [uri] is signed, reading it only, so media
-     * shared with read access alone keeps the sidecar path.
+     * shared with read access alone keeps the sidecar path. Interruptible:
+     * leaving the screen ends the copy of the original.
      */
-    private fun sharedSigning(uri: Uri, mimeType: String): XmpMetadataHelper.SharedSigning =
-        XmpMetadataHelper.sharedSigning(
-            open = { MediaPublisher.openOriginal(applicationContext, uri) },
-            format = XmpContainers.formatOf(mimeType)
-        )
+    private suspend fun sharedSigning(uri: Uri, mimeType: String): XmpMetadataHelper.SharedSigning =
+        runInterruptible {
+            XmpMetadataHelper.sharedSigning(
+                open = { MediaPublisher.openOriginal(applicationContext, uri) },
+                format = XmpContainers.formatOf(mimeType)
+            )
+        }
 
     /**
      * Write the pending signed copy to the user-selected URI. The shared
@@ -1602,7 +1605,8 @@ class FileOperationActivity : AppCompatActivity() {
                     "$fileName.xkeyenc",
                     write = { staged ->
                         // The file whole: a capture's location is encrypted with it, never dropped.
-                        MediaPublisher.openOriginal(applicationContext, uri).use { input ->
+                        // Cancellable: leaving the screen ends the copy of the original.
+                        MediaPublisher.openOriginalCancellable(applicationContext, uri).use { input ->
                             FileOutputStream(staged).use { output ->
                                 fileEncryptor.encryptForRecipient(
                                     recipient.publicKeyDer,
