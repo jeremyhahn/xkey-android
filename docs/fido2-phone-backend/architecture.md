@@ -43,7 +43,33 @@ against a CTAP2 BLE client.
 | Method | Params | Result |
 |--------|--------|--------|
 | `local.listFido2Credentials` | `rpId` | `credentials[]`: `credentialId`, `rpId`, `rpName`?, `userId`?, `userName`?, `userDisplayName`?, `isDiscoverable`, `createdAt` |
-| `local.signFido2Assertion` | `credentialId`, `clientDataHash` (base64), `rpId`, `userVerificationRequired` (default `true`) | `authenticatorData` (base64), `signature` (base64), `userHandle`?, `signCount` |
+| `local.signFido2Assertion` | `credentialId`, `clientDataHash`, `rpId`, `userVerificationRequired` (default `true`) | `authenticatorData`, `signature`, `userHandle`?, `signCount` |
+
+Byte fields. `credentialId`, `userId`, `clientDataHash`, `authenticatorData`,
+`signature` and `userHandle` are bytes, sent as standard-alphabet, padded
+base64 (RFC 4648 section 4). The desktop reads them as Go `[]byte` with
+`encoding/json`, which accepts nothing else: a URL-safe or unpadded value
+fails the whole result. The phone refuses a `credentialId` that is not
+standard padded base64 with `INVALID_PARAMS`.
+
+Stored ids to bytes. The phone stores a passkey's id (`KeyEntity.keyId`) and
+user id (`KeyEntity.userId`) as strings, URL-safe unpadded base64 for every
+passkey it makes. `Fido2WireIds`
+(`app/src/main/kotlin/com/automatethethings/xkey/protocol/Fido2WireIds.kt`)
+is the one place the two methods convert them: a stored string that is
+base64 in either alphabet, padded or not, maps to its decoded bytes, and any
+other string to its UTF-8 bytes. The CTAP2 BLE path uses the same rule
+(`Fido2WireIds.wireId`), so a passkey has one credential ID on every
+transport. `local.signFido2Assertion` resolves the request's `credentialId`
+once, to the single FIDO2 passkey for `rpId` with those bytes; every later
+step (Keystore alias, counter, audit, log) uses the stored id. Two stored
+passkeys with the same bytes answer `KEY_NOT_FOUND`, as neither is offered
+over BLE.
+
+`userVerificationRequired`. The desktop omits the field when it is false
+(`omitempty`). The phone reads a missing field as `true`, the stricter
+reading, so a desktop that wants no verification is still verified when the
+owner's settings require it.
 
 Sharing policy (`KeyEntity.sharingPolicy`), applied by `canShareKeyWithPeer` to
 both methods:
@@ -56,7 +82,9 @@ both methods:
 
 The authenticator data is 37 bytes: `SHA-256(rpId)` (32) `|| flags` (1)
 `|| signCount` (4, big-endian). The signature is over
-`SHA-256(authenticatorData || clientDataHash)`. UP is always set, AT never.
+`authenticatorData || clientDataHash`, made with SHA256withECDSA, which
+hashes it once (`ApprovedKey.signWebAuthn` passes it unhashed). UP is always
+set, AT never.
 
 The passkey provider serves the same passkeys, so both paths take the
 counter from one `PasskeySignCounter`
@@ -97,7 +125,7 @@ sequenceDiagram
     H->>H: UserVerificationCompliance.enforce
     H->>DB: PasskeySignCounter.next (both stores)
     H->>H: authData = rpIdHash || flags || signCount
-    H->>KM: signWithoutBiometric(SHA-256(authData || clientDataHash))
+    H->>KM: signApproved(authData || clientDataHash) via ApprovedKey.signWebAuthn
     H->>H: AuditLogger.logFido2Authentication
     H-->>Desk: {authenticatorData, signature, userHandle, signCount}
 ```
@@ -108,7 +136,7 @@ sequenceDiagram
 |-----------|---------|
 | Missing params, `rpId`, `credentialId` or `clientDataHash` | `ProtocolException`, `ErrorCodes.INVALID_PARAMS` |
 | Unknown credential | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` |
-| Key is not `KeyTypes.FIDO2`; stored `rpId` differs from the request | `ProtocolException`, `ErrorCodes.INVALID_PARAMS` |
+| Key is not `KeyTypes.FIDO2`; stored `rpId` differs from the request | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` ("Credential not found"): the lookup offers only FIDO2 passkeys of the requested `rpId`, so such a key cannot be named |
 | Sharing policy refuses this peer | `ProtocolException`, `ErrorCodes.OPERATION_DENIED` (list omits the credential instead) |
 | UV required but not performed, with strict user verification on | `UserVerificationRequiredException` from `UserVerificationCompliance.enforce`; `RequestHandler.dispatch` answers `ErrorCodes.BIOMETRIC_FAILED` (-32003) with the exception's message |
 
@@ -243,10 +271,11 @@ Left: verification on a device against a CTAP2 BLE client and
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric; both prompts over the lock screen with their own notification; the account chooser as one list call |
 | `app/src/test/kotlin/com/automatethethings/xkey/ui/TransparentBiometricActivityAccountChoiceTest.kt` | The account list: every account in order as plain text under the RP, a tap answers its index, Cancel and back answer none, over the lock screen, taken down when its caller is cancelled |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoGattServerTest.kt` | Control point write to fidoStatus notification, permissions, revision, MTU, subscription, the bounded queue, no cross-client frame below API 33, a refused or failed notification sent again and the connection ended after three attempts |
-| `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal |
+| `app/src/androidTest/kotlin/com/automatethethings/xkey/protocol/RequestHandlerFido2AndCosignTest.kt` | Discovery metadata, sharing policies, rpId scoping, verifiable assertion, counter persistence, every refusal; every listing assertion goes through one wire-ID helper (`listsCredential`/`listedEntry`) that encodes the stored id |
 | `app/src/androidTest/kotlin/com/automatethethings/xkey/e2e/ProtocolIntegrationTest.kt` | `local.listFido2Credentials` end to end |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/ProtocolConstantsTest.kt` | Method name constants |
 | `app/src/test/kotlin/com/automatethethings/xkey/protocol/UserVerificationWireErrorTest.kt` | Missing user verification answers `BIOMETRIC_FAILED` on both methods |
+| `app/src/test/kotlin/com/automatethethings/xkey/protocol/Fido2WireEncodingTest.kt` | Listed `credentialId` and `userId` decode as standard padded base64 to the stored bytes, a non-base64 stored id as its UTF-8 bytes; the listed id signs and `userHandle` decodes the same way; a non-standard id answers `INVALID_PARAMS`, an unknown one `KEY_NOT_FOUND`; the raw stored id and an id two passkeys share do not sign; a passkey of another `rpId` and a non-FIDO2 key with the same bytes answer `KEY_NOT_FOUND`; a source scan keeps the device test's listing reads in its wire-ID helpers |
 
 ## Related features
 

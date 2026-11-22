@@ -116,6 +116,7 @@ class QueuedApprovalRaceTest {
 
         keyDao = mockk(relaxed = true)
         coEvery { keyDao.getByKeyId(credentialId) } answers { passkey(storedSignCount) }
+        coEvery { keyDao.getFido2ByRpId("example.com") } answers { listOf(passkey(storedSignCount)) }
         coEvery { keyDao.updateSignCount(credentialId, any(), any()) } answers {
             storedSignCount = secondArg()
         }
@@ -238,7 +239,7 @@ class QueuedApprovalRaceTest {
         id = id,
         method = MethodNames.LOCAL_SIGN_FIDO2_ASSERTION,
         params = JSONObject()
-            .put("credentialId", credentialId)
+            .put("credentialId", Fido2WireIds.encode(credentialId))
             .put("clientDataHash", Base64.getEncoder().encodeToString(ByteArray(32) { id.toByte() }))
             .put("rpId", "example.com")
             .put("userVerificationRequired", true)
