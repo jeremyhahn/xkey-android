@@ -1108,8 +1108,10 @@ class KeyShareAuditTest {
         val keys = mutableMapOf("xkey_key_$KEY_ID" to general, "xkey_credential_$KEY_ID" to credential)
         platformKeystore(keys)
         val keystore = KeystoreManager(context)
-        coEvery { keyDao.getByKeyId(KEY_ID) } returns
-            keyEntity(SharingPolicyType.ALL_PEERS, shareable = true, keyType = "fido2")
+        val passkey = keyEntity(SharingPolicyType.ALL_PEERS, shareable = true, keyType = "fido2").copy(rpId = "example.com")
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns passkey
+        // The assertion names the passkey by its wire id, among the relying party's passkeys.
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(passkey)
         handler = RequestHandler(
             context = context,
             keystoreManager = keystore,
@@ -1122,7 +1124,7 @@ class KeyShareAuditTest {
         val assertion = Request(
             id = 7,
             method = MethodNames.LOCAL_SIGN_FIDO2_ASSERTION,
-            params = JSONObject().put("credentialId", KEY_ID).put("rpId", "example.com")
+            params = JSONObject().put("credentialId", Fido2WireIds.encode(KEY_ID)).put("rpId", "example.com")
                 .put("clientDataHash", Base64.getEncoder().encodeToString(clientDataHash))
                 .put("userVerificationRequired", false)
         ).toJson()
@@ -1141,10 +1143,10 @@ class KeyShareAuditTest {
         val result = success(served(assertion))
         val authData = Base64.getDecoder().decode(result.getString("authenticatorData"))
         val signature = Base64.getDecoder().decode(result.getString("signature"))
-        val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(authData + clientDataHash)
+        // WebAuthn: ECDSA with SHA-256 over authenticatorData || clientDataHash, hashed once.
         fun verifies(key: java.security.PublicKey) = java.security.Signature.getInstance("SHA256withECDSA").run {
             initVerify(key)
-            update(dataHash)
+            update(authData + clientDataHash)
             verify(signature)
         }
         assertTrue("the assertion verifies against the returned public key", verifies(general.public))

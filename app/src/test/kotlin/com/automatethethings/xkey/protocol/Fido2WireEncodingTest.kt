@@ -113,6 +113,12 @@ class Fido2WireEncodingTest {
 
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No passkey has a policy row of its own or a pending deletion: each
+        // is shared as its stored policy says.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            io.mockk.coEvery { policyRow(any()) } returns null
+            io.mockk.coEvery { deletion(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
