@@ -940,7 +940,7 @@ class FileOperationActivity : AppCompatActivity() {
             withContext(Dispatchers.Main) {
                 populateKeySpinner()
                 populateRecipientSpinner()
-                onOperationChanged()
+                showSelectors()
                 keysLoaded = true
                 val resumed = runAfterLoad
                 runAfterLoad = -1
@@ -1017,6 +1017,18 @@ class FileOperationActivity : AppCompatActivity() {
      * - Encrypt: show recipient selector, hide key selector
      */
     private fun onOperationChanged() {
+        showSelectors()
+
+        // Hide result card when switching operations
+        resultCard.visibility = View.GONE
+    }
+
+    /**
+     * The key and recipient selectors [selectedOperation] uses, shown with
+     * the lists loaded so far. The result card is left as it is: the lists
+     * loading ([loadKeysAndContacts]) never hides a result already shown.
+     */
+    private fun showSelectors() {
         val recipientCard = rootLayout.findViewWithTag<View>("recipientCard")
 
         when (selectedOperation) {
@@ -1041,9 +1053,6 @@ class FileOperationActivity : AppCompatActivity() {
                 populateKeySpinner()
             }
         }
-
-        // Hide result card when switching operations
-        resultCard.visibility = View.GONE
     }
 
     // -------------------------------------------------------------------------
@@ -1080,12 +1089,14 @@ class FileOperationActivity : AppCompatActivity() {
      * The one way an operation that went through [runWithOriginals] runs:
      * with the key and recipient chosen when Process was pressed
      * ([chosenKeyId], [chosenRecipientId]), selected by identity in the
-     * spinners, which a recreation rebuilds at their first entries. It waits
-     * for the key and contact lists if they are still loading. If the chosen
+     * spinners, which a recreation rebuilds at their first entries. An
+     * operation that uses a chosen key or recipient waits for the key and
+     * contact lists if they are still loading; Verify reads neither list
+     * (it looks up each signer itself), so it runs at once. If the chosen
      * key or recipient is gone, nothing runs: the screen shows why.
      */
     private fun runChosen(operation: Int) {
-        if (!keysLoaded) {
+        if (!keysLoaded && operation != OP_VERIFY) {
             runAfterLoad = operation
             return
         }

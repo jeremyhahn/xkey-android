@@ -122,6 +122,16 @@ class FileOperationVerifyKeyLoadTest {
         XKeyDatabase::class.java.getDeclaredField("instanceRef").apply { isAccessible = true }
             .get(null) as AtomicReference<XKeyDatabase?>
 
+    private fun idleUntil(condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (!condition()) {
+            assertTrue("timed out", System.currentTimeMillis() < deadline)
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+
     private fun field(name: String) =
         FileOperationActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
 
@@ -150,10 +160,10 @@ class FileOperationVerifyKeyLoadTest {
         assertEquals("one verification is audited", listOf(false), audited.toList())
         val shown = (field("resultText").get(activity) as TextView).text.toString()
 
+        // The database ends the load on its own threads once its queries run.
         queries.release()
-        shadowOf(Looper.getMainLooper()).idle()
+        idleUntil { field("keysLoaded").getBoolean(activity) }
 
-        assertTrue("the key list loaded", field("keysLoaded").getBoolean(activity))
         assertEquals("the result stays shown once the key list loads", View.VISIBLE, resultCard.visibility)
         assertEquals("the result is unchanged", shown, (field("resultText").get(activity) as TextView).text.toString())
         assertEquals("the verify ran once", listOf(false), audited.toList())
