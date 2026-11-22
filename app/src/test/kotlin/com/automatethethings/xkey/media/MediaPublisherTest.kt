@@ -274,7 +274,8 @@ class MediaPublisherTest {
         "readSignatureFromUri(applicationContext",
         "readSignatureFromUri(this",
         "MediaHasher.hashCanonicalUri(",
-        "checkInBandUri("
+        "checkInBandUri(",
+        "checkContentHashUri("
     )
 
     /**
@@ -292,7 +293,7 @@ class MediaPublisherTest {
     private fun uninterruptibleScreenReads(text: String): List<String> =
         blocks(text, "lifecycleScope.launch").filter { (function, _) -> function !in processScopedReads }
             .flatMap { (function, body) ->
-                val wrapped = Regex(Regex.escape("runInterruptible")).findAll(body).map { match ->
+                val wrapped = Regex("runInterruptible|" + Regex.escape(signalBlock)).findAll(body).map { match ->
                     val open = body.indexOf('{', match.range.last + 1)
                     open until open + blockAt(body, match.range.last + 1).length
                 }.toList()
@@ -329,6 +330,108 @@ class MediaPublisherTest {
         assertEquals(
             listOf("load: readSignatureFromUri(applicationContext"),
             uninterruptibleScreenReads(planted)
+        )
+    }
+
+    /** The screen's read helper: its block makes the signal each read inside it passes on. */
+    private val signalBlock = "MediaPublisher.readCancellable"
+
+    /** Whether [index] in [text] sits on a comment line. */
+    private fun inComment(text: String, index: Int): Boolean {
+        val line = text.substring(text.lastIndexOf('\n', index) + 1).substringBefore('\n').trim()
+        return line.startsWith("*") || line.startsWith("/*") || line.startsWith("//")
+    }
+
+    /** The argument text of the call whose `(` is at [open] in [text], parentheses matched. */
+    private fun callArguments(text: String, open: Int): String {
+        var depth = 0
+        for (i in open until text.length) {
+            when (text[i]) {
+                '(' -> depth++
+                ')' -> if (--depth == 0) return text.substring(open + 1, i)
+            }
+        }
+        error("unbalanced call at offset $open")
+    }
+
+    /**
+     * Every read of an original in [text] outside the process-scoped
+     * functions that does not run inside a [signalBlock] block passing that
+     * block's signal on, as "function: call".
+     */
+    private fun unsignalledScreenReads(text: String): List<String> {
+        val signalled = Regex(Regex.escape(signalBlock)).findAll(text)
+            .filterNot { inComment(text, it.range.first) }
+            .map { match ->
+                val start = text.indexOf('{', match.range.last + 1)
+                val block = blockAt(text, match.range.last + 1)
+                val name = Regex("""^\{\s*(\w+)\s*->""").find(block)?.groupValues?.get(1) ?: "it"
+                Triple(start, start + block.length, name)
+            }.toList()
+        return (originalReads + "openOriginalCancellable(").flatMap { read ->
+            Regex(Regex.escape(read)).findAll(text).filterNot { inComment(text, it.range.first) }.mapNotNull { match ->
+                val function = Regex("""fun (?:<[^>]*> )?(\w+)\(""").findAll(text.substring(0, match.range.first))
+                    .lastOrNull()?.groupValues?.get(1) ?: "<top level>"
+                if (function in processScopedReads) return@mapNotNull null
+                val arguments = callArguments(text, text.indexOf('(', match.range.first))
+                val passed = signalled.any { (start, end, name) ->
+                    match.range.first in start until end && Regex("""\b${Regex.escape(name)}\b""").containsMatchIn(arguments)
+                }
+                "$function: $read".takeUnless { passed }
+            }.toList()
+        }
+    }
+
+    /**
+     * An interrupt ends work on the screen's own thread only; an open blocked
+     * in the provider's process ends only through its CancellationSignal. A
+     * screen reads an original inside [signalBlock], whose signal the
+     * screen's cancel fires, and hands that signal to the open.
+     */
+    @Test
+    fun `no screen opens an original without its cancel signal`() {
+        val sources = mainSources()
+        val screens = sources.filterKeys { it.startsWith("com/automatethethings/xkey/ui/") }
+        assertTrue("the scan found the screens", screens.isNotEmpty())
+        val reads = screens.flatMap { (file, text) -> unsignalledScreenReads(text).map { "$file: $it" } }
+        assertEquals("screen reads of an original without a cancel signal", emptyList<String>(), reads)
+
+        val dropped = sources.flatMap { (name, text) ->
+            text.lines().withIndex()
+                .filter { (_, line) ->
+                    "cancel = null" in line || ("openOriginalCancellable(" in line && "fun openOriginalCancellable(" !in line)
+                }
+                .map { (i, line) -> "$name:${i + 1}: ${line.trim()}" }
+        }
+        assertEquals("reads that drop the screen's signal", emptyList<String>(), dropped)
+
+        val helper = sources.entries.single { it.key.endsWith("media/XmpMetadataHelper.kt") }.value
+        val declared = helper.indexOf("suspend fun readOriginalSignature(")
+        assertTrue("readOriginalSignature is declared", declared >= 0)
+        val body = helper.substring(declared).substringBefore("\n\n")
+        assertTrue("readOriginalSignature reads inside $signalBlock: $body", signalBlock in body)
+        assertTrue(
+            "readOriginalSignature passes the signal on: $body",
+            unsignalledScreenReads(body.replace("readSignatureFromUri(context", "readSignatureFromUri(this")).isEmpty()
+        )
+    }
+
+    @Test
+    fun `the scan sees a screen read without a cancel signal`() {
+        val planted = """
+            fun verify(u: Uri, m: String?) {
+                lifecycleScope.launch(Dispatchers.IO) { runInterruptible { MediaHasher.checkInBandUri(applicationContext, u, m) } }
+            }
+            fun verifyDropped(u: Uri, m: String?) {
+                lifecycleScope.launch(Dispatchers.IO) { MediaPublisher.readCancellable { signal -> MediaHasher.checkInBandUri(applicationContext, u, m) } }
+            }
+            fun verifySignalled(u: Uri, m: String?) {
+                lifecycleScope.launch(Dispatchers.IO) { MediaPublisher.readCancellable { signal -> MediaHasher.checkInBandUri(applicationContext, u, m, signal) } }
+            }
+        """
+        assertEquals(
+            listOf("verify: checkInBandUri(", "verifyDropped: checkInBandUri("),
+            unsignalledScreenReads(planted)
         )
     }
 

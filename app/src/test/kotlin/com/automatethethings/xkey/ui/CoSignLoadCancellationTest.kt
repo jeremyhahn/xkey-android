@@ -170,4 +170,38 @@ class CoSignLoadCancellationTest {
         assertTrue("at most one read of the original: ${provider.inStall.get()}", provider.inStall.get() <= 1)
         assertEquals("one read was interrupted", 1, provider.stallInterrupted.get())
     }
+
+    @Test
+    fun `leaving the co-sign screen cancels the open of the original`() {
+        provider.stallAcrossProcess = true
+        val activity = pickAndStall()
+
+        controller!!.pause().stop().destroy()
+        controller = null
+
+        within5s("the open of the original is cancelled when the screen goes") {
+            provider.stallCancelled.get() == 1
+        }
+        within5s("no read is left inside the provider") { provider.inStall.get() == 0 }
+        val load = mediaLoad(activity)
+        within5s("the load ends") { load?.isCompleted == true }
+        within5s("the snapshot is deleted: ${snapshots()}") { snapshots().isEmpty() }
+        assertTrue("every read open carries a cancel signal: ${provider.readSignals}", provider.readSignals.all { it })
+    }
+
+    @Test
+    fun `a recreation during a load cancels the first screen's open`() {
+        provider.stallAcrossProcess = true
+        pickAndStall()
+
+        controller = controller!!.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        within5s("the first screen's open is cancelled by the recreation") {
+            provider.stallCancelled.get() == 1
+        }
+        Thread.sleep(200)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("at most one read of the original: ${provider.inStall.get()}", provider.inStall.get() <= 1)
+    }
 }

@@ -16,13 +16,18 @@ package com.automatethethings.xkey.media
 
 import android.content.ContentProvider
 import android.content.ContentValues
+import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
+import android.os.Bundle
+import android.os.CancellationSignal
+import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import java.io.File
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -71,19 +76,52 @@ class FakeMediaProvider : ContentProvider() {
     /** Reads inside the stall now. */
     val inStall = AtomicInteger()
 
+    /**
+     * With [stall], the stall stands for an open blocked in the provider's
+     * own process: the calling thread's interrupt does not reach it, so it
+     * ends only by [release] or by the open's [CancellationSignal] being
+     * cancelled, which counts [stallCancelled] and throws
+     * [OperationCanceledException].
+     */
+    var stallAcrossProcess = false
+
+    /** Stalled reads ended by their open's cancel signal. */
+    val stallCancelled = AtomicInteger()
+
+    /** For each read open, in order: whether it was handed a cancel signal. */
+    val readSignals: MutableList<Boolean> = java.util.Collections.synchronizedList(mutableListOf())
+
     override fun onCreate() = true
 
     override fun getType(uri: Uri): String = mimeType
 
-    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
+    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor = openFile(uri, mode, null)
+
+    /**
+     * As MediaStore does: the open's signal reaches [openFile]. A read
+     * through `ContentResolver.openFileDescriptor` arrives here (the
+     * framework's defaults drop the signal).
+     */
+    override fun openAssetFile(uri: Uri, mode: String, signal: CancellationSignal?): AssetFileDescriptor =
+        AssetFileDescriptor(openFile(uri, mode, signal), 0, AssetFileDescriptor.UNKNOWN_LENGTH)
+
+    override fun openTypedAssetFile(
+        uri: Uri,
+        mimeTypeFilter: String,
+        opts: Bundle?,
+        signal: CancellationSignal?
+    ): AssetFileDescriptor = openAssetFile(uri, "r", signal)
+
+    override fun openFile(uri: Uri, mode: String, signal: CancellationSignal?): ParcelFileDescriptor {
         openModes += mode
         openUris += uri
         onOpen(mode)
         val writes = 'w' in mode
+        if (!writes) readSignals += signal != null
         if (stall && !writes) {
             inStall.incrementAndGet()
             try {
-                stalled.await()
+                if (stallAcrossProcess) stallAcrossProcess(signal) else stalled.await()
             } catch (e: InterruptedException) {
                 stallInterrupted.incrementAndGet()
                 throw e
@@ -102,6 +140,26 @@ class FakeMediaProvider : ContentProvider() {
         if (writes && 't' in mode) media.writeBytes(ByteArray(0))
         if (writes && failWrites) return ParcelFileDescriptor.open(media, ParcelFileDescriptor.MODE_READ_ONLY)
         return ParcelFileDescriptor.open(media, ParcelFileDescriptor.parseMode(mode))
+    }
+
+    /** Waits out the stall deaf to interrupts, as another process's open is, until [release] or [signal]'s cancel. */
+    private fun stallAcrossProcess(signal: CancellationSignal?) {
+        var interrupted = false
+        try {
+            while (true) {
+                if (signal?.isCanceled == true) {
+                    stallCancelled.incrementAndGet()
+                    throw OperationCanceledException("the open was cancelled")
+                }
+                try {
+                    if (stalled.await(10, TimeUnit.MILLISECONDS)) return
+                } catch (e: InterruptedException) {
+                    interrupted = true
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
     }
 
     /** The file MediaStore names for every item (`_data`), or null for none: then a query finds nothing. */
