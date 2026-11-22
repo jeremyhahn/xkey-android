@@ -272,20 +272,13 @@ object XmpMetadataHelper {
 
     private inline fun readSignature(uri: Any, mimeType: String?, open: () -> InputStream?): ContentAuthenticityData? {
         val type = mimeType ?: ""
-        if (type.startsWith("image/jpeg") || type.startsWith("image/jpg")) {
-            try {
-                open()?.use { inputStream ->
-                    return readExifSignatureFromStream(inputStream)
-                }
-            } catch (e: MediaPublisher.OriginalUnavailableException) {
-                throw e
-            } catch (_: Exception) { }
-            return null
-        }
-        val format = XmpContainers.formatOf(type) ?: return null
-        // A failed open or read propagates: unreadable media is not unsigned media.
+        val jpeg = type.startsWith("image/jpeg") || type.startsWith("image/jpg")
+        val format = if (jpeg) null else XmpContainers.formatOf(type) ?: return null
+        // A failed open propagates for every type, a JPEG included:
+        // unreadable media is not unsigned media. Only a JPEG whose bytes
+        // carry no readable signature reads as unsigned.
         val input = open() ?: throw IOException("cannot open $uri")
-        return input.use { readEmbeddedSignatureFromStream(it, format) }
+        return input.use { if (format == null) readExifSignatureFromStream(it) else readEmbeddedSignatureFromStream(it, format) }
     }
 
     /**
