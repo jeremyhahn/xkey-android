@@ -33,10 +33,12 @@ CVE-2021-22569 exp:2026-12-21
 # kotlin-compiler drops it, or by 2026-12-21.
 CVE-2024-7254 exp:2026-12-21
 
-# 2026-10-27: guava 33.4.6-jre in Gradle 9.8.1's own lib/
-# (still 33.4.6-jre in the current stable, 9.8.2) and guava 33.3.1-jre shaded
-# in KGP 2.4.21's kotlin-gradle-plugin jar; build-only, not in the APK. Every
-# guava Gradle resolves, the APK's included, is pinned to 33.7.2 (catalog
-# guavaJre, guavaAndroid). Remove with the first stable Gradle and KGP that
-# ship guava 33.7.2 or later, or by 2026-11-26.
-CVE-2026-102554 exp:2026-11-26
+# 2026-11-21: guava 33.4.6-jre in Gradle 9.8.1's own lib/ and guava
+# 33.3.1-jre shaded (as org.jetbrains.kotlin.com.google.common) in KGP
+# 2.4.21's kotlin-gradle-plugin jar; build-only, not in the APK. Every guava
+# Gradle resolves, the APK's included, is pinned to 33.7.2 (catalog guavaJre,
+# guavaAndroid). Gradle 9.9.2, the current stable, ships guava 33.7.2, but
+# KGP 2.4.21 is still the newest stable KGP (2.5.0 is at RC) and keeps 33.3.1,
+# so bumping Gradle alone does not clear the finding. Remove with the first
+# stable Gradle and KGP that both ship guava 33.7.2 or later, or by 2026-12-21.
+CVE-2026-102554 exp:2026-12-21

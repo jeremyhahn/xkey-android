@@ -27,6 +27,8 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.GeneratedKeyDiscard
 import com.automatethethings.xkey.crypto.UserKeyKind
+import com.automatethethings.xkey.protocol.Fido2WireIds.decodeBase64
+import com.automatethethings.xkey.protocol.Fido2WireIds.wireId
 import com.automatethethings.xkey.protocol.KeyIdReservations
 import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.protocol.isSameKeyAs
@@ -779,31 +781,5 @@ class AndroidFidoCredentialBackend(
                 else -> "Account ${index + 1}"
             }
         }
-
-        /**
-         * The credential ID a BLE client sees for a stored key ID: its bytes
-         * when the stored ID is base64 (URL-safe or standard, padded or not),
-         * else the stored ID's own UTF-8 bytes. Never null, so every stored
-         * passkey can be offered.
-         */
-        fun wireId(keyId: String): ByteArray = decodeBase64(keyId) ?: keyId.toByteArray(Charsets.UTF_8)
-
-        /** Base64 in either alphabet, padded or not; null for anything else. */
-        fun decodeBase64(text: String): ByteArray? {
-            val bare = text.trimEnd('=')
-            if (bare.isEmpty() || text.length - bare.length > 2) return null
-            val decoder = when {
-                bare.all { it.isLetterOrDigitAscii() || it == '-' || it == '_' } -> Base64.getUrlDecoder()
-                bare.all { it.isLetterOrDigitAscii() || it == '+' || it == '/' } -> Base64.getDecoder()
-                else -> return null
-            }
-            return try {
-                decoder.decode(bare)
-            } catch (e: IllegalArgumentException) {
-                null
-            }
-        }
-
-        private fun Char.isLetterOrDigitAscii(): Boolean = this in 'A'..'Z' || this in 'a'..'z' || this in '0'..'9'
     }
 }

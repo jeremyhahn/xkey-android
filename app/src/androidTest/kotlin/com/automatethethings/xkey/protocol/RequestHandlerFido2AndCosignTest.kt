@@ -73,6 +73,9 @@ class RequestHandlerFido2AndCosignTest {
         private lateinit var keystoreManager: KeystoreManager
         private lateinit var pairedDevices: PairedDeviceRepository
 
+        /** The user handle every seeded passkey stores, as the phone stores it. */
+        private const val SEEDED_USER_ID = "dXNlci1oYW5kbGU="
+
         /** Unique per run so nothing collides with a previous run's leftovers. */
         private val runId = System.currentTimeMillis().toString(36)
 
@@ -168,14 +171,8 @@ class RequestHandlerFido2AndCosignTest {
     fun listFido2CredentialsReturnsTheDiscoveryMetadataForAShareableCredential() {
         val credentialId = seedPasskey("list-shared-$runId", SharingPolicyType.ALL_PEERS)
 
-        val credentials = call(
-            "local.listFido2Credentials",
-            JSONObject().put("rpId", rpId)
-        ).ok().getJSONArray("credentials")
-
-        val listed = (0 until credentials.length())
-            .map { credentials.getJSONObject(it) }
-            .single { it.getString("credentialId") == credentialId }
+        val listed = listedEntry(credentialId)
+            ?: throw AssertionError("the shareable credential must be listed")
 
         assertEquals(rpId, listed.getString("rpId"))
         assertEquals("Fido2 Test RP", listed.getString("rpName"))
@@ -191,10 +188,8 @@ class RequestHandlerFido2AndCosignTest {
         val private = seedPasskey("list-private-$runId", SharingPolicyType.PRIVATE)
         val shared = seedPasskey("list-visible-$runId", SharingPolicyType.ALL_PEERS)
 
-        val ids = listedCredentialIds()
-
-        assertFalse("a PRIVATE credential must not be offered", ids.contains(private))
-        assertTrue(ids.contains(shared))
+        assertFalse("a PRIVATE credential must not be offered", listsCredential(private))
+        assertTrue("an ALL_PEERS credential must be offered", listsCredential(shared))
     }
 
     /**
@@ -208,19 +203,19 @@ class RequestHandlerFido2AndCosignTest {
 
         assertTrue(
             "the peer named in the policy must see the credential",
-            listedCredentialIds().contains(credentialId)
+            listsCredential(credentialId)
         )
 
         servedPeer = otherPeerHex
         assertFalse(
             "a peer with no policy row must not see the credential",
-            listedCredentialIds().contains(credentialId)
+            listsCredential(credentialId)
         )
 
         servedPeer = null
         assertFalse(
             "an anonymous session cannot satisfy a SELECTED_PEERS policy",
-            listedCredentialIds().contains(credentialId)
+            listsCredential(credentialId)
         )
     }
 
@@ -228,15 +223,9 @@ class RequestHandlerFido2AndCosignTest {
     fun listFido2CredentialsIsScopedToTheRequestedRelyingParty() {
         val credentialId = seedPasskey("list-scope-$runId", SharingPolicyType.ALL_PEERS)
 
-        val otherRp = call(
-            "local.listFido2Credentials",
-            JSONObject().put("rpId", "unrelated-$runId.example")
-        ).ok().getJSONArray("credentials")
-
-        val ids = (0 until otherRp.length()).map { otherRp.getJSONObject(it).getString("credentialId") }
         assertFalse(
             "a credential must not be offered to a relying party it was not created for",
-            ids.contains(credentialId)
+            listsCredential(credentialId, forRpId = "unrelated-$runId.example")
         )
     }
 
@@ -271,7 +260,7 @@ class RequestHandlerFido2AndCosignTest {
         val result = call(
             "local.signFido2Assertion",
             JSONObject()
-                .put("credentialId", credentialId)
+                .put("credentialId", Fido2WireIds.encode(credentialId))
                 .put("clientDataHash", b64(clientDataHash))
                 .put("rpId", rpId)
                 .put("userVerificationRequired", false)
@@ -302,17 +291,16 @@ class RequestHandlerFido2AndCosignTest {
         )
         assertEquals(
             "the user handle must be echoed for a discoverable credential",
-            "dXNlci1oYW5kbGU=",
+            Fido2WireIds.encode(SEEDED_USER_ID),
             result.getString("userHandle")
         )
 
         val signedData = authData + clientDataHash
-        val dataHash = MessageDigest.getInstance("SHA-256").digest(signedData)
         val publicKey = keystoreManager.getPublicKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
             ?: throw AssertionError("the credential has no public key")
         val verifier = Signature.getInstance("SHA256withECDSA")
         verifier.initVerify(publicKey)
-        verifier.update(dataHash)
+        verifier.update(signedData)
         assertTrue(
             "the assertion signature must verify over authenticatorData || clientDataHash",
             verifier.verify(Base64.getDecoder().decode(result.getString("signature")))
@@ -388,7 +376,7 @@ class RequestHandlerFido2AndCosignTest {
         servedPeer = otherPeerHex
         assertFalse(
             "the handler-wide grant must not list the credential for another caller",
-            listedCredentialIds().contains(credentialId)
+            listsCredential(credentialId)
         )
         assertEquals(
             ErrorCodes.OPERATION_DENIED,
@@ -399,14 +387,16 @@ class RequestHandlerFido2AndCosignTest {
         servedPeer = peerKeyHex
         assertTrue(
             "the granted caller must see the credential whatever the handler-wide peer",
-            listedCredentialIds().contains(credentialId)
+            listsCredential(credentialId)
         )
         assertTrue(signAssertion(credentialId, rpId).isSuccess())
     }
 
     /**
      * A credential is bound to one relying party. Signing it for another would
-     * hand a working assertion to the wrong site.
+     * hand a working assertion to the wrong site. The lookup only offers the
+     * FIDO2 passkeys of the requested relying party, so a passkey of another
+     * one cannot be named at all: the answer is KEY_NOT_FOUND.
      */
     @Test
     fun signFido2AssertionRefusesAMismatchedRelyingParty() {
@@ -414,18 +404,22 @@ class RequestHandlerFido2AndCosignTest {
 
         val response = signAssertion(credentialId, "attacker-$runId.example")
 
-        assertEquals(ErrorCodes.INVALID_PARAMS, response.errorCode())
-        assertTrue(response.errorMessage().contains("rpId"))
+        assertEquals(ErrorCodes.KEY_NOT_FOUND, response.errorCode())
+        assertTrue(response.errorMessage().contains("Credential not found"))
     }
 
+    /**
+     * The lookup only offers FIDO2 passkeys of the requested relying party, so
+     * a general-purpose key cannot be named as a credential: KEY_NOT_FOUND.
+     */
     @Test
     fun signFido2AssertionRefusesANonFido2Key() {
         val keyId = generateSigningKey("assert-not-fido2-$runId")
 
         val response = signAssertion(keyId, rpId)
 
-        assertEquals(ErrorCodes.INVALID_PARAMS, response.errorCode())
-        assertTrue(response.errorMessage().contains("FIDO2"))
+        assertEquals(ErrorCodes.KEY_NOT_FOUND, response.errorCode())
+        assertTrue(response.errorMessage().contains("Credential not found"))
     }
 
     @Test
@@ -566,13 +560,28 @@ class RequestHandlerFido2AndCosignTest {
     // Helpers
     // ------------------------------------------------------------------
 
-    private fun listedCredentialIds(): List<String> {
+    /**
+     * Whether a listing for [forRpId] offers the passkey stored as [storedId].
+     *
+     * The listing names a passkey by its wire ID, so this is the one place a
+     * listed `credentialId` is compared, and it always compares the encoded
+     * stored ID; no test compares raw listing output.
+     */
+    private fun listsCredential(storedId: String, forRpId: String = rpId): Boolean =
+        listedEntry(storedId, forRpId) != null
+
+    /** The listing entry for [forRpId] that names the passkey stored as [storedId], or null. */
+    private fun listedEntry(storedId: String, forRpId: String = rpId): JSONObject? {
         val credentials = call(
             "local.listFido2Credentials",
-            JSONObject().put("rpId", rpId)
+            JSONObject().put("rpId", forRpId)
         ).ok().getJSONArray("credentials")
-        return (0 until credentials.length())
-            .map { credentials.getJSONObject(it).getString("credentialId") }
+        val wireId = Fido2WireIds.encode(storedId)
+        val matches = (0 until credentials.length())
+            .map { credentials.getJSONObject(it) }
+            .filter { it.getString("credentialId") == wireId }
+        assertTrue("a passkey must be listed at most once: $matches", matches.size <= 1)
+        return matches.singleOrNull()
     }
 
     private fun assertionResult(credentialId: String): JSONObject =
@@ -581,7 +590,7 @@ class RequestHandlerFido2AndCosignTest {
     private fun signAssertion(credentialId: String, forRpId: String): Response = call(
         "local.signFido2Assertion",
         JSONObject()
-            .put("credentialId", credentialId)
+            .put("credentialId", Fido2WireIds.encode(credentialId))
             .put("clientDataHash", b64(MessageDigest.getInstance("SHA-256").digest(ByteArray(8))))
             .put("rpId", forRpId)
             .put("userVerificationRequired", false)
@@ -634,7 +643,7 @@ class RequestHandlerFido2AndCosignTest {
                     source = "test",
                     rpId = rpId,
                     rpName = "Fido2 Test RP",
-                    userId = "dXNlci1oYW5kbGU=",
+                    userId = SEEDED_USER_ID,
                     userName = "alice",
                     userDisplayName = "Alice Example",
                     isDiscoverable = true,

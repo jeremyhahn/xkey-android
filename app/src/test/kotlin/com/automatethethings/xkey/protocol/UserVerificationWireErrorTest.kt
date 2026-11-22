@@ -144,7 +144,7 @@ class UserVerificationWireErrorTest {
     @Test
     fun `signFido2Assertion answers missing user verification with BIOMETRIC_FAILED`() {
         val error = refusal()
-        coEvery { keyDao.getByKeyId(any()) } throws error
+        coEvery { keyDao.getFido2ByRpId(any()) } throws error
 
         assertBiometricFailed(
             Request(
