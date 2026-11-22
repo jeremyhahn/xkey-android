@@ -21,6 +21,7 @@ import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -122,10 +123,14 @@ class Fido2WireEncodingTest {
             mockk<NotificationManager>(relaxed = true)
 
         keystoreManager = mockk(relaxed = true)
-        every { keystoreManager.resolveKeystoreAlias(any()) } returns null
+        every { keystoreManager.resolveKeystoreAlias(any(), any()) } returns null
+        every { keystoreManager.soleKind(any()) } returns null
         for (stored in listOf(STORED_ID, PLAIN_ID)) {
-            val alias = "xkey_credential_$stored"
-            every { keystoreManager.resolveKeystoreAlias(stored) } returns alias
+            // Each passkey is held in the credential namespace alone, so the
+            // assertion signs under that namespace's alias.
+            val alias = KeystoreManager.userKeyAlias(stored, UserKeyKind.CREDENTIAL)
+            every { keystoreManager.soleKind(stored) } returns UserKeyKind.CREDENTIAL
+            every { keystoreManager.resolveKeystoreAlias(stored, UserKeyKind.CREDENTIAL) } returns alias
             every { keystoreManager.publicKeyDERAt(alias) } returns APPROVED_DER
             coEvery { keystoreManager.signApproved(alias, APPROVED_DER, any(), any()) } answers {
                 signed += thirdArg<ByteArray>()
