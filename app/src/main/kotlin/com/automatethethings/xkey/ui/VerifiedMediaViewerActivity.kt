@@ -50,6 +50,7 @@ import com.automatethethings.xkey.storage.entity.ContactEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.KeyFactory
@@ -252,8 +253,9 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
             try {
                 // The signature embedded in the original and the check of its
                 // content hash, both from one read of it: the signature
-                // checked is the one in the bytes hashed.
-                val inBand = MediaHasher.checkInBandUri(applicationContext, uri, mimeType)
+                // checked is the one in the bytes hashed. Leaving the screen
+                // cancels a read the provider stalls.
+                val inBand = runInterruptible { MediaHasher.checkInBandUri(applicationContext, uri, mimeType) }
                 var sigData = inBand?.data
                 var check = inBand?.check
 
@@ -263,9 +265,12 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                 if (sigData == null) {
                     sigData = XmpMetadataHelper.readSidecar(applicationContext, uri)
                     if (sigData != null) {
-                        check = MediaHasher.checkContentHashUri(
-                            applicationContext, uri, sigData.contentHash, MediaHasher.SignatureSource.SIDECAR
-                        )
+                        val sidecarHash = sigData.contentHash
+                        check = runInterruptible {
+                            MediaHasher.checkContentHashUri(
+                                applicationContext, uri, sidecarHash, MediaHasher.SignatureSource.SIDECAR
+                            )
+                        }
                     }
                 }
 

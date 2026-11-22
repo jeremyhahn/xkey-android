@@ -146,29 +146,34 @@ object XmpMetadataHelper {
         }
         if (access == MediaPublisher.MediaWriteAccess.NEEDS_GRANT) return MediaSignResult.NeedsWriteAuthorization
         val lock = if (filePath != null) lockFor(filePath) else lockForKey(uri.toString())
-        // The granted-write section puts back a write of this capture an
-        // earlier process died in before it is staged.
-        synchronized(lock) { MediaPublisher.grantedSection(context, uri) {
+        synchronized(lock) {
+            // A write of this capture an earlier process died in is put back
+            // before it is staged; one that cannot be yet stages nothing.
+            MediaPublisher.recoverInterruptedWrite(context, uri)
             val staged = MediaSaveRuns.work(MediaPublisher.recoveryDirectory(context), stagingSuffix(mimeType))
             var kept = false
             try {
                 // The capture whole, location included: the signed bytes
-                // written over it are made from this copy.
+                // written over it are made from this copy. It is read before
+                // the publication lock is taken: a provider that stalls holds
+                // this capture's signing alone, never another's publication.
                 MediaPublisher.openOriginal(context, uri).use { source -> staged.outputStream().use { source.copyTo(it) } }
-                // What was staged, before the signature goes in: the granted
-                // write refuses a capture that no longer matches it.
-                val source = MediaPublisher.StagedSource.of(staged, mimeType, data.contentHash)
-                writeSignatureLocked(staged.path, data)
-                val sidecar = File(getSidecarPath(staged.path))
-                if (sidecar.exists()) {
-                    // The container refused the packet: the media stays as it
-                    // is and the signature goes to a sidecar xKey owns: the
-                    // grant covers the capture alone, never a file beside it.
-                    writeOwnedSidecar(context, uri, filePath, data)
+                MediaPublisher.grantedSection(context, uri) {
+                    // What was staged, before the signature goes in: the granted
+                    // write refuses a capture that no longer matches it.
+                    val source = MediaPublisher.StagedSource.of(staged, mimeType, data.contentHash)
+                    writeSignatureLocked(staged.path, data)
+                    val sidecar = File(getSidecarPath(staged.path))
+                    if (sidecar.exists()) {
+                        // The container refused the packet: the media stays as it
+                        // is and the signature goes to a sidecar xKey owns: the
+                        // grant covers the capture alone, never a file beside it.
+                        writeOwnedSidecar(context, uri, filePath, data)
+                        return MediaSignResult.Signed
+                    }
+                    MediaPublisher.writeGranted(context, uri, staged, source)
                     return MediaSignResult.Signed
                 }
-                MediaPublisher.writeGranted(context, uri, staged, source)
-                return MediaSignResult.Signed
             } catch (e: MediaPublishException) {
                 kept = true
                 throw e
@@ -176,7 +181,7 @@ object XmpMetadataHelper {
                 File(getSidecarPath(staged.path)).delete()
                 if (!kept) staged.delete()
             }
-        } }
+        }
     }
 
     /**

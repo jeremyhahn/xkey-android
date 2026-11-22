@@ -68,6 +68,7 @@ import com.google.android.material.progressindicator.CircularProgressIndicator
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -1369,8 +1370,8 @@ class FileOperationActivity : AppCompatActivity() {
                 val mimeType = contentResolver.getType(uri)
                 // The signature and the hash of its content come from one read
                 // of the original: the signature checked is the one in the
-                // bytes hashed.
-                val inBand = MediaHasher.checkInBandUri(applicationContext, uri, mimeType)
+                // bytes hashed. Leaving the screen cancels a read the provider stalls.
+                val inBand = runInterruptible { MediaHasher.checkInBandUri(applicationContext, uri, mimeType) }
 
                 if (inBand != null) {
                     val embeddedData = inBand.data
@@ -1434,9 +1435,11 @@ class FileOperationActivity : AppCompatActivity() {
                 } ?: throw IllegalStateException("Cannot read sidecar file")
 
                 // A sidecar may cover the canonical or the whole-file hash.
-                val check = MediaHasher.checkContentHashUri(
-                    applicationContext, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
-                )
+                val check = runInterruptible {
+                    MediaHasher.checkContentHashUri(
+                        applicationContext, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
+                    )
+                }
                 val results = when (check) {
                     MediaHasher.ContentHashCheck.MATCHES ->
                         verifySignatures(cad, true).ifEmpty { listOf("No signatures" to "none") }

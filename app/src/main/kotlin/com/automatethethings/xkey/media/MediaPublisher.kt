@@ -26,17 +26,27 @@ import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.CancellationSignal
+import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
+import java.nio.channels.ClosedByInterruptException
+import java.nio.channels.ClosedChannelException
+import java.util.concurrent.CancellationException
+import java.util.concurrent.atomic.AtomicIntegerArray
+import java.util.concurrent.atomic.AtomicLongArray
 
 /**
  * Writing the bytes it was publishing failed, or closing the destination
@@ -167,6 +177,10 @@ object MediaPublisher {
      * no empty or partial backup can stand in for its signature.
      */
     fun writeOwned(context: Context, target: Uri, bytes: ByteArray, created: Boolean = false): Unit = synchronized(grantedWrites) {
+        writingItem(target) { writeOwnedLocked(context, target, bytes, created) }
+    }
+
+    private fun writeOwnedLocked(context: Context, target: Uri, bytes: ByteArray, created: Boolean) {
         recoverInterruptedWrite(context, target)
         val resolver = context.contentResolver
         val directory = recoveryDirectory(context)
@@ -467,37 +481,138 @@ object MediaPublisher {
      * write of it is recorded and not put back ([recoveryPending]): its bytes
      * may be part-written, so nothing hashes, signs, stages or shows them.
      *
-     * The capture is read whole into a private snapshot while the
-     * granted-write lock is held, and the stream returned reads that
-     * snapshot: a granted write ([writeGranted]) overwrites in place under
-     * the same lock, so a reader gets the capture as it was before the write
-     * or after it, never bytes of both. The snapshot is unlinked once open,
-     * so nothing of it outlives the stream; one a process died copying is a
-     * dead save's working file ([MediaSaveRuns.sweep]).
+     * The capture is read whole into a private snapshot, and the stream
+     * returned reads that snapshot. The read holds no lock: the provider
+     * serving [target] may be any app (a Share-sheet source), and a read it
+     * stalls must never hold another capture's publication or recovery. It
+     * is checked instead against the item's write generation
+     * ([writingItem]): a read that overlapped a granted or owned write of
+     * the same item ([writeGranted], [writeOwned], [restore]) is thrown away
+     * and taken again, at most [READ_ATTEMPTS] times, then fails with an
+     * [IOException] naming [target]. So a reader gets the capture as it was
+     * before a write or after it, never bytes of both. The snapshot is
+     * unlinked once open, so nothing of it outlives the stream; one a
+     * process died copying is a dead save's working file ([MediaSaveRuns.sweep]).
+     *
+     * [cancel] ends a read the provider stalls: the open is passed it, its
+     * listener closes the descriptor being read, and the copy, in
+     * [READ_CHUNK] pieces, checks it and the thread's interrupt between
+     * them. A cancelled or interrupted read deletes its snapshot and throws
+     * [CancellationException]. A screen reads through [openOriginalCancellable].
+     *
+     * Lock order: this takes no lock. Writers take [grantedWrites], then
+     * bump the item's generation ([writingItem]), which is lock-free.
      */
-    fun openOriginal(context: Context, target: Uri): InputStream = synchronized(grantedWrites) {
+    fun openOriginal(context: Context, target: Uri, cancel: CancellationSignal? = null): InputStream {
         val directory = recoveryDirectory(context)
         val journal = GrantedWriteJournal.of(directory, target)
-        if (journal.recorded()) throw RecoveryPendingException(target, journal.backup)
-        val snapshot = MediaSaveRuns.work(directory, ".read")
-        try {
-            openOriginalUnchecked(context, target).use { input ->
-                FileOutputStream(snapshot).use { input.copyTo(it) }
+        val slot = generationSlot(target)
+        repeat(READ_ATTEMPTS) {
+            while (itemWrites.get(slot) > 0) {
+                checkCancelled(cancel)
+                try {
+                    Thread.sleep(WRITE_WAIT_MS)
+                } catch (e: InterruptedException) {
+                    throw CancellationException("the read of $target was interrupted").apply { initCause(e) }
+                }
             }
-            FileInputStream(snapshot)
-        } finally {
-            snapshot.delete()
+            val generation = itemGenerations.get(slot)
+            if (journal.recorded()) throw RecoveryPendingException(target, journal.backup)
+            val snapshot = MediaSaveRuns.work(directory, ".read")
+            try {
+                copyOriginal(context, target, snapshot, cancel)
+                if (itemWrites.get(slot) == 0 && itemGenerations.get(slot) == generation) {
+                    if (journal.recorded()) throw RecoveryPendingException(target, journal.backup)
+                    return FileInputStream(snapshot)
+                }
+            } finally {
+                // Unlinked once open, or at once when the read failed, was cancelled or overlapped a write.
+                snapshot.delete()
+            }
+        }
+        throw IOException("$target was written during each of $READ_ATTEMPTS reads of it")
+    }
+
+    /**
+     * [openOriginal] for a coroutine: cancelling it interrupts the read,
+     * which closes the descriptor being read and throws [CancellationException].
+     */
+    suspend fun openOriginalCancellable(context: Context, target: Uri): InputStream =
+        runInterruptible(Dispatchers.IO) { openOriginal(context, target) }
+
+    /** Throws [CancellationException] once [cancel] is cancelled or the thread interrupted. */
+    private fun checkCancelled(cancel: CancellationSignal?) {
+        if (cancel?.isCanceled == true) throw CancellationException("the read was cancelled")
+        if (Thread.interrupted()) throw CancellationException("the read was interrupted")
+    }
+
+    /**
+     * Copy [target]'s original bytes into [snapshot] with no lock held, in
+     * [READ_CHUNK] pieces, through an interruptible channel when the
+     * provider hands out a file. With a [cancel] signal the descriptor is
+     * opened with it, and its listener closes that channel, which ends a
+     * read the provider stalls.
+     */
+    private fun copyOriginal(context: Context, target: Uri, snapshot: File, cancel: CancellationSignal?) {
+        checkCancelled(cancel)
+        val original = originalUri(context, target) ?: throw OriginalUnavailableException(target)
+        val resolver = context.contentResolver
+        val input = try {
+            if (cancel == null) {
+                openOriginalUnchecked(context, target)
+            } else {
+                resolver.openFileDescriptor(original, "r", cancel)?.let { ParcelFileDescriptor.AutoCloseInputStream(it) }
+            }
+        } catch (e: OperationCanceledException) {
+            throw CancellationException("the read of $target was cancelled").apply { initCause(e) }
+        } catch (e: InterruptedException) {
+            throw CancellationException("the read of $target was interrupted").apply { initCause(e) }
+        } ?: throw IOException("cannot read $target")
+        input.use {
+            val channel = (input as? FileInputStream)?.channel
+            if (channel != null) cancel?.setOnCancelListener { runCatching { channel.close() } }
+            try {
+                FileOutputStream(snapshot).use { out ->
+                    if (channel != null) {
+                        val buffer = ByteBuffer.allocate(READ_CHUNK)
+                        while (true) {
+                            checkCancelled(cancel)
+                            buffer.clear()
+                            if (channel.read(buffer) < 0) break
+                            out.write(buffer.array(), 0, buffer.position())
+                        }
+                    } else {
+                        val buffer = ByteArray(READ_CHUNK)
+                        while (true) {
+                            checkCancelled(cancel)
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            out.write(buffer, 0, n)
+                        }
+                    }
+                }
+            } catch (e: ClosedChannelException) {
+                // Closed by the cancel listener (AsynchronousCloseException) or an interrupt (ClosedByInterruptException).
+                if (e is ClosedByInterruptException || cancel?.isCanceled == true) {
+                    Thread.interrupted()
+                    throw CancellationException("the read of $target was cancelled").apply { initCause(e) }
+                }
+                throw e
+            } finally {
+                if (channel != null) cancel?.setOnCancelListener(null)
+            }
         }
     }
 
-    /** [openOriginal] for a coroutine. Not cancellable yet: it calls [openOriginal] as it is. */
-    suspend fun openOriginalCancellable(context: Context, target: Uri): InputStream = openOriginal(context, target)
+    /** How often [openOriginal] takes a read again that overlapped a write of the same item. */
+    private const val READ_ATTEMPTS = 3
 
-    /**
-     * [openOriginal] without the recovery check: only the granted write and
-     * its recovery read a capture whose write is recorded, to back it up,
-     * check it and tell what an interrupted write left.
-     */
+    /** The piece [openOriginal] copies between its cancellation checks. */
+    private const val READ_CHUNK = 8 * 1024
+
+    /** How long [openOriginal] sleeps between looks at an item a write is in progress on. */
+    private const val WRITE_WAIT_MS = 10L
+
     private fun openOriginalUnchecked(context: Context, target: Uri): InputStream {
         val original = originalUri(context, target) ?: throw OriginalUnavailableException(target)
         return context.contentResolver.openInputStream(original) ?: throw IOException("cannot read $target")
@@ -595,6 +710,10 @@ object MediaPublisher {
      * [staged] is deleted only once the write and the close both succeeded.
      */
     fun writeGranted(context: Context, target: Uri, staged: File, source: StagedSource) = synchronized(grantedWrites) {
+        writingItem(target) { writeGrantedLocked(context, target, staged, source) }
+    }
+
+    private fun writeGrantedLocked(context: Context, target: Uri, staged: File, source: StagedSource) {
         if (writeAccess(context, target) == MediaWriteAccess.NEEDS_GRANT) throw WriteAuthorizationRequiredException(target)
         // The backup must be the capture whole, location included, or the
         // write would leave nothing to put the location back from.
@@ -654,9 +773,47 @@ object MediaPublisher {
      * Held across every granted write and every recovery, so a recovery
      * never puts a backup back under a write in progress. [grantedSection]
      * lets a caller hold it from staging the capture to writing it.
+     *
+     * Nothing reads a provider stream it does not write under this lock: a
+     * source read ([openOriginal]) holds no lock and checks the item's write
+     * generation ([writingItem]) instead, so a stalled provider never holds
+     * another capture's publication. The one read under it is a write's
+     * backup of its own target, which the write needs whole to put back.
+     * Lock order: a per-destination lock ([XmpMetadataHelper]), then this,
+     * then the lock-free generation.
      */
     @PublishedApi
     internal val grantedWrites = Any()
+
+    /** Write generations, one slot per hash of [mediaItemIdentity]: a collision costs a retry, never a mix. */
+    private const val GENERATION_SLOTS = 64
+
+    /** Each slot's generation, bumped as a write of an item in it begins and again as it ends. */
+    private val itemGenerations = AtomicLongArray(GENERATION_SLOTS)
+
+    /** Each slot's writes in progress (a restore runs inside a write, so this nests). */
+    private val itemWrites = AtomicIntegerArray(GENERATION_SLOTS)
+
+    private fun generationSlot(target: Uri): Int =
+        Math.floorMod(mediaItemIdentity(target).hashCode(), GENERATION_SLOTS)
+
+    /**
+     * Run [block], a write in place of [target], marked as one in its
+     * generation slot: a source read ([openOriginal]) that overlapped it
+     * sees the slot busy or its generation changed and reads again. Writers
+     * call it holding [grantedWrites].
+     */
+    private inline fun <T> writingItem(target: Uri, block: () -> T): T {
+        val slot = generationSlot(target)
+        itemWrites.incrementAndGet(slot)
+        itemGenerations.incrementAndGet(slot)
+        try {
+            return block()
+        } finally {
+            itemGenerations.incrementAndGet(slot)
+            itemWrites.decrementAndGet(slot)
+        }
+    }
 
     /**
      * Run [block] holding the granted-write lock, once any write of
@@ -987,7 +1144,10 @@ object MediaPublisher {
      * path with its first failure suppressed in it; only the sweep
      * ([recoverInterruptedWrites]) leaves it pending, as it has no screen.
      */
-    private fun restore(context: Context, target: Uri, journal: GrantedWriteJournal): Boolean {
+    private fun restore(context: Context, target: Uri, journal: GrantedWriteJournal): Boolean =
+        writingItem(target) { restoreLocked(context, target, journal) }
+
+    private fun restoreLocked(context: Context, target: Uri, journal: GrantedWriteJournal): Boolean {
         val backup = journal.backup
         try {
             journal.markRestoring()
