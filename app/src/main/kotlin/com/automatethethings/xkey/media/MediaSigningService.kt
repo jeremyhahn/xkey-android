@@ -71,7 +71,7 @@ internal object AutoSignHash {
 
     /**
      * Media the automatic signer refuses to sign: a JPEG above [limit] bytes,
-     * or larger media that already carries an embedded signature.
+     * the only media whose embed is held in memory.
      */
     class TooLargeException(
         val limit: Int,
@@ -96,11 +96,9 @@ internal object AutoSignHash {
      * An MP4/MOV, PNG or WebP may already carry an embedded signature (an
      * import, or a capture notified again after a restart), which the
      * canonical hash leaves out and [XmpMetadataHelper.writeSignature]
-     * replaces. It is hashed canonically while streaming. One above
-     * [embedLimit] bytes, unsigned, is embedded by the writer
-     * streaming ([XmpContainers.embedFile]); if it already carries an embedded
-     * signature, which only an in-memory rewrite replaces, it is refused with
-     * [TooLargeException] and the existing signature is kept.
+     * replaces. It is hashed canonically while streaming, at any size: the
+     * writer embeds a signature, or strips the carried one and embeds its
+     * replacement, by streaming ([XmpContainers.embedFile]), never in memory.
      *
      * Any other media goes to a sidecar and is hashed whole by streaming
      * ([MediaHasher.hashUri]).
@@ -109,9 +107,8 @@ internal object AutoSignHash {
         contentResolver: ContentResolver,
         uri: Uri,
         workDir: java.io.File,
-        limit: Int = MAX_CANONICAL_JPEG_BYTES,
-        embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
-    ): String = contentHashOf(contentResolver.getType(uri), limit, embedLimit, workDir) {
+        limit: Int = MAX_CANONICAL_JPEG_BYTES
+    ): String = contentHashOf(contentResolver.getType(uri), limit, workDir) {
         contentResolver.openInputStream(uri) ?: throw IllegalArgumentException("Cannot open URI: $uri")
     }
 
@@ -134,12 +131,11 @@ internal object AutoSignHash {
     fun contentHashOriginal(
         context: Context,
         uri: Uri,
-        limit: Int = MAX_CANONICAL_JPEG_BYTES,
-        embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
+        limit: Int = MAX_CANONICAL_JPEG_BYTES
     ): String {
         MediaPublisher.recoverInterruptedWrite(context, uri)
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
-        return contentHashOf(context.contentResolver.getType(uri), limit, embedLimit, MediaPublisher.recoveryDirectory(context)) {
+        return contentHashOf(context.contentResolver.getType(uri), limit, MediaPublisher.recoveryDirectory(context)) {
             MediaPublisher.openOriginal(context, uri)
         }
     }
@@ -153,9 +149,8 @@ internal object AutoSignHash {
     fun contentHashFile(
         file: java.io.File,
         mimeType: String?,
-        limit: Int = MAX_CANONICAL_JPEG_BYTES,
-        embedLimit: Int = XmpMetadataHelper.maxEmbedBytes
-    ): String = contentHashOfFile(mimeType, limit, embedLimit, file)
+        limit: Int = MAX_CANONICAL_JPEG_BYTES
+    ): String = contentHashOfFile(mimeType, limit, file)
 
     /**
      * The one place the signer's content hash is computed, over the media
@@ -163,14 +158,14 @@ internal object AutoSignHash {
      * ([MediaHasher.hashStreamed]): no capture is held in memory to hash it,
      * so the hashing memory of every signing job is bounded whatever its
      * size. A JPEG above [limit] bytes, which the writer would have to hold
-     * in memory to embed, is refused before it is hashed; so is an
-     * MP4/MOV, PNG or WebP above [embedLimit] that already carries an
-     * embedded signature, which only an in-memory rewrite replaces.
+     * in memory to embed, is refused before it is hashed: the only refusal.
+     * An MP4/MOV, PNG or WebP that already carries an embedded signature is
+     * hashed canonically while streaming, and the streaming writer replaces
+     * its packet at any size.
      */
     internal fun contentHashOf(
         mimeType: String?,
         limit: Int,
-        embedLimit: Int,
         workDir: java.io.File,
         open: () -> java.io.InputStream
     ): String {
@@ -178,30 +173,20 @@ internal object AutoSignHash {
         if (!MediaHasher.isCanonicalisedJpeg(mimeType) && XmpContainers.formatOf(mimeType) == null) {
             return open().use { MediaHasher.hashStream(it) }
         }
-        // One read: the size bound, the carried signature and the hash all
-        // come from the same snapshot, never from separate reads of media
-        // that may change between them.
+        // One read: the size bound and the hash come from the same snapshot,
+        // never from separate reads of media that may change between them.
         return MediaHasher.withSnapshot(open, workDir) { snapshot, _ ->
-            contentHashOfFile(mimeType, limit, embedLimit, snapshot)
+            contentHashOfFile(mimeType, limit, snapshot)
         }
     }
 
     /** [contentHashOf] over [file], a private copy nothing else writes: every check and pass reads it. */
-    private fun contentHashOfFile(mimeType: String?, limit: Int, embedLimit: Int, file: java.io.File): String {
+    private fun contentHashOfFile(mimeType: String?, limit: Int, file: java.io.File): String {
         if (MediaHasher.isCanonicalisedJpeg(mimeType)) {
             if (file.length() > limit.toLong()) throw TooLargeException(limit)
             return MediaHasher.hashStreamedFile(file, mimeType).canonical
         }
-        val format = XmpContainers.formatOf(mimeType) ?: return file.inputStream().use { MediaHasher.hashStream(it) }
-        if (file.length() > embedLimit.toLong()) {
-            val carried = file.inputStream().use { XmpContainers.read(it.buffered(), format) }
-            if (carried != null) {
-                throw TooLargeException(
-                    embedLimit,
-                    "media is larger than $embedLimit bytes and already carries an embedded signature"
-                )
-            }
-        }
+        if (XmpContainers.formatOf(mimeType) == null) return file.inputStream().use { MediaHasher.hashStream(it) }
         return MediaHasher.hashStreamedFile(file, mimeType).canonical
     }
 

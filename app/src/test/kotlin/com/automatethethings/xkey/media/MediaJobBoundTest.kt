@@ -70,15 +70,14 @@ class MediaJobBoundTest {
     }
 
     @Test
-    fun `a video under the embed bound is hashed with constant-size buffers, never held whole`() {
+    fun `a video is hashed with constant-size buffers, never held whole`() {
         val size = 24 * 1024 * 1024
         val video = mp4(size)
-        val embedLimit = 64 * 1024 * 1024
         // Warm up class loading so only the hash itself is measured.
-        AutoSignHash.contentHashFile(mp4(16), "video/mp4", embedLimit = embedLimit)
+        AutoSignHash.contentHashFile(mp4(16), "video/mp4")
 
         val before = allocated()
-        val hash = AutoSignHash.contentHashFile(video, "video/mp4", embedLimit = embedLimit)
+        val hash = AutoSignHash.contentHashFile(video, "video/mp4")
         val used = allocated() - before
 
         assertEquals(MediaHasher.hashStreamedFile(video, "video/mp4").canonical, hash)

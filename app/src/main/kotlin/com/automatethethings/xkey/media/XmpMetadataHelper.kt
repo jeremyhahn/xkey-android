@@ -47,11 +47,12 @@ object XmpMetadataHelper {
     private const val XKEY_SIGNATURE_PREFIX = "XKEY_SIG:"
 
     /**
-     * Largest MP4/MOV, PNG or WebP whose existing XMP packet the writer
-     * replaces: 128 MiB, or a sixth of the heap when that is less. Replacing
-     * holds the file in memory about three times over (the read, the
-     * stripped copy and the output). A file with no packet yet is embedded
-     * streaming at any size ([XmpContainers.embedFile]).
+     * Memory bound of the in-memory JPEG embed, which holds the image and
+     * its rewrite: 128 MiB, or a sixth of the heap when that is less
+     * ([MediaJobGate.forSigning] budgets each signing job by it). It bounds
+     * nothing else: an MP4/MOV, PNG or WebP is embedded streaming at any
+     * size, a packet it already carries stripped and replaced while
+     * streaming ([XmpContainers.embedFile]).
      * Settable so tests can exercise the bound without a large fixture.
      */
     @Volatile

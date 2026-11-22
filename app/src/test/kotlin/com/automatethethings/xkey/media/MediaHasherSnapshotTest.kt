@@ -115,7 +115,7 @@ class MediaHasherSnapshotTest {
         val source = ChangingSource(signed, raw)
         val (resolver, uri) = resolverFor(png, source)
 
-        val hash = AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile(), embedLimit = 1)
+        val hash = AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile())
 
         assertEquals("the capture is read once", 1, source.calls)
         assertEquals(MediaHasher.hashCanonical(signed, png), hash)

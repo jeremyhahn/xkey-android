@@ -40,6 +40,7 @@ import com.automatethethings.xkey.media.ContentAuthenticityData
 import com.automatethethings.xkey.media.MediaHasher
 import com.automatethethings.xkey.media.MediaLocationAccess
 import com.automatethethings.xkey.media.MediaPublisher
+import com.automatethethings.xkey.media.MediaSaveRuns
 import com.automatethethings.xkey.media.SignatureEntry
 import com.automatethethings.xkey.media.SignerVerification
 import com.automatethethings.xkey.media.XmpMetadataHelper
@@ -98,6 +99,8 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
 
         binding = ActivityVerifiedViewerBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        // Verification's snapshots a killed process left are reclaimed here.
+        MediaSaveRuns.sweepAtScreenStart(lifecycleScope, applicationContext)
 
         // Translucent navy scrim behind the verification results. Applied here
         // rather than in the layout so the colour comes from the palette instead

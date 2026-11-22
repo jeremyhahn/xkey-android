@@ -26,8 +26,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -242,7 +244,8 @@ object MediaSaveRuns {
      * journal's files, and a backup set aside on purpose, stay. This is the
      * one reclaim of every prefix the recovery directory holds; it runs
      * under the granted-write lock, so no commit is part-way, at every start
-     * ([MediaPublisher.recoverInterruptedWrites]) and when a media screen opens.
+     * ([MediaPublisher.recoverInterruptedWrites]) and when a screen that reads
+     * an original opens ([sweepAtScreenStart]).
      */
     fun sweep(directory: File, keep: Collection<File> = emptyList()): Unit = synchronized(MediaPublisher.grantedWrites) {
         MediaPublisher.GrantedWriteJournal.unrecorded(directory).forEach { it.delete() }
@@ -259,6 +262,22 @@ object MediaSaveRuns {
             }
             if (left && recovering.none { sameFile(it, file) }) file.delete()
         }
+    }
+
+    /**
+     * The one call every screen that reads an original makes in its
+     * onCreate: [sweep] of the recovery directory
+     * ([MediaPublisher.recoveryDirectory]), so the snapshots and working
+     * files a killed process left are reclaimed whichever screen the user
+     * opens next, a viewer included. [keep] is the files the screen restored
+     * from saved state still holds.
+     *
+     * Launched in [scope] on [Dispatchers.IO], off the main thread: the
+     * sweep waits on the granted-write lock while a write is in progress.
+     */
+    fun sweepAtScreenStart(scope: CoroutineScope, context: Context, keep: Collection<File> = emptyList()): Job {
+        val directory = MediaPublisher.recoveryDirectory(context.applicationContext)
+        return scope.launch(Dispatchers.IO) { sweep(directory, keep) }
     }
 
     private fun isOwn(name: String): Boolean =

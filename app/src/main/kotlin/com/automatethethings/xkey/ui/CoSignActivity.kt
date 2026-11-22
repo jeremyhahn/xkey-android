@@ -424,9 +424,8 @@ class CoSignActivity : AppCompatActivity() {
         // process died) stays until that exchange ends; one a screen not yet
         // restored may name stays for MediaSaveRuns.STAGED_RETENTION_MS.
         // Off the main thread: the sweep waits on any granted write in progress.
-        val recovery = MediaPublisher.recoveryDirectory(applicationContext)
         val held = listOfNotNull(exchange.pendingCopy?.staged, exchange.runningCopy?.copy?.staged)
-        lifecycleScope.launch(Dispatchers.IO) { MediaSaveRuns.sweep(recovery, keep = held) }
+        MediaSaveRuns.sweepAtScreenStart(lifecycleScope, applicationContext, keep = held)
         exchange.runningCopy?.let { runCopy(it) }
         // The append reads the media whole: after a recreation during the
         // location dialog it waits on that dialog's answer.

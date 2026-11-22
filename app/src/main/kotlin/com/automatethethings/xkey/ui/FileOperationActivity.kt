@@ -317,8 +317,7 @@ class FileOperationActivity : AppCompatActivity() {
         staging.sweep()
         // A signed-copy save an earlier process died in left its working file
         // Off the main thread: the sweep waits on any granted write in progress.
-        val recovery = MediaPublisher.recoveryDirectory(applicationContext)
-        lifecycleScope.launch(Dispatchers.IO) { MediaSaveRuns.sweep(recovery) }
+        MediaSaveRuns.sweepAtScreenStart(lifecycleScope, applicationContext)
 
         // Build and set the programmatic UI
         setContentView(buildUI())

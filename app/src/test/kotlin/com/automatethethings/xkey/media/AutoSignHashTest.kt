@@ -188,7 +188,7 @@ class AutoSignHashTest {
         try {
             XmpFixtures.all.forEach { (mime, original) ->
                 val format = XmpContainers.formatOf(mime)!!
-                val ext = mime.substringAfter('/')
+                val ext = if (mime == "video/quicktime") "mov" else mime.substringAfter('/')
                 val unsigned = tempFolder.newFile("unsigned.$ext").apply { writeBytes(original) }
                 val expected = MediaHasher.hashStreamedFile(unsigned, mime).canonical
                 val file = tempFolder.newFile("signed.$ext").apply {
@@ -238,7 +238,9 @@ class AutoSignHashTest {
         val jpeg = body.substringAfter("isCanonicalisedJpeg(mimeType)").substringBefore("\n        }")
         assertTrue("the one refusal is contentHashOfFile's JPEG check: $body", "TooLargeException(" in jpeg)
 
-        val limits = sources.filterValues { "embedLimit" in it }.keys.sorted()
-        assertEquals("sources that still name embedLimit", emptyList<String>(), limits)
+        // Spelled in two parts so this scan does not name the removed parameter itself.
+        val removed = "embed" + "Limit"
+        val limits = sources.filterValues { removed in it }.keys.sorted()
+        assertEquals("sources that still name $removed", emptyList<String>(), limits)
     }
 }
