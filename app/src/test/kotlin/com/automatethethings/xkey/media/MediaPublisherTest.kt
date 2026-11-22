@@ -416,6 +416,34 @@ class MediaPublisherTest {
         )
     }
 
+    /**
+     * A screen that reads an original leaves snapshots in the recovery
+     * directory when its process dies part-way; the screen that opens next
+     * removes them. Every such screen makes the one start sweep in onCreate,
+     * and none reaches the sweep any other way.
+     */
+    @Test
+    fun `every screen that reads an original sweeps the recovery directory when it opens`() {
+        val reads = listOf(
+            "openOriginal(", "readCancellable", "MediaHasher.", "readOriginalSignature(",
+            "readSignatureFromUri(", "recoveryDirectory("
+        )
+        val screens = mainSources().filterKeys { it.startsWith("com/automatethethings/xkey/ui/") }
+        val readers = screens.filterValues { text -> reads.any { it in text } }
+        assertTrue("the scan found the screens that read an original", readers.size >= 3)
+        val unswept = readers.filterValues { text ->
+            val start = text.indexOf("override fun onCreate(")
+            if (start < 0) return@filterValues true
+            val rest = text.substring(start + 1)
+            val end = Regex("\n    (override |private |internal |protected )?(suspend )?fun ").find(rest)?.range?.first
+            val onCreate = if (end == null) rest else rest.substring(0, end)
+            "MediaSaveRuns.sweepAtScreenStart(" !in onCreate
+        }.keys.sorted()
+        assertEquals("screens that read an original with no sweep when they open", emptyList<String>(), unswept)
+        val direct = screens.filterValues { "MediaSaveRuns.sweep(" in it }.keys.sorted()
+        assertEquals("screens that call the sweep directly", emptyList<String>(), direct)
+    }
+
     @Test
     fun `the scan sees a screen read without a cancel signal`() {
         val planted = """

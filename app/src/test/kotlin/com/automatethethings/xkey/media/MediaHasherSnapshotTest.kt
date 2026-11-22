@@ -111,13 +111,13 @@ class MediaHasherSnapshotTest {
         val png = "image/png"
         val raw = XmpFixtures.png()
         val signed = XmpContainers.embed(raw, XmpContainers.Format.PNG, XmpFixtures.json())!!
-        // Read signed, then unsigned: the check must not pass on the second read.
+        // Read signed, then unsigned: the hash comes from the first read alone.
         val source = ChangingSource(signed, raw)
         val (resolver, uri) = resolverFor(png, source)
 
-        assertThrows(AutoSignHash.TooLargeException::class.java) {
-            AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile(), embedLimit = 1)
-        }
+        val hash = AutoSignHash.contentHashUri(resolver, uri, kotlin.io.path.createTempDirectory("hash").toFile(), embedLimit = 1)
+
         assertEquals("the capture is read once", 1, source.calls)
+        assertEquals(MediaHasher.hashCanonical(signed, png), hash)
     }
 }

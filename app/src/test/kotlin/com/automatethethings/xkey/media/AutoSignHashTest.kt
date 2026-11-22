@@ -164,14 +164,14 @@ class AutoSignHashTest {
             )
 
             // Oversized media already carrying an embedded signature: the
-            // automatic signer's hash refuses it, but the writer streams a
-            // replacement as it streamed the first embed, never a sidecar.
+            // automatic signer hashes it canonically while streaming, and the
+            // writer streams a replacement as it streamed the first embed.
             val signed = XmpContainers.embed(original, XmpContainers.Format.ISO_BMFF, XmpFixtures.json())!!
             val carried = tempFolder.newFile("carried.mp4").apply { writeBytes(signed) }
             val (signedResolver, signedUri) = resolverFor(mime, carried)
-            assertThrows(AutoSignHash.TooLargeException::class.java) {
-                AutoSignHash.contentHashUri(signedResolver, signedUri, kotlin.io.path.createTempDirectory("hash").toFile())
-            }
+            val again = AutoSignHash.contentHashUri(signedResolver, signedUri, kotlin.io.path.createTempDirectory("hash").toFile())
+            assertEquals(MediaHasher.hashStreamedFile(carried, mime).canonical, again)
+            assertEquals("the carried signature is not part of the hash", hash, again)
             XmpMetadataHelper.writeSignature(carried.path, signatureOver(hash))
             assertEquals(signatureOver(hash), XmpMetadataHelper.readSignature(carried.path))
             assertArrayEquals(original, XmpContainers.strip(carried.readBytes(), XmpContainers.Format.ISO_BMFF))
@@ -179,5 +179,66 @@ class AutoSignHashTest {
         } finally {
             XmpMetadataHelper.maxEmbedBytes = bound
         }
+    }
+
+    @Test
+    fun `media already carrying XMP above the bound is hashed and signed again, whatever its container`() {
+        val bound = XmpMetadataHelper.maxEmbedBytes
+        XmpMetadataHelper.maxEmbedBytes = 8
+        try {
+            XmpFixtures.all.forEach { (mime, original) ->
+                val format = XmpContainers.formatOf(mime)!!
+                val ext = mime.substringAfter('/')
+                val unsigned = tempFolder.newFile("unsigned.$ext").apply { writeBytes(original) }
+                val expected = MediaHasher.hashStreamedFile(unsigned, mime).canonical
+                val file = tempFolder.newFile("signed.$ext").apply {
+                    writeBytes(XmpContainers.embed(original, format, XmpFixtures.json())!!)
+                }
+                assertTrue("$mime: the fixture is above the bound", file.length() > XmpMetadataHelper.maxEmbedBytes)
+
+                val hash = AutoSignHash.contentHashFile(file, mime)
+                assertEquals("$mime: hashed without its carried signature", expected, hash)
+
+                XmpMetadataHelper.writeSignature(file.path, signatureOver(hash))
+                assertEquals("$mime: the packet is replaced", signatureOver(hash), XmpMetadataHelper.readSignature(file.path))
+                assertFalse("$mime: no sidecar", File(XmpMetadataHelper.getSidecarPath(file.path)).exists())
+            }
+        } finally {
+            XmpMetadataHelper.maxEmbedBytes = bound
+        }
+    }
+
+    private fun mainSources(): Map<String, String> {
+        val rel = "src/main/kotlin"
+        val dir = listOf(File(rel), File("app/$rel")).firstOrNull { it.isDirectory }
+            ?: error("$rel not found from ${File(".").absolutePath}")
+        return dir.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }
+            .associate { it.relativeTo(dir).path to it.readText() }
+    }
+
+    /**
+     * The streaming writer replaces a carried packet at any size, so the only
+     * media refused before it is hashed is a JPEG too large to embed in
+     * memory: one size check, in the one place the hash is computed.
+     */
+    @Test
+    fun `only an oversized JPEG is refused before hashing`() {
+        val sources = mainSources()
+        val media = sources.filterKeys { it.startsWith("com/automatethethings/xkey/media/") }
+        val constructions = media.flatMap { (name, text) ->
+            text.lines().withIndex()
+                .filter { (_, line) -> "TooLargeException(" in line && "class TooLargeException(" !in line }
+                .map { (i, line) -> "$name:${i + 1}: ${line.trim()}" }
+        }
+        assertEquals("places that refuse media as too large: $constructions", 1, constructions.size)
+        val signing = media.entries.single { it.key.endsWith("media/MediaSigningService.kt") }.value
+        val start = signing.indexOf("private fun contentHashOfFile(")
+        assertTrue("contentHashOfFile is declared", start >= 0)
+        val body = signing.substring(start).substringBefore("\n    }\n")
+        val jpeg = body.substringAfter("isCanonicalisedJpeg(mimeType)").substringBefore("\n        }")
+        assertTrue("the one refusal is contentHashOfFile's JPEG check: $body", "TooLargeException(" in jpeg)
+
+        val limits = sources.filterValues { "embedLimit" in it }.keys.sorted()
+        assertEquals("sources that still name embedLimit", emptyList<String>(), limits)
     }
 }

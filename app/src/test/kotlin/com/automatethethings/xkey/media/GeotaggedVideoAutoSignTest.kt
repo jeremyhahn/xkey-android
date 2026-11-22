@@ -250,5 +250,28 @@ class GeotaggedVideoAutoSignTest {
         Unit
     }
 
+    @Test
+    fun `an already-signed video above the embed bound is signed again, never refused`() = runBlocking<Unit> {
+        shadowOf(context as Application).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        granted = true
+        // Imported already signed: the packet another signature left is in the original.
+        media.writeBytes(XmpContainers.embed(geotagged, XmpContainers.Format.ISO_BMFF, XmpFixtures.json())!!)
+        val originalHash = AutoSignHash.contentHashFile(geotaggedCopy(), "video/mp4")
+        val bound = XmpMetadataHelper.maxEmbedBytes
+        XmpMetadataHelper.maxEmbedBytes = geotagged.size / 2
+        try {
+            assertEquals(AutoSigner.Outcome.Signed, AutoSigner.signCapture(context, uri, null, "key-1", "Key"))
+        } finally {
+            XmpMetadataHelper.maxEmbedBytes = bound
+        }
+
+        assertEquals("signed once, over the original without its old packet", listOf(originalHash), signedHashes)
+        val written = media.readBytes()
+        val embedded = XmpContainers.read(written.inputStream().buffered(), XmpContainers.Format.ISO_BMFF)
+        assertEquals("the new signature replaces the old", data(originalHash).toJsonString(), embedded)
+        assertArrayEquals(geotagged, XmpContainers.strip(written, XmpContainers.Format.ISO_BMFF))
+        assertTrue("the video keeps where it was recorded", hasLocation(written))
+    }
+
     private fun geotaggedCopy(): File = folder.newFile().apply { writeBytes(geotagged) }
 }
