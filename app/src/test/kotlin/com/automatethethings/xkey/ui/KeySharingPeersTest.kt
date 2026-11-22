@@ -630,6 +630,113 @@ class KeySharingPeersTest {
     }
 
     /**
+     * A withdrawal held in the process (its grant delete and its denial
+     * write both failed), repeated once storage recovers and before its
+     * retry runs: the repeated withdrawal lands, and it stands only once the
+     * held denial is written to the key's policy row, so this process and a
+     * fresh one agree on what is authorized and whether a grant is taken.
+     */
+    @Test
+    fun aRepeatedWithdrawalThatLandsSavesTheHeldDenial() = runTest {
+        rows(KEY to PEER_A, KEY to PEER_B)
+        tables.failing += setOf("deleteGrant", "putPolicyRow")
+        val peers = peersOf()
+
+        assertEquals(KeySharingPeers.Outcome.UNSAVED, peers.setAllowedOutcome(PEER_A, false, repo.pairingGeneration(PEER_A)))
+        runCurrent()
+        assertTrue(store.isHeld(KEY, instance))
+
+        // Storage recovers; the user withdraws A again before the retry runs.
+        tables.failing.clear()
+        assertEquals(KeySharingPeers.Outcome.STOOD, peers.setAllowedOutcome(PEER_A, false, repo.pairingGeneration(PEER_A)))
+        assertFalse("a landed withdrawal left the denial held in the process only", store.isHeld(KEY, instance))
+        assertEquals(emptySet<String>(), KeySharingPeers.unsavedKeys.first())
+        assertTrue(table.none { it == (KEY to PEER_A) })
+
+        val key = FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS, id = instance)
+        val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
+        assertEquals(
+            "this process and a restart disagree on what the key authorizes",
+            restarted.enforcedPolicy(key),
+            store.enforcedPolicy(key)
+        )
+        assertEquals("the denial was not saved", StoredPolicy.PRIVATE, restarted.enforcedPolicy(key))
+        assertFalse(hasAccess(PEER_B))
+        assertEquals(
+            "this process and a restart disagree on whether a grant is taken",
+            runCatching { restarted.grant(KEY, instance, PEER_C) }.isSuccess,
+            runCatching { store.grant(KEY, instance, PEER_C) }.isSuccess
+        )
+        advanceUntilIdle()
+        assertEquals(emptySet<String>(), KeySharingPeers.unsavedKeys.first())
+    }
+
+    /**
+     * As above, but only the grant delete recovers: the repeated withdrawal
+     * lands while the held denial still fails to write, so it is not saved,
+     * and the key stays shown unsaved until the retry writes that denial.
+     */
+    @Test
+    fun aRepeatedWithdrawalWhoseDenialStillFailsStaysUnsaved() = runTest {
+        rows(KEY to PEER_A, KEY to PEER_B)
+        tables.failing += setOf("deleteGrant", "putPolicyRow")
+        val peers = peersOf()
+
+        assertEquals(KeySharingPeers.Outcome.UNSAVED, peers.setAllowedOutcome(PEER_A, false, repo.pairingGeneration(PEER_A)))
+        runCurrent()
+        assertTrue(store.isHeld(KEY, instance))
+
+        tables.failing -= "deleteGrant"
+        assertEquals(
+            "a withdrawal whose denial is held in the process only stood",
+            KeySharingPeers.Outcome.UNSAVED,
+            peers.setAllowedOutcome(PEER_A, false, repo.pairingGeneration(PEER_A))
+        )
+        assertEquals(setOf(KEY), KeySharingPeers.unsavedKeys.first())
+        assertTrue(store.isHeld(KEY, instance))
+        assertFalse(hasAccess(PEER_B))
+
+        // The denial's write recovers: the retry saves it.
+        tables.failing.clear()
+        advanceUntilIdle()
+        assertFalse(store.isHeld(KEY, instance))
+        assertEquals(emptySet<String>(), KeySharingPeers.unsavedKeys.first())
+        val key = FakeKeyPolicyTables.entity(KEY, StoredPolicy.SELECTED_PEERS, id = instance)
+        val restarted = KeyPolicyStore(tables, tables, java.util.concurrent.ConcurrentHashMap())
+        assertEquals(StoredPolicy.PRIVATE, restarted.enforcedPolicy(key))
+        assertFalse(hasAccess(PEER_B))
+    }
+
+    /**
+     * Bypass guard: a withdrawal that lands settles its pending obligation
+     * only through the one helper that saves the key row's held denial
+     * first, and every other place an obligation is settled is one of the
+     * known writes that leave no denial held.
+     */
+    @Test
+    fun noPendingObligationIsSettledPastTheHeldDenialCheck() {
+        val root = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
+        val source = java.io.File(root, "com/automatethethings/xkey/ui/KeySharingPeers.kt").readText()
+        val withdraw = source.substringAfter("private suspend fun withdraw(", "").substringBefore("\n    }\n")
+        assertTrue("withdraw is missing", withdraw.isNotEmpty())
+        assertFalse("a withdrawal settles past the held-denial check", "settle {" in withdraw)
+        assertTrue("a withdrawal skips the landed-write helper", "settleLanded(" in withdraw)
+        val helper = source.substringAfter("private suspend fun settleLanded(", "").substringBefore("\n        }\n")
+        assertTrue("the landed-write helper skips the held-denial check", "reconciled(" in helper)
+        val allowed = setOf(
+            "if (granted == Outcome.STOOD) settle { it == entry }",
+            "if (store.setPolicy(keyId, instance, StoredPolicy.valueOf(policy.name), decision)) settle { it.keyId == keyId }",
+            "settle { it.keyId == keyId && it.instance == instance && it.peer == null }",
+            "if (deleted == KeyPolicyStore.KeyDelete.DELETED) settle { it.keyId == keyId }"
+        )
+        val outside = source.replace(helper, "").lines().mapIndexedNotNull { i, line ->
+            val code = line.substringBefore("//").trim()
+            if ("settle {" in code && code !in allowed) "KeySharingPeers.kt:${i + 1}: $code" else null
+        }
+        assertEquals("a pending obligation is settled past the held-denial check", emptyList<String>(), outside)
+    }
+
+    /**
      * Bypass guard (#270 review): every obligation retry is accepted as done
      * only through the one helper that saves the key row's held denial
      * first; no attempt returns [KeySharingPeers]' done result itself.
