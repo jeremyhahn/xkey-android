@@ -22,6 +22,7 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import java.io.File
+import java.util.concurrent.CountDownLatch
 
 /**
  * Stands in for MediaStore's "media" provider: every content URI is backed
@@ -50,6 +51,19 @@ class FakeMediaProvider : ContentProvider() {
      */
     var redact: ((ByteArray) -> ByteArray)? = null
 
+    /**
+     * When set, a read stalls, as a slow or hostile provider's does, until
+     * [release]. Robolectric's pipe reaches end of file as soon as it is
+     * drained, write end open or not, so the read blocks on a latch in the
+     * open instead; an interrupt ends the wait, as a cancelled call does.
+     */
+    var stall = false
+
+    private val stalled = CountDownLatch(1)
+
+    /** Ends every stalled read: each goes on to read [media]. */
+    fun release() = stalled.countDown()
+
     override fun onCreate() = true
 
     override fun getType(uri: Uri): String = mimeType
@@ -59,6 +73,7 @@ class FakeMediaProvider : ContentProvider() {
         openUris += uri
         onOpen(mode)
         val writes = 'w' in mode
+        if (stall && !writes) stalled.await()
         val redacted = redact
         if (!writes && redacted != null && uri.getQueryParameter("requireOriginal") != "1") {
             // MediaStore's redacted view of a foreign capture: location left out.

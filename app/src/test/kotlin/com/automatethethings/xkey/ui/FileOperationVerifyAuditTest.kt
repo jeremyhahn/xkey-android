@@ -23,6 +23,7 @@ import android.net.Uri
 import android.os.Looper
 import android.view.View
 import android.widget.TextView
+import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.media.AutoSignHash
 import com.automatethethings.xkey.media.ContentAuthenticityData
@@ -159,6 +160,95 @@ class FileOperationVerifyAuditTest {
         assertFalse(FileOperationActivity.verificationSucceeded(listOf("Signer" to "verified", "Other" to "failed")))
         assertFalse(FileOperationActivity.verificationSucceeded(listOf("Signer" to "unknown")))
         assertTrue(FileOperationActivity.verificationSucceeded(listOf("Signer" to "verified")))
+    }
+
+    @Test
+    fun `no verify screen reaches a verdict over results except through the non-empty rule`() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).firstOrNull { it.isDirectory }
+            ?: error("src/main/kotlin not found from ${File(".").absolutePath}")
+        val screens = listOf("FileOperationActivity.kt", "VerifiedMediaViewerActivity.kt").map { name ->
+            File(root, "com/automatethethings/xkey/ui/$name").also { assertTrue("$it not found", it.isFile) }
+        }
+        val verdicts = screens.flatMap { file ->
+            file.readLines().withIndex()
+                .filter { (_, line) -> ".all {" in line && ("results" in line || "status" in line) }
+                .filterNot { (_, line) -> "isNotEmpty() &&" in line }
+                .map { (i, line) -> "${file.name}:${i + 1}: ${line.trim()}" }
+        }
+        assertEquals("a verdict over results that an empty list passes", emptyList<String>(), verdicts)
+    }
+
+    /** A packet for [hash] that carries no signature at all. */
+    private fun noSignatures(hash: String) =
+        ContentAuthenticityData.fromJsonString(XmpFixtures.json(hash)).copy(signatures = emptyList())
+
+    /** Waits for the result, then expects it not shown as verified and audited once as not verified. */
+    private fun assertShownAndAuditedNotVerified(activity: FileOperationActivity) {
+        val resultCard = field("resultCard").get(activity) as View
+        shadowOf(Looper.getMainLooper()).idle() // the verify, then the result it posts
+        settled("the result is shown") { resultCard.visibility == View.VISIBLE }
+        val shown = (field("resultText").get(activity) as TextView).text.toString()
+        val success = activity.getString(R.string.file_operation_verify_success)
+        assertFalse("no signature is shown as verified: $shown", shown.contains(success))
+        settled("the verification is audited") { fileVerified().isNotEmpty() }
+        assertEquals("one verification is audited", 1, fileVerified().size)
+        assertFalse("no signature is audited as verified", fileVerified().single())
+    }
+
+    @Test
+    fun `a matching packet with no signatures is shown and audited as not verified`() {
+        val signed = File(folder.root, "capture.png").apply {
+            writeBytes(XmpFixtures.png())
+            XmpMetadataHelper.writeSignature(path, noSignatures(originalHash))
+        }
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            media = signed
+            mimeType = "image/png"
+        }
+
+        assertShownAndAuditedNotVerified(verifyGranted())
+    }
+
+    @Test
+    fun `a matching WebP packet with no signatures is shown and audited as not verified`() {
+        val webp = XmpFixtures.simpleWebp()
+        val signed = File(folder.root, "capture.webp").apply {
+            writeBytes(webp)
+            XmpMetadataHelper.writeSignature(path, noSignatures(AutoSignHash.contentHash(webp, "image/webp")))
+        }
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            media = signed
+            mimeType = "image/webp"
+        }
+
+        assertShownAndAuditedNotVerified(verifyGranted())
+    }
+
+    @Test
+    fun `a matching sidecar with no signatures is shown and audited as not verified`() {
+        val bytes = XmpFixtures.png()
+        val unsigned = File(folder.root, "capture.gif").apply { writeBytes(bytes) }
+        provider = Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").apply {
+            media = unsigned
+            mimeType = "image/gif"
+        }
+        val sidecar = File(folder.root, "capture.gif.xkeysig").apply {
+            writeText(noSignatures(AutoSignHash.contentHash(bytes, "image/gif")).toJsonString())
+        }
+
+        val activity = verifyGranted()
+
+        var picker: ShadowActivity.IntentForResult? = null
+        settled("the sidecar picker is open") {
+            picker = generateSequence { shadowOf(activity).nextStartedActivityForResult }
+                .firstOrNull { it.intent.action == Intent.ACTION_OPEN_DOCUMENT }
+            picker != null
+        }
+        activity.activityResultRegistry.dispatchResult(
+            picker!!.requestCode, Activity.RESULT_OK, Intent().setData(Uri.fromFile(sidecar))
+        )
+
+        assertShownAndAuditedNotVerified(activity)
     }
 
     @Test

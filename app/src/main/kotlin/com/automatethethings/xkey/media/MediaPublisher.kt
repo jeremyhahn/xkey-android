@@ -490,6 +490,9 @@ object MediaPublisher {
         }
     }
 
+    /** [openOriginal] for a coroutine. Not cancellable yet: it calls [openOriginal] as it is. */
+    suspend fun openOriginalCancellable(context: Context, target: Uri): InputStream = openOriginal(context, target)
+
     /**
      * [openOriginal] without the recovery check: only the granted write and
      * its recovery read a capture whose write is recorded, to back it up,

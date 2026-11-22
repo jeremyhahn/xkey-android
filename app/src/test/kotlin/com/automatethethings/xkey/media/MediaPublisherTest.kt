@@ -207,6 +207,67 @@ class MediaPublisherTest {
         assertTrue(writingOpens.any { it in planted })
     }
 
+    /** The `{ ... }` block that opens at or after [from] in [text], braces matched. */
+    private fun blockAt(text: String, from: Int): String {
+        val open = text.indexOf('{', from)
+        require(open >= 0) { "no block after offset $from" }
+        var depth = 0
+        for (i in open until text.length) {
+            when (text[i]) {
+                '{' -> depth++
+                '}' -> if (--depth == 0) return text.substring(open, i + 1)
+            }
+        }
+        error("unbalanced block at offset $open")
+    }
+
+    /** Every block that opens with [marker] in [text], with the name of the function it sits in. */
+    private fun blocks(text: String, marker: String): List<Pair<String, String>> =
+        Regex(Regex.escape(marker)).findAll(text).map { match ->
+            val function = Regex("""fun (?:<[^>]*> )?(\w+)\(""").findAll(text.substring(0, match.range.first))
+                .lastOrNull()?.groupValues?.get(1) ?: "<top level>"
+            function to blockAt(text, match.range.last + 1)
+        }.toList()
+
+    /**
+     * A provider read under the global publication lock stalls every other
+     * capture's publication and recovery for as long as the provider takes.
+     * The only reads left under it are a granted or owned write's backup of
+     * its own target (a MediaStore item the user granted, or xKey's sidecar),
+     * which that write has to read under the lock to restore it.
+     */
+    @Test
+    fun `no untrusted provider read runs under the global publication lock`() {
+        val sources = mainSources()
+        fun source(name: String) = sources.entries.singleOrNull { it.key.endsWith(name) }?.value
+            ?: error("$name not found in the main sources")
+        val publisher = source("media/MediaPublisher.kt")
+        val helper = source("media/XmpMetadataHelper.kt")
+        val targetBackups = setOf("writeGranted", "writeOwned")
+        val copies = listOf("copyTo(", ".read(", "readBytes(")
+
+        // grantedSection's own body is one of these: a caller's block is scanned where it is written.
+        val locked = blocks(publisher, "synchronized(grantedWrites)")
+        assertTrue("the scan found the publisher's locked sections", locked.isNotEmpty())
+        val publisherReads = locked.flatMap { (function, body) ->
+            val unchecked = body.indexOf("openOriginalUnchecked(")
+            listOfNotNull(
+                "$function: openOriginal( under grantedWrites".takeIf { "openOriginal(" in body },
+                "$function: provider copy under grantedWrites".takeIf {
+                    unchecked >= 0 && function !in targetBackups &&
+                        copies.any { body.indexOf(it, unchecked) >= 0 }
+                }
+            )
+        }
+        val sections = blocks(helper, "MediaPublisher.grantedSection(")
+        assertTrue("the scan found signMedia's granted section", sections.isNotEmpty())
+        val helperReads = sections
+            .filter { (_, body) -> "MediaPublisher.openOriginal(" in body }
+            .map { (function, _) -> "$function: MediaPublisher.openOriginal( inside grantedSection" }
+
+        assertEquals("provider reads under the publication lock", emptyList<String>(), publisherReads + helperReads)
+    }
+
 
     private fun explains(content: String, written: String, backup: String, restoring: Boolean): Boolean {
         val w = folder.newFile().apply { writeText(written) }
