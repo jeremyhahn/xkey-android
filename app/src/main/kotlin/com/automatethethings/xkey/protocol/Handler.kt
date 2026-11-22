@@ -3384,10 +3384,10 @@ class RequestHandler(
 
         val credentials = shareableEntities.map { entity ->
             Fido2CredentialInfo(
-                credentialId = entity.keyId,
+                credentialId = Fido2WireIds.encode(entity.keyId),
                 rpId = entity.rpId ?: listParams.rpId,
                 rpName = entity.rpName,
-                userId = entity.userId,
+                userId = entity.userId?.let { Fido2WireIds.encode(it) },
                 userName = entity.userName,
                 userDisplayName = entity.userDisplayName,
                 isDiscoverable = entity.isDiscoverable,
@@ -3438,12 +3438,17 @@ class RequestHandler(
 
         val assertionParams = LocalSignFido2AssertionParams.fromJson(params)
 
-        // Look up credential
-        val entity = keyDao.getByKeyId(assertionParams.credentialId)
-            ?: throw ProtocolException(
-                "Credential not found: ${assertionParams.credentialId}",
-                errorCode = ErrorCodes.KEY_NOT_FOUND
-            )
+        // Look up credential: the wire id is the passkey's bytes, never the
+        // stored string. Every later use takes the stored entity.keyId.
+        val entity = Fido2WireIds.resolve(
+            assertionParams.credentialId,
+            assertionParams.rpId,
+            keyDao.getFido2ByRpId(assertionParams.rpId)
+        ) ?: throw ProtocolException(
+            "Credential not found: ${assertionParams.credentialId}",
+            errorCode = ErrorCodes.KEY_NOT_FOUND
+        )
+        val keyId = entity.keyId
 
         // Verify it's a FIDO2 credential with matching rpId
         if (entity.keyType != KeyTypes.FIDO2) {
@@ -3472,9 +3477,9 @@ class RequestHandler(
 
         // The passkey as the owner approves it, rechecked under the lock. Its
         // alias is resolved once, here, and signed with under the lock.
-        val passkeyAlias = keystoreManager.resolveKeystoreAlias(assertionParams.credentialId)
+        val passkeyAlias = keystoreManager.resolveKeystoreAlias(keyId)
             ?: throw ProtocolException(
-                "Credential key not found: ${assertionParams.credentialId}",
+                "Credential key not found: $keyId",
                 errorCode = ErrorCodes.KEY_NOT_FOUND
             )
         val asApproved = approvalSnapshot(entity, passkeyAlias)
@@ -3526,7 +3531,7 @@ class RequestHandler(
             // The credential provider serves this passkey too, so the counter
             // comes from the one both paths share. It advances before signing:
             // a failed signature leaves a gap, never a reused value.
-            val newSignCount = passkeySignCounter.next(assertionParams.credentialId)
+            val newSignCount = passkeySignCounter.next(keyId)
 
             // Build authenticator data
             // rpIdHash (32 bytes) || flags (1 byte) || signCount (4 bytes, big-endian)
@@ -3548,18 +3553,10 @@ class RequestHandler(
             authData[35] = ((newSignCount shr 8) and 0xFF).toByte()
             authData[36] = (newSignCount and 0xFF).toByte()
 
-            // Sign: authenticatorData || clientDataHash
-            val clientDataHash = assertionParams.getClientDataHashBytes()
-            val signedData = ByteArray(authData.size + clientDataHash.size)
-            System.arraycopy(authData, 0, signedData, 0, authData.size)
-            System.arraycopy(clientDataHash, 0, signedData, authData.size, clientDataHash.size)
-
-            // Hash the signed data for ECDSA (sign expects a hash)
-            val dataHash = java.security.MessageDigest.getInstance("SHA-256").digest(signedData)
-
-            // Sign with the credential key the owner approved, under the
-            // alias its approval read.
-            val signature = current.sign(dataHash, KeystoreManager.PASSKEY_SIGNATURE_ALGORITHM)
+            // Sign authenticatorData || clientDataHash, unhashed, with the
+            // credential key the owner approved, under the alias its
+            // approval read.
+            val signature = current.signWebAuthn(authData, assertionParams.getClientDataHashBytes())
 
             Triple(newSignCount, authData, signature)
         }
@@ -3567,17 +3564,17 @@ class RequestHandler(
         val result = LocalSignFido2AssertionResult(
             authenticatorData = Base64.getEncoder().encodeToString(authData),
             signature = Base64.getEncoder().encodeToString(signature),
-            userHandle = entity.userId,
+            userHandle = entity.userId?.let { Fido2WireIds.encode(it) },
             signCount = newSignCount
         )
 
-        Log.i(TAG, "Signed FIDO2 assertion for credential: ${assertionParams.credentialId}, " +
+        Log.i(TAG, "Signed FIDO2 assertion for credential: $keyId, " +
                 "rpId=${assertionParams.rpId}, signCount=$newSignCount")
 
         // Log FIDO2 authentication
         AuditLogger.logFido2Authentication(
-            keyId = assertionParams.credentialId,
-            keyLabel = entity.rpName ?: entity.label ?: assertionParams.credentialId,
+            keyId = keyId,
+            keyLabel = entity.rpName ?: entity.label ?: keyId,
             rpId = assertionParams.rpId
         )
 
@@ -5130,6 +5127,18 @@ private class ApprovedKey(
             )
         }
     }
+
+    /**
+     * Signs a WebAuthn assertion: `authenticatorData || clientDataHash`
+     * under [alias], through [sign].
+     *
+     * The data goes to the signer unhashed: SHA256withECDSA
+     * ([KeystoreManager.PASSKEY_SIGNATURE_ALGORITHM]) hashes it once, which
+     * is the signature a relying party verifies. This is the only place a
+     * WebAuthn assertion is signed in this file.
+     */
+    suspend fun signWebAuthn(authenticatorData: ByteArray, clientDataHash: ByteArray): ByteArray =
+        sign(authenticatorData + clientDataHash, KeystoreManager.PASSKEY_SIGNATURE_ALGORITHM)
 }
 
 /**

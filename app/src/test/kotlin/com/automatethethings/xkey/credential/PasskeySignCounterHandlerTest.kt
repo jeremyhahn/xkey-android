@@ -28,6 +28,7 @@ import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.protocol.ErrorCodes
+import com.automatethethings.xkey.protocol.Fido2WireIds
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -46,7 +47,6 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
-import java.security.MessageDigest
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -314,8 +314,7 @@ class PasskeySignCounterHandlerTest {
         assertEquals("no error expected: ${response.error?.message}", null, response.error)
         val result = response.result!!
         val authData = Base64.getDecoder().decode(result.getString("authenticatorData"))
-        val digest = MessageDigest.getInstance("SHA-256").digest(authData + CLIENT_DATA_HASH)
-        assertArrayEquals("the phone backend signed other data", digest, signed.last())
+        assertArrayEquals("the phone backend signed other data", authData + CLIENT_DATA_HASH, signed.last())
         assertEquals(result.getLong("signCount"), counterOf(authData))
         return counterOf(authData)
     }
@@ -328,7 +327,7 @@ class PasskeySignCounterHandlerTest {
             sessionAuthManager = null
         )
         val params = JSONObject()
-            .put("credentialId", ID)
+            .put("credentialId", Fido2WireIds.encode(ID))
             .put("clientDataHash", Base64.getEncoder().encodeToString(CLIENT_DATA_HASH))
             .put("rpId", RP_ID)
             .put("userVerificationRequired", userVerificationRequired)
@@ -371,6 +370,7 @@ class PasskeySignCounterHandlerTest {
         }
         return mockk(relaxed = true) {
             coEvery { getByKeyId(ID) } returns entity
+            coEvery { getFido2ByRpId(RP_ID) } returns listOf(entity)
             coEvery { updateSignCount(ID, any(), any()) } answers {
                 if (failCounterWrite) throw IllegalStateException("key store unavailable")
                 keyCount = secondArg()
