@@ -268,6 +268,70 @@ class MediaPublisherTest {
         assertEquals("provider reads under the publication lock", emptyList<String>(), publisherReads + helperReads)
     }
 
+    /** Reads of a capture's original that copy it whole, which only an interrupt ends early. */
+    private val originalReads = listOf(
+        "MediaPublisher.openOriginal(",
+        "readSignatureFromUri(applicationContext",
+        "readSignatureFromUri(this",
+        "MediaHasher.hashCanonicalUri(",
+        "checkInBandUri("
+    )
+
+    /**
+     * Process-scoped on purpose: the next screen instance waits on them, so a
+     * screen's cancel must not end them. appendToMedia runs in
+     * MediaSaveRuns.attach, writeSave is static over the application context.
+     */
+    private val processScopedReads = setOf("appendToMedia", "writeSave")
+
+    /**
+     * Every read of [originalReads] in a `lifecycleScope.launch` block of
+     * [text] that no `runInterruptible { ... }` block around it wraps, as
+     * "function: call". The cancellable helpers are not in [originalReads].
+     */
+    private fun uninterruptibleScreenReads(text: String): List<String> =
+        blocks(text, "lifecycleScope.launch").filter { (function, _) -> function !in processScopedReads }
+            .flatMap { (function, body) ->
+                val wrapped = Regex(Regex.escape("runInterruptible")).findAll(body).map { match ->
+                    val open = body.indexOf('{', match.range.last + 1)
+                    open until open + blockAt(body, match.range.last + 1).length
+                }.toList()
+                originalReads.flatMap { read ->
+                    Regex(Regex.escape(read)).findAll(body)
+                        .filter { match -> wrapped.none { match.range.first in it } }
+                        .map { "$function: $read" }.toList()
+                }
+            }
+
+    /**
+     * Leaving or rotating a screen cancels its scope, but a cancel does not
+     * end synchronous IO: a screen reads a capture's original through an
+     * interruptible call, so its cancel ends the copy and deletes the snapshot.
+     */
+    @Test
+    fun `no screen reads an original outside an interruptible call`() {
+        val screens = mainSources().filterKeys { it.startsWith("com/automatethethings/xkey/ui/") }
+        assertTrue("the scan found the screens", screens.isNotEmpty())
+        val reads = screens.flatMap { (file, text) -> uninterruptibleScreenReads(text).map { "$file: $it" } }
+        assertEquals("uninterruptible screen reads of an original", emptyList<String>(), reads)
+    }
+
+    @Test
+    fun `the scan sees an uninterruptible screen read`() {
+        val planted = """
+            fun load(u: Uri, m: String?) {
+                lifecycleScope.launch(Dispatchers.IO) { XmpMetadataHelper.readSignatureFromUri(applicationContext, u, m) }
+            }
+            fun loadWrapped(u: Uri, m: String?) {
+                lifecycleScope.launch(Dispatchers.IO) { runInterruptible { MediaHasher.hashCanonicalUri(applicationContext, u) } }
+            }
+        """
+        assertEquals(
+            listOf("load: readSignatureFromUri(applicationContext"),
+            uninterruptibleScreenReads(planted)
+        )
+    }
+
 
     private fun explains(content: String, written: String, backup: String, restoring: Boolean): Boolean {
         val w = folder.newFile().apply { writeText(written) }

@@ -23,6 +23,7 @@ import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import java.io.File
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Stands in for MediaStore's "media" provider: every content URI is backed
@@ -64,6 +65,12 @@ class FakeMediaProvider : ContentProvider() {
     /** Ends every stalled read: each goes on to read [media]. */
     fun release() = stalled.countDown()
 
+    /** Stalled reads whose thread was interrupted, which left the stall. */
+    val stallInterrupted = AtomicInteger()
+
+    /** Reads inside the stall now. */
+    val inStall = AtomicInteger()
+
     override fun onCreate() = true
 
     override fun getType(uri: Uri): String = mimeType
@@ -73,7 +80,17 @@ class FakeMediaProvider : ContentProvider() {
         openUris += uri
         onOpen(mode)
         val writes = 'w' in mode
-        if (stall && !writes) stalled.await()
+        if (stall && !writes) {
+            inStall.incrementAndGet()
+            try {
+                stalled.await()
+            } catch (e: InterruptedException) {
+                stallInterrupted.incrementAndGet()
+                throw e
+            } finally {
+                inStall.decrementAndGet()
+            }
+        }
         val redacted = redact
         if (!writes && redacted != null && uri.getQueryParameter("requireOriginal") != "1") {
             // MediaStore's redacted view of a foreign capture: location left out.
