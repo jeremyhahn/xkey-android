@@ -592,19 +592,42 @@ class RequestHandler(
     private suspend fun requestSessionId(): String =
         currentCoroutineContext()[ApprovalSession]?.sessionId ?: unsharedApprovalId()
 
-    private fun keyIdsUsedBy(request: Request): List<Pair<String, com.automatethethings.xkey.crypto.UserKeyKind>> {
-        if (request.method in KEY_WRITING_METHODS) return emptyList()
-        val params = request.params ?: return emptyList()
-        // A credentialId names a credential, every other key id parameter a
-        // general key: a delete of one key of a shared id refuses only uses
-        // of that key (#255 review).
-        return KEY_ID_PARAMS.mapNotNull { name ->
-            params.optString(name, "").takeIf { it.isNotEmpty() }?.let { keyId ->
-                keyId to if (name == "credentialId") com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
-                else com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
-            }
+    /**
+     * The deleted-key gate, before any handler reads the key: refuses a request whose key's delete reported success.
+     *
+     * A delete of one key of a shared id refuses only uses of that key
+     * (#255), so each id is checked as the key its handler reads, by
+     * [usedKind]; an id with no pending delete is never resolved.
+     */
+    private suspend fun requireKeysUsable(request: Request) {
+        if (request.method in KEY_WRITING_METHODS) return
+        val params = request.params ?: return
+        val named = KEY_ID_PARAMS.mapNotNull { name ->
+            params.optString(name, "").takeIf { it.isNotEmpty() }?.let { keyId -> keyId to namedKind(name) }
         }.distinct()
+        for ((keyId, kind) in named) {
+            if (!keyPolicyStore.isDeletionPending(keyId)) continue
+            keyPolicyStore.requireUsable(keyId, usedKind(keyId, kind))
+        }
     }
+
+    /** The namespace a key id parameter names when no one namespace holds the id: `credentialId` a credential. */
+    private fun namedKind(param: String): com.automatethethings.xkey.crypto.UserKeyKind =
+        if (param == "credentialId") com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        else com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+
+    /**
+     * The one user-key namespace a request naming [keyId] reaches, resolved
+     * as its handler resolves it (#255): the one namespace holding the id
+     * ([KeystoreManager.soleKind]), which sign and loadKey sign and load
+     * with whatever parameter names it. A passkey made through
+     * local.generateKey is a general key named by `credentialId`, and a
+     * credential can be named by `keyId`. With no sole holder (neither
+     * namespace, or both) the handlers find no key to read; the gate then
+     * checks the key the parameter [named].
+     */
+    private fun usedKind(keyId: String, named: com.automatethethings.xkey.crypto.UserKeyKind): com.automatethethings.xkey.crypto.UserKeyKind =
+        keystoreManager.soleKind(keyId) ?: named
 
     private suspend fun dispatch(request: Request): Response {
         Log.d(TAG, "Handling request: id=${request.id}, method=${request.method}")
@@ -620,8 +643,7 @@ class RequestHandler(
         }
 
         return try {
-            // The deleted-key gate, before any handler reads the key (#193 r12).
-            for ((keyId, kind) in keyIdsUsedBy(request)) keyPolicyStore.requireUsable(keyId, kind)
+            requireKeysUsable(request)
             handler(request)
         } catch (e: KeyPolicyStore.KeyDeletedException) {
             Log.w(TAG, "Deleted key refused: ${e.message}")
