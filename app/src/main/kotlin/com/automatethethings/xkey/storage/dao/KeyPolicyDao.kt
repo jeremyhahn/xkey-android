@@ -54,6 +54,15 @@ interface KeyPolicyDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun putPolicyRow(row: KeyPolicyEntity)
 
+    /**
+     * Moves `keys.policy_revision` of [keyId]'s key row [instance] forward,
+     * so a write decided on the revision read before it (a passkey
+     * replacement's conditional delete, a remote decision) no longer matches.
+     * Returns the number of rows changed: 1, or 0 if that key row is gone.
+     */
+    @Query("UPDATE keys SET policy_revision = policy_revision + 1 WHERE id = :instance AND key_id = :keyId")
+    suspend fun advancePolicyRevision(keyId: String, instance: Long): Int
+
     /** Sets the key row's policy, and `shareable` from it as [KeyDao.updateSharingPolicy] does. */
     @Query(
         """

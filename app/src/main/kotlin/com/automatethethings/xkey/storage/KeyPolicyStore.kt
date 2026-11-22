@@ -289,7 +289,7 @@ class KeyPolicyStore(
                     held(keyId, instance)?.clearGrants == true
                 if (clear) dao.deleteGrants(keyId)
                 if (dao.setKeyPolicy(keyId, policy) != 1) throw KeyChangedException(keyId)
-                dao.putPolicyRow(KeyPolicyEntity(keyId, instance, policy))
+                putPolicyRow(KeyPolicyEntity(keyId, instance, policy))
                 clear
             }.also {
                 unrecorded.computeIfPresent(keyId) { _, held -> held.takeUnless { it.instance == instance } }
@@ -372,7 +372,7 @@ class KeyPolicyStore(
                 val row = bound(keyId, instance)
                     ?: KeyPolicyEntity(keyId, instance, dao.storedPolicy(keyId) ?: throw KeyChangedException(keyId))
                 owed = obligation(narrowing, heldClear || row.clearGrants)
-                dao.putPolicyRow(
+                putPolicyRow(
                     row.copy(pendingPolicy = narrowing ?: row.pendingPolicy, denial = owed.denial, clearGrants = owed.clearGrants)
                 )
                 true
@@ -397,6 +397,25 @@ class KeyPolicyStore(
 
     /** Whether an obligation for [keyId]'s key row [instance] is held in the process only: not durable, which a restart loses. */
     fun isHeld(keyId: String, instance: Long): Boolean = held(keyId, instance) != null
+
+    /**
+     * The one write of an existing key row's policy row, inside the caller's
+     * transaction: writes [row] and moves its key row's
+     * `keys.policy_revision` forward with it. A denial recorded here only,
+     * with `keys.sharing_policy` unchanged, narrows the key as much as a
+     * policy write that landed, so every write decided on the revision read
+     * before it no longer matches: a passkey registration's delete of the
+     * passkey it replaces ([KeyDao.deletePasskeyRowIfUnchanged]) and a remote
+     * decision ([RemoteDecision.revision]) refuse instead of acting on a key
+     * the store already denies. The caller has checked, in the same
+     * transaction, that the key row is [KeyPolicyEntity.keyInstance], so the
+     * revision write changes it. [insertKey] writes the policy row of the key
+     * row it inserts directly: no write can have read that row before.
+     */
+    private suspend fun putPolicyRow(row: KeyPolicyEntity) {
+        dao.putPolicyRow(row)
+        dao.advancePolicyRevision(row.keyId, row.keyInstance)
+    }
 
     /**
      * Writes the obligation held in the process for [keyId]'s key row

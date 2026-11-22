@@ -168,6 +168,14 @@ class FakeKeyPolicyTables : KeyPolicyDao, KeyPolicyStore.Transactor {
         rows.value = rows.value + (row.keyId to row)
     }
 
+    override suspend fun advancePolicyRevision(keyId: String, instance: Long): Int {
+        check("advancePolicyRevision")
+        val key = keys.value[keyId] ?: return 0
+        if (key.id != instance) return 0
+        keys.value = keys.value + (keyId to key.copy(policyRevision = key.policyRevision + 1))
+        return 1
+    }
+
     override suspend fun setKeyPolicy(keyId: String, policy: SharingPolicyType): Int {
         check("setKeyPolicy")
         val key = keys.value[keyId] ?: return 0
