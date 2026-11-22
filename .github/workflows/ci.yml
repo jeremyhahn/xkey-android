@@ -19,8 +19,12 @@
 # `schedule-{repository}` and a workflow_dispatch run keeps
 # `main-workflow_dispatch`. This supersedes `main-{event}-{sha}`.
 # cancel-in-progress stays a literal `true`.
-# (adapted: applied. This workflow has no schedule trigger; the schedule
-# group is kept in the expression so a later trigger never takes a main group.)
+# (adapted: main keeps one group per run, `main-{event}-{sha}`, so main runs
+# never cancel each other here: each main run validates its own merge, and
+# the revert-red-main workflow can always read the parent commit's CI Gate
+# (push). A workflow_dispatch run still has its own group. The schedule group
+# is applied, tested first, though this workflow has no schedule trigger, so
+# a later trigger never takes a main group.)
 # v1.53 also: CI Gate runs on !cancelled() off pull_request, so a main run
 # cancelled by a newer push posts a skipped gate, not a failed one; a pull
 # request keeps always(), as a skipped required check counts as passed.
@@ -118,8 +122,8 @@
 # job starts at once, so a run takes as long as its slowest job.
 #
 # Concurrency. A newer push to a PR cancels that PR's older run. On main each
-# event is its own group (v1.53), so a newer push cancels the older main run
-# and a dispatch run never cancels a push run. cancel-in-progress is a
+# event and commit is its own group, so every merge keeps its run and a
+# dispatch run never cancels a push run. cancel-in-progress is a
 # literal `true`: an expression there once left a main run queued with no
 # task.
 #
@@ -178,15 +182,16 @@ on:
                                         # only retry when a run was never
                                         # created
 
-# v1.53: on main the group is the workflow and the event, `main-{event}`, so a
-# newer push to main cancels the older main run, and the newest run validates
-# every merge under it; a workflow_dispatch run (`main-workflow_dispatch`)
-# never cancels a push run. A schedule run takes `schedule-{repository}`, tested
-# first, so it never takes a main group. Every other ref is one group, so a
-# PR's newer run cancels the older. No expression reaches cancel-in-progress:
-# a run after it was set to an expression was never released.
+# On main the group is the event and the commit (adapted from v1.53's
+# `main-{event}`, see the header), so main runs never cancel each other: each
+# main run validates its own merge, and the revert-red-main workflow can always
+# read the parent commit's CI Gate (push). A workflow_dispatch run still has
+# its own group. A schedule run takes `schedule-{repository}`, tested first,
+# so it never takes a main group. Every other ref is one group, so a PR's
+# newer run cancels the older. No expression reaches cancel-in-progress: a
+# run after it was set to an expression was never released.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -866,8 +871,8 @@ jobs:
     # was skipped or failed, and then fails on its own.
     runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}   # v1.48
     timeout-minutes: 10
-    # v1.53: with main-{event} a newer push cancels the older main run, and an
-    # always() gate then read the cancelled needs and failed. Off pull_request
+    # v1.53: an always() gate in a cancelled main run read the cancelled
+    # needs and failed. Off pull_request
     # the gate runs on !cancelled(): a cancelled run posts a skipped gate, and a
     # run that is not cancelled still fails closed on any need that failed. A
     # pull request keeps always(): a skipped required check counts as passed,
