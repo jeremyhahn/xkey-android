@@ -255,7 +255,9 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                 // content hash, both from one read of it: the signature
                 // checked is the one in the bytes hashed. Leaving the screen
                 // cancels a read the provider stalls.
-                val inBand = runInterruptible { MediaHasher.checkInBandUri(applicationContext, uri, mimeType) }
+                val inBand = MediaPublisher.readCancellable { signal ->
+                    MediaHasher.checkInBandUri(applicationContext, uri, mimeType, signal)
+                }
                 var sigData = inBand?.data
                 var check = inBand?.check
 
@@ -266,9 +268,9 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                     sigData = XmpMetadataHelper.readSidecar(applicationContext, uri)
                     if (sigData != null) {
                         val sidecarHash = sigData.contentHash
-                        check = runInterruptible {
+                        check = MediaPublisher.readCancellable { signal ->
                             MediaHasher.checkContentHashUri(
-                                applicationContext, uri, sidecarHash, MediaHasher.SignatureSource.SIDECAR
+                                applicationContext, uri, sidecarHash, MediaHasher.SignatureSource.SIDECAR, signal
                             )
                         }
                     }

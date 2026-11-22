@@ -1184,7 +1184,9 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Hash the file content
-                val hashHex = runInterruptible { MediaHasher.hashCanonicalUri(applicationContext, uri) }
+                val hashHex = MediaPublisher.readCancellable { signal ->
+                    MediaHasher.hashCanonicalUri(applicationContext, uri, signal)
+                }
                 val hashBytes = hexToBytes(hashHex)
 
                 // Sign the hash
@@ -1292,13 +1294,13 @@ class FileOperationActivity : AppCompatActivity() {
 
     /**
      * How the shared media at [uri] is signed, reading it only, so media
-     * shared with read access alone keeps the sidecar path. Interruptible:
-     * leaving the screen ends the copy of the original.
+     * shared with read access alone keeps the sidecar path. Leaving the
+     * screen cancels the provider's open of the original and ends its copy.
      */
     private suspend fun sharedSigning(uri: Uri, mimeType: String): XmpMetadataHelper.SharedSigning =
-        runInterruptible {
+        MediaPublisher.readCancellable { signal ->
             XmpMetadataHelper.sharedSigning(
-                open = { MediaPublisher.openOriginal(applicationContext, uri) },
+                open = { MediaPublisher.openOriginal(applicationContext, uri, signal) },
                 format = XmpContainers.formatOf(mimeType)
             )
         }
@@ -1374,7 +1376,9 @@ class FileOperationActivity : AppCompatActivity() {
                 // The signature and the hash of its content come from one read
                 // of the original: the signature checked is the one in the
                 // bytes hashed. Leaving the screen cancels a read the provider stalls.
-                val inBand = runInterruptible { MediaHasher.checkInBandUri(applicationContext, uri, mimeType) }
+                val inBand = MediaPublisher.readCancellable { signal ->
+                    MediaHasher.checkInBandUri(applicationContext, uri, mimeType, signal)
+                }
 
                 if (inBand != null) {
                     val embeddedData = inBand.data
@@ -1438,9 +1442,9 @@ class FileOperationActivity : AppCompatActivity() {
                 } ?: throw IllegalStateException("Cannot read sidecar file")
 
                 // A sidecar may cover the canonical or the whole-file hash.
-                val check = runInterruptible {
+                val check = MediaPublisher.readCancellable { signal ->
                     MediaHasher.checkContentHashUri(
-                        applicationContext, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
+                        applicationContext, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR, signal
                     )
                 }
                 val results = when (check) {
@@ -1606,7 +1610,9 @@ class FileOperationActivity : AppCompatActivity() {
                     write = { staged ->
                         // The file whole: a capture's location is encrypted with it, never dropped.
                         // Cancellable: leaving the screen ends the copy of the original.
-                        MediaPublisher.openOriginalCancellable(applicationContext, uri).use { input ->
+                        MediaPublisher.readCancellable(Dispatchers.IO) { signal ->
+                            MediaPublisher.openOriginal(applicationContext, uri, signal)
+                        }.use { input ->
                             FileOutputStream(staged).use { output ->
                                 fileEncryptor.encryptForRecipient(
                                     recipient.publicKeyDer,

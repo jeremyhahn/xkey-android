@@ -33,7 +33,11 @@ import android.os.Process
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import java.io.File
 import java.io.FileInputStream
@@ -45,8 +49,11 @@ import java.nio.ByteBuffer
 import java.nio.channels.ClosedByInterruptException
 import java.nio.channels.ClosedChannelException
 import java.util.concurrent.CancellationException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicIntegerArray
 import java.util.concurrent.atomic.AtomicLongArray
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 
 /**
  * Writing the bytes it was publishing failed, or closing the destination
@@ -498,7 +505,9 @@ object MediaPublisher {
      * listener closes the descriptor being read, and the copy, in
      * [READ_CHUNK] pieces, checks it and the thread's interrupt between
      * them. A cancelled or interrupted read deletes its snapshot and throws
-     * [CancellationException]. A screen reads through [openOriginalCancellable].
+     * [CancellationException]. A screen always reads with a signal, inside
+     * [readCancellable], whose signal its cancel fires; only process-scoped
+     * reads, which outlive any one screen, pass none.
      *
      * Lock order: this takes no lock. Writers take [grantedWrites], then
      * bump the item's generation ([writingItem]), which is lock-free.
@@ -534,11 +543,44 @@ object MediaPublisher {
     }
 
     /**
-     * [openOriginal] for a coroutine: cancelling it interrupts the read,
-     * which closes the descriptor being read and throws [CancellationException].
+     * Runs [block], a blocking read, as a screen reads: on the caller's
+     * dispatcher, or [context] when given (a screen reads on
+     * [Dispatchers.IO]), handed a [CancellationSignal] that the calling coroutine's cancel
+     * fires. Cancelling the caller both cancels the signal, which ends an
+     * open the provider has blocked in its own process, and interrupts the
+     * worker, which ends a copy on this side. [block] passes the signal to
+     * every provider open it makes ([openOriginal]'s `cancel`).
+     *
+     * The signal is fired by a watcher started with the read, not by the
+     * caller's completion: a cancelled job completes only once the blocked
+     * read returns, which is the read the signal has to end.
      */
+    suspend fun <T> readCancellable(
+        context: CoroutineContext = EmptyCoroutineContext,
+        block: (CancellationSignal) -> T
+    ): T {
+        val signal = CancellationSignal()
+        return coroutineScope {
+            val done = AtomicBoolean(false)
+            val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    if (!done.get()) signal.cancel()
+                }
+            }
+            try {
+                runInterruptible(context) { block(signal) }
+            } finally {
+                done.set(true)
+                watcher.cancel()
+            }
+        }
+    }
+
+    /** [openOriginal] inside [readCancellable], its signal passed to the open. */
     suspend fun openOriginalCancellable(context: Context, target: Uri): InputStream =
-        runInterruptible(Dispatchers.IO) { openOriginal(context, target) }
+        readCancellable(Dispatchers.IO) { signal -> openOriginal(context, target, signal) }
 
     /** Throws [CancellationException] once [cancel] is cancelled or the thread interrupted. */
     private fun checkCancelled(cancel: CancellationSignal?) {
@@ -551,7 +593,8 @@ object MediaPublisher {
      * [READ_CHUNK] pieces, through an interruptible channel when the
      * provider hands out a file. With a [cancel] signal the descriptor is
      * opened with it, and its listener closes that channel, which ends a
-     * read the provider stalls.
+     * read the provider stalls. A screen's read always has one
+     * ([readCancellable]); a null [cancel] is a process-scoped read's.
      */
     private fun copyOriginal(context: Context, target: Uri, snapshot: File, cancel: CancellationSignal?) {
         checkCancelled(cancel)

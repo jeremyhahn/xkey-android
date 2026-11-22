@@ -17,6 +17,7 @@ package com.automatethethings.xkey.media
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import android.os.CancellationSignal
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -45,9 +46,11 @@ object MediaHasher {
      * or a document URI. It reads the original bytes, as the capture signer
      * does ([MediaPublisher.openOriginal]): without location access a
      * MediaStore item throws [MediaPublisher.OriginalUnavailableException].
+     * The provider's open is passed [cancel]: a screen hashes inside
+     * [MediaPublisher.readCancellable] and passes its signal.
      */
-    fun hashCanonicalUri(context: Context, uri: Uri): String =
-        hashStreamedUri(context, uri).canonical
+    fun hashCanonicalUri(context: Context, uri: Uri, cancel: CancellationSignal? = null): String =
+        hashStreamedUri(context, uri, cancel).canonical
 
     fun hashUri(contentResolver: ContentResolver, uri: Uri): String {
         val inputStream = contentResolver.openInputStream(uri)
@@ -176,10 +179,10 @@ object MediaHasher {
      * the one read every verification and co-signing hash shares with the
      * signer ([MediaPublisher.openOriginal]), never MediaStore's redacted view.
      */
-    private fun hashStreamedUri(context: Context, uri: Uri): StreamedHashes {
+    private fun hashStreamedUri(context: Context, uri: Uri, cancel: CancellationSignal? = null): StreamedHashes {
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
         return hashStreamed(
-            { MediaPublisher.openOriginal(context, uri) },
+            { MediaPublisher.openOriginal(context, uri, cancel) },
             context.contentResolver.getType(uri),
             MediaPublisher.recoveryDirectory(context)
         )
@@ -194,14 +197,16 @@ object MediaHasher {
      * snapshot of the original ([withSnapshot]): the signature checked is the
      * one in the bytes hashed. Null when the media carries none, and without
      * a read for a type that carries no in-band signature. Without location
-     * access it throws [MediaPublisher.OriginalUnavailableException].
+     * access it throws [MediaPublisher.OriginalUnavailableException]. The
+     * provider's open is passed [cancel]: a screen checks inside
+     * [MediaPublisher.readCancellable] and passes its signal.
      */
-    fun checkInBandUri(context: Context, uri: Uri, mimeType: String?): InBandCheck? {
+    fun checkInBandUri(context: Context, uri: Uri, mimeType: String?, cancel: CancellationSignal? = null): InBandCheck? {
         val type = mimeType ?: ""
         val jpeg = type.startsWith("image/jpeg") || type.startsWith("image/jpg")
         if (!jpeg && XmpContainers.formatOf(type) == null) return null
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
-        return withSnapshot({ MediaPublisher.openOriginal(context, uri) }, MediaPublisher.recoveryDirectory(context)) { snapshot, whole ->
+        return withSnapshot({ MediaPublisher.openOriginal(context, uri, cancel) }, MediaPublisher.recoveryDirectory(context)) { snapshot, whole ->
             val data = XmpMetadataHelper.readSignatureFromSnapshot(snapshot, mimeType) ?: return@withSnapshot null
             InBandCheck(data, contentHashCheck(canonicalOf(snapshot, mimeType, whole), data.contentHash, SignatureSource.IN_BAND))
         }
@@ -274,16 +279,18 @@ object MediaHasher {
     /**
      * [contentHashMatches] over the original bytes at [uri] ([hashStreamedUri]),
      * typed by the resolver and hashed streaming, so a video larger than the
-     * heap verifies. **Both verify screens use this.**
+     * heap verifies. **Both verify screens use this**, inside
+     * [MediaPublisher.readCancellable], passing its signal as [cancel].
      */
     fun checkContentHashUri(
         context: Context,
         uri: Uri,
         storedContentHash: String,
-        source: SignatureSource
+        source: SignatureSource,
+        cancel: CancellationSignal? = null
     ): ContentHashCheck {
         val hashes = try {
-            hashStreamedUri(context, uri)
+            hashStreamedUri(context, uri, cancel)
         } catch (_: MediaPublisher.OriginalUnavailableException) {
             return ContentHashCheck.ACCESS_UNAVAILABLE
         }

@@ -17,15 +17,15 @@ package com.automatethethings.xkey.media
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import android.os.CancellationSignal
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.exifinterface.media.ExifInterface
+import kotlinx.coroutines.Dispatchers
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runInterruptible
 
 /**
  * Where a media file's signature lives:
@@ -240,21 +240,26 @@ object XmpMetadataHelper {
      * ([MediaPublisher.openOriginal]), the ones its content hash covers.
      * Without location access a MediaStore capture throws
      * [MediaPublisher.OriginalUnavailableException]: unreadable is not unsigned.
-     * It blocks for the whole copy of the original: a screen reads through
-     * [readOriginalSignature] instead.
+     * It blocks for the whole copy of the original, its provider open
+     * passed [cancel]: a screen reads through [readOriginalSignature] instead.
      */
-    fun readSignatureFromUri(context: Context, uri: Uri, mimeType: String?): ContentAuthenticityData? =
-        readSignature(uri, mimeType) { MediaPublisher.openOriginal(context, uri) }
+    fun readSignatureFromUri(
+        context: Context,
+        uri: Uri,
+        mimeType: String?,
+        cancel: CancellationSignal? = null
+    ): ContentAuthenticityData? =
+        readSignature(uri, mimeType) { MediaPublisher.openOriginal(context, uri, cancel) }
 
     /**
-     * [readSignatureFromUri] as a screen reads it: on [Dispatchers.IO], its
-     * thread interrupted when the caller is cancelled. A cancel alone does not
-     * end synchronous IO; the interrupt ends [MediaPublisher.openOriginal]'s
-     * chunked copy of the original and deletes its snapshot, so leaving or
-     * recreating the screen never leaves a full copy running.
+     * [readSignatureFromUri] as a screen reads it, inside
+     * [MediaPublisher.readCancellable]: cancelling the caller cancels the
+     * provider's open of the original through its signal and interrupts the
+     * copy, which deletes its snapshot, so leaving or recreating the screen
+     * never leaves a read running, on either side of the provider.
      */
     suspend fun readOriginalSignature(context: Context, uri: Uri, mimeType: String?): ContentAuthenticityData? =
-        runInterruptible(Dispatchers.IO) { readSignatureFromUri(context, uri, mimeType) }
+        MediaPublisher.readCancellable(Dispatchers.IO) { signal -> readSignatureFromUri(context, uri, mimeType, signal) }
 
     /**
      * [readSignatureFromUri] over [snapshot], a private copy of the media
