@@ -300,10 +300,9 @@ class GrantedSidecarDestinationTest {
             .toList()
 
         assertTrue("the choke point derives the sidecar", derivations.any { it.first == "authoritativeSidecar" })
-        // The two staged-copy uses in signMedia name the private copy's own sidecar, never the capture's.
-        val stagedCopy = derivations.filter { it.first == "signMedia" }
-        assertEquals(listOf("File(getSidecarPath(", "File(getSidecarPath("), stagedCopy.map { it.second })
-        val bypasses = derivations.filter { it.first != "authoritativeSidecar" && it.first != "signMedia" }
+        // The staged copy's sidecar in signMedia is the one the writer
+        // returns, never derived again: no function is excepted.
+        val bypasses = derivations.filter { it.first != "authoritativeSidecar" }
         assertEquals("every sidecar read and write asks authoritativeSidecar", emptyList<Pair<String, String>>(), bypasses)
     }
 }

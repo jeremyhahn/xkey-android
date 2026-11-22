@@ -78,18 +78,21 @@ object XmpMetadataHelper {
         writeSignatureLocked(filePath, data)
     }
 
-    /** [writeSignature] for a caller that already holds the lock of the media it writes. */
-    private fun writeSignatureLocked(filePath: String, data: ContentAuthenticityData) {
+    /**
+     * [writeSignature] for a caller that already holds the lock of the media
+     * it writes. Returns the sidecar it wrote ([authoritativeSidecar]'s
+     * choice), or null when the signature went into the media itself.
+     */
+    private fun writeSignatureLocked(filePath: String, data: ContentAuthenticityData): File? {
         val mimeType = getMimeType(filePath)
         val format = XmpContainers.formatOf(mimeType)
-        when {
+        return when {
             mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg") -> {
                 writeExifSignature(filePath, data)
+                null
             }
-            format != null && writeEmbeddedSignature(filePath, format, data) -> Unit
-            else -> {
-                writeSidecarSignature(filePath, data)
-            }
+            format != null && writeEmbeddedSignature(filePath, format, data) -> null
+            else -> writeSidecarSignature(filePath, data)
         }
     }
 
@@ -155,6 +158,9 @@ object XmpMetadataHelper {
             MediaPublisher.recoverInterruptedWrite(context, uri)
             val staged = MediaSaveRuns.work(MediaPublisher.recoveryDirectory(context), stagingSuffix(mimeType))
             var kept = false
+            // The staged copy's sidecar, as the writer chose it: never a
+            // second guess at where it went.
+            var stagedSidecar: File? = null
             try {
                 // The capture whole, location included: the signed bytes
                 // written over it are made from this copy. It is read before
@@ -165,9 +171,8 @@ object XmpMetadataHelper {
                     // What was staged, before the signature goes in: the granted
                     // write refuses a capture that no longer matches it.
                     val source = MediaPublisher.StagedSource.of(staged, mimeType, data.contentHash)
-                    writeSignatureLocked(staged.path, data)
-                    val sidecar = File(getSidecarPath(staged.path))
-                    if (sidecar.exists()) {
+                    stagedSidecar = writeSignatureLocked(staged.path, data)
+                    if (stagedSidecar != null) {
                         // The container refused the packet: the media stays as it
                         // is and the signature goes to a sidecar xKey owns: the
                         // grant covers the capture alone, never a file beside it.
@@ -181,7 +186,7 @@ object XmpMetadataHelper {
                 kept = true
                 throw e
             } finally {
-                File(getSidecarPath(staged.path)).delete()
+                stagedSidecar?.delete()
                 if (!kept) staged.delete()
             }
         }
@@ -628,9 +633,10 @@ object XmpMetadataHelper {
     }
 
     /** Write [data] to the sidecar of [filePath] ([authoritativeSidecar]), replaced atomically ([MediaPublisher.replaceFile]). */
-    private fun writeSidecarSignature(filePath: String, data: ContentAuthenticityData) {
+    private fun writeSidecarSignature(filePath: String, data: ContentAuthenticityData): File {
         val sidecar = checkNotNull(authoritativeSidecar(filePath, null)) { "a named file always has a sidecar" }
         MediaPublisher.replaceFile(sidecar) { temp -> temp.writeText(data.toJsonString()); true }
+        return sidecar
     }
 
     /**
