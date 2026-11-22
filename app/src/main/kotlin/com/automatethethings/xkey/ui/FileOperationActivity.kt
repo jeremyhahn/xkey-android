@@ -98,6 +98,9 @@ class FileOperationActivity : AppCompatActivity() {
          * line, and every one verified. A mismatch, an unknown signer, nothing
          * checked, or location access unavailable (only MediaStore's redacted
          * view readable, so nothing was hashed or checked) is not verified.
+         * The screen's verdict ([showVerificationResult]) and the audit share
+         * it, so a packet with no signature is shown and audited alike: never
+         * as verified.
          */
         internal fun verificationSucceeded(results: List<Pair<String, String>>): Boolean =
             results.isNotEmpty() && results.all { it.second == "verified" }
@@ -1380,7 +1383,8 @@ class FileOperationActivity : AppCompatActivity() {
                     // signature entries. An unreadable original is no
                     // mismatch: nothing is verified and it says so.
                     val result = when (check) {
-                        MediaHasher.ContentHashCheck.MATCHES -> verifySignatures(embeddedData, true)
+                        MediaHasher.ContentHashCheck.MATCHES ->
+                            verifySignatures(embeddedData, true).ifEmpty { listOf("No signatures" to "none") }
                         MediaHasher.ContentHashCheck.MISMATCH ->
                             listOf("Content hash mismatch" to "failed") + verifySignatures(embeddedData, false)
                         // Nothing was hashed or checked: audited as not verified.
@@ -1434,7 +1438,8 @@ class FileOperationActivity : AppCompatActivity() {
                     applicationContext, fileUri, cad.contentHash, MediaHasher.SignatureSource.SIDECAR
                 )
                 val results = when (check) {
-                    MediaHasher.ContentHashCheck.MATCHES -> verifySignatures(cad, true)
+                    MediaHasher.ContentHashCheck.MATCHES ->
+                        verifySignatures(cad, true).ifEmpty { listOf("No signatures" to "none") }
                     MediaHasher.ContentHashCheck.MISMATCH -> listOf("Content hash mismatch" to "failed")
                     // Nothing was hashed or checked: audited as not verified.
                     MediaHasher.ContentHashCheck.ACCESS_UNAVAILABLE ->
@@ -1537,12 +1542,14 @@ class FileOperationActivity : AppCompatActivity() {
                 "verified" -> "Verified"
                 "unknown" -> "Unknown signer"
                 "failed" -> "Failed"
+                "none" -> "None"
                 else -> status
             }
             sb.appendLine("$signer: $statusLabel")
         }
 
-        val allVerified = results.all { it.second == "verified" }
+        // The one verdict the audit records too: no signature is no verification.
+        val allVerified = verificationSucceeded(results)
         val anyFailed = results.any { it.second == "failed" }
 
         val headerText = when {

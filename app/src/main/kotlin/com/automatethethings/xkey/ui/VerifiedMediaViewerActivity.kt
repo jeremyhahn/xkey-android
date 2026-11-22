@@ -286,7 +286,8 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
                     verifyEntry(entry, contentHashMatches, sigData.contentHash)
                 }
 
-                val allVerified = results.all { it.status == VerificationStatus.VERIFIED }
+                // Zero signatures verify nothing.
+                val allVerified = results.isNotEmpty() && results.all { it.status == VerificationStatus.VERIFIED }
 
                 withContext(Dispatchers.Main) {
                     displayVerificationResults(results, sigData.signatures.size)
