@@ -58,23 +58,51 @@ object XmpMetadataHelper {
     @Volatile
     var maxEmbedBytes: Int = minOf(128L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 6).toInt()
 
-    private val pathLocks = Array(64) { Any() }
+    /** One destination's lock, kept while a holder or a waiter has it. */
+    private class DestinationLock {
+        var users = 0
+    }
 
-    /** The lock serializing every write to [filePath]; a fixed set, so it never grows. */
-    private fun lockFor(filePath: String): Any {
+    /** The lock of each destination in use; an entry lives only while it is held or awaited. */
+    private val destinationLocks = HashMap<String, DestinationLock>()
+
+    /** The identity of the media at [filePath]: its canonical path. */
+    private fun pathIdentity(filePath: String): String {
         val file = File(filePath)
-        val key = try {
+        return try {
             file.canonicalPath
         } catch (_: IOException) {
             file.absolutePath
         }
-        return lockForKey(key)
     }
 
-    /** The lock for a destination named by [identity], a canonical path or a URI. */
-    private fun lockForKey(identity: String): Any = pathLocks[Math.floorMod(identity.hashCode(), pathLocks.size)]
+    /**
+     * Run [block] holding the lock of the destination named by [identity], a
+     * canonical path ([pathIdentity]) or a URI: the one lock serializing
+     * every write to that destination. Each destination has a lock of its
+     * own, never one shared by hash, so a source read that stalls under it
+     * (a provider that never answers) holds that destination alone, never
+     * the write of another. The lock is reentrant, and the map holds only
+     * the destinations in use.
+     */
+    private inline fun <T> withDestinationLock(identity: String, block: () -> T): T {
+        val lock = synchronized(destinationLocks) {
+            destinationLocks.getOrPut(identity) { DestinationLock() }.also { it.users++ }
+        }
+        try {
+            return synchronized(lock) { block() }
+        } finally {
+            synchronized(destinationLocks) {
+                if (--lock.users == 0) destinationLocks.remove(identity)
+            }
+        }
+    }
 
-    fun writeSignature(filePath: String, data: ContentAuthenticityData): Unit = synchronized(lockFor(filePath)) {
+    /** [withDestinationLock] for the media at [filePath]. */
+    private inline fun <T> withPathLock(filePath: String, block: () -> T): T =
+        withDestinationLock(pathIdentity(filePath), block)
+
+    fun writeSignature(filePath: String, data: ContentAuthenticityData): Unit = withPathLock(filePath) {
         writeSignatureLocked(filePath, data)
     }
 
@@ -128,7 +156,7 @@ object XmpMetadataHelper {
     fun signMedia(context: Context, uri: Uri, filePath: String?, data: ContentAuthenticityData): MediaSignResult {
         val access = MediaPublisher.writeAccess(context, uri)
         if (access == MediaPublisher.MediaWriteAccess.OWNED && filePath != null) {
-            synchronized(lockFor(filePath)) {
+            withPathLock(filePath) {
                 requireCurrent(context, uri, filePath, getMimeType(filePath), data)
                 writeSignatureLocked(filePath, data)
             }
@@ -143,16 +171,16 @@ object XmpMetadataHelper {
         val mimeType = providerType ?: filePath?.let(::getMimeType) ?: "application/octet-stream"
         if (!isJpeg(mimeType) && XmpContainers.formatOf(mimeType) == null) {
             // Not xKey's file: its sidecar is one xKey owns, never a file beside it.
-            val lock = if (filePath != null) lockFor(filePath) else lockForKey(uri.toString())
-            synchronized(lock) {
+            val identity = if (filePath != null) pathIdentity(filePath) else uri.toString()
+            withDestinationLock(identity) {
                 requireCurrent(context, uri, null, mimeType, data)
                 writeOwnedSidecar(context, uri, filePath, data)
             }
             return MediaSignResult.Signed
         }
         if (access == MediaPublisher.MediaWriteAccess.NEEDS_GRANT) return MediaSignResult.NeedsWriteAuthorization
-        val lock = if (filePath != null) lockFor(filePath) else lockForKey(uri.toString())
-        synchronized(lock) {
+        val identity = if (filePath != null) pathIdentity(filePath) else uri.toString()
+        withDestinationLock(identity) {
             // A write of this capture an earlier process died in is put back
             // before it is staged; one that cannot be yet stages nothing.
             MediaPublisher.recoverInterruptedWrite(context, uri)
@@ -291,7 +319,7 @@ object XmpMetadataHelper {
      * from: an embedded signature stays embedded, and a legacy sidecar beside
      * an MP4/MOV, PNG or WebP stays a sidecar, so the media file is untouched.
      */
-    fun appendSignature(filePath: String, entry: SignatureEntry): Unit = synchronized(lockFor(filePath)) {
+    fun appendSignature(filePath: String, entry: SignatureEntry): Unit = withPathLock(filePath) {
         val format = XmpContainers.formatOf(getMimeType(filePath))
         // Not the swallowing reader: a failed read must not route the append to a sidecar.
         val embedded = format?.let { probeEmbeddedSignature(filePath, it) }
@@ -403,7 +431,7 @@ object XmpMetadataHelper {
         workDir: File,
         destination: String,
         embed: (String) -> Boolean
-    ): Boolean = synchronized(lockForKey(destination)) {
+    ): Boolean = withDestinationLock(destination) {
         // A save's working file: one a process death leaves, the next start reclaims.
         val work = MediaSaveRuns.work(workDir, ".xkeytmp")
         var handed = false
