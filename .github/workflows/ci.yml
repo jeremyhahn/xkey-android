@@ -1,5 +1,43 @@
-# ci-template: v1.52 — CI for a Kotlin/Gradle Android app, kept in step with a
+# ci-template: v1.54 — CI for a Kotlin/Gradle Android app, kept in step with a
 # shared template; change both together.
+# v1.54: preflight's runner selection balances each run between GitHub-hosted
+# runners and the self-hosted pools, whichever the repository uses less, with
+# limits from the repository variables CI_HOSTED_SHARE,
+# CI_SELF_HOSTED_BIGDISK and CI_SELF_HOSTED_BIGDISK_DOCKER; the
+# HOSTED_JOBS_PER_REPO and HOSTED_QUEUE_GRACE_SECONDS env values are removed.
+# (adapted: the repo line of v1.48 and v1.49 is kept, no job change. This
+# repository is public and has no self-hosted runners registered, so a run
+# sent to a self-hosted pool would queue forever, and a runner registered
+# later could run a fork's pull request code. Every job stays GitHub-hosted
+# on ubuntu-latest, `Runner (GitHub-hosted only)` makes no Actions API call
+# and needs no actions: read, and neither the balancing step nor its
+# variables are added. A fork's pull request never reaches a self-hosted
+# runner.)
+# v1.53: on main the concurrency group is one per event, `main-{event}`, so a
+# newer push to main cancels the older main run still queued or in progress,
+# and the newest run validates every merge under it; a schedule run keeps
+# `schedule-{repository}` and a workflow_dispatch run keeps
+# `main-workflow_dispatch`. This supersedes `main-{event}-{sha}`.
+# cancel-in-progress stays a literal `true`.
+# (adapted: applied. This workflow has no schedule trigger; the schedule
+# group is kept in the expression so a later trigger never takes a main group.)
+# v1.53 also: CI Gate runs on !cancelled() off pull_request, so a main run
+# cancelled by a newer push posts a skipped gate, not a failed one; a pull
+# request keeps always(), as a skipped required check counts as passed.
+# (adapted: applied; no schedule `busy` clause, see the schedule guard note.)
+# v1.53 also: `Runner labels` lets code-review.yml's API-only jobs take a
+# self-hosted label set for a same-repository head under a pull request event.
+# (adapted: no `Runner labels` step here, see v1.51, and every runs-on in
+# code-review.yml stays GitHub-hosted, so no change.)
+# v1.53 also: main-green for a release tag is a successful ci.yml run for the
+# exact commit tagged, a push run or a workflow_dispatch run on main.
+# (adapted: a release practice, no job change in this file.)
+# v1.53 also: preflight takes the self-hosted pool while CI_PREFLIGHT_RUNS_ON is
+# unset. (adapted: preflight stays on ubuntu-latest, see v1.49.)
+# v1.53 also: `Mask the LAN addresses` reads the internal registry from a
+# secret, and a job output never carries a registry address.
+# (adapted: no mask step, no internal registry and no image hand-off between
+# jobs here, see v1.48, so no change.)
 # v1.52: a pull request whose head repository is not this repository (a fork)
 # runs every job on ubuntu-latest: preflight's runs-on and the runner
 # selection never pick a self-hosted runner for a fork's head.
@@ -80,8 +118,8 @@
 # job starts at once, so a run takes as long as its slowest job.
 #
 # Concurrency. A newer push to a PR cancels that PR's older run. On main each
-# event and commit is its own group, so every merge keeps its run and a
-# dispatch run never cancels a push run. cancel-in-progress is a
+# event is its own group (v1.53), so a newer push cancels the older main run
+# and a dispatch run never cancels a push run. cancel-in-progress is a
 # literal `true`: an expression there once left a main run queued with no
 # task.
 #
@@ -140,14 +178,15 @@ on:
                                         # only retry when a run was never
                                         # created
 
-# On main the group is the event and the commit, so a newer push to main never
-# cancels an older main run (every merge keeps its run) and a
-# workflow_dispatch run never cancels a push run. Every other ref is one
-# group, so a PR's newer run cancels the older. No expression reaches
-# cancel-in-progress: a run after it was set to an expression was never
-# released.
+# v1.53: on main the group is the workflow and the event, `main-{event}`, so a
+# newer push to main cancels the older main run, and the newest run validates
+# every merge under it; a workflow_dispatch run (`main-workflow_dispatch`)
+# never cancels a push run. A schedule run takes `schedule-{repository}`, tested
+# first, so it never takes a main group. Every other ref is one group, so a
+# PR's newer run cancels the older. No expression reaches cancel-in-progress:
+# a run after it was set to an expression was never released.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -827,7 +866,13 @@ jobs:
     # was skipped or failed, and then fails on its own.
     runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}   # v1.48
     timeout-minutes: 10
-    if: always()
+    # v1.53: with main-{event} a newer push cancels the older main run, and an
+    # always() gate then read the cancelled needs and failed. Off pull_request
+    # the gate runs on !cancelled(): a cancelled run posts a skipped gate, and a
+    # run that is not cancelled still fails closed on any need that failed. A
+    # pull request keeps always(): a skipped required check counts as passed,
+    # so a cancelled PR run must post a failing gate, never a skip.
+    if: ${{ startsWith(github.event_name, 'pull_request') && always() || !cancelled() }}
     # The job list. Add every new job here AND as a check line below.
     needs: [preflight, image, lint-gates, integration, soak]
     steps:
