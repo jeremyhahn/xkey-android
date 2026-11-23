@@ -369,6 +369,31 @@ class NoiseHandshakeTest {
         }
     }
 
+    /**
+     * msg3 is the encrypted static key (48) plus the encrypted payload (at
+     * least its 16-byte tag): flynn/noise always sends 64 bytes or more. A
+     * shorter msg3 (the old 48-byte "legacy" form, or one byte short) is
+     * refused, never completed without its payload authenticated.
+     */
+    @Test
+    fun responderRefusesAShortFinalMessage() = runTest {
+        for (size in listOf(48, 63)) {
+            val initiator = NoiseInitiatorSession(randomBytes(KEY_SIZE))
+            val responder = newResponder()
+            initiator.processHandshakeMessage2(
+                responder.processHandshakeMessage(initiator.createHandshakeMessage1())!!
+            )
+            val msg3 = initiator.createHandshakeMessage3()
+            assertEquals(MSG3_SIZE, msg3.size)
+            try {
+                responder.processHandshakeMessage(msg3.copyOf(size))
+                fail("expected a $size-byte msg3 to be refused")
+            } catch (expected: NoiseException) {
+                assertFalse("a $size-byte msg3 must not complete", responder.isHandshakeComplete())
+            }
+        }
+    }
+
     // -----------------------------------------------------------------
     // Transport phase
     // -----------------------------------------------------------------
