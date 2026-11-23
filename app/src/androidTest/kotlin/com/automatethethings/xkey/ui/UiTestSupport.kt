@@ -18,6 +18,7 @@ import android.app.Activity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import androidx.biometric.BiometricManager
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
@@ -33,6 +34,7 @@ import org.hamcrest.Matcher
 import org.hamcrest.Matchers.allOf
 import org.hamcrest.TypeSafeMatcher
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeFalse
 
 /**
  * Shared helpers for the programmatic-UI instrumented tests in this package.
@@ -329,4 +331,24 @@ fun <T : View> switchForLabel(root: View, label: String, switchType: Class<T>): 
 /** Blocks until the instrumentation main loop is idle. */
 fun waitForIdle() {
     InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+}
+
+/**
+ * Skips the calling test on a device with an enrolled strong biometric.
+ *
+ * The prompt tests cover the path where the system prompt fails at once
+ * because nothing is enrolled -- the emulator's situation. On a phone with a
+ * fingerprint or face enrolled the same prompt shows and waits for its owner,
+ * so the test would time out on a person rather than on the app.
+ */
+fun assumeNoEnrolledStrongBiometric() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val enrolled = BiometricManager.from(context)
+        .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+        BiometricManager.BIOMETRIC_SUCCESS
+    assumeFalse(
+        "this device has an enrolled strong biometric: the prompt would wait for its owner " +
+            "instead of failing at once",
+        enrolled
+    )
 }
