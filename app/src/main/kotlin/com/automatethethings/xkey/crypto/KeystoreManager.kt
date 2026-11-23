@@ -524,31 +524,84 @@ class KeystoreManager(
         // Biometric required - show prompt, with a fresh Signature: the silent
         // one may have been initialised (and fed) before the refusal.
         try {
-            val signature = Signature.getInstance(SIGNATURE_ALGORITHM)
-            signature.initSign(privateKey)
-
-            // Create CryptoObject for biometric binding
-            val cryptoObject = BiometricPrompt.CryptoObject(signature)
-
-            // Authenticate with biometric - this unlocks the signature object.
-            // The prompt waits for its queue turn, and onTurn posts its wake
-            // notification on that turn.
-            biometricHelper.authenticate(
-                cryptoObject = cryptoObject,
-                title = title,
-                subtitle = subtitle,
-                onTurn = onTurn
+            return signWithPrompt(
+                alias, privateKey, SIGNATURE_ALGORITHM, dataHash,
+                biometricHelper, title, subtitle, onTurn
             )
-
-            // After successful biometric, the signature object is unlocked
-            signature.update(dataHash)
-            return signature.sign()
         } catch (e: XKeyCryptoException) {
             // Re-throw our typed exceptions
             throw e
         } catch (e: Exception) {
             throw SigningException("Signing operation failed", e)
         }
+    }
+
+    /**
+     * Signs [data] with [privateKey] behind a biometric prompt, in the flow
+     * the key's kind allows: the one place a prompt meets a Keystore key.
+     *
+     * - A time-window key (authentication valid for a number of seconds)
+     *   cannot be bound to a CryptoObject, and its provider may refuse
+     *   `initSign` until the user has authenticated. The user authenticates
+     *   first, without a CryptoObject; then a fresh Signature is
+     *   initialised and signs inside the new window.
+     * - A per-operation key (validity 0) is bound to the prompt: `initSign`,
+     *   then the prompt unlocks that Signature through its CryptoObject.
+     *   Should its `initSign` refuse for want of authentication (the key's
+     *   [KeyInfo] was unreadable, and it is a time-window key after all), the
+     *   time-window flow runs instead, so no key is initialised before the
+     *   authentication it needs.
+     */
+    private suspend fun signWithPrompt(
+        alias: String,
+        privateKey: PrivateKey,
+        algorithm: String,
+        data: ByteArray,
+        biometricHelper: BiometricHelper,
+        title: String,
+        subtitle: String,
+        onTurn: (key: String) -> Unit
+    ): ByteArray {
+        suspend fun authenticateThenSign(): ByteArray {
+            biometricHelper.authenticateWithoutCrypto(title = title, subtitle = subtitle, onTurn = onTurn)
+            val signature = Signature.getInstance(algorithm)
+            signature.initSign(privateKey)
+            signature.update(data)
+            return signature.sign()
+        }
+
+        if (isTimeWindowKey(alias, privateKey)) return authenticateThenSign()
+
+        val signature = Signature.getInstance(algorithm)
+        try {
+            signature.initSign(privateKey)
+        } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) return authenticateThenSign()
+            throw e
+        }
+        // The prompt waits for its queue turn, and onTurn posts its wake
+        // notification on that turn; success unlocks the signature object.
+        biometricHelper.authenticate(
+            cryptoObject = BiometricPrompt.CryptoObject(signature),
+            title = title,
+            subtitle = subtitle,
+            onTurn = onTurn
+        )
+        signature.update(data)
+        return signature.sign()
+    }
+
+    /**
+     * True when the key under [alias] authenticates for a time window
+     * (validity > 0 seconds) rather than per operation. An unreadable
+     * [KeyInfo] reads as per-operation; [signWithPrompt] recovers if the
+     * key then refuses `initSign`.
+     */
+    private fun isTimeWindowKey(alias: String, key: Key): Boolean = try {
+        @Suppress("DEPRECATION")
+        keyInfoReader(alias, key).userAuthenticationValidityDurationSeconds > 0
+    } catch (e: Exception) {
+        false
     }
 
     /**
