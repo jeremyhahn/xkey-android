@@ -54,8 +54,8 @@ class GattServerSeamSignatureTest {
         Seam("sendResponse", device, bytes, continuation),
         Seam("sendStatusNotification", device),
         Seam("sendNotification", device, BluetoothGattCharacteristic::class.java, bytes),
-        Seam("sendRequestAndWaitForResponse", string, JSONObject::class.java, continuation),
-        Seam("performPostPairingEnrollment", string, string, continuation),
+        Seam("sendRequestAndWaitForResponse", NoiseSession::class.java, string, JSONObject::class.java, continuation),
+        Seam("performPostPairingEnrollment", string, string, NoiseSession::class.java, continuation),
         Seam("refuseEnrollment", string, string, EnrollmentRefusal::class.java),
         Seam("handleDeviceConnected", device, link, continuation),
         Seam("handleDeviceDisconnected", device, continuation),
@@ -63,7 +63,7 @@ class GattServerSeamSignatureTest {
         Seam("handleHandshakeMessage", device, bytes, continuation),
         Seam("handleApplicationMessage", device, bytes, continuation),
         Seam("interceptOrRoute", bytes, continuation),
-        Seam("handlePairingConfirmIfNeeded", bytes, continuation)
+        Seam("handlePairingConfirmIfNeeded", bytes, NoiseSession::class.java, continuation)
     )
     private val outboundProbeFields = listOf(
         "gattServer", "isStarting", "noiseSession", "connectedDevice", "identityExchangeComplete",
