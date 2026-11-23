@@ -1784,6 +1784,12 @@ class NoiseInitiatorSession(
     // Random
     private val secureRandom = java.security.SecureRandom()
 
+    /**
+     * Test seam: the static public key msg3 carries in place of ours, so a test
+     * can send a responder a small-order point. Production code must not set it.
+     */
+    internal var staticKeyOnWireForTest: ByteArray? = null
+
     init {
         // Compute public key from private key
         localStaticPublicKey = x25519ScalarMultBase(localStaticPrivateKey)
@@ -1890,7 +1896,7 @@ class NoiseInitiatorSession(
      */
     fun createHandshakeMessage3(): ByteArray {
         // s - encrypt our static key
-        val encryptedS = encryptAndHash(localStaticPublicKey)
+        val encryptedS = encryptAndHash(staticKeyOnWireForTest ?: localStaticPublicKey)
 
         // se - DH(s, re)
         val seSecret = x25519(localStaticPrivateKey, remoteEphemeralKey!!)

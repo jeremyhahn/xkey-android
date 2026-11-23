@@ -323,6 +323,52 @@ class NoiseHandshakeTest {
         }
     }
 
+    /**
+     * A msg1 whose ephemeral key is a small-order point (u = 0 or u = 1) would
+     * make DH(e, re) all zeros, a secret the peer knows without any key. The
+     * responder must refuse it rather than mix it in (RFC 7748 §6.1).
+     */
+    @Test
+    fun responderRefusesASmallOrderEphemeralInMsg1() = runTest {
+        for (u in listOf(ByteArray(KEY_SIZE), ByteArray(KEY_SIZE).also { it[0] = 1 })) {
+            val responder = newResponder()
+            try {
+                responder.processHandshakeMessage(u)
+                fail("expected a small-order ephemeral to be refused")
+            } catch (expected: NoiseException) {
+                assertFalse(responder.isHandshakeComplete())
+            }
+        }
+    }
+
+    /**
+     * A msg3 whose static key is a small-order point makes DH(e, rs) all
+     * zeros: the responder must refuse it with a [NoiseException] before it
+     * splits, on either X25519 path.
+     */
+    @Test
+    fun responderRefusesASmallOrderStaticKeyInMsg3() = runTest {
+        for (fallback in listOf(false, true)) {
+            X25519.forceFallbackForTest = fallback
+            try {
+                val initiator = NoiseInitiatorSession(randomBytes(KEY_SIZE))
+                initiator.staticKeyOnWireForTest = ByteArray(KEY_SIZE).also { it[0] = 1 }
+                val responder = newResponder()
+                initiator.processHandshakeMessage2(
+                    responder.processHandshakeMessage(initiator.createHandshakeMessage1())!!
+                )
+                try {
+                    responder.processHandshakeMessage(initiator.createHandshakeMessage3())
+                    fail("expected a small-order static key to be refused (fallback=$fallback)")
+                } catch (expected: NoiseException) {
+                    assertFalse(responder.isHandshakeComplete())
+                }
+            } finally {
+                X25519.forceFallbackForTest = false
+            }
+        }
+    }
+
     // -----------------------------------------------------------------
     // Transport phase
     // -----------------------------------------------------------------
