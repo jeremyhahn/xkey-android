@@ -43,6 +43,19 @@ class Advertiser(
     private val isAdvertising = AtomicBoolean(false)
 
     /**
+     * The start the stack has not yet answered, kept so a too-large refusal
+     * can be retried once without the device name.
+     */
+    @Volatile
+    private var pendingStart: PendingStart? = null
+
+    private data class PendingStart(
+        val settings: AdvertiseSettings,
+        val advertiseData: AdvertiseData,
+        val nameDropped: Boolean = false
+    )
+
+    /**
      * Starts BLE advertising for the xKey service.
      *
      * @return true if advertising started successfully
@@ -76,19 +89,53 @@ class Advertiser(
 
         val settings = buildAdvertiseSettings()
         val advertiseData = buildAdvertiseData()
-        val scanResponse = buildScanResponseData()
+        val scanResponse = buildScanResponseData(includeDeviceName = true)
 
+        pendingStart = PendingStart(settings, advertiseData)
+        return requestStart(settings, advertiseData, scanResponse)
+    }
+
+    /**
+     * Hands one start request to the stack; a throw is reported as an internal
+     * error and clears the pending start, so no retry follows it.
+     */
+    @SuppressLint("MissingPermission")
+    private fun requestStart(
+        settings: AdvertiseSettings,
+        advertiseData: AdvertiseData,
+        scanResponse: AdvertiseData
+    ): Boolean {
         try {
             advertiser?.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start advertising", e)
+            pendingStart = null
             _advertisingState.value = AdvertisingState.Error(
                 AdvertiseError.INTERNAL_ERROR,
                 "Failed to start advertising: ${e.message}"
             )
             return false
         }
+    }
+
+    /**
+     * Retries a start the stack refused as too large, once, with a scan
+     * response that carries only the TX power level: the device name is the
+     * only field whose length the app does not control.
+     *
+     * @return true if the retry was handed to the stack
+     */
+    private fun retryWithoutDeviceName(): Boolean {
+        val pending = pendingStart ?: return false
+        if (pending.nameDropped || advertiser == null) return false
+        pendingStart = pending.copy(nameDropped = true)
+        Log.w(TAG, "Advertise data too large; retrying without the device name")
+        return requestStart(
+            pending.settings,
+            pending.advertiseData,
+            buildScanResponseData(includeDeviceName = false)
+        )
     }
 
     /**
@@ -145,11 +192,12 @@ class Advertiser(
     }
 
     /**
-     * Builds the scan response data containing additional information.
+     * Builds the scan response data: the TX power level, and the device name
+     * unless a start was refused as too large.
      */
-    private fun buildScanResponseData(): AdvertiseData {
+    private fun buildScanResponseData(includeDeviceName: Boolean): AdvertiseData {
         return AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
+            .setIncludeDeviceName(includeDeviceName)
             .setIncludeTxPowerLevel(true)
             .build()
     }
@@ -159,6 +207,7 @@ class Advertiser(
      */
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+            pendingStart = null
             isAdvertising.set(true)
             _advertisingState.value = AdvertisingState.Advertising(
                 connectable = settingsInEffect.isConnectable,
@@ -173,6 +222,12 @@ class Advertiser(
 
         override fun onStartFailure(errorCode: Int) {
             isAdvertising.set(false)
+            if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE &&
+                retryWithoutDeviceName()
+            ) {
+                return
+            }
+            pendingStart = null
             val (error, message) = mapAdvertiseError(errorCode)
             _advertisingState.value = AdvertisingState.Error(error, message)
             Log.e(TAG, "Advertising failed: $message (code=$errorCode)")
