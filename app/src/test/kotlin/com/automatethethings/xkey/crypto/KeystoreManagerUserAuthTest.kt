@@ -26,6 +26,9 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import java.security.InvalidKeyException
+import java.security.Key
+import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.ProviderException
@@ -35,11 +38,13 @@ import java.security.SignatureException
 import java.security.cert.Certificate
 import javax.crypto.Cipher
 import javax.crypto.IllegalBlockSizeException
+import javax.crypto.KeyAgreement
 import javax.crypto.SecretKey
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -320,5 +325,169 @@ class KeystoreManagerUserAuthTest {
         assertThrows(BiometricRequiredException::class.java) {
             runBlocking { keystoreManager.symmetricEncrypt("aes", ByteArray(16)) }
         }
+    }
+
+    /** The wrappers devices put a Keystore refusal in. */
+    private val wrappers: List<Pair<String, (Throwable) -> Exception>> = listOf(
+        "SignatureException" to { cause -> SignatureException("refused", cause) },
+        "InvalidKeyException" to { cause -> InvalidKeyException("refused", cause) },
+        "ProviderException" to { cause -> ProviderException("refused", cause) },
+    )
+
+    /**
+     * Runs [call] on an API 32 and an API 34 device with every refusal shape
+     * [inject]ed into the operation, and asserts which become
+     * [BiometricRequiredException] and which stay [failure]:
+     * - [UserNotAuthenticatedException], bare or wrapped: biometric on both;
+     * - a wrapped Keystore ERROR_USER_AUTHENTICATION_REQUIRED: biometric on
+     *   API 33+ only, where the error code exists; [failure] below it;
+     * - a wrapped Keystore error of any other code, or an unrelated
+     *   exception: [failure] on both.
+     */
+    private fun assertAuthClassification(
+        operation: String,
+        failure: Class<out Throwable>,
+        inject: (Exception) -> Unit,
+        call: suspend (KeystoreManager) -> Unit
+    ) {
+        for (sdk in listOf(32, 34)) {
+            val manager = KeystoreManager(mockk<Context>(relaxed = true), sdkInt = sdk)
+            fun expect(expected: Class<out Throwable>, case: String, error: Exception) {
+                inject(error)
+                assertThrows("$operation, API $sdk, $case", expected) { runBlocking { call(manager) } }
+            }
+
+            expect(BiometricRequiredException::class.java, "UserNotAuthenticatedException", userNotAuthenticated())
+            for ((name, wrap) in wrappers) {
+                expect(
+                    BiometricRequiredException::class.java,
+                    "$name(UserNotAuthenticatedException)",
+                    wrap(userNotAuthenticated())
+                )
+                expect(
+                    if (sdk >= 33) BiometricRequiredException::class.java else failure,
+                    "$name(KEY_USER_NOT_AUTHENTICATED)",
+                    wrap(keystoreError(android.security.KeyStoreException.ERROR_USER_AUTHENTICATION_REQUIRED))
+                )
+                expect(
+                    failure,
+                    "$name(KEY_DOES_NOT_EXIST)",
+                    wrap(keystoreError(android.security.KeyStoreException.ERROR_KEY_DOES_NOT_EXIST))
+                )
+            }
+            expect(failure, "unrelated IllegalStateException", IllegalStateException("unrelated"))
+        }
+    }
+
+    @Test
+    fun `signApproved classifies authentication-required errors at sign`() {
+        val der = byteArrayOf(7, 7, 7)
+        val approvedCertificate = certificateOf(der)
+        every { keyStore.getCertificate("xkey_key_k") } returns approvedCertificate
+        val signature = mockk<Signature>(relaxed = true)
+        every { Signature.getInstance(any<String>()) } returns signature
+
+        assertAuthClassification(
+            "signApproved",
+            SigningException::class.java,
+            inject = { e -> every { signature.sign() } throws e },
+            call = { it.signApproved("xkey_key_k", der, ByteArray(32), "SHA256withECDSA") }
+        )
+    }
+
+    @Test
+    fun `signApproved classifies authentication-required errors at initSign`() {
+        val der = byteArrayOf(7, 7, 7)
+        val approvedCertificate = certificateOf(der)
+        every { keyStore.getCertificate("xkey_key_k") } returns approvedCertificate
+        val signature = mockk<Signature>(relaxed = true)
+        every { Signature.getInstance(any<String>()) } returns signature
+
+        assertAuthClassification(
+            "signApproved initSign",
+            SigningException::class.java,
+            inject = { e -> every { signature.initSign(any<PrivateKey>()) } throws e },
+            call = { it.signApproved("xkey_key_k", der, ByteArray(32), "SHA256withECDSA") }
+        )
+    }
+
+    @Test
+    fun `rsaDecryptWithAlgorithm classifies authentication-required errors at doFinal`() {
+        val cipher = mockk<Cipher>(relaxed = true)
+        mockkStatic(Cipher::class)
+        every { Cipher.getInstance(any<String>()) } returns cipher
+
+        assertAuthClassification(
+            "rsaDecryptWithAlgorithm",
+            DecryptionException::class.java,
+            inject = { e -> every { cipher.doFinal(any<ByteArray>()) } throws e },
+            call = { it.rsaDecryptWithAlgorithm("k", ByteArray(256)) }
+        )
+    }
+
+    @Test
+    fun `symmetricDecrypt classifies authentication-required errors at doFinal`() {
+        val cipher = mockk<Cipher>(relaxed = true)
+        mockkStatic(Cipher::class)
+        every { Cipher.getInstance(any<String>()) } returns cipher
+
+        assertAuthClassification(
+            "symmetricDecrypt",
+            DecryptionException::class.java,
+            inject = { e -> every { cipher.doFinal(any<ByteArray>()) } throws e },
+            call = { it.symmetricDecrypt("aes", ByteArray(28)) }
+        )
+    }
+
+    private fun peerPublicKeyDer(): ByteArray =
+        KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair().public.encoded
+
+    /**
+     * ECDH refusals at `KeyAgreement.init` pass through its inner
+     * [InvalidKeyException] handler first: an authentication failure must
+     * leave it intact for the outer classifier, not become the
+     * "not generated with PURPOSE_AGREE_KEY" [ECDHException].
+     */
+    @Test
+    fun `performECDH keeps authentication-required errors through the init handler`() {
+        val agreement = mockk<KeyAgreement>(relaxed = true)
+        mockkStatic(KeyAgreement::class)
+        every { KeyAgreement.getInstance("ECDH") } returns agreement
+        val peer = peerPublicKeyDer()
+
+        assertAuthClassification(
+            "performECDH init",
+            ECDHException::class.java,
+            inject = { e -> every { agreement.init(any<Key>()) } throws e },
+            call = { it.performECDH("k", peer) }
+        )
+    }
+
+    @Test
+    fun `performECDH classifies authentication-required errors at generateSecret`() {
+        val agreement = mockk<KeyAgreement>(relaxed = true)
+        mockkStatic(KeyAgreement::class)
+        every { KeyAgreement.getInstance("ECDH") } returns agreement
+        val peer = peerPublicKeyDer()
+
+        assertAuthClassification(
+            "performECDH generateSecret",
+            ECDHException::class.java,
+            inject = { e -> every { agreement.generateSecret() } throws e },
+            call = { it.performECDH("k", peer) }
+        )
+    }
+
+    @Test
+    fun `performECDH init handler reports a non-agreeing key, not an auth failure`() {
+        val agreement = mockk<KeyAgreement>(relaxed = true)
+        mockkStatic(KeyAgreement::class)
+        every { KeyAgreement.getInstance("ECDH") } returns agreement
+        every { agreement.init(any<Key>()) } throws InvalidKeyException("incompatible purpose")
+
+        val error = assertThrows(ECDHException::class.java) {
+            runBlocking { keystoreManager.performECDH("k", peerPublicKeyDer()) }
+        }
+        assertTrue(error.message.orEmpty().contains("PURPOSE_AGREE_KEY"))
     }
 }
