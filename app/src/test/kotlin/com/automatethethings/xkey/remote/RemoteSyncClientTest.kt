@@ -15,11 +15,15 @@
 package com.automatethethings.xkey.remote
 
 import android.content.Context
+import android.net.Uri
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.oath.OathCredentialDao
+import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.sync.SyncEngine
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ui.SyncStatusText
@@ -29,6 +33,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.mockkObject
+import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
@@ -45,6 +50,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.net.URI
+import java.net.URLDecoder
+import java.security.KeyStore
 import java.security.SecureRandom
 import java.time.ZoneOffset
 import java.util.Locale
@@ -418,6 +426,63 @@ class RemoteSyncClientTest {
                 deviceId = DESK_PEER, deviceName = DESK_NAME, count = 0, direction = AuditLogger.SYNC_OUTBOUND,
                 added = 0, updated = 0, skipped = 0, success = true, errorMessage = null
             )
+        }
+    }
+
+    @Test
+    fun `syncAll still runs the password leg when the OATH reply carries an invalid item`() = runTest {
+        // The real OATH merge, over a recording DAO; every other store is idle.
+        coEvery { anyConstructed<SyncEngine>().gatherCertificates() } returns JSONArray()
+        coEvery { anyConstructed<SyncEngine>().gatherOath() } returns JSONArray()
+        coEvery { anyConstructed<SyncEngine>().gatherPasswords() } returns JSONArray()
+        coEvery { anyConstructed<SyncEngine>().mergeCertificates(any()) } returns
+            SyncEngine.CertCounts(added = 0, skipped = 0)
+        coEvery { anyConstructed<SyncEngine>().mergePasswords(any()) } returns
+            SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 0)
+        val dao = mockk<OathCredentialDao>(relaxed = true)
+        coEvery { dao.getByOathId(any()) } returns null
+        coEvery { dao.insertIfAbsent(any()) } returns 1L
+        val db = mockk<XKeyDatabase>()
+        every { db.oathCredentialDao() } returns dao
+        mockkObject(XKeyDatabase.Companion)
+        every { XKeyDatabase.getInstance(any()) } returns db
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
+        mockkConstructor(OathSecretManager::class)
+        every { anyConstructed<OathSecretManager>().encryptSecret(any()) } answers { firstArg() }
+        mockkStatic(Uri::class)
+        every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
+
+        val oathReply = JSONArray()
+            .put(JSONObject().put("id", "good").put("account_name", "alice").put("secret", "JBSWY3DPEHPK3PXP"))
+            .put(JSONObject().put("id", "bad").put("account_name", "bob").put("secret", "ABC1!"))
+        sender.replyWith { request ->
+            val local = if (request.method == "remote.syncOATH") oathReply else JSONArray()
+            """{"id":${request.id},"result":{"added":0,"updated":0,"local":$local}}"""
+        }
+
+        val result = client.syncAll()
+
+        assertEquals(
+            listOf("remote.syncTrustStore", "remote.syncOATH", "remote.syncPasswords"),
+            sender.sent.map { it.method }
+        )
+        assertEquals(1, result.oathPulled)
+        coVerify(exactly = 1) { anyConstructed<SyncEngine>().mergePasswords(any()) }
+        coVerify(exactly = 1) { anyConstructed<SyncEngine>().markSynced() }
+    }
+
+    /** An android [Uri] answering what the OATH import reads, from [URI] (the JVM has no android.net). */
+    private fun jvmUri(uriString: String): Uri {
+        val uri = URI(uriString)
+        val params = uri.rawQuery.orEmpty().split("&").filter { it.isNotEmpty() }
+            .map { it.split("=", limit = 2) }
+            .associate { it[0] to URLDecoder.decode(it.getOrElse(1) { "" }, Charsets.UTF_8.name()) }
+        return mockk {
+            every { scheme } returns uri.scheme
+            every { host } returns uri.host
+            every { encodedPath } returns uri.rawPath
+            every { getQueryParameter(any()) } answers { params[firstArg()] }
         }
     }
 
