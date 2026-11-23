@@ -18,7 +18,9 @@ package com.automatethethings.xkey.transport
 import android.content.Context
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.NoiseTestKeyStore
+import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import io.mockk.mockk
@@ -36,16 +38,20 @@ import kotlinx.coroutines.withTimeout
  * an earlier desktop is still connected, so the newer one replaces it.
  * Android `Log` must be stubbed by the caller.
  */
-internal class StreamSessionHarness : Closeable {
+internal class StreamSessionHarness(
+    pairingCallback: PairingConfirmationCallback? = null,
+    transportMethods: List<TransportMethods> = emptyList(),
+) : Closeable {
 
     private val context = mockk<Context>(relaxed = true)
     val repo = PairedDeviceRepository(InMemorySharedPreferences())
     val pairing = StreamPairingSession(
         requestHandler = mockk<RequestHandler>(relaxed = true),
         messageRouter = null,
-        pairingCallback = null,
+        pairingCallback = pairingCallback,
         pairedDeviceRepository = repo,
         transportLabel = "TEST",
+        transportMethods = transportMethods,
     )
     private val listener = ServerSocket(0, 4, InetAddress.getLoopbackAddress())
     private val connections = ServedConnections()
@@ -59,9 +65,15 @@ internal class StreamSessionHarness : Closeable {
      * the earlier desktop paired, so that only the session binding (not a
      * revocation) keeps the newer desktop from inheriting the old session.
      */
-    suspend fun connectPaired(): DesktopPeer {
+    suspend fun connectPaired(): DesktopPeer = connect(pair = true)
+
+    /** Connects a desktop the repository does not know: its session stays gated. */
+    suspend fun connectUnpaired(): DesktopPeer = connect(pair = false)
+
+    private suspend fun connect(pair: Boolean): DesktopPeer {
         val desktop = DesktopPeer(Socket(listener.inetAddress, listener.localPort))
-        repo.addDevice(desktop.publicKeyHex, "desktop-${++paired}")
+        ++paired
+        if (pair) repo.addDevice(desktop.publicKeyHex, "desktop-$paired")
         val accepted = connections.track(listener.accept())
         val connected = CompletableDeferred<Unit>()
         connections.scope.launch {
