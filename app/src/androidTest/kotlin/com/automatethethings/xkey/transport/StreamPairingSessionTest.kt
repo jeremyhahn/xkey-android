@@ -365,12 +365,11 @@ class StreamPairingSessionTest {
 
     /**
      * A transport with no paired-device repository has no notion of approval —
-     * there is no store to record it in and no UI to ask. It cannot gate on
-     * something it cannot express, so it routes directly to the request handler.
-     * This is also the only configuration in which the router-less path runs.
+     * there is no store to record it in and no UI to ask. It fails closed:
+     * every request is refused, and pairing.confirm cannot pair.
      */
     @Test
-    fun aTransportWithoutAPairedDeviceStoreCannotGateOnPairing() {
+    fun aTransportWithoutAPairedDeviceStoreRefusesEveryRequest() {
         val ungated = TcpHsmServer(requestHandler = headlessHandler(null))
         ungatedServer = ungated
         ungated.start(context, UNGATED_PORT)
@@ -378,9 +377,19 @@ class StreamPairingSessionTest {
 
         RawStreamPeer(UNGATED_PORT, randomStaticKey()).use { peer ->
             peer.handshake()
-            // No pairing.confirm at all.
-            assertNotNull(peer.call("local.listKeys", JSONObject()).getJSONArray("keys"))
-            assertTrue(peer.call("ping").optBoolean("pong"))
+            val listKeys = peer.callExpectingError("local.listKeys", JSONObject())
+            assertNotNull("an unpaired request must be refused", listKeys)
+            assertEquals(ErrorCodes.PAIRING_REQUIRED, listKeys!!.getInt("code"))
+
+            val confirm = peer.callExpectingError(
+                "pairing.confirm",
+                JSONObject().put("deviceName", "Desktop").put("publicKeyHex", peer.publicKeyHex)
+            )
+            assertNotNull("pairing.confirm must not pair without a store", confirm)
+            assertEquals(ErrorCodes.PAIRING_REJECTED, confirm!!.getInt("code"))
+
+            val afterConfirm = peer.callExpectingError("local.listKeys", JSONObject())
+            assertEquals(ErrorCodes.PAIRING_REQUIRED, afterConfirm!!.getInt("code"))
         }
     }
 

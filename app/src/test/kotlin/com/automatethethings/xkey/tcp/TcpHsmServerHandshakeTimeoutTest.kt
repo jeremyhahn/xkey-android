@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.tcp
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -79,6 +80,7 @@ class TcpHsmServerHandshakeTimeoutTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0

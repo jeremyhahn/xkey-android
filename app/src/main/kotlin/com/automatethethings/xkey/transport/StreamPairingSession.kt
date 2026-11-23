@@ -277,7 +277,9 @@ class StreamPairingSession(
                 // A phone-initiated frame goes only to the connection that
                 // holds the server, checked with the encryption it admits.
                 if (activeConnection !== this) throw IOException("Another desktop's connection replaced this one")
-                pairedDeviceRepository?.requirePaired(peerKeyHex)
+                // No store, no paired peer: nothing goes out (fails closed)
+                val repo = pairedDeviceRepository ?: throw IOException("No paired-device store; peer is not paired")
+                repo.requirePaired(peerKeyHex)
             }
             check()
             noise.encrypt(plaintext)
@@ -657,9 +659,9 @@ class StreamPairingSession(
      * Intercepts pairing.confirm before normal routing, otherwise routes via the
      * message router (bidirectional) or directly to the request handler.
      *
-     * Internal so that the USB wire-contract tests can drive a decrypted
-     * request through the same dispatch the message loop uses; it runs
-     * against the active connection.
+     * Internal so that tests can drive a decrypted request through the same
+     * gate and dispatch the message loop uses; it runs against the active
+     * connection.
      */
     internal suspend fun interceptOrRoute(plaintext: ByteArray): ByteArray? =
         interceptOrRoute(plaintext, activeConnection)
@@ -670,7 +672,9 @@ class StreamPairingSession(
         // only request that may run is pairing.confirm itself; everything else
         // is refused. Without this, any peer that can reach the transport
         // could sign, list keys, or export shared material unapproved.
-        if (pairingEnforced && connection?.confirmed != true) {
+        // A session without a paired-device store cannot approve anyone, so it
+        // is gated like any other: nothing it serves runs unpaired.
+        if (connection?.confirmed != true) {
             handlePairingConfirm(plaintext, connection)?.let { return it }
             // A request that outlived its connection answers nothing.
             if (connection != null && !connection.isCurrent) return null
@@ -683,10 +687,22 @@ class StreamPairingSession(
         // reads as a protocol mismatch rather than "you are already paired" --
         // so re-running `xkey device pair` against a known phone failed with a
         // confusing error. Confirming again is a no-op, so it simply succeeds.
-        if (pairingEnforced) {
-            confirmAlreadyPaired(plaintext)?.let { return it }
-        }
+        confirmAlreadyPaired(plaintext)?.let { return it }
 
+        return routeConfirmed(plaintext, connection)
+    }
+
+    /**
+     * Test seam: dispatches [plaintext] as a confirmed connection's request,
+     * past the pairing gate (which is tested on its own), so the wire-contract
+     * tests can reach the transport's dispatch without a paired peer.
+     * Production code must not call this.
+     */
+    internal suspend fun routeConfirmedForTest(plaintext: ByteArray): ByteArray? =
+        routeConfirmed(plaintext, activeConnection)
+
+    /** The dispatch a confirmed connection's request runs through. */
+    private suspend fun routeConfirmed(plaintext: ByteArray, connection: Connection?): ByteArray? {
         routeTransportMethod(plaintext)?.let { return it }
 
         // The router calls the handler in this coroutine, so the elements
@@ -755,14 +771,6 @@ class StreamPairingSession(
     }
 
     /**
-     * Whether this session can enforce pairing. A transport constructed
-     * without a paired-device repository has no notion of approval, so it
-     * cannot gate on it.
-     */
-    private val pairingEnforced: Boolean
-        get() = pairedDeviceRepository != null
-
-    /**
      * Refuses a request that arrived before pairing was confirmed. Responses
      * to our own outbound requests are not refused — they carry no method and
      * belong to the router.
@@ -810,7 +818,13 @@ class StreamPairingSession(
             return null
         }
 
-        val repo = pairedDeviceRepository!!
+        val repo = pairedDeviceRepository
+        if (repo == null) {
+            Log.e(TAG, "[$transportLabel] no paired-device store; refusing pairing")
+            return ProtocolResponse.error(
+                id, ErrorCodes.PAIRING_REJECTED, "Pairing is unavailable on this transport", generation = generation
+            ).toJson()
+        }
         val callback = pairingCallback
         Log.i(TAG, "[$transportLabel] pairing.confirm from \"${pairingParams.deviceName}\"")
 

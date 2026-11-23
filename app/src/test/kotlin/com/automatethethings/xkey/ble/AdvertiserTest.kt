@@ -17,8 +17,10 @@ package com.automatethethings.xkey.ble
 
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
+import android.os.ParcelUuid
 import android.util.Log
 import io.mockk.every
 import io.mockk.mockk
@@ -31,6 +33,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * [Advertiser] is what makes the phone discoverable, and every one of its
@@ -46,8 +50,9 @@ import org.junit.Test
  *  - the `AdvertiseCallback` the BLE stack invokes, reached by reflection,
  *    which is where the whole error-code mapping and the success state live.
  *
- * Building the real `AdvertiseSettings`/`AdvertiseData` needs a device; those
- * three builders are the only part of the class this cannot reach.
+ * Building the real `AdvertiseSettings`/`AdvertiseData` needs the framework;
+ * [AdvertiserPayloadTest] covers those payloads and the too-large retry
+ * under Robolectric.
  */
 class AdvertiserTest {
 
@@ -277,5 +282,106 @@ class AdvertiserTest {
         every { it.txPowerLevel } returns txPowerLevel
         every { it.mode } returns mode
         every { it.timeout } returns 0
+    }
+}
+
+/**
+ * The payload [Advertiser] hands the stack, and its one retry. Building real
+ * `AdvertiseData` needs the framework, so this suite runs under Robolectric
+ * and captures what `startAdvertising` passes to the LE advertiser.
+ *
+ * A long device name pushes the scan response past 31 bytes and the stack
+ * answers `ADVERTISE_FAILED_DATA_TOO_LARGE`; the phone must then still be
+ * discoverable, so the start is retried once with the name dropped.
+ */
+@RunWith(RobolectricTestRunner::class)
+class AdvertiserPayloadTest {
+
+    private val leAdvertiser = mockk<BluetoothLeAdvertiser>(relaxed = true)
+    private val adapter = mockk<BluetoothAdapter>().also {
+        every { it.isEnabled } returns true
+        every { it.bluetoothLeAdvertiser } returns leAdvertiser
+    }
+
+    private val primary = mutableListOf<AdvertiseData>()
+    private val scanResponses = mutableListOf<AdvertiseData>()
+    private val callbacks = mutableListOf<AdvertiseCallback>()
+
+    @Before
+    fun setUp() {
+        every {
+            leAdvertiser.startAdvertising(
+                any<AdvertiseSettings>(),
+                capture(primary),
+                capture(scanResponses),
+                capture(callbacks)
+            )
+        } returns Unit
+    }
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
+
+    /** The primary PDU carries the xkey 128-bit UUID desktops scan for. */
+    @Test
+    fun thePrimaryAdvertiseDataHoldsTheXkeyServiceUuid() {
+        val advertiser = Advertiser(adapter)
+
+        assertTrue(advertiser.startAdvertising())
+
+        assertEquals(1, primary.size)
+        assertTrue(primary[0].serviceUuids.contains(ParcelUuid(GattServer.XKEY_SERVICE_UUID)))
+        assertTrue(scanResponses[0].includeDeviceName)
+        assertTrue(scanResponses[0].includeTxPowerLevel)
+    }
+
+    /** A too-large refusal is retried once, same primary data, no device name. */
+    @Test
+    fun aTooLargeRefusalIsRetriedWithoutTheDeviceName() {
+        val advertiser = Advertiser(adapter)
+        advertiser.startAdvertising()
+
+        callbacks[0].onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
+
+        assertEquals(2, scanResponses.size)
+        assertFalse(scanResponses[1].includeDeviceName)
+        assertTrue(scanResponses[1].includeTxPowerLevel)
+        assertTrue(primary[1].serviceUuids.contains(ParcelUuid(GattServer.XKEY_SERVICE_UUID)))
+        assertFalse(advertiser.advertisingState.value is AdvertisingState.Error)
+
+        callbacks[1].onStartSuccess(mockk<AdvertiseSettings>(relaxed = true))
+        assertTrue(advertiser.isAdvertising())
+    }
+
+    /** A second too-large refusal is reported as today, with no third try. */
+    @Test
+    fun aSecondTooLargeRefusalIsReported() {
+        val advertiser = Advertiser(adapter)
+        advertiser.startAdvertising()
+
+        callbacks[0].onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
+        callbacks[1].onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
+
+        verify(exactly = 2) { leAdvertiser.startAdvertising(any(), any(), any(), any()) }
+        val state = advertiser.advertisingState.value as AdvertisingState.Error
+        assertEquals(AdvertiseError.DATA_TOO_LARGE, state.error)
+        assertFalse(advertiser.isAdvertising())
+    }
+
+    /** Any other refusal is reported at once, without a retry. */
+    @Test
+    fun anotherRefusalIsNotRetried() {
+        val advertiser = Advertiser(adapter)
+        advertiser.startAdvertising()
+
+        callbacks[0].onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS)
+
+        verify(exactly = 1) { leAdvertiser.startAdvertising(any(), any(), any(), any()) }
+        assertEquals(
+            AdvertiseError.TOO_MANY_ADVERTISERS,
+            (advertiser.advertisingState.value as AdvertisingState.Error).error
+        )
     }
 }

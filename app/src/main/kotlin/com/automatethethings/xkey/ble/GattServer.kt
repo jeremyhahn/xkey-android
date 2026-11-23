@@ -1176,7 +1176,11 @@ class GattServer(
             // The same device reconnected over its old session: that one has ended.
             replaced?.let { senders.retire(it, scope) }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create Noise session", e)
+            // No session (the static key could not be loaded): the link has
+            // nothing to answer with, so it is dropped rather than left holding
+            // the one connection slot.
+            Log.e(TAG, "Failed to create Noise session; dropping ${device.address}", e)
+            gattServer?.cancelConnection(device)
             throw e
         }
 
@@ -1651,7 +1655,9 @@ class GattServer(
         // only request that may run is pairing.confirm itself; everything else
         // is refused. Without this, any peer that can reach the transport
         // could sign, list keys, or export shared material unapproved.
-        if (pairingEnforced && !pairingConfirmed) {
+        // A server without a paired-device store cannot approve anyone, so it
+        // is gated like any other: nothing it serves runs unpaired.
+        if (!pairingConfirmed) {
             handlePairingConfirmIfNeeded(plaintext, session)?.let { return it }
             if (!isCurrent(session)) return null
             return rejectUnpaired(plaintext)
@@ -1662,11 +1668,9 @@ class GattServer(
         // StreamPairingSession does: RequestHandler has no handler for it, and
         // rerunning `xkey device pair` must still succeed. No prompt, no store
         // change; a session revoked or replaced meanwhile answers nothing.
-        if (pairingEnforced) {
-            confirmAlreadyPaired(plaintext)?.let { response ->
-                return synchronized(revocationLock) {
-                    response.takeIf { isCurrent(session) && pairingConfirmed }
-                }
+        confirmAlreadyPaired(plaintext)?.let { response ->
+            return synchronized(revocationLock) {
+                response.takeIf { isCurrent(session) && pairingConfirmed }
             }
         }
 
@@ -1709,14 +1713,6 @@ class GattServer(
         requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex)
         Log.i(TAG, "Peer is already paired; session confirmed without pairing.confirm")
     }
-
-    /**
-     * Whether this server can enforce pairing. A server constructed without a
-     * paired-device repository has no notion of approval, so it cannot gate on
-     * it.
-     */
-    private val pairingEnforced: Boolean
-        get() = pairedDeviceRepository != null
 
     /**
      * Refuses a request that arrived before pairing was confirmed. Responses to
@@ -1774,7 +1770,13 @@ class GattServer(
 
         Log.i(TAG, "Received pairing.confirm from \"${pairingParams.deviceName}\"")
 
-        val repo = pairedDeviceRepository!!
+        val repo = pairedDeviceRepository
+        if (repo == null) {
+            Log.e(TAG, "No paired-device store; refusing pairing")
+            return ProtocolResponse.error(
+                id, ErrorCodes.PAIRING_REJECTED, "Pairing is unavailable on this transport", generation = generation
+            ).toJson()
+        }
         val callback = pairingCallback
 
         // Identity comes from the Noise transcript, never from the request
@@ -2603,10 +2605,12 @@ class GattServer(
                             throw java.io.IOException("The connection to ${device.address} is closing")
                         }
                         if (revalidatePeer) {
-                            pairedDeviceRepository?.requirePaired(peerKeyHex)
+                            // No store, no paired peer: nothing goes out (fails closed)
+                            val repo = pairedDeviceRepository ?: throw PeerNotPairedException(peerKeyHex)
+                            repo.requirePaired(peerKeyHex)
                             // Paired in the store but not confirmed on this
                             // session: its reply would be refused as unpaired.
-                            if (pairingEnforced && !pairingConfirmed) throw PeerNotPairedException(peerKeyHex)
+                            if (!pairingConfirmed) throw PeerNotPairedException(peerKeyHex)
                         }
                         check()
                         session.encrypt(plaintext)
