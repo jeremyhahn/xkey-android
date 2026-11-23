@@ -548,8 +548,8 @@ class KeystoreManagerAliasTest {
         assertTrue(der.isNotEmpty())
         assertFalse("no Keystore entry is created for Ed25519", keystoreManager.generalKeyExists(keyId))
         assertEquals(
-            "the raw identifier is what resolves for a software-backed key",
-            keyId,
+            "a software Ed25519 key resolves to the general alias (callers use it as a Keystore alias; #186)",
+            "xkey_key_$keyId",
             keystoreManager.resolveKeystoreAlias(keyId)
         )
     }
