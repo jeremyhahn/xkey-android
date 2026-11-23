@@ -100,10 +100,14 @@ class MainActivityUiTest {
             .check(matches(isClickable()))
     }
 
-    /** With no service bound the switch label reads the "off" string. */
+    /**
+     * At rest the switch label reads the "off" string. The rest-state tests
+     * launch through [launchMainActivityAtRest] so a phone's live BLE service
+     * (Bluetooth on, permissions granted) does not replace the rest state.
+     */
     @Test
     fun bleStatusText_readsOffAtRest() {
-        ActivityScenario.launch(MainActivity::class.java)
+        launchMainActivityAtRest()
 
         onView(withId(R.id.textBleStatus))
             .check(matches(withText(R.string.ble_switch_off)))
@@ -111,7 +115,7 @@ class MainActivityUiTest {
 
     @Test
     fun statusText_showsDisconnected() {
-        ActivityScenario.launch(MainActivity::class.java)
+        launchMainActivityAtRest()
 
         onView(withId(R.id.textStatusLarge))
             .check(matches(isDisplayed()))
@@ -120,7 +124,7 @@ class MainActivityUiTest {
 
     @Test
     fun statusDescription_showsNoDeviceConnected() {
-        ActivityScenario.launch(MainActivity::class.java)
+        launchMainActivityAtRest()
 
         onView(withId(R.id.textStatusDescription))
             .check(matches(isDisplayed()))
@@ -402,7 +406,7 @@ class MainActivityUiTest {
 
     @Test
     fun syncNowCard_whenNotConnected_showsSnackbar() {
-        ActivityScenario.launch(MainActivity::class.java)
+        launchMainActivityAtRest()
 
         // Navigate to Management tab, then tap the Sync with Desktop card.
         // No BLE permissions are granted in the test, so the service is never
