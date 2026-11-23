@@ -341,12 +341,13 @@ class UsbAccessoryServer(
     }
 
     /**
-     * Answers one decrypted request [plaintext] exactly as the USB message loop
-     * does, or returns null for a message that needs no answer. The wire-contract
-     * tests use it to reach the USB dispatch without a Noise session.
+     * Test seam: answers one decrypted request [plaintext] as the USB message
+     * loop does for a paired desktop, or returns null for a message that needs
+     * no answer. The wire-contract tests use it to reach the USB dispatch
+     * without a Noise session; the pairing gate is tested on its own.
      */
     internal suspend fun handlePlaintext(plaintext: ByteArray): ByteArray? =
-        pairingSession.interceptOrRoute(plaintext)
+        pairingSession.routeConfirmedForTest(plaintext)
 
     /**
      * The desktop on this accessory for outbound `remote.*` clients, or null
