@@ -500,8 +500,14 @@ class KeystoreManager(
         // local.generateKey could never be signed with a prompt either.
         val alias = resolveKeystoreAlias(credentialId) ?: throw KeyNotFoundException(credentialId)
 
-        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
-            ?: throw KeyNotFoundException(credentialId)
+        // The selected key and its public key, read together under the
+        // alias's gate: a prompt that runs before initSign signs only if the
+        // alias still holds this key afterwards (signWithPrompt).
+        val (privateKey, selectedPublicKeyDer) = withAliasGate(alias) {
+            val key = keyStore.getKey(alias, null) as? PrivateKey
+                ?: throw KeyNotFoundException(credentialId)
+            key to (publicKeyDERAt(alias) ?: throw KeyNotFoundException(credentialId))
+        }
 
         // First, try to sign without biometric (uses cached auth if within timeout)
         try {
@@ -525,7 +531,7 @@ class KeystoreManager(
         // one may have been initialised (and fed) before the refusal.
         try {
             return signWithPrompt(
-                alias, privateKey, SIGNATURE_ALGORITHM, dataHash,
+                alias, privateKey, selectedPublicKeyDer, SIGNATURE_ALGORITHM, dataHash,
                 biometricHelper, title, subtitle, onTurn
             )
         } catch (e: XKeyCryptoException) {
@@ -551,10 +557,22 @@ class KeystoreManager(
      *   [KeyInfo] was unreadable, and it is a time-window key after all), the
      *   time-window flow runs instead, so no key is initialised before the
      *   authentication it needs.
+     *
+     * The time-window flow prompts before it initialises a key, and on API
+     * 28-30 a Keystore key handle names its alias, not the key: were the
+     * alias deleted and regenerated while the prompt waits, `initSign` would
+     * sign with the replacement under the user's fresh authentication. So
+     * after the prompt it signs through [signApproved], which rereads the key
+     * under [alias] and signs only if its public key is still
+     * [selectedPublicKeyDer], the one read with [privateKey] before the
+     * prompt, all inside the alias's gate.
+     *
+     * @throws ApprovedKeyChangedException if [alias] no longer holds the selected key.
      */
     private suspend fun signWithPrompt(
         alias: String,
         privateKey: PrivateKey,
+        selectedPublicKeyDer: ByteArray,
         algorithm: String,
         data: ByteArray,
         biometricHelper: BiometricHelper,
@@ -564,10 +582,7 @@ class KeystoreManager(
     ): ByteArray {
         suspend fun authenticateThenSign(): ByteArray {
             biometricHelper.authenticateWithoutCrypto(title = title, subtitle = subtitle, onTurn = onTurn)
-            val signature = Signature.getInstance(algorithm)
-            signature.initSign(privateKey)
-            signature.update(data)
-            return signature.sign()
+            return signApproved(alias, selectedPublicKeyDer, data, algorithm)
         }
 
         if (isTimeWindowKey(alias, privateKey)) return authenticateThenSign()
