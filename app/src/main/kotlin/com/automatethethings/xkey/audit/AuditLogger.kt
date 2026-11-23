@@ -84,27 +84,28 @@ object AuditLogger {
     /**
      * Initialize the audit logger with application context.
      *
-     * Must be called once during application startup before any logging operations.
+     * Must be called once during application startup before any logging
+     * operations. The wiring happens once; every call then applies the
+     * retention policy (entries older than 90 days, then beyond the
+     * [MAX_ENTRIES] newest) in the background.
      *
      * @param context Application context for database access.
      */
     fun initialize(context: Context) {
-        val existing = daoRef.get()
-        if (existing != null) return
-
-        val database = XKeyDatabase.getInstance(context)
-        val dao = database.auditLogDao()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-        if (daoRef.compareAndSet(null, dao)) {
-            scopeRef.set(scope)
-            // Apply retention policy on startup
-            scope.launch {
-                try {
-                    applyRetentionPolicy(dao)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to apply retention policy", e)
-                }
+        if (daoRef.get() == null) {
+            val dao = XKeyDatabase.getInstance(context).auditLogDao()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            if (daoRef.compareAndSet(null, dao)) {
+                scopeRef.set(scope)
+            }
+        }
+        val dao = daoRef.get() ?: return
+        val scope = scopeRef.get() ?: return
+        scope.launch {
+            try {
+                applyRetentionPolicy(dao)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to apply retention policy", e)
             }
         }
     }

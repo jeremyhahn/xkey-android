@@ -961,12 +961,22 @@ class AuditLogActivity : AppCompatActivity() {
             .build()
 
         picker.addOnPositiveButtonClickListener { selection ->
-            dateRangeStart = selection.first
-            dateRangeEnd = selection.second?.let { it + 24 * 60 * 60 * 1000 - 1 }
-            applyFilters()
+            applyDateRange(selection.first, selection.second?.let { it + 24 * 60 * 60 * 1000 - 1 })
         }
 
         picker.show(supportFragmentManager, "date_picker")
+    }
+
+    /**
+     * Limits the list and both exports to entries timestamped within
+     * [start]..[endInclusive] (epoch ms, null = open); what the picker's
+     * positive button applies.
+     */
+    @VisibleForTesting
+    internal fun applyDateRange(start: Long?, endInclusive: Long?) {
+        dateRangeStart = start
+        dateRangeEnd = endInclusive
+        applyFilters()
     }
 
     // -------------------------------------------------------------------------
