@@ -14,23 +14,36 @@
  */
 package com.automatethethings.xkey.piv
 
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Log
+import androidx.annotation.RequiresApi
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.KeySecurityLevel
+import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.security.GeneralSecurityException
+import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.ProviderException
+import java.security.PublicKey
 import java.security.Signature
 import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.security.spec.ECGenParameterSpec
+import java.security.spec.X509EncodedKeySpec
+import javax.crypto.KeyAgreement
 
 /**
  * Summary information about a PIV slot, combining the slot definition with
@@ -118,8 +131,14 @@ const val PIV_KEYSTORE_ALIAS_PREFIX = "xkey_piv_"
  * - **Generate**: Create a new key pair in a PIV slot with a specified algorithm.
  * - **Import certificate**: Store an X.509 certificate for an existing slot key.
  * - **Sign**: Produce a digital signature using a slot's private key.
+ * - **Agree**: X25519 key agreement with a slot's private key.
  * - **List**: Enumerate all slots and their current state.
  * - **Delete**: Destroy a key and remove its metadata.
+ *
+ * Ed25519 and X25519 keys exist only in secure hardware: on a device below
+ * Android 13 they are refused before the slot is touched, and a generated key
+ * the Keystore reports as software-backed (or whose level cannot be read) is
+ * removed and refused. There is no software fallback.
  *
  * All operations that modify key material or perform cryptographic operations
  * are logged via [AuditLogger] for security auditing.
@@ -128,15 +147,23 @@ const val PIV_KEYSTORE_ALIAS_PREFIX = "xkey_piv_"
  * @param generateKeyPair Generates the slot's key pair under its Keystore
  *   alias, replacing any key there; the Android Keystore unless a test
  *   substitutes it.
+ * @param sdkInt The platform API level curve 25519 keys are checked against.
+ * @param securityLevelOf Reads the security level of the key under an alias,
+ *   or null when it cannot be read; the Android Keystore's [KeyInfo] unless a
+ *   test substitutes it.
  */
 class PivKeyManager(
     private val pivSlotDao: PivSlotDao,
-    private val generateKeyPair: (alias: String, algorithm: PivAlgorithm) -> KeyPair = ::generateInAndroidKeystore
+    private val generateKeyPair: (alias: String, algorithm: PivAlgorithm) -> KeyPair = ::generateInAndroidKeystore,
+    private val sdkInt: Int = Build.VERSION.SDK_INT,
+    securityLevelOf: ((alias: String) -> KeySecurityLevel?)? = null
 ) {
 
     // Opened on first use, so constructing a manager does not need the
     // AndroidKeyStore provider (JVM unit tests substitute it).
     private val keyStore: KeyStore by lazy { KeyStore.getInstance("AndroidKeyStore").apply { load(null) } }
+
+    private val readSecurityLevel: (String) -> KeySecurityLevel? = securityLevelOf ?: ::keystoreSecurityLevel
 
     companion object {
         private const val TAG = "PivKeyManager"
@@ -150,18 +177,25 @@ class PivKeyManager(
      * already exists in the slot, it is overwritten.
      *
      * The key is configured with:
-     * - Purpose: SIGN and VERIFY
-     * - Digest: SHA-256 (EC) or SHA-256 (RSA)
-     * - For EC keys: no padding required
-     * - For RSA keys: PKCS1 padding
+     * - ECDSA and RSA: SIGN and VERIFY, SHA-256 (and SHA-384 for EC); RSA uses PKCS1 padding
+     * - Ed25519: SIGN and VERIFY over the raw message (no digest)
+     * - X25519: AGREE_KEY only
      *
      * @param slot The PIV slot to generate the key in.
      * @param algorithm The cryptographic algorithm for key generation.
      * @return [PivSlotInfo] describing the newly generated key.
+     * @throws PivAlgorithmUnavailableException If [algorithm] needs Android 13
+     *   secure hardware this device does not have.
      * @throws java.security.GeneralSecurityException If key generation fails.
      */
-    suspend fun generateKey(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo =
-        PivSlotLocks.withSlot(slot) { generateKeyLocked(slot, algorithm) }
+    suspend fun generateKey(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
+        // Refused before the slot lock and before the alias is touched: the
+        // slot keeps whatever key it holds.
+        if (!algorithm.isAvailableOn(sdkInt)) {
+            throw PivAlgorithmUnavailableException(algorithm, "this device runs API level $sdkInt")
+        }
+        return PivSlotLocks.withSlot(slot) { generateKeyLocked(slot, algorithm) }
+    }
 
     private suspend fun generateKeyLocked(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
         val alias = slot.keystoreAlias
@@ -171,7 +205,29 @@ class PivKeyManager(
         val (publicKeyDer, now) = SharePermissionLedger.revoking(alias) {
             // This replaces any key the slot held: from here the row must be made
             // to describe the new key, or the slot must be emptied.
-            val keyPair = generateKeyPair(alias, algorithm)
+            val keyPair = try {
+                generateKeyPair(alias, algorithm)
+            } catch (e: Exception) {
+                // A Keystore that cannot make the curve leaves the alias as it was.
+                if (algorithm.isCurve25519 && (e is GeneralSecurityException || e is ProviderException ||
+                        e is UnsupportedOperationException || e is IllegalArgumentException)
+                ) {
+                    throw PivAlgorithmUnavailableException(algorithm, "the Keystore cannot create it (${e.message})", e)
+                }
+                throw e
+            }
+
+            if (algorithm.isCurve25519) {
+                val level = runCatching { readSecurityLevel(alias) }.getOrNull()
+                if (level != KeySecurityLevel.TEE && level != KeySecurityLevel.STRONGBOX) {
+                    withContext(NonCancellable) { discardUnrecordedKey(slot) }
+                    Log.w(TAG, "Refused ${algorithm.displayName} key in PIV slot ${slot.hexId}: security level $level")
+                    throw PivAlgorithmUnavailableException(
+                        algorithm,
+                        if (level == null) "the key's security level cannot be read" else "the Keystore made a ${level.wire} key"
+                    )
+                }
+            }
 
             val publicKeyDer = keyPair.public.encoded
             val now = System.currentTimeMillis()
@@ -223,15 +279,32 @@ class PivKeyManager(
 
     /**
      * Empty [slot] after its Keystore key was replaced but the row could not
-     * be written: the replaced key is gone, and leaving the new one would
-     * leave a row describing a key the slot no longer holds. Best effort; the
-     * caller rethrows the original failure.
+     * be written, or the new key is not in secure hardware: the replaced key
+     * is gone, and leaving the new one would leave a row describing a key the
+     * slot no longer holds. Best effort; the caller rethrows the failure.
      */
     private suspend fun discardUnrecordedKey(slot: PivSlot) {
         runCatching { keyStore.deleteEntry(slot.keystoreAlias) }
             .onFailure { Log.w(TAG, "Could not remove unrecorded key from PIV slot ${slot.hexId}: ${it.message}") }
         runCatching { pivSlotDao.deleteBySlotId(slot.hexId) }
             .onFailure { Log.w(TAG, "Could not clear PIV slot ${slot.hexId} row: ${it.message}") }
+    }
+
+    /**
+     * The security level of the Keystore key under [alias], read from its
+     * [KeyInfo], or null when the key or its [KeyInfo] cannot be read.
+     */
+    private fun keystoreSecurityLevel(alias: String): KeySecurityLevel? {
+        val key = keyStore.getKey(alias, null) as? PrivateKey ?: return null
+        val info = runCatching {
+            KeyFactory.getInstance(key.algorithm, "AndroidKeyStore").getKeySpec(key, KeyInfo::class.java)
+        }.recoverCatching {
+            KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore").getKeySpec(key, KeyInfo::class.java)
+        }.getOrNull() ?: return null
+        val keyInfoLevel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) info.securityLevel else -1
+        @Suppress("DEPRECATION")
+        val insideSecureHardware = info.isInsideSecureHardware
+        return KeystoreManager.securityLevelOf(Build.VERSION.SDK_INT, keyInfoLevel, insideSecureHardware, false)
     }
 
     /**
@@ -335,13 +408,7 @@ class PivKeyManager(
             val slot = PivSlot.fromHexId(listed.slotId) ?: return@mapNotNull null
             PivSlotLocks.withSlot(slot) {
                 val entity = pivSlotDao.getBySlotId(slot.hexId) ?: return@withSlot null
-                val algorithm = entity.algorithm?.let { name ->
-                    try {
-                        PivAlgorithm.valueOf(name)
-                    } catch (_: IllegalArgumentException) {
-                        null
-                    }
-                }
+                val algorithm = PivAlgorithm.fromStoredName(entity.algorithm)
                 val livePublicKey = if (entity.hasKey) liveSlotPublicKey(slot) else null
                 PivSlotInfo(
                     slot = slot,
@@ -358,37 +425,57 @@ class PivKeyManager(
     }
 
     /**
+     * The algorithm the `piv_slots` row records for [slot], or null when the
+     * slot has no row or the row names no known algorithm.
+     */
+    private suspend fun recordedAlgorithm(slot: PivSlot): PivAlgorithm? =
+        PivAlgorithm.fromStoredName(pivSlotDao.getBySlotId(slot.hexId)?.algorithm)
+
+    /**
      * Sign data using the private key in the specified PIV slot.
      *
      * Retrieves the private key from Android Keystore and produces a digital
-     * signature. The signature algorithm is determined by the key type:
-     * - EC keys: SHA256withECDSA (ES256) or SHA384withECDSA (ES384)
-     * - RSA keys: SHA256withRSA
+     * signature with the slot's recorded algorithm:
+     * - ES256: SHA256withECDSA; ES384: SHA384withECDSA
+     * - RS2048: SHA256withRSA
+     * - ED25519: Ed25519 over the raw [data] (no pre-hash)
+     *
+     * An X25519 key cannot sign and is refused. A caller-supplied [algorithm]
+     * must be the slot's; it is used only for a slot whose row records none.
      *
      * Records the usage in the database and logs the operation to the audit system.
      *
      * @param slot The PIV slot containing the signing key.
      * @param data The data to sign.
-     * @param algorithm The algorithm to use for signing (must match the key's algorithm).
+     * @param algorithm The algorithm the caller expects, or null for the slot's.
      * @return The signature bytes.
+     * @throws PivAlgorithmMismatchException If the slot's key is X25519 or not [algorithm].
      * @throws IllegalStateException If the slot does not contain a key in Android Keystore.
      * @throws java.security.GeneralSecurityException If the signing operation fails.
      */
-    suspend fun sign(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm): ByteArray {
+    suspend fun sign(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm? = null): ByteArray {
         val alias = slot.keystoreAlias
+        val recorded = recordedAlgorithm(slot)
+        // A slot without a recorded algorithm predates the row; the legacy
+        // default is ES256.
+        val effective = recorded ?: algorithm ?: PivAlgorithm.ES256
+        if (!effective.canSign) {
+            throw PivAlgorithmMismatchException("${effective.displayName} keys cannot sign")
+        }
+        if (algorithm != null && algorithm != effective) {
+            throw PivAlgorithmMismatchException(
+                "PIV slot ${slot.hexId} holds a ${effective.displayName} key, not ${algorithm.displayName}"
+            )
+        }
 
         val privateKey = keyStore.getKey(alias, null)
             ?: throw IllegalStateException("No key found in Android Keystore for PIV slot ${slot.hexId} (${slot.label})")
 
-        val signatureAlgorithm = when (algorithm) {
-            PivAlgorithm.ES256 -> "SHA256withECDSA"
-            PivAlgorithm.ES384 -> "SHA384withECDSA"
-            PivAlgorithm.RS2048 -> "SHA256withRSA"
-        }
+        val signatureAlgorithm = signatureAlgorithmOf(effective)
 
         val startTime = System.currentTimeMillis()
         val signature = Signature.getInstance(signatureAlgorithm)
-        signature.initSign(privateKey as java.security.PrivateKey)
+        signature.initSign(privateKey as PrivateKey)
         signature.update(data)
         val signatureBytes = signature.sign()
         val durationMs = System.currentTimeMillis() - startTime
@@ -411,12 +498,88 @@ class PivKeyManager(
         return signatureBytes
     }
 
+    private fun signatureAlgorithmOf(algorithm: PivAlgorithm): String = when (algorithm) {
+        PivAlgorithm.ES256 -> "SHA256withECDSA"
+        PivAlgorithm.ES384 -> "SHA384withECDSA"
+        PivAlgorithm.RS2048 -> "SHA256withRSA"
+        PivAlgorithm.ED25519 -> "Ed25519"
+        PivAlgorithm.X25519 -> throw PivAlgorithmMismatchException("X25519 keys cannot sign")
+    }
+
+    /**
+     * X25519 key agreement between the slot's private key and a peer's raw
+     * 32-byte public key (RFC 7748), as a YubiKey's GENERAL AUTHENTICATE
+     * key agreement returns it.
+     *
+     * Records the usage in the database and logs the operation to the audit system.
+     *
+     * @param slot The PIV slot holding an X25519 key.
+     * @param peerPublicKeyRaw32 The peer's raw X25519 public key.
+     * @return The 32-byte shared secret.
+     * @throws IllegalArgumentException If the peer key is not 32 bytes, is all
+     *   zeros, or the slot's key is not X25519 ([PivAlgorithmMismatchException]).
+     * @throws PivSlotEmptyException If the slot holds no key.
+     * @throws java.security.GeneralSecurityException If the agreement fails.
+     */
+    suspend fun agree(slot: PivSlot, peerPublicKeyRaw32: ByteArray): ByteArray {
+        require(peerPublicKeyRaw32.size == PivPublicKeyEncoding.CURVE25519_KEY_SIZE) {
+            "X25519 peer key is ${peerPublicKeyRaw32.size} bytes, not ${PivPublicKeyEncoding.CURVE25519_KEY_SIZE}"
+        }
+        require(peerPublicKeyRaw32.any { it != 0.toByte() }) { "X25519 peer key is all zeros" }
+        val recorded = recordedAlgorithm(slot)
+        if (recorded != PivAlgorithm.X25519) {
+            throw PivAlgorithmMismatchException(
+                "PIV slot ${slot.hexId} holds ${recorded?.displayName ?: "no"} key, not X25519; it cannot agree"
+            )
+        }
+
+        val alias = slot.keystoreAlias
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey ?: throw PivSlotEmptyException(slot)
+        val peerKey = x25519PublicKey(peerPublicKeyRaw32)
+
+        val startTime = System.currentTimeMillis()
+        val secret = KeyAgreement.getInstance("XDH").run {
+            init(privateKey)
+            doPhase(peerKey, true)
+            generateSecret()
+        }
+        val durationMs = System.currentTimeMillis() - startTime
+        if (secret.all { it == 0.toByte() }) {
+            // RFC 7748 section 6.1: a low-order peer point yields all zeros.
+            throw IllegalArgumentException("X25519 peer key is a low-order point")
+        }
+
+        pivSlotDao.recordUsage(slot.hexId)
+
+        AuditLogger.logKeyUsed(
+            keyId = alias,
+            keyLabel = slot.label,
+            keyType = "piv",
+            operation = "key agreement",
+            success = true,
+            durationMs = durationMs
+        )
+
+        Log.d(TAG, "X25519 agreement with PIV slot ${slot.hexId} in ${durationMs}ms")
+
+        return secret
+    }
+
+    private fun x25519PublicKey(raw32: ByteArray): PublicKey {
+        val spec = X509EncodedKeySpec(PivPublicKeyEncoding.x25519Spki(raw32))
+        return runCatching { KeyFactory.getInstance("XDH").generatePublic(spec) }
+            .recoverCatching { KeyFactory.getInstance("X25519").generatePublic(spec) }
+            .getOrThrow()
+    }
+
     /**
      * Get the DER-encoded certificate for a PIV slot.
      *
      * Returns the certificate that was previously imported via [importCertificate],
      * or the auto-generated self-signed certificate from Android Keystore if no
-     * explicit certificate was imported.
+     * explicit certificate was imported. An X25519 key cannot sign, so the
+     * Keystore's placeholder certificate for it carries no valid signature: an
+     * X25519 slot without an imported certificate has none.
      *
      * @param slot The PIV slot to get the certificate for.
      * @return DER-encoded certificate bytes, or null if the slot has no key.
@@ -426,6 +589,9 @@ class PivKeyManager(
         val entity = pivSlotDao.getBySlotId(slot.hexId)
         if (entity?.certificateDer != null) {
             return entity.certificateDer
+        }
+        if (PivAlgorithm.fromStoredName(entity?.algorithm) == PivAlgorithm.X25519) {
+            return null
         }
 
         // Fall back to the Android Keystore auto-generated certificate
@@ -494,8 +660,8 @@ class PivKeyManager(
  * certificate against key A must finish before another caller can replace or
  * delete A, or its upsert would bring A's row back. [PivKeyManager.listSlots]
  * reads each slot under its lock so a listing never mixes two generations.
- * Different slots do not wait for each other; signing and the getters take
- * no lock.
+ * Different slots do not wait for each other; signing, agreement and the
+ * getters take no lock.
  */
 internal object PivSlotLocks {
     private val locks: Map<PivSlot, Mutex> = PivSlot.entries.associateWith { Mutex() }
@@ -510,6 +676,26 @@ internal object PivSlotLocks {
  */
 class PivSlotEmptyException(slot: PivSlot) :
     IllegalStateException("No key exists in PIV slot ${slot.hexId} (${slot.label})")
+
+/**
+ * [algorithm] cannot be generated here: it needs Android 13 and a Keystore in
+ * secure hardware, and xKey never makes a software PIV key. The slot keeps
+ * the key it held, unless a generated key turned out not to be in secure
+ * hardware, in which case the slot is emptied. The handler reports it as
+ * `FEATURE_UNAVAILABLE`.
+ */
+class PivAlgorithmUnavailableException(
+    val algorithm: PivAlgorithm,
+    reason: String,
+    cause: Throwable? = null
+) : GeneralSecurityException("${algorithm.displayName} PIV keys need Android 13 secure hardware: $reason", cause)
+
+/**
+ * The slot's key cannot do what was asked: an X25519 key asked to sign, a
+ * signing key asked to agree, or a caller naming another algorithm than the
+ * slot's. The handler reports it as `INVALID_ALGORITHM`.
+ */
+class PivAlgorithmMismatchException(message: String) : IllegalArgumentException(message)
 
 /**
  * A certificate offered for a PIV slot was refused and nothing was stored.
@@ -533,15 +719,24 @@ class PivCertificateKeyMismatchException(slot: PivSlot) :
  * there.
  *
  * The key is configured with:
- * - Purpose: SIGN and VERIFY
- * - Digest: SHA-256 (EC) or SHA-256 (RSA)
- * - For EC keys: no padding required
- * - For RSA keys: PKCS1 padding
+ * - ECDSA: SIGN and VERIFY, SHA-256 and SHA-384
+ * - RSA: SIGN and VERIFY, SHA-256, PKCS1 padding
+ * - Ed25519: SIGN and VERIFY, no digest (EdDSA signs the raw message)
+ * - X25519: AGREE_KEY
+ *
+ * Curve 25519 keys are never requested in StrongBox, which does not support
+ * them; the TEE makes them.
  */
 private fun generateInAndroidKeystore(alias: String, algorithm: PivAlgorithm): KeyPair {
     // Build key generation parameters based on the algorithm
-    val paramSpec = when (algorithm.keyAlgorithm) {
-        "EC" -> {
+    val paramSpec = when {
+        algorithm.isCurve25519 -> {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                throw ProviderException("${algorithm.displayName} needs API level 33")
+            }
+            curve25519Spec(alias, algorithm)
+        }
+        algorithm.keyAlgorithm == "EC" -> {
             KeyGenParameterSpec.Builder(
                 alias,
                 KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
@@ -550,7 +745,7 @@ private fun generateInAndroidKeystore(alias: String, algorithm: PivAlgorithm): K
                 .setKeySize(algorithm.keySizeBits)
                 .build()
         }
-        "RSA" -> {
+        algorithm.keyAlgorithm == "RSA" -> {
             KeyGenParameterSpec.Builder(
                 alias,
                 KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
@@ -571,3 +766,20 @@ private fun generateInAndroidKeystore(alias: String, algorithm: PivAlgorithm): K
     keyPairGenerator.initialize(paramSpec)
     return keyPairGenerator.generateKeyPair()
 }
+
+/** The Keystore spec for an Ed25519 or X25519 key under [alias] (API 33). */
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+private fun curve25519Spec(alias: String, algorithm: PivAlgorithm): KeyGenParameterSpec =
+    when (algorithm) {
+        PivAlgorithm.ED25519 -> KeyGenParameterSpec.Builder(
+            alias,
+            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+        )
+            .setAlgorithmParameterSpec(ECGenParameterSpec("ed25519"))
+            .setDigests(KeyProperties.DIGEST_NONE)
+            .build()
+        PivAlgorithm.X25519 -> KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_AGREE_KEY)
+            .setAlgorithmParameterSpec(ECGenParameterSpec("x25519"))
+            .build()
+        else -> throw IllegalArgumentException("${algorithm.displayName} is not a curve 25519 algorithm")
+    }
