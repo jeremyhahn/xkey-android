@@ -84,27 +84,28 @@ object AuditLogger {
     /**
      * Initialize the audit logger with application context.
      *
-     * Must be called once during application startup before any logging operations.
+     * Must be called once during application startup before any logging
+     * operations. The wiring happens once; every call then applies the
+     * retention policy (entries older than 90 days, then beyond the
+     * [MAX_ENTRIES] newest) in the background.
      *
      * @param context Application context for database access.
      */
     fun initialize(context: Context) {
-        val existing = daoRef.get()
-        if (existing != null) return
-
-        val database = XKeyDatabase.getInstance(context)
-        val dao = database.auditLogDao()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-        if (daoRef.compareAndSet(null, dao)) {
-            scopeRef.set(scope)
-            // Apply retention policy on startup
-            scope.launch {
-                try {
-                    applyRetentionPolicy(dao)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to apply retention policy", e)
-                }
+        if (daoRef.get() == null) {
+            val dao = XKeyDatabase.getInstance(context).auditLogDao()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            if (daoRef.compareAndSet(null, dao)) {
+                scopeRef.set(scope)
+            }
+        }
+        val dao = daoRef.get() ?: return
+        val scope = scopeRef.get() ?: return
+        scope.launch {
+            try {
+                applyRetentionPolicy(dao)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to apply retention policy", e)
             }
         }
     }
@@ -1642,6 +1643,43 @@ object AuditLogger {
         }
         log(AuditLogEntity(operationType = AuditOperationType.BACKUP_RESTORED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
     }
+
+    /**
+     * Records that the user cleared the whole audit log, after the delete.
+     *
+     * Written and awaited on [dao] (the table just cleared) rather than queued,
+     * so the entry is in place when the clear returns and survives it.
+     *
+     * @param dao The audit table the rows were deleted from.
+     * @param deleted Rows the clear removed.
+     */
+    suspend fun logAuditLogCleared(dao: AuditLogDao, deleted: Int) {
+        dao.insert(auditLogClearedEntry(deleted))
+    }
+
+    /**
+     * Records that the user deleted audit entries older than [olderThan], after
+     * the delete; written and awaited as [logAuditLogCleared] is.
+     *
+     * @param dao The audit table the rows were deleted from.
+     * @param deleted Rows the prune removed.
+     * @param olderThan The epoch-millisecond cutoff.
+     */
+    suspend fun logAuditLogPruned(dao: AuditLogDao, deleted: Int, olderThan: Long) {
+        dao.insert(auditLogPrunedEntry(deleted, olderThan))
+    }
+
+    internal fun auditLogClearedEntry(deleted: Int): AuditLogEntity = AuditLogEntity(
+        operationType = AuditOperationType.AUDIT_LOG_CLEARED,
+        success = true,
+        details = JSONObject().put("deleted", deleted).toString()
+    )
+
+    internal fun auditLogPrunedEntry(deleted: Int, olderThan: Long): AuditLogEntity = AuditLogEntity(
+        operationType = AuditOperationType.AUDIT_LOG_PRUNED,
+        success = true,
+        details = JSONObject().put("deleted", deleted).put("olderThan", olderThan).toString()
+    )
 
     // -------------------------------------------------------------------------
     // Internal Methods

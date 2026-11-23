@@ -623,6 +623,8 @@
     <string name="audit_delete_older_confirm">Delete all audit log entries older than 30 days? This cannot be undone.</string>
     <string name="audit_logs_cleared">All audit logs cleared</string>
     <string name="audit_old_logs_deleted">Old audit logs deleted (%1$d removed)</string>
+    <string name="audit_delete_auth_subtitle">Confirm it is you before deleting audit history</string>
+    <string name="audit_delete_not_authenticated">Not confirmed; nothing was deleted</string>
     <string name="audit_log_card_description">View security event history</string>
 
     <!-- Passkeys -->
@@ -1129,6 +1131,8 @@
     <string name="audit_log_op_password_deleted">Password Deleted</string>
     <string name="audit_log_op_backup_created">Backup Stored</string>
     <string name="audit_log_op_backup_restored">Backup Restored</string>
+    <string name="audit_log_op_audit_log_cleared">Audit Log Cleared</string>
+    <string name="audit_log_op_audit_log_pruned">Old Audit Entries Deleted</string>
 
     <!-- PIV Smart Card -->
     <string name="piv_title">PIV Smart Card</string>

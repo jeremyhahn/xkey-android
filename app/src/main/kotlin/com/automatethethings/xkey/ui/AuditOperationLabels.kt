@@ -89,6 +89,8 @@ object AuditOperationLabels {
         AuditOperationType.PASSWORD_DELETED -> R.string.audit_log_op_password_deleted
         AuditOperationType.BACKUP_CREATED -> R.string.audit_log_op_backup_created
         AuditOperationType.BACKUP_RESTORED -> R.string.audit_log_op_backup_restored
+        AuditOperationType.AUDIT_LOG_CLEARED -> R.string.audit_log_op_audit_log_cleared
+        AuditOperationType.AUDIT_LOG_PRUNED -> R.string.audit_log_op_audit_log_pruned
     }
 
     /** The operation types the audit screen offers as filter chips, in order. */
