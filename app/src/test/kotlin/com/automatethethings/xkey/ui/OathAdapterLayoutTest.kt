@@ -94,7 +94,10 @@ class OathAdapterLayoutTest {
         assertEquals("code ellipsized at font scale $fontScale", 0, layout.getEllipsisCount(0))
         val textRoom = codeView.measuredWidth - codeView.totalPaddingLeft - codeView.totalPaddingRight
         assertTrue(
-            "code needs ${codeView.paint.measureText(text)}px, has $textRoom px",
+            "code needs ${codeView.paint.measureText(text)}px, has $textRoom px " +
+                "(view ${codeView.measuredWidth}/${codeView.width}, section " +
+                "${(codeView.parent as View).measuredWidth}, row ${host.width}, " +
+                "lines ${layout.lineCount}, layout width ${layout.width})",
             codeView.paint.measureText(text) <= textRoom
         )
         assertTrue(
