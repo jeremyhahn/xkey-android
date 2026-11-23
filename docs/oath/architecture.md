@@ -28,7 +28,10 @@ covered by the sync feature, not here.
 | `OathEngine` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathEngine.kt` | `generateHotpCode`, `generateTotpCode`; stateless |
 | `OathSecretManager` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathSecretManager.kt` | `encryptSecret` / `decryptSecret`: Keystore AES-256-GCM, output `IV(12) || ciphertext || tag` |
 | `OathCredentialEntity`, `OathCredentialDao` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathCredentialEntity.kt`, `OathCredentialDao.kt` | Row: `oathId`, `oathType`, `algorithm`, `digits`, `periodSeconds`, `counter`, `issuer`, `accountName`, `secretEncrypted`, `source`; DAO `getAll`, `getByOathId`, `updateCounter`, `recordUsage`, `deleteByOathId` |
-| `OathActivity`, `OathAdapter`, `AddOathDialog` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone screens |
+| `OathActivity`, `OathAdapter` (`OathRowLayout`), `AddOathDialog` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone list and add screens |
+| `OathCodeClipboard` | `app/src/main/kotlin/com/automatethethings/xkey/ui/OathCodeClipboard.kt` | The one copy path: sensitive clip, HOTP through `generateCode` |
+| `OathListMenu` | `app/src/main/kotlin/com/automatethethings/xkey/ui/OathListMenu.kt` | Long-press menu entries and index-to-action mapping |
+| `OathCredentialDetailActivity`, `OathCredentialDetailViewModel` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | Details screen; state without the secret, injectable clock |
 | `AuditLogger` (`logOathCodeGenerated`, `logOathCredentialCreated`, `logOathCredentialDeleted`) | `app/src/main/kotlin/com/automatethethings/xkey/audit/AuditLogger.kt` | Audit records |
 
 ## Wire methods served
@@ -98,6 +101,39 @@ sequenceDiagram
     H-->>D: {code, expires_in}
 ```
 
+## Phone screens
+
+**List row.** `OathRowLayout` measures the code column (code and countdown)
+first and gives the issuer and account what is left. The code is one line and
+never ellipsized; the account wraps to two lines, then ellipsizes. When less
+than `OathAdapter.MIN_INFO_WIDTH_DP` (96dp) would be left beside the code, as
+on a narrow outer display or at a large font scale, the code moves below the
+issuer and account. Only if the code is wider than the whole row is its text
+size reduced to fit. The row mirrors for right-to-left layouts.
+
+**Tap and copy.** A tap on a row, the long-press Copy and the details screen's
+Copy all go through `OathCodeClipboard`. The clip is marked sensitive
+(`ClipDescription.EXTRA_IS_SENSITIVE`, API 33+). A TOTP copy copies the code on
+screen and changes nothing. An HOTP copy calls `OathRepository.generateCode`,
+which copies the code at the stored counter, advances the counter and records
+the use, so every HOTP copy is a fresh code.
+
+**Long-press menu.** `OathListMenu` lists Copy, Delete and Details, followed by
+the desktop entries (copy to the desktop, show the desktop's code) that the
+connected desktop offers. Delete asks for confirmation; Cancel keeps the credential.
+
+**Details screen.** Details opens `OathCredentialDetailActivity` (not
+exported, parent `OathActivity`) for one `oathId`. Each second its view model
+reads the credential and shows issuer, account, type, algorithm, digits,
+period (TOTP) or counter (HOTP), created, last used, use count, source, the
+remote device id when set, how the secret is stored, the current code and, for
+TOTP, the seconds left. The view model decrypts the secret only to compute
+the code and zeroes it afterwards; its state carries no secret. The screen
+closes if the credential is deleted while it is open.
+
+**The secret is never shown.** No screen has a field or button that reveals
+the shared secret, raw or base32.
+
 ## Errors and refusals
 
 | Condition | Result |
@@ -114,8 +150,8 @@ secrets (see its handler documentation).
 
 ## Tests
 
-- Unit (`app/src/test`): `OathEngineTest`, `OathEngineRfcVectorTest` (RFC 4226 / RFC 6238 vectors, the basis for codes matching the desktop's), `OathCredentialEntityTest`, `OathAdapterTest`.
-- Instrumented (`app/src/androidTest`): `OathRepositoryTest`, `OathSecretManagerTest`, `OathImportIntegrityTest`, `OathActivityUiTest`, `OathFlowTest`, `OathManualEntryFlowTest`, `AddOathDialogFlowTest`.
+- Unit (`app/src/test`): `OathEngineTest`, `OathEngineRfcVectorTest` (RFC 4226 / RFC 6238 vectors, the basis for codes matching the desktop's), `OathCredentialEntityTest`, `OathAdapterTest`, `OathAdapterLayoutTest` (320dp row at font scale 1 and 2), `OathCodeClipboardTest`, `OathListMenuTest`, `OathCredentialDetailViewModelTest`.
+- Instrumented (`app/src/androidTest`): `OathRepositoryTest`, `OathSecretManagerTest`, `OathImportIntegrityTest`, `OathActivityUiTest`, `OathCredentialDetailActivityTest`, `OathFlowTest`, `OathManualEntryFlowTest`, `AddOathDialogFlowTest`.
 
 ## Related features
 

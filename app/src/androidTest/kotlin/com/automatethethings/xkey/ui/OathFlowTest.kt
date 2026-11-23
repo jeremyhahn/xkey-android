@@ -67,14 +67,13 @@ import org.junit.runner.RunWith
  * - Codes are time-based, so no literal code is ever asserted. The row's code is
  *   read and the row is clicked inside the *same* main-thread block, which is
  *   the only way to compare the clipboard against what the user actually saw.
- * - The detail dialog is a tall column of rows, most of them below the fold.
- *   Assertions therefore read the dialog window's view tree ([dialogTexts])
- *   instead of requiring `isDisplayed()`.
+ * - Dialog assertions read the dialog window's view tree instead of
+ *   requiring `isDisplayed()`.
  *
  * Tests cover:
- * - HOTP: counter row instead of period, and the hero's HOTP badge count
+ * - HOTP: the hero's HOTP badge count (the details screen has its own test)
  * - A credential with no issuer: account promoted to the title, account row hidden
- * - Context-menu title, detail dialog contents and its dismissal
+ * - Context-menu title
  * - Tapping a row placing the displayed code on the clipboard
  * - Manual entry persisting the chosen parameters, and an invalid Base32 secret
  *   being reported without writing anything
@@ -116,25 +115,6 @@ class OathFlowTest {
     // ---------------------------------------------------------------
     // HOTP rendering
     // ---------------------------------------------------------------
-
-    /**
-     * A counter-based credential has no period, so the detail dialog swaps the
-     * "Period" row for "Counter".
-     */
-    @Test
-    fun hotpCredential_detailDialogShowsTheCounterInsteadOfThePeriod() {
-        val account = seed(type = "HOTP")
-        val scenario = ActivityScenario.launch(OathActivity::class.java)
-        assertShownTextInList(scenario, account)
-
-        openDetailDialog(scenario, account)
-
-        val counterLabel = withActivity(scenario) { it.getString(R.string.oath_detail_counter) }
-        val periodLabel = withActivity(scenario) { it.getString(R.string.oath_detail_period) }
-        DialogFlowSupport.assertShowsExactly(counterLabel)
-        DialogFlowSupport.assertDoesNotContain(periodLabel)
-        DialogFlowSupport.assertShowsExactly("HOTP")
-    }
 
     /** The hero badges count the two OATH types independently. */
     @Test
@@ -183,7 +163,7 @@ class OathFlowTest {
     }
 
     // ---------------------------------------------------------------
-    // Context menu and detail dialog
+    // Context menu
     // ---------------------------------------------------------------
 
     @Test
@@ -195,26 +175,6 @@ class OathFlowTest {
         RowFlowInteractions.longClickText(scenario, account)
 
         DialogFlowSupport.assertShowsExactly("$ISSUER: $account")
-    }
-
-    @Test
-    fun detailDialog_reportsTheStoredParameters() {
-        val account = seed(algorithm = "SHA256", digits = 8, periodSeconds = 60)
-
-        val scenario = ActivityScenario.launch(OathActivity::class.java)
-        assertShownTextInList(scenario, account)
-        openDetailDialog(scenario, account)
-
-        DialogFlowSupport.assertShowsExactly("SHA256")
-        DialogFlowSupport.assertShowsExactly("8")
-        DialogFlowSupport.assertShowsExactly(
-            withActivity(scenario) { it.getString(R.string.oath_detail_period_value, 60) }
-        )
-        // Source is stored lowercase and title-cased for display.
-        DialogFlowSupport.assertShowsExactly("Local")
-        DialogFlowSupport.assertShowsExactly(
-            withActivity(scenario) { it.getString(R.string.oath_detail_never_used) }
-        )
     }
 
     // ---------------------------------------------------------------
@@ -399,12 +359,6 @@ class OathFlowTest {
     private fun openManualEntryDialog() {
         openAddMethodChooser()
         onView(withText(R.string.oath_add_enter_manually)).inRoot(isDialog()).perform(click())
-        waitForIdle()
-    }
-
-    private fun openDetailDialog(scenario: ActivityScenario<OathActivity>, account: String) {
-        RowFlowInteractions.longClickText(scenario, account)
-        onView(withText(R.string.oath_context_view_details)).inRoot(isDialog()).perform(click())
         waitForIdle()
     }
 
