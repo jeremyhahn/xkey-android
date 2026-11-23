@@ -48,6 +48,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.audit.AuditCsv
 import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditLogEntity
 import com.automatethethings.xkey.audit.AuditOperationType
@@ -973,26 +974,12 @@ class AuditLogActivity : AppCompatActivity() {
                 )
 
                 val csv = StringBuilder()
-                csv.appendLine("ID,Timestamp,Operation,Key ID,Key Label,Key Type,Device ID,Device Name,Success,Error,Details,Duration (ms)")
+                // Every field goes through AuditCsv: quoted, quotes doubled, formulas neutralised.
+                csv.appendLine(AuditCsv.headerRow())
 
                 val dateFormat = SimpleDateFormat(DATE_FORMAT_FULL, Locale.US)
                 entries.forEach { entry ->
-                    csv.appendLine(
-                        listOf(
-                            entry.id,
-                            dateFormat.format(Date(entry.timestamp)),
-                            entry.operationType.name,
-                            entry.keyId ?: "",
-                            "\"${entry.keyLabel?.replace("\"", "\"\"") ?: ""}\"",
-                            entry.keyType ?: "",
-                            entry.deviceId ?: "",
-                            "\"${entry.deviceName?.replace("\"", "\"\"") ?: ""}\"",
-                            entry.success,
-                            "\"${entry.errorMessage?.replace("\"", "\"\"") ?: ""}\"",
-                            "\"${entry.details?.replace("\"", "\"\"") ?: ""}\"",
-                            entry.durationMs ?: ""
-                        ).joinToString(",")
-                    )
+                    csv.appendLine(AuditCsv.entryRow(entry, dateFormat.format(Date(entry.timestamp))))
                 }
 
                 val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
