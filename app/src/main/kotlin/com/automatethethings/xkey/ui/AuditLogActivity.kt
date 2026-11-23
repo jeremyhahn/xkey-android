@@ -36,6 +36,7 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
@@ -51,12 +52,15 @@ import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditCsv
 import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.audit.AuditLogEntity
+import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.audit.AuditOperationType
+import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.datepicker.MaterialDatePicker
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -93,6 +97,40 @@ class AuditLogActivity : AppCompatActivity() {
         private const val DATE_FORMAT_DISPLAY = "MMM dd, yyyy"
         private const val DATE_FORMAT_FULL = "MMM dd, yyyy HH:mm:ss"
         private const val EXPORT_FILE_NAME = "xkey_audit_log"
+
+        /** "Delete Older" removes entries older than this. */
+        private const val DELETE_OLDER_THAN_MS = 30L * 24 * 60 * 60 * 1000
+
+        /**
+         * The authentication step Clear all and Delete older pass before any
+         * row is deleted. Tests swap it; production uses [BiometricConfirmation].
+         */
+        @VisibleForTesting
+        @Volatile
+        var deleteConfirmation: DeleteConfirmation = BiometricConfirmation
+    }
+
+    /** Confirms a destructive audit log action is the device owner's. */
+    interface DeleteConfirmation {
+        /** True only when the user authenticated; a refusal or cancel is false. */
+        suspend fun confirm(activity: AuditLogActivity, title: String): Boolean
+    }
+
+    /** A biometric prompt that also accepts the screen lock. */
+    object BiometricConfirmation : DeleteConfirmation {
+        override suspend fun confirm(activity: AuditLogActivity, title: String): Boolean =
+            try {
+                BiometricHelper(activity).authenticateWithoutCrypto(
+                    title = title,
+                    subtitle = activity.getString(R.string.audit_delete_auth_subtitle),
+                    allowDeviceCredential = true
+                )
+                true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
+            }
     }
 
     // -------------------------------------------------------------------------
@@ -880,12 +918,24 @@ class AuditLogActivity : AppCompatActivity() {
             .setMessage(getString(R.string.audit_clear_all_confirm))
             .setPositiveButton(getString(R.string.key_delete_confirm)) { _, _ ->
                 lifecycleScope.launch {
-                    auditLogDao.deleteAll()
+                    if (!authenticated(getString(R.string.audit_clear_all))) return@launch
+                    val deleted = auditLogDao.deleteAll()
+                    AuditLogger.logAuditLogCleared(auditLogDao, deleted)
                     Snackbar.make(rootLayout, getString(R.string.audit_logs_cleared), Snackbar.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton(getString(R.string.button_cancel), null)
             .show()
+    }
+
+    /**
+     * Runs [deleteConfirmation]; on a refusal or cancel says nothing was
+     * deleted and returns false, so the caller deletes nothing.
+     */
+    private suspend fun authenticated(title: String): Boolean {
+        if (deleteConfirmation.confirm(this, title)) return true
+        Snackbar.make(rootLayout, getString(R.string.audit_delete_not_authenticated), Snackbar.LENGTH_SHORT).show()
+        return false
     }
 
     private fun confirmDeleteOlderLogs() {
@@ -894,8 +944,10 @@ class AuditLogActivity : AppCompatActivity() {
             .setMessage(getString(R.string.audit_delete_older_confirm))
             .setPositiveButton(getString(R.string.key_delete_confirm)) { _, _ ->
                 lifecycleScope.launch {
-                    val thirtyDaysAgo = System.currentTimeMillis() - (30L * 24 * 60 * 60 * 1000)
-                    val deleted = auditLogDao.deleteOlderThan(thirtyDaysAgo)
+                    if (!authenticated(getString(R.string.audit_delete_older))) return@launch
+                    val cutoff = System.currentTimeMillis() - DELETE_OLDER_THAN_MS
+                    val deleted = auditLogDao.deleteOlderThan(cutoff)
+                    AuditLogger.logAuditLogPruned(auditLogDao, deleted, cutoff)
                     Snackbar.make(rootLayout, getString(R.string.audit_old_logs_deleted, deleted), Snackbar.LENGTH_SHORT).show()
                 }
             }
@@ -1023,7 +1075,9 @@ class AuditLogActivity : AppCompatActivity() {
             ContextCompat.getColor(this, R.color.on_primary)
         )
         AuditOperationType.KEY_DELETED,
-        AuditOperationType.DEVICE_UNPAIRED -> Pair(
+        AuditOperationType.DEVICE_UNPAIRED,
+        AuditOperationType.AUDIT_LOG_CLEARED,
+        AuditOperationType.AUDIT_LOG_PRUNED -> Pair(
             ContextCompat.getColor(this, R.color.security_error),
             ContextCompat.getColor(this, R.color.on_primary)
         )

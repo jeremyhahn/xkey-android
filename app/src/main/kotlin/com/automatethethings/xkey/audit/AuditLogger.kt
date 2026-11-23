@@ -1643,6 +1643,43 @@ object AuditLogger {
         log(AuditLogEntity(operationType = AuditOperationType.BACKUP_RESTORED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
     }
 
+    /**
+     * Records that the user cleared the whole audit log, after the delete.
+     *
+     * Written and awaited on [dao] (the table just cleared) rather than queued,
+     * so the entry is in place when the clear returns and survives it.
+     *
+     * @param dao The audit table the rows were deleted from.
+     * @param deleted Rows the clear removed.
+     */
+    suspend fun logAuditLogCleared(dao: AuditLogDao, deleted: Int) {
+        dao.insert(auditLogClearedEntry(deleted))
+    }
+
+    /**
+     * Records that the user deleted audit entries older than [olderThan], after
+     * the delete; written and awaited as [logAuditLogCleared] is.
+     *
+     * @param dao The audit table the rows were deleted from.
+     * @param deleted Rows the prune removed.
+     * @param olderThan The epoch-millisecond cutoff.
+     */
+    suspend fun logAuditLogPruned(dao: AuditLogDao, deleted: Int, olderThan: Long) {
+        dao.insert(auditLogPrunedEntry(deleted, olderThan))
+    }
+
+    internal fun auditLogClearedEntry(deleted: Int): AuditLogEntity = AuditLogEntity(
+        operationType = AuditOperationType.AUDIT_LOG_CLEARED,
+        success = true,
+        details = JSONObject().put("deleted", deleted).toString()
+    )
+
+    internal fun auditLogPrunedEntry(deleted: Int, olderThan: Long): AuditLogEntity = AuditLogEntity(
+        operationType = AuditOperationType.AUDIT_LOG_PRUNED,
+        success = true,
+        details = JSONObject().put("deleted", deleted).put("olderThan", olderThan).toString()
+    )
+
     // -------------------------------------------------------------------------
     // Internal Methods
     // -------------------------------------------------------------------------

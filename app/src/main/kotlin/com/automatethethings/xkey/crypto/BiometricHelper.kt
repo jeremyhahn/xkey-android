@@ -146,6 +146,8 @@ class BiometricHelper(
      * @param subtitle Subtitle providing context.
      * @param description Optional additional description.
      * @param onTurn As for [authenticate].
+     * @param allowDeviceCredential Whether the screen lock (PIN, pattern,
+     *   password) is accepted in place of a biometric.
      * @throws UserCancelledException if the user cancels authentication.
      * @throws BiometricLockoutException if too many failed attempts occurred.
      * @throws BiometricException for other authentication errors.
@@ -154,8 +156,11 @@ class BiometricHelper(
         title: String = DEFAULT_TITLE,
         subtitle: String = DEFAULT_SUBTITLE,
         description: String? = null,
-        onTurn: (key: String) -> Unit = {}
-    ) = inTurn(onTurn) { prompt(title, subtitle, description, cryptoObject = null) }
+        onTurn: (key: String) -> Unit = {},
+        allowDeviceCredential: Boolean = false
+    ) = inTurn(onTurn) {
+        prompt(title, subtitle, description, cryptoObject = null, allowDeviceCredential = allowDeviceCredential)
+    }
 
     /**
      * Runs [prompt] on a queue turn of its own, after [onTurn]; inside a turn
@@ -184,7 +189,8 @@ class BiometricHelper(
         title: String,
         subtitle: String,
         description: String?,
-        cryptoObject: BiometricPrompt.CryptoObject?
+        cryptoObject: BiometricPrompt.CryptoObject?,
+        allowDeviceCredential: Boolean = false
     ): Unit = suspendCancellableCoroutine { continuation ->
         val callback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
@@ -210,9 +216,19 @@ class BiometricHelper(
         val promptInfoBuilder = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
-            .setNegativeButtonText(NEGATIVE_BUTTON_TEXT)
-            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
             .setConfirmationRequired(true)
+        if (allowDeviceCredential && cryptoObject == null) {
+            // The screen lock stands in for a biometric; the system draws its
+            // own cancel, so no negative button may be set.
+            promptInfoBuilder.setAllowedAuthenticators(
+                BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                    BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            )
+        } else {
+            promptInfoBuilder
+                .setNegativeButtonText(NEGATIVE_BUTTON_TEXT)
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+        }
 
         if (description != null) {
             promptInfoBuilder.setDescription(description)
