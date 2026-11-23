@@ -65,6 +65,7 @@ Never does:
 | fido2-built-in-uv | shipped | A biometric-gated, verifiable "verify user" RPC so the desktop authenticator can issue a pinUvAuthToken through UV `local.verifyUser` per go-xkms#1716 | `docs/fido2-built-in-uv/` |
 | protected-memory | shipped | `NoiseSession` zeroes the Noise static, ephemeral and session keys, and the handshake intermediates, with `fill(0)` once they are no longer needed; on Android's managed heap this is best-effort hygiene, not a guarantee, since the collector and the JCA objects may keep copies, and the class documentation states that limit | `docs/protected-memory/` |
 | trusted-computing-enrollment | future | Android initiators for `remote.getTCGCSRIDevID`, `remote.activateCredential` and `remote.getAttestationQuote` (needs a Kotlin TPM2 credential-activation flow), and the `local.*` IDevID and TCG family, dormant on both sides | none |
+| maintenance | standing | Dependency updates (dependabot and manual) and CI configuration changes (ci.yml template adoptions, workflow fixes) are worked on `row/317-maintenance` and land as PRs from it; no dependency or CI branch exists outside this row; the row stays open and carries no Dev complete milestone (owner decision 1234, #317) | `#317` |
 
 ## Interfaces
 
