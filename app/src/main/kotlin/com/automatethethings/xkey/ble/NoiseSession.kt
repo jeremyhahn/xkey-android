@@ -1,6 +1,7 @@
 package com.automatethethings.xkey.ble
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -13,6 +14,7 @@ import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Noise_XX_25519_ChaChaPoly_SHA256 session for BLE encryption.
@@ -82,6 +84,32 @@ class NoiseSession {
         private const val KEY_STATIC_PRIVATE = "static_private_key"
         private const val KEY_STATIC_PUBLIC = "static_public_key"
 
+        /** Opens the encrypted store the static key pair lives in. */
+        private fun openEncryptedKeyStore(context: Context): SharedPreferences {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+
+            return EncryptedSharedPreferences.create(
+                context,
+                PREFS_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        }
+
+        /** The production [keyStoreOpener]. */
+        internal val ENCRYPTED_KEY_STORE: (Context) -> SharedPreferences = { openEncryptedKeyStore(it) }
+
+        /**
+         * Opens the store the static key pair lives in. Test seam: off-device
+         * there is no Android Keystore, so a unit test puts an in-memory store
+         * here (or one whose open throws); production code must not set it.
+         */
+        @Volatile
+        internal var keyStoreOpener: (Context) -> SharedPreferences = ENCRYPTED_KEY_STORE
+
         /**
          * Data class for returning the stored static key pair.
          */
@@ -99,17 +127,7 @@ class NoiseSession {
          */
         suspend fun getStoredStaticKeyPair(context: Context): StaticKeyPair? {
             return try {
-                val masterKey = MasterKey.Builder(context)
-                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                    .build()
-
-                val prefs = EncryptedSharedPreferences.create(
-                    context,
-                    PREFS_NAME,
-                    masterKey,
-                    EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                    EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-                )
+                val prefs = keyStoreOpener(context)
 
                 val privateKeyBase64 = prefs.getString(KEY_STATIC_PRIVATE, null)
                 val publicKeyBase64 = prefs.getString(KEY_STATIC_PUBLIC, null)
@@ -209,20 +227,20 @@ class NoiseSession {
 
     /**
      * Loads the static key from encrypted storage.
+     *
+     * The static key is the device identity every paired desktop pins. When no
+     * key is stored yet (neither half present) one is generated and saved.
+     * Anything else that goes wrong (the store cannot be opened, one half is
+     * missing, a stored key cannot be decoded, the new key cannot be saved)
+     * throws [NoiseException]: the session fails closed rather than answer
+     * under an unsaved identity that no paired desktop knows and the next
+     * connection would replace.
+     *
+     * @throws NoiseException when the static key cannot be loaded or saved.
      */
     suspend fun loadStaticKey(context: Context) {
         try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-
-            val prefs = EncryptedSharedPreferences.create(
-                context,
-                PREFS_NAME,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            val prefs = keyStoreOpener(context)
 
             val privateKeyBase64 = prefs.getString(KEY_STATIC_PRIVATE, null)
             val publicKeyBase64 = prefs.getString(KEY_STATIC_PUBLIC, null)
@@ -241,12 +259,10 @@ class NoiseSession {
                 } else {
                     decodedPrivKey
                 }
-                if (staticPrivateKey !== rawPrivKey) staticPrivateKey?.fill(0)
-                staticPrivateKey = rawPrivKey
 
                 // Check if the public key is X.509 encoded (44 bytes) vs raw (32 bytes)
                 // X.509 header for X25519: 302a300506032b656e032100 (12 bytes)
-                staticPublicKey = if (decodedPubKey.size == 44 &&
+                val rawPubKey = if (decodedPubKey.size == 44 &&
                     decodedPubKey[0] == 0x30.toByte() && decodedPubKey[1] == 0x2a.toByte()) {
                     Log.w(TAG, "Converting X.509 encoded public key to raw format")
                     // Extract raw 32-byte key from X.509 encoding (skip 12-byte header)
@@ -255,57 +271,61 @@ class NoiseSession {
                     decodedPubKey
                 }
 
-                Log.d(TAG, "Loaded static key from storage (privkey: ${staticPrivateKey!!.size}, pubkey: ${staticPublicKey!!.size})")
+                if (rawPrivKey.size != KEY_SIZE || rawPubKey.size != KEY_SIZE) {
+                    rawPrivKey.fill(0)
+                    throw NoiseException(
+                        "Stored static key has the wrong size (privkey: ${rawPrivKey.size}, pubkey: ${rawPubKey.size})"
+                    )
+                }
+
+                if (staticPrivateKey !== rawPrivKey) staticPrivateKey?.fill(0)
+                staticPrivateKey = rawPrivKey
+                staticPublicKey = rawPubKey
+
+                Log.d(TAG, "Loaded static key from storage")
 
                 // If we had to convert from encoded format, re-save in raw format
-                if (decodedPrivKey.size != 32 || decodedPubKey.size != 32) {
+                if (decodedPrivKey.size != KEY_SIZE || decodedPubKey.size != KEY_SIZE) {
                     Log.i(TAG, "Re-saving keys in raw format for future compatibility")
                     saveStaticKey(context)
                 }
-            } else {
+            } else if (privateKeyBase64 == null && publicKeyBase64 == null) {
                 generateStaticKey()
                 saveStaticKey(context)
                 Log.d(TAG, "Generated new static key")
+            } else {
+                throw NoiseException("Stored static key pair is incomplete")
             }
 
             initializeHandshakeState()
-
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load static key, generating new one", e)
-            generateStaticKey()
-            initializeHandshakeState()
+            Log.e(TAG, "Failed to load static key; refusing the session", e)
+            // Nothing half-loaded stays behind
+            staticPrivateKey?.fill(0)
+            staticPrivateKey = null
+            staticPublicKey = null
+            throw e as? NoiseException ?: NoiseException("Failed to load static key: ${e.message}", e)
         }
     }
 
     /**
-     * Saves the static key to encrypted storage.
+     * Saves the static key to encrypted storage. Throws when it cannot: a key
+     * that is not saved is not the device identity.
      */
     private suspend fun saveStaticKey(context: Context) {
         val privKey = staticPrivateKey ?: return
         val pubKey = staticPublicKey ?: return
 
-        try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
+        val prefs = keyStoreOpener(context)
+        val saved = prefs.edit()
+            .putString(KEY_STATIC_PRIVATE, Base64.getEncoder().encodeToString(privKey))
+            .putString(KEY_STATIC_PUBLIC, Base64.getEncoder().encodeToString(pubKey))
+            .commit()
+        if (!saved) throw NoiseException("Failed to save static key")
 
-            val prefs = EncryptedSharedPreferences.create(
-                context,
-                PREFS_NAME,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-
-            prefs.edit()
-                .putString(KEY_STATIC_PRIVATE, Base64.getEncoder().encodeToString(privKey))
-                .putString(KEY_STATIC_PUBLIC, Base64.getEncoder().encodeToString(pubKey))
-                .apply()
-
-            Log.d(TAG, "Saved static key to storage")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save static key", e)
-        }
+        Log.d(TAG, "Saved static key to storage")
     }
 
     private fun generateStaticKey() {
@@ -392,6 +412,10 @@ class NoiseSession {
         // Message is just the remote ephemeral public key (32 bytes)
         if (message.size != KEY_SIZE) {
             throw NoiseException("Invalid init message size: ${message.size}, expected $KEY_SIZE")
+        }
+        // No identity, no answer: loadStaticKey failed or was never called
+        if (staticPrivateKey == null || staticPublicKey == null) {
+            throw NoiseException("No static key loaded")
         }
 
         // Extract remote ephemeral public key (e)

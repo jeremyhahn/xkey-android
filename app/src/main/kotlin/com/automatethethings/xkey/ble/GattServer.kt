@@ -1176,7 +1176,11 @@ class GattServer(
             // The same device reconnected over its old session: that one has ended.
             replaced?.let { senders.retire(it, scope) }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create Noise session", e)
+            // No session (the static key could not be loaded): the link has
+            // nothing to answer with, so it is dropped rather than left holding
+            // the one connection slot.
+            Log.e(TAG, "Failed to create Noise session; dropping ${device.address}", e)
+            gattServer?.cancelConnection(device)
             throw e
         }
 
