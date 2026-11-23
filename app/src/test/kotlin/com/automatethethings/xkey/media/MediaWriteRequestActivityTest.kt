@@ -72,6 +72,14 @@ class MediaWriteRequestActivityTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        run {
+            val runsF = MediaSaveRuns::class.java.getDeclaredField("runs").apply { isAccessible = true }
+            val scopeF = MediaSaveRuns::class.java.getDeclaredField("scope").apply { isAccessible = true }
+            val runs = runsF.get(MediaSaveRuns) as Map<*, *>
+            val scope = scopeF.get(MediaSaveRuns) as kotlinx.coroutines.CoroutineScope
+            val active = scope.coroutineContext[kotlinx.coroutines.Job]!!.children.count { it.isActive }
+            System.out.println("DIAG runs=${runs.size} active=$active")
+        }
         capture = File(folder.newFolder("DCIM", "Camera"), "IMG_0101.png").apply { writeBytes(XmpFixtures.png()) }
         media = folder.newFile("media.png").apply { writeBytes(capture.readBytes()) }
         Robolectric.setupContentProvider(FakeMediaProvider::class.java, "media").media = media
