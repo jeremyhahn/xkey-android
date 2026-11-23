@@ -16,8 +16,10 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import android.security.keystore.KeyInfo
 import android.security.keystore.UserNotAuthenticatedException
 import android.util.Log
+import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
@@ -135,6 +137,70 @@ class KeystoreManagerUserAuthTest {
 
         assertArrayEquals(promptSignature, result)
         coVerify(exactly = 1) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
+    }
+
+    /**
+     * A time-window key (auth timeout > 0) whose Keystore refuses every
+     * operation, the fresh Signature's included, until the user has
+     * authenticated: [refuse] is thrown by whichever step refuses.
+     */
+    private fun timeWindowKeyRefusingUntilAuthenticated(refuse: () -> Exception) {
+        val keyInfo = mockk<KeyInfo> {
+            @Suppress("DEPRECATION")
+            every { userAuthenticationValidityDurationSeconds } returns 5
+        }
+        keystoreManager.keyInfoReader = { _, _ -> keyInfo }
+        var authenticated = false
+        coEvery {
+            biometricHelper.authenticateWithoutCrypto(any(), any(), any(), any())
+        } answers { authenticated = true }
+        for (signature in listOf(silent, prompted)) {
+            every { signature.initSign(any<PrivateKey>()) } answers {
+                if (!authenticated) throw refuse()
+            }
+        }
+    }
+
+    @Test
+    fun `sign authenticates a time-window key before initSign when init refuses`() = runBlocking {
+        timeWindowKeyRefusingUntilAuthenticated { userNotAuthenticated() }
+
+        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+
+        assertArrayEquals(promptSignature, result)
+        coVerify(exactly = 1) { biometricHelper.authenticateWithoutCrypto(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `sign authenticates a time-window key before initSign on the Keystore auth error`() = runBlocking {
+        timeWindowKeyRefusingUntilAuthenticated {
+            ProviderException(
+                "Key user not authenticated",
+                keystoreError(android.security.KeyStoreException.ERROR_USER_AUTHENTICATION_REQUIRED)
+            )
+        }
+
+        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+
+        assertArrayEquals(promptSignature, result)
+        coVerify(exactly = 1) { biometricHelper.authenticateWithoutCrypto(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `sign binds a per-operation key to the prompt with a CryptoObject`() = runBlocking {
+        val keyInfo = mockk<KeyInfo> {
+            @Suppress("DEPRECATION")
+            every { userAuthenticationValidityDurationSeconds } returns 0
+        }
+        keystoreManager.keyInfoReader = { _, _ -> keyInfo }
+        every { silent.sign() } throws authRequiredAtSign()
+
+        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+
+        assertArrayEquals(promptSignature, result)
+        coVerify(exactly = 1) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { biometricHelper.authenticateWithoutCrypto(any(), any(), any(), any()) }
     }
 
     @Test
