@@ -158,6 +158,36 @@ class NoiseSessionZeroizationTest {
     // The protocol still works
     // ---------------------------------------------------------------------
 
+    /**
+     * `reset()` leaves no secret behind for the next handshake to start from:
+     * no ephemeral private key exists until the next msg1 arrives.
+     */
+    @Test
+    fun resetLeavesNoEphemeralPrivateKey() = runTest {
+        val responder = newResponder()
+        handshake(NoiseInitiatorSession(randomBytes(KEY_SIZE)), responder)
+
+        responder.reset()
+
+        val held = responder.secretArraysForTest()
+        assertFalse("no ephemeral private key after reset", "ephemeralPrivateKey" in held)
+        assertAllZero(held - "staticPrivateKey")
+    }
+
+    /** A reset session still completes a full handshake with a new peer. */
+    @Test
+    fun aResetSessionCompletesANewHandshake() = runTest {
+        val responder = newResponder()
+        handshake(NoiseInitiatorSession(randomBytes(KEY_SIZE)), responder)
+        responder.reset()
+
+        val second = NoiseInitiatorSession(randomBytes(KEY_SIZE))
+        handshake(second, responder)
+
+        assertTrue(responder.isHandshakeComplete())
+        assertArrayEquals(second.getLocalStaticPublicKey(), responder.getRemoteStaticKey())
+    }
+
     // ---------------------------------------------------------------------
     // Keys handed out
     // ---------------------------------------------------------------------
