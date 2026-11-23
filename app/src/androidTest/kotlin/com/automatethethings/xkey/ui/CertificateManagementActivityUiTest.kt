@@ -425,7 +425,7 @@ class CertificateManagementActivityUiTest {
 
         longClickRecyclerItem(scenario, position)
         onView(withText(R.string.cert_delete_title)).inRoot(isPlatformPopup()).perform(click())
-        onView(withText(R.string.cert_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.cert_delete_confirm)
 
         assertTrue(
             "Confirming delete must remove the certificate row",

@@ -415,7 +415,7 @@ class CertificateDetailFlowTest {
         assertShownTextInTree(scenario, "Revoke Cancel Cert")
 
         clickTextInTree(scenario, string(R.string.cert_detail_revoke))
-        onView(withId(android.R.id.button2)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button2))
         waitForIdle()
 
         assertFalse(
@@ -432,7 +432,7 @@ class CertificateDetailFlowTest {
         assertShownTextInTree(scenario, "Revoke Confirm Cert")
 
         clickTextInTree(scenario, string(R.string.cert_detail_revoke))
-        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button1))
 
         awaitCondition("The certificate should be marked revoked") {
             runBlocking { dao.getBySerial(serial)?.revoked } == true
