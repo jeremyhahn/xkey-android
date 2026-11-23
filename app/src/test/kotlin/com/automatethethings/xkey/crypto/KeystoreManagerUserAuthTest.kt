@@ -29,8 +29,10 @@ import io.mockk.verify
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.ProviderException
+import java.security.PublicKey
 import java.security.Signature
 import java.security.SignatureException
+import java.security.cert.Certificate
 import javax.crypto.Cipher
 import javax.crypto.IllegalBlockSizeException
 import javax.crypto.SecretKey
@@ -56,6 +58,7 @@ class KeystoreManagerUserAuthTest {
     private val promptSignature = byteArrayOf(1, 2, 3)
     private val biometricHelper = mockk<BiometricHelper>(relaxed = true)
     private lateinit var keystoreManager: KeystoreManager
+    private val keyStore = mockk<KeyStore>(relaxed = true)
 
     @Before
     fun setUp() {
@@ -66,7 +69,6 @@ class KeystoreManagerUserAuthTest {
         every { Log.e(any(), any<String>()) } returns 0
         every { Log.e(any(), any<String>(), any()) } returns 0
 
-        val keyStore = mockk<KeyStore>(relaxed = true)
         every { keyStore.containsAlias(any()) } answers {
             firstArg<String>() in setOf("xkey_credential_c", "xkey_key_k", "xkey_key_aes")
         }
@@ -201,6 +203,63 @@ class KeystoreManagerUserAuthTest {
         assertArrayEquals(promptSignature, result)
         coVerify(exactly = 1) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { biometricHelper.authenticateWithoutCrypto(any(), any(), any(), any()) }
+    }
+
+    private fun certificateOf(der: ByteArray): Certificate = mockk {
+        every { publicKey } returns mockk<PublicKey> { every { encoded } returns der }
+    }
+
+    /**
+     * On API 28-30 a Keystore key handle names its alias, not the key: once
+     * the alias is deleted and regenerated, `initSign` on the old handle
+     * signs with the replacement. Here the alias is replaced while the
+     * prompt that comes before `initSign` waits; the call must refuse rather
+     * than sign with a key the user never selected.
+     */
+    private fun assertRefusesKeyReplacedDuringPrompt(sdk: Int, keyInfoReadable: Boolean) {
+        val original = mockk<PrivateKey>()
+        val replacement = mockk<PrivateKey>()
+        val originalCertificate = certificateOf(byteArrayOf(10))
+        val replacementCertificate = certificateOf(byteArrayOf(20))
+        var replaced = false
+        every { keyStore.getKey("xkey_credential_c", null) } answers { if (replaced) replacement else original }
+        every { keyStore.getCertificate("xkey_credential_c") } answers {
+            if (replaced) replacementCertificate else originalCertificate
+        }
+
+        val silentSignature = mockk<Signature>(relaxed = true)
+        val freshSignature = mockk<Signature>(relaxed = true)
+        every { Signature.getInstance(any<String>()) } returnsMany listOf(silentSignature, freshSignature)
+        every { silentSignature.initSign(any<PrivateKey>()) } throws userNotAuthenticated()
+        every { freshSignature.sign() } answers { if (replaced) byteArrayOf(6, 6, 6) else promptSignature }
+
+        val helper = mockk<BiometricHelper>(relaxed = true)
+        coEvery { helper.authenticateWithoutCrypto(any(), any(), any(), any()) } answers { replaced = true }
+
+        val manager = KeystoreManager(mockk<Context>(relaxed = true), sdkInt = sdk)
+        val keyInfo = mockk<KeyInfo> {
+            @Suppress("DEPRECATION")
+            every { userAuthenticationValidityDurationSeconds } returns 5
+        }
+        manager.keyInfoReader = { _, _ ->
+            if (!keyInfoReadable) throw IllegalStateException("KeyInfo unreadable")
+            keyInfo
+        }
+
+        assertThrows("API $sdk, KeyInfo readable: $keyInfoReadable", ApprovedKeyChangedException::class.java) {
+            runBlocking { manager.sign("c", ByteArray(32), helper) }
+        }
+        coVerify(exactly = 1) { helper.authenticateWithoutCrypto(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `sign refuses a time-window key replaced under its alias while the prompt waits`() {
+        for (sdk in 28..30) assertRefusesKeyReplacedDuringPrompt(sdk, keyInfoReadable = true)
+    }
+
+    @Test
+    fun `sign refuses a key replaced under its alias while the fallback prompt waits`() {
+        for (sdk in 28..30) assertRefusesKeyReplacedDuringPrompt(sdk, keyInfoReadable = false)
     }
 
     @Test
