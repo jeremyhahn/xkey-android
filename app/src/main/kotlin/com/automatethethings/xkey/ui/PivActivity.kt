@@ -21,6 +21,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Gravity
@@ -80,7 +81,8 @@ import java.util.Locale
  * - Gradient toolbar with slot summary
  * - Hero summary card showing populated slot count and type badges
  * - Per-slot cards with key status, algorithm badges, and certificate expiry indicators
- * - Key generation dialog supporting ES256, ES384, and RS2048 algorithms
+ * - Key generation dialog supporting ES256, ES384 and RS2048, plus Ed25519
+ *   and X25519 on Android 13 and later
  * - Reactive UI updates via Room Flow observation
  *
  * Follows the programmatic UI pattern established by [OathActivity].
@@ -947,15 +949,18 @@ class PivActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     private fun showGenerateKeyDialog(slot: PivSlot) {
-        val algorithms = PivAlgorithm.entries.toTypedArray()
+        // Ed25519 and X25519 need the Android 13 Keystore in secure
+        // hardware; below Android 13 they are not offered at all.
+        val algorithms = PivAlgorithm.entries.filter { it.isAvailableOn(Build.VERSION.SDK_INT) }.toTypedArray()
         val algorithmNames = algorithms.map { it.displayName }.toTypedArray()
         var selectedIndex = 0
 
         // AlertController only attaches a choice list when the message is
         // null, so setting both silently drops the list and pins the
         // selection to the first algorithm. The prompt therefore lives in the
-        // title rather than as a message.
-        MaterialAlertDialogBuilder(this)
+        // title rather than as a message, and the Android 13 note is a
+        // custom view below the list.
+        val builder = MaterialAlertDialogBuilder(this)
             .setTitle(getString(R.string.piv_generate_title, slot.hexId))
             .setSingleChoiceItems(algorithmNames, selectedIndex) { _, which ->
                 selectedIndex = which
@@ -964,7 +969,14 @@ class PivActivity : AppCompatActivity() {
                 generateKey(slot, algorithms[selectedIndex])
             }
             .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        if (algorithms.size < PivAlgorithm.entries.size) {
+            val padding = UIHelpers.dpToPxInt(this, 24)
+            builder.setView(TextView(this).apply {
+                text = getString(R.string.piv_generate_curve25519_needs_android13)
+                setPadding(padding, UIHelpers.dpToPxInt(this@PivActivity, 8), padding, 0)
+            })
+        }
+        builder.show()
     }
 
     /**
