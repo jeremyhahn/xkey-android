@@ -51,9 +51,10 @@ import javax.crypto.spec.SecretKeySpec
  * array before it is zeroed, and several copies are out of reach: the
  * `SecretKeySpec`, `PKCS8EncodedKeySpec`, `PrivateKey`, `Mac` and `Cipher`
  * objects the JCA builds keep their own clones; the Base64 `String` the static
- * key is stored as is immutable; and the pure-Kotlin X25519 fallback
- * ([x25519ScalarMultPure]) carries the scalar and the ladder state in
- * `BigInteger`, which is immutable and cannot be overwritten at all. The static
+ * key is stored as is immutable; and the X25519 implementations ([X25519]: the
+ * platform provider, or Bouncy Castle's constant-time fallback where the
+ * platform has none) keep their own working state, out of this class's reach.
+ * The static
  * private key also lives for as long as the session object does: nothing
  * releases it before the collector does.
  *
@@ -311,14 +312,14 @@ class NoiseSession {
         val privateKey = newClampedScalar()
         staticPrivateKey?.fill(0)
         staticPrivateKey = privateKey
-        staticPublicKey = x25519ScalarMultBase(privateKey)
+        staticPublicKey = X25519.scalarMultBase(privateKey)
     }
 
     private fun generateEphemeralKey() {
         val privateKey = newClampedScalar()
         ephemeralPrivateKey?.fill(0)
         ephemeralPrivateKey = privateKey
-        ephemeralPublicKey = x25519ScalarMultBase(privateKey)
+        ephemeralPublicKey = X25519.scalarMultBase(privateKey)
     }
 
     /**
@@ -493,212 +494,6 @@ class NoiseSession {
     }
 
     /**
-     * X25519 scalar multiplication with base point.
-     * Computes public key from private key scalar.
-     *
-     * This uses the X25519 base point (u=9) and computes publicKey = scalar * basePoint.
-     * We use the pure implementation here because Java's KeyAgreement may not accept
-     * the base point as a valid public key for DH operations.
-     */
-    private fun x25519ScalarMultBase(scalar: ByteArray): ByteArray {
-        // X25519 base point u-coordinate (u = 9 in little-endian)
-        val basePoint = ByteArray(32)
-        basePoint[0] = 9
-
-        // Use pure implementation for scalar-mult-base since Java's KeyAgreement
-        // may reject the base point as a public key
-        return x25519ScalarMultPure(scalar, basePoint)
-    }
-
-    /**
-     * X25519 scalar multiplication.
-     * Computes result = scalar * point (Montgomery ladder).
-     */
-    private fun x25519ScalarMult(scalar: ByteArray, point: ByteArray): ByteArray {
-        return try {
-            // Try Java crypto API first
-            // The key spec keeps its own copy of the encoding
-            val encodedPrivKey = wrapX25519PrivateKey(scalar)
-            val privKeySpec = try {
-                java.security.spec.PKCS8EncodedKeySpec(encodedPrivKey)
-            } finally {
-                encodedPrivKey.fill(0)
-            }
-            val pubKeySpec = java.security.spec.X509EncodedKeySpec(wrapX25519PublicKey(point))
-
-            val keyFactory = java.security.KeyFactory.getInstance("X25519")
-            val privKey = keyFactory.generatePrivate(privKeySpec)
-            val pubKey = keyFactory.generatePublic(pubKeySpec)
-
-            val keyAgreement = javax.crypto.KeyAgreement.getInstance("X25519")
-            keyAgreement.init(privKey)
-            keyAgreement.doPhase(pubKey, true)
-            keyAgreement.generateSecret()
-        } catch (e: Exception) {
-            Log.e(TAG, "X25519 scalar mult via Java failed, using pure impl", e)
-            x25519ScalarMultPure(scalar, point)
-        }
-    }
-
-    /**
-     * Pure Kotlin X25519 scalar multiplication (fallback).
-     * Implements the Montgomery ladder from RFC 7748 using BigInteger.
-     *
-     * Zeroization limit (#6): the clamped scalar copy is overwritten, but the
-     * ladder state derived from it (`x2`, `z2`, `x3`, `z3`, the result) lives in
-     * immutable `BigInteger`s, which cannot be overwritten and stay on the heap
-     * until the collector reclaims them.
-     */
-    private fun x25519ScalarMultPure(k: ByteArray, u: ByteArray): ByteArray {
-        // Field arithmetic in GF(2^255 - 19)
-        val p = java.math.BigInteger.ONE.shiftLeft(255).subtract(java.math.BigInteger.valueOf(19))
-
-        // Copy the scalar: the ladder clamps the copy in place
-        val kClamped = k.copyOf()
-        try {
-            return montgomeryLadder(kClamped, u, p)
-        } finally {
-            kClamped.fill(0)
-        }
-    }
-
-    /**
-     * The RFC 7748 ladder over an already-copied scalar, which it clamps in
-     * place. See [x25519ScalarMultPure] for what it cannot zeroize.
-     */
-    private fun montgomeryLadder(kClamped: ByteArray, u: ByteArray, p: java.math.BigInteger): ByteArray {
-        kClamped[0] = (kClamped[0].toInt() and 248).toByte()
-        kClamped[31] = (kClamped[31].toInt() and 127).toByte()
-        kClamped[31] = (kClamped[31].toInt() or 64).toByte()
-
-        // Decode u-coordinate (little-endian)
-        val uInt = decodeLittleEndian(u).mod(p)
-
-        // Montgomery ladder
-        var x1 = uInt
-        var x2 = java.math.BigInteger.ONE
-        var z2 = java.math.BigInteger.ZERO
-        var x3 = uInt
-        var z3 = java.math.BigInteger.ONE
-
-        var swap = java.math.BigInteger.ZERO
-
-        for (t in 254 downTo 0) {
-            val kT = kClamped[t / 8].toInt().ushr(t % 8).and(1)
-            val kTBig = java.math.BigInteger.valueOf(kT.toLong())
-
-            swap = swap.xor(kTBig)
-            val (cx2, cx3) = cswap(swap, x2, x3)
-            val (cz2, cz3) = cswap(swap, z2, z3)
-            x2 = cx2; x3 = cx3; z2 = cz2; z3 = cz3
-            swap = kTBig
-
-            val a = x2.add(z2).mod(p)
-            val aa = a.multiply(a).mod(p)
-            val b = x2.subtract(z2).mod(p)
-            val bb = b.multiply(b).mod(p)
-            val e = aa.subtract(bb).mod(p)
-            val c = x3.add(z3).mod(p)
-            val d = x3.subtract(z3).mod(p)
-            val da = d.multiply(a).mod(p)
-            val cb = c.multiply(b).mod(p)
-            x3 = da.add(cb).mod(p).pow(2).mod(p)
-            z3 = x1.multiply(da.subtract(cb).mod(p).pow(2)).mod(p)
-            x2 = aa.multiply(bb).mod(p)
-            val a24 = java.math.BigInteger.valueOf(121665)
-            z2 = e.multiply(aa.add(a24.multiply(e))).mod(p)
-        }
-
-        val (fx2, _) = cswap(swap, x2, x3)
-        val (fz2, _) = cswap(swap, z2, z3)
-        x2 = fx2; z2 = fz2
-
-        // Compute result = x2 * z2^(p-2) mod p
-        val result = x2.multiply(z2.modPow(p.subtract(java.math.BigInteger.valueOf(2)), p)).mod(p)
-
-        return encodeLittleEndian(result)
-    }
-
-    private fun decodeLittleEndian(b: ByteArray): java.math.BigInteger {
-        val reversed = b.reversedArray()
-        return java.math.BigInteger(1, reversed)
-    }
-
-    private fun encodeLittleEndian(n: java.math.BigInteger): ByteArray {
-        val raw = n.toByteArray()
-        var bytes = raw
-        // Remove leading zero if present
-        if (bytes.size > 32 && bytes[0] == 0.toByte()) {
-            bytes = bytes.copyOfRange(1, bytes.size)
-        }
-        // Pad to 32 bytes
-        val result = ByteArray(32)
-        val offset = 32 - bytes.size
-        System.arraycopy(bytes, 0, result, offset, bytes.size)
-        // The output may be a DH secret: overwrite the intermediates
-        raw.fill(0)
-        bytes.fill(0)
-        // Reverse for little-endian
-        return result.reversedArray().also { result.fill(0) }
-    }
-
-    private fun cswap(swap: java.math.BigInteger, a: java.math.BigInteger, b: java.math.BigInteger): Pair<java.math.BigInteger, java.math.BigInteger> {
-        return if (swap == java.math.BigInteger.ONE) Pair(b, a) else Pair(a, b)
-    }
-
-    /**
-     * X25519 Diffie-Hellman.
-     * Computes shared secret = privateKey * publicKey
-     */
-    /**
-     * X25519 Diffie-Hellman.
-     * Computes shared secret = privateKey * publicKey
-     */
-    private fun x25519(privateKey: ByteArray, publicKey: ByteArray): ByteArray {
-        // Use the unified scalar multiplication function
-        return x25519ScalarMult(privateKey, publicKey)
-    }
-
-    /**
-     * Wraps raw X25519 private key in PKCS#8 format.
-     */
-    private fun wrapX25519PrivateKey(raw: ByteArray): ByteArray {
-        // PKCS#8 header for X25519 private key
-        val header = byteArrayOf(
-            0x30, 0x2e, // SEQUENCE, length 46
-            0x02, 0x01, 0x00, // INTEGER 0 (version)
-            0x30, 0x05, // SEQUENCE, length 5
-            0x06, 0x03, 0x2b, 0x65, 0x6e, // OID 1.3.101.110 (X25519)
-            0x04, 0x22, // OCTET STRING, length 34
-            0x04, 0x20  // OCTET STRING, length 32
-        )
-        return header + raw
-    }
-
-    /**
-     * Wraps raw X25519 public key in X.509 format.
-     */
-    private fun wrapX25519PublicKey(raw: ByteArray): ByteArray {
-        // X.509 header for X25519 public key
-        val header = byteArrayOf(
-            0x30, 0x2a, // SEQUENCE, length 42
-            0x30, 0x05, // SEQUENCE, length 5
-            0x06, 0x03, 0x2b, 0x65, 0x6e, // OID 1.3.101.110 (X25519)
-            0x03, 0x21, 0x00 // BIT STRING, length 33, no unused bits
-        )
-        return header + raw
-    }
-
-    /**
-     * Extracts raw 32-byte public key from Java PublicKey.
-     */
-    private fun extractRawPublicKey(publicKey: java.security.PublicKey): ByteArray {
-        val encoded = publicKey.encoded
-        // X.509 encoded X25519 key is 44 bytes, raw key is last 32
-        return encoded.copyOfRange(encoded.size - 32, encoded.size)
-    }
-
-    /**
      * SHA-256 hash.
      */
     private fun sha256(data: ByteArray): ByteArray {
@@ -725,10 +520,11 @@ class NoiseSession {
 
     /**
      * MixKey(DH(privateKey, publicKey)). The DH output is overwritten once it
-     * has been mixed in, or once mixing it in has failed.
+     * has been mixed in, or once mixing it in has failed. [X25519.dh] refuses
+     * an all-zero output, so a small-order peer key never reaches [mixKey].
      */
     private fun mixDh(privateKey: ByteArray, publicKey: ByteArray) {
-        val secret = x25519(privateKey, publicKey)
+        val secret = X25519.dh(privateKey, publicKey)
         try {
             mixKey(secret)
         } finally {
