@@ -42,6 +42,7 @@ import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlin.math.roundToInt
 
 /**
  * Instrumented tests for [UIHelpers], the Context-only view/drawable toolkit
@@ -87,10 +88,10 @@ class UIHelpersTest {
     }
 
     @Test
-    fun dpToPxInt_truncatesToWholePixels() {
+    fun dpToPxInt_roundsToWholePixels() {
         onHost { activity ->
             val density = activity.resources.displayMetrics.density
-            assertEquals((24 * density).toInt(), UIHelpers.dpToPxInt(activity, 24))
+            assertEquals((24 * density).roundToInt(), UIHelpers.dpToPxInt(activity, 24))
         }
     }
 
