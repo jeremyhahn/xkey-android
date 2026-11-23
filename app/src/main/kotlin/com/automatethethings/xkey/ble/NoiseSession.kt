@@ -296,8 +296,6 @@ class NoiseSession {
             } else {
                 throw NoiseException("Stored static key pair is incomplete")
             }
-
-            initializeHandshakeState()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -417,6 +415,10 @@ class NoiseSession {
         if (staticPrivateKey == null || staticPublicKey == null) {
             throw NoiseException("No static key loaded")
         }
+
+        // The handshake state (and the ephemeral key) exists only from msg1
+        // on, so a reset or an idle session holds no handshake secret
+        initializeHandshakeState()
 
         // Extract remote ephemeral public key (e)
         remoteEphemeralKey = message.copyOf()
@@ -764,7 +766,8 @@ class NoiseSession {
      * Call this when reconnecting to the same or different device.
      * The prologue is preserved unless explicitly changed via [setPrologue].
      * Every transient secret of the old session is overwritten with zeros
-     * before it is dropped; the static key pair is kept.
+     * before it is dropped; the static key pair is kept. No new handshake
+     * secret is made here: the next msg1 initializes the handshake state.
      */
     fun reset() {
         ephemeralPrivateKey?.fill(0)
@@ -787,7 +790,8 @@ class NoiseSession {
         recvNonce = 0
         handshakeState = HandshakeState.AWAITING_INIT
         handshakeComplete = false
-        initializeHandshakeState()
+        // No fresh ephemeral key here: the next msg1 initializes the handshake
+        // state, under whatever prologue is set by then.
         Log.d(TAG, "Session reset for new handshake")
     }
 
