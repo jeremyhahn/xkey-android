@@ -73,6 +73,32 @@ Only the unit layer runs in CI: instrumented and E2E suites need a device or
 emulator, which the CI runners do not provide, so run them locally before
 merging changes that touch the Keystore, Room or the wire protocol.
 
+### Instrumented tests on a personal phone
+
+The instrumented suite runs under `XKeyTestRunner`
+(`app/src/androidTest/kotlin/com/automatethethings/xkey/XKeyTestRunner.kt`),
+which makes an unattended run on a locked, everyday phone behave like one on
+an emulator. Before the first test it:
+
+- sets `window_animation_scale`, `transition_animation_scale` and
+  `animator_duration_scale` to 0;
+- wakes the screen, sets `stay_on_while_plugged_in` so the screen stays on
+  while the phone is powered, and raises `screen_off_timeout` to 30 minutes;
+- shows every activity of the app's test process over the keyguard and turns
+  the screen on for it. A PIN, pattern or password lock is never removed or
+  bypassed; only a swipe keyguard is dismissed.
+
+After the last test it writes every changed setting back to the value it read
+(or deletes it, if it had none). The original values sit in `Settings.Global`
+under `xkey_test_saved_*` keys while the run lasts; if a run is killed before
+it can restore them, the next run restores them instead. To put a phone back
+by hand, read those keys with `adb shell settings list global | grep
+xkey_test_saved_` and write each value back.
+
+Keep the phone on USB power for the run. Tests that expect the biometric
+prompt to fail at once (nothing enrolled, as on an emulator) are skipped on a
+phone with a fingerprint or face enrolled, with the reason in the report.
+
 ### Wire-protocol integration suite
 
 `make protocol-test` runs `ProtocolIntegrationTest`, which starts the app's

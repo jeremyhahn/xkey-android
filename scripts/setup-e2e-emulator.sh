@@ -89,5 +89,5 @@ if [ "$RUN" = true ]; then
     echo "=== Running E2E Tests ==="
     adb shell am instrument -w -r \
         -e class com.automatethethings.xkey.e2e.WebAuthnE2ETest \
-        com.automatethethings.xkey.debug.test/androidx.test.runner.AndroidJUnitRunner
+        com.automatethethings.xkey.debug.test/com.automatethethings.xkey.XKeyTestRunner
 fi

@@ -102,7 +102,7 @@ class EnableTcpPairingHelper {
         //   adb shell am instrument -w \
         //     -e class com.automatethethings.xkey.tcp.EnableTcpPairingHelper \
         //     -e holdSeconds 180 \
-        //     com.automatethethings.xkey.debug.test/androidx.test.runner.AndroidJUnitRunner
+        //     com.automatethethings.xkey.debug.test/com.automatethethings.xkey.XKeyTestRunner
         val holdSeconds = InstrumentationRegistry.getArguments()
             .getString("holdSeconds")?.toLongOrNull() ?: DEFAULT_HOLD_SECONDS
         Thread.sleep(holdSeconds * 1000L)

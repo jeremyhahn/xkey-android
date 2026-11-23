@@ -344,7 +344,10 @@ class ContactManagementFlowTest {
 
         val scenario = launch()
         openImportBottomSheet(scenario)
-        onView(withText(R.string.contact_import_file)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.chooseFromSheet(
+            R.string.contact_import_file,
+            next = withHint(R.string.contact_name_hint)
+        )
 
         onView(withHint(R.string.contact_name_hint))
             .inRoot(isDialog())
@@ -368,7 +371,10 @@ class ContactManagementFlowTest {
 
         val scenario = launch()
         openImportBottomSheet(scenario)
-        onView(withText(R.string.contact_import_file)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.chooseFromSheet(
+            R.string.contact_import_file,
+            next = withHint(R.string.contact_name_hint)
+        )
 
         onView(withHint(R.string.contact_name_hint))
             .inRoot(isDialog())
@@ -388,7 +394,7 @@ class ContactManagementFlowTest {
         val scenario = launch()
         val before = contactCount()
         openImportBottomSheet(scenario)
-        onView(withText(R.string.contact_import_file)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.chooseFromSheet(R.string.contact_import_file)
 
         assertShownTextInTree(scenario, errorPrefix(scenario))
         assertEquals(before, contactCount())
@@ -448,7 +454,7 @@ class ContactManagementFlowTest {
         onView(withSubstring(string(scenario, R.string.contact_imported_date, "").trim()))
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
-        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button1))
 
         assertNotNull(
             "Dismissing the detail dialog must keep the contact",
@@ -514,7 +520,15 @@ class ContactManagementFlowTest {
 
     private fun openPasteDialog(scenario: ActivityScenario<ContactManagementActivity>) {
         openImportBottomSheet(scenario)
-        onView(withText(R.string.contact_import_paste)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.chooseFromSheet(
+            R.string.contact_import_paste,
+            next = withHint(R.string.contact_paste_hint)
+        )
+    }
+
+    /** Waits for the name prompt that follows a pasted or picked key. */
+    private fun awaitNamePrompt() {
+        DialogFlowSupport.awaitInDialog(withHint(R.string.contact_name_hint))
     }
 
     /** Runs the paste dialog and the name prompt end to end. */
@@ -528,6 +542,7 @@ class ContactManagementFlowTest {
             .inRoot(isDialog())
             .perform(replaceText(pem), closeSoftKeyboard())
         clickPositiveButton()
+        awaitNamePrompt()
         onView(withHint(R.string.contact_name_hint))
             .inRoot(isDialog())
             .perform(replaceText(name), closeSoftKeyboard())
