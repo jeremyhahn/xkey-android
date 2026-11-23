@@ -1,6 +1,6 @@
 # PIN architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
+> **Status: REFERENCE** · Last verified: 2026-11-23
 > As-built description of the phone's SO PIN and User PIN: the `local.pin*` wire family, hashing, lockout and storage.
 
 ## Summary
@@ -26,8 +26,8 @@ call with `FEATURE_UNAVAILABLE`.
 | `RequestHandler` (`handlePinStatus`, `handlePinVerify`, `handlePinSet`, `handlePinChange`, `handlePinResetLockout`) | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | Wire handlers; map `PinManager` exceptions to error codes |
 | `PinManager`, `PinType`, `LockoutStatus`, `PinException`, `PinLockedException` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinManager.kt` | PIN lifecycle and lockout; every read-modify-write runs under one process-wide `pinStateMutex`, shared by all `PinManager` instances |
 | `PinHasher` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinHasher.kt` | Argon2id (Signal `org.signal.argon2`): 64 MiB, 3 iterations, 4 lanes, 32-byte hash, 16-byte salt; PIN length 6 to 63 (`MIN_PIN_LENGTH`, `MAX_PIN_LENGTH`) |
-| `PinLockout` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinLockout.kt` | One lockout rule (also used by the password vault): once the consecutive failure count reaches `maxAttempts`, each failure locks for `lockoutDurationSeconds`; only a success clears the count |
-| `PinSettingsData`, `PinSettingsRepository` | `app/src/main/kotlin/com/automatethethings/xkey/settings/PinSettings.kt` | Jetpack DataStore persistence of the hashes and salts (Base64, `NO_WRAP`), attempt counters and lock times (epoch ms, so a lockout survives a restart); defaults `maxPinAttempts = 5`, `lockoutDurationSeconds = 300` |
+| `PinLockout` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinLockout.kt` | One lockout rule (also used by the password vault) on a monotonic clock, with backoff and a permanent block; see [Lockout](#lockout). Only a success or a reset clears the count |
+| `PinSettingsData`, `PinSettingsRepository` | `app/src/main/kotlin/com/automatethethings/xkey/settings/PinSettings.kt` | Jetpack DataStore persistence of the hashes and salts (Base64, `NO_WRAP`), attempt counters and each PIN's lockout state (time left plus a monotonic anchor, so a lockout survives a restart); defaults `maxPinAttempts = 5`, `lockoutDurationSeconds = 300`, `backoffEnabled = true` |
 | `PinManagementActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/PinManagementActivity.kt` | On-phone PIN screen over its own `PinManager` |
 | `AuditLogger` (`logPinSet`, `logPinChanged`, `logPinVerificationSuccess`, `logPinVerificationFailed`, `logPinLockoutReset`) | `app/src/main/kotlin/com/automatethethings/xkey/audit/AuditLogger.kt` | Audit records for every PIN event |
 
@@ -39,7 +39,7 @@ call with `FEATURE_UNAVAILABLE`.
 | `local.pinVerify` | `LOCAL_PIN_VERIFY` | `pin`, `pinType` (`USER_PIN` default, or `SO_PIN`) | `verified: true` |
 | `local.pinSet` | `LOCAL_PIN_SET` | `pinType`, `newPin`; `currentPin` for an SO PIN that is already set; `soPin` for `USER_PIN` | `success: true` |
 | `local.pinChange` | `LOCAL_PIN_CHANGE` | `pinType`, `currentPin`, `newPin` | `success: true` |
-| `local.pinResetLockout` | `LOCAL_PIN_RESET_LOCKOUT` | `soPin` | `success: true` (clears the User PIN counter and lock) |
+| `local.pinResetLockout` | `LOCAL_PIN_RESET_LOCKOUT` | `soPin` | `success: true` (clears the User PIN counter and lock, a permanent block included) |
 
 ## Main flow
 
@@ -71,10 +71,42 @@ sequenceDiagram
         M->>S: reset counter
         H-->>D: {verified: true}
     else wrong
-        M->>S: counter + 1, lockedUntil from PinLockout
+        M->>S: counter + 1, lockout state from PinLockout
         H-->>D: error PIN_INCORRECT
     end
 ```
+
+## Lockout
+
+`PinLockout` is the one failed-attempt rule for both PINs. Each PIN keeps its
+own consecutive failure count; a correct PIN clears it.
+
+- **First lockout.** The failure that brings the count to `maxPinAttempts`
+  locks the PIN for `lockoutDurationSeconds`.
+- **Escalation.** With `backoffEnabled` (the default), each further failure
+  doubles the previous lockout, capped at 24 hours (`MAX_LOCKOUT_MS`, or the
+  base duration when that is longer). Without backoff every lockout is the
+  base duration.
+- **Permanent block.** At 15 consecutive failures
+  (`PERMANENT_BLOCK_ATTEMPTS`, or `maxPinAttempts` when that is higher) the
+  PIN is blocked until it is reset; no amount of time ends it. A blocked User
+  PIN is cleared by `local.pinResetLockout` with the SO PIN; a blocked SO PIN
+  only by a full reset of the PIN settings.
+- **Monotonic clock.** The stored state is the failed count, the time left
+  and an anchor: `elapsedRealtime` and the boot identifier at which the time
+  left was measured. On the same boot the time left runs down with elapsed
+  realtime; after a reboot the stored remainder resumes whole and is
+  re-anchored. Moving the wall clock forward or back neither ends nor
+  extends a lockout. A lock time stored by an older version as a wall-clock
+  deadline is migrated once, by the wall clock.
+
+`LockoutStatus` reports `permanent` for a blocked PIN. Its `lockoutUntil`,
+also sent as `lockoutUntil` in the `PIN_LOCKED` error data, is an
+informational wall-clock deadline only (`Long.MAX_VALUE` when blocked); the
+lock itself never reads it.
+
+The password vault passphrase uses the same clock-safe rule and backoff, but
+without the permanent block, which would make the vault unrecoverable.
 
 ## Errors and refusals
 
@@ -90,8 +122,8 @@ sequenceDiagram
 
 ## Tests
 
-- Unit (`app/src/test`): `PinManagerTest`, `PinHasherTest`, `PinSettingsDataTest`, `ProtocolConstantsTest`, `PinOathHandlerErrorsTest` (the handler error codes above).
-- Instrumented (`app/src/androidTest`): `PinHasherInstrumentedTest`, `RequestHandlerPinAndDataFamilyTest`, `RequestHandlerErrorPathTest`, `ProtocolIntegrationTest`, `PinManagementActivityUiTest`, `PinManagementFlowTest`.
+- Unit (`app/src/test`): `PinLockoutTest` (wall-clock changes, escalation, permanent block), `PinManagerTest`, `PinHasherTest`, `PinSettingsDataTest`, `ProtocolConstantsTest`, `PinOathHandlerErrorsTest` (the handler error codes above).
+- Instrumented (`app/src/androidTest`): `PinLockoutPersistenceTest` (lockout and block survive a restart), `PinHasherInstrumentedTest`, `RequestHandlerPinAndDataFamilyTest`, `RequestHandlerErrorPathTest`, `ProtocolIntegrationTest`, `PinManagementActivityUiTest`, `PinManagementFlowTest`.
 
 ## Related features
 
