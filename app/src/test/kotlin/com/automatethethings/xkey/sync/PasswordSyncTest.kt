@@ -8,6 +8,7 @@ package com.automatethethings.xkey.sync
 
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreAeadCipher
+import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.password.FakePasswordDao
 import com.automatethethings.xkey.password.PassphraseHasher
 import com.automatethethings.xkey.password.PasswordDao
@@ -194,14 +195,24 @@ class PasswordSyncTest {
         repository.upsert(PasswordRecord(passwordId = id, name = "GitHub", password = password, updatedAt = updatedAt))
     }
 
-    private fun incoming(id: String = "remote-1", password: String = "s3cret"): JSONArray =
+    /** One minute after [updatedAt]: a peer copy newer than the local one. */
+    private val newerIso = "2023-11-14T22:14:20Z"
+
+    /** One minute before [updatedAt]: a peer copy older than the local one. */
+    private val olderIso = "2023-11-14T22:12:20Z"
+
+    private fun incoming(
+        id: String = "remote-1",
+        password: String = "s3cret",
+        at: String? = updatedAtIso
+    ): JSONArray =
         JSONArray().put(
             JSONObject()
                 .put("id", id)
                 .put("name", "Mail")
                 .put("username", "octo")
                 .put("password", password)
-                .put("updated_at", updatedAtIso)
+                .apply { if (at != null) put("updated_at", at) }
         )
 
     private suspend fun assertLocked(block: suspend () -> Unit) {
@@ -309,7 +320,7 @@ class PasswordSyncTest {
     @Test
     fun `merge still counts updates and skips entries without an id or password`() = runTest {
         storeLocal(id = "remote-1", password = "old")
-        val batch = incoming(id = "remote-1", password = "new")
+        val batch = incoming(id = "remote-1", password = "new", at = newerIso)
             .put(JSONObject().put("id", "").put("password", "x"))
             .put(JSONObject().put("id", "no-password"))
 
@@ -317,6 +328,52 @@ class PasswordSyncTest {
 
         assertEquals(SyncEngine.ItemCounts(added = 0, updated = 1, skipped = 2), counts)
         assertEquals("new", repository.get("remote-1")!!.password)
+    }
+
+    // -------------------------------------------------------------------------
+    // Last writer wins by updated_at
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `an incoming entry with a newer updated_at overwrites the local one`() = runTest {
+        storeLocal(id = "remote-1", password = "old")
+
+        val counts = sync.merge(incoming(id = "remote-1", password = "new", at = newerIso))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 1, skipped = 0), counts)
+        assertEquals("new", repository.get("remote-1")!!.password)
+        assertEquals(SyncCodec.parseRfc3339(newerIso), dao.rows.getValue("remote-1").updatedAt)
+    }
+
+    @Test
+    fun `an incoming entry with an older updated_at keeps the local one`() = runTest {
+        assertKeptLocal(olderIso)
+    }
+
+    @Test
+    fun `an incoming entry with an equal updated_at keeps the local one`() = runTest {
+        assertKeptLocal(updatedAtIso)
+    }
+
+    @Test
+    fun `an incoming entry with no updated_at keeps the local one`() = runTest {
+        assertKeptLocal(null)
+    }
+
+    @Test
+    fun `an incoming entry with an unparseable updated_at keeps the local one`() = runTest {
+        assertKeptLocal("yesterday")
+    }
+
+    private suspend fun assertKeptLocal(at: String?) {
+        storeLocal(id = "remote-1", password = "old")
+        val before = dao.rows.getValue("remote-1")
+
+        val counts = sync.merge(incoming(id = "remote-1", password = "new", at = at))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
+        assertEquals(before, dao.rows.getValue("remote-1"))
+        assertEquals("old", repository.get("remote-1")!!.password)
     }
 
     // -------------------------------------------------------------------------
@@ -339,7 +396,7 @@ class PasswordSyncTest {
         )
         val createdAt = dao.rows.getValue("remote-1").createdAt
 
-        val counts = sync.merge(incoming(id = "remote-1", password = "new"))
+        val counts = sync.merge(incoming(id = "remote-1", password = "new", at = newerIso))
 
         assertEquals(SyncEngine.ItemCounts(added = 0, updated = 1, skipped = 0), counts)
         val row = dao.rows.getValue("remote-1")
@@ -378,10 +435,16 @@ class PasswordSyncTest {
                 SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 0),
                 racingSync.merge(incoming(id = "remote-1", password = "from-b"))
             )
-            assertTrue(racingRepository.updateFields("remote-1", PasswordPatch(expiresAt = "2030-01-01T00:00:00Z")))
+            assertTrue(
+                racingRepository.updateFields(
+                    "remote-1",
+                    PasswordPatch(expiresAt = "2030-01-01T00:00:00Z", updatedAt = updatedAt + 1_000L)
+                )
+            )
         }
 
-        val counts = racingSync.merge(incoming(id = "remote-1", password = "from-a"))
+        // A's copy is newer than B's and the expiry edit, so it wins on the fields it carries.
+        val counts = racingSync.merge(incoming(id = "remote-1", password = "from-a", at = newerIso))
 
         // A patches the entry B added instead of replacing it, so the expiry stays.
         assertEquals(SyncEngine.ItemCounts(added = 0, updated = 1, skipped = 0), counts)

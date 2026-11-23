@@ -105,6 +105,15 @@ class PasswordUpdateConflictException :
     Exception("the entry changed while it was being updated; nothing was written")
 
 /**
+ * An update refused, nothing written, because the stored entry is the same
+ * age as or newer than the incoming copy ([PasswordRepository.updateFields]
+ * with `onlyIfOlderThan`): under last-writer-wins the local entry is kept.
+ * The message names no content.
+ */
+class PasswordNotNewerException :
+    Exception("the stored entry is not older than the incoming one; nothing was written")
+
+/**
  * Repository for the encrypted password store. Encrypts each password value with
  * the Android Keystore via [KeystoreAeadCipher] before persisting through
  * [PasswordDao], and decrypts on read.
@@ -268,12 +277,27 @@ class PasswordRepository(
      * gets the patch on top of its current fields. An entry that changes again
      * before the second write is refused with [PasswordUpdateConflictException],
      * nothing written.
+     *
+     * With [onlyIfOlderThan] (a sync's last-writer-wins check), the patch is
+     * applied only while the stored entry's `updatedAt` is strictly older than
+     * it; the check is made on each read, inside the compare-and-set, so a
+     * newer local write between the reads still wins. An entry the same age
+     * or newer is refused with [PasswordNotNewerException], nothing written;
+     * so is any existing entry when [onlyIfOlderThan] is 0 (no timestamp).
      */
-    suspend fun updateFields(passwordId: String, patch: PasswordPatch, tenantId: String? = null): Boolean {
+    suspend fun updateFields(
+        passwordId: String,
+        patch: PasswordPatch,
+        tenantId: String? = null,
+        onlyIfOlderThan: Long? = null
+    ): Boolean {
         val updatedAt = if (patch.updatedAt > 0) patch.updatedAt else System.currentTimeMillis()
         var newCiphertext: ByteArray? = null
         repeat(UPDATE_ATTEMPTS) {
             val existing = find(passwordId, tenantId) ?: return false
+            if (onlyIfOlderThan != null && existing.updatedAt >= onlyIfOlderThan) {
+                throw PasswordNotNewerException()
+            }
             val patched = patch.applyTo(existing.toRecord(decrypt = false)).copy(updatedAt = updatedAt)
             requireFits(patched, patch.password, existing.passwordEncrypted)
             val passwordEncrypted = when (val password = patch.password) {

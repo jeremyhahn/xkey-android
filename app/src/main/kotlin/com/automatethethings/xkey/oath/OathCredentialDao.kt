@@ -53,6 +53,15 @@ interface OathCredentialDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(credential: OathCredentialEntity): Long
 
+    /**
+     * Insert an OATH credential only while no row has its
+     * [OathCredentialEntity.oathId]; an existing row is left untouched.
+     *
+     * @return The new row ID, or -1 if a row with that OATH ID already exists.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(credential: OathCredentialEntity): Long
+
     // -------------------------------------------------------------------------
     // Query Operations
     // -------------------------------------------------------------------------
@@ -117,6 +126,31 @@ interface OathCredentialDao {
      */
     @Query("UPDATE oath_credentials SET counter = :counter WHERE oath_id = :oathId")
     suspend fun updateCounter(oathId: String, counter: Long)
+
+    /**
+     * Update a synced credential in place: the row keeps its primary key,
+     * creation time, usage statistics, source and remote device, and its
+     * HOTP counter only moves forward (`MAX(counter, :counter)`), so a peer
+     * that has generated fewer codes never rewinds it.
+     *
+     * @return The number of rows updated: 0 if no row has [oathId].
+     */
+    @Query(
+        "UPDATE oath_credentials SET oath_type = :oathType, algorithm = :algorithm, digits = :digits, " +
+            "period_seconds = :periodSeconds, counter = MAX(counter, :counter), issuer = :issuer, " +
+            "account_name = :accountName, secret_encrypted = :secretEncrypted WHERE oath_id = :oathId"
+    )
+    suspend fun updateSynced(
+        oathId: String,
+        oathType: String,
+        algorithm: String,
+        digits: Int,
+        periodSeconds: Int,
+        counter: Long,
+        issuer: String?,
+        accountName: String,
+        secretEncrypted: ByteArray
+    ): Int
 
     // -------------------------------------------------------------------------
     // Delete Operations

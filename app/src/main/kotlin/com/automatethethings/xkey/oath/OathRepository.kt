@@ -238,7 +238,105 @@ class OathRepository(
         return importParsed(uri, structuredLabel = true)
     }
 
+    /**
+     * Merge a credential a paired peer synced, under the peer's [oathId]: the
+     * one entry point that turns a synced item into an OATH row. The fields
+     * are decoded and validated as [importStructured] does them. While no
+     * row has [oathId] one is added under it; otherwise that row is updated
+     * in place ([OathCredentialDao.updateSynced]), keeping its primary key,
+     * creation time and usage statistics, with the HOTP counter the larger
+     * of the stored one and [counter]. Merging the same item again therefore
+     * never adds a second row.
+     *
+     * @return true if a row was added, false if an existing one was updated.
+     * @throws IllegalArgumentException if [oathId] is blank or the fields are
+     *         invalid (for example a secret that is not Base32); nothing is written.
+     */
+    suspend fun upsertStructured(
+        oathId: String,
+        type: String,
+        issuer: String?,
+        accountName: String,
+        secret: String,
+        algorithm: String = "SHA1",
+        digits: Int = 6,
+        period: Int = 30,
+        counter: Long? = null
+    ): Boolean {
+        require(oathId.isNotBlank()) { "Missing OATH credential id" }
+        val otpType = type.lowercase()
+        val parsed = parseOathUri(
+            otpauthUri(
+                type = otpType,
+                issuer = issuer,
+                accountName = accountName,
+                secret = secret,
+                algorithm = algorithm,
+                digits = digits,
+                period = period,
+                counter = if (otpType == "hotp") counter ?: 0L else null
+            ),
+            structuredLabel = true
+        )
+        val encryptedSecret = secretManager.encryptSecret(parsed.secret)
+        val entity = OathCredentialEntity(
+            oathId = oathId,
+            oathType = parsed.type,
+            algorithm = parsed.algorithm,
+            digits = parsed.digits,
+            periodSeconds = parsed.periodSeconds,
+            counter = parsed.counter,
+            issuer = parsed.issuer,
+            accountName = parsed.accountName,
+            secretEncrypted = encryptedSecret,
+            source = "local",
+            createdAt = System.currentTimeMillis()
+        )
+        // Never REPLACE: that deletes the row and inserts a new one, losing its usage statistics.
+        if (dao.insertIfAbsent(entity) != -1L) return true
+        val updated = dao.updateSynced(
+            oathId = oathId,
+            oathType = entity.oathType,
+            algorithm = entity.algorithm,
+            digits = entity.digits,
+            periodSeconds = entity.periodSeconds,
+            counter = entity.counter,
+            issuer = entity.issuer,
+            accountName = entity.accountName,
+            secretEncrypted = entity.secretEncrypted
+        )
+        if (updated > 0) return false
+        // Deleted between the insert and the update: add it again.
+        return dao.insertIfAbsent(entity) != -1L
+    }
+
     private suspend fun importParsed(uri: String, structuredLabel: Boolean): String {
+        val parsed = parseOathUri(uri, structuredLabel)
+        return addCredential(
+            issuer = parsed.issuer,
+            accountName = parsed.accountName,
+            secret = parsed.secret,
+            type = parsed.type,
+            algorithm = parsed.algorithm,
+            digits = parsed.digits,
+            periodSeconds = parsed.periodSeconds,
+            counter = parsed.counter
+        )
+    }
+
+    /** The decoded fields of an `otpauth://` URI, as [parseOathUri] reads them. */
+    private class ParsedOath(
+        val issuer: String?,
+        val accountName: String,
+        val secret: ByteArray,
+        val type: String,
+        val algorithm: String,
+        val digits: Int,
+        val periodSeconds: Int,
+        val counter: Long
+    )
+
+    private fun parseOathUri(uri: String, structuredLabel: Boolean): ParsedOath {
         val parsed = Uri.parse(uri)
 
         require(parsed.scheme == "otpauth") {
@@ -284,7 +382,7 @@ class OathRepository(
             0L
         }
 
-        return addCredential(
+        return ParsedOath(
             issuer = issuer,
             accountName = accountName,
             secret = secret,

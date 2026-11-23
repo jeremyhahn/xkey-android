@@ -10,6 +10,7 @@ import android.util.Log
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.password.PasswordEntity
 import com.automatethethings.xkey.password.PasswordEntryTooLargeException
+import com.automatethethings.xkey.password.PasswordNotNewerException
 import com.automatethethings.xkey.password.PasswordPatch
 import com.automatethethings.xkey.password.PasswordRecord
 import com.automatethethings.xkey.password.PasswordRepository
@@ -89,6 +90,11 @@ class PasswordSync(
      * between the check and the add, perhaps with its expiry set since, is
      * patched in place instead.
      *
+     * An existing entry is overwritten last-writer-wins: only by an incoming
+     * copy whose `updated_at` is strictly newer than the stored one. An older
+     * or equal copy, or one without a parseable `updated_at`, keeps the local
+     * entry and is counted as skipped.
+     *
      * @throws com.automatethethings.xkey.password.PasswordStoreLockedException
      *   if the store is locked; nothing is written.
      */
@@ -120,17 +126,22 @@ class PasswordSync(
             val patch = record.asPatch()
             val existed = try {
                 // In any tenant: an id names one entry, wherever it lives.
+                // Last writer wins: an existing entry is patched only while it is older than the incoming copy.
                 when {
-                    repository.updateFields(id, patch) -> true
+                    repository.updateFields(id, patch, onlyIfOlderThan = record.updatedAt) -> true
                     // Added only while still absent: never replaces an entry another writer added since.
                     repository.insertIfAbsent(record) -> false
                     // Added meanwhile: patched in place like any existing entry, keeping the policy it was given.
-                    repository.updateFields(id, patch) -> true
+                    repository.updateFields(id, patch, onlyIfOlderThan = record.updatedAt) -> true
                     // Added and deleted again between the two: it keeps moving, so the next sync retries.
                     else -> throw PasswordUpdateConflictException()
                 }
             } catch (e: PasswordEntryTooLargeException) {
                 // Too large for go-xkms to read back over USB: nothing is written for it.
+                skipped++
+                continue
+            } catch (e: PasswordNotNewerException) {
+                // The local entry is the same age or newer (or the incoming one has no updated_at): it is kept.
                 skipped++
                 continue
             } catch (e: PasswordUpdateConflictException) {
