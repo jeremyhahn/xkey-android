@@ -230,7 +230,13 @@ class KeystoreManagerUserAuthTest {
         val silentSignature = mockk<Signature>(relaxed = true)
         val freshSignature = mockk<Signature>(relaxed = true)
         every { Signature.getInstance(any<String>()) } returnsMany listOf(silentSignature, freshSignature)
-        every { silentSignature.initSign(any<PrivateKey>()) } throws userNotAuthenticated()
+        // Both Signatures refuse initSign until the user has authenticated,
+        // so an unreadable KeyInfo still ends in the prompt-first fallback.
+        for (signature in listOf(silentSignature, freshSignature)) {
+            every { signature.initSign(any<PrivateKey>()) } answers {
+                if (!replaced) throw userNotAuthenticated()
+            }
+        }
         every { freshSignature.sign() } answers { if (replaced) byteArrayOf(6, 6, 6) else promptSignature }
 
         val helper = mockk<BiometricHelper>(relaxed = true)
