@@ -171,23 +171,26 @@ exit 1
 EOF
 # gradle-retry <log> <gradle args...>: the online run below, its output to
 # log, retried while a failed attempt's log says Gradle could not download a
-# dependency: a repository's transient error must not fail the image. Three
-# attempts, 15 s then 30 s apart, gradle-quiesce between them so no JVM of
-# the failed attempt still writes the cache. Any other failure, or the third
-# download failure, prints the log's tail and exits with gradle's status.
+# dependency or a repository answered HTTP 429 Too Many Requests: a
+# repository's transient error or rate limit must not fail the image.
+# GRADLE_RETRY_ATTEMPTS attempts (default 5), the first wait
+# GRADLE_RETRY_DELAY s (default 30) and doubling (30, 60, 120, 240 s: a rate
+# limit gets about 7.5 minutes to lift), gradle-quiesce between them so no
+# JVM of the failed attempt still writes the cache. Any other failure, or the
+# last download failure, prints the log's tail and exits with gradle's status.
 COPY --chmod=0755 <<'EOF' /usr/local/bin/gradle-retry
 #!/bin/bash
 set -uo pipefail
 log=$1
 shift
-attempts=3
-delay=${GRADLE_RETRY_DELAY:-15}
+attempts=${GRADLE_RETRY_ATTEMPTS:-5}
+delay=${GRADLE_RETRY_DELAY:-30}
 n=1
 while :; do
   gradle "$@" > "${log}" 2>&1
   rc=$?
   [ "${rc}" -ne 0 ] || exit 0
-  if [ "${n}" -ge "${attempts}" ] || ! grep -Eq 'Could not (resolve|GET|HEAD|download)' "${log}"; then
+  if [ "${n}" -ge "${attempts}" ] || ! grep -Eq 'Could not (resolve|GET|HEAD|download)|status code 429|Too Many Requests' "${log}"; then
     tail -n 60 "${log}"
     echo "gradle-retry: gradle failed (exit ${rc}) on attempt ${n} of ${attempts}" >&2
     exit "${rc}"
