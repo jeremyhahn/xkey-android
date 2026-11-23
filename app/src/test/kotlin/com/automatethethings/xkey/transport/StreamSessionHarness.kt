@@ -17,6 +17,7 @@ package com.automatethethings.xkey.transport
 
 import android.content.Context
 import com.automatethethings.xkey.ble.NoiseSession
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -68,7 +69,10 @@ internal class StreamSessionHarness : Closeable {
                 pairing.serve(
                     input = accepted.getInputStream(),
                     output = accepted.getOutputStream(),
-                    noiseSession = NoiseSession().also { it.loadStaticKey(context) },
+                    noiseSession = NoiseSession().also {
+                        NoiseTestKeyStore.install()
+                        it.loadStaticKey(context)
+                    },
                     connectionId = "test:desktop-$paired",
                     isActive = { !accepted.isClosed },
                     onConnected = { connected.complete(Unit) },

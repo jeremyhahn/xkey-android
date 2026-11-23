@@ -41,8 +41,7 @@ import org.junit.Test
  * these tests prove the session overwrites the arrays it owns, nothing more.
  *
  * The rest of the harness is the one [NoiseHandshakeTest] uses: the responder
- * runs against [NoiseInitiatorSession], and `loadStaticKey` falls back to an
- * in-memory static key off-device.
+ * runs against [NoiseInitiatorSession], its static key in the [NoiseTestKeyStore].
  */
 class NoiseSessionZeroizationTest {
 
@@ -65,6 +64,7 @@ class NoiseSessionZeroizationTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
