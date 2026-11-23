@@ -443,34 +443,25 @@ class NoiseSession {
         Log.d(TAG, "Processing handshake final, message size: ${message.size}")
 
         try {
-            // Message contains: encrypted static key (32 + 16 bytes) + encrypted empty payload (16 bytes) = 64 bytes
-            // Per Noise spec, even empty payloads are encrypted with a 16-byte AEAD tag
+            // Message contains: encrypted static key (32 + 16 bytes) + encrypted payload
+            // (at least its 16-byte AEAD tag). flynn/noise always encrypts the payload,
+            // so a shorter msg3 is malformed: refuse it, never complete without it.
             val expectedMinSize = KEY_SIZE + TAG_SIZE + TAG_SIZE // 32 + 16 + 16 = 64
             if (message.size < expectedMinSize) {
-                // Backwards compatibility: accept 48-byte messages without empty payload
-                // This handles implementations that don't encrypt empty payloads
-                Log.w(TAG, "msg3 is only ${message.size} bytes, expected $expectedMinSize - proceeding with legacy format")
+                throw NoiseException("Invalid final message size: ${message.size}, expected at least $expectedMinSize")
             }
 
             // Decrypt remote static key
-            Log.d(TAG, "Decrypting remote static key...")
             val encryptedRS = message.copyOfRange(0, KEY_SIZE + TAG_SIZE)
-            Log.d(TAG, "encryptedRS size: ${encryptedRS.size}")
             remoteStaticKey = decryptAndHash(encryptedRS)
 
             // se - DH(e, rs)
-            Log.d(TAG, "Computing se DH...")
             mixDh(ephemeralPrivateKey!!, remoteStaticKey!!)
-            Log.d(TAG, "Computed se DH and mixKey complete")
 
-            // Decrypt empty payload if present (flynn/noise includes this)
-            if (message.size >= expectedMinSize) {
-                Log.d(TAG, "Decrypting empty payload...")
-                val encryptedEmptyPayload = message.copyOfRange(KEY_SIZE + TAG_SIZE, message.size)
-                Log.d(TAG, "encryptedEmptyPayload size: ${encryptedEmptyPayload.size}")
-                val emptyPayload = decryptAndHash(encryptedEmptyPayload)
-                Log.d(TAG, "Decrypted empty payload: ${emptyPayload.size} bytes")
-            }
+            // Decrypt the payload (flynn/noise always sends one, empty or not)
+            val encryptedPayload = message.copyOfRange(KEY_SIZE + TAG_SIZE, message.size)
+            val payload = decryptAndHash(encryptedPayload)
+            Log.d(TAG, "Decrypted msg3 payload: ${payload.size} bytes")
 
             // Split into transport keys
             Log.d(TAG, "Splitting symmetric state...")
