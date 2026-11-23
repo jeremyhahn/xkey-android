@@ -120,7 +120,14 @@ class SyncEngine(
         return out
     }
 
-    /** Imports/updates incoming OATH credentials. */
+    /**
+     * Imports/updates incoming OATH credentials by the peer's `id`
+     * ([OathRepository.upsertStructured]): an item whose id is already stored
+     * updates that row in place, its HOTP counter never moving back, so
+     * merging the same payload again adds no rows. An item without an id,
+     * secret or account, or with an invalid field (a secret that is not
+     * Base32, say), is counted as skipped and the rest still merge.
+     */
     suspend fun mergeOath(incoming: JSONArray): ItemCounts {
         val secretManager = OathSecretManager()
         val oathRepo = OathRepository(db.oathCredentialDao(), secretManager)
@@ -136,19 +143,26 @@ class SyncEngine(
                 skipped++
                 continue
             }
-            val existed = db.oathCredentialDao().getByOathId(id) != null
-            oathRepo.importStructured(
-                type = obj.optString("type", "totp"),
-                issuer = obj.optString("issuer", "").ifBlank { null },
-                accountName = accountName,
-                secret = secret,
-                algorithm = obj.optString("algorithm", "SHA1"),
-                digits = obj.optInt("digits", 6),
-                period = obj.optInt("period", 30),
-                counter = obj.optLong("counter", 0)
-            )
-            if (existed) updated++ else added++
+            val wasAdded = try {
+                oathRepo.upsertStructured(
+                    oathId = id,
+                    type = obj.optString("type", "totp"),
+                    issuer = obj.optString("issuer", "").ifBlank { null },
+                    accountName = accountName,
+                    secret = secret,
+                    algorithm = obj.optString("algorithm", "SHA1"),
+                    digits = obj.optInt("digits", 6),
+                    period = obj.optInt("period", 30),
+                    counter = obj.optLong("counter", 0)
+                )
+            } catch (e: IllegalArgumentException) {
+                // One invalid item never aborts the sync. The message can quote the secret, so it is not logged.
+                skipped++
+                continue
+            }
+            if (wasAdded) added++ else updated++
         }
+        if (skipped > 0) Log.w(TAG, "Skipped $skipped incoming OATH credentials")
         return ItemCounts(added, updated, skipped)
     }
 
