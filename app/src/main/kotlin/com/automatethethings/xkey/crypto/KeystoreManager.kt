@@ -108,8 +108,13 @@ class DecryptResult(val plaintext: ByteArray, val algorithm: String)
  * ```
  *
  * @param context Application context for checking device capabilities.
+ * @param sdkInt The device API level, [Build.VERSION.SDK_INT] by default.
  */
-class KeystoreManager(private val context: Context) {
+class KeystoreManager(
+    private val context: Context,
+    /** The device API level; a JVM test stands in a device here. */
+    @VisibleForTesting private val sdkInt: Int = Build.VERSION.SDK_INT
+) {
 
     private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply {
         load(null)
