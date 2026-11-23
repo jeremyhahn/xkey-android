@@ -83,6 +83,9 @@ import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivAlgorithm
+import com.automatethethings.xkey.piv.PivAlgorithmMismatchException
+import com.automatethethings.xkey.piv.PivAlgorithmUnavailableException
+import com.automatethethings.xkey.piv.PivPublicKeyEncoding
 import com.automatethethings.xkey.settings.PinSettingsRepository
 
 /**
@@ -4889,16 +4892,39 @@ class RequestHandler(
 
     /**
      * Reads a PIV algorithm, accepting go-xkms spellings ("ECDSA-P256",
-     * "RSA-2048") alongside the [PivAlgorithm] enum names.
+     * "RSA-2048", "Ed25519", "X25519") alongside the [PivAlgorithm] enum
+     * names and the PIV algorithm id in hex ("0x11", "0xE0").
      */
     private fun pivAlgorithmOf(name: String): PivAlgorithm? {
         if (name.isBlank()) return null
         runCatching { return PivAlgorithm.valueOf(name) }
-        return when (name.uppercase().replace("_", "-")) {
-            "ECDSA-P256", "EC-P256", "P256" -> PivAlgorithm.ES256
-            "ECDSA-P384", "EC-P384", "P384" -> PivAlgorithm.ES384
-            "RSA-2048", "RSA2048" -> PivAlgorithm.RS2048
+        val upper = name.trim().uppercase().replace("_", "-")
+        if (upper.startsWith("0X")) {
+            val id = upper.substring(2).toIntOrNull(16) ?: return null
+            return PivAlgorithm.fromPivAlgorithmId(id)
+        }
+        return when (upper) {
+            "ECDSA-P256", "EC-P256", "P256", "ES256" -> PivAlgorithm.ES256
+            "ECDSA-P384", "EC-P384", "P384", "ES384" -> PivAlgorithm.ES384
+            "RSA-2048", "RSA2048", "RS2048" -> PivAlgorithm.RS2048
+            "ED25519", "EDDSA" -> PivAlgorithm.ED25519
+            "X25519" -> PivAlgorithm.X25519
             else -> null
+        }
+    }
+
+    /**
+     * Adds the PIV algorithm id (`algorithm_id`) of [algorithm] and, for an
+     * Ed25519 or X25519 key, the raw 32-byte public key (`public_key_raw`,
+     * the PIV tag 0x86 value) read from [publicKeyDer].
+     */
+    private fun JSONObject.putPivKeyFields(algorithm: PivAlgorithm?, publicKeyDer: ByteArray?) {
+        algorithm ?: return
+        put("algorithm_id", algorithm.pivAlgorithmId)
+        if (algorithm.isCurve25519 && publicKeyDer != null) {
+            runCatching { PivPublicKeyEncoding.pivPublicKeyValue(publicKeyDer) }.getOrNull()?.let {
+                put("public_key_raw", Base64.getEncoder().encodeToString(it))
+            }
         }
     }
 
@@ -4927,6 +4953,7 @@ class RequestHandler(
                         put("publicKey", encoded)
                         put("public_key_der", encoded)
                     }
+                    putPivKeyFields(info.algorithm, info.publicKeyDer)
                     info.createdAt?.let { put("createdAt", it) }
                     info.lastUsedAt?.let { put("lastUsedAt", it) }
                     put("useCount", info.useCount)
@@ -4960,8 +4987,11 @@ class RequestHandler(
                     put("publicKey", encoded)
                     put("public_key_der", encoded)
                 }
+                putPivKeyFields(info.algorithm, info.publicKeyDer)
             }
             Response.success(request.id, result)
+        } catch (e: PivAlgorithmUnavailableException) {
+            Response.error(request.id, ErrorCodes.FEATURE_UNAVAILABLE, e.message ?: "${algorithm.displayName} PIV keys are not available")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.KEY_GENERATION_FAILED, e.message ?: "PIV key generation failed")
         }
@@ -4996,17 +5026,25 @@ class RequestHandler(
         val params = request.params ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
         val slotId = params.pivSlotId()
         val dataBase64 = params.optString("data", "")
-        val algorithmName = params.optString("algorithm", "ES256")
+        // No algorithm means the slot's own; the manager falls back to ES256
+        // only for a slot whose row records none.
+        val algorithmName = params.optString("algorithm", "")
         val slot = PivSlot.fromHexId(slotId) ?: return Response.error(request.id, ErrorCodes.PIV_INVALID_SLOT, "Invalid slot: $slotId")
         if (dataBase64.isEmpty()) return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Data is required")
-        val algorithm = pivAlgorithmOf(algorithmName)
-            ?: return Response.error(request.id, ErrorCodes.INVALID_ALGORITHM, "Invalid algorithm: $algorithmName")
+        val algorithm = if (algorithmName.isBlank()) {
+            null
+        } else {
+            pivAlgorithmOf(algorithmName)
+                ?: return Response.error(request.id, ErrorCodes.INVALID_ALGORITHM, "Invalid algorithm: $algorithmName")
+        }
         return try {
             val data = Base64.getDecoder().decode(dataBase64)
             val signature = pkm.sign(slot, data, algorithm)
             Response.success(request.id, JSONObject().apply {
                 put("signature", Base64.getEncoder().encodeToString(signature))
             })
+        } catch (e: PivAlgorithmMismatchException) {
+            Response.error(request.id, ErrorCodes.INVALID_ALGORITHM, e.message ?: "Algorithm does not match the slot key")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.PIV_SIGN_FAILED, e.message ?: "PIV signing failed")
         }

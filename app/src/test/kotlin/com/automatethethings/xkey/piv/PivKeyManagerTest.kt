@@ -17,6 +17,7 @@ package com.automatethethings.xkey.piv
 import android.security.keystore.KeyGenParameterSpec
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
@@ -41,6 +42,7 @@ import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -50,11 +52,14 @@ import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.ProviderException
+import java.security.Signature
 import java.security.cert.Certificate
 import java.security.cert.CertificateFactory
 import java.security.spec.AlgorithmParameterSpec
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
+import javax.crypto.KeyAgreement
 
 /**
  * Unit tests for [PivKeyManager] paths that run without the Android Keystore.
@@ -69,12 +74,18 @@ import java.util.Date
  * [FakePivKeystore] holding a JDK-generated P-256 key in place of the
  * AndroidKeyStore entry (#173). The `piv_slots` row is only a cache: tests
  * where it disagrees with the Keystore pin that the Keystore decides.
+ *
+ * Ed25519 and X25519 slot keys are generated through the manager's
+ * `generateKeyPair` seam with JDK keys, with the platform level and the
+ * key's security level injected: the refusals on a device below Android 13
+ * or without secure hardware are decided by the manager, not the Keystore.
  */
 class PivKeyManagerTest {
 
     private lateinit var pivSlotDao: PivSlotDao
     private val slotKey = PivTestCertificates.ecKeyPair()
     private lateinit var keystore: FakePivKeystore
+    private var generatorCalls = 0
 
     @Before
     fun setUp() {
@@ -88,6 +99,10 @@ class PivKeyManagerTest {
         every { AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
         every { AuditLogger.logKeyCreated(any(), any(), any(), any()) } returns Unit
         every { AuditLogger.logPivCertImported(any(), any()) } returns Unit
+        every {
+            AuditLogger.logSigningRequest(any(), any(), any(), any(), any(), any(), any(), any(), any())
+        } returns Unit
+        every { AuditLogger.logKeyUsed(any(), any(), any(), any(), any(), any(), any()) } returns Unit
     }
 
     @After
@@ -376,6 +391,249 @@ class PivKeyManagerTest {
         assertArrayEquals(slotKey.public.encoded, parsed.publicKey.encoded)
     }
 
+    // -------------------------------------------------------------------------
+    // Ed25519 and X25519 slot keys
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `generateKey Ed25519 below Android 13 is refused before the Keystore is touched`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+
+        val error = generateError(manager(sdkInt = 32, generates = PivTestCertificates.ed25519KeyPair()), PivAlgorithm.ED25519)
+
+        assertTrue("got $error", error is PivAlgorithmUnavailableException)
+        assertTrue(error?.message, error?.message?.contains("Ed25519") == true)
+        assertTrue(error?.message, error?.message?.contains("Android 13 secure hardware") == true)
+        assertEquals("the Keystore generator ran", 0, generatorCalls)
+        assertTrue("the slot lost its key", keystore.live === slotKey)
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+        coVerify(exactly = 0) { pivSlotDao.deleteBySlotId(any()) }
+    }
+
+    @Test
+    fun `generateKey X25519 below Android 13 is refused and the slot keeps its key`() = runTest {
+        val error = generateError(manager(sdkInt = 32, generates = PivTestCertificates.x25519KeyPair()), PivAlgorithm.X25519)
+
+        assertTrue("got $error", error is PivAlgorithmUnavailableException)
+        assertTrue(error?.message, error?.message?.contains("X25519") == true)
+        assertEquals(0, generatorCalls)
+        assertTrue(keystore.live === slotKey)
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+        coVerify(exactly = 0) { pivSlotDao.deleteBySlotId(any()) }
+    }
+
+    @Test
+    fun `generateKey ES256 below Android 13 still runs`() = runTest {
+        val newKey = PivTestCertificates.ecKeyPair()
+
+        val info = manager(sdkInt = 28, level = null, generates = newKey).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ES256)
+
+        assertEquals(PivAlgorithm.ES256, info.algorithm)
+        assertTrue(keystore.live === newKey)
+    }
+
+    @Test
+    fun `generateKey Ed25519 in a software Keystore empties the slot and is refused`() = runTest {
+        val newKey = PivTestCertificates.ed25519KeyPair()
+
+        val error = generateError(manager(level = KeySecurityLevel.SOFTWARE, generates = newKey), PivAlgorithm.ED25519)
+
+        assertTrue("got $error", error is PivAlgorithmUnavailableException)
+        assertTrue(error?.message, error?.message?.contains("Android 13 secure hardware") == true)
+        assertNull("the slot kept a software key", keystore.live)
+        coVerify { pivSlotDao.deleteBySlotId("9A") }
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
+
+    @Test
+    fun `generateKey X25519 whose security level cannot be read empties the slot and is refused`() = runTest {
+        val error = generateError(manager(level = null, generates = PivTestCertificates.x25519KeyPair()), PivAlgorithm.X25519)
+
+        assertTrue("got $error", error is PivAlgorithmUnavailableException)
+        assertNull(keystore.live)
+        coVerify { pivSlotDao.deleteBySlotId("9A") }
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+    }
+
+    @Test
+    fun `generateKey Ed25519 the Keystore cannot create is refused and the slot keeps its key`() = runTest {
+        val manager = manager(generatorError = ProviderException("Unsupported EC curve: ed25519"))
+
+        val error = generateError(manager, PivAlgorithm.ED25519)
+
+        assertTrue("got $error", error is PivAlgorithmUnavailableException)
+        assertTrue(keystore.live === slotKey)
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+        coVerify(exactly = 0) { pivSlotDao.deleteBySlotId(any()) }
+    }
+
+    @Test
+    fun `generateKey Ed25519 in the TEE records the key`() = runTest {
+        val newKey = PivTestCertificates.ed25519KeyPair()
+
+        val info = manager(level = KeySecurityLevel.TEE, generates = newKey).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ED25519)
+
+        assertEquals(PivAlgorithm.ED25519, info.algorithm)
+        assertArrayEquals(newKey.public.encoded, info.publicKeyDer)
+        coVerify {
+            pivSlotDao.upsert(match {
+                it.algorithm == "ED25519" && it.publicKeyDer.contentEquals(newKey.public.encoded) && it.hasKey
+            })
+        }
+    }
+
+    @Test
+    fun `generateKey X25519 in StrongBox records the key`() = runTest {
+        val newKey = PivTestCertificates.x25519KeyPair()
+
+        val info = manager(level = KeySecurityLevel.STRONGBOX, generates = newKey).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.X25519)
+
+        assertEquals(PivAlgorithm.X25519, info.algorithm)
+        coVerify { pivSlotDao.upsert(match { it.algorithm == "X25519" }) }
+    }
+
+    @Test
+    fun `sign without an algorithm uses the slot's Ed25519 key over the raw message`() = runTest {
+        val edKey = PivTestCertificates.ed25519KeyPair()
+        keystore.live = edKey
+        coEvery { pivSlotDao.getBySlotId("9A") } returns
+            PivTestCertificates.slotRow(edKey.public.encoded, algorithm = PivAlgorithm.ED25519)
+        val message = "xKey PIV Ed25519 message".toByteArray()
+
+        val signature = manager().sign(PivSlot.AUTHENTICATION, message)
+
+        val verifier = Signature.getInstance("Ed25519").apply {
+            initVerify(edKey.public)
+            update(message)
+        }
+        assertTrue("the Ed25519 signature does not verify", verifier.verify(signature))
+        coVerify { pivSlotDao.recordUsage("9A", any()) }
+    }
+
+    @Test
+    fun `sign on an X25519 slot is refused`() = runTest {
+        val xKey = PivTestCertificates.x25519KeyPair()
+        keystore.live = xKey
+        coEvery { pivSlotDao.getBySlotId("9A") } returns
+            PivTestCertificates.slotRow(xKey.public.encoded, algorithm = PivAlgorithm.X25519)
+
+        val error = runCatching { manager().sign(PivSlot.AUTHENTICATION, byteArrayOf(1, 2, 3)) }.exceptionOrNull()
+
+        assertTrue("got $error", error is IllegalArgumentException)
+        assertEquals("X25519 keys cannot sign", error?.message)
+        coVerify(exactly = 0) { pivSlotDao.recordUsage(any(), any()) }
+    }
+
+    @Test
+    fun `sign with an algorithm other than the slot's is refused with a clear message`() = runTest {
+        val edKey = PivTestCertificates.ed25519KeyPair()
+        keystore.live = edKey
+        coEvery { pivSlotDao.getBySlotId("9A") } returns
+            PivTestCertificates.slotRow(edKey.public.encoded, algorithm = PivAlgorithm.ED25519)
+
+        val error = runCatching { manager().sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ES256) }
+            .exceptionOrNull()
+
+        assertTrue("got $error", error is PivAlgorithmMismatchException)
+        assertTrue(error?.message, error?.message?.contains("Ed25519") == true)
+    }
+
+    @Test
+    fun `agree on an X25519 slot matches the peer's agreement`() = runTest {
+        val phoneKey = PivTestCertificates.x25519KeyPair()
+        keystore.live = phoneKey
+        coEvery { pivSlotDao.getBySlotId("9A") } returns
+            PivTestCertificates.slotRow(phoneKey.public.encoded, algorithm = PivAlgorithm.X25519)
+        val peer = PivTestCertificates.x25519KeyPair()
+        val peerRaw = PivPublicKeyEncoding.pivPublicKeyValue(peer.public.encoded)
+
+        val secret = manager().agree(PivSlot.AUTHENTICATION, peerRaw)
+
+        val expected = KeyAgreement.getInstance("XDH").run {
+            init(peer.private)
+            doPhase(phoneKey.public, true)
+            generateSecret()
+        }
+        assertArrayEquals(expected, secret)
+        coVerify { pivSlotDao.recordUsage("9A", any()) }
+        verify { AuditLogger.logKeyUsed(PivSlot.AUTHENTICATION.keystoreAlias, any(), "piv", "key agreement", true, any(), any()) }
+    }
+
+    @Test
+    fun `agree on a slot that is not X25519 is refused`() = runTest {
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
+        val peerRaw = PivPublicKeyEncoding.pivPublicKeyValue(PivTestCertificates.x25519KeyPair().public.encoded)
+
+        val error = runCatching { manager().agree(PivSlot.AUTHENTICATION, peerRaw) }.exceptionOrNull()
+
+        assertTrue("got $error", error is IllegalArgumentException)
+        coVerify(exactly = 0) { pivSlotDao.recordUsage(any(), any()) }
+    }
+
+    @Test
+    fun `agree refuses a peer key that is not 32 bytes or is all zeros`() = runTest {
+        val phoneKey = PivTestCertificates.x25519KeyPair()
+        keystore.live = phoneKey
+        coEvery { pivSlotDao.getBySlotId("9A") } returns
+            PivTestCertificates.slotRow(phoneKey.public.encoded, algorithm = PivAlgorithm.X25519)
+
+        listOf(ByteArray(31) { 1 }, ByteArray(33) { 1 }, ByteArray(32)).forEach { peer ->
+            val error = runCatching { manager().agree(PivSlot.AUTHENTICATION, peer) }.exceptionOrNull()
+            assertTrue("peer of ${peer.size} bytes: got $error", error is IllegalArgumentException)
+        }
+        coVerify(exactly = 0) { pivSlotDao.recordUsage(any(), any()) }
+    }
+
+    @Test
+    fun `getCertificate of an X25519 slot without an imported certificate is null`() = runTest {
+        val xKey = PivTestCertificates.x25519KeyPair()
+        keystore.live = xKey
+        coEvery { pivSlotDao.getBySlotId("9A") } returns
+            PivTestCertificates.slotRow(xKey.public.encoded, algorithm = PivAlgorithm.X25519)
+
+        assertNull(manager().getCertificate(PivSlot.AUTHENTICATION))
+    }
+
+    @Test
+    fun `listSlots reports a curve 25519 slot with its algorithm`() = runTest {
+        val edKey = PivTestCertificates.ed25519KeyPair()
+        keystore.live = edKey
+        val row = PivTestCertificates.slotRow(edKey.public.encoded, algorithm = PivAlgorithm.ED25519)
+        coEvery { pivSlotDao.getAll() } returns listOf(row)
+        coEvery { pivSlotDao.getBySlotId("9A") } returns row
+
+        val info = manager().listSlots().single()
+
+        assertEquals(PivAlgorithm.ED25519, info.algorithm)
+        assertArrayEquals(edKey.public.encoded, info.publicKeyDer)
+    }
+
+    /**
+     * A manager whose Keystore generator puts the next key in [keystore] (or
+     * throws [generatorError]), on platform level [sdkInt], reading [level]
+     * as every key's security level.
+     */
+    private fun manager(
+        sdkInt: Int = 33,
+        level: KeySecurityLevel? = KeySecurityLevel.TEE,
+        generates: KeyPair? = null,
+        generatorError: Exception? = null
+    ) = PivKeyManager(
+        pivSlotDao,
+        generateKeyPair = { _, _ ->
+            generatorCalls++
+            generatorError?.let { throw it }
+            val next = generates ?: error("this test generates no key")
+            keystore.live = next
+            next
+        },
+        sdkInt = sdkInt,
+        securityLevelOf = { level }
+    )
+
+    private suspend fun generateError(manager: PivKeyManager, algorithm: PivAlgorithm): Throwable? =
+        runCatching { manager.generateKey(PivSlot.AUTHENTICATION, algorithm) }.exceptionOrNull()
+
     private suspend fun importError(certDer: ByteArray): Throwable? =
         runCatching { PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, certDer) }
             .exceptionOrNull()
@@ -440,7 +698,18 @@ internal object PivTestCertificates {
         initialize(ECGenParameterSpec("secp256r1"))
     }.generateKeyPair()
 
-    /** A self-signed DER certificate whose subject key is [keyPair]'s public key. */
+    /** A fresh Ed25519 key pair, the shape an `ED25519` slot key has. */
+    fun ed25519KeyPair(): KeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+
+    /** A fresh X25519 key pair, the shape an `X25519` slot key has. */
+    fun x25519KeyPair(): KeyPair = KeyPairGenerator.getInstance("X25519").generateKeyPair()
+
+    /**
+     * A DER certificate whose subject key is [keyPair]'s public key, signed by
+     * that key. An X25519 key cannot sign, so its certificate is signed by a
+     * throwaway P-256 key, as the Keystore's certificate for such a key
+     * carries no valid self-signature either.
+     */
     fun selfSigned(keyPair: KeyPair): ByteArray {
         val name = X500Name("CN=xkey PIV test")
         val now = System.currentTimeMillis()
@@ -452,14 +721,24 @@ internal object PivTestCertificates {
             name,
             keyPair.public
         )
-        val signer = JcaContentSignerBuilder("SHA256withECDSA").build(keyPair.private)
+        val (signingKey, signatureAlgorithm) = when (keyPair.public.algorithm) {
+            "EdDSA", "Ed25519" -> keyPair.private to "Ed25519"
+            "XDH", "X25519" -> ecKeyPair().private to "SHA256withECDSA"
+            "RSA" -> keyPair.private to "SHA256withRSA"
+            else -> keyPair.private to "SHA256withECDSA"
+        }
+        val signer = JcaContentSignerBuilder(signatureAlgorithm).build(signingKey)
         return builder.build(signer).encoded
     }
 
     /** The `piv_slots` row for slot 9A holding [publicKeyDer]. */
-    fun slotRow(publicKeyDer: ByteArray, certificateDer: ByteArray? = null) = PivSlotEntity(
+    fun slotRow(
+        publicKeyDer: ByteArray,
+        certificateDer: ByteArray? = null,
+        algorithm: PivAlgorithm = PivAlgorithm.ES256
+    ) = PivSlotEntity(
         slotId = "9A",
-        algorithm = PivAlgorithm.ES256.name,
+        algorithm = algorithm.name,
         publicKeyDer = publicKeyDer,
         certificateDer = certificateDer,
         hasKey = true

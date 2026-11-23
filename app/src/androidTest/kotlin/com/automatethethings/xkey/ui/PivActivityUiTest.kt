@@ -17,6 +17,7 @@ package com.automatethethings.xkey.ui
 import android.app.Activity
 import android.app.Instrumentation
 import android.content.Context
+import android.os.Build
 import android.view.View
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -46,6 +47,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -325,15 +327,43 @@ class PivActivityUiTest {
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
 
-        val missing = PivAlgorithm.entries.filterNot { isDisplayedInDialog(it.displayName) }
+        // Ed25519 and X25519 are offered only where the Keystore makes them.
+        val supported = PivAlgorithm.entries.filter { it.isAvailableOn(Build.VERSION.SDK_INT) }
+        val missing = supported.filterNot { isDisplayedInDialog(it.displayName) }
+        val unexpected = (PivAlgorithm.entries - supported.toSet()).filter { isDisplayedInDialog(it.displayName) }
 
         onView(withText(android.R.string.cancel)).inRoot(isDialog()).perform(click())
 
         assertTrue(
-            "the generate-key dialog must offer every algorithm, missing: " +
+            "the generate-key dialog must offer every supported algorithm, missing: " +
                 missing.map { it.displayName },
             missing.isEmpty()
         )
+        assertTrue(
+            "the generate-key dialog must not offer ${unexpected.map { it.displayName }} " +
+                "on API ${Build.VERSION.SDK_INT}",
+            unexpected.isEmpty()
+        )
+    }
+
+    /** On Android 13 and later the dialog offers Ed25519 and X25519, with no API note. */
+    @Test
+    fun generateKeyDialog_offersCurve25519OnAndroid13AndLater() {
+        assumeTrue("Ed25519 and X25519 need API 33", Build.VERSION.SDK_INT >= 33)
+        val scenario = launch()
+        val slot = emptyPrimarySlot()
+        assertShownTextInTree(scenario, slot.label)
+
+        clickSlotAction(scenario, slot, withString(scenario, R.string.piv_generate_key))
+        val ed25519 = isDisplayedInDialog(PivAlgorithm.ED25519.displayName)
+        val x25519 = isDisplayedInDialog(PivAlgorithm.X25519.displayName)
+        val note = isDisplayedInDialog(withString(scenario, R.string.piv_generate_curve25519_needs_android13))
+
+        onView(withText(android.R.string.cancel)).inRoot(isDialog()).perform(click())
+
+        assertTrue("Ed25519 must be offered on API ${Build.VERSION.SDK_INT}", ed25519)
+        assertTrue("X25519 must be offered on API ${Build.VERSION.SDK_INT}", x25519)
+        assertFalse("the Android 13 note must not show on API ${Build.VERSION.SDK_INT}", note)
     }
 
     /** A non-default algorithm must be selectable and actually used. */
@@ -344,8 +374,10 @@ class PivActivityUiTest {
         assertShownTextInTree(scenario, slot.label)
 
         // Anything other than entries[0], which was the only reachable choice
-        // while the chooser was suppressed.
-        val target = PivAlgorithm.entries.last()
+        // while the chooser was suppressed. Picked by name: it is offered on
+        // every API level and generated in any Keystore, unlike the curve
+        // 25519 entries that now follow it.
+        val target = PivAlgorithm.RS2048
 
         clickSlotAction(scenario, slot, withString(scenario, R.string.piv_generate_key))
         onView(withText(target.displayName)).inRoot(isDialog()).perform(click())
