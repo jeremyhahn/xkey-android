@@ -21,6 +21,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.annotation.ChecksSdkIntAtLeast
 import androidx.annotation.RequiresApi
 import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricPrompt
@@ -508,18 +509,20 @@ class KeystoreManager(
             signature.initSign(privateKey)
             signature.update(dataHash)
             return signature.sign()
-        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
-            // Key requires fresh biometric authentication - proceed with prompt
         } catch (e: Exception) {
+            // The key requires fresh user authentication: proceed with the
+            // prompt. Devices refuse at initSign (UserNotAuthenticatedException)
+            // or only at sign() (SignatureException over a Keystore error).
             // Anything else here is a real failure, not a reason to prompt. The
             // algorithm is fixed to ECDSA, so a non-EC key resolved by
             // resolveKeystoreAlias throws InvalidKeyException — which used to
             // escape past this function's documented SigningException contract
             // and surface to the desktop as INTERNAL_ERROR.
-            throw SigningException("Signing operation failed", e)
+            if (!requiresUserAuthentication(e)) throw SigningException("Signing operation failed", e)
         }
 
-        // Biometric required - show prompt
+        // Biometric required - show prompt, with a fresh Signature: the silent
+        // one may have been initialised (and fed) before the refusal.
         try {
             val signature = Signature.getInstance(SIGNATURE_ALGORITHM)
             signature.initSign(privateKey)
@@ -584,12 +587,47 @@ class KeystoreManager(
             signature.initSign(privateKey)
             signature.update(dataHash)
             return signature.sign()
-        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
-            throw BiometricRequiredException()
         } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
             throw SigningException("Signing operation failed", e)
         }
     }
+
+    /**
+     * True when [e] is Keystore refusing a key operation for want of user
+     * authentication: the one test every silent key operation here uses to
+     * choose the prompt (or [BiometricRequiredException]) over a failure.
+     *
+     * Devices refuse in two shapes. Most throw
+     * [android.security.keystore.UserNotAuthenticatedException] from
+     * `initSign`/`init`; some accept the init and refuse only at
+     * `sign()`/`doFinal()` (or in a `ProviderException`), with an
+     * `android.security.KeyStoreException` whose numeric error code is
+     * `ERROR_USER_AUTHENTICATION_REQUIRED` somewhere in the cause chain.
+     * That error code exists from API 33; below it only the first shape is
+     * recognised.
+     */
+    private fun requiresUserAuthentication(e: Throwable): Boolean {
+        var current: Throwable? = e
+        var depth = 0
+        while (current != null && depth < MAX_CAUSE_DEPTH) {
+            if (current is android.security.keystore.UserNotAuthenticatedException) return true
+            if (hasKeystoreErrorCodes() && isUserAuthenticationRequired(current)) return true
+            val next = current.cause
+            current = if (next === current) null else next
+            depth++
+        }
+        return false
+    }
+
+    /** True from API 33, where android.security.KeyStoreException carries its error code. */
+    @ChecksSdkIntAtLeast(api = Build.VERSION_CODES.TIRAMISU)
+    private fun hasKeystoreErrorCodes(): Boolean = sdkInt >= Build.VERSION_CODES.TIRAMISU
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private fun isUserAuthenticationRequired(e: Throwable): Boolean =
+        e is android.security.KeyStoreException &&
+            e.numericErrorCode == android.security.KeyStoreException.ERROR_USER_AUTHENTICATION_REQUIRED
 
     /**
      * Check if a key exists for a credential.
@@ -1237,9 +1275,8 @@ class KeystoreManager(
             signature.initSign(privateKey)
             signature.update(data)
             return signature.sign()
-        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
-            throw BiometricRequiredException()
         } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
             throw SigningException("Signing with $algorithm failed", e)
         }
     }
@@ -1308,9 +1345,8 @@ class KeystoreManager(
             signature.initSign(privateKey)
             signature.update(data)
             signature.sign()
-        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
-            throw BiometricRequiredException()
         } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
             throw SigningException("Signing with $jcaAlgorithm failed", e)
         }
     }
@@ -1347,9 +1383,8 @@ class KeystoreManager(
 
         try {
             return rsaOaepDecrypt(privateKey, ciphertext)
-        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
-            throw BiometricRequiredException()
         } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
             throw DecryptionException("RSA decryption failed", e)
         }
     }
@@ -1397,9 +1432,8 @@ class KeystoreManager(
 
             // Return IV || ciphertext || tag
             return iv + encrypted
-        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
-            throw BiometricRequiredException()
         } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
             throw EncryptionException("AES-GCM encryption failed", e)
         }
     }
@@ -1445,11 +1479,10 @@ class KeystoreManager(
             }
 
             return cipher.doFinal(encryptedData)
-        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
-            throw BiometricRequiredException()
         } catch (e: DecryptionException) {
             throw e
         } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
             throw DecryptionException("AES-GCM decryption failed", e)
         }
     }
@@ -1535,7 +1568,7 @@ class KeystoreManager(
             } catch (e: java.security.InvalidKeyException) {
                 // An EC key generated before the device reached API 31 (or
                 // before PURPOSE_AGREE_KEY was requested) cannot agree.
-                if (e is android.security.keystore.UserNotAuthenticatedException ||
+                if (requiresUserAuthentication(e) ||
                     e is android.security.keystore.KeyPermanentlyInvalidatedException
                 ) throw e
                 throw ECDHException(
@@ -1546,11 +1579,10 @@ class KeystoreManager(
             }
             keyAgreement.doPhase(peerPublicKey, true)
             return keyAgreement.generateSecret()
-        } catch (e: android.security.keystore.UserNotAuthenticatedException) {
-            throw BiometricRequiredException()
         } catch (e: ECDHException) {
             throw e
         } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
             throw ECDHException("ECDH key agreement failed", e)
         }
     }
@@ -2267,6 +2299,9 @@ class KeystoreManager(
 
         /** AES GCM cipher transformation. */
         private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
+
+        /** How far [requiresUserAuthentication] walks a cause chain. */
+        private const val MAX_CAUSE_DEPTH = 8
 
         /**
          * Audit names of the fixed algorithms [symmetricEncrypt]/[symmetricDecrypt]
