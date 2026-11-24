@@ -14,9 +14,11 @@
  */
 package com.automatethethings.xkey.ui
 
+import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.MlDsaParameterSet
 import com.automatethethings.xkey.crypto.PqcBacking
 import com.automatethethings.xkey.crypto.SoftwareKeyOps
+import com.automatethethings.xkey.storage.entity.KeyEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -113,5 +115,32 @@ class KeyCreationAlgorithmsTest {
             KeyCreationAlgorithms.storageOptions(set, setOf(MlDsaParameterSet.ML_DSA_44))
         )
         assertEquals(listOf(PqcBacking.SOFTWARE), KeyCreationAlgorithms.storageOptions(set, emptySet()))
+    }
+
+    private fun row(keyId: String, algorithm: String, keyType: String = "signing") = KeyEntity(
+        keyId = keyId, keyType = keyType, algorithm = algorithm, label = keyId, keySizeBits = 256, source = "local"
+    )
+
+    @Test
+    fun `the media and file signing pickers drop ML-DSA keys`() {
+        val keys = listOf(row("ec", "ES256"), row("rsa", "RS256", "fido2")) +
+            MlDsaParameterSet.entries.map { row(it.wireName, it.wireName) }
+
+        assertEquals(listOf("ec", "rsa"), mediaSigningKeys(keys).map { it.keyId })
+        assertEquals(listOf("ec", "rsa"), fileSigningKeys(keys).map { it.keyId })
+    }
+
+    @Test
+    fun `every algorithm with a JCA signature maps to one and no ML-DSA name has one`() {
+        val candidates = listOf("ES256", "ES384", "ES512", "RS256", "RS384", "RS512", "Ed25519", "EdDSA") +
+            MlDsaParameterSet.entries.map { it.wireName } + listOf("ML-DSA", "AES-256", "HMAC-SHA256", "")
+        for (algorithm in candidates.filter { KeystoreManager.hasJcaSignature(it) }) {
+            assertTrue(algorithm, KeystoreManager.jcaSignatureAlgorithm(algorithm).isNotEmpty())
+        }
+        for (set in MlDsaParameterSet.entries) {
+            assertFalse(set.wireName, KeystoreManager.hasJcaSignature(set.wireName))
+        }
+        assertFalse(KeystoreManager.hasJcaSignature("ML-DSA"))
+        assertTrue(KeystoreManager.hasJcaSignature("ES256"))
     }
 }
