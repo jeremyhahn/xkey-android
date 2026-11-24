@@ -303,6 +303,38 @@ class XKeyDatabaseMigrationTest {
     }
 
     /**
+     * MIGRATION_13_14 adds the OATH delete records and changes no existing
+     * table: an OATH credential written at 13 is still there, whole, and a
+     * deletion is recorded in the new table.
+     */
+    @Test
+    fun migration13To14KeepsOathCredentialsAndRecordsDeletions() {
+        createLegacyDatabase(13) { db ->
+            db.execSQL(
+                "INSERT INTO oath_credentials (oath_id, oath_type, algorithm, digits, period_seconds, counter, " +
+                    "issuer, account_name, secret_encrypted, source, remote_device_id, created_at, last_used_at, use_count) " +
+                    "VALUES ('oath-v13', 'HOTP', 'SHA1', 6, 30, 7, 'Acme', 'alice', X'0102030405', 'local', NULL, 1000, NULL, 3)"
+            )
+        }
+
+        withMigratedDatabase { db ->
+            val oath = db.oathCredentialDao()
+            val row = requireNotNull(oath.getByOathId("oath-v13"))
+            assertEquals("Acme", row.issuer)
+            assertEquals("alice", row.accountName)
+            assertEquals(7L, row.counter)
+            assertEquals(3, row.useCount)
+            assertEquals(listOf<Byte>(1, 2, 3, 4, 5), row.secretEncrypted.toList())
+            assertEquals(false, oath.isDeleted("oath-v13"))
+
+            oath.recordDeletion("oath-v13", 2000L)
+            oath.deleteByOathId("oath-v13")
+            assertNull(oath.getByOathId("oath-v13"))
+            assertEquals(true, oath.isDeleted("oath-v13"))
+        }
+    }
+
+    /**
      * MIGRATION_3_4 introduced the per-key sharing policy and had to decide
      * what the pre-existing boolean `shareable` flag meant. A key that was
      * shareable keeps working (ALL_PEERS); one that was not stays PRIVATE.
