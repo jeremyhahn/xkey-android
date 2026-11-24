@@ -667,6 +667,45 @@ class PasswordSyncTest {
     }
 
     @Test
+    fun `a peer copy without updated_at does not restore an entry the phone deleted`() = runTest {
+        storeLocal(id = "remote-1")
+        assertTrue(repository.delete("remote-1"))
+        now += MINUTE
+
+        val result = sync.mergeWithDetail(incoming(id = "remote-1", at = null))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), result.counts)
+        assertEquals(1, result.keptDeleted)
+        assertFalse(dao.rows.containsKey("remote-1"))
+    }
+
+    @Test
+    fun `a peer copy with a blank updated_at does not restore an entry the phone deleted`() = runTest {
+        storeLocal(id = "remote-1")
+        assertTrue(repository.delete("remote-1"))
+        now += MINUTE
+
+        val result = sync.mergeWithDetail(incoming(id = "remote-1", at = ""))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), result.counts)
+        assertEquals(1, result.keptDeleted)
+        assertFalse(dao.rows.containsKey("remote-1"))
+    }
+
+    @Test
+    fun `a clamped peer copy is held back by the deletion record and counted as kept deleted`() = runTest {
+        storeLocal(id = "remote-1")
+        assertTrue(repository.delete("remote-1"))
+        now += MINUTE
+
+        val result = sync.mergeWithDetail(incoming(id = "remote-1", at = iso(now + 365 * DAY)))
+
+        assertEquals(1, result.clamped)
+        assertEquals(1, result.keptDeleted)
+        assertFalse(dao.rows.containsKey("remote-1"))
+    }
+
+    @Test
     fun `a peer copy within the skew bound is compared as sent`() = runTest {
         storeLocal(id = "remote-1")
 

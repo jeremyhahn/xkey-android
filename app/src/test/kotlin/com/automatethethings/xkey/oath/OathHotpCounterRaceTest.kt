@@ -20,13 +20,17 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import java.net.URI
@@ -143,22 +147,207 @@ class OathHotpCounterRaceTest {
         assertEquals(7L, dao.row!!.counter)
     }
 
-    /** An android [Uri] answering what the importer reads, from [URI]. */
-    private fun jvmUri(uriString: String): Uri {
-        val uri = URI(uriString)
-        val params = uri.rawQuery.orEmpty().split("&").filter { it.isNotEmpty() }
-            .map { it.split("=", limit = 2) }
-            .associate { it[0] to URLDecoder.decode(it.getOrElse(1) { "" }, Charsets.UTF_8.name()) }
-        return mockk {
-            every { scheme } returns uri.scheme
-            every { host } returns uri.host
-            every { encodedPath } returns uri.rawPath
-            every { getQueryParameter(any()) } answers { params[firstArg()] }
-        }
-    }
-
     private companion object {
         const val ID = "phone-1:hotp"
         const val SECRET = "JBSWY3DPEHPK3PXP"
+    }
+}
+
+/** An android [Uri] answering what the importer reads, from [URI]. */
+private fun jvmUri(uriString: String): Uri {
+    val uri = URI(uriString)
+    val params = uri.rawQuery.orEmpty().split("&").filter { it.isNotEmpty() }
+        .map { it.split("=", limit = 2) }
+        .associate { it[0] to URLDecoder.decode(it.getOrElse(1) { "" }, Charsets.UTF_8.name()) }
+    return mockk {
+        every { scheme } returns uri.scheme
+        every { host } returns uri.host
+        every { encodedPath } returns uri.rawPath
+        every { getQueryParameter(any()) } answers { params[firstArg()] }
+    }
+}
+
+/**
+ * A phone deletion of an OATH credential and a sync merge of the same id
+ * never leave the credential stored, wherever one interrupts the other.
+ *
+ * The DAO keeps the table and the deletion records in memory. Each of its
+ * methods is one committed statement or one transaction, and [afterCall]
+ * runs after each, numbered from 1: there a test lands a phone deletion
+ * between two of the repository's steps, or ends the merge as a
+ * cancellation or process death would. Nothing runs inside a transaction.
+ */
+class OathSyncDeletionRaceTest {
+
+    private class DeletionFakeOathDao(delegate: OathCredentialDao = mockk()) : OathCredentialDao by delegate {
+        val rows = linkedMapOf<String, OathCredentialEntity>()
+        val deletions = linkedMapOf<String, Long>()
+        private var calls = 0
+
+        /** Run after each DAO call returns its result, with the call's number. */
+        var afterCall: (suspend (Int) -> Unit)? = null
+
+        private suspend fun <T> call(block: () -> T): T {
+            val result = block()
+            afterCall?.invoke(++calls)
+            return result
+        }
+
+        override suspend fun getByOathId(oathId: String): OathCredentialEntity? = call { rows[oathId] }
+
+        override suspend fun insertIfAbsent(credential: OathCredentialEntity): Long = call {
+            if (rows.containsKey(credential.oathId)) {
+                -1L
+            } else {
+                rows[credential.oathId] = credential.copy(id = rows.size + 1L)
+                rows.size.toLong()
+            }
+        }
+
+        override suspend fun updateSynced(oathId: String, counter: Long, issuer: String?, accountName: String): Int = call {
+            val current = rows[oathId]
+            if (current == null) {
+                0
+            } else {
+                rows[oathId] = current.copy(counter = maxOf(current.counter, counter), issuer = issuer, accountName = accountName)
+                1
+            }
+        }
+
+        override suspend fun isDeleted(oathId: String): Boolean = call { oathId in deletions }
+
+        override suspend fun deleteByOathId(oathId: String): Unit = call {
+            rows.remove(oathId)
+            Unit
+        }
+
+        override suspend fun recordDeletion(oathId: String, deletedAt: Long): Unit = call {
+            deletions[oathId] = deletedAt
+            Unit
+        }
+
+        /** One transaction: a deleted id's leftover row goes. Returns whether the id has a deletion record. */
+        suspend fun removeIfDeleted(oathId: String): Boolean = call {
+            if (oathId in deletions) rows.remove(oathId)
+            oathId in deletions
+        }
+
+        /** One transaction: a deleted id's leftover row goes, and nothing is added for it. */
+        suspend fun insertIfAbsentUnlessDeleted(credential: OathCredentialEntity): Long = call {
+            if (credential.oathId in deletions) {
+                rows.remove(credential.oathId)
+                KEPT_DELETED_IN_FAKE
+            } else if (rows.containsKey(credential.oathId)) {
+                -1L
+            } else {
+                rows[credential.oathId] = credential.copy(id = rows.size + 1L)
+                rows.size.toLong()
+            }
+        }
+
+        /** One transaction: the record and the delete land together. */
+        suspend fun deleteAndRecordDeletion(oathId: String, deletedAt: Long): Unit = call {
+            deletions[oathId] = deletedAt
+            rows.remove(oathId)
+            Unit
+        }
+
+        /** What the phone's delete leaves, applied directly, outside any merge step. */
+        fun phoneDeletes(oathId: String) {
+            deletions[oathId] = 1L
+            rows.remove(oathId)
+        }
+    }
+
+    private lateinit var dao: DeletionFakeOathDao
+    private lateinit var repository: OathRepository
+
+    @Before
+    fun setUp() {
+        dao = DeletionFakeOathDao()
+        val secretManager = mockk<OathSecretManager>()
+        every { secretManager.encryptSecret(any()) } answers { firstArg<ByteArray>().copyOf() }
+        every { secretManager.decryptSecret(any()) } answers { firstArg<ByteArray>().copyOf() }
+        mockkStatic(Uri::class)
+        every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
+        repository = OathRepository(dao, secretManager)
+    }
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
+
+    private suspend fun merge(): SyncMergeOutcome =
+        repository.upsertStructured(ID, "totp", "Example", "alice", SECRET)
+
+    @Test
+    fun `a phone deletion between the merge's steps leaves no row`() = runTest {
+        dao.afterCall = { n -> if (n == 1) dao.phoneDeletes(ID) }
+
+        assertEquals(SyncMergeOutcome.DELETED, merge())
+
+        assertFalse(dao.rows.containsKey(ID))
+    }
+
+    @Test
+    fun `a merge cancelled right after its insert leaves no deleted credential stored`() = runTest {
+        dao.afterCall = { n ->
+            if (n == 1) dao.phoneDeletes(ID)
+            if (n == 2) throw CancellationException("process death")
+        }
+
+        try {
+            merge()
+            fail("expected the merge to be cancelled")
+        } catch (e: CancellationException) {
+            // expected
+        }
+
+        assertTrue(ID in dao.deletions)
+        assertFalse("a deleted id is never stored", dao.rows.containsKey(ID))
+    }
+
+    @Test
+    fun `a row left beside its deletion record is removed by the next merge`() = runTest {
+        dao.rows[ID] = OathCredentialEntity(
+            id = 1,
+            oathId = ID,
+            oathType = "totp",
+            algorithm = "SHA1",
+            digits = 6,
+            periodSeconds = 30,
+            counter = 0,
+            issuer = "Example",
+            accountName = "alice",
+            secretEncrypted = byteArrayOf(1, 2, 3),
+            source = "local",
+            createdAt = 1L
+        )
+        dao.deletions[ID] = 1L
+
+        assertEquals(SyncMergeOutcome.DELETED, merge())
+
+        assertFalse(dao.rows.containsKey(ID))
+    }
+
+    @Test
+    fun `a delete cancelled after its first step leaves the record and the row together or neither`() = runTest {
+        assertEquals(SyncMergeOutcome.ADDED, merge())
+        dao.afterCall = { throw CancellationException("process death") }
+
+        try {
+            repository.deleteCredential(ID)
+        } catch (e: CancellationException) {
+            // expected
+        }
+
+        assertEquals("deleted means recorded and gone", ID in dao.deletions, !dao.rows.containsKey(ID))
+    }
+
+    private companion object {
+        const val ID = "desk-1:totp"
+        const val SECRET = "JBSWY3DPEHPK3PXP"
+        const val KEPT_DELETED_IN_FAKE = -2L
     }
 }
