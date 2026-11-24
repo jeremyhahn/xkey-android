@@ -23,6 +23,7 @@ import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.automatethethings.xkey.password.PasswordDeletionEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -205,6 +206,52 @@ class XKeyDatabaseMigrationTest {
     }
 
     /**
+     * MIGRATION_13_14 adds the password deletion records. Every entry written
+     * at 13 is kept as it was, none starts with a deletion record, and the new
+     * table takes and drops records.
+     */
+    @Test
+    fun migration13To14KeepsPasswordsAndStartsWithNoDeletionRecords() {
+        createLegacyDatabase(13) { db ->
+            insertRow(
+                db,
+                "passwords",
+                mapOf(
+                    "password_id" to "pw-13",
+                    "name" to "Kept",
+                    "username" to "user@example.com",
+                    "password_encrypted" to byteArrayOf(4, 5, 6),
+                    "source" to "local",
+                    "created_at" to 1_000L,
+                    "updated_at" to 2_000L,
+                    "expires_at" to "2030-01-01T00:00:00Z",
+                    "shared" to 1,
+                    "tenant_id" to "work"
+                )
+            )
+        }
+
+        withMigratedDatabase { db ->
+            val dao = db.passwordDao()
+            val kept = requireNotNull(dao.getByPasswordId("pw-13"))
+            assertEquals("Kept", kept.name)
+            assertEquals("user@example.com", kept.username)
+            assertEquals(1_000L, kept.createdAt)
+            assertEquals(2_000L, kept.updatedAt)
+            assertEquals("2030-01-01T00:00:00Z", kept.expiresAt)
+            assertTrue(kept.shared)
+            assertEquals("work", kept.tenantId)
+            assertTrue(kept.passwordEncrypted.contentEquals(byteArrayOf(4, 5, 6)))
+            assertNull("no entry starts with a deletion record", dao.getDeletedAt("pw-13"))
+
+            dao.recordDeletion(PasswordDeletionEntity("pw-gone", 3_000L))
+            assertEquals(3_000L, dao.getDeletedAt("pw-gone"))
+            assertEquals(1, dao.pruneDeletionsBefore(3_001L))
+            assertNull(dao.getDeletedAt("pw-gone"))
+        }
+    }
+
+    /**
      * MIGRATION_12_13 adds the keys table's policy revision. Every key
      * written at 12 starts at revision 0 with its policy kept, and from then
      * on every policy write moves the revision forward: the DAO's own
@@ -371,7 +418,8 @@ class XKeyDatabaseMigrationTest {
                 XKeyDatabase.MIGRATION_9_10,
                 XKeyDatabase.MIGRATION_10_11,
                 XKeyDatabase.MIGRATION_11_12,
-                XKeyDatabase.MIGRATION_12_13
+                XKeyDatabase.MIGRATION_12_13,
+                XKeyDatabase.MIGRATION_13_14
             )
             .build()
         try {
