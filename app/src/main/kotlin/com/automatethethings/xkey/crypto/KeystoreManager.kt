@@ -74,6 +74,14 @@ enum class KeySecurityLevel(val wire: String) {
 class KeyInfoUnavailableException(val alias: String, cause: Throwable?) :
     KeyStoreException("Cannot read the KeyInfo of $alias", cause)
 
+/**
+ * Removing a key's material failed: a Keystore entry that could not be
+ * deleted, a software key store that could not be read, or a removal that did
+ * not reach disk. The material may still be there, so a caller keeps the
+ * key's metadata and reports an error, never "deleted" or "no such key".
+ */
+class KeyDeletionException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
 /** A MAC and the algorithm that computed it ("HMAC-SHA256" or "HMAC-SHA512"). */
 class HmacResult(val mac: ByteArray, val algorithm: String)
 
@@ -714,12 +722,19 @@ class KeystoreManager(
      *
      * @param credentialId Base64-encoded credential ID.
      * @return true if the key was deleted, false if it didn't exist.
+     * @throws KeyDeletionException if removing it failed: its material may
+     *   still be there.
      */
     fun deleteKey(credentialId: String): Boolean {
         // Resolving here also means a key created in the general namespace is
         // actually removed; callers that deleted through the FIDO2-only alias
         // were silently leaking those entries.
-        val alias = resolveKeystoreAlias(credentialId) ?: return false
+        // An unreadable software key store resolves no alias, which is not
+        // "no key": the delete fails instead.
+        val alias = resolveKeystoreAlias(credentialId) ?: run {
+            requireSoftwareKeyStoreReadable()
+            return false
+        }
         // The alias resolved outside the gate; another delete may have
         // removed it since, so only a removal under the gate counts.
         if (!withAliasGate(alias) { removeAliasLocked(alias) }) return false
@@ -1222,18 +1237,37 @@ class KeystoreManager(
      * Removes the software Ed25519 key stored under [alias], if any. Call it
      * inside `withAliasGate(alias)`.
      *
-     * @return true only if a key was stored and its removal committed.
+     * @return true if a key was stored and its removal committed, false if
+     *   none is stored (or the device keeps no software Ed25519 keys).
+     * @throws KeyDeletionException if the store cannot be opened or read, so
+     *   a key may be in it, or the removal does not commit: the key is still
+     *   on disk, and that is never "no key".
      */
     private fun removeSoftwareEd25519Key(alias: String): Boolean {
         if (!softwareEd25519Supported()) return false
-        val prefs = try {
+        val stored = try {
+            val prefs = ed25519Prefs()
+            if (!prefs.contains(alias)) return false
+            prefs.edit().remove(alias).commit()
+        } catch (e: Exception) {
+            throw KeyDeletionException("The software key store could not be read to delete $alias", e)
+        }
+        if (!stored) throw KeyDeletionException("Deleting software key $alias did not reach disk")
+        return true
+    }
+
+    /**
+     * Throws [KeyDeletionException] if the software Ed25519 key store cannot
+     * be opened: a delete that found no key must not report the key absent
+     * when the store it would be in was unreadable.
+     */
+    private fun requireSoftwareKeyStoreReadable() {
+        if (!softwareEd25519Supported()) return
+        try {
             ed25519Prefs()
         } catch (e: Exception) {
-            // As in hasEd25519Key: an unreadable store holds no key we can find.
-            return false
+            throw KeyDeletionException("The software key store could not be read", e)
         }
-        if (!prefs.contains(alias)) return false
-        return prefs.edit().remove(alias).commit()
     }
 
     /**
@@ -1241,11 +1275,20 @@ class KeystoreManager(
      * Call it inside `withAliasGate(alias)`, so the existence checks and the
      * removals are one step against any other delete of the alias.
      *
-     * @return true if either existed and was removed.
+     * The one choke point of every [KeystoreManager] key delete: a removal
+     * that fails throws, so no caller reads it as an absent key and drops the
+     * key's metadata while its material stays.
+     *
+     * @return true if either existed and was removed, false if neither existed.
+     * @throws KeyDeletionException if the Keystore entry cannot be checked or
+     *   deleted, or the software key cannot be removed.
      */
     private fun removeAliasLocked(alias: String): Boolean {
-        val inKeystore = keyStore.containsAlias(alias)
-        if (inKeystore) keyStore.deleteEntry(alias)
+        val inKeystore = try {
+            keyStore.containsAlias(alias).also { if (it) keyStore.deleteEntry(alias) }
+        } catch (e: Exception) {
+            throw KeyDeletionException("Keystore entry $alias could not be deleted", e)
+        }
         val inSoftware = removeSoftwareEd25519Key(alias)
         return inKeystore || inSoftware
     }
@@ -1933,6 +1976,8 @@ class KeystoreManager(
      *
      * @param alias The Keystore alias to delete.
      * @return true if the key was deleted, false if it didn't exist.
+     * @throws KeyDeletionException if removing it failed: its material may
+     *   still be there.
      */
     fun deleteByAlias(alias: String): Boolean {
         // PIV slot keys are deleted through PivKeyManager with their row.
@@ -1956,6 +2001,8 @@ class KeystoreManager(
      *
      * @param keyId Key identifier.
      * @return true if the key was deleted, false if it did not exist.
+     * @throws KeyDeletionException if removing it failed: its material may
+     *   still be there.
      */
     fun deleteGeneralKey(keyId: String): Boolean {
         val alias = buildGeneralAlias(keyId)
@@ -1978,6 +2025,8 @@ class KeystoreManager(
      *
      * @param credentialId Credential identifier.
      * @return true if the entry was deleted, false if it did not exist.
+     * @throws KeyDeletionException if removing it failed: its material may
+     *   still be there.
      */
     fun deleteCredentialKey(credentialId: String): Boolean {
         val alias = credentialAlias(credentialId)

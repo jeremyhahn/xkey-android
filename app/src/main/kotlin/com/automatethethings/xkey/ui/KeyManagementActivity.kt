@@ -54,6 +54,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.crypto.KeyDeletionException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.storage.deleteKeyRow
@@ -1259,7 +1260,14 @@ class KeyManagementActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyManagementActivity))
+            try {
+                keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyManagementActivity))
+            } catch (e: KeyDeletionException) {
+                // The material may still be on disk: the row stays listed.
+                android.util.Log.e("KeyManagement", "Deleting key ${key.keyId} failed", e)
+                Snackbar.make(rootLayout, getString(R.string.key_delete_failed), Snackbar.LENGTH_LONG).show()
+                return@launch
+            }
             Snackbar.make(rootLayout, getString(R.string.key_deleted), Snackbar.LENGTH_SHORT).show()
         }
     }

@@ -159,6 +159,8 @@
     <string name="key_badge_system">System</string>
     <string name="key_badge_shared">Shared</string>
     <string name="key_deleted">Key deleted</string>
+    <string name="key_delete_failed">The key could not be deleted. It is still on this device.</string>
+    <string name="ca_reset_failed">The CA could not be reset. Its keys may still be on this device.</string>
 
     <!-- Key Context Menu -->
     <string name="key_menu_share_settings">Share Settings</string>

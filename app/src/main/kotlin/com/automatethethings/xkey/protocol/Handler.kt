@@ -1308,10 +1308,12 @@ class RequestHandler(
         // Keystore is touched, like every other key delete: a share of the key
         // pending at a transport is refused at admission. The ID as given is
         // revoked too when it differs.
-        val deleted = SharePermissionLedger.revoking(keyId) {
-            SharePermissionLedger.revoking(deleteParams.credentialId) {
-                keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
-                    if (removed) keyDao.deleteByKeyId(keyId)
+        val deleted = keyDeletionOrError(deleteParams.credentialId) {
+            SharePermissionLedger.revoking(keyId) {
+                SharePermissionLedger.revoking(deleteParams.credentialId) {
+                    keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
+                        if (removed) keyDao.deleteByKeyId(keyId)
+                    }
                 }
             }
         }
@@ -2397,20 +2399,26 @@ class RequestHandler(
         // finishes with it before it goes.
         val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
         val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
+        //
+        // A removal that fails throws KeyDeletionException before the row
+        // goes: the key's material may still be on disk, so the row stays and
+        // the request answers an error, never deleted=true.
         var materialRemoved = false
-        val rowsDeleted = keyIds.withKeyLock(keyLockId(canonicalId)) {
-            keyDao.deleteKeyAndMaterial(canonicalId) {
-                materialRemoved = when {
-                    canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
-                    softwareKeys.contains(canonicalId) -> {
-                        softwareKeys.delete(canonicalId)
-                        true
+        val rowsDeleted = keyDeletionOrError(keyId) {
+            keyIds.withKeyLock(keyLockId(canonicalId)) {
+                keyDao.deleteKeyAndMaterial(canonicalId) {
+                    materialRemoved = when {
+                        canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
+                        softwareKeys.contains(canonicalId) -> {
+                            softwareKeys.delete(canonicalId)
+                            true
+                        }
+                        // A canonical ID names its general key `xkey_key_k` first, as
+                        // this method always did; another alias only when it has none.
+                        else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
+                            .sortedByDescending { it == KeystoreManager.generalKeyAlias(canonicalId) }
+                            .any { deleteKeystoreAlias(canonicalId, it) }
                     }
-                    // A canonical ID names its general key `xkey_key_k` first, as
-                    // this method always did; another alias only when it has none.
-                    else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
-                        .sortedByDescending { it == KeystoreManager.generalKeyAlias(canonicalId) }
-                        .any { deleteKeystoreAlias(canonicalId, it) }
                 }
             }
         }
@@ -2431,6 +2439,20 @@ class RequestHandler(
             keystoreManager.deleteGeneralKey(keyId)
         } else {
             keystoreManager.deleteByAlias(alias)
+        }
+
+    /**
+     * Runs the delete [block] of key [keyId] and answers a removal that
+     * failed ([KeyDeletionException]: the key's material may still be on
+     * disk) as an INTERNAL_ERROR, so no delete request reads it as done or as
+     * a key that was never there.
+     */
+    private suspend fun <T> keyDeletionOrError(keyId: String, block: suspend () -> T): T =
+        try {
+            block()
+        } catch (e: com.automatethethings.xkey.crypto.KeyDeletionException) {
+            Log.e(TAG, "Deleting key $keyId failed; its metadata is kept", e)
+            throw ProtocolException("Failed to delete key: its material could not be removed", errorCode = ErrorCodes.INTERNAL_ERROR)
         }
 
     /**

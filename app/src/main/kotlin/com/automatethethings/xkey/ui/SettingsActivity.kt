@@ -2189,9 +2189,16 @@ class SettingsActivity : AppCompatActivity() {
             .setNegativeButton(getString(R.string.button_cancel), null)
             .setPositiveButton(getString(R.string.ca_reset)) { _, _ ->
                 lifecycleScope.launch {
-                    androidCA.reset()
+                    val reset = try {
+                        androidCA.reset()
+                        true
+                    } catch (e: com.automatethethings.xkey.crypto.KeyDeletionException) {
+                        // A CA private key may still be on the device: never "complete".
+                        false
+                    }
                     updateCAStatus()
-                    Snackbar.make(binding.root, "CA reset complete", Snackbar.LENGTH_SHORT).show()
+                    val message = if (reset) "CA reset complete" else getString(R.string.ca_reset_failed)
+                    Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG).show()
                 }
             }
             .show()

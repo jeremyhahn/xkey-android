@@ -43,7 +43,7 @@ class SoftwareKeyStoreDeleteFailureTest {
         File(material, "pinned").writeText("x")
         assertTrue(store.contains("k"))
 
-        assertThrows(Exception::class.java) { store.delete("k") }
+        assertThrows(KeyDeletionException::class.java) { store.delete("k") }
 
         assertTrue(store.contains("k"))
     }

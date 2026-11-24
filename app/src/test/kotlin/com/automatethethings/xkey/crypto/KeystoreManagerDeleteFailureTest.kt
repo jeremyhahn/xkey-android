@@ -34,6 +34,7 @@ import io.mockk.verify
 import java.security.KeyStore
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -76,7 +77,7 @@ class KeystoreManagerDeleteFailureTest {
     fun `a software Ed25519 removal that does not commit throws and is not audited`() {
         val manager = softwareEd25519Manager { failingCommitPrefs() }
 
-        assertThrows(Exception::class.java) { manager.deleteGeneralKey("ed") }
+        assertThrows(KeyDeletionException::class.java) { manager.deleteGeneralKey("ed") }
 
         verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
     }
@@ -85,14 +86,14 @@ class KeystoreManagerDeleteFailureTest {
     fun `deleteByAlias of a software Ed25519 key that does not commit throws`() {
         val manager = softwareEd25519Manager { failingCommitPrefs() }
 
-        assertThrows(Exception::class.java) { manager.deleteByAlias("xkey_key_ed") }
+        assertThrows(KeyDeletionException::class.java) { manager.deleteByAlias("xkey_key_ed") }
     }
 
     @Test
     fun `an unreadable software key store is a failure, not an absent key`() {
         val manager = softwareEd25519Manager { throw IllegalStateException("master key unreadable") }
 
-        assertThrows(Exception::class.java) { manager.deleteGeneralKey("ed") }
+        assertThrows(KeyDeletionException::class.java) { manager.deleteGeneralKey("ed") }
 
         verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
     }
@@ -111,6 +112,49 @@ class KeystoreManagerDeleteFailureTest {
         val outcome = runCatching { keyDao.deleteKeyRow(key, manager, softwareKeys) }
 
         assertTrue("a failed key removal must fail the delete, got $outcome", outcome.isFailure)
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+    }
+
+    @Test
+    fun `a Keystore entry that cannot be deleted is a deletion failure`() {
+        every { keyStore.containsAlias("xkey_key_hw") } returns true
+        every { keyStore.deleteEntry("xkey_key_hw") } throws java.security.KeyStoreException("busy")
+
+        assertThrows(KeyDeletionException::class.java) { keystoreManager.deleteGeneralKey("hw") }
+        assertThrows(KeyDeletionException::class.java) { keystoreManager.deleteByAlias("xkey_key_hw") }
+
+        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+    }
+
+    @Test
+    fun `deleteKey with an unreadable software key store fails instead of reporting no key`() {
+        val manager = softwareEd25519Manager { throw IllegalStateException("master key unreadable") }
+
+        assertThrows(KeyDeletionException::class.java) { manager.deleteKey("ed") }
+    }
+
+    @Test
+    fun `a key stored nowhere in a readable store is still absent`() {
+        val manager = softwareEd25519Manager { failingCommitPrefs() }
+
+        assertFalse(manager.deleteGeneralKey("none"))
+        assertFalse(manager.deleteByAlias("xkey_key_none"))
+        assertFalse(manager.deleteKey("none"))
+    }
+
+    @Test
+    fun `the phone delete keeps the row when the software key file stays`() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val softwareKeys = mockk<SoftwareKeyStore>()
+        every { softwareKeys.contains("sw") } returns true
+        every { softwareKeys.delete("sw") } throws KeyDeletionException("stays")
+        val key = mockk<KeyEntity>()
+        every { key.keyId } returns "sw"
+        every { key.source } returns "local"
+
+        assertThrows(KeyDeletionException::class.java) {
+            runBlocking { keyDao.deleteKeyRow(key, keystoreManager, softwareKeys) }
+        }
         coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
     }
 

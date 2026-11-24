@@ -178,7 +178,7 @@ class KeystoreManagerCredentialDeleteTest {
         every { prefs.edit() } returns editor
         val manager = softwareEd25519Manager(prefs)
 
-        assertThrows(Exception::class.java) { manager.deleteGeneralKey("ed") }
+        assertThrows(KeyDeletionException::class.java) { manager.deleteGeneralKey("ed") }
 
         verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
     }
