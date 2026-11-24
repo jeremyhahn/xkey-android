@@ -37,32 +37,50 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * The OATH list row on a narrow screen (a folding phone's outer display is
- * about 320dp wide) next to a long account name: the code must stay on one
- * line, unellipsized and inside the row, at the default font scale and at
- * the largest accessibility font scale. The issuer and account give way.
+ * The OATH list row has one shape at every width and font scale: the issuer
+ * and account as a small title at the top, the code on its own line below.
+ * With a long account name the title ellipsizes; the code stays on one line,
+ * unellipsized and inside the row, at a normal width, on a narrow screen and
+ * at the largest accessibility font scale.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], application = Application::class, qualifiers = "w320dp-h700dp")
+@Config(sdk = [34], application = Application::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class OathAdapterLayoutTest {
 
     @Test
-    fun `code stays whole beside a long account name at font scale 1`() {
-        assertCodeWhole(fontScale = 1.0f)
+    fun `code sits below a long account name at normal width`() {
+        val row = layoutRow(widthDp = 411, fontScale = 1.0f)
+        assertStacked(row)
+        assertCountdownBesideCode(row)
     }
 
     @Test
-    fun `code stays whole beside a long account name at font scale 2`() {
-        assertCodeWhole(fontScale = 2.0f)
+    fun `code sits below a long account name on a narrow screen`() {
+        assertStacked(layoutRow(widthDp = 280, fontScale = 1.0f))
     }
 
     @Test
-    fun `eight digit code stays whole at font scale 2`() {
-        assertCodeWhole(fontScale = 2.0f, code = "12345678")
+    fun `code sits below a long account name at font scale 2`() {
+        assertStacked(layoutRow(widthDp = 411, fontScale = 2.0f))
     }
 
-    private fun assertCodeWhole(fontScale: Float, code: String = "123456") {
+    @Test
+    fun `code sits below a long account name on a narrow screen at font scale 2`() {
+        assertStacked(layoutRow(widthDp = 280, fontScale = 2.0f))
+    }
+
+    @Test
+    fun `eight digit code stays whole on a narrow screen at font scale 2`() {
+        assertStacked(layoutRow(widthDp = 280, fontScale = 2.0f, code = "12345678"))
+    }
+
+    private class Row(val host: ViewGroup, val itemView: View, val code: String) {
+        fun <T : View> tagged(tag: String): T = itemView.findViewWithTag(tag)
+    }
+
+    private fun layoutRow(widthDp: Int, fontScale: Float, code: String = "123456"): Row {
+        RuntimeEnvironment.setQualifiers("w${widthDp}dp-h800dp")
         RuntimeEnvironment.setFontScale(fontScale)
         val context: Context = ContextThemeWrapper(
             ApplicationProvider.getApplicationContext<Context>(),
@@ -76,7 +94,7 @@ class OathAdapterLayoutTest {
         // The list pads each side by 12dp, so a row gets the screen width less 24dp.
         val density = context.resources.displayMetrics.density
         val screenWidthDp = context.resources.configuration.screenWidthDp
-        assertEquals(320, screenWidthDp)
+        assertEquals(widthDp, screenWidthDp)
         val rowWidth = ((screenWidthDp - 24) * density).toInt()
         val host = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         host.addView(holder.itemView)
@@ -85,36 +103,65 @@ class OathAdapterLayoutTest {
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
         host.layout(0, 0, host.measuredWidth, host.measuredHeight)
+        return Row(host, holder.itemView, code)
+    }
 
-        val codeView = holder.itemView.findViewWithTag<TextView>("code")
+    /** Title above, code below, code whole, title ellipsized. */
+    private fun assertStacked(row: Row) {
+        val codeView = row.tagged<TextView>("code")
+        val issuer = row.tagged<TextView>("issuer")
+        val account = row.tagged<TextView>("account")
         val text = codeView.text.toString()
-        assertEquals(OathAdapter.formatCode(code), text)
+        assertEquals(OathAdapter.formatCode(row.code), text)
+
+        val codeTop = topIn(codeView, row.host)
+        for (title in listOf(issuer, account)) {
+            val bottom = topIn(title, row.host) + title.height
+            assertTrue("${title.tag} ends at $bottom, below the code top $codeTop", codeTop >= bottom)
+        }
+
         val layout = codeView.layout
-        assertEquals("code wraps at font scale $fontScale", 1, layout.lineCount)
-        assertEquals("code ellipsized at font scale $fontScale", 0, layout.getEllipsisCount(0))
+        assertEquals("code wraps", 1, layout.lineCount)
+        assertEquals("code ellipsized", 0, layout.getEllipsisCount(0))
         val textRoom = codeView.measuredWidth - codeView.totalPaddingLeft - codeView.totalPaddingRight
         assertTrue(
-            "code needs ${codeView.paint.measureText(text)}px, has $textRoom px " +
-                "(view ${codeView.measuredWidth}/${codeView.width}, section " +
-                "${(codeView.parent as View).measuredWidth}, row ${host.width}, " +
-                "lines ${layout.lineCount}, layout width ${layout.width})",
+            "code needs ${codeView.paint.measureText(text)}px, has $textRoom px (row ${row.host.width})",
             codeView.paint.measureText(text) <= textRoom
         )
-        assertTrue(
-            "code line ${layout.getLineWidth(0)}px, has $textRoom px",
-            layout.getLineWidth(0) <= textRoom
-        )
-        assertInsideRow(codeView, host)
+        assertTrue("code line ${layout.getLineWidth(0)}px, has $textRoom px", layout.getLineWidth(0) <= textRoom)
+        assertInsideRow(codeView, row.host)
 
-        val account = holder.itemView.findViewWithTag<TextView>("account")
         val accountLayout = account.layout
-        val lastLine = accountLayout.lineCount - 1
+        assertEquals("account wraps", 1, accountLayout.lineCount)
+        assertTrue("the long account is not ellipsized", accountLayout.getEllipsisCount(0) > 0)
+        assertInsideRow(account, row.host)
+        assertInsideRow(issuer, row.host)
+    }
+
+    /** The countdown shares the code's line. */
+    private fun assertCountdownBesideCode(row: Row) {
+        val codeView = row.tagged<TextView>("code")
+        val countdown = row.tagged<TextView>("countdown")
+        val codeTop = topIn(codeView, row.host)
+        val countdownTop = topIn(countdown, row.host)
         assertTrue(
-            "the long account is neither ellipsized nor wrapped",
-            accountLayout.lineCount > 1 || accountLayout.getEllipsisCount(lastLine) > 0
+            "countdown $countdownTop..${countdownTop + countdown.height} is not on the code line " +
+                "$codeTop..${codeTop + codeView.height}",
+            countdownTop < codeTop + codeView.height && countdownTop + countdown.height > codeTop
         )
-        assertInsideRow(account, host)
-        assertInsideRow(holder.itemView.findViewWithTag<TextView>("issuer"), host)
+        assertEquals(1, countdown.layout.lineCount)
+        assertEquals(0, countdown.layout.getEllipsisCount(0))
+        assertInsideRow(countdown, row.host)
+    }
+
+    private fun topIn(view: View, host: ViewGroup): Int {
+        var top = 0
+        var current: View = view
+        while (current !== host) {
+            top += current.top
+            current = current.parent as View
+        }
+        return top
     }
 
     /** The view lies wholly within the row horizontally (no clipping by a parent). */
