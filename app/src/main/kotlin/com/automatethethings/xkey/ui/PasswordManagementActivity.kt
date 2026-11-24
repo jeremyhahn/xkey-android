@@ -32,6 +32,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -59,8 +60,14 @@ import java.util.UUID
  */
 class PasswordManagementActivity : AppCompatActivity() {
 
+    companion object {
+        /** Test seam: the repository a new activity uses instead of the app database's. */
+        @VisibleForTesting
+        internal var repositoryForTest: PasswordRepository? = null
+    }
+
     private val repository: PasswordRepository by lazy {
-        PasswordRepository(XKeyDatabase.getInstance(this).passwordDao())
+        repositoryForTest ?: PasswordRepository(XKeyDatabase.getInstance(this).passwordDao())
     }
 
     private val edits: PasswordEdits by lazy { PasswordEdits(repository) }
