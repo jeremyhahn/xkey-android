@@ -135,7 +135,7 @@ class LocalGenerateKeyRsaSizeHandlerTest {
         assertEquals(listOf<Int?>(null), forwarded.toList())
         assertEquals(2048, result!!.getInt("keySizeBits"))
         assertEquals(2048, stored.captured.keySizeBits)
-        assertEquals(2048, modulusBits(result.getString("publicKey")))
+        assertEquals(2048, modulusBits(result.getString("publicKeyDer")))
     }
 
     @Test
@@ -181,7 +181,7 @@ class LocalGenerateKeyRsaSizeHandlerTest {
         val result = response.optJSONObject("result")
         assertNotNull("RS256/$requested must succeed, got $response", result)
         assertEquals("the size must reach the key generator", listOf<Int?>(requested), forwarded.toList())
-        assertEquals(requested, modulusBits(result!!.getString("publicKey")))
+        assertEquals(requested, modulusBits(result!!.getString("publicKeyDer")))
         assertEquals(requested, result.getInt("keySizeBits"))
         assertTrue("the key must be stored", stored.isCaptured)
         assertEquals(keyId, stored.captured.keyId)
