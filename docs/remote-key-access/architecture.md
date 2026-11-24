@@ -1,29 +1,30 @@
 # Remote key access architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-13
-> As-built description of how xKey forwards `remote.*` requests to the desktop.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> How xKey sends `remote.*` requests to the paired desktop and matches the answers.
 
-## Message Types
+The phone sends `remote.*` requests to the desktop on the session the desktop
+opened. The desktop answers on the same session. Inbound plaintext goes
+through `BidirectionalMessageRouter.processMessage`: a message with `result`
+or `error` and no `method` is an answer to one of the phone's requests and is
+matched to it by id; anything else is a request for `RequestHandler`. Paths
+below are relative to `app/src/main/kotlin/com/automatethethings/xkey/`.
 
-### Remote Methods (forwarded to desktop)
+## Methods the phone sends
 
-Messages prefixed with `remote.*` are forwarded through the
-`BidirectionalMessageRouter` to the connected desktop client.
+`protocol/Messages.kt` names them in `MethodNames`. Each client lives in
+`remote/` and draws request ids from its own range.
 
-| Method | Description |
-|--------|-------------|
-| `remote.listKeys` | List keys on the desktop keychain |
-| `remote.sign` | Request signing from desktop key |
-| `remote.getPublicKey` | Get desktop public key |
-| `remote.attestDevice` | Request device attestation from desktop |
-| `remote.sharePublicKey` | Send a phone key's public half (and certificate) for the desktop to import |
-| `remote.shareSymmetric` | Send symmetric key material for the desktop to import (client only; see [key sharing](../key-sharing/architecture.md#sending-keys-to-the-paired-desktop)) |
-| `remote.importSharedKey` | Ask the desktop to export one of its keys to the phone |
-| `remote.oathAdd` | Store a phone OATH credential on the desktop (`RemoteOathClient.oathAdd`) |
-| `remote.oathGenerate` | Get the current code and expiry of a desktop-stored OATH credential (`RemoteOathClient.oathGenerate`) |
-| `remote.pivListSlots` | List the desktop's PIV slots (`backend` optional) |
-| `remote.pivGetCert` | Get the DER certificate in one desktop PIV slot |
-| `remote.pivSign` | Sign base64 `data` with one desktop PIV slot key |
+| Client | Id range from | Methods |
+|--------|---------------|---------|
+| `RemoteKeyClient` | 1,000,000 | `remote.listBackends`, `remote.listKeys`, `remote.getPublicKey`, `remote.getKeyInfo`, `remote.generateKey`, `remote.deleteKey`, `remote.sign`, `remote.verify`, `remote.encrypt`, `remote.decrypt`, `remote.deriveKey`, `remote.attestKey`, `remote.attestDevice`, `remote.pivListSlots`, `remote.pivGetCert`, `remote.pivSign` |
+| `RemoteSyncClient` | 2,000,000 | `remote.syncTrustStore`, `remote.syncOATH`, `remote.syncPasswords`, `remote.syncStatus` (see [store-sync](../store-sync/architecture.md)) |
+| `GattServer` enrollment | 3,000,000 | `remote.getTCGCSRIDevID`, `remote.activateCredential`, `remote.getAttestationQuote`, `remote.storeEnrollmentCerts` |
+| `RemoteBackupClient` | 4,000,000 | `remote.createBackup`, `remote.restoreBackup`, `remote.listBackups` (see [desktop-backup-store](../desktop-backup-store/architecture.md)) |
+| `RemoteOathClient` | 5,000,000 | `remote.oathAdd`, `remote.oathGenerate` |
+| `RemoteShareClient` | 6,000,000 | `remote.sharePublicKey`, `remote.shareSymmetric`, `remote.importSharedKey` (see [key sharing](../key-sharing/architecture.md#sending-keys-to-the-paired-desktop)) |
+
+`MethodNames` also defines `remote.syncAll`; no client sends it.
 
 The three sharing methods are sent by `remote/RemoteShareClient.kt`, with
 params and results as go-xkms `pkg/pairingproto` `RemoteSharePublicKey*`,
@@ -41,9 +42,8 @@ with a missing field or a wrong type is rejected.
 | `remote.oathAdd` | `{"credential": {name, issuer?, account_name?, secret (Base32), type ("totp"/"hotp"), algorithm?, digits?, period?, counter?}}` | `{success, credential_id, message?}` |
 | `remote.oathGenerate` | `{"credential_id"}` | `{code, expires_in?}` (seconds, TOTP only) |
 
-- Request IDs come from one counter shared by all `RemoteOathClient`
-  instances, starting above 5,000,000 (key 1M, sync 2M, enrollment 3M,
-  backup 4M).
+- Request ids come from one counter shared by all `RemoteOathClient`
+  instances, starting at 5,000,000.
 - The oathAdd body is built by hand so the secret never becomes a String;
   the caller's secret chars are zeroed once encoded and the body as soon as
   it is sent, before the reply is awaited.
@@ -57,8 +57,8 @@ with a missing field or a wrong type is rejected.
 
 ### Session binding
 
-Every outbound `remote.*` client (`RemoteKeyClient`, `RemoteSyncClient`,
-`RemoteBackupClient`, `RemoteOathClient`) is built from a `ConnectedDesktop`,
+The outbound clients (`RemoteKeyClient`, `RemoteSyncClient`,
+`RemoteBackupClient`, `RemoteOathClient`) are built from a `ConnectedDesktop`,
 never from a transport. `XKeyGattService.connectedDesktop()` is the only
 source; it asks BLE, then TCP, then USB.
 
@@ -127,49 +127,32 @@ no certificate), and its "sign test" action sends `remote.pivSign`. The section 
 `XKeyGattService.desktopSession`, which publishes the same client
 `remoteKeyClient()` returns: bound to the connection its peer was confirmed on.
 
-## BLE Protocol Communication Stack
+## Request and answer flow
 
 ```mermaid
 sequenceDiagram
-    participant Desktop
-    participant GATT as GattServer
-    participant FR as FragmentReassembler
-    participant NS as NoiseSession
+    participant UI as Screen or feature
+    participant C as Remote client
+    participant S as Session sender
+    participant T as GattServer / StreamPairingSession
     participant BMR as BidirectionalMessageRouter
-    participant RH as RequestHandler
-    participant KM as KeystoreManager
+    participant Desktop
 
-    Desktop->>GATT: BLE write (fragment bytes)
-    GATT->>FR: addFragment(data)
-    FR-->>GATT: Complete message (or null)
-
-    alt Complete message received
-        GATT->>NS: decrypt(ciphertext)
-        NS-->>GATT: plaintext JSON
-
-        GATT->>GATT: Parse Request from JSON
-
-        alt local.* method
-            GATT->>RH: handleRequest(request)
-            RH->>KM: cryptographic operation
-            KM-->>RH: result
-            RH-->>GATT: Response
-        else remote.* method
-            GATT->>BMR: routeRequest(request)
-            BMR-->>GATT: Forwarded response
-        else cosign.* method
-            GATT->>RH: handleCosignRequest(request)
-            RH-->>GATT: Response
-        end
-
-        GATT->>NS: encrypt(response JSON)
-        NS-->>GATT: ciphertext
-
-        GATT->>FR: fragment(ciphertext)
-        FR-->>GATT: List of fragment packets
-
-        loop Each fragment
-            GATT->>Desktop: BLE notify (fragment bytes)
-        end
+    UI->>C: e.g. listKeys(backend)
+    C->>BMR: registerPendingResponse(id)
+    C->>S: request JSON
+    S->>T: encrypt on the bound session
+    T->>Desktop: frames
+    Desktop->>T: frames
+    T->>BMR: processMessage(plaintext)
+    alt answer (result or error, no method)
+        BMR->>C: handleIncomingResponse completes the pending id
+        C-->>UI: typed result or ProtocolException
+    else request from the desktop
+        BMR->>BMR: RequestHandler.handleRawRequest
     end
 ```
+
+A client waits up to its request timeout for the answer: 30 seconds, or 60
+for `RemoteBackupClient`. When a session ends, `cancelAllPending` answers
+every waiting request with `INTERNAL_ERROR` "Connection lost".

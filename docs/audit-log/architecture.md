@@ -1,18 +1,20 @@
 # Audit log architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-23
-> As-built description of the `audit_logs` table in the xKey Room database
-> (`XKeyDatabase`, schema version 12).
+> **Status: REFERENCE** · Last verified: 2026-11-24
+> How the `audit_logs` table in the xKey Room database (`XKeyDatabase`,
+> schema version 13) is written, kept and shown.
 
-## Entity Details
+## The entity
 
 ### AuditLogEntity (`audit_logs`)
 
-Security event log with 65 operation types (`AuditOperationType`) covering key
-lifecycle, cryptographic operations, FIDO2 events, pairing and connection
-events, configuration, certificate operations, file/media operations, contact
-management, OATH, co-signing, PIN, PIV, passwords, backups and the audit log's
-own clearing and pruning.
+The phone's security event log. `AuditOperationType` has 65 values: key
+lifecycle and key use, FIDO2, pairing and connections (device attestation
+and enrollment included), settings and the trust store, biometric and policy
+denials, service start and stop, certificates, files and media, contacts,
+OATH, password and OATH sync, co-signing, PINs, PIV slots, password entries,
+desktop backups and the audit log's own clearing and pruning. `AuditLog.kt`
+holds the list.
 
 Key attestation is among the recorded events: every `local.attestKey` the
 phone answers writes one `KEY_ATTESTED` entry with the key id, label, type,
@@ -104,7 +106,7 @@ sync still runs and is audited. See [store-sync](../store-sync/architecture.md#a
 
 Trust store events: `TrustStoreRepository` records `TRUST_STORE_IMPORT` (subject, fingerprint, source: `manual`, `url:<url>`, `internal-ca`, ...) for each stored certificate and `TRUST_STORE_DELETE` (subject, fingerprint) for each removed one, `clearAll` included; duplicates and refused certificates record nothing.
 
-## Index Strategy
+## Indexes
 
 ### audit_logs
 
@@ -142,12 +144,14 @@ well as the text columns):
 
 ### Recent activity on the home screen (`MainActivity`)
 
-The Audit Log card on the home screen carries a Recent Activity section
-(`layoutRecentActivity`). `MainActivity.observeRecentActivity` collects
+The Audit Log card on the home screen (`cardAuditLog`) has a Recent
+Activity section (`layoutRecentActivity`, rows in `layoutRecentActivityRows`).
+`MainActivity.observeRecentActivity` collects `RecentActivityRows.observe`
+while the activity is resumed. That flow combines
 `AuditLogDao.observeRecent(RecentActivityRows.DEFAULT_LIMIT)` (5 entries,
-uses `index_audit_logs_timestamp`) while the activity is started and
-redraws the section on every change. Tapping the card opens the audit
-screen.
+read through `index_audit_logs_timestamp`), the stored key labels from
+`KeyDao.observeAll`, and a one-minute ticker, so the section redraws when an
+entry lands, a key is renamed, or a minute passes and the ages are out of date. Tapping the card opens the audit screen.
 
 `RecentActivityRows.build` (pure, JVM-tested in `RecentActivityRowsTest`)
 maps the entries to rows, newest first, at most the limit:

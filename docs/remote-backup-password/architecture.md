@@ -1,15 +1,15 @@
 # Remote backup password architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of the phone-initiated desktop backup and restore, which send the required backup password.
+> **Status: REFERENCE** · Last verified: 2026-11-24
+> The phone-initiated desktop backup and restore, which send the required backup password.
 
 ## Summary
 
 The phone can ask the paired desktop to create an encrypted backup of chosen
 stores (`remote.createBackup`) or to restore one (`remote.restoreBackup`), and
 lists the backups the desktop holds (`remote.listBackups`) before a restore.
-Create and restore carry a `password` field, which the desktop requires: the desktop
-derives the backup key from it and returns the encrypted envelope, which the
+Create and restore carry a `password` field, which the desktop requires. The
+desktop derives the backup key from it and returns the encrypted envelope, which the
 phone keeps in `BackupStore` as an opaque blob (see
 [desktop-backup-store](../desktop-backup-store/architecture.md)).
 
@@ -21,14 +21,16 @@ carries no password.
 
 ## Components
 
+Paths are relative to ``.
+
 | Class | File | Role |
 |-------|------|------|
-| `RemoteBackupClient` | `app/src/main/kotlin/com/automatethethings/xkey/remote/RemoteBackupClient.kt` | `createBackup`, `restoreBackup`, `listBackups`; `encodeRequest` builds the request bytes with the password; types `Include`, `CreateResult`, `RestoreItem`, `RestoreResult`, `BackupInfo` |
+| `RemoteBackupClient` | `remote/RemoteBackupClient.kt` | `createBackup`, `restoreBackup`, `listBackups`; `encodeRequest` builds the request bytes with the password; types `Include`, `CreateResult`, `RestoreItem`, `RestoreResult`, `BackupInfo` |
 | `RemoteBackupErrorCodes` | same file | The desktop's error codes for these replies |
 | `RemoteBackupException` | same file | Typed failures; `fromError` maps a reply code to one |
-| `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | `createDesktopBackup` and `restoreDesktopBackup` pick the active transport, call the client, and store or load the envelope in `BackupStore`; both zero the password. `listDesktopBackups` calls `listBackups` |
-| `DesktopBackupDialogs` | `app/src/main/kotlin/com/automatethethings/xkey/ui/DesktopBackupDialogs.kt` | The create and restore dialogs, opened from `MainActivity` |
-| `DesktopBackupForm` | `app/src/main/kotlin/com/automatethethings/xkey/ui/DesktopBackupForm.kt` | View-free form logic: `checkCreate`, `checkRestore`, `errorMessage`, `findLatest`, `listDesktop`, `listingNote`, `canRetry`, `itemLabel` |
+| `XKeyGattService` | `ble/XKeyGattService.kt` | `createDesktopBackup` and `restoreDesktopBackup` pick the active transport, call the client, and store or load the envelope in `BackupStore`; both zero the password. `listDesktopBackups` calls `listBackups` |
+| `DesktopBackupDialogs` | `ui/DesktopBackupDialogs.kt` | The create and restore dialogs, opened from `MainActivity` |
+| `DesktopBackupForm` | `ui/DesktopBackupForm.kt` | View-free form logic: `checkCreate`, `checkRestore`, `errorMessage`, `findLatest`, `listDesktop`, `listingNote`, `canRetry`, `itemLabel` |
 
 ## Wire methods
 
