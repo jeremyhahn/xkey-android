@@ -351,6 +351,30 @@ class DesktopBackupDialogsRestoreTest {
         coVerify(exactly = 0) { host.gatt.restoreDesktopBackup(any(), any()) }
     }
 
+    @Test
+    fun `the password array sent is zeroed once the call returns`() {
+        storedAndListed()
+        val sent = slot<CharArray>()
+        coEvery { host.gatt.restoreDesktopBackup(any(), capture(sent)) } returns result(success = true)
+
+        send("hunter22")
+
+        assertTrue("the dialogs must zero the copy they made", sent.captured.all { it == '\u0000' })
+    }
+
+    @Test
+    fun `the password array sent is zeroed when the call throws`() {
+        storedAndListed()
+        val sent = slot<CharArray>()
+        coEvery { host.gatt.restoreDesktopBackup(any(), capture(sent)) } throws
+            RemoteBackupException.WrongPasswordOrDamaged("cannot decrypt")
+
+        send("hunter22")
+
+        assertEquals(8, sent.captured.size)
+        assertTrue("the dialogs must zero the copy they made", sent.captured.all { it == '\u0000' })
+    }
+
     // --------------------------------------------------------------- helpers
 
     private fun stored(id: String?) {

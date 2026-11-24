@@ -306,6 +306,27 @@ class DesktopBackupDialogsCreateTest {
         coVerify(exactly = 0) { host.gatt.createDesktopBackup(any(), any()) }
     }
 
+    @Test
+    fun `the password array sent is zeroed once the call returns`() {
+        val sent = slot<CharArray>()
+        coEvery { host.gatt.createDesktopBackup(capture(sent), any()) } returns result()
+
+        send("hunter22")
+
+        assertTrue("the dialogs must zero the copy they made", sent.captured.all { it == '\u0000' })
+    }
+
+    @Test
+    fun `the password array sent is zeroed when the call throws`() {
+        val sent = slot<CharArray>()
+        coEvery { host.gatt.createDesktopBackup(capture(sent), any()) } throws IOException("link lost")
+
+        send("hunter22")
+
+        assertEquals(8, sent.captured.size)
+        assertTrue("the dialogs must zero the copy they made", sent.captured.all { it == '\u0000' })
+    }
+
     // --------------------------------------------------------------- helpers
 
     private fun openCreate(): AlertDialog {
