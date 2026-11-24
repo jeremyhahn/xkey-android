@@ -256,6 +256,23 @@ class PromptActivityTrackerTest {
         )
     }
 
+    /**
+     * A dialog answer awaited by hand settles only on its buttons, and a host
+     * destroyed under it leaves the caller waiting forever. Every such wait
+     * goes through the one host-bound choke point.
+     */
+    @Test
+    fun everyDialogAnswerWaitIsBoundToItsHost() {
+        val bypasses = mainSources()
+            .filter { it.name != "HostBoundDialog.kt" }
+            .filter {
+                val text = it.readText()
+                text.contains("suspendCancellableCoroutine") && text.contains("AlertDialog")
+            }
+            .map { "${it.name}: awaits a dialog answer outside awaitHostedAnswer" }
+        assertEquals("dialog waits not bound to their host", emptyList<String>(), bypasses)
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------

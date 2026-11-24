@@ -34,6 +34,7 @@ import com.automatethethings.xkey.settings.BiometricSettingsRepository
 import com.automatethethings.xkey.ui.MainActivity
 import com.automatethethings.xkey.ui.PromptActivityTracker
 import com.automatethethings.xkey.ui.PromptHost
+import com.automatethethings.xkey.ui.awaitHostedAnswer
 import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.tcp.TcpHsmServer
@@ -64,11 +65,8 @@ import com.automatethethings.xkey.ca.EnrolledDeviceRepository
 import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
 import com.automatethethings.xkey.truststore.IDevIDVerifier
 import com.automatethethings.xkey.truststore.TrustStoreRepository
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -1170,23 +1168,14 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             return false
         }
 
-        return withContext(Dispatchers.Main) {
-            suspendCancellableCoroutine { continuation ->
-                MaterialAlertDialogBuilder(activity)
-                    .setTitle(getString(R.string.pairing_dialog_title))
-                    .setMessage(message)
-                    .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ ->
-                        if (continuation.isActive) continuation.resume(true)
-                    }
-                    .setNegativeButton(getString(R.string.pairing_dialog_deny)) { _, _ ->
-                        if (continuation.isActive) continuation.resume(false)
-                    }
-                    .setOnCancelListener {
-                        if (continuation.isActive) continuation.resume(false)
-                    }
-                    .setCancelable(false)
-                    .show()
-            }
+        // Bound to the host: a host destroyed under the dialog is a refusal.
+        return awaitHostedAnswer(activity) { dialog, answer ->
+            dialog
+                .setTitle(getString(R.string.pairing_dialog_title))
+                .setMessage(message)
+                .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ -> answer(true) }
+                .setNegativeButton(getString(R.string.pairing_dialog_deny)) { _, _ -> answer(false) }
+                .setCancelable(false)
         }
     }
 }
