@@ -79,7 +79,7 @@ sequenceDiagram
   JSON, gets an error without one.
 - A `generation` that is negative, has a sign, a leading zero, a fraction, an
   exponent, or is above the uint64 range is treated as absent.
-- Refusals echo it too: `PAIRING_REQUIRED` (-32025), `PAIRING_REJECTED`
+- Refusals echo it too: `PAIRING_REQUIRED` (-32051), `PAIRING_REJECTED`
   (-32017), `METHOD_NOT_FOUND` (-32601) and `INTERNAL_ERROR` (-32603) from
   `BleClient`, and every handler error.
 - `RequestHandler.createErrorResponse(id, code, message)` takes no generation

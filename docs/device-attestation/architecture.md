@@ -95,7 +95,7 @@ sequenceDiagram
   not 32 bytes: `ErrorCodes.INVALID_PARAMS` (-32602).
 - No Noise session binding on the request's `CallerSession`, a phone-initiated
   session with no peer key, a device with no attestation chain, or a failed
-  signature: `ErrorCodes.ATTESTATION_FAILED` (-32023).
+  signature: `ErrorCodes.ATTESTATION_FAILED` (-32009).
 - The prompt is skipped when the policy does not require it
   (`NEVER`, or `PAIRED_DEVICES_SKIP` for a paired peer) or when the UV policy
   is `DISABLED`.
