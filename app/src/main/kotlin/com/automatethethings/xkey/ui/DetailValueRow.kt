@@ -16,6 +16,7 @@ package com.automatethethings.xkey.ui
 
 import android.content.Context
 import android.graphics.Typeface
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -23,7 +24,9 @@ import android.widget.TextView
 
 /**
  * A label / value row of the key details screen. A monospace value is an
- * identifier (a key ID, an attestation application ID).
+ * identifier (a key ID, an attestation application ID) and wraps to show
+ * whole; any other value takes at most two lines and ends in an ellipsis
+ * when it is longer.
  */
 internal object DetailValueRow {
 
@@ -66,9 +69,14 @@ internal object DetailValueRow {
             setTextColor(UIHelpers.resolveThemeColor(context, com.google.android.material.R.attr.colorOnSurface))
             typeface = if (isMonospace) Typeface.MONOSPACE else Typeface.DEFAULT_BOLD
             gravity = Gravity.END
-            maxLines = if (isMonospace) 1 else 2
             if (isMonospace) {
+                // An identifier is read and compared character by character:
+                // it wraps onto as many lines as it needs, never cut off.
                 textSize = 10f
+            } else {
+                // A cut-off label value shows that it is cut off.
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
             }
         }
         row.addView(valueView)
