@@ -318,6 +318,8 @@ class KeyShareAuditTest {
         assertEquals(PEER, entry.deviceId)
         assertTrue(entry.errorMessage!!.isNotBlank())
         assertNoKeyBytes(entry)
+        assertOneDenial(MethodNames.LOCAL_IMPORT_SHARED_KEY)
+        assertEquals("the failed export and the denial, nothing else: $entries", 2, entries.size)
     }
 
     /**
@@ -338,6 +340,8 @@ class KeyShareAuditTest {
         assertFalse(entry.success)
         assertEquals("signing", entry.keyType)
         assertEquals("public", JSONObject(entry.details!!).getString("format"))
+        assertOneDenial(MethodNames.LOCAL_IMPORT_SHARED_KEY)
+        assertEquals("the failed export and the denial, nothing else: $entries", 2, entries.size)
 
         entries.clear()
         coEvery { keyDao.getByKeyId(KEY_ID) } returns
@@ -987,11 +991,28 @@ class KeyShareAuditTest {
         return response.result!!
     }
 
+    /**
+     * The one entry of [type]. Any other entry may only be the POLICY_DENIED
+     * row the dispatcher writes for a refusal, which a refusal test pins
+     * with [assertOneDenial]; no other record may appear.
+     */
     private fun single(type: AuditOperationType): AuditLogEntity {
-        assertEquals("one entry expected: $entries", 1, entries.size)
-        val entry = entries.single()
-        assertEquals(type, entry.operationType)
-        return entry
+        val matching = entries.filter { it.operationType == type }
+        assertEquals("one $type entry expected: $entries", 1, matching.size)
+        val others = entries.filterNot { it.operationType == type }
+        assertTrue(
+            "no other record than a policy denial expected: $entries",
+            others.all { it.operationType == AuditOperationType.POLICY_DENIED }
+        )
+        return matching.single()
+    }
+
+    /** Exactly one POLICY_DENIED row, naming the caller's peer and [method]. */
+    private fun assertOneDenial(method: String) {
+        val denial = single(AuditOperationType.POLICY_DENIED)
+        assertFalse(denial.success)
+        assertEquals(PEER, denial.deviceId)
+        assertEquals(method, JSONObject(denial.details!!).getString("operation"))
     }
 
     /** Neither the material nor its encodings may appear in any field. */
