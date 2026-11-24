@@ -68,6 +68,19 @@ class OathChokePointsTest {
     }
 
     @Test
+    fun clipboardTimerIsArmedInOnePlace() {
+        assertEquals(
+            "SensitiveClipboard arms its timer outside scheduleCheck",
+            mapOf("ui/SensitiveClipboard.kt" to 1),
+            occurrences(Regex("""postDelayed\(""")).filterKeys { it == "ui/SensitiveClipboard.kt" }
+        )
+        assertTrue(
+            "SensitiveClipboard lost its one timer choke point",
+            sourceRoot.resolve("ui/SensitiveClipboard.kt").readText().contains("private fun scheduleCheck(")
+        )
+    }
+
+    @Test
     fun codesAreComputedOnlyAtTheirChokePoints() {
         val found = occurrences(Regex("""OathEngine\.generate"""))
         val allowed = setOf("oath/OathEngine.kt", "oath/OathCurrentCode.kt", "oath/OathRepository.kt")

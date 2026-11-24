@@ -29,8 +29,10 @@ import java.util.UUID
  *
  * - The time is counted on [clock], which keeps counting while the device
  *   sleeps: a copy left on the clipboard through a deep sleep is due as soon
- *   as the device wakes. The handler timer only wakes the check; whether a
- *   copy is due is always decided by [clock].
+ *   as the device wakes. The handler timer is armed for the time left on
+ *   [clock] at the copy and re-armed for the time left whenever the app
+ *   regains focus before the deadline; it only wakes the check, and whether
+ *   a copy is due is always decided by [clock].
  * - The clip is marked sensitive ([ClipDescription.EXTRA_IS_SENSITIVE], API
  *   33+), so the system clipboard preview does not show it.
  * - Each clip carries a random token in its description's extras. When the
@@ -59,8 +61,21 @@ internal object SensitiveClipboard {
     /** The deadline clock; counts time asleep. Replaced in tests. */
     internal var clock: MonotonicClock = MonotonicClock.SYSTEM
 
-    /** A copy whose clip is to be cleared once [clock] reaches [dueAt] (milliseconds, time asleep included). */
-    private class PendingClear(val token: String, val dueAt: Long)
+    /**
+     * A copy whose clip is to be cleared once [clock] reaches [dueAt]
+     * (milliseconds, time asleep included). [check] is created once per copy
+     * and posted on [handler] only by [scheduleCheck], so re-arming it never
+     * stacks timers.
+     */
+    private class PendingClear(
+        val token: String,
+        val dueAt: Long,
+        val clipboard: ClipboardManager,
+        val handler: Handler
+    ) {
+        lateinit var listener: ClipboardManager.OnPrimaryClipChangedListener
+        lateinit var check: Runnable
+    }
 
     /** Copies not yet cleared or given up; at most the latest copy, since a new copy replaces the clip. */
     private val pending = mutableListOf<PendingClear>()
@@ -85,32 +100,53 @@ internal object SensitiveClipboard {
         handler: Handler = mainHandler
     ) {
         val token = newToken()
-        val entry = PendingClear(token, clock.nowMillis() + clearAfterMs)
-        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+        val entry = PendingClear(token, clock.nowMillis() + clearAfterMs, clipboard, handler)
+        entry.listener = ClipboardManager.OnPrimaryClipChangedListener {
             val seen = tokenReader(clipboard)
             if (seen is TokenRead.Readable && seen.token != token) pending.remove(entry)
+        }
+        entry.check = Runnable {
+            when {
+                entry !in pending -> clipboard.removePrimaryClipChangedListener(entry.listener)
+                entry.dueAt <= clock.nowMillis() -> {
+                    clipboard.removePrimaryClipChangedListener(entry.listener)
+                    clearIfOwned(clipboard, entry)
+                }
+                // Woken before the sleep-inclusive deadline: wait for the time left.
+                else -> scheduleCheck(entry)
+            }
         }
         clipboard.setPrimaryClip(clip(label, text, token))
         // This clip replaced any earlier copy of ours: those can never match again.
         pending.clear()
         pending.add(entry)
-        clipboard.addPrimaryClipChangedListener(listener)
-        handler.postDelayed({
-            clipboard.removePrimaryClipChangedListener(listener)
-            if (entry in pending && entry.dueAt <= clock.nowMillis()) clearIfOwned(clipboard, entry)
-        }, clearAfterMs)
+        clipboard.addPrimaryClipChangedListener(entry.listener)
+        scheduleCheck(entry)
+    }
+
+    /**
+     * The only timer: cancels [entry]'s earlier check and posts it again for
+     * the time left until [PendingClear.dueAt] on [clock]. The timer only wakes
+     * the check; the check decides on [clock].
+     */
+    private fun scheduleCheck(entry: PendingClear) {
+        entry.handler.removeCallbacks(entry.check)
+        entry.handler.postDelayed(entry.check, (entry.dueAt - clock.nowMillis()).coerceAtLeast(0))
     }
 
     /**
      * Clear the copies whose time is up and whose clip the clipboard still
      * holds. Called only by [ClipboardFocusRetry], when any window of the app
      * gains focus: from Android 10 on that is when the app can read the
-     * clipboard again.
+     * clipboard again. A copy not yet due has its timer re-armed for the time
+     * left on [clock]: the uptime timer stops while the device sleeps, so
+     * after a sleep it would fire late.
      */
     fun retryPendingClears(clipboard: ClipboardManager) {
         val now = clock.nowMillis()
-        pending.filter { it.dueAt <= now }.forEach { entry ->
-            if (entry in pending) clearIfOwned(clipboard, entry)
+        pending.toList().forEach { entry ->
+            if (entry !in pending) return@forEach
+            if (entry.dueAt <= now) clearIfOwned(clipboard, entry) else scheduleCheck(entry)
         }
     }
 
