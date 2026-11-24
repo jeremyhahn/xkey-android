@@ -239,7 +239,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
         assertTrue("the row commit is not in the same unit", unitSource.indexOf("commit(", calls[0]) > calls[0])
         assertTrue("uncommitted material is not removed", unitSource.indexOf("deleteGeneralKey(", calls[0]) > calls[0])
 
-        val unitCall = Regex("""\.generateMlDsaKeyAndCommit\(""")
+        val unitCall = Regex("""(?<!fun <T> KeystoreManager)\.generateMlDsaKeyAndCommit\(""")
         val users = root.walk()
             .filter { it.extension == "kt" && unitCall.containsMatchIn(it.readText()) }
             .map { it.relativeTo(root).path }.sorted().toList()

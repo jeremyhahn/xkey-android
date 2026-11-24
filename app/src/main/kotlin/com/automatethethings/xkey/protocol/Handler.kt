@@ -55,6 +55,7 @@ import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
 import com.automatethethings.xkey.crypto.publicKeySizeBits
+import com.automatethethings.xkey.crypto.generateMlDsaKeyAndCommit
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -1688,37 +1689,46 @@ class RequestHandler(
         val keySizeBits = set.publicKeyBytes * 8
         // Generation and its row commit as one non-cancellable unit: a cancelled caller cannot leave a key without its row.
         val (publicKeyDer, level) = persistAudited(write = {
-            val publicKeyDer = generateMlDsaMaterial(genParams, set, backing, authDurationSeconds)
             try {
-                val level = generatedKeyLevel(
-                    genParams.keyId,
-                    read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
-                    discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
-                )
-                keyDao.insert(
-                    KeyEntity(
-                        keyId = genParams.keyId,
-                        keyType = genParams.keyType,
-                        algorithm = set.wireName,
-                        label = genParams.label,
-                        publicKeyDer = publicKeyDer,
-                        keySizeBits = keySizeBits,
-                        strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
-                        biometricRequired = genParams.requireUserVerification,
-                        authDurationSeconds = authDurationSeconds,
-                        shareable = genParams.shareable,
-                        sharingPolicy = if (genParams.shareable) {
-                            SharingPolicyType.ALL_PEERS
-                        } else {
-                            SharingPolicyType.PRIVATE
-                        },
-                        source = "remote_ble"
+                keystoreManager.generateMlDsaKeyAndCommit(
+                    keyId = genParams.keyId,
+                    set = set,
+                    backing = backing,
+                    authDurationSeconds = authDurationSeconds,
+                    preferStrongBox = genParams.preferStrongBox
+                ) { publicKeyDer ->
+                    val level = generatedKeyLevel(
+                        genParams.keyId,
+                        read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
+                        discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
                     )
+                    keyDao.insert(
+                        KeyEntity(
+                            keyId = genParams.keyId,
+                            keyType = genParams.keyType,
+                            algorithm = set.wireName,
+                            label = genParams.label,
+                            publicKeyDer = publicKeyDer,
+                            keySizeBits = keySizeBits,
+                            strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
+                            biometricRequired = genParams.requireUserVerification,
+                            authDurationSeconds = authDurationSeconds,
+                            shareable = genParams.shareable,
+                            sharingPolicy = if (genParams.shareable) {
+                                SharingPolicyType.ALL_PEERS
+                            } else {
+                                SharingPolicyType.PRIVATE
+                            },
+                            source = "remote_ble"
+                        )
+                    )
+                    publicKeyDer to level
+                }
+            } catch (e: com.automatethethings.xkey.crypto.UnsupportedAlgorithmException) {
+                throw ProtocolException(
+                    "This device does not make ${set.wireName} keys in hardware",
+                    errorCode = ErrorCodes.FEATURE_UNAVAILABLE
                 )
-                publicKeyDer to level
-            } catch (e: Throwable) {
-                discardUnrecordedMlDsaKey(genParams.keyId)
-                throw e
             }
         }, record = {
             Log.i(TAG, "Generated key: ${genParams.keyId}, algo=${set.wireName}, backing=${backing.wire}")
@@ -1732,43 +1742,6 @@ class RequestHandler(
             level = level
         )
         return Response.success(request.id, result.toJson())
-    }
-
-    /**
-     * Makes the ML-DSA key material for [genParams] on the IO dispatcher;
-     * material a failed generation may have written is removed. Called only
-     * inside [createMlDsaKey]'s cancellation-safe unit.
-     */
-    private suspend fun generateMlDsaMaterial(
-        genParams: LocalGenerateKeyParams,
-        set: com.automatethethings.xkey.crypto.MlDsaParameterSet,
-        backing: com.automatethethings.xkey.crypto.PqcBacking,
-        authDurationSeconds: Int
-    ): ByteArray =
-        try {
-            withContext(Dispatchers.IO) {
-                keystoreManager.generateMlDsaKey(
-                    keyId = genParams.keyId,
-                    set = set,
-                    backing = backing,
-                    authDurationSeconds = authDurationSeconds,
-                    preferStrongBox = genParams.preferStrongBox
-                )
-            }
-        } catch (e: com.automatethethings.xkey.crypto.UnsupportedAlgorithmException) {
-            throw ProtocolException(
-                "This device does not make ${set.wireName} keys in hardware",
-                errorCode = ErrorCodes.FEATURE_UNAVAILABLE
-            )
-        } catch (e: Throwable) {
-            discardUnrecordedMlDsaKey(genParams.keyId)
-            throw e
-        }
-
-    /** Removes the key under [keyId]'s general alias after its row was not committed; best effort. */
-    private fun discardUnrecordedMlDsaKey(keyId: String) {
-        runCatching { keystoreManager.deleteGeneralKey(keyId) }
-            .onFailure { Log.w(TAG, "Could not remove unrecorded ML-DSA key $keyId: ${it.message}") }
     }
 
     /**

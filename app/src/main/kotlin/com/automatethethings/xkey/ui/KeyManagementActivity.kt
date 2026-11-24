@@ -59,6 +59,7 @@ import com.automatethethings.xkey.crypto.MlDsaParameterSet
 import com.automatethethings.xkey.crypto.PqcBacking
 import com.automatethethings.xkey.crypto.PqcHardware
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.crypto.generateMlDsaKeyAndCommit
 import com.automatethethings.xkey.crypto.publicKeySizeBits
 import com.automatethethings.xkey.storage.deleteKeyRow
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
@@ -1782,7 +1783,8 @@ class KeyManagementActivity : AppCompatActivity() {
 
 /**
  * Makes the ML-DSA [set] key [keyId] for the key screen and stores the row
- * [row] builds from its public key.
+ * [row] builds from its public key, as one unit closing the screen cannot
+ * interrupt; a key whose row is not stored is removed.
  *
  * @return the SubjectPublicKeyInfo DER.
  */
@@ -1794,10 +1796,8 @@ internal suspend fun createMlDsaKeyRow(
     backing: PqcBacking,
     authDurationSeconds: Int,
     row: (ByteArray) -> KeyEntity
-): ByteArray {
-    val publicKeyDer = withContext(Dispatchers.IO) {
-        keystoreManager.generateMlDsaKey(keyId, set, backing, authDurationSeconds)
+): ByteArray =
+    keystoreManager.generateMlDsaKeyAndCommit(keyId, set, backing, authDurationSeconds) { publicKeyDer ->
+        keyDao.insert(row(publicKeyDer))
+        publicKeyDer
     }
-    keyDao.insert(row(publicKeyDer))
-    return publicKeyDer
-}
