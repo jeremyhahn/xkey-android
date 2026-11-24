@@ -677,7 +677,8 @@ class RequestHandler(
      */
     private suspend fun auditPolicyDenied(method: String, e: ProtocolException) {
         try {
-            val peer = currentPeerPublicKeyHex()
+            // A refusal is recorded only against the peer of this request's session.
+            val peer = backupAuditPeer()?.publicKeyHex ?: return
             AuditLogger.logPolicyDenied(
                 deviceId = peer,
                 deviceName = auditPeerName(peer),
