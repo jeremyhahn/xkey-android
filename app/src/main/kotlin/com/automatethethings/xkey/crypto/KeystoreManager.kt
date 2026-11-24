@@ -2036,6 +2036,15 @@ class KeystoreManager(
     fun pqcSoftwareKeyExists(keyId: String): Boolean = pqcStore.contains(buildGeneralAlias(keyId))
 
     /**
+     * Whether [keyId] has live key material: a Keystore (or software Ed25519)
+     * alias [resolveKeystoreAlias] finds, or a software ML-DSA record under
+     * its general alias. [resolveKeystoreAlias] stays Keystore-only, since
+     * its callers pass the alias to the Keystore.
+     */
+    fun keyMaterialExists(keyId: String): Boolean =
+        resolveKeystoreAlias(keyId) != null || pqcSoftwareKeyExists(keyId)
+
+    /**
      * Whether [keyId] is a software ML-DSA key sealed with a user-authentication
      * policy, so its signer must authenticate the user first whatever the
      * request asks. A record that does not open counts as requiring it.

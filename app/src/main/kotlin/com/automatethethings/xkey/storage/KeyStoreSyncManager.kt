@@ -200,7 +200,8 @@ class KeyStoreSyncManager(
     }
 
     /**
-     * Removes keys table entries for local keys whose Keystore entries no longer exist.
+     * Removes keys table entries for local keys whose key material no longer
+     * exists ([KeystoreManager.keyMaterialExists]).
      *
      * Only removes entries with local sources (not "xkmsd" remote references).
      * A PIV slot alias listed by an earlier sync is removed as well, because
@@ -216,7 +217,8 @@ class KeyStoreSyncManager(
             // Classify by the resolved alias, never the logical id: a general
             // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
             // a raw PIV slot alias row never resolves and so is removed here.
-            if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
+            // A software ML-DSA key has no Keystore alias; its record counts.
+            if (!keystoreManager.keyMaterialExists(key.keyId)) {
                 SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
                 removed++
                 Log.d(TAG, "Removed stale key entry: ${key.keyId}")

@@ -70,6 +70,10 @@ class KeyStoreSyncManagerTest {
 
         keystoreManager = mockk(relaxed = true)
         every { keystoreManager.resolveKeystoreAlias(any()) } answers { firstArg() }
+        // No software ML-DSA keys here: live material is a resolving alias.
+        every { keystoreManager.keyMaterialExists(any()) } answers {
+            keystoreManager.resolveKeystoreAlias(firstArg()) != null
+        }
         credentialDao = mockk(relaxed = true)
         coEvery { credentialDao.getAll() } returns emptyList()
         keyDao = mockk(relaxed = true)
