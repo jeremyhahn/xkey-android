@@ -243,9 +243,7 @@ class BleClientCallbackTest {
         verify(exactly = 0) { h.scanner.stopScan(any<ScanCallback>()) }
     }
 
-    // -----------------------------------------------------------------
     // The GATT callback
-    // -----------------------------------------------------------------
 
     /**
      * The client writes exactly one descriptor, but the stack reports every

@@ -452,7 +452,7 @@ class NoiseHandshakeTest {
      * Documents the transport's ordering requirement. The counter is derived
      * from a local monotonic nonce with no replay window, so a frame that
      * arrives out of order cannot be decrypted. A failed frame leaves the
-     * receive counter where it was (#236), so the frames then decrypt in
+     * receive counter where it was, so the frames then decrypt in
      * their sending order.
      */
     @Test

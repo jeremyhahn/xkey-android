@@ -196,8 +196,7 @@ class TcpHsmServer(
                 input = socket.getInputStream(),
                 output = socket.getOutputStream().let { outputStreamForTest?.invoke(it) ?: it },
                 noiseSession = noiseSession,
-                // Each accepted socket is its own connection, so its approval
-                // is its own (#134).
+                // Each accepted socket is its own connection with its own approval.
                 connectionId = "tcp:${UUID.randomUUID()}",
                 isActive = { serverScope?.isActive == true && !socket.isClosed },
                 onConnected = { _state.value = TcpHsmState.Connected(remote) },

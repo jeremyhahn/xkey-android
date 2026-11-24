@@ -52,7 +52,7 @@ import org.junit.runner.RunWith
 
 /**
  * The real SAS confirmation dialog of a session the phone opens from
- * [DeviceDetailActivity] (#137).
+ * [DeviceDetailActivity].
  *
  * The JVM tests drive BleClient with a recording callback; these drive the
  * activity's own callback: the dialog shows the transcript's SAS and the

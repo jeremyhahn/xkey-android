@@ -42,8 +42,8 @@ import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 
 /**
- * The latest CCCD write decides a send that waits for notifications
- * (#63): every interleaving of up to three CCCD writes with the
+ * The latest CCCD write decides a send that waits for notifications:
+ * every interleaving of up to three CCCD writes with the
  * identity frame, whose acknowledgement is the response, and a disconnect
  * at the points where one can change the outcome.
  *
@@ -73,10 +73,7 @@ class GattServerCccdOrderTest(private val row: String) {
         private const val MTU = 247
         private const val TIMEOUT_MS = 5_000L
 
-        // The notification-ready wait this test gives the server. The
-        // tracked scope holds its timer: it expires only when a row moves
-        // the scope's clock past it, so what happens before was not caused
-        // by the wait expiring, however slow the runner (#252).
+        // The notification-ready wait; its timer expires only when the scope's clock passes it.
         private const val NOTIFICATION_READY_TIMEOUT_MS = 600L
 
         private val ENABLE = byteArrayOf(0x01, 0x00)

@@ -112,9 +112,7 @@ class OathFlowTest {
         Intents.release()
     }
 
-    // ---------------------------------------------------------------
     // HOTP rendering
-    // ---------------------------------------------------------------
 
     /** The hero badges count the two OATH types independently. */
     @Test

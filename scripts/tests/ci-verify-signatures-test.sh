@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
-# Tests scripts/ci-verify-signatures.sh, the commit signature check that
-# .github/workflows/signatures.yml runs from the base checkout, against
-# offline git fixtures in a temp dir: a bare "origin" holding the base on
-# main and the pull request head only under refs/pull/<n>/head (as a fork's
-# head is), and a clone of it standing for the base checkout.
-#
-# Cases: a fork head, a head moved after the event, a missing base object,
-# a missing head object, a signer registry present only on the head, an
-# unsigned commit, and a push to main. Every case also asserts that no file
-# from the pull request head ran: the head ships its own
-# scripts/ci-verify-signatures.sh that would write a marker file.
-#
-# SCRIPT=<path> runs the cases against another script (a deliberately
-# broken copy must fail them). Needs bash, git and ssh-keygen; offline.
+# Tests scripts/ci-verify-signatures.sh against offline git fixtures; no head file may run. SCRIPT=<path> tests another copy.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -55,8 +42,7 @@ commit() {
 # unpushed: a commit object that exists only in the work repo.
 unpushed() { git -C "$T/w" commit-tree -m "never pushed" "$(git -C "$T/w" write-tree)"; }
 
-# setup <with-registry|no-registry>: a fresh origin whose main is the base;
-# sets BASE.
+# setup <with-registry|no-registry>: a fresh origin whose main is the base; sets BASE.
 setup() {
   rm -rf "$T/o" "$T/w" "$T/ck" "$MARKER"
   git init -q --bare -b main "$T/o"

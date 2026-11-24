@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test code-review-test runner-select-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test ci-verify-signatures-test release-check
+	reaper-test revert-red-main-test code-review-test runner-select-test ci-tier-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test ci-verify-signatures-test release-check
 
 .DEFAULT_GOAL := help
 
@@ -119,7 +119,7 @@ lint: android-lint ## Android lint on the debug variant (the repository's own ga
 # of lint: CI's lint-gates job runs `make lint-gates` in parallel with the
 # image job's `make lint`, so nothing runs twice there. It runs without -k,
 # so the first failing gate ends the run.
-lint-gates: actionlint closing-links-test revert-red-main-test runner-select-test reaper-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test deps-check-test code-review-test ci-verify-signatures-test ## actionlint over .github/workflows + the signature check's fixtures + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures + the image builds' apt retries + the toolchain image's Gradle download retry
+lint-gates: actionlint closing-links-test revert-red-main-test runner-select-test ci-tier-test reaper-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test deps-check-test code-review-test ci-verify-signatures-test ## actionlint over .github/workflows + the signature check's fixtures + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures + the image builds' apt retries + the toolchain image's Gradle download retry
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -145,6 +145,9 @@ code-review-test: ## Test code-review.yml's twin filter, owner-resume freshness 
 
 runner-select-test: ## Test ci.yml's runner selection step against a stubbed Actions API, and that preflight and the review scope job reach self-hosted runners only on the events they accept (bash + jq, offline)
 	./scripts/runner-select-test.sh
+
+ci-tier-test: ## Test that integration runs on every PR but a docs-only one, and that CI Gate, read from ci.yml, passes a skipped integration only on a docs-only PR (bash, offline)
+	./scripts/ci-tier-test.sh
 
 ci-verify-signatures-test: ## Test scripts/ci-verify-signatures.sh (signatures.yml's check) against offline git fixtures: fork head, head moved after the event, missing base or head object, registry only on the head; no file from the head ever runs (bash + git + ssh-keygen, offline)
 	./scripts/tests/ci-verify-signatures-test.sh

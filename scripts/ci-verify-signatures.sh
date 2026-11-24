@@ -1,20 +1,5 @@
 #!/usr/bin/env bash
-# Verify commit signatures against .github/allowed_signers: the check that
-# .github/workflows/signatures.yml runs from the base checkout (never from
-# the pull request head, whose files are untrusted input and are never
-# checked out or run here).
-#
-# Environment (set by the workflow step):
-#   EVENT     pull_request_target or push
-#   PR        the pull request number (pull_request_target)
-#   BASE_SHA  the pull request's base SHA (pull_request_target)
-#   HEAD_SHA  the event's head SHA (the pull request head, or the pushed SHA)
-#   BEFORE    the push's before SHA (push)
-#   REPO, API, GH_TOKEN  the forge API, read only for commits GitHub made
-#   RUNNER_TEMP          where the registry copy goes (default /tmp)
-#
-# Tested by scripts/tests/ci-verify-signatures-test.sh (make lint-gates).
-# -e as the workflow's default run shell (bash -e -o pipefail) had it inline.
+# Verify commit signatures against .github/allowed_signers, from the base checkout (env: EVENT, PR, BASE_SHA, HEAD_SHA, BEFORE, REPO, API, GH_TOKEN, RUNNER_TEMP).
 set -euo pipefail
 zero() { [ -z "$1" ] || printf '%s' "$1" | grep -qE '^0+$'; }
 isrev() { ! zero "$1" && git cat-file -e "$1^{commit}" 2>/dev/null; }
@@ -81,8 +66,7 @@ for c in $COMMITS; do
     fi
     continue
   fi
-  # grep reads the whole object (no -q), so under pipefail a long
-  # commit message never ends the pipeline with SIGPIPE.
+  # No -q: grep reads the whole object so pipefail never sees SIGPIPE.
   if ! git cat-file commit "$c" | grep '^gpgsig' >/dev/null; then
     echo "FAIL ${c:0:12} unsigned, committer $(shown "$ce"): $s"; BAD=1; continue
   fi

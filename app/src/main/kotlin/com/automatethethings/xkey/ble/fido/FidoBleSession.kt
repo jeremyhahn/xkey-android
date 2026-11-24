@@ -145,8 +145,7 @@ class FidoBleSession(
                     sendMessage(listOf(FidoBle.errorFrame(FidoBle.ERR_BUSY)))
                     return
                 }
-                // ATOMIC: the body runs even when CANCEL lands before the
-                // coroutine starts, so that request still gets its answer.
+                // ATOMIC: the body runs even if CANCEL lands first, so the request is answered.
                 request.job = scope.launch(start = CoroutineStart.ATOMIC) { run(request, data) }
             }
             else -> sendMessage(listOf(FidoBle.errorFrame(FidoBle.ERR_INVALID_CMD)))
@@ -168,10 +167,7 @@ class FidoBleSession(
                     )
                 }
             }
-            // The one way a request ends: exactly one MSG response, whether
-            // the authenticator answered, the client cancelled (even before
-            // the request started) or the authenticator failed. Only a closed
-            // session answers nothing.
+            // Exactly one MSG response per request, unless the session is closed.
             val response = try {
                 handler.handle(data) { waitingForUser.set(true) }
             } catch (e: CancellationException) {

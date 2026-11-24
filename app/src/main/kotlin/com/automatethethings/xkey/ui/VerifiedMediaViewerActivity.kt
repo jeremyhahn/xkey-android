@@ -334,7 +334,7 @@ class VerifiedMediaViewerActivity : AppCompatActivity() {
      */
     private fun readSignatureViaTempFile(uri: Uri, mimeType: String): ContentAuthenticityData? {
         val extension = when {
-            mimeType.contains("jpeg") || mimeType.contains("jpg") -> ".jpg"
+            MediaHasher.isJpeg(mimeType) -> ".jpg"
             mimeType.contains("png") -> ".png"
             mimeType.contains("webp") -> ".webp"
             mimeType.contains("mp4") -> ".mp4"

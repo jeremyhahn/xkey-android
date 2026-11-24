@@ -350,9 +350,7 @@ class GattServerDrainingTest {
         verify(exactly = 0) { gatt.notifyCharacteristicChanged(device, status, any(), any<ByteArray>()) }
     }
 
-    // ---------------------------------------------------------------------
-    // Finding 2: the CCCD read comes from the connection that took the write
-    // ---------------------------------------------------------------------
+    // The CCCD read comes from the connection that took the write
 
     /**
      * A CCCD enable written before the consumer has published its connection

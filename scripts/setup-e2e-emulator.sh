@@ -1,16 +1,5 @@
 #!/bin/bash
-# setup-e2e-emulator.sh — Prepare an Android emulator for xKey E2E tests
-#
-# Prerequisites:
-#   - API 34+ emulator running with Google APIs system image
-#   - Chrome installed on the emulator
-#   - ADB connected to the emulator
-#
-# Usage:
-#   ./scripts/setup-e2e-emulator.sh [--build] [--run]
-#
-#   --build  Build debug + test APKs before installing
-#   --run    Run the E2E tests after setup
+# Prepare an API 34+ Google APIs emulator with Chrome for xKey E2E tests. Usage: ./scripts/setup-e2e-emulator.sh [--build] [--run]
 
 set -euo pipefail
 

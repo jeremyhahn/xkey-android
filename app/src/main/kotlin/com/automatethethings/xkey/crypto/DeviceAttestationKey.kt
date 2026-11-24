@@ -95,10 +95,12 @@ class DeviceAttestationKey {
         val existing = keyStore.getCertificateChain(ALIAS)
             ?.filterIsInstance<X509Certificate>()
             .orEmpty()
-        if (existing.isEmpty()) {
+        if (existing.size < 2) {
             // An alias with no chain is a half-created entry from an interrupted
-            // generation; there is nothing to preserve, so replace it.
-            Log.w(TAG, "Device attestation key alias held no certificate chain; regenerating")
+            // generation, and one with a lone self-signed certificate is a key no
+            // mint would have kept (attestedChain refuses it): neither is a DAK,
+            // so there is nothing to preserve. Replace it.
+            Log.w(TAG, "Device attestation key alias held no attestation chain; regenerating")
             keyStore.deleteEntry(ALIAS)
             return generate()
         }

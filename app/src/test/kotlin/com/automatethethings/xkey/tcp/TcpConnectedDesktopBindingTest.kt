@@ -62,7 +62,7 @@ import org.junit.Test
  * A [ConnectedDesktop] from [TcpHsmServer.connectedDesktop] sends only on
  * the connection whose handshake authenticated its key: once desktop A has
  * gone and paired desktop B holds the server, a send captured for A fails
- * and B receives nothing (ruling 554, #141).
+ * and B receives nothing.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class TcpConnectedDesktopBindingTest {

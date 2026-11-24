@@ -103,12 +103,7 @@ class AttestationHelper(private val context: Context) {
             var deviceFingerprint: String? = null
 
             if (certChainArray != null && certChainArray.length() > 0) {
-                // The device identity is the per-device ATTESTED KEY (#93), not
-                // the attestation ROOT — the old SHA-256-of-the-last-cert value,
-                // which was a Google Hardware Attestation Root shared by every
-                // handset under it (a vendor identity, not a device one). Hash
-                // the leaf (index 0) SubjectPublicKeyInfo, matching go-xkms
-                // sha256(cert.RawSubjectPublicKeyInfo). See docs/12 and #93.
+                // Device identity: SHA-256 of the leaf certificate's SubjectPublicKeyInfo, matching go-xkms; see docs/12.
                 val leafCertB64 = certChainArray.getString(0)
                 val leafCertBytes = Base64.decode(leafCertB64, BASE64_FLAGS)
                 deviceFingerprint = AttestedKeyFingerprint.hexOf(leafCertBytes)

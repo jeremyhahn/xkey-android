@@ -1,21 +1,4 @@
-# scans-template: v1.0.0 (customized) — the scheduled scans on main.
-# The hermetic CI Gate (owner ruling 742 (1)) moves every check that fails on
-# the state of the world rather than on a change here, and only here: `make
-# deps-check`, `make security` (trivy fs, vuln and secret) and `trivy image`
-# of the integration image. It runs on a schedule and on workflow_dispatch on
-# main, never on a pull_request or a push, and it is not the workflow named
-# CI, so a finding never reads as a red main and never blocks a PR. A finding
-# opens or updates ONE issue, found by its fixed title (SCAN_ISSUE_TITLE),
-# with the run link, and fails this job, so the Actions run is red; a run
-# with no finding closes that issue.
-#
-# CUSTOMIZE (xkey-android), against the template:
-#   - Each check is its own step, named and run as it was in ci.yml's image
-#     job; the images are built as that job builds them (the Alpine and
-#     Debian package index sums, `make -s it-image`, `make docker-build`, the
-#     images by ID). trivy image fetches the Java DB first with a 30-minute
-#     timeout (Fleet Ops 11-13).
-#   - No bump half: a Gradle project has no `make deps-bump`.
+# Scheduled scans on main (deps-check, trivy fs and image); a finding opens or updates one issue and fails the run, a clean run closes it.
 
 name: Scheduled Scans
 
@@ -90,9 +73,7 @@ jobs:
             echo "IT_IMAGE=$it"
           } >> "$GITHUB_ENV"
 
-      # The checks that left ci.yml (ruling 742 (1)), each its own step with
-      # ci.yml's command, so a red one names itself. Each runs to the end
-      # (continue-on-error); "Collect the findings" lists the failed ones.
+      # Each check is its own step so a red one names itself; collect the findings at the end.
       - name: make deps-check
         id: deps
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
@@ -141,10 +122,7 @@ jobs:
           echo "scans: ${fired:-none fired}"
           echo "fired=$fired" >> "$GITHUB_OUTPUT"
 
-      # ONE issue for the findings, found by its exact title among the open
-      # issues (pull requests excluded): created when none is open, its body
-      # replaced when one is, and closed with a comment by the first run with
-      # no finding.
+      # One findings issue, found by exact title: created, updated, or closed by a clean run.
       - name: Open, update or close the scan issue
         if: ${{ !cancelled() && steps.scans.outcome == 'success' }}
         env:

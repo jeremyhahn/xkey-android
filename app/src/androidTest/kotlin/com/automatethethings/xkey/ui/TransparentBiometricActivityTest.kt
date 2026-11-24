@@ -87,9 +87,7 @@ class TransparentBiometricActivityTest {
     /** Queue keys this test holds ACTIVE ([newRequestId]), let go in tearDown. */
     private val held = mutableListOf<String>()
 
-    // ---------------------------------------------------------------
     // createIntent() factory
-    // ---------------------------------------------------------------
 
     @Test
     fun createIntent_appliesTheDocumentedDefaults() {

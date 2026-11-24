@@ -1,26 +1,5 @@
 #!/usr/bin/env bash
-# Build a release APK signed with a throwaway key and check its signature.
-#
-# Makes a one-day PKCS12 keystore under build/release-check/ (ignored by
-# /build/*, deleted on exit), runs assembleRelease with the four XKEY_*
-# variables app/build.gradle.kts reads, then requires `apksigner verify
-# --print-certs` to report exactly one signer whose certificate SHA-256
-# digest is the throwaway certificate's.
-#
-# Environment:
-#   GRADLE              the Gradle command (default ./gradlew)
-#   APKSIGNER           apksigner to run (default: $ANDROID_HOME, else
-#                       $ANDROID_SDK_ROOT, /build-tools/$ANDROID_BUILD_TOOLS)
-#   RELEASE_CHECK_OMIT  one XKEY_* name to leave unset. The check then
-#                       fails either way: exit 1 ("release build refused")
-#                       when assembleRelease exits nonzero with the release
-#                       guard's "Release signing is not configured." message,
-#                       the expected outcome; exit 2 ("GUARD BROKEN") when
-#                       Gradle succeeds (an unsigned APK) or fails for any
-#                       other reason
-#
-# Exit status: 0 the release verifies; 1 the check failed (or, with
-# RELEASE_CHECK_OMIT, the guard refused the build as it must); 2 GUARD BROKEN.
+# Build a release APK with a throwaway key and verify its single signer. Exit 0 ok, 1 failed (or guard refused under RELEASE_CHECK_OMIT), 2 guard broken.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

@@ -94,7 +94,7 @@ reads `keys.sign_count` and `credential_metadata.sign_count`, and writes
 max + 1 to both before it returns the value. Stores that disagree continue
 from the larger value. The counter advances before signing, so a failed
 signature leaves a gap. A relying party accepts a gap, and no value is ever
-signed twice. The handler no longer writes `sign_count` itself.
+signed twice. The handler does not write `sign_count` itself.
 
 ## Main flow
 
