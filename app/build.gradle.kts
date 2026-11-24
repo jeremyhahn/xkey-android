@@ -53,7 +53,8 @@ android {
         versionCode = 1
         versionName = "1.0.0"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Keeps a real phone awake and animation-free for the run and restores it after.
+        testInstrumentationRunner = "com.automatethethings.xkey.XKeyTestRunner"
     }
 
     signingConfigs {
@@ -118,6 +119,9 @@ android {
     // Robolectric tests start the real activities, which read the app's
     // layouts and strings.
     testOptions {
+        // A second layer under XKeyTestRunner: AGP passes --no-window-animation to
+        // am instrument.
+        animationsDisabled = true
         unitTests {
             isIncludeAndroidResources = true
         }

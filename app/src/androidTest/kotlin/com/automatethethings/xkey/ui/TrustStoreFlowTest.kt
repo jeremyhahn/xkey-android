@@ -298,7 +298,7 @@ class TrustStoreFlowTest {
         onView(withText(R.string.trust_store_delete_title))
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
-        onView(withText(R.string.trust_store_delete)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.trust_store_delete)
 
         awaitCondition("Confirming a long-press delete must remove the certificate") {
             !runBlocking { repository.hasCertificate(validFingerprint) }
@@ -320,7 +320,7 @@ class TrustStoreFlowTest {
         val position = rowPositionOf(scenario, expiredFingerprint, EXPIRED_CN)
 
         longClickRecyclerItem(scenario, position)
-        onView(withText(R.string.trust_store_delete)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.trust_store_delete)
 
         awaitCondition("The orphaned metadata row must be cleared") {
             runBlocking { repository.getCertificate(expiredFingerprint) } == null
@@ -363,7 +363,7 @@ class TrustStoreFlowTest {
         val before = certificateCount()
 
         clickTextInTree(scenario, BOOTSTRAP_BUTTON)
-        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button1))
 
         assertShownTextInTree(scenario, MISSING_URL_MESSAGE)
         assertEquals(before, certificateCount())

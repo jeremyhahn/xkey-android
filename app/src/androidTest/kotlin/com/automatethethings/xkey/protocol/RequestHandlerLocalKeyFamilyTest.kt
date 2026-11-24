@@ -681,10 +681,12 @@ class RequestHandlerLocalKeyFamilyTest {
     }
 
     /**
-     * A credential `k` exists, then general keys named `k` are generated: the
-     * result and the stored row report each general key's own level, not the
-     * credential's. The credential's KeyInfo read fails, so a lookup that
-     * resolved to xkey_credential_k would turn the call into an error.
+     * A credential `k` exists: local.generateKey refuses `k` with KEY_EXISTS,
+     * because it refuses an ID any key store holds, the credential Keystore
+     * namespace included (docs/plans/144.md, #271). No general key is made and
+     * the credential is left in place. A general key on a non-colliding id
+     * still reports its own level while every credential KeyInfo read fails,
+     * so a lookup that resolved to an xkey_credential_ alias would be an error.
      */
     @Test
     fun generateKeyReportsTheGeneralKeyLevelWhenACredentialSharesItsId() {
@@ -702,39 +704,61 @@ class RequestHandlerLocalKeyFamilyTest {
             Pair(KeyTypes.SIGNING, "ES256")
         ).forEach { (keyType, algorithm) ->
             val keyId = "collide-${algorithm.lowercase()}-$runId"
+            val freeKeyId = "nocollide-${algorithm.lowercase()}-$runId"
             createdKeyIds.add(keyId)
+            createdKeyIds.add(freeKeyId)
             runBlocking { keystoreManager.generateKey(keyId, requireBiometric = false, requireStrongBox = false) }
+            val real = keystoreManager.keyInfoReader
             try {
-                val real = keystoreManager.keyInfoReader
                 keystoreManager.keyInfoReader = { alias, key ->
-                    if (alias == "xkey_credential_$keyId") {
+                    if (alias.startsWith("xkey_credential_")) {
                         throw java.security.spec.InvalidKeySpecException("credential KeyInfo unreadable")
                     }
                     real(alias, key)
                 }
-                val request = Request(
-                    nextRequestId.getAndIncrement(),
-                    "local.generateKey",
-                    JSONObject()
-                        .put("keyId", keyId)
-                        .put("keyType", keyType)
-                        .put("algorithm", algorithm)
-                        .put("requireUserVerification", false)
-                        .put("preferStrongBox", false)
-                )
-                val result = runBlocking { collidingHandler.handleRequest(request) }.ok()
-                keystoreManager.keyInfoReader = real
 
-                val level = keystoreManager.generalKeySecurityLevel(keyId)
+                val refused = runBlocking {
+                    collidingHandler.handleRequest(generateKeyRequest(keyId, keyType, algorithm))
+                }
+                assertEquals(
+                    algorithm + ": " + refused.toJsonString(),
+                    ErrorCodes.KEY_EXISTS,
+                    refused.errorCode()
+                )
+                assertNull(
+                    "$algorithm: no general key is created for a credential's id",
+                    keystoreManager.generalKeySecurityLevel(keyId)
+                )
+                assertTrue(
+                    "$algorithm: the credential must still be present",
+                    keystoreManager.keyExists(keyId)
+                )
+
+                val result = runBlocking {
+                    collidingHandler.handleRequest(generateKeyRequest(freeKeyId, keyType, algorithm))
+                }.ok()
+                val level = keystoreManager.generalKeySecurityLevel(freeKeyId)
                     ?: throw AssertionError("$algorithm: the general key must have a level")
                 assertEquals(algorithm, level.wire, result.getString("securityLevel"))
                 assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
-                assertFalse(algorithm, storedKey(keyId).strongBoxBacked)
+                assertFalse(algorithm, storedKey(freeKeyId).strongBoxBacked)
             } finally {
+                keystoreManager.keyInfoReader = real
                 keystoreManager.deleteKey(keyId)
             }
         }
     }
+
+    private fun generateKeyRequest(keyId: String, keyType: String, algorithm: String) = Request(
+        nextRequestId.getAndIncrement(),
+        "local.generateKey",
+        JSONObject()
+            .put("keyId", keyId)
+            .put("keyType", keyType)
+            .put("algorithm", algorithm)
+            .put("requireUserVerification", false)
+            .put("preferStrongBox", false)
+    )
 
     /**
      * A generated key whose KeyInfo cannot be read is an error: nothing is
