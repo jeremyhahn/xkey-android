@@ -16,6 +16,7 @@ package com.automatethethings.xkey.sync
 
 import android.content.Context
 import android.net.Uri
+import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathSecretManager
@@ -27,6 +28,7 @@ import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.test.runTest
 import org.json.JSONArray
 import org.json.JSONObject
@@ -72,6 +74,11 @@ class SyncEngineMergeOathTest {
         mockkStatic(Uri::class)
         every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
 
+        // Every add, a synced one included, writes a created row from the
+        // repository; the logger is not initialized on the JVM.
+        mockkObject(AuditLogger)
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
+
         engine = SyncEngine(mockk<Context>())
     }
 
@@ -110,6 +117,7 @@ class SyncEngineMergeOathTest {
         assertEquals(1, inserted.size)
         assertNull(inserted[0].issuer)
         assertEquals("host:user", inserted[0].accountName)
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), null, "host:user", "TOTP") }
     }
 
     @Test

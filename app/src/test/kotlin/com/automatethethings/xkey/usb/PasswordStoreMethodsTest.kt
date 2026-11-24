@@ -25,6 +25,7 @@ import com.automatethethings.xkey.password.PasswordPatch
 import com.automatethethings.xkey.password.PasswordRecord
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordVault
+import com.automatethethings.xkey.pin.FakeLockoutClock
 import com.automatethethings.xkey.password.PasswordVaultFactorRecord
 import com.automatethethings.xkey.password.PasswordVaultFactorStore
 import com.automatethethings.xkey.password.PasswordVaultFactorsUnreadableException
@@ -216,7 +217,7 @@ class PasswordStoreMethodsTest {
                 update(salt)
                 digest(passphrase.toByteArray(Charsets.UTF_8))
             }
-        })
+        }, clock = FakeLockoutClock())
         repository = PasswordRepository(dao, cipher)
         methods = PasswordStoreMethods(repository, vault, clock = { createdAt })
     }
