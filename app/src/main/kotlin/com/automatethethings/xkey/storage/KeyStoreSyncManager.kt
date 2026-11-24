@@ -367,7 +367,9 @@ class KeyStoreSyncManager(
  * [SharePermissionLedger] revoke of the row's key ID ([deleteKeyAndMaterial]).
  *
  * The row's ID names exactly one key, and only its material is removed: the
- * software key of that ID if [softwareKeys] holds one, else the Keystore
+ * software ML-DSA record of that ID if one is live
+ * ([KeystoreManager.pqcSoftwareKeyExists]), else the software key of that ID
+ * if [softwareKeys] holds one, else the Keystore
  * entry [KeyStoreSyncManager] discovers under that ID. Never
  * [KeystoreManager.resolveKeystoreAlias], which reads `xkey_key_a` as the
  * alias of hardware key `a`: software key `xkey_key_a` and hardware key `a`
@@ -381,7 +383,10 @@ suspend fun KeyDao.deleteKeyRow(
     softwareKeys: SoftwareKeyStore
 ): Int = deleteKeyAndMaterial(key.keyId) {
     if (key.source == "xkmsd") return@deleteKeyAndMaterial
-    if (softwareKeys.contains(key.keyId)) {
+    if (keystoreManager.pqcSoftwareKeyExists(key.keyId)) {
+        // A software ML-DSA key: its sealed record, which no Keystore alias holds.
+        keystoreManager.deleteGeneralKey(key.keyId)
+    } else if (softwareKeys.contains(key.keyId)) {
         softwareKeys.delete(key.keyId)
     } else {
         KeyStoreSyncManager.keystoreAliasesOf(key.keyId).firstOrNull { keystoreManager.deleteByAlias(it) }
