@@ -36,12 +36,13 @@ object MediaHasher {
     /**
      * [hashCanonical] over the content at [uri]. The mime type comes from the
      * resolver, so a JPEG is recognised whether it arrived as a file or a
-     * document URI.
+     * document URI; content that starts like a JPEG ([isJpeg]) is one
+     * whatever the resolver says.
      */
     fun hashCanonicalUri(contentResolver: ContentResolver, uri: Uri): String {
         val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        return hashCanonical(bytes, contentResolver.getType(uri))
+        return hashCanonical(bytes, sniffedType(bytes, contentResolver.getType(uri)))
     }
 
     fun hashUri(contentResolver: ContentResolver, uri: Uri): String {
@@ -76,8 +77,12 @@ object MediaHasher {
 
     /** The bytes [hashCanonical] covers. Exposed for tests and diagnostics. */
     fun canonicalContent(data: ByteArray, mimeType: String?): ByteArray {
-        return if (isJpeg(mimeType, head = data)) jpegWithoutMetadata(data) else data
+        return if (isJpeg(mimeType)) jpegWithoutMetadata(data) else data
     }
+
+    /** [mimeType], or the JPEG type when [isJpeg] says [data] is a JPEG by its first bytes. */
+    private fun sniffedType(data: ByteArray, mimeType: String?): String? =
+        if (isJpeg(mimeType, head = data)) JPEG_MIME_TYPE else mimeType
 
     /** The type a file [isJpeg] says is a JPEG is hashed and signed as. */
     const val JPEG_MIME_TYPE = "image/jpeg"
@@ -168,7 +173,7 @@ object MediaHasher {
         return source == SignatureSource.SIDECAR && storedContentHash == hashBytes(data)
     }
 
-    /** [contentHashMatches] over the content at [uri], typed by the resolver. */
+    /** [contentHashMatches] over the content at [uri], typed by the resolver or by its JPEG bytes. */
     fun contentHashMatchesUri(
         contentResolver: ContentResolver,
         uri: Uri,
@@ -177,7 +182,7 @@ object MediaHasher {
     ): Boolean {
         val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        return contentHashMatches(storedContentHash, bytes, contentResolver.getType(uri), source)
+        return contentHashMatches(storedContentHash, bytes, sniffedType(bytes, contentResolver.getType(uri)), source)
     }
 
     /**
