@@ -980,6 +980,28 @@ object CoseAlgorithms {
         }
     }
 
+    /** RSA modulus sizes the Android Keystore generates (TEE; StrongBox guarantees 2048 only). */
+    val RSA_KEY_SIZES: List<Int> = listOf(2048, 3072, 4096)
+
+    /** True for the RSA signature algorithms, whose modulus a request may choose. */
+    fun isRsa(algorithm: Int): Boolean = algorithm == RS256 || algorithm == RS384 || algorithm == RS512
+
+    /**
+     * The key size [algorithm] fixes, or its default modulus for RSA: curve
+     * size for EC, key length for AES, digest length for HMAC. Null when the
+     * algorithm has no size a request can name (EdDSA, unknown).
+     */
+    fun nominalKeySizeBits(algorithm: Int): Int? = when (algorithm) {
+        ES256, ES384, ES512, RS256, RS384, RS512 -> getKeySizeBits(algorithm)
+        A128GCM -> 128
+        A192GCM -> 192
+        A256GCM -> 256
+        HMAC_256 -> 256
+        HMAC_384 -> 384
+        HMAC_512 -> 512
+        else -> null
+    }
+
     /**
      * Returns the curve name for an EC algorithm.
      */
@@ -1210,9 +1232,61 @@ data class LocalGenerateKeyParams(
     val userId: String? = null,
     val userName: String? = null,
     val userDisplayName: String? = null,
-    val isDiscoverable: Boolean = false
+    val isDiscoverable: Boolean = false,
+    /**
+     * The key size the caller asked for, or null when it named none (absent
+     * or 0). RSA takes its modulus from it; any other algorithm accepts only
+     * its own size.
+     */
+    val keySizeBits: Int? = null
 ) {
+    /** The size the key is generated at: [keySizeBits], else the algorithm's own. */
+    fun resolvedKeySizeBits(): Int? = keySizeBits ?: CoseAlgorithms.nominalKeySizeBits(algorithm)
+
     companion object {
+        /**
+         * Reads `keySizeBits` and refuses a size the phone would not make
+         * exactly: an RSA size outside [CoseAlgorithms.RSA_KEY_SIZES], or any
+         * other algorithm's size that is not its own.
+         */
+        private fun keySizeBitsOf(params: JSONObject, algorithm: Int): Int? {
+            if (!params.has("keySizeBits") || params.isNull("keySizeBits")) return null
+            val raw = params.get("keySizeBits")
+            // A whole number in Int range only: Number.toInt() would truncate
+            // 2048.9 and wrap 4294969344 to 2048.
+            val bits = (raw as? Number)?.let { exactInt(it.toString()) }
+                ?: (raw as? String)?.trim()?.toIntOrNull()
+                ?: throw ProtocolException("'keySizeBits' must be an integer", errorCode = ErrorCodes.INVALID_PARAMS)
+            if (bits == 0) return null
+            val name = runCatching { CoseAlgorithms.getAlgorithmName(algorithm) }.getOrDefault(algorithm.toString())
+            if (CoseAlgorithms.isRsa(algorithm)) {
+                if (bits !in CoseAlgorithms.RSA_KEY_SIZES) {
+                    throw ProtocolException(
+                        "Unsupported RSA key size $bits; supported: ${CoseAlgorithms.RSA_KEY_SIZES.joinToString()}",
+                        errorCode = ErrorCodes.INVALID_PARAMS
+                    )
+                }
+                return bits
+            }
+            val own = CoseAlgorithms.nominalKeySizeBits(algorithm)
+            if (own != null && bits != own) {
+                throw ProtocolException(
+                    "$name keys are $own bits; keySizeBits $bits cannot be made",
+                    errorCode = ErrorCodes.INVALID_PARAMS
+                )
+            }
+            return bits
+        }
+
+        /** [text] as an Int when it is a whole number in Int range, else null. */
+        private fun exactInt(text: String): Int? = try {
+            java.math.BigDecimal(text).intValueExact()
+        } catch (_: NumberFormatException) {
+            null
+        } catch (_: ArithmeticException) {
+            null
+        }
+
         fun fromJson(params: JSONObject): LocalGenerateKeyParams {
             val keyId = params.getStringOrNull("keyId")
                 ?: throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS)
@@ -1248,7 +1322,8 @@ data class LocalGenerateKeyParams(
                 userId = params.getStringOrNull("userId"),
                 userName = params.getStringOrNull("userName"),
                 userDisplayName = params.getStringOrNull("userDisplayName"),
-                isDiscoverable = params.optBoolean("isDiscoverable", false)
+                isDiscoverable = params.optBoolean("isDiscoverable", false),
+                keySizeBits = keySizeBitsOf(params, algorithm)
             )
         }
     }
@@ -1269,6 +1344,7 @@ data class LocalGenerateKeyParams(
             userName?.let { put("userName", it) }
             userDisplayName?.let { put("userDisplayName", it) }
             put("isDiscoverable", isDiscoverable)
+            keySizeBits?.let { put("keySizeBits", it) }
         }
     }
 }

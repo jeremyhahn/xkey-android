@@ -54,7 +54,7 @@ import java.io.RandomAccessFile
  * the UI showing "handshaking" forever, and it must not consume the connection
  * slot — otherwise the retry that Android delivers on the next attach would be
  * silently dropped. The same holds for a pulled cable: the detach must close
- * the accessory and free the slot, so the next attach serves again (#134).
+ * the accessory and free the slot, so the next attach serves again.
  *
  * The handshake itself belongs to `StreamPairingSession` and is covered by its
  * own suites; here it only matters that nothing is sent before one exists.
@@ -253,9 +253,7 @@ class UsbAccessoryServerTest {
         assertEquals(UsbAccessoryState.Disconnected, server.state.value)
     }
 
-    // -------------------------------------------------------------------------
-    // Detach and reattach (#134)
-    // -------------------------------------------------------------------------
+    // Detach and reattach
 
     @Test
     fun `an open accessory registers a detach receiver until it disconnects`() {

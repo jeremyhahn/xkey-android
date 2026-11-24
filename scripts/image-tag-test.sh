@@ -1,19 +1,5 @@
 #!/usr/bin/env bash
-# Tests the package index sums in the image tags and
-# scripts/apt-index-sum.sh.
-#
-# Tags, from the real `make -s it-image` and `make -s toolchain-image`: two
-# different non-empty APK_INDEX_SUM or APT_INDEX_SUM values give different
-# integration tags; unset and empty give the tree's tag; the toolchain tag is
-# the same in every case. apt-index-sum.sh, against a stub docker whose `run`
-# runs the script's own probe on a fixture lists directory with a stub
-# apt-get: it runs the pinned BASE_IMAGE with --rm and dropped capabilities
-# and prints one sha256 of the _Packages files alone; it fails (exit 1, no
-# stdout) with no _Packages file, when `docker run` or `apt-get update`
-# fails, and with no docker. Every `apt-get update` the integration tag
-# depends on (the Dockerfile's integration stage, the probe) passes
-# APT::Update::Error-Mode=any. Needs bash, git and make only.
-# `make image-tag-test` (make lint-gates).
+# Tests the package index sums in image tags and scripts/apt-index-sum.sh against a stub docker. `make image-tag-test`.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -49,10 +35,7 @@ strict_words() {
 	return 1
 }
 
-# strict_updates <file> [stage]: every `apt-get ... update` in the file, or in
-# the Dockerfile stage named, is strict (strict_words), and there is one at
-# least. Comment lines are skipped, continuation lines joined, and commands
-# split at &&, ||, | and ;.
+# strict_updates <file> [stage]: every apt-get update is strict, and there is at least one.
 strict_updates() {
 	local file=$1 stage=${2:-} in=1 n=0 line logical='' cmd i seen
 	local -a cmds w
@@ -233,10 +216,7 @@ check "apt: no docker: says so" grep -q "docker not found" "${T}/err"
 
 # ---- strict index refresh ----
 
-# Every `apt-get update` the APT_INDEX_SUM tag depends on fails on an index it
-# cannot refresh: the integration stage's, whose upgrade the tag reruns, and
-# the probe's, whose index the tag hashes. A warning would cache a stale
-# upgrade under the new tag. base and toolchain do not take APT_INDEX_SUM.
+# Every apt-get update the APT_INDEX_SUM tag depends on must fail on an index it cannot refresh.
 check "strict: the integration stage's apt-get update" \
 	strict_updates "${ROOT}/build/docker/devcontainer/Dockerfile" integration
 check "strict: apt-index-sum.sh's apt-get update" \

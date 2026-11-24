@@ -89,11 +89,7 @@ object CborEncoder {
         // Map with 5 items: 0xA5
         buffer.write(CBOR_MAP.toInt() or 5)
 
-        // Keys must be in canonical order (numerically ascending):
-        // -3, -2, -1, 1, 3 -> encoded as: 1, 3, -1, -2, -3
-        // Actually canonical CBOR sorts by encoded bytes, so:
-        // positive ints come before negative ints of same magnitude
-        // 1 (0x01) < 3 (0x03) < -1 (0x20) < -2 (0x21) < -3 (0x22)
+        // Canonical CBOR sorts keys by encoded bytes: 1, 3, -1, -2, -3.
 
         // 1: 2 (kty: EC2)
         encodeUnsignedInt(buffer, COSE_LABEL_KTY)

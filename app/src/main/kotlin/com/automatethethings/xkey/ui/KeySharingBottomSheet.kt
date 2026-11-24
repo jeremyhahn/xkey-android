@@ -792,7 +792,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                     currentEntity = { id -> keyDao.getByKeyId(id) }
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->
-                        getString(R.string.sharing_desktop_sent, out.result.importId)
+                        getString(R.string.sharing_desktop_sent, boundedDesktopText(out.result.importId))
                     // Declined, refused, or (null) a changed session: nothing was
                     // imported. A changed session re-reads what the new one allows.
                     else -> desktopOutcomeFor(out)?.let { getString(it) }
@@ -800,7 +800,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                getString(R.string.sharing_desktop_failed, e.message ?: e.javaClass.simpleName)
+                getString(R.string.sharing_desktop_failed, boundedDesktopText(e.message ?: e.javaClass.simpleName))
             }
             if (!isAdded) return@launch
             desktopSendButton.isEnabled = true
@@ -977,6 +977,32 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         private const val RADIO_ID_PRIVATE = 0x7f0a0001
         private const val RADIO_ID_ALL_PEERS = 0x7f0a0002
         private const val RADIO_ID_SELECTED_PEERS = 0x7f0a0003
+
+        /** The most characters of desktop-supplied text a status line shows. */
+        private const val DESKTOP_TEXT_MAX = 200
+
+        /** True for a control character or a Unicode line or paragraph separator. */
+        internal fun breaksLine(c: Char): Boolean = c.isISOControl() ||
+            Character.getType(c) == Character.LINE_SEPARATOR.toInt() ||
+            Character.getType(c) == Character.PARAGRAPH_SEPARATOR.toInt()
+
+        /**
+         * Desktop-supplied text (an error message, an import id) as one
+         * bounded line: characters that [breaksLine] become spaces, and text past
+         * [DESKTOP_TEXT_MAX] is cut, never inside a surrogate pair, and ends in an ellipsis.
+         */
+        internal fun boundedDesktopText(text: String): String {
+            val line = buildString(minOf(text.length, DESKTOP_TEXT_MAX + 1)) {
+                for (c in text) {
+                    if (length > DESKTOP_TEXT_MAX) break
+                    append(if (breaksLine(c)) ' ' else c)
+                }
+            }
+            if (line.length <= DESKTOP_TEXT_MAX) return line
+            var end = DESKTOP_TEXT_MAX
+            if (Character.isHighSurrogate(line[end - 1])) end--
+            return line.substring(0, end) + "…"
+        }
 
         /**
          * The status line for a [DesktopShareGate] decision: what will be

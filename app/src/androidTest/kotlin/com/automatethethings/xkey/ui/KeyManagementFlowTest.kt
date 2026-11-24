@@ -162,21 +162,21 @@ class KeyManagementFlowTest {
         openCreateDialog()
 
         assertEquals(
-            listOf("ECDSA P-256", "ECDSA P-384", "RSA 2048"),
+            listOf("ECDSA P-256", "ECDSA P-384", "ECDSA P-521", "RSA 2048", "RSA 3072"),
             selectPurposeAndReadAlgorithms(PURPOSE_SIGNING)
         )
         assertEquals(asymmetricAlgorithms(), selectPurposeAndReadAlgorithms(PURPOSE_TLS))
         assertEquals(asymmetricAlgorithms(), selectPurposeAndReadAlgorithms(PURPOSE_SSH))
         assertEquals(
-            listOf("RSA-OAEP 2048", "RSA-OAEP 4096"),
+            listOf("RSA-OAEP 2048", "RSA-OAEP 3072", "RSA-OAEP 4096"),
             selectPurposeAndReadAlgorithms(PURPOSE_ENCRYPTION)
         )
         assertEquals(
-            listOf("AES-128", "AES-256"),
+            listOf("AES-128", "AES-192", "AES-256"),
             selectPurposeAndReadAlgorithms(PURPOSE_SECRET)
         )
         assertEquals(
-            listOf("HMAC-SHA256", "HMAC-SHA512"),
+            listOf("HMAC-SHA256", "HMAC-SHA384", "HMAC-SHA512"),
             selectPurposeAndReadAlgorithms(PURPOSE_HMAC)
         )
 
@@ -196,7 +196,7 @@ class KeyManagementFlowTest {
         launch()
 
         val label = "UI Flow Signing ES384 $runId"
-        val key = createKey(label, PURPOSE_SIGNING, algorithmIndex = 1)
+        val key = createKey(label, PURPOSE_SIGNING, algorithm = "ECDSA P-384")
 
         assertEquals("ES384", key.algorithm)
         assertEquals("signing", key.keyType)
@@ -213,7 +213,7 @@ class KeyManagementFlowTest {
         val key = createKey(
             "UI Flow Keystore Backing $runId",
             PURPOSE_SIGNING,
-            algorithmIndex = 0
+            algorithm = "ECDSA P-256"
         )
 
         assertTrue(
@@ -230,7 +230,7 @@ class KeyManagementFlowTest {
         val key = createKey(
             "UI Flow TLS RSA $runId",
             PURPOSE_TLS,
-            algorithmIndex = 2,
+            algorithm = "RSA 2048",
             timeoutMs = RSA_TIMEOUT_MS
         )
 
@@ -243,7 +243,7 @@ class KeyManagementFlowTest {
     fun createSshKey_recordsTheSshKeyType() {
         launch()
 
-        val key = createKey("UI Flow SSH $runId", PURPOSE_SSH, algorithmIndex = 0)
+        val key = createKey("UI Flow SSH $runId", PURPOSE_SSH, algorithm = "ECDSA P-256")
 
         assertEquals("ssh", key.keyType)
         assertEquals("ES256", key.algorithm)
@@ -254,7 +254,7 @@ class KeyManagementFlowTest {
     fun createSecretKey_storesASymmetricKeyWithoutAPublicKey() {
         launch()
 
-        val key = createKey("UI Flow Secret $runId", PURPOSE_SECRET, algorithmIndex = 1)
+        val key = createKey("UI Flow Secret $runId", PURPOSE_SECRET, algorithm = "AES-256")
 
         assertEquals("secret", key.keyType)
         assertEquals("AES-256", key.algorithm)
@@ -266,7 +266,7 @@ class KeyManagementFlowTest {
     fun createHmacKey_honoursTheSha512Variant() {
         launch()
 
-        val key = createKey("UI Flow HMAC $runId", PURPOSE_HMAC, algorithmIndex = 1)
+        val key = createKey("UI Flow HMAC $runId", PURPOSE_HMAC, algorithm = "HMAC-SHA512")
 
         assertEquals("hmac", key.keyType)
         assertEquals("HMAC-SHA512", key.algorithm)
@@ -281,7 +281,7 @@ class KeyManagementFlowTest {
         val key = createKey(
             "UI Flow Encryption $runId",
             PURPOSE_ENCRYPTION,
-            algorithmIndex = 1,
+            algorithm = "RSA-OAEP 4096",
             timeoutMs = RSA_TIMEOUT_MS
         )
 
@@ -294,7 +294,7 @@ class KeyManagementFlowTest {
     fun createKey_withoutALabel_fallsBackToThePurposeName() {
         launch()
 
-        val key = createKey(label = null, purposeIndex = PURPOSE_SIGNING, algorithmIndex = 0)
+        val key = createKey(label = null, purposeIndex = PURPOSE_SIGNING, algorithm = "ECDSA P-256")
 
         assertEquals("${string(R.string.key_create_purpose_signing)} Key", key.label)
     }
@@ -305,7 +305,7 @@ class KeyManagementFlowTest {
         val scenario = launch()
         val label = "UI Flow Listed Key $runId"
 
-        createKey(label, PURPOSE_SIGNING, algorithmIndex = 0)
+        createKey(label, PURPOSE_SIGNING, algorithm = "ECDSA P-256")
 
         assertShownTextInList(scenario, label)
         assertExactTextShown(scenario, runBlocking { keyDao.countAll() }.toString())
@@ -316,7 +316,7 @@ class KeyManagementFlowTest {
     fun createKey_confirmsWithASnackbar() {
         val scenario = launch()
 
-        createKey("UI Flow Snackbar $runId", PURPOSE_SIGNING, algorithmIndex = 0)
+        createKey("UI Flow Snackbar $runId", PURPOSE_SIGNING, algorithm = "ECDSA P-256")
 
         assertShownTextInTree(scenario, string(R.string.key_create_success))
     }
@@ -379,7 +379,7 @@ class KeyManagementFlowTest {
         val key = createKey(
             "UI Flow Export $runId",
             PURPOSE_SIGNING,
-            algorithmIndex = 0
+            algorithm = "ECDSA P-256"
         )
 
         openContextMenu(scenario, key.keyId)
@@ -398,7 +398,7 @@ class KeyManagementFlowTest {
         val key = createKey(
             "UI Flow Delete Cancel $runId",
             PURPOSE_SIGNING,
-            algorithmIndex = 0
+            algorithm = "ECDSA P-256"
         )
 
         openContextMenu(scenario, key.keyId)
@@ -426,7 +426,7 @@ class KeyManagementFlowTest {
         val key = createKey(
             "UI Flow Delete Confirm $runId",
             PURPOSE_SIGNING,
-            algorithmIndex = 0
+            algorithm = "ECDSA P-256"
         )
 
         openContextMenu(scenario, key.keyId)
@@ -533,7 +533,7 @@ class KeyManagementFlowTest {
     fun remoteFilter_showsOnlyKeysBackedByAPairedDevice() {
         val scenario = launch()
         val localLabel = "UI Flow Local Signing $runId"
-        createKey(localLabel, PURPOSE_SIGNING, algorithmIndex = 0)
+        createKey(localLabel, PURPOSE_SIGNING, algorithm = "ECDSA P-256")
 
         clickFilterChip(scenario, R.string.key_filter_remote)
 
@@ -671,7 +671,7 @@ class KeyManagementFlowTest {
     private fun createKey(
         label: String?,
         purposeIndex: Int,
-        algorithmIndex: Int,
+        algorithm: String,
         timeoutMs: Long = CREATE_TIMEOUT_MS
     ): KeyEntity {
         val before = runBlocking { keyDao.getAll() }.map { it.keyId }.toSet()
@@ -683,7 +683,9 @@ class KeyManagementFlowTest {
                 .perform(replaceText(label), closeSoftKeyboard())
         }
         selectSpinnerItem(PURPOSE_SPINNER, purposeIndex)
-        selectSpinnerItem(ALGORITHM_SPINNER, algorithmIndex)
+        onView(dialogSpinner(ALGORITHM_SPINNER)).inRoot(isDialog())
+            .perform(selectSpinnerItemByText(algorithm))
+        waitForIdle()
         // The emulator has no enrolled biometric, so an auth-bound key cannot be
         // generated there; the switch defaults to on and has to be cleared.
         onView(isAssignableFrom(MaterialSwitch::class.java))
@@ -711,7 +713,9 @@ class KeyManagementFlowTest {
     private fun asymmetricAlgorithms(): List<String> = buildList {
         add("ECDSA P-256")
         add("ECDSA P-384")
+        add("ECDSA P-521")
         add("RSA 2048")
+        add("RSA 3072")
         add("RSA 4096")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add("Ed25519")
     }
@@ -880,5 +884,32 @@ class KeyManagementFlowTest {
          * this screen parses it.
          */
         val FAKE_PUBLIC_KEY = ByteArray(64) { it.toByte() }
+    }
+}
+
+/**
+ * Selects the spinner entry whose displayed text is [text].
+ *
+ * The create dialog's algorithm lists grow as the Keystore support does, so a
+ * pick by position silently moves to a different algorithm when an entry is
+ * inserted ahead of it. Every algorithm pick goes through here instead: the
+ * index is resolved from the adapter by name, and a name the spinner does not
+ * offer fails the test with the entries it does offer.
+ */
+internal fun selectSpinnerItemByText(text: String): ViewAction = object : ViewAction {
+    override fun getConstraints(): Matcher<View> = isAssignableFrom(Spinner::class.java)
+
+    override fun getDescription(): String = "select spinner item '$text'"
+
+    override fun perform(uiController: UiController, view: View) {
+        val spinner = view as Spinner
+        val adapter = spinner.adapter
+        val offered = (0 until adapter.count).map { adapter.getItem(it).toString() }
+        val index = offered.indexOf(text)
+        if (index < 0) {
+            throw AssertionError("The spinner does not offer '$text'; it offers $offered")
+        }
+        spinner.setSelection(index)
+        uiController.loopMainThreadUntilIdle()
     }
 }

@@ -35,7 +35,7 @@ import org.junit.Test
 /**
  * [PairedDeviceRepository] tells its removal listeners about every key that
  * stops being paired, and [PairedDeviceRepository.requirePaired] refuses a key
- * that is not (#59).
+ * that is not.
  */
 class PairedDeviceRemovalTest {
 

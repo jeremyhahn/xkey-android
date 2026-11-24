@@ -555,6 +555,9 @@
     <string name="bootstrap_dns_server_hint">DNS Server (e.g., 8.8.8.8:53)</string>
     <string name="bootstrap_static_key_hint">64 hex characters</string>
     <string name="bootstrap_spki_pin_hint">64 hex characters</string>
+    <string name="bootstrap_spki_pin_refused">SPKI settings not saved: the pin must be 64 hex characters (0-9, a-f). The stored server URL and pin are unchanged.</string>
+    <string name="bootstrap_ca_url_refused">Not fetched: enter an http or https server URL. The stored bootstrap servers are unchanged.</string>
+    <string name="bootstrap_noise_key_refused">Noise settings not saved: the key must be 64 hex characters (0-9, a-f). The stored server address and key are unchanged.</string>
     <string name="bootstrap_timeout_label">Per-Method Timeout</string>
 
     <!-- Audit Log -->

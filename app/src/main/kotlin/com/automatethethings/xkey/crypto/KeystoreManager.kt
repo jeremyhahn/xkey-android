@@ -132,7 +132,7 @@ class KeystoreManager(
      * @return true if StrongBox is available.
      */
     fun isStrongBoxAvailable(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        return if (sdkInt >= Build.VERSION_CODES.P) {
             context.packageManager.hasSystemFeature(
                 PackageManager.FEATURE_STRONGBOX_KEYSTORE
             )
@@ -914,17 +914,24 @@ class KeystoreManager(
      * @param algorithm One of "ES256", "ES384", "ES512", "RS256", "RS384", "RS512".
      * @param authDurationSeconds Authentication validity: -1 = no auth, 0 = per-op, >0 = seconds.
      * @param preferStrongBox Whether to prefer StrongBox hardware.
+     * @param keySizeBits RSA modulus (2048, 3072 or 4096); null takes the
+     *   size the hash implies. Ignored for EC and Ed25519.
      * @return DER-encoded public key bytes.
-     * @throws KeyGenerationException if key generation fails.
+     * @throws KeyGenerationException if key generation fails or [keySizeBits]
+     *   is not a size the Keystore makes.
      * @throws UnsupportedAlgorithmException if the algorithm is not supported.
      */
     suspend fun generateKeyForAlgorithm(
         keyId: String,
         algorithm: String,
         authDurationSeconds: Int = 5,
-        preferStrongBox: Boolean = true
+        preferStrongBox: Boolean = true,
+        keySizeBits: Int? = null
     ): ByteArray {
         val alias = buildGeneralAlias(keyId)
+        if (algorithm.startsWith("RS") && keySizeBits != null && keySizeBits !in setOf(2048, 3072, 4096)) {
+            throw KeyGenerationException("Unsupported RSA modulus size: $keySizeBits")
+        }
 
         // Delete existing key if present
         if (keyStore.containsAlias(alias)) {
@@ -947,7 +954,7 @@ class KeystoreManager(
                     generateEd25519KeyPair(alias, authDurationSeconds)
                 }
                 isEC -> generateECKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
-                else -> generateRSAKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
+                else -> generateRSAKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox, keySizeBits)
             }
 
             // Log key creation. The audit line only; callers read the level
@@ -979,9 +986,11 @@ class KeystoreManager(
         alias: String,
         algorithm: String,
         authDurationSeconds: Int,
-        preferStrongBox: Boolean
+        preferStrongBoxForCurve: Boolean
     ): java.security.KeyPair {
         val curve = getECCurve(algorithm)
+        // StrongBox guarantees P-256 only: P-384 and P-521 go to the TEE.
+        val preferStrongBox = preferStrongBoxForCurve && curve == EC_CURVE_P256
         val digest = getDigestProperty(algorithm)
 
         // PURPOSE_AGREE_KEY (API 31+) is required for local.ecdh; Keystore
@@ -1073,7 +1082,8 @@ class KeystoreManager(
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
 
         applyAuthDuration(specBuilder, authDurationSeconds)
-        applyStrongBox(specBuilder, preferStrongBox)
+        // StrongBox guarantees RSA 2048 only; larger moduli go to the TEE.
+        applyStrongBox(specBuilder, preferStrongBox && keySizeBits == 2048)
         applyAttestationChallenge(specBuilder)
 
         try {
@@ -1092,9 +1102,12 @@ class KeystoreManager(
         alias: String,
         algorithm: String,
         authDurationSeconds: Int,
-        preferStrongBox: Boolean
+        preferStrongBoxForSize: Boolean,
+        requestedKeySize: Int? = null
     ): java.security.KeyPair {
-        val keySize = getRSAKeySize(algorithm)
+        val keySize = requestedKeySize ?: getRSAKeySize(algorithm)
+        // StrongBox guarantees RSA 2048 only: larger moduli go to the TEE.
+        val preferStrongBox = preferStrongBoxForSize && keySize == 2048
         val digest = getDigestProperty(algorithm)
 
         val specBuilder = KeyGenParameterSpec.Builder(
@@ -1229,8 +1242,8 @@ class KeystoreManager(
     ) {
         val alias = buildGeneralAlias(keyId)
 
-        if (keySizeBits != 128 && keySizeBits != 256) {
-            throw KeyGenerationException("AES key size must be 128 or 256 bits, got $keySizeBits")
+        if (keySizeBits != 128 && keySizeBits != 192 && keySizeBits != 256) {
+            throw KeyGenerationException("AES key size must be 128, 192 or 256 bits, got $keySizeBits")
         }
 
         // Delete existing key if present
@@ -1282,6 +1295,7 @@ class KeystoreManager(
 
         val jcaAlgorithm = when (algorithm) {
             "HMAC-SHA256" -> KeyProperties.KEY_ALGORITHM_HMAC_SHA256
+            "HMAC-SHA384" -> KeyProperties.KEY_ALGORITHM_HMAC_SHA384
             "HMAC-SHA512" -> KeyProperties.KEY_ALGORITHM_HMAC_SHA512
             else -> throw UnsupportedAlgorithmException(algorithm)
         }
@@ -1589,13 +1603,18 @@ class KeystoreManager(
             // Determine HMAC algorithm from key algorithm
             val macAlgorithm = when (secretKey.algorithm) {
                 KeyProperties.KEY_ALGORITHM_HMAC_SHA256, "HmacSHA256" -> "HmacSHA256"
+                KeyProperties.KEY_ALGORITHM_HMAC_SHA384, "HmacSHA384" -> "HmacSHA384"
                 KeyProperties.KEY_ALGORITHM_HMAC_SHA512, "HmacSHA512" -> "HmacSHA512"
                 else -> "HmacSHA256"
             }
 
             val mac = Mac.getInstance(macAlgorithm)
             mac.init(secretKey)
-            val name = if (macAlgorithm == "HmacSHA512") "HMAC-SHA512" else "HMAC-SHA256"
+            val name = when (macAlgorithm) {
+                "HmacSHA512" -> "HMAC-SHA512"
+                "HmacSHA384" -> "HMAC-SHA384"
+                else -> "HMAC-SHA256"
+            }
             return HmacResult(mac.doFinal(data), name)
         } catch (e: Exception) {
             throw HMACException("Failed to compute HMAC", e)
@@ -2017,7 +2036,7 @@ class KeystoreManager(
         preferStrongBox: Boolean
     ): Boolean {
         if (preferStrongBox &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            sdkInt >= Build.VERSION_CODES.P &&
             isStrongBoxAvailable()
         ) {
             specBuilder.setIsStrongBoxBacked(true)

@@ -39,12 +39,14 @@ fun NoiseSession.sessionBinding(): SessionBinding? {
  * handshake's, not the devices': here the phone's static key is the
  * initiator's and the desktop's is the responder's.
  *
- * Null until the handshake completes.
+ * Null until the handshake completes. The keys are copies: the initiator's
+ * accessors return its own arrays, and a binding must not let a caller edit
+ * the keys the session authenticated.
  */
 fun NoiseInitiatorSession.sessionBinding(): SessionBinding? {
     if (!isHandshakeComplete()) return null
-    val responder = getRemoteStaticKey() ?: return null
-    return SessionBinding(getLocalStaticPublicKey(), responder, getPrologue())
+    val responder = getRemoteStaticKey()?.copyOf() ?: return null
+    return SessionBinding(getLocalStaticPublicKey().copyOf(), responder, getPrologue())
 }
 
 /**

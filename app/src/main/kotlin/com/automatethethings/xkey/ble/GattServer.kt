@@ -2146,7 +2146,9 @@ class GattServer(
                 )
             }
             try {
-                TpmQuoteVerifier.verify(iak, quote.quoted, quote.signature, nonce)
+                TpmQuoteVerifier.verify(
+                    iak, quote.quoted, quote.signature, nonce, pcrBank, quote.pcrValues
+                )
             } catch (e: TpmQuoteException) {
                 refuseEnrollment(
                     publicKeyHex, deviceName,

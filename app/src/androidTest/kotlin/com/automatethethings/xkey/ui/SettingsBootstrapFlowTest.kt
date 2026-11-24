@@ -181,10 +181,7 @@ class SettingsBootstrapFlowTest {
         val scenario = ActivityScenario.launch(SettingsActivity::class.java)
         awaitInitialized(scenario)
 
-        // Asserted on the DANE checkbox, not on the text "DANE": the
-        // auto-bootstrap row's own description reads "Automatically try methods
-        // in order: DANE, Noise, SPKI, Direct" and is always on screen, so a
-        // substring search can never observe the collapse.
+        // Assert on the DANE checkbox: the text "DANE" is always on screen in the auto-bootstrap description.
         assertFalse(
             "Bootstrap methods should be collapsed when auto-bootstrap is off",
             methodShown(scenario, DANE)

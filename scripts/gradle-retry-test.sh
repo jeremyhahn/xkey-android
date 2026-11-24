@@ -1,34 +1,5 @@
 #!/usr/bin/env bash
-# gradle-retry-test: the toolchain image's Gradle download retry, checked two
-# ways.
-#
-# The warm stage of build/docker/devcontainer/Dockerfile runs the gates once,
-# online, to fill the Gradle dependency cache. One transient repository error
-# (an artifact Gradle "Could not resolve") must not fail the image build, so
-# that run goes through /usr/local/bin/gradle-retry, a script the Dockerfile
-# writes with a COPY heredoc: a bounded retry, with gradle-quiesce between
-# attempts, that still fails closed.
-#
-# 1. Static: in the warm stage, every online RUN of the gates (assembleDebug)
-#    runs them through gradle-retry, after the COPY that writes it; no bare
-#    `gradle ... assembleDebug` online run remains, and the offline proof is
-#    never retried (there a missing dependency is a gap in the cache). Copies of the Dockerfile with the
-#    retry removed from the RUN, or with the script's COPY removed, fail.
-# 2. Behaviour: the gradle-retry script itself, extracted from the Dockerfile
-#    (the heredoc body between its COPY line and EOF, never a copy), run with
-#    a stubbed gradle, gradle-quiesce and sleep on PATH (sleep records its
-#    argument and returns at once). It passes when an attempt fails to
-#    resolve a dependency, or a repository answers HTTP 429 Too Many
-#    Requests, and a later one succeeds; fails after exactly the bound (5, or
-#    GRADLE_RETRY_ATTEMPTS) when every attempt fails, printing the log tail;
-#    waits 30, 60, 120, 240 s between the default attempts; makes no attempt
-#    after a success; and does not retry a failure that is not a download
-#    failure (a failing test, even one naming 429). Mutants of the script
-#    (the bound changed or removed, the last attempt failing open, every
-#    failure retried, 429 not retried, the backoff not doubled) are caught.
-#
-# Needs bash and coreutils; offline. `make gradle-retry-test` (make
-# lint-gates).
+# Checks the warm stage runs the gates through gradle-retry and tests gradle-retry's bound and backoff with stubs. `make gradle-retry-test`.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -53,10 +24,7 @@ check() {
 	fi
 }
 
-# warm_uses_retry <dockerfile>: the warm stage writes gradle-retry with a COPY
-# heredoc, and every RUN in it naming assembleDebug runs `gradle-retry`, after
-# that COPY; at least one does. Comment lines and heredoc bodies are skipped,
-# continuation lines joined.
+# warm_uses_retry <dockerfile>: every online assembleDebug RUN in the warm stage uses gradle-retry.
 warm_uses_retry() {
 	local file=$1 line logical='' words in_warm=0 heredoc='' copied=0 runs=0 bad=0
 	while IFS= read -r line || [ -n "${line}" ]; do
@@ -159,13 +127,7 @@ check "heredoc bodies are skipped and the bare offline proof passes" warm_uses_r
 
 # --- behaviour --------------------------------------------------------------
 
-# The stubs: gradle reads its outcome for attempt n from line n of
-# ${STUB_DIR}/plan (ok, resolve, throttle, test, test429; ok past the end),
-# counts its calls in ${STUB_DIR}/calls and its arguments in ${STUB_DIR}/args;
-# gradle-quiesce counts its calls in ${STUB_DIR}/quiesce; sleep writes its
-# argument to ${STUB_DIR}/sleeps and returns at once. throttle is a 429 with
-# no "Could not" line, so only the 429 pattern retries it; test429 is a
-# failing test that names 429, which is not a download failure.
+# Stub gradle reads each attempt's outcome from STUB_DIR/plan; quiesce and sleep record their calls.
 BIN=${T}/bin
 mkdir -p "${BIN}"
 cat > "${BIN}/gradle" << 'STUB'
@@ -214,10 +176,7 @@ echo "$1" >> "${STUB_DIR}/sleeps"
 STUB
 chmod +x "${BIN}/gradle" "${BIN}/gradle-quiesce" "${BIN}/sleep"
 
-# run_retry <script> <plan words...>: run script with the stubs and that plan,
-# GRADLE_RETRY_DELAY unset and GRADLE_RETRY_ATTEMPTS set only from
-# RETRY_ATTEMPTS when that is non-empty; sets RC, CALLS, QUIESCE, SLEEPS (the
-# waits, space-separated) and OUT (its output), LOG (the log it was given).
+# run_retry <script> <plan words...>: sets RC, CALLS, QUIESCE, SLEEPS, OUT and LOG.
 run_retry() {
 	local script=$1
 	shift

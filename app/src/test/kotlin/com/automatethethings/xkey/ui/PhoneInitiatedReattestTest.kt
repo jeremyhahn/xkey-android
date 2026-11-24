@@ -24,7 +24,7 @@ import org.junit.Test
 import java.io.IOException
 
 /**
- * How the phone-initiated re-attest in [DeviceDetailActivity] ends (#137).
+ * How the phone-initiated re-attest in [DeviceDetailActivity] ends.
  *
  * The step waits on the user's SAS confirmation. Leaving the screen cancels
  * the activity's scope, and that cancellation is not a connection failure: it

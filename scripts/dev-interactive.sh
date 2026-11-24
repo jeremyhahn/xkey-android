@@ -1,25 +1,5 @@
 #!/usr/bin/env bash
-#
-# dev-interactive.sh — one-command interactive setup for driving the xKey app
-# against a live go-xkms backend on an emulator.
-#
-# It will:
-#   1. boot the AVD (if no device is attached)
-#   2. build + install the debug APK
-#   3. grant runtime perms, battery-whitelist the app, enable emulator Bluetooth
-#   4. enable the "TCP Pairing (ADB)" setting (writes the DataStore preference)
-#   5. launch MainActivity and auto-start the BLE service (taps the BLE toggle),
-#      then verify the phone's TCP HSM server is listening on :8444
-#   6. adb-forward localhost:8444 -> the phone
-#   7. build the go-xkms e2eprobe and (default) run the backend E2E once
-#
-# After it finishes, the phone's pairing server is reachable at localhost:8444,
-# so you can drive it interactively:
-#     cd <go-xkms>/xkey && go run ./cmd/e2eprobe          # scripted full-flow probe
-#     <go-xkms>/xkey/xkey device pair                     # real desktop pairing
-#
-# Usage: scripts/dev-interactive.sh [--no-emulator] [--no-e2e] [--avd NAME]
-#
+# Boots an emulator, installs the debug APK, starts the TCP HSM server on :8444, forwards it and runs the go-xkms e2eprobe. Usage: scripts/dev-interactive.sh [--no-emulator] [--no-e2e] [--avd NAME]
 # Copyright (c) 2025 Jeremy Hahn / Automate The Things, LLC. AGPL-3.0 or commercial.
 
 set -euo pipefail

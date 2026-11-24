@@ -32,7 +32,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * [NoiseSession] overwrites its key material before it lets go of it (#6).
+ * [NoiseSession] overwrites its key material before it lets go of it.
  *
  * The session's live arrays are reached through
  * [NoiseSession.secretArraysForTest]; a test keeps the references, drives the

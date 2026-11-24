@@ -9,8 +9,7 @@ TMP=$(mktemp -d)
 # shellcheck disable=SC2064  # expand TMP now
 trap "rm -rf '${TMP}'" EXIT INT TERM
 
-# release name date-offset version...: publishes GROUP:name (GROUP defaults
-# to com.example), each version's POM dated by its offset ("10 days ago").
+# release name date-offset version...: publish GROUP:name with each POM dated by its offset.
 release() {
 	local name=$1 group=${GROUP:-com.example} dir spec v when
 	dir="${TMP}/repo/${group//.//}/$1"
@@ -28,8 +27,7 @@ release() {
 	done
 }
 
-# report file name current latest...: a dependencyUpdates JSON report of
-# GROUP's libraries (GROUP defaults to com.example).
+# report file name current latest...: a dependencyUpdates JSON report.
 report() {
 	local file=$1
 	shift
@@ -58,9 +56,7 @@ release sep "1.0-1@40 days ago" "1.0.1@10 days ago" "1.0.2@3 days ago"
 release beta "1.0@40 days ago" "1.1-Beta2@8 days ago"
 release betayoung "1.0@40 days ago" "1.0.1@3 days ago" "1.1-Beta2@10 days ago"
 release betaold "1.0@40 days ago" "1.0.1@10 days ago" "1.1-Beta2@8 days ago"
-# The project's own exemption (#225): android-all-instrumented's version names
-# the API level, so its newest is a newer API, not a newer build. The rest of
-# org.robolectric is not exempt.
+# android-all-instrumented is exempt (its version names the API level); the rest of org.robolectric is not.
 GROUP=org.robolectric release android-all-instrumented "14-robolectric-10818077-i7@400 days ago" \
 	"16-robolectric-13921718-i7@60 days ago"
 GROUP=org.robolectric release robolectric "4.14@400 days ago" "4.16@60 days ago"
@@ -74,8 +70,7 @@ printf '%s\n' 'com.example:held' > "${TMP}/exempt-noreason"
 export DEPS_CHECK_REPOS="file://${TMP}/repo" DEPS_CHECK_PROTO='=file' DEPS_CHECK_EXEMPT="${TMP}/exempt"
 
 fails=0 runs=0
-# verify rc verdict label command...: the exit code, and the verdict (report,
-# FAIL, exempt) the output's first line must start with.
+# verify rc verdict label command...: check the exit code and the first output line's verdict.
 verify() {
 	local want=$1 verdict=$2 label=$3 got=0
 	shift 3

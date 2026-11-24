@@ -57,7 +57,7 @@ import org.junit.Test
 
 /**
  * The inbound `local.syncOATH` and `local.syncPasswords` handlers record one
- * audit entry per sync (issue #221), success or failure, naming the desktop
+ * audit entry per sync, success or failure, naming the desktop
  * that asked and never a secret, password, site or user name.
  *
  * The real handler runs; [SyncEngine] is a constructor mock (it reads Room and

@@ -459,7 +459,7 @@ class BiometricActivityLauncherTest {
         )
     }
 
-    // ------------------------------------- overlapping signing requests (Codex 7369)
+    // ------------------------------------- overlapping signing requests
 
     @Test
     fun overlappingSigningRequests_takeTurnsAndBothSettle() {

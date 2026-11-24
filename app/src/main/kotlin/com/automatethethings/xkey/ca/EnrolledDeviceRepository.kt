@@ -340,8 +340,7 @@ class EnrolledDeviceRepository(context: Context) {
         devices.removeAll { it.deviceId == device.deviceId }
         devices.add(device)
         saveDevices(devices)
-        // A device that has just been certified is no longer refused; leaving
-        // the old record would show a stale reason beside a valid certificate.
+        // A newly certified device is not refused; clear the stale reason.
         clearRefusal(device.deviceId)
     }
 

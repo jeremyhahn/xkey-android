@@ -6,7 +6,7 @@ import org.junit.Test
 /**
  * The otpauth label split of [parseOathLabel]: the label is split on its
  * first literal `:` before percent-decoding, so an encoded `%3A` in either
- * part stays in that part (#156). With no literal `:`, an imported label
+ * part stays in that part. With no literal `:`, an imported label
  * splits on an encoded one, as third-party codes write it; a structured label
  * (manual entry, sync) does not.
  */
