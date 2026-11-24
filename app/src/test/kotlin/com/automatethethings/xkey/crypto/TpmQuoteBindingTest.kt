@@ -256,4 +256,59 @@ class TpmQuoteBindingTest {
             TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", values)
         }
     }
+
+    /** Asserts [e] refuses [pcr] on its length rather than on the digest. */
+    private fun assertRefusedOnLength(e: TpmQuoteException, pcr: Int) {
+        val message = e.message!!
+        assertTrue(message, message.contains("PCR $pcr "))
+        assertTrue(message, message.contains("bytes"))
+        assertTrue(message, !message.contains("digest"))
+    }
+
+    @Test
+    fun `refuses PCR values whose bytes were redistributed across indices`() {
+        // The concatenation, and so the signed digest, is unchanged: PCR 0
+        // loses its last byte and PCR 1 gains it at the front.
+        val values = pcrValues(32)
+        val q = boundQuote(values)
+        val pcr0 = values.getValue(0)
+        val reported = values.toMutableMap().apply {
+            put(0, pcr0.copyOf(31))
+            put(1, byteArrayOf(pcr0[31]) + values.getValue(1))
+        }
+
+        val e = refused {
+            TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", reported)
+        }
+        assertRefusedOnLength(e, 0)
+    }
+
+    @Test
+    fun `refuses sha384-length values reported for the sha256 bank`() {
+        // The digest is computed over the same 48-byte values, so it matches.
+        val values = pcrValues(48)
+        val q = boundQuote(values)
+
+        val e = refused {
+            TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", values)
+        }
+        assertRefusedOnLength(e, 0)
+    }
+
+    @Test
+    fun `refuses an empty value for a selected PCR`() {
+        // PCR 3 is reported empty and PCR 4 carries its bytes, so the
+        // concatenation still matches the signed digest.
+        val values = pcrValues(32)
+        val q = boundQuote(values)
+        val reported = values.toMutableMap().apply {
+            put(3, ByteArray(0))
+            put(4, values.getValue(3) + values.getValue(4))
+        }
+
+        val e = refused {
+            TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", reported)
+        }
+        assertRefusedOnLength(e, 3)
+    }
 }
