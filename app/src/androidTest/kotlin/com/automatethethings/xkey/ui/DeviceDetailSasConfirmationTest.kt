@@ -98,7 +98,7 @@ class DeviceDetailSasConfirmationTest {
     fun allowIsConsent() {
         val answer = prompt()
 
-        onView(withText(R.string.pairing_dialog_allow)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.pairing_dialog_allow)
 
         assertEquals(true, await(answer))
     }
@@ -107,7 +107,7 @@ class DeviceDetailSasConfirmationTest {
     fun denyIsRefusal() {
         val answer = prompt()
 
-        onView(withText(R.string.pairing_dialog_deny)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.pairing_dialog_deny)
 
         assertEquals(false, await(answer))
     }
@@ -142,7 +142,7 @@ class DeviceDetailSasConfirmationTest {
             }
         }
         runBlocking { withTimeout(TIMEOUT_MS) { reached.await() } }
-        onView(withText(expectedMessage())).inRoot(isDialog()).check(matches(isDisplayed()))
+        DialogFlowSupport.awaitInDialog(withText(expectedMessage()))
         val texts = withActivity(scenario) {
             listOf(
                 it.getString(R.string.device_reattest_title),
@@ -171,6 +171,7 @@ class DeviceDetailSasConfirmationTest {
             }
         }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        DialogFlowSupport.awaitInDialog(withText(expectedMessage()))
         return answer!!
     }
 
@@ -189,6 +190,6 @@ class DeviceDetailSasConfirmationTest {
         const val DEVICE_NAME = "SAS Test Desktop"
         const val FINGERPRINT = "AB:CD:EF:01:23:45:67:89"
         const val SAS = "482 913"
-        const val TIMEOUT_MS = 10_000L
+        const val TIMEOUT_MS = PROMPT_TIMEOUT_MS
     }
 }
