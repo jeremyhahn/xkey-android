@@ -492,11 +492,6 @@ class OathHandlerWireTest {
         oath.forEach { assertEquals("entry names the credential: $it", id, it.keyId) }
     }
 
-    @Ignore(
-        "Fails on main: AuditLogger.logOathCredentialCreated, logOathCodeGenerated and " +
-            "logOathCredentialDeleted take no device, so no OATH entry names the desktop. " +
-            "The fix is in AuditLogger (a device id and name parameter), then in the handlers."
-    )
     @Test
     fun `every OATH audit entry names the requesting desktop`() = runTest {
         val id = result(add(credential())).getString("credential_id")
@@ -505,7 +500,10 @@ class OathHandlerWireTest {
 
         val oath = audit.filter { it.operationType in OATH_ENTRIES }
         assertEquals(OATH_ENTRIES, oath.map { it.operationType })
-        oath.forEach { assertEquals("entry names the desktop: $it", PEER, it.deviceId) }
+        oath.forEach {
+            assertEquals("entry names the desktop: $it", PEER, it.deviceId)
+            assertEquals("entry names the desktop: $it", PEER_NAME, it.deviceName)
+        }
     }
 
     @Ignore(
