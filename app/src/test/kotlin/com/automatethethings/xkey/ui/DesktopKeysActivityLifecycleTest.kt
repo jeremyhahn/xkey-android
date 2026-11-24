@@ -181,6 +181,23 @@ class DesktopKeysActivityLifecycleTest {
         verify { reconnected wasNot Called }
     }
 
+
+    @Test
+    fun `a second service connection on the same session keeps the screen the user is on`() {
+        val activity = desktop.start().get()
+        activity.tapRow(0)
+        activity.tapRow(0)
+        activity.assertDetail()
+        val connection = shadowOf(desktop.app).boundServiceConnections.single()
+
+        connection.onServiceDisconnected(desktop.component)
+        connection.onServiceConnected(desktop.component, desktop.binder())
+        idle()
+
+        activity.assertDetail()
+        coVerify(exactly = 1) { client.listBackends() }
+    }
+
     @Test
     fun `back walks from detail to keys to backends, then finishes`() {
         val activity = desktop.start().get()
