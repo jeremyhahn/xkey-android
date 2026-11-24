@@ -104,7 +104,12 @@ class DesktopKeysActivity : AppCompatActivity() {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             gattService = (binder as? XKeyGattService.LocalBinder)?.getService()
             serviceBound = true
-            launch { controller.open() }
+            // A reconnect to the session already on screen keeps the user's place; any
+            // other session opens again, which the controller refuses if it is not ours.
+            val held = adapted?.first
+            val sameSession = held != null && gattService?.desktopSession()?.client === held &&
+                controller.state !is DesktopKeysState.NoSession
+            if (!sameSession) launch { controller.open() }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
