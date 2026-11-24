@@ -453,6 +453,22 @@ class PivKeyManagerTest {
             assertTrue(store.contains(alias))
         }
 
+    @Test
+    fun `a PIV delete keeps the slot row and skips the audit whenever the store delete throws`() = runTest {
+        keystore.live = null
+        val store = io.mockk.spyk(softwareStore())
+        val alias = PivSlot.AUTHENTICATION.keystoreAlias
+        store.generate(alias, MlDsaParameterSet.ML_DSA_44)
+        every { store.delete(any()) } throws java.io.IOException("Cannot delete ML-DSA key")
+
+        val error = runCatching { PivKeyManager(pivSlotDao, pqcStore = store).deleteKey(PivSlot.AUTHENTICATION) }
+            .exceptionOrNull()
+
+        assertTrue("delete must fail, got $error", error is java.io.IOException)
+        coVerify(exactly = 0) { pivSlotDao.deleteBySlotId(any()) }
+        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+    }
+
     /** A software ML-DSA store over a temporary directory and a stand-in seal. */
     private fun softwareStore(): PqcSoftwareKeyStore {
         val cipher = mockk<KeystoreAeadCipher>()

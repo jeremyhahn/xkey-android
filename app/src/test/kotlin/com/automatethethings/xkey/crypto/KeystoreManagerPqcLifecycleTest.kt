@@ -219,6 +219,26 @@ class KeystoreManagerPqcLifecycleTest {
     }
 
     @Test
+    fun `no general-key delete path drops metadata or audits when the store delete throws`() {
+        generate("held", -1)
+        val failing = io.mockk.spyk(store)
+        every { failing.delete(any()) } throws java.io.IOException("Cannot delete ML-DSA key")
+        val held = KeystoreManager(context, sdkInt = 34, pqcStore = failing)
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.deleteByKeyId(any()) } returns 1
+        val softwareKeys = mockk<SoftwareKeyStore>(relaxed = true)
+        every { softwareKeys.contains(any()) } returns false
+
+        assertTrue(runCatching { runBlocking { keyDao.deleteKeyRow(row("held"), held, softwareKeys) } }.isFailure)
+        assertTrue(runCatching { held.deleteGeneralKey("held") }.isFailure)
+        assertTrue(runCatching { held.deleteKey("held") }.isFailure)
+
+        io.mockk.coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+        assertTrue(held.pqcSoftwareKeyExists("held"))
+    }
+
+    @Test
     fun `no internal wrap key is resolved or deleted and a software key still signs`() {
         val spki = generate("kept", -1)
         every { keyStore.containsAlias(any()) } answers { firstArg<String>() in INTERNAL_ALIASES }
