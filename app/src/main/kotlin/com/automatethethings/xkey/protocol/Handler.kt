@@ -3847,16 +3847,21 @@ class RequestHandler(
                 counter = credential.optLong("counter", 0)
             )
 
-            AuditLogger.logOathCredentialCreated(name, issuer, accountName, type.uppercase())
+            // The entry names the stored credential, not the caller's free-form name.
+            AuditLogger.logOathCredentialCreated(credentialId, issuer, accountName, type.uppercase())
 
             val result = JSONObject().apply {
                 put("success", true)
                 put("credential_id", credentialId)
             }
             Response.success(request.id, result)
+        } catch (e: IllegalArgumentException) {
+            // The importer's validation: its messages never name the secret.
+            Log.w(TAG, "Refused OATH credential: ${e.message}")
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid credential: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add OATH credential", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to add: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to add credential")
         }
     }
 
