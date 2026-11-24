@@ -89,6 +89,19 @@ import java.util.concurrent.TimeUnit
 class DeviceDetailActivity : AppCompatActivity() {
 
     companion object {
+        /**
+         * Computes truncated SHA-256 fingerprint from DER bytes.
+         */
+        internal fun computeFingerprint(certDER: ByteArray): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val hash = digest.digest(certDER)
+            return hash.take(8).joinToString(":") { "%02X".format(it) } + "..."
+        }
+
+        /** The clip the copy button puts on the clipboard: the fingerprint the screen shows. */
+        internal fun fingerprintClip(certDER: ByteArray): ClipData =
+            ClipData.newPlainText("IDevID Fingerprint", computeFingerprint(certDER))
+
         /** Intent extra key for the device's public key hex string. */
         const val EXTRA_PUBLIC_KEY_HEX = "publicKeyHex"
 
@@ -1343,10 +1356,9 @@ class DeviceDetailActivity : AppCompatActivity() {
      */
     private fun copyFingerprintToClipboard() {
         val d = device ?: return
-        val fingerprint = d.idevidCertificateDER?.let { computeFingerprint(it) } ?: return
+        val clip = d.idevidCertificateDER?.let { fingerprintClip(it) } ?: return
 
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("IDevID Fingerprint", fingerprint)
         clipboard.setPrimaryClip(clip)
 
         Snackbar.make(
@@ -1742,14 +1754,6 @@ class DeviceDetailActivity : AppCompatActivity() {
         return SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(date)
     }
 
-    /**
-     * Computes truncated SHA-256 fingerprint from DER bytes.
-     */
-    private fun computeFingerprint(certDER: ByteArray): String {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        val hash = digest.digest(certDER)
-        return hash.take(8).joinToString(":") { "%02X".format(it) } + "..."
-    }
 }
 
 /**
