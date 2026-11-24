@@ -34,8 +34,11 @@ import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -43,6 +46,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -151,8 +155,14 @@ class PasswordSyncTest {
             }
         override suspend fun getBySource(source: String): List<PasswordEntity> =
             rows.values.filter { it.source == source }
-        override suspend fun deleteByPasswordId(passwordId: String): Int =
-            if (rows.remove(passwordId) != null) 1 else 0
+        /** Run once a delete has removed its row, before it returns: a writer that lands in between. */
+        var afterDelete: (suspend () -> Unit)? = null
+
+        override suspend fun deleteByPasswordId(passwordId: String): Int {
+            val removed = rows.remove(passwordId) != null
+            afterDelete?.invoke()
+            return if (removed) 1 else 0
+        }
         override suspend fun deleteByPasswordIdInTenant(passwordId: String, tenantId: String): Int =
             if (rows[passwordId]?.tenantId == tenantId) deleteByPasswordId(passwordId) else 0
         override suspend fun count(): Int = rows.size
@@ -533,6 +543,30 @@ class PasswordSyncTest {
 
         assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), result.counts)
         assertEquals(1, result.keptDeleted)
+        assertFalse(dao.rows.containsKey("remote-1"))
+    }
+
+    @Test
+    fun `a password deleted while a sync merges it stays deleted`() = runTest {
+        storeLocal(id = "remote-1")
+        val gate = CompletableDeferred<Unit>()
+        dao.afterDelete = {
+            dao.afterDelete = null
+            gate.await()
+        }
+
+        val deleting = async { repository.delete("remote-1") }
+        runCurrent()
+        val merging = async { sync.mergeWithDetail(incoming(id = "remote-1", at = iso(now - MINUTE))) }
+        runCurrent()
+        gate.complete(Unit)
+        merging.await()
+
+        assertTrue(deleting.await())
+        assertFalse(dao.rows.containsKey("remote-1"))
+        assertNotNull(repository.deletedAt("remote-1"))
+        val again = sync.mergeWithDetail(incoming(id = "remote-1", at = iso(now - MINUTE)))
+        assertEquals(1, again.keptDeleted)
         assertFalse(dao.rows.containsKey("remote-1"))
     }
 
