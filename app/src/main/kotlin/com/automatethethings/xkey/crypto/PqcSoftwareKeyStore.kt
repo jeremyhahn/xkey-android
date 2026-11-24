@@ -98,11 +98,11 @@ class PqcSoftwareKeyStore(
         return spki
     }
 
-    /** The file holding the generation of the newest key made under [alias]; delete keeps it. */
+    /** The file holding the generation a record under [alias] must reach to open; delete keeps it. */
     internal fun generationFileFor(alias: String): File =
         File(File(context.filesDir, DIR), SyncCodec.sha256Hex(alias.toByteArray(Charsets.UTF_8)) + ".gen")
 
-    /** The generation of the newest key made under [alias], or 0 when none was. */
+    /** The generation a record under [alias] must reach to open, or 0 when none is stored. */
     private fun storedGeneration(alias: String): Long {
         val file = generationFileFor(alias)
         if (!file.exists()) return 0
@@ -231,8 +231,8 @@ class PqcSoftwareKeyStore(
 
     /**
      * Deletes the key under [alias]; true when there was one, false when
-     * there was none. The alias's generation stays, so the deleted record
-     * cannot be put back.
+     * there was none. The alias's generation moves past the deleted record, so
+     * that record cannot be put back.
      *
      * @throws IOException when a record exists and cannot be removed: the
      *   key is still usable, so a caller must keep its slot row or metadata.
@@ -241,8 +241,13 @@ class PqcSoftwareKeyStore(
     fun delete(alias: String): Boolean {
         val file = fileFor(alias)
         if (!file.exists()) return false
-        if (removeFile(file) || !file.exists()) return true
-        throw IOException("Cannot delete ML-DSA key")
+        if (!removeFile(file) && file.exists()) throw IOException("Cannot delete ML-DSA key")
+        // Advanced past the removed record, so a copy of it put back does not open; the key is gone either way.
+        runCatching {
+            val generation = (runCatching { storedGeneration(alias) }.getOrNull() ?: 0L) + 1
+            write(generationFileFor(alias), ByteBuffer.allocate(8).putLong(generation).array())
+        }
+        return true
     }
 
     /** Removes a record file; a test swaps in one that fails. */
