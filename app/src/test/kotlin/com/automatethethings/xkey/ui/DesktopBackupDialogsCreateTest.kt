@@ -24,6 +24,7 @@ import io.mockk.coVerify
 import io.mockk.confirmVerified
 import io.mockk.slot
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -104,6 +105,8 @@ class DesktopBackupDialogsCreateTest {
 
         assertFalse(menu.isShowing)
         assertNull(host.snackbarText())
+        // The menu reaches the service only to check that a desktop is connected.
+        verify(exactly = 1) { host.gatt.connectedDesktop() }
         confirmVerified(host.gatt)
     }
 

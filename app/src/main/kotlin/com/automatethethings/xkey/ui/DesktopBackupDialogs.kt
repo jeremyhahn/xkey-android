@@ -55,7 +55,7 @@ class DesktopBackupDialogs(
 
     /** Offers create or restore, or explains that no desktop is connected. */
     fun show() {
-        if (service() == null) {
+        if (connectedService() == null) {
             Snackbar.make(root, R.string.sync_not_connected, Snackbar.LENGTH_LONG).show()
             return
         }
@@ -130,7 +130,7 @@ class DesktopBackupDialogs(
      * restore dialog and does not block the restore.
      */
     private fun pickLatestAndRestore() {
-        val gatt = service()
+        val gatt = connectedService()
         if (gatt == null) {
             Snackbar.make(root, R.string.sync_not_connected, Snackbar.LENGTH_LONG).show()
             return
@@ -255,12 +255,19 @@ class DesktopBackupDialogs(
     }
 
     /**
+     * The service when a desktop is connected to it, else null. A bound
+     * service outlives the desktop session, so being bound is not enough.
+     */
+    private fun connectedService(): XKeyGattService? =
+        service()?.takeIf { it.connectedDesktop() != null }
+
+    /**
      * When the desktop went away after [dialog] opened, closes it (which
      * wipes its fields) and says so, before any password is copied; returns
      * whether it did.
      */
     private fun desktopGone(dialog: DialogInterface): Boolean {
-        if (service() != null) return false
+        if (connectedService() != null) return false
         dialog.dismiss()
         Snackbar.make(root, R.string.sync_not_connected, Snackbar.LENGTH_LONG).show()
         return true
