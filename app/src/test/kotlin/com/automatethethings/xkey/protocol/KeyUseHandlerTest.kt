@@ -596,13 +596,31 @@ class KeyUseHandlerTest {
     }
 
     @Test
-    fun `found - an unpaired peer and a request with no peer pass the gate`() = runTest {
-        // isDeviceAttestationCurrent allows a peer with no paired record and
-        // a request with no session peer: no device policy applies to either.
+    fun `an unpaired peer is refused before any key operation`() = runTest {
         gatedRequests().forEach { (method, params) ->
-            servedBy(PEER_UNPAIRED) { result(call(method, params)) }
-            result(call(method, params))
+            val response = servedBy(PEER_UNPAIRED) { call(method, params) }
+            assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, response)
         }
+        assertNoKeyOperation()
+    }
+
+    @Test
+    fun `a served connection with no authenticated peer is refused before any key operation`() = runTest {
+        gatedRequests().forEach { (method, params) ->
+            val response = withContext(RequestHandler.servedConnection(binding, null, "test:anonymous")) {
+                rawCall(method, params)
+            }
+            assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, response)
+        }
+        assertNoKeyOperation()
+    }
+
+    @Test
+    fun `a request outside any session with no connected desktop is refused before any key operation`() = runTest {
+        gatedRequests().forEach { (method, params) ->
+            assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, rawCall(method, params))
+        }
+        assertNoKeyOperation()
     }
 
     // ---------------------------------------------------------------------
@@ -787,8 +805,19 @@ class KeyUseHandlerTest {
     private fun algorithmOf(entry: AuditLogEntity): String? =
         entry.details?.let { JSONObject(it).optString("algorithm", "").ifEmpty { null } }
 
+    /** Whether a [servedBy] block is running, so [call] keeps its peer. */
+    private var served = false
+
     private suspend fun <T> servedBy(peer: String, block: suspend () -> T): T =
-        withContext(RequestHandler.servedConnection(binding, peer, "test:connection")) { block() }
+        withContext(RequestHandler.servedConnection(binding, peer, "test:connection")) {
+            val outer = served
+            served = true
+            try {
+                block()
+            } finally {
+                served = outer
+            }
+        }
 
     private fun device(name: String, requireAttestation: Boolean, lastAttested: Long?): PairedDeviceData =
         mockk(relaxed = true) {
@@ -798,7 +827,12 @@ class KeyUseHandlerTest {
             every { attestationGracePeriodMinutes } returns 5
         }
 
-    private suspend fun call(method: String, params: String): JSONObject {
+    /** Sends [method] from the paired [PEER_OK] unless a [servedBy] block names another peer. */
+    private suspend fun call(method: String, params: String): JSONObject =
+        if (served) rawCall(method, params) else servedBy(PEER_OK) { rawCall(method, params) }
+
+    /** Sends [method] with no session, as a caller outside any desktop connection. */
+    private suspend fun rawCall(method: String, params: String): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
         return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
     }
