@@ -375,6 +375,24 @@ class DesktopBackupDialogsRestoreTest {
         assertTrue("the dialogs must zero the copy they made", sent.captured.all { it == '\u0000' })
     }
 
+    @Test
+    fun `a desktop gone by the send shows not connected and copies no password`() {
+        storedAndListed()
+        val dialog = openRestore()
+        val field = host.fields(dialog)[0]
+        field.setText("hunter22")
+        host.service = { null }
+
+        host.clickPositive(dialog)
+        host.settle()
+
+        assertEquals(listOf(host.string(R.string.sync_not_connected)), host.snackbarTexts())
+        assertNull("not connected offers no retry", host.snackbarAction())
+        assertFalse(dialog.isShowing)
+        assertEquals("", field.text.toString())
+        coVerify(exactly = 0) { host.gatt.restoreDesktopBackup(any(), any()) }
+    }
+
     // --------------------------------------------------------------- helpers
 
     private fun stored(id: String?) {
