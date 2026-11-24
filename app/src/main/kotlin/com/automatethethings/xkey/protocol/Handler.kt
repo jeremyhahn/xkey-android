@@ -1685,7 +1685,66 @@ class RequestHandler(
         authDurationSeconds: Int
     ): Response {
         val backing = mlDsaBacking(genParams, set)
-        val publicKeyDer = try {
+        val keySizeBits = set.publicKeyBytes * 8
+        // Generation and its row commit as one unit: a cancelled caller cannot leave a key without its row.
+        val (publicKeyDer, level) = withContext(NonCancellable) {
+            val publicKeyDer = generateMlDsaMaterial(genParams, set, backing, authDurationSeconds)
+            try {
+                val level = generatedKeyLevel(
+                    genParams.keyId,
+                    read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
+                    discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
+                )
+                keyDao.insert(
+                    KeyEntity(
+                        keyId = genParams.keyId,
+                        keyType = genParams.keyType,
+                        algorithm = set.wireName,
+                        label = genParams.label,
+                        publicKeyDer = publicKeyDer,
+                        keySizeBits = keySizeBits,
+                        strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
+                        biometricRequired = genParams.requireUserVerification,
+                        authDurationSeconds = authDurationSeconds,
+                        shareable = genParams.shareable,
+                        sharingPolicy = if (genParams.shareable) {
+                            SharingPolicyType.ALL_PEERS
+                        } else {
+                            SharingPolicyType.PRIVATE
+                        },
+                        source = "remote_ble"
+                    )
+                )
+                publicKeyDer to level
+            } catch (e: Throwable) {
+                discardUnrecordedMlDsaKey(genParams.keyId)
+                throw e
+            }
+        }
+        val result = LocalGenerateKeyResult.withLevel(
+            keyId = genParams.keyId,
+            publicKey = Base64.getEncoder().encodeToString(publicKeyDer),
+            publicKeyCose = null,
+            algorithm = set.wireName,
+            keySizeBits = keySizeBits,
+            level = level
+        )
+        Log.i(TAG, "Generated key: ${genParams.keyId}, algo=${set.wireName}, backing=${backing.wire}")
+        return Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * Makes the ML-DSA key material for [genParams] on the IO dispatcher;
+     * material a failed generation may have written is removed. Called only
+     * inside [createMlDsaKey]'s cancellation-safe unit.
+     */
+    private suspend fun generateMlDsaMaterial(
+        genParams: LocalGenerateKeyParams,
+        set: com.automatethethings.xkey.crypto.MlDsaParameterSet,
+        backing: com.automatethethings.xkey.crypto.PqcBacking,
+        authDurationSeconds: Int
+    ): ByteArray =
+        try {
             withContext(Dispatchers.IO) {
                 keystoreManager.generateMlDsaKey(
                     keyId = genParams.keyId,
@@ -1700,43 +1759,15 @@ class RequestHandler(
                 "This device does not make ${set.wireName} keys in hardware",
                 errorCode = ErrorCodes.FEATURE_UNAVAILABLE
             )
+        } catch (e: Throwable) {
+            discardUnrecordedMlDsaKey(genParams.keyId)
+            throw e
         }
-        val keySizeBits = set.publicKeyBytes * 8
-        val level = generatedKeyLevel(
-            genParams.keyId,
-            read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
-            discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
-        )
-        keyDao.insert(
-            KeyEntity(
-                keyId = genParams.keyId,
-                keyType = genParams.keyType,
-                algorithm = set.wireName,
-                label = genParams.label,
-                publicKeyDer = publicKeyDer,
-                keySizeBits = keySizeBits,
-                strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
-                biometricRequired = genParams.requireUserVerification,
-                authDurationSeconds = authDurationSeconds,
-                shareable = genParams.shareable,
-                sharingPolicy = if (genParams.shareable) {
-                    SharingPolicyType.ALL_PEERS
-                } else {
-                    SharingPolicyType.PRIVATE
-                },
-                source = "remote_ble"
-            )
-        )
-        val result = LocalGenerateKeyResult.withLevel(
-            keyId = genParams.keyId,
-            publicKey = Base64.getEncoder().encodeToString(publicKeyDer),
-            publicKeyCose = null,
-            algorithm = set.wireName,
-            keySizeBits = keySizeBits,
-            level = level
-        )
-        Log.i(TAG, "Generated key: ${genParams.keyId}, algo=${set.wireName}, backing=${backing.wire}")
-        return Response.success(request.id, result.toJson())
+
+    /** Removes the key under [keyId]'s general alias after its row was not committed; best effort. */
+    private fun discardUnrecordedMlDsaKey(keyId: String) {
+        runCatching { keystoreManager.deleteGeneralKey(keyId) }
+            .onFailure { Log.w(TAG, "Could not remove unrecorded ML-DSA key $keyId: ${it.message}") }
     }
 
     /**
