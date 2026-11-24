@@ -225,4 +225,21 @@ class MediaSigningServiceGateTest {
         assertTrue(fixture.observers(VIDEOS).isEmpty())
         assertFalse("onDestroy must release the wake lock", wakeLock.isHeld)
     }
+
+    /**
+     * A change already dispatched to an observer when the service stops still
+     * runs its onChange. A destroyed service must not start signing from it:
+     * nothing cancels that work any more, and it runs without the wake lock.
+     */
+    @Test
+    fun `an observer that fires after onDestroy signs nothing`() {
+        val observer = fixture.observers(IMAGES).single()
+        val photo = photo()
+
+        fixture.destroy()
+        fixture.fire(observer, photo.uri)
+
+        assertNotSigned(photo)
+        assertTrue("nothing may be signed", fixture.signCalls.isEmpty())
+    }
 }
