@@ -548,6 +548,80 @@ class OathHandlerWireTest {
         }
     }
 
+
+    // -------------------------------------------------------------------------
+    // Device attestation gate
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `a desktop whose required attestation is stale is refused every OATH method`() = runTest {
+        every { pairedDevices.lookupDevice(PEER) } returns DeviceLookup.Paired(
+            attestedDesktop(lastAttestationTime = System.currentTimeMillis() - 60 * 60 * 1000L)
+        )
+
+        assertEveryOathMethodRefused()
+    }
+
+    @Test
+    fun `a desktop that never attested, where attestation is required, is refused every OATH method`() = runTest {
+        every { pairedDevices.lookupDevice(PEER) } returns DeviceLookup.Paired(attestedDesktop(lastAttestationTime = null))
+
+        assertEveryOathMethodRefused()
+    }
+
+    @Test
+    fun `an unreadable paired-device store refuses every OATH method`() = runTest {
+        every { pairedDevices.lookupDevice(any()) } returns
+            DeviceLookup.Unreadable(SecurityException("keystore unavailable"))
+
+        assertEveryOathMethodRefused()
+    }
+
+    @Test
+    fun `a desktop with a current attestation is served every OATH method`() = runTest {
+        every { pairedDevices.lookupDevice(PEER) } returns DeviceLookup.Paired(
+            attestedDesktop(lastAttestationTime = System.currentTimeMillis())
+        )
+        store(hotp(ID_HOTP))
+
+        assertEquals(1, result(call(MethodNames.LOCAL_OATH_LIST)).getJSONArray("credentials").length())
+        assertEquals(RFC4226_CODES[0], code(generate(ID_HOTP)))
+        result(add(credential()))
+        assertTrue(result(remove(ID_HOTP)).getBoolean("deleted"))
+    }
+
+    private fun attestedDesktop(lastAttestationTime: Long?) = PairedDeviceData(
+        publicKeyHex = PEER,
+        deviceName = PEER_NAME,
+        pairedAt = 0L,
+        lastAttestationTime = lastAttestationTime,
+        requireAttestationForKeyUse = true,
+        attestationGracePeriodMinutes = 5
+    )
+
+    /** Each method answers DEVICE_ATTESTATION_REQUIRED and nothing is read, written or audited. */
+    private suspend fun assertEveryOathMethodRefused() {
+        store(hotp(ID_HOTP, counter = 0))
+
+        val answers = mapOf(
+            MethodNames.LOCAL_OATH_LIST to call(MethodNames.LOCAL_OATH_LIST),
+            MethodNames.LOCAL_OATH_GENERATE to generate(ID_HOTP),
+            MethodNames.LOCAL_OATH_ADD to add(credential()),
+            MethodNames.LOCAL_OATH_REMOVE to remove(ID_HOTP)
+        )
+
+        for ((method, response) in answers) {
+            assertEquals("$method: $response", ErrorCodes.DEVICE_ATTESTATION_REQUIRED, errorCode(response))
+        }
+        coVerify(exactly = 0) { dao.getAll() }
+        coVerify(exactly = 0) { dao.claimCounter(any(), any()) }
+        assertEquals(0L, rows.getValue(ID_HOTP).counter)
+        assertTrue("no secret decrypted", decrypted.isEmpty())
+        assertTrue("nothing stored: $inserted", inserted.isEmpty())
+        assertTrue("nothing deleted: $deleted", deleted.isEmpty())
+        assertTrue("nothing audited: $audit", audit.none { it.operationType in OATH_ENTRIES })
+    }
+
     // -------------------------------------------------------------------------
     // Harness
     // -------------------------------------------------------------------------
