@@ -2298,6 +2298,13 @@ class RequestHandler(
      * Handles local.getPublicKey - export public key in specified format.
      */
     private suspend fun handleLocalGetPublicKey(request: Request): Response {
+        if (!isDeviceAttestationCurrent(forKeyUse = true)) {
+            throw ProtocolException(
+                "Device attestation required before key use",
+                errorCode = ErrorCodes.DEVICE_ATTESTATION_REQUIRED
+            )
+        }
+        val caller = auditCaller()
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
@@ -2329,6 +2336,16 @@ class RequestHandler(
                 errorCode = ErrorCodes.UNSUPPORTED_FORMAT
             )
         }
+
+        // Log the export; the entry names the key, the format and the desktop.
+        AuditLogger.logKeyExported(
+            keyId = pubKeyParams.keyId,
+            keyLabel = keyEntity.label,
+            keyType = auditKeyType(pubKeyParams.keyId),
+            format = pubKeyParams.format,
+            deviceId = caller.peerPublicKeyHex,
+            deviceName = caller.deviceName
+        )
 
         val result = LocalGetPublicKeyResult(
             publicKey = publicKey,
