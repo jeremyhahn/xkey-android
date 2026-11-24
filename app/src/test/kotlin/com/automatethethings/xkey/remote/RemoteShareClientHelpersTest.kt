@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.remote
 
 import com.automatethethings.xkey.ca.DeviceIdentity
+import com.automatethethings.xkey.crypto.DeviceAttestationKey
 import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.protocol.ProtocolException
@@ -233,6 +234,13 @@ class RemoteShareClientHelpersTest {
         assertTrue(DesktopShareGate.isIdentityKey(DeviceIdentity.ALIAS_PREFIX + "1"))
         assertTrue(DesktopShareGate.isIdentityKey(DeviceIdentity.ALIAS_PREFIX))
         assertTrue(DesktopShareGate.isIdentityKey(KeystoreUserVerificationKey.ALIAS))
+    }
+
+    @Test
+    fun `the device attestation key is an identity key`() {
+        assertTrue(DesktopShareGate.isIdentityKey(DeviceAttestationKey.ALIAS))
+        assertFalse(DesktopShareGate.isIdentityKey(DeviceAttestationKey.ALIAS.uppercase()))
+        assertFalse(DesktopShareGate.isIdentityKey(DeviceAttestationKey.ALIAS + " "))
     }
 
     @Test
