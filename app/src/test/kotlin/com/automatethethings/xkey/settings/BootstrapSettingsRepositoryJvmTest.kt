@@ -34,6 +34,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -339,8 +340,7 @@ class BootstrapSettingsRepositoryJvmTest {
     fun `updateSpkiSettings refuses a pin that is not 64 hex characters`() = runBlocking {
         repository.updateSpkiSettings(pinSha256 = PIN)
         for (bad in listOf(PIN.dropLast(1), PIN + "0", PIN.dropLast(1) + "g", "sha256/" + PIN.drop(7))) {
-            val refused = runCatching { repository.updateSpkiSettings(enabled = true, pinSha256 = bad) }
-            assertTrue("pin $bad was accepted", refused.exceptionOrNull() is IllegalArgumentException)
+            assertFalse("pin $bad was accepted", repository.updateSpkiSettings(enabled = true, pinSha256 = bad))
         }
 
         val settings = reopened().getSettings()
@@ -352,8 +352,7 @@ class BootstrapSettingsRepositoryJvmTest {
     fun `updateNoiseSettings refuses an invalid static key`() = runBlocking {
         repository.updateNoiseSettings(serverStaticKey = NOISE_KEY)
         for (bad in listOf(NOISE_KEY.take(32), NOISE_KEY + "AB", NOISE_KEY.dropLast(1) + "Z")) {
-            val refused = runCatching { repository.updateNoiseSettings(enabled = true, serverStaticKey = bad) }
-            assertTrue("key $bad was accepted", refused.exceptionOrNull() is IllegalArgumentException)
+            assertFalse("key $bad was accepted", repository.updateNoiseSettings(enabled = true, serverStaticKey = bad))
         }
 
         val settings = reopened().getSettings()
