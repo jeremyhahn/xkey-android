@@ -35,6 +35,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -177,7 +178,7 @@ class KeystoreManagerCredentialDeleteTest {
         every { prefs.edit() } returns editor
         val manager = softwareEd25519Manager(prefs)
 
-        assertFalse(manager.deleteGeneralKey("ed"))
+        assertThrows(Exception::class.java) { manager.deleteGeneralKey("ed") }
 
         verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
     }
