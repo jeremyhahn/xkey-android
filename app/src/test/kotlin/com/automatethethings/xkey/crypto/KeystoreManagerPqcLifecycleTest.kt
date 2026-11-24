@@ -21,6 +21,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.deleteKeyRow
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import io.mockk.coEvery
 import io.mockk.every
@@ -72,6 +73,7 @@ class KeystoreManagerPqcLifecycleTest {
 
         every { keyStore.containsAlias(any()) } returns false
         every { keyStore.aliases() } answers { Collections.emptyEnumeration() }
+        every { keyStore.getCertificate(any()) } returns null
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
 
@@ -175,6 +177,22 @@ class KeystoreManagerPqcLifecycleTest {
         runBlocking { KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll() }
 
         assertEquals(listOf("gone"), deleted)
+    }
+
+    @Test
+    fun `deleting the row of a software key deletes its record and it signs no more`() {
+        val spki = generate("doomed", -1)
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.deleteByKeyId(any()) } returns 1
+        val softwareKeys = mockk<SoftwareKeyStore>(relaxed = true)
+        every { softwareKeys.contains(any()) } returns false
+
+        val deleted = runBlocking { keyDao.deleteKeyRow(row("doomed"), manager, softwareKeys) }
+
+        assertEquals(1, deleted)
+        assertFalse(manager.pqcSoftwareKeyExists("doomed"))
+        assertFalse(manager.generalKeyExists("doomed"))
+        assertThrows(KeyNotFoundException::class.java) { signApproved("doomed", spki) }
     }
 
     private companion object {
