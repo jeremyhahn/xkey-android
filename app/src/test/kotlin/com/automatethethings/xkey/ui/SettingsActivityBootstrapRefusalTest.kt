@@ -19,6 +19,7 @@ import android.content.Context
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
@@ -26,6 +27,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.settings.BootstrapSettingsData
 import com.automatethethings.xkey.settings.BootstrapSettingsRepository
+import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -150,6 +152,29 @@ class SettingsActivityBootstrapRefusalTest {
     fun `the Noise refusal says the stored server address and key are unchanged`() {
         val message = context.getString(R.string.bootstrap_noise_key_refused)
         assertTrue(message, message.contains("stored server address and key are unchanged"))
+    }
+
+    private fun <T> field(activity: SettingsActivity, name: String): T =
+        @Suppress("UNCHECKED_CAST")
+        (SettingsActivity::class.java.getDeclaredField(name).apply { isAccessible = true }.get(activity) as T)
+
+    @Test
+    fun `Fetch CA Bundle with an ftp URL shows a message and changes no server`() {
+        val message = context.getString(R.string.bootstrap_ca_url_refused)
+        val trusted = TrustedComputingSettingsRepository(context)
+        val endpointBefore = runBlocking { trusted.getSettings() }.xkmsEndpoint
+        ActivityScenario.launch(SettingsActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                assertTrue("settings never finished loading", waitUntil { !isInitializing(activity) })
+                field<EditText>(activity, "editTextCAUrl").setText("ftp://new.example.com")
+                val button = field<Button>(activity, "buttonFetchCA")
+                button.performClick()
+                assertTrue("no refusal message shown", waitUntil { message in shownTexts(activity) })
+                assertTrue("the button is never re-enabled", waitUntil { button.isEnabled })
+            }
+            assertEquals(endpointBefore, runBlocking { trusted.getSettings() }.xkmsEndpoint)
+            assertEquals(BootstrapSettingsData.DEFAULT, runBlocking { repository.getSettings() })
+        }
     }
 
     @Test
