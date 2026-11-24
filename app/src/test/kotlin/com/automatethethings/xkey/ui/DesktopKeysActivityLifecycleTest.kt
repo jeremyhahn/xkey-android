@@ -251,6 +251,27 @@ class DesktopKeysActivityLifecycleTest {
         coVerify(exactly = 1) { client.listBackends() }
     }
 
+
+    @Test
+    fun `after a back the Snackbar's retry does not reopen the screen the user left`() {
+        var fail = true
+        coEvery { client.getKeyInfo("tpm", "k1") } coAnswers { if (fail) throw IOException("link down") else info() }
+        val activity = desktop.start().get()
+        activity.tapRow(0)
+        activity.tapRow(0)
+        activity.assertKeys()
+        val retry = activity.snackbarAction()!!
+
+        activity.back()
+        activity.assertBackends()
+        fail = false
+        retry.performClick()
+        idle()
+
+        activity.assertBackends()
+        coVerify(exactly = 1) { client.getKeyInfo("tpm", "k1") }
+    }
+
     @Test
     fun `a refused bind leaves Loading for no session and nothing is unbound`() {
         val controller = desktop.refuseBind().start()
