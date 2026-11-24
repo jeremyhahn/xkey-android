@@ -33,6 +33,7 @@ import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.password.PasswordDao
+import com.automatethethings.xkey.password.PasswordDeletionEntity
 import com.automatethethings.xkey.password.PasswordEntity
 import com.automatethethings.xkey.piv.PivSlotDao
 import com.automatethethings.xkey.piv.PivSlotEntity
@@ -68,6 +69,8 @@ import java.util.concurrent.atomic.AtomicReference
  * - v12: Added expires_at, shared and tenant_id columns to passwords table.
  * - v13: Added policy_revision to keys, and the trigger that only lets it
  *        move forward.
+ * - v14: Added the `password_deletions` table: when the phone deleted a
+ *        password entry, so that sync does not add it back.
  *
  * Usage:
  * ```kotlin
@@ -96,9 +99,10 @@ import java.util.concurrent.atomic.AtomicReference
         ContactEntity::class,
         OathCredentialEntity::class,
         PivSlotEntity::class,
-        PasswordEntity::class
+        PasswordEntity::class,
+        PasswordDeletionEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = true
 )
 @TypeConverters(AuditOperationTypeConverter::class)
@@ -612,6 +616,20 @@ abstract class XKeyDatabase : RoomDatabase() {
         }
 
         /**
+         * Migration from v13 to v14: add the `password_deletions` table
+         * ([PasswordDeletionEntity]). Additive: every existing row is kept,
+         * and no entry starts with a deletion record.
+         */
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `password_deletions` " +
+                        "(`password_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`password_id`))"
+                )
+            }
+        }
+
+        /**
          * Creates what Room's schema does not carry on a fresh install: the
          * policy revision trigger a migrated database gets from
          * [MIGRATION_12_13].
@@ -648,7 +666,7 @@ abstract class XKeyDatabase : RoomDatabase() {
                 XKeyDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
                 .addCallback(CREATE_TRIGGERS)
                 .build()
         }

@@ -285,7 +285,9 @@ class PasswordRepositoryUpdateTest {
  * it, where a racing writer's statements land; the writer's own reads do not
  * run it again.
  */
-internal class FakePasswordDao : PasswordDao {
+internal class FakePasswordDao(
+    val deletions: InMemoryPasswordDeletions = InMemoryPasswordDeletions()
+) : PasswordDao, PasswordDeletionQueries by deletions {
 
     val rows = linkedMapOf<String, PasswordEntity>()
     var inserts = 0

@@ -10,6 +10,8 @@ import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.password.FakePasswordDao
+import com.automatethethings.xkey.password.InMemoryPasswordDeletions
+import com.automatethethings.xkey.password.PasswordDeletionQueries
 import com.automatethethings.xkey.password.PassphraseHasher
 import com.automatethethings.xkey.password.PasswordDao
 import com.automatethethings.xkey.password.PasswordEntity
@@ -76,7 +78,9 @@ class PasswordSyncTest {
 
     private fun iso(millis: Long): String = SyncCodec.toRfc3339(millis)
 
-    private class InMemoryPasswordDao : PasswordDao {
+    private class InMemoryPasswordDao(
+        val deletions: InMemoryPasswordDeletions = InMemoryPasswordDeletions()
+    ) : PasswordDao, PasswordDeletionQueries by deletions {
         val rows = linkedMapOf<String, PasswordEntity>()
         private var rowId = 0L
 

@@ -28,7 +28,7 @@ import kotlinx.coroutines.flow.Flow
  * reactive UI updates.
  */
 @Dao
-interface PasswordDao {
+interface PasswordDao : PasswordDeletionQueries {
 
     /**
      * Insert or replace a password entry, keyed by the unique
@@ -158,4 +158,23 @@ interface PasswordDao {
     /** Observe the total number of stored password entries. */
     @Query("SELECT COUNT(*) FROM passwords")
     fun observeCount(): Flow<Int>
+}
+
+/**
+ * The `password_deletions` queries of [PasswordDao]: when this phone deleted
+ * an entry, so that sync does not add it back ([PasswordDeletionEntity]).
+ */
+interface PasswordDeletionQueries {
+
+    /** Record (or move forward) the deletion of an entry; one record per id. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun recordDeletion(deletion: PasswordDeletionEntity)
+
+    /** When the entry with [passwordId] was deleted on this phone, or null if no record is kept. */
+    @Query("SELECT deleted_at FROM password_deletions WHERE password_id = :passwordId")
+    suspend fun getDeletedAt(passwordId: String): Long?
+
+    /** Drop the deletion records made before [cutoff]. Returns how many were dropped. */
+    @Query("DELETE FROM password_deletions WHERE deleted_at < :cutoff")
+    suspend fun pruneDeletionsBefore(cutoff: Long): Int
 }

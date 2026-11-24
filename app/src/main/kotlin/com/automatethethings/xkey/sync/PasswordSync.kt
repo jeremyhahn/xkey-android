@@ -30,8 +30,19 @@ import org.json.JSONObject
  */
 class PasswordSync(
     private val repository: PasswordRepository,
-    private val factors: PasswordVaultFactorStore
+    private val factors: PasswordVaultFactorStore,
+    private val clock: () -> Long = System::currentTimeMillis
 ) {
+
+    /**
+     * What [mergeWithDetail] did: the [counts] [merge] answers with, and how
+     * many of the skipped entries were held back because the phone deleted
+     * them ([keptDeleted]).
+     */
+    data class MergeResult(
+        val counts: SyncEngine.ItemCounts,
+        val keptDeleted: Int = 0
+    )
 
     /**
      * Exports the phone's password entries as [SyncPassword] JSON.
@@ -95,11 +106,23 @@ class PasswordSync(
      * or equal copy, or one without a parseable `updated_at`, keeps the local
      * entry and is counted as skipped.
      *
+     * An entry the phone deleted ([PasswordRepository.deletedAt]) is not added
+     * back by a copy whose `updated_at` is the deletion time or earlier: the
+     * peer has not seen the delete yet. It is counted as skipped. A copy
+     * changed after the delete is added again. Deletion records older than
+     * [PasswordRepository.DELETION_RETENTION_MS] are dropped first.
+     *
      * @throws com.automatethethings.xkey.password.PasswordStoreLockedException
      *   if the store is locked; nothing is written.
      */
-    suspend fun merge(incoming: JSONArray): SyncEngine.ItemCounts {
+    suspend fun merge(incoming: JSONArray): SyncEngine.ItemCounts = mergeWithDetail(incoming).counts
+
+    /** [merge], answering with what it held back as well as its counts. */
+    suspend fun mergeWithDetail(incoming: JSONArray): MergeResult {
         requirePasswordStoreUnlocked(factors)
+        val now = clock()
+        repository.pruneDeletions(now)
+        var keptDeleted = 0
         var added = 0
         var updated = 0
         var skipped = 0
@@ -129,6 +152,12 @@ class PasswordSync(
                 // Last writer wins: an existing entry is patched only while it is older than the incoming copy.
                 when {
                     repository.updateFields(id, patch, onlyIfOlderThan = record.updatedAt) -> true
+                    // Deleted on the phone, and this copy is no newer than the delete: it stays deleted.
+                    isDeletedSince(id, record.updatedAt) -> {
+                        keptDeleted++
+                        skipped++
+                        continue
+                    }
                     // Added only while still absent: never replaces an entry another writer added since.
                     repository.insertIfAbsent(record) -> false
                     // Added meanwhile: patched in place like any existing entry, keeping the policy it was given.
@@ -151,7 +180,17 @@ class PasswordSync(
             }
             if (existed) updated++ else added++
         }
-        return SyncEngine.ItemCounts(added, updated, skipped)
+        return MergeResult(SyncEngine.ItemCounts(added, updated, skipped), keptDeleted = keptDeleted)
+    }
+
+    /**
+     * Whether the phone deleted [id] at or after [updatedAt], the incoming
+     * copy's time: the peer's copy predates the delete, so it must not add
+     * the entry back.
+     */
+    private suspend fun isDeletedSince(id: String, updatedAt: Long): Boolean {
+        val deletedAt = repository.deletedAt(id) ?: return false
+        return updatedAt <= deletedAt
     }
 
     /**

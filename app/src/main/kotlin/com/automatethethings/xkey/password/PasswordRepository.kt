@@ -125,10 +125,18 @@ class PasswordNotNewerException :
  */
 class PasswordRepository(
     private val dao: PasswordDao,
-    private val cipher: KeystoreAeadCipher = KeystoreAeadCipher(KEY_ALIAS)
+    private val cipher: KeystoreAeadCipher = KeystoreAeadCipher(KEY_ALIAS),
+    private val clock: () -> Long = System::currentTimeMillis
 ) {
     companion object {
         private const val KEY_ALIAS = "xkey_password_encryption_key"
+
+        /**
+         * How long a deletion record ([PasswordDeletionEntity]) is kept: 180
+         * days. A peer that still holds a deleted entry after that can add it
+         * back.
+         */
+        const val DELETION_RETENTION_MS = 180L * 24 * 60 * 60 * 1000
 
         /** Reads of an entry [updateFields] makes before refusing one that keeps moving. */
         private const val UPDATE_ATTEMPTS = 2
@@ -356,13 +364,33 @@ class PasswordRepository(
     /**
      * Delete a password by ID, in any tenant or, with a [tenantId], only if it
      * belongs to that tenant. Returns whether an entry was deleted.
+     *
+     * A deleted entry gets a deletion record ([PasswordDeletionEntity]) at
+     * the current time, so that a sync with a peer which still holds it does
+     * not add it back ([deletedAt]).
      */
-    suspend fun delete(passwordId: String, tenantId: String? = null): Boolean =
-        if (tenantId == null) {
+    suspend fun delete(passwordId: String, tenantId: String? = null): Boolean {
+        val deleted = if (tenantId == null) {
             dao.deleteByPasswordId(passwordId) > 0
         } else {
             dao.deleteByPasswordIdInTenant(passwordId, tenantId) > 0
         }
+        if (deleted) dao.recordDeletion(PasswordDeletionEntity(passwordId, clock()))
+        return deleted
+    }
+
+    /**
+     * When the entry with [passwordId] was last deleted on this phone, or
+     * null if it never was or the record has been dropped ([pruneDeletions]).
+     */
+    suspend fun deletedAt(passwordId: String): Long? = dao.getDeletedAt(passwordId)
+
+    /**
+     * Drop the deletion records older than [DELETION_RETENTION_MS] at [now],
+     * so the table stays bounded. Returns how many were dropped.
+     */
+    suspend fun pruneDeletions(now: Long = clock()): Int =
+        dao.pruneDeletionsBefore(now - DELETION_RETENTION_MS)
 
     /** Number of stored passwords. */
     suspend fun count(): Int = dao.count()
