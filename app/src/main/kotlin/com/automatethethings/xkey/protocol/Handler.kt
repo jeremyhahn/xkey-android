@@ -1928,7 +1928,7 @@ class RequestHandler(
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
-        val symParams = LocalSymmetricParams.fromJson(params)
+        val symParams = LocalSymmetricParams.forEncrypt(params)
         val plaintext = decodeBase64Strict("plaintext", symParams.data)
         val aad = symParams.aad?.let { decodeBase64Strict("aad", it) }
         // The requesting desktop, captured before anything can suspend.
@@ -1990,7 +1990,7 @@ class RequestHandler(
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
-        val symParams = LocalSymmetricParams.fromJson(params)
+        val symParams = LocalSymmetricParams.forDecrypt(params)
         val ciphertext = decodeBase64Strict("ciphertext", symParams.data)
         val aad = symParams.aad?.let { decodeBase64Strict("aad", it) }
         // The requesting desktop, captured before anything can suspend.
