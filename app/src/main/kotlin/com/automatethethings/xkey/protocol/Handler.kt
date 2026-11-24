@@ -1988,7 +1988,14 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad)
+            // A tag mismatch or a short input answers as the Keystore path does.
+            val pt = try {
+                com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad)
+            } catch (e: java.security.GeneralSecurityException) {
+                throw DecryptionException("AES-GCM decryption failed", e)
+            } catch (e: IllegalArgumentException) {
+                throw DecryptionException("ciphertext too short", e)
+            }
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
