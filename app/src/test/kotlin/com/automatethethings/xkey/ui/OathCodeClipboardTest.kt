@@ -39,9 +39,9 @@ import java.time.Duration
 
 /**
  * [OathCodeClipboard], the one copy path of the OATH screens: the clip is
- * marked sensitive, a TOTP copy leaves the credential alone and an HOTP copy
- * takes its code from [OathRepository.generateCode], which advances the
- * counter.
+ * marked sensitive and every copy takes its code from
+ * [OathRepository.generateCode] when it runs (TOTP at that time, HOTP
+ * advancing the counter once), never a code captured on screen.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -56,6 +56,7 @@ class OathCodeClipboardTest {
         context = ApplicationProvider.getApplicationContext()
         clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         repository = mockk(relaxed = true)
+        coEvery { repository.generateCode(any()) } returns "287082"
     }
 
     @Test
@@ -69,12 +70,26 @@ class OathCodeClipboardTest {
     }
 
     @Test
-    fun `a TOTP copy copies the code shown and leaves the counter alone`() = runBlocking {
+    fun `a TOTP copy copies the code generated when it runs`() = runBlocking {
+        coEvery { repository.generateCode("id-TOTP") } returns "755224"
+
         val copied = OathCodeClipboard.create(context, repository).copy(credential("TOTP"), "287082")
 
-        assertEquals("287082", copied)
-        assertEquals("287082", clipboard.primaryClip!!.getItemAt(0).text.toString())
-        coVerify(exactly = 0) { repository.generateCode(any()) }
+        assertEquals("755224", copied)
+        assertEquals("755224", clipboard.primaryClip!!.getItemAt(0).text.toString())
+        coVerify(exactly = 1) { repository.generateCode("id-TOTP") }
+    }
+
+    @Test
+    fun `a menu left open across a period copies the next period's code`() = runBlocking {
+        // The long-press menu opened while "111111" was shown; Copy is tapped
+        // after the period rolled over.
+        coEvery { repository.generateCode("id-TOTP") } returns "222222"
+
+        val copied = OathCodeClipboard.create(context, repository).copy(credential("TOTP"), "111111")
+
+        assertEquals("222222", copied)
+        assertEquals("222222", clipboard.primaryClip!!.getItemAt(0).text.toString())
     }
 
     @Test
@@ -124,6 +139,7 @@ class OathCodeClipboardTest {
 
     @Test
     fun `a second copy is not cleared by the first copy's timer`() = runBlocking {
+        coEvery { repository.generateCode("id-TOTP") } returnsMany listOf("287082", "755224")
         val copier = OathCodeClipboard.create(context, repository)
         copier.copy(credential("TOTP"), "287082")
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(30))
