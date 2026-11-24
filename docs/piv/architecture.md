@@ -64,13 +64,30 @@ there). `PivKeyManager` never falls back to a software key:
 1. Below API 33 `generateKey` throws `PivAlgorithmUnavailableException`
    ("<algorithm> PIV keys need Android 13 secure hardware: ...") before the
    slot lock is taken; the slot's alias and row are untouched.
-2. A Keystore that cannot create the curve fails the generator; that is
-   reported as the same exception and the slot keeps its key.
-3. After generation, inside `SharePermissionLedger.revoking` and before the
-   row upsert, the key's security level is read from its `KeyInfo`
+2. Inside the slot lock, before the revoke and before the slot's alias is
+   touched, a hardware probe generates the curve under a disposable alias
+   (`xkey_piv_probe_<ALGORITHM>`, which no slot alias equals and the general
+   key paths skip), reads its security level with the same reader as a slot
+   key, and always deletes it. The answer is kept for the process. Anything
+   but TEE or StrongBox, a Keystore that cannot create the curve, or an
+   unreadable level throws the same exception, and the slot keeps its key,
+   row and certificate. `availableAlgorithms()` (API level plus this probe)
+   is the only source of the algorithms the PIV screen offers.
+3. A Keystore that cannot create the curve under the slot's alias fails the
+   generator; that is reported as the same exception and the slot keeps its
+   key.
+4. Backstop: after generation, inside `SharePermissionLedger.revoking` and
+   before the row upsert, the key's security level is read from its `KeyInfo`
    (`KeystoreManager.securityLevelOf`). Anything but TEE or StrongBox,
    including an unreadable level, removes the new key and the slot's row and
-   throws the same exception.
+   throws the same exception. The slot's alias is still replaced in place
+   after a passing probe, so this backstop empties the slot if the Keystore
+   makes a software key right after a hardware probe.
+
+`sign`, `agree` and `getCertificate` run inside `PivSlotLocks.withSlot`,
+from the row read through the Keystore read, the operation and the usage
+record, so a use that starts while a generation has replaced the Keystore
+key but not yet written its row waits and answers for the new key.
 
 `sign(slot, data, algorithm = null)` uses the slot's recorded algorithm; a
 caller-supplied algorithm that differs is refused with
