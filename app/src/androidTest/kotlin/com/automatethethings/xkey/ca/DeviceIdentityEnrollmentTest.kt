@@ -240,6 +240,23 @@ class DeviceIdentityEnrollmentTest {
         assertTrue(identity.isCredentialExpired(now = notAfter + 1))
     }
 
+    /**
+     * notAfter is inclusive (RFC 5280 §4.1.2.5): the certificate is valid at
+     * that instant, and [X509Certificate.checkValidity] agrees. The device must
+     * not call itself expired a moment before the CA does.
+     */
+    @Test
+    fun theCredentialIsCurrentAtNotAfter() {
+        val issued = enroll("boundary")
+        val notAfter = issued.notAfter
+
+        issued.checkValidity(notAfter)
+        assertFalse(
+            "a credential is still valid at its notAfter",
+            identity.isCredentialExpired(now = notAfter.time)
+        )
+    }
+
     @Test
     fun theCredentialChain_keepsTheOrderItWasGiven() {
         val request = identity.createEnrollmentRequest("chain".toByteArray())
