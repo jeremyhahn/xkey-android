@@ -1,80 +1,102 @@
 # Verified media viewer architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of the verified media viewing flow in xKey.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> How `VerifiedMediaViewerActivity` finds a file's signatures, checks each signer, and shows the result over the image or video.
 
-## View Verified Media
+The viewer is `ui/VerifiedMediaViewerActivity.kt`. Gallery and file manager
+apps reach it through `ACTION_VIEW` for `image/*` and `video/*`. No screen
+inside xKey opens it.
 
-A user opens a signed image to verify its authenticity and see who signed it.
+## Viewing a signed file
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant Gallery as Gallery / File Manager
+    participant Gallery as Gallery or file manager
     participant VMA as VerifiedMediaViewerActivity
     participant XMP as XmpMetadataHelper
     participant MH as MediaHasher
-    participant KD as KeyDao
-    participant CD as ContactDao
+    participant SV as SignerVerification
 
-    User->>Gallery: Tap on image, select "Open with xKey"
-    Gallery->>VMA: ACTION_VIEW with image URI
+    User->>Gallery: Open with xKey
+    Gallery->>VMA: ACTION_VIEW with the media URI
+    VMA->>VMA: Show the image (BitmapFactory) or play the video (ExoPlayer)
 
-    VMA->>VMA: Display image (BitmapFactory with inSampleSize)
+    VMA->>XMP: readSignatureFromUri(uri, mimeType)
+    Note over VMA: JPEG: EXIF UserComment block (in-band)
+    alt No in-band block
+        VMA->>VMA: readSidecarBesideMedia(uri): "<name>.xkeysig" next to the file
+    end
+    alt Still nothing
+        VMA->>XMP: readSignature(temp copy in cacheDir)
+    end
 
-    VMA->>XMP: readSignatureFromUri(uri, "image/jpeg")
-    XMP-->>VMA: ContentAuthenticityData (2 signatures)
-
-    VMA->>MH: hashStream(image content)
-    MH-->>VMA: Content hash
-
-    Note over VMA: Process Signature 1 (Creator)
-    VMA->>KD: getByPublicKeyFingerprint("a1b2c3...")
-    KD-->>VMA: KeyEntity (own key "My Photo Key")
-    VMA->>VMA: Verify signature against hash
-    Note over VMA: Valid -- GREEN badge "My Photo Key (Creator)"
-
-    Note over VMA: Process Signature 2 (Attestor)
-    VMA->>KD: getByPublicKeyFingerprint("f5e6d7...")
-    KD-->>VMA: null (not a local key)
-    VMA->>CD: getByFingerprint("f5e6d7...")
-    CD-->>VMA: ContactEntity (name="Bob")
-    VMA->>VMA: Verify signature against hash
-    Note over VMA: Valid -- GREEN badge "Bob (Attestor)"
-
-    VMA-->>User: Image displayed with verification overlay
-    Note over User: Two green badges showing:<br/>1. My Photo Key (Creator)<br/>2. Bob (Attestor)
+    VMA->>MH: contentHashMatchesUri(uri, contentHash, source)
+    loop Each SignatureEntry
+        VMA->>VMA: ContactDao.getByFingerprint(fp), or every KeyDao row when no contact
+        VMA->>SV: verify(entry, contentHashMatches, contact, localKeys)
+        SV-->>VMA: Result(status, displayName, claimedName)
+    end
+    VMA-->>User: One row per signer on the overlay
+    VMA->>VMA: AuditLogger.logFileVerified(name, signerCount, allVerified)
 ```
+
+## Finding the signature block
+
+The viewer tries three places in order and stops at the first block it
+finds:
+
+1. **In-band.** For a JPEG, `XmpMetadataHelper.readSignatureFromUri` reads
+   the EXIF `UserComment` from the stream and accepts it when it starts with
+   `XKEY_SIG:`.
+2. **Sidecar beside the file.** `readSidecarBesideMedia` opens
+   `<name>.xkeysig` next to the media. It can do this only for a `file://`
+   URI, or for a document URI whose provider gives the sibling an ID made by
+   adding `.xkeysig`. For any other URI, such as a `content://media/` URI from
+   a gallery, it finds nothing.
+3. **Temp copy.** The viewer copies the file to `cacheDir/verify_temp.<ext>`
+   and calls `readSignature` on it, then deletes the copy. This reads the
+   EXIF block of a JPEG by path. It cannot find a real sidecar, because it
+   looks next to the temp copy.
+
+With no block, or a block with no signatures, the overlay shows "No
+signatures found in this file". An exception anywhere in the check shows the
+same text.
 
 ## When a signer shows as verified
 
-`SignerVerification.verify` (in `media/`) decides each signer's badge; the
-file-operation screen's Verify uses the same function.
+`SignerVerification.verify` (in `media/`) decides each row. Verify in
+[file operations](../file-operations/architecture.md) uses the same function.
 
 1. The stored content hash must match the file
-   (`MediaHasher.contentHashMatchesUri`). If it does not, every signer
-   fails: the signatures cover some other content.
-2. The signer is looked up as a contact, then as a local key whose public
-   key hashes to the entry's fingerprint. The signature is then checked
-   against that public key (`SignatureVerifier.verifyEntry`): valid is
-   verified (green), invalid is failed (red).
-3. A signer with no public key we hold is unknown, never verified. A local
-   key row without public key material never matches, even when its keyId
-   equals the fingerprint: the fingerprint comes from the file being
-   checked, so matching on it would let any file name a trusted signer.
+   (`MediaHasher.contentHashMatchesUri`). An in-band block must match the
+   canonical hash. A sidecar found beside the file may match the canonical
+   hash or the whole-file hash. If neither matches, every signer fails: the
+   signatures cover other content.
+2. The public key comes from the contact whose fingerprint equals the
+   entry's `keyFingerprint`. With no such contact, it comes from the local key
+   whose public key DER hashes to that fingerprint. The signature is then
+   checked against it (`SignatureVerifier`): valid is verified, invalid is
+   failed.
+3. A signer with no public key the phone holds is unknown, never verified. A
+   local key row without public key material never matches, even when its
+   key ID equals the fingerprint, because the fingerprint comes from the file
+   being checked.
 
-## Where the badge name comes from
+An exception while checking one entry marks that entry failed.
 
-The name beside a badge comes from the key the signature was checked
-against, never from the file (`SignerVerification.Result.displayName`):
+## Where the row name comes from
 
-| Case | Badge name | Claim line |
+The name on a row comes from the key the signature was checked against, not
+from the file (`SignerVerification.Result.displayName`):
+
+| Case | Row name | Claim line |
 |---|---|---|
-| Verified or failed, contact matched | contact name | embedded name, if it differs |
-| Verified or failed, local key matched | local key label | embedded name, if it differs |
-| Unknown, or failed with no match | embedded name, else the first 16 fingerprint characters | none |
+| Verified or failed, contact matched | Contact name | Embedded name, if it differs |
+| Verified or failed, local key matched | Local key label | Embedded name, if it differs |
+| Unknown, or failed with no match | Embedded name, else the first 16 fingerprint characters | None |
 
-A file signed by contact "Bob" that embeds signerName "Alice" shows a green
-badge for "Bob" and, under it, "Claims: Alice"
-(`Result.claimedName`, string `verified_viewer_claims`). The
-file-operation screen's Verify shows `displayName` only.
+A file signed by contact "Bob" that embeds signerName "Alice" shows a
+verified row for "Bob" with "Claims: Alice" under it
+(`Result.claimedName`, string `verified_viewer_claims`). Verify in file
+operations shows `displayName` only.

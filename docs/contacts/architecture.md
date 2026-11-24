@@ -1,79 +1,69 @@
 # Contacts architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of the contact table and the contact import flow in xKey.
+> **Status: REFERENCE** · Last verified: 2026-11-24
+> The `contacts` table and how a contact gets into it. The table is in the
+> xKey Room schema (`XKeyDatabase.kt`, version 13); `MIGRATION_6_7` added it.
+> The full schema and migration history are in
+> [hardware-backed-keys](../hardware-backed-keys/architecture.md#migration-history).
 
-## Import a Contact via QR
+A contact is someone else's public key. The phone uses it to encrypt files
+for that person and to put a name on their signatures. There are four ways
+in: scan their QR code, pick a key file, paste a PEM key, or have a paired
+desktop push one with `local.sharePublicKey`.
 
-A user scans another person's QR code to import their public key as a contact,
-enabling file encryption and signature verification for that person.
+## Importing a contact by QR
 
 ```mermaid
 sequenceDiagram
     actor User
-    actor Other as Other Person
+    actor Other as Other person
     participant OApp as Other's xKey
-    participant QR as QR Code Display
     participant CMA as ContactManagementActivity
-    participant Cam as QR Scanner (CameraX + ML Kit)
+    participant Cam as QrCodeScannerHelper (CameraX + ML Kit)
     participant DB as ContactDao
 
-    Other->>OApp: Open Contact Management, tap "Export Key"
-    OApp->>OApp: Select key to export
-    OApp->>OApp: Get public key DER from KeystoreManager
-    OApp->>QR: Display QR code
-    Note over QR: type=xkey-contact, v=1,<br/>label=Other's Key, algorithm=ES256,<br/>key_id=key-1234, public_key_pem=PEM public key
+    Other->>OApp: Contacts, menu "Show My Public Key QR"
+    OApp->>OApp: Pick one of their keys
+    OApp->>OApp: KeystoreManager.getPublicKeyPEM(keyId)
+    OApp->>OApp: Render the JSON envelope as a QR code (ZXing)
+    Note over OApp: type=xkey-contact, v=1, label,<br/>algorithm, key_id, public_key_pem
 
-    User->>CMA: Open Contact Management, tap FAB
-    CMA-->>User: Import options bottom sheet
-    User->>CMA: Select "Scan QR Code"
-    CMA->>Cam: Open camera preview
+    User->>CMA: Contacts, tap the add button
+    CMA-->>User: Bottom sheet: file, QR, paste
+    User->>CMA: "Scan QR Code"
+    CMA->>Cam: Camera preview in a dialog
+    User->>Cam: Point at the code
+    Cam->>CMA: Decoded text
 
-    User->>Cam: Point at QR code
-    Cam->>CMA: Decoded JSON string
+    CMA->>CMA: ContactImportCandidate.fromScannedPayload
+    Note over CMA: PEM decoded, key parsed,<br/>algorithm detected, SHA-256 fingerprint
+    CMA-->>User: Name prompt, pre-filled from label
+    User->>CMA: Import
 
-    CMA->>CMA: Parse QR payload
-    CMA->>CMA: Parse public key PEM
-    CMA->>CMA: Compute SHA-256 fingerprint
-    CMA-->>User: "Import 'Other's Key' (ES256)?"
-    User->>CMA: Confirm import
-
-    CMA->>DB: insert(ContactEntity)
-    Note over DB: Unique index on fingerprint<br/>prevents duplicates
-
-    CMA-->>User: "Contact imported successfully"
-
-    Note over User: Can now encrypt files for this contact<br/>and verify their signatures
+    CMA->>DB: insert(ContactEntity, source = qr)
+    Note over DB: Unique index on the fingerprint<br/>refuses a key already stored
+    CMA-->>User: "Contact imported"
 ```
 
-## Entity Details
-
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of the contact table in the xKey Room schema (`XKeyDatabase.kt`, version 12; the table was added in v7). The full schema and migration history are in [hardware-backed-keys](../hardware-backed-keys/architecture.md#migration-history).
+## The entity
 
 ### ContactEntity (`contacts`)
-
-Recipient public keys for file encryption and signature verification. Each
-contact stores a DER-encoded public key with a SHA-256 fingerprint for
-deduplication (unique index on `public_key_fingerprint`).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER | Primary key, auto-generated |
 | `name` | TEXT | |
-| `public_key_der` | BLOB | DER-encoded public key |
-| `public_key_fingerprint` | TEXT | SHA-256 fingerprint, unique |
-| `algorithm` | TEXT | |
+| `public_key_der` | BLOB | DER-encoded SubjectPublicKeyInfo |
+| `public_key_fingerprint` | TEXT | Lowercase hex SHA-256 of `public_key_der`, unique |
+| `algorithm` | TEXT | `ES256`, `ES384`, `ES512` or `RS256` for keys imported in the app |
 | `imported_at` | INTEGER | Epoch milliseconds |
-| `source` | TEXT | |
-| `notes` | TEXT | Nullable |
+| `source` | TEXT | `file`, `qr`, `paste` or `shared` |
+| `notes` | TEXT | Nullable; only a desktop push fills it (its `backend`) |
 
-## Index Strategy
-
-### contacts
+## Indexes
 
 | Index | Columns | Unique | Purpose |
 |-------|---------|--------|---------|
-| `index_contacts_public_key_fingerprint` | `public_key_fingerprint` | Yes | Deduplication and fingerprint lookup |
-| `index_contacts_name` | `name` | No | Search by contact name |
-| `index_contacts_algorithm` | `algorithm` | No | Filter by key algorithm |
+| `index_contacts_public_key_fingerprint` | `public_key_fingerprint` | Yes | No duplicates; signer lookup |
+| `index_contacts_name` | `name` | No | Name search |
+| `index_contacts_algorithm` | `algorithm` | No | Filter by algorithm |

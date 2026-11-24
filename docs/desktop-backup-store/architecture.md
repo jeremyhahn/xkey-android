@@ -1,7 +1,7 @@
 # Desktop backup store architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of how xKey holds a paired desktop's encrypted backups and hands them back.
+> **Status: REFERENCE** · Last verified: 2026-11-24
+> How xKey holds a paired desktop's encrypted backups and hands them back.
 
 ## Summary
 
@@ -14,13 +14,15 @@ keeps the envelopes the phone fetches itself with `remote.createBackup` (see
 
 ## Components
 
+Paths are relative to ``.
+
 | Class | File | Role |
 |-------|------|------|
-| `BackupStore` | `app/src/main/kotlin/com/automatethethings/xkey/backup/BackupStore.kt` | `store`, `load`, `latestId`, `createdAtMillis`; id generation, on-disk record format and legacy migration |
-| `RequestHandler` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | `handleCreateBackup`, `handleRestoreBackup`; `decodeBase64Strict` checks the payload |
-| `MethodNames` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Messages.kt` | `LOCAL_CREATE_BACKUP`, `LOCAL_RESTORE_BACKUP` |
-| `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | `latestStoredBackupId()`, and `createDesktopBackup` / `restoreDesktopBackup`, which store and load envelopes in `BackupStore` |
-| `SyncCodec` | `app/src/main/kotlin/com/automatethethings/xkey/crypto/SyncCodec.kt` | `sha256Hex` for file names, `toRfc3339` for `created_at` |
+| `BackupStore` | `backup/BackupStore.kt` | `store`, `load`, `latestId`, `createdAtMillis`; id generation, on-disk record format and legacy migration |
+| `RequestHandler` | `protocol/Handler.kt` | `handleCreateBackup`, `handleRestoreBackup`; `decodeBase64Strict` checks the payload |
+| `MethodNames` | `protocol/Messages.kt` | `LOCAL_CREATE_BACKUP`, `LOCAL_RESTORE_BACKUP` |
+| `XKeyGattService` | `ble/XKeyGattService.kt` | `latestStoredBackupId()`, and `createDesktopBackup` / `restoreDesktopBackup`, which store and load envelopes in `BackupStore` |
+| `SyncCodec` | `crypto/SyncCodec.kt` | `sha256Hex` for file names, `toRfc3339` for `created_at` |
 
 ## Wire methods
 
@@ -53,8 +55,8 @@ A session that names no peer logs no device and the call still succeeds.
 `details` holds `backupId` and `sizeBytes` only; the backup bytes, their
 base64 and the desktop's `label` never enter the log. A failed call (missing
 or invalid `backup_data`, no backup stored, an unknown id, an unreadable or
-cut-short record) writes no entry. Backups `XKeyGattService` stores directly are not
-audited here.
+cut-short record) writes no entry. Backups `XKeyGattService` stores directly
+are not audited here.
 
 ## Backup ids
 
