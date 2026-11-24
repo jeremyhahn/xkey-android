@@ -301,6 +301,10 @@ jobs:
           fi
           echo "OK: no runBlocking in app/src/main"
 
+      # Drafts are not reviewed, by job condition and by the live PR (code-review v5.12.13).
+      - name: Code review draft tests
+        run: python3 -I scripts/testdata/code-review-v51213-tests.py .github/workflows/code-review.yml
+
   # Every stage runs in the project's own devcontainer image and no other. One
   # image job builds the images once from build/docker/devcontainer/Dockerfile
   # at this commit (`make docker-build`) and runs each stage's `make` target in
