@@ -275,7 +275,10 @@ class OathActivityUiTest {
         onView(withText(R.string.oath_detail_code)).check(matches(isDisplayed()))
     }
 
-    /** A 60+ character account never pushes the code off the row or onto two lines. */
+    /**
+     * A 60+ character account is a small ellipsized title; the code sits on
+     * its own line below it, whole and on screen.
+     */
     @Test
     fun longAccount_codeIsCompletelyDisplayed() {
         seedLongAccountCredential()
@@ -283,7 +286,7 @@ class OathActivityUiTest {
         val scenario = ActivityScenario.launch(OathActivity::class.java)
         awaitText(scenario, longAccount)
 
-        awaitCondition("The code beside a long account should be on screen") {
+        awaitCondition("The code under a long account should be on screen") {
             var shown = false
             scenario.onActivity { activity ->
                 shown = rowCodeView(activity.window.decorView, longAccount)?.isShown == true
@@ -300,7 +303,26 @@ class OathActivityUiTest {
                 code.paint.measureText(code.text.toString()) <=
                     code.width - code.totalPaddingLeft - code.totalPaddingRight + 1
             )
+            val shown = code.layout.text.toString()
+            assertEquals("Code text must be shown in full", code.text.toString(), shown)
+
+            val decor = activity.window.decorView
+            val codeTop = IntArray(2).also { code.getLocationOnScreen(it) }[1]
+            for (title in listOf(rowTitleView(decor, "issuer"), rowTitleView(decor, "account"))) {
+                val titleTop = IntArray(2).also { title.getLocationOnScreen(it) }[1]
+                assertTrue(
+                    "Code (top $codeTop) must sit below the ${title.tag} (bottom ${titleTop + title.height})",
+                    codeTop >= titleTop + title.height
+                )
+            }
         }
+    }
+
+    /** The issuer or account TextView in the row showing [longAccount]. */
+    private fun rowTitleView(decor: View, tag: String): TextView {
+        var view: View? = findTextView(decor, longAccount)
+        while (view != null && view !is OathRowLayout) view = view.parent as? View
+        return view!!.findViewWithTag(tag)
     }
 
     // ---------------------------------------------------------------
