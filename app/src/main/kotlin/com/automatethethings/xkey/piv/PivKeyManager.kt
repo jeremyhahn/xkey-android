@@ -246,8 +246,8 @@ class PivKeyManager(
     /**
      * Runs [replace], which swaps [slot]'s key and writes its row: the one
      * path a slot key is generated through. Any failure, cancellation
-     * included, empties the slot, so no row (or certificate) is left
-     * describing a key the slot no longer holds.
+     * included, leaves the slot with its old key, row and certificate, or with
+     * none of them.
      */
     private suspend fun <T> replaceSlotKey(slot: PivSlot, replace: suspend () -> T): T =
         try {
@@ -258,12 +258,15 @@ class PivKeyManager(
         }
 
     /**
-     * Empty [slot] after its Keystore key was replaced but the row could not
-     * be written: the replaced key is gone, and leaving the new one would
-     * leave a row describing a key the slot no longer holds. Best effort; the
-     * caller rethrows the original failure.
+     * Empty [slot] after a failed replacement, unless the key it still holds
+     * is the one its row describes: then the old key, row and certificate
+     * stay together. Best effort; the caller rethrows the original failure.
      */
     private suspend fun discardUnrecordedKey(slot: PivSlot) {
+        val row = runCatching { pivSlotDao.getBySlotId(slot.hexId) }.getOrNull()
+        val live = runCatching { liveSlotPublicKey(slot) }.getOrNull()
+        // The old key could not be removed, so its row and certificate still describe it.
+        if (row != null && live != null && live.contentEquals(row.publicKeyDer)) return
         runCatching { keyStore.deleteEntry(slot.keystoreAlias) }
             .onFailure { Log.w(TAG, "Could not remove unrecorded key from PIV slot ${slot.hexId}: ${it.message}") }
         runCatching { mlDsaStore?.delete(slot.keystoreAlias) }
