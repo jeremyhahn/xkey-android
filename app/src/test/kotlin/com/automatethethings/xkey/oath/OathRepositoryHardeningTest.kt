@@ -77,7 +77,6 @@ class OathRepositoryHardeningTest {
             "otpauth://totp/x?secret=$SECRET&digits=4",
             "otpauth://totp/x?secret=$SECRET&period=0",
             "otpauth://totp/x?secret=$SECRET&period=-30",
-            "otpauth://totp/x?secret=$SECRET&period=301",
             "otpauth://totp/x?secret=$SECRET&algorithm=MD5",
             "otpauth://hotp/x?secret=$SECRET&digits=9",
             "otpauth://totp/x?secret=A",
@@ -120,6 +119,21 @@ class OathRepositoryHardeningTest {
 
         assertEquals(4, dao.count())
         assertEquals(setOf("SHA1", "SHA256", "SHA512"), dao.getAll().map { it.algorithm }.toSet())
+    }
+
+    @Test
+    fun `an hotp period and a long totp period still import, and the long period computes`() = runBlocking {
+        repository.importFromUri("otpauth://hotp/h?secret=$SECRET&period=0")
+        repository.importStructured(
+            type = "hotp", issuer = null, accountName = "h2", secret = SECRET, period = 0, counter = 5
+        )
+        val long = repository.importFromUri("otpauth://totp/t?secret=$SECRET&period=600")
+        repository.importStructured(type = "totp", issuer = null, accountName = "t2", secret = SECRET, period = 600)
+
+        assertEquals(4, dao.count())
+        val code = repository.generateCode(long)
+        assertEquals(6, code.length)
+        assertTrue(code.all { it.isDigit() })
     }
 
     @Test
