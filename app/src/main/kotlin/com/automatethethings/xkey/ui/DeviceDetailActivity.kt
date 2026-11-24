@@ -90,12 +90,13 @@ class DeviceDetailActivity : AppCompatActivity() {
 
     companion object {
         /**
-         * Computes truncated SHA-256 fingerprint from DER bytes.
+         * The certificate's whole SHA-256 fingerprint from its DER bytes, as
+         * 32 colon-separated hex bytes; the row wraps it.
          */
         internal fun computeFingerprint(certDER: ByteArray): String {
             val digest = java.security.MessageDigest.getInstance("SHA-256")
             val hash = digest.digest(certDER)
-            return hash.take(8).joinToString(":") { "%02X".format(it) } + "..."
+            return hash.joinToString(":") { "%02X".format(it) }
         }
 
         /** The clip the copy button puts on the clipboard: the fingerprint the screen shows. */
