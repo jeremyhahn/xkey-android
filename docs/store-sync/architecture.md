@@ -1,7 +1,7 @@
 # Store sync architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of how xKey synchronizes its trust store, OATH credentials and passwords with a paired desktop.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> How xKey synchronizes its trust store, OATH credentials and passwords with a paired desktop.
 
 ## Summary
 
@@ -9,9 +9,9 @@ One class, `SyncEngine`, gathers (exports) and merges (imports) the three
 synced stores: the trust store, OATH credentials and passwords. Both
 directions use it:
 
-- **Inbound** (`local.sync*`, desktop to phone): `RequestHandler` merges the
+- Inbound (`local.sync*`, desktop to phone): `RequestHandler` merges the
   desktop's items, then returns the phone's items in a `remote` array.
-- **Outbound** (`remote.sync*`, phone to desktop): `RemoteSyncClient` sends the
+- Outbound (`remote.sync*`, phone to desktop): `RemoteSyncClient` sends the
   phone's items, then merges the desktop's reply, which comes back in a `local`
   array.
 
@@ -59,24 +59,24 @@ Method names are constants in `MethodNames` (`protocol/Messages.kt`).
 serves it, but the phone never sends it. go-xkms `RemoteSyncAllParams` carries
 only the include flags (`include_trust_store`, `include_oath`,
 `include_passwords`) and none of the phone's items, so the desktop could not
-merge the phone's stores from it: it would be a pull, not a sync. Each
+merge the phone's stores from it. Each
 per-store `remote.sync*` call pushes the phone's items and pulls the desktop's
 in one round trip, and lets the password leg be skipped on its own when the
 vault is locked.
 
 ## Merge rules
 
-- **Certificates:** skipped when the fingerprint is already in the trust store
+- Certificates: skipped when the fingerprint is already in the trust store
   or the PEM does not decode; otherwise imported with the `purpose` field as its
   label (`sync` when blank).
-- **OATH:** an entry without an id (or name), secret or `account_name` is
+- OATH: an entry without an id (or name), secret or `account_name` is
   skipped; the rest are imported through `OathRepository.importStructured`, counted
   as updated when the id already existed.
-- **Passwords:** `PasswordSync.merge` patches an existing entry in place or adds
+- Passwords: `PasswordSync.merge` patches an existing entry in place or adds
   a new personal, non-expiring entry in the default tenant. `PasswordSync.gather`
   leaves out entries with a non-default tenant, sharing or an expiry, because
   `SyncPassword` cannot carry them.
-- **Status:** `storeChecksums` hashes OATH ids with counters, password ids with
+- Status: `storeChecksums` hashes OATH ids with counters, password ids with
   update times (read without decrypting a password) and trust-store
   fingerprints. It is not behind the password vault's lock.
 
@@ -91,7 +91,7 @@ sequenceDiagram
     participant Eng as SyncEngine
     participant Desk as Desktop
 
-    User->>UI: Sync now
+    User->>UI: Sync with Desktop
     UI->>Svc: syncNow()
     Svc->>Svc: connectedDesktop()
     Svc->>RSC: syncAll()
@@ -121,8 +121,8 @@ sequenceDiagram
 The status request runs after the store legs and touches no phone store. A
 failure there, including an unreadable reply (a missing `device_id` or a
 wrongly typed field), is turned into no status by `SyncStatusText.fetch`: the
-completed sync is still reported, with the desktop's status shown as unavailable. The
-phone does not compare `store_checksums` with its own digests: the two sides'
+completed sync is still reported, with the desktop's status shown as
+unavailable. The phone does not compare `store_checksums` with its own digests: the two sides'
 digest inputs are not pinned to match.
 
 The inbound flow is the mirror image: `RequestHandler` builds a `SyncEngine`,
