@@ -17,6 +17,11 @@ package com.automatethethings.xkey.piv
 import android.security.keystore.KeyGenParameterSpec
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
+import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.PqcHardwareBackend
+import com.automatethethings.xkey.crypto.PqcKeysTest
+import com.automatethethings.xkey.crypto.UnsupportedAlgorithmException
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
@@ -393,6 +398,33 @@ class PivKeyManagerTest {
             .generateCertificate(cert.inputStream())
 
         assertArrayEquals(slotKey.public.encoded, parsed.publicKey.encoded)
+    }
+
+    @Test
+    fun `a hardware ML-DSA-87 slot asked for ML-DSA-44 refuses before it signs`() = runTest {
+        val slotCertificate = mockk<Certificate>()
+        every { slotCertificate.publicKey.encoded } returns PqcKeysTest.spkiOf(MlDsaParameterSet.ML_DSA_87)
+        every { keystore.keyStore.getCertificate(PivSlot.AUTHENTICATION.keystoreAlias) } returns slotCertificate
+        val saved = PqcHardware.backend
+        PqcHardware.backend = object : PqcHardwareBackend {
+            override fun supportedParameterSets() = MlDsaParameterSet.entries.toSet()
+            override fun generate(
+                alias: String,
+                set: MlDsaParameterSet,
+                authDurationSeconds: Int,
+                preferStrongBox: Boolean
+            ): ByteArray = throw UnsupportedOperationException()
+            override fun jcaSignatureAlgorithm(set: MlDsaParameterSet) = "ML-DSA"
+        }
+        try {
+            val error = runCatching {
+                PivKeyManager(pivSlotDao).sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
+            }.exceptionOrNull()
+            assertTrue("$error", error is UnsupportedAlgorithmException)
+            coVerify(exactly = 0) { pivSlotDao.recordUsage(any()) }
+        } finally {
+            PqcHardware.backend = saved
+        }
     }
 
     private suspend fun importError(certDer: ByteArray): Throwable? =

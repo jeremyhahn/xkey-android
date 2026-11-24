@@ -16,7 +16,11 @@
 package com.automatethethings.xkey.crypto
 
 import com.automatethethings.xkey.protocol.CoseAlgorithms
+import org.bouncycastle.asn1.ASN1ObjectIdentifier
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo
 import org.junit.After
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -100,5 +104,30 @@ class PqcKeysTest {
             override fun jcaSignatureAlgorithm(set: MlDsaParameterSet) = set.wireName
         }
         assertEquals(setOf(MlDsaParameterSet.ML_DSA_65), PqcHardware.supported())
+    }
+
+    @Test
+    fun `an SPKI names its own set and a key of another set is refused`() {
+        for (set in MlDsaParameterSet.entries) {
+            val spki = spkiOf(set)
+            assertEquals(set, MlDsaParameterSet.fromSpki(spki))
+            MlDsaParameterSet.requireSpkiSet(spki, set)
+            for (other in MlDsaParameterSet.entries - set) {
+                assertThrows(other.wireName, UnsupportedAlgorithmException::class.java) {
+                    MlDsaParameterSet.requireSpkiSet(spki, other)
+                }
+            }
+        }
+        assertNull(MlDsaParameterSet.fromSpki(byteArrayOf(1, 2, 3)))
+        assertThrows(UnsupportedAlgorithmException::class.java) {
+            MlDsaParameterSet.requireSpkiSet(byteArrayOf(1, 2, 3), MlDsaParameterSet.ML_DSA_44)
+        }
+    }
+
+    companion object {
+        /** A SubjectPublicKeyInfo DER with [set]'s OID and a zero key of its size. */
+        fun spkiOf(set: MlDsaParameterSet): ByteArray = SubjectPublicKeyInfo(
+            AlgorithmIdentifier(ASN1ObjectIdentifier(set.oid)), ByteArray(set.publicKeyBytes)
+        ).encoded
     }
 }
