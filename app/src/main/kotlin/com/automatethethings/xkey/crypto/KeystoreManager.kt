@@ -382,7 +382,10 @@ class KeystoreManager(
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         specBuilder.setUserAuthenticationParameters(
                             0,
-                            KeyProperties.AUTH_BIOMETRIC_STRONG
+                            // Same policy as the StrongBox path: a device with
+                            // only a PIN can still use the passkey.
+                            KeyProperties.AUTH_BIOMETRIC_STRONG or
+                                KeyProperties.AUTH_DEVICE_CREDENTIAL
                         )
                     } else {
                         @Suppress("DEPRECATION")
