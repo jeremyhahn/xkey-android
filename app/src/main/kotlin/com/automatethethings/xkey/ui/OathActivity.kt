@@ -356,7 +356,7 @@ class OathActivity : AppCompatActivity() {
 
     private fun buildKeyList() {
         adapter = OathAdapter(
-            onItemClick = { item -> copyCodeToClipboard(item) },
+            onItemClick = { item -> copyCodeToClipboard(item.credential.oathId) },
             onItemLongClick = { item ->
                 showContextMenu(item)
                 true
@@ -656,16 +656,35 @@ class OathActivity : AppCompatActivity() {
     // Actions
     // -------------------------------------------------------------------------
 
-    private fun copyCodeToClipboard(item: OathCredentialWithCode) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("OTP Code", item.code)
-        clipboard.setPrimaryClip(clip)
+    /**
+     * Copies a freshly generated code for [oathId]. The code comes from
+     * [OathRepository.generateCode], the audited generation, never from the
+     * list's cached code; an HOTP copy advances the counter there.
+     */
+    private fun copyCodeToClipboard(oathId: String) {
+        lifecycleScope.launch {
+            val code = try {
+                repository.generateCode(oathId)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Snackbar.make(
+                    rootLayout,
+                    R.string.oath_code_copy_failed,
+                    Snackbar.LENGTH_SHORT
+                ).show()
+                return@launch
+            }
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = ClipData.newPlainText("OTP Code", code)
+            clipboard.setPrimaryClip(clip)
 
-        Snackbar.make(
-            rootLayout,
-            R.string.oath_code_copied,
-            Snackbar.LENGTH_SHORT
-        ).show()
+            Snackbar.make(
+                rootLayout,
+                R.string.oath_code_copied,
+                Snackbar.LENGTH_SHORT
+            ).show()
+        }
     }
 
     override fun onDestroy() {

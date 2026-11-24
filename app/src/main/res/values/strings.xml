@@ -954,6 +954,7 @@
     <string name="oath_field_digits">Digits</string>
     <string name="oath_field_period">Period (seconds)</string>
     <string name="oath_code_copied">Code copied to clipboard</string>
+    <string name="oath_code_copy_failed">Could not generate a code to copy</string>
     <string name="oath_delete_confirm">Delete this credential?</string>
     <string name="oath_delete_message">This will permanently remove the %s credential for %s.</string>
     <string name="oath_context_view_details">View Details</string>
