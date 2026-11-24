@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.security.keystore.KeyGenParameterSpec
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
@@ -24,6 +25,7 @@ import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -47,6 +49,7 @@ class KeystoreManagerRsaKeySizeTest {
 
     private val keyStore = mockk<KeyStore>(relaxed = true)
     private var requestedBits = 0
+    private val context = mockk<Context>(relaxed = true)
     private lateinit var keystoreManager: KeystoreManager
 
     @Before
@@ -88,7 +91,7 @@ class KeystoreManagerRsaKeySizeTest {
         mockkStatic(KeyPairGenerator::class)
         every { KeyPairGenerator.getInstance(any<String>(), "AndroidKeyStore") } returns generator
 
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true), sdkInt = 34)
+        keystoreManager = KeystoreManager(context, sdkInt = 34)
     }
 
     @After
@@ -129,5 +132,33 @@ class KeystoreManagerRsaKeySizeTest {
                 assertEquals("no key was asked for", 0, requestedBits)
             }
         }
+    }
+
+    private fun withStrongBox() {
+        every { context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE) } returns true
+    }
+
+    @Test
+    fun `an RSA-OAEP 3072 or 4096 key is made in the TEE even when StrongBox is present`() = runBlocking {
+        withStrongBox()
+        for (bits in listOf(3072, 4096)) {
+            val der = keystoreManager.generateRSAEncryptionKey("e$bits", bits, -1)
+            assertEquals(bits, modulusBits(der))
+        }
+        verify(exactly = 0) { anyConstructed<KeyGenParameterSpec.Builder>().setIsStrongBoxBacked(any()) }
+    }
+
+    @Test
+    fun `an RSA-OAEP 2048 key still asks for StrongBox when it is present`() = runBlocking {
+        withStrongBox()
+        assertEquals(2048, modulusBits(keystoreManager.generateRSAEncryptionKey("e", 2048, -1)))
+        verify(exactly = 1) { anyConstructed<KeyGenParameterSpec.Builder>().setIsStrongBoxBacked(true) }
+    }
+
+    @Test
+    fun `an RS256 4096 key is made in the TEE even when StrongBox is present`() = runBlocking {
+        withStrongBox()
+        assertEquals(4096, modulusBits(keystoreManager.generateKeyForAlgorithm("k", "RS256", -1, true, keySizeBits = 4096)))
+        verify(exactly = 0) { anyConstructed<KeyGenParameterSpec.Builder>().setIsStrongBoxBacked(any()) }
     }
 }

@@ -81,6 +81,17 @@ class LocalGenerateKeySizeTest {
     }
 
     @Test
+    fun `a fractional or out-of-range number is INVALID_PARAMS, never narrowed to a size`() {
+        assertRefused("RS256", 2048.9)
+        assertRefused("RS256", 3072.5)
+        assertRefused("ES256", 256.1)
+        assertRefused("RS256", 4294969344L)
+        assertRefused("RS256", Long.MAX_VALUE)
+        assertRefused("RS256", -4294963200L)
+        assertRefused("RS256", Double.MAX_VALUE)
+    }
+
+    @Test
     fun `a size that is not the algorithm's own is INVALID_PARAMS`() {
         assertRefused("ES256", 384)
         assertRefused("ES384", 2048)
