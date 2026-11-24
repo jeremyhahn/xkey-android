@@ -190,6 +190,26 @@ class PromptActivityTrackerTest {
         assertFalse("the user's refusal must reach the caller", completed(answer))
     }
 
+    /**
+     * A short-lived host (a biometric screen that finishes itself once its
+     * prompt is answered) taking the pairing dialog down with its window must
+     * not leave the caller waiting: on the stream path that wait holds the
+     * only connection. The host going away is a refusal.
+     */
+    @Test
+    fun aPairingWhoseHostIsDestroyedIsRefusedAndItsDialogGoesAway() {
+        val host = launch(HostActivity::class.java)
+
+        val answer = askToPair()
+        val dialog = shownDialog()
+        host.get().finish()
+        host.pause().stop().destroy()
+        idle()
+
+        assertFalse("a prompt whose host went away is a refusal", completed(answer))
+        assertFalse("the prompt must not outlive its host", dialog.isShowing)
+    }
+
     @Test
     fun withNoResumedActivityThePairingIsRefused() {
         val main = launch(HostActivity::class.java)
