@@ -479,6 +479,23 @@ class KeyUseHandlerTest {
     }
 
     @Test
+    fun `malformed base64 in each byte field answers INVALID_PARAMS before any key operation`() = runTest {
+        gatedRequests().forEach { (method, params) ->
+            JSONObject(params).keys().asSequence().toList()
+                .filter { it != "keyId" }
+                .forEach { field ->
+                    val response = call(method, withField(params, field, "not*base64!"))
+                    assertCleanError("$method $field", ErrorCodes.INVALID_PARAMS, response)
+                    assertTrue(
+                        "$method $field: the message names the field: ${errorMessage(response)}",
+                        errorMessage(response).contains(field)
+                    )
+                }
+        }
+        assertNoKeyOperation()
+    }
+
+    @Test
     fun `found - symmetricDecrypt takes a payload sent as plaintext`() = runTest {
         // LocalSymmetricParams reads plaintext ?: ciphertext ?: data for both
         // directions, so a decrypt request naming its input "plaintext" is
