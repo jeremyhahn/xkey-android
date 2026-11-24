@@ -560,7 +560,7 @@ class KeyUseHandlerTest {
 
     @Test
     fun `a paired desktop with stale attestation is refused before any key operation`() = runTest {
-        gatedRequests().forEach { (method, params) ->
+        allRequests().forEach { (method, params) ->
             val response = servedBy(PEER_STALE) { call(method, params) }
             assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, response)
         }
@@ -569,7 +569,7 @@ class KeyUseHandlerTest {
 
     @Test
     fun `an unreadable paired-device store is refused before any key operation`() = runTest {
-        gatedRequests().forEach { (method, params) ->
+        allRequests().forEach { (method, params) ->
             val response = servedBy(PEER_UNREADABLE) { call(method, params) }
             assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, response)
         }
@@ -578,26 +578,14 @@ class KeyUseHandlerTest {
 
     @Test
     fun `a paired desktop with current attestation is served`() = runTest {
-        gatedRequests().forEach { (method, params) ->
+        allRequests().forEach { (method, params) ->
             servedBy(PEER_OK) { result(call(method, params)) }
         }
     }
 
     @Test
-    fun `found - getPublicKey has no attestation gate`() = runTest {
-        // local.getPublicKey exports public material only and never checks
-        // the desktop's attestation: a stale or unreadable peer is answered.
-        listOf(PEER_STALE, PEER_UNREADABLE).forEach { peer ->
-            val response = servedBy(peer) {
-                call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"der"}""")
-            }
-            assertEquals(peer, b64(publicDer), result(response).getString("publicKey"))
-        }
-    }
-
-    @Test
     fun `an unpaired peer is refused before any key operation`() = runTest {
-        gatedRequests().forEach { (method, params) ->
+        allRequests().forEach { (method, params) ->
             val response = servedBy(PEER_UNPAIRED) { call(method, params) }
             assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, response)
         }
@@ -606,7 +594,7 @@ class KeyUseHandlerTest {
 
     @Test
     fun `a served connection with no authenticated peer is refused before any key operation`() = runTest {
-        gatedRequests().forEach { (method, params) ->
+        allRequests().forEach { (method, params) ->
             val response = withContext(RequestHandler.servedConnection(binding, null, "test:anonymous")) {
                 rawCall(method, params)
             }
@@ -617,7 +605,7 @@ class KeyUseHandlerTest {
 
     @Test
     fun `a request outside any session with no connected desktop is refused before any key operation`() = runTest {
-        gatedRequests().forEach { (method, params) ->
+        allRequests().forEach { (method, params) ->
             assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, rawCall(method, params))
         }
         assertNoKeyOperation()
@@ -688,14 +676,13 @@ class KeyUseHandlerTest {
     }
 
     @Test
-    fun `found - getPublicKey writes no audit entry`() = runTest {
-        servedBy(PEER_OK) { result(call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"der"}""")) }
-        val keyUse = setOf(
-            AuditOperationType.DECRYPTION_REQUEST, AuditOperationType.ENCRYPTION_REQUEST,
-            AuditOperationType.HMAC_REQUEST, AuditOperationType.KEY_DERIVATION_REQUEST,
-            AuditOperationType.SIGNING_REQUEST
-        )
-        assertTrue("no key-use entry: $inserted", inserted.none { it.operationType in keyUse })
+    fun `getPublicKey writes one entry naming the key, the format and the desktop`() = runTest {
+        listOf("der", "pem", "ssh", "cose").forEach { format ->
+            assertOneKeyUseEntry(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"$format"}""")
+            val entry = inserted.single { it.success && it.keyId != null }
+            assertEquals(format, "signing", entry.keyType)
+            assertTrue("$format: ${entry.details}", entry.details.orEmpty().contains(format))
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -708,6 +695,7 @@ class KeyUseHandlerTest {
         MethodNames.LOCAL_SYMMETRIC_ENCRYPT -> AuditOperationType.ENCRYPTION_REQUEST
         MethodNames.LOCAL_HMAC -> AuditOperationType.HMAC_REQUEST
         MethodNames.LOCAL_ECDH -> AuditOperationType.KEY_DERIVATION_REQUEST
+        MethodNames.LOCAL_GET_PUBLIC_KEY -> AuditOperationType.KEY_EXPORTED
         else -> error("no key-use operation for $method")
     }
 
@@ -774,6 +762,7 @@ class KeyUseHandlerTest {
         io.mockk.coVerify(exactly = 0) { keystore.symmetricDecrypt(any(), any(), any()) }
         io.mockk.coVerify(exactly = 0) { keystore.computeHMACWithAlgorithm(any(), any()) }
         io.mockk.coVerify(exactly = 0) { keystore.performECDH(any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.getPublicKeyDER(any()) }
         io.mockk.verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().get(any()) }
         assertTrue("no key-use entry: $inserted", inserted.none { it.success && it.keyId != null })
     }
