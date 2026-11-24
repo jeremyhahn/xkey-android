@@ -62,6 +62,9 @@ import java.security.spec.ECGenParameterSpec
 import java.util.Date
 import javax.crypto.KeyAgreement
 
+/** Every algorithm a device offers without the curve 25519 hardware probe. */
+private val NON_CURVE_25519 = PivAlgorithm.entries.filterNot { it.isCurve25519 }
+
 /**
  * Unit tests for [PivKeyManager] paths that run without the Android Keystore.
  *
@@ -392,7 +395,7 @@ class PivKeyManagerTest {
             val newKey = KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }.generateKeyPair()
             keystore.generatesOnNextCall(newKey)
 
-            val info = PivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, algorithm)
+            val info = testPivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, algorithm)
 
             assertTrue("$algorithm reported as ${info.algorithm}", info.algorithm == algorithm)
             assertTrue(info.hasKey)
@@ -595,17 +598,17 @@ class PivKeyManagerTest {
 
         val offered = manager.availableAlgorithms()
 
-        assertEquals(listOf(PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048), offered)
+        assertEquals(NON_CURVE_25519, offered)
         assertEquals(2, generatedAliases.size)
         generatedAliases.forEach { alias -> verify { keystore.keyStore.deleteEntry(alias) } }
         assertTrue(keystore.live === slotKey)
     }
 
     @Test
-    fun `availableAlgorithms on API 33 whose probe reads software offers only ES256, ES384 and RS2048`() = runTest {
+    fun `availableAlgorithms on API 33 whose probe reads software offers only ECDSA and RSA`() = runTest {
         val offered = manager(probe = KeySecurityLevel.SOFTWARE).availableAlgorithms()
 
-        assertEquals(listOf(PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048), offered)
+        assertEquals(NON_CURVE_25519, offered)
     }
 
     @Test
@@ -613,7 +616,7 @@ class PivKeyManagerTest {
         assertEquals(PivAlgorithm.entries.toList(), manager(probe = KeySecurityLevel.TEE).availableAlgorithms())
         assertEquals(PivAlgorithm.entries.toList(), manager(probe = KeySecurityLevel.STRONGBOX).availableAlgorithms())
         assertEquals(
-            listOf(PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048),
+            NON_CURVE_25519,
             manager(sdkInt = 32, probe = KeySecurityLevel.TEE).availableAlgorithms()
         )
     }
