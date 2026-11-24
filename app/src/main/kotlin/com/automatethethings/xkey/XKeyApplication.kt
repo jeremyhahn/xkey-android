@@ -6,6 +6,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.KeystorePqcBackend
+import com.automatethethings.xkey.crypto.PqcHardware
 import com.automatethethings.xkey.settings.PairedDeviceGrantCleanup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -29,6 +31,7 @@ class XKeyApplication : Application() {
         registerActivityLifecycleCallbacks(PromptActivityTracker)
         createNotificationChannels()
         initializeAuditLogger()
+        registerPqcHardware()
         registerGrantCleanup()
         // Finish a copied secret's pending clipboard clear from any screen.
         registerActivityLifecycleCallbacks(ClipboardFocusRetry)
@@ -39,6 +42,17 @@ class XKeyApplication : Application() {
      */
     private fun initializeAuditLogger() {
         AuditLogger.initialize(this)
+    }
+
+    /**
+     * Registers the Android Keystore ML-DSA backend and starts its probe on
+     * an application-lifetime IO scope. Startup never waits for it: until
+     * the probe ends no hardware ML-DSA set is offered.
+     */
+    private fun registerPqcHardware() {
+        val backend = KeystorePqcBackend()
+        PqcHardware.backend = backend
+        backend.startProbe(CoroutineScope(SupervisorJob() + Dispatchers.IO))
     }
 
     /**
