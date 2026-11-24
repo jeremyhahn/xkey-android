@@ -39,7 +39,7 @@ class QrCodeScannerHelper(
     private val previewView: PreviewView,
     private val onResult: (String) -> Unit,
     frameSource: FrameSource? = null,
-    private val scannerFactory: () -> BarcodeScanner = { BarcodeScanning.getClient() }
+    scannerFactory: (() -> BarcodeScanner)? = null
 ) {
     /**
      * Where the frames come from: the back camera, decoded by ML Kit, unless
@@ -69,6 +69,18 @@ class QrCodeScannerHelper(
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private val frames: FrameSource = frameSource ?: CameraFrames()
 
+    /**
+     * Makes the ML Kit client: the given factory, else the real client when
+     * the frames are the camera's. A frame source of a test's own decodes its
+     * frames itself and, without a factory, needs no client.
+     */
+    private val scannerFactory: (() -> BarcodeScanner)? =
+        scannerFactory ?: if (frameSource == null) {
+            { BarcodeScanning.getClient() }
+        } else {
+            null
+        }
+
     /** Guards [scanner], [decoding] and [stopped]. */
     private val lock = Any()
 
@@ -95,7 +107,7 @@ class QrCodeScannerHelper(
     fun start() {
         synchronized(lock) {
             if (stopped) return
-            if (scanner == null) scanner = scannerFactory()
+            if (scanner == null) scanner = scannerFactory?.invoke()
             processing = false
         }
         frames.bind(::analyze)
