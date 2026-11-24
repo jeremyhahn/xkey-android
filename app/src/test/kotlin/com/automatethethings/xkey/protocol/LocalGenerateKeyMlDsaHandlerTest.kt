@@ -44,8 +44,12 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import java.security.KeyStore
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -166,6 +170,56 @@ class LocalGenerateKeyMlDsaHandlerTest {
         assertEquals("ML-DSA-65", stored.captured.algorithm)
         assertEquals(MlDsaParameterSet.ML_DSA_65.publicKeyBytes * 8, stored.captured.keySizeBits)
         coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `a request cancelled while its ML-DSA key is made leaves both the key and its row or neither`() = runTest {
+        val material = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        coEvery { keystore.generateMlDsaKey("c", any(), any(), any(), any()) } answers {
+            entered.countDown()
+            release.await(10, TimeUnit.SECONDS)
+            material += "c"
+            spki
+        }
+        every { keystore.deleteGeneralKey("c") } answers { material.remove("c") }
+
+        val request = CoroutineScope(Dispatchers.Default).launch {
+            generate("""{"keyId":"c","algorithm":"ML-DSA-65","requireUserVerification":false}""")
+        }
+        assertTrue("generation never started", entered.await(10, TimeUnit.SECONDS))
+        request.cancel()
+        release.countDown()
+        request.join()
+
+        val rowStored = stored.isCaptured && stored.captured.keyId == "c"
+        assertEquals("key material $material, row stored $rowStored", "c" in material, rowStored)
+    }
+
+    @Test
+    fun `an ML-DSA key whose row cannot be stored is removed and a retry succeeds`() = runTest {
+        val material = mutableSetOf<String>()
+        coEvery { keystore.generateMlDsaKey("f", any(), any(), any(), any()) } answers {
+            material += "f"
+            spki
+        }
+        every { keystore.deleteGeneralKey("f") } answers { material.remove("f") }
+        every { keystore.generalKeyExists("f") } answers { "f" in material }
+        var inserts = 0
+        coEvery { keyDao.insert(match { it.keyId == "f" }) } answers {
+            if (inserts++ == 0) throw IllegalStateException("database is full") else 1L
+        }
+        val params = """{"keyId":"f","algorithm":"ML-DSA-65","requireUserVerification":false}"""
+
+        val first = generate(params)
+        assertTrue("the first request must fail, got $first", first.has("error"))
+        assertFalse("the unrecorded key must be removed", "f" in material)
+
+        val retry = generate(params)
+        assertFalse(retry.toString(), retry.has("error"))
+        assertTrue("f" in material)
+        assertEquals(2, inserts)
     }
 
     @Test
