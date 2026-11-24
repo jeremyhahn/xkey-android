@@ -47,6 +47,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.crypto.publicKeySizeBits
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -1543,9 +1544,11 @@ class RequestHandler(
             preferStrongBox = genParams.preferStrongBox,
             keySizeBits = if (CoseAlgorithms.isRsa(genParams.algorithm)) genParams.keySizeBits else null
         )
-        // The size asked for (an RSA modulus from keySizeBits), else the
-        // algorithm's own: a size the Keystore cannot make never gets here.
-        keySizeBits = genParams.resolvedKeySizeBits() ?: CoseAlgorithms.getKeySizeBits(genParams.algorithm)
+        // The size of the key that was made, read off its public key; only a
+        // key with no readable size (EdDSA) falls back to the algorithm's own.
+        keySizeBits = generatedKeySize(genParams, publicKeyDer)
+            ?: genParams.resolvedKeySizeBits()
+            ?: CoseAlgorithms.getKeySizeBits(genParams.algorithm)
         val level = generatedKeyLevel(
             genParams.keyId,
             read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
@@ -1617,6 +1620,26 @@ class RequestHandler(
         }
 
         return Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * The size of the asymmetric key local.generateKey just made, read off
+     * [publicKeyDer] by [publicKeySizeBits], or null when it has no readable
+     * size (EdDSA). A key whose size is not the one asked for (an RSA
+     * modulus from keySizeBits, else the algorithm's own) is discarded and
+     * the request fails before anything is stored: the row and the response
+     * never describe a key that was not produced.
+     */
+    private fun generatedKeySize(genParams: LocalGenerateKeyParams, publicKeyDer: ByteArray): Int? {
+        val made = publicKeySizeBits(publicKeyDer) ?: return null
+        val requested = genParams.resolvedKeySizeBits()
+        if (made == requested) return made
+        runCatching { keystoreManager.deleteGeneralKey(genParams.keyId) }
+        Log.e(TAG, "Generated key ${genParams.keyId} is $made bits, $requested were requested")
+        throw ProtocolException(
+            "Generated key ${genParams.keyId} is $made bits, not the $requested requested",
+            errorCode = ErrorCodes.INTERNAL_ERROR
+        )
     }
 
     /**

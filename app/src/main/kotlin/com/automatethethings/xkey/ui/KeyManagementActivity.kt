@@ -56,6 +56,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.crypto.publicKeySizeBits
 import com.automatethethings.xkey.storage.deleteKeyRow
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -66,10 +67,6 @@ import com.google.android.material.floatingactionbutton.ExtendedFloatingActionBu
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import java.security.KeyFactory
-import java.security.interfaces.ECPublicKey
-import java.security.interfaces.RSAPublicKey
-import java.security.spec.X509EncodedKeySpec
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -110,9 +107,6 @@ class KeyManagementActivity : AppCompatActivity() {
         private const val CHIP_ANIMATION_DURATION = 200L
         /** Animation duration for FAB show/hide. */
         private const val FAB_ANIMATION_DURATION = 250L
-
-        /** Key-factory algorithms tried when decoding a generated SPKI public key. */
-        private val KEY_FACTORY_ALGORITHMS = listOf("EC", "RSA")
 
     }
 
@@ -1114,7 +1108,7 @@ class KeyManagementActivity : AppCompatActivity() {
                 when (keyType) {
                     "signing", "tls", "ssh" -> {
                         publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
-                        keySizeBits = actualKeySizeBits(publicKeyDer)
+                        keySizeBits = publicKeySizeBits(publicKeyDer)
                             ?: nominalKeySizeBits(algorithm)
                     }
                     "encryption" -> {
@@ -1127,7 +1121,7 @@ class KeyManagementActivity : AppCompatActivity() {
                             requestedBits,
                             authDuration
                         )
-                        keySizeBits = actualKeySizeBits(publicKeyDer) ?: requestedBits
+                        keySizeBits = publicKeySizeBits(publicKeyDer) ?: requestedBits
                     }
                     "secret" -> {
                         keySizeBits = KeyCreationAlgorithms.aesKeyBits(algorithm)
@@ -1160,48 +1154,13 @@ class KeyManagementActivity : AppCompatActivity() {
     }
 
     /**
-     * Reads the real key size out of an SPKI-encoded public key.
-     *
-     * The size stored against a key must describe the key that was produced, not the
-     * one the dialog asked for: a request for "RSA-OAEP 4096" is currently satisfied
-     * by a 2048-bit modulus, and recording 4096 made the vault claim a strength the
-     * key does not have. For RSA this is the modulus bit length, for EC the field
-     * size of the curve.
-     *
-     * @param der The DER/SPKI public key returned by the keystore, or null.
-     * @return The key size in bits, or null when [der] is absent or undecodable
-     *   (which is the case for Ed25519, whose strength is fixed anyway).
-     */
-    private fun actualKeySizeBits(der: ByteArray?): Int? {
-        if (der == null) return null
-        val spec = X509EncodedKeySpec(der)
-        // A KeyFactory is selected by key algorithm and SPKI does not name it without
-        // decoding the AlgorithmIdentifier, so try the two families this screen can
-        // generate and let the other one reject the encoding.
-        val publicKey = KEY_FACTORY_ALGORITHMS.firstNotNullOfOrNull { name ->
-            runCatching { KeyFactory.getInstance(name).generatePublic(spec) }.getOrNull()
-        }
-        return when (publicKey) {
-            is RSAPublicKey -> publicKey.modulus.bitLength()
-            is ECPublicKey -> publicKey.params.curve.field.fieldSize
-            else -> {
-                android.util.Log.w(
-                    "KeyManagementActivity",
-                    "Could not read the key size back from the generated public key"
-                )
-                null
-            }
-        }
-    }
-
-    /**
      * The size a **generation** algorithm nominally implies, used only when the
      * generated key cannot be decoded (Ed25519, or a keystore that returned
      * something unexpected).
      *
      * Only algorithms this screen actually passes to `KeystoreManager` belong here.
      * The `RSA-OAEP-*` labels deliberately do not: they name what the dialog offered,
-     * not what was generated, and that gap is the whole reason [actualKeySizeBits]
+     * not what was generated, and that gap is the whole reason [publicKeySizeBits]
      * exists.
      */
     private fun nominalKeySizeBits(algorithm: String): Int = when (algorithm) {
