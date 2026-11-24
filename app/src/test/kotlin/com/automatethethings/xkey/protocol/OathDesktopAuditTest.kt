@@ -88,7 +88,7 @@ class OathDesktopAuditTest {
         coEvery { dao.getByOathId(any()) } returns null
         coEvery { dao.getByOathId(STORED_ID) } returns stored()
         // A relaxed mock returns 0, which reads as a lost counter race.
-        coEvery { dao.advanceCounter(any(), any(), any()) } returns 1
+        coEvery { dao.claimCounter(any(), any()) } returns 1
         // Likewise a delete count of 0 reads as a delete that removed nothing.
         coEvery { dao.deleteByOathId(any()) } returns 1
         val database = mockk<XKeyDatabase>(relaxed = true)

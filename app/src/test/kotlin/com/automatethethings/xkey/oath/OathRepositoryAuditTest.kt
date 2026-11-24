@@ -71,7 +71,7 @@ class OathRepositoryAuditTest {
         coEvery { dao.getByOathId(HOTP_ID) } returns stored(HOTP_ID, "HOTP")
         coEvery { dao.getByOathId(TOTP_ID) } returns stored(TOTP_ID, "TOTP")
         // A relaxed mock returns 0, which reads as a lost counter race.
-        coEvery { dao.advanceCounter(any(), any(), any()) } returns 1
+        coEvery { dao.claimCounter(any(), any()) } returns 1
         // Likewise a delete count of 0 reads as a delete that removed nothing.
         coEvery { dao.deleteByOathId(any()) } returns 1
 
@@ -159,7 +159,7 @@ class OathRepositoryAuditTest {
     fun `an HOTP code generation writes one generated row`() = runTest {
         repository.generateCode(HOTP_ID)
 
-        coVerify(exactly = 1) { dao.advanceCounter(HOTP_ID, 5L, 6L) }
+        coVerify(exactly = 1) { dao.claimCounter(HOTP_ID, 5L) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
     }
@@ -228,7 +228,7 @@ class OathRepositoryAuditTest {
     @Test
     fun `an HOTP generation cancelled after its counter commit is still audited`() = runTest {
         lateinit var job: Job
-        coEvery { dao.advanceCounter(HOTP_ID, 5L, 6L) } coAnswers {
+        coEvery { dao.claimCounter(HOTP_ID, 5L) } coAnswers {
             cancelAfterCommit { job }
             1
         }
@@ -236,7 +236,7 @@ class OathRepositoryAuditTest {
         job = launch { repository.generateCode(HOTP_ID) }
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { dao.advanceCounter(HOTP_ID, 5L, 6L) }
+        coVerify(exactly = 1) { dao.claimCounter(HOTP_ID, 5L) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
     }
