@@ -33,7 +33,7 @@ the desktop for that copy's code, through `remote.oathAdd` and
 | `OathRepository`, `OathCredentialWithCode` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathRepository.kt` | `addCredential` (new random UUID `oathId`), `importStructured` (app-held fields), `importFromUri` (external URIs), `otpauthUri`, `generateCode`, `observeAll`, `deleteCredential`, `getCredentialsForSync`; RFC 4648 Base32 decoding |
 | `OathEngine` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathEngine.kt` | `generateHotpCode`, `generateTotpCode`; stateless |
 | `OathSecretManager` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathSecretManager.kt` | `encryptSecret` / `decryptSecret`: Keystore AES-256-GCM, output `IV(12) || ciphertext || tag` |
-| `OathCredentialEntity`, `OathCredentialDao` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathCredentialEntity.kt`, `OathCredentialDao.kt` | Row: `oathId`, `oathType`, `algorithm`, `digits`, `periodSeconds`, `counter`, `issuer`, `accountName`, `secretEncrypted`, `source`; DAO `getAll`, `getByOathId`, `getByIssuer`, `getBySource`, `count`, `observeCount`, `updateCounter`, `recordUsage`, `deleteByOathId` |
+| `OathCredentialEntity`, `OathCredentialDao` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathCredentialEntity.kt`, `OathCredentialDao.kt` | Row: `oathId`, `oathType`, `algorithm`, `digits`, `periodSeconds`, `counter`, `issuer`, `accountName`, `secretEncrypted`, `source`; DAO `getAll`, `getByOathId`, `getByIssuer`, `getBySource`, `count`, `observeCount`, `advanceCounter`, `recordUsage`, `deleteByOathId` |
 | `parseOathLabel`, `parseStructuredOathLabel` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathLabel.kt` | Split an `otpauth://` label into issuer and account |
 | `OathActivity`, `OathAdapter`, `AddOathDialog`, `QrScannerActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone screens: the list with live codes, manual entry, QR import |
 | `OathDesktopActions`, `PrefsDesktopOathLinks` | `app/src/main/kotlin/com/automatethethings/xkey/ui/OathActivity.kt` | The long-press menu's desktop entries; remembers, per desktop, the id the desktop gave each copied credential (SharedPreferences `oath_desktop_links`, ids only) |
@@ -113,7 +113,7 @@ sequenceDiagram
         R->>E: generateTotpCode(secret, algorithm, digits, period)
     else HOTP
         R->>E: generateHotpCode(secret, counter, ...)
-        R->>DB: updateCounter(counter + 1)
+        R->>DB: advanceCounter(counter, counter + 1), read again when 0
     end
     R->>DB: recordUsage
     H-->>D: {code, expires_in}

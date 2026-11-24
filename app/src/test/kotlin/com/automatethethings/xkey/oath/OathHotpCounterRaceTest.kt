@@ -78,9 +78,10 @@ class OathHotpCounterRaceTest {
             row = current.copy(lastUsedAt = timestamp, useCount = current.useCount + 1)
         }
 
-        override suspend fun updateCounter(oathId: String, counter: Long) {
-            val current = row?.takeIf { it.oathId == oathId } ?: return
-            row = current.copy(counter = counter)
+        override suspend fun advanceCounter(oathId: String, expected: Long, next: Long): Int {
+            val current = row?.takeIf { it.oathId == oathId && it.counter == expected } ?: return 0
+            row = current.copy(counter = next)
+            return 1
         }
     }
 

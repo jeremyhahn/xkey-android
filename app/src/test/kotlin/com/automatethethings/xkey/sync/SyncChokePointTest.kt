@@ -25,7 +25,10 @@ import java.io.File
  * password delete and its deletion record are one transaction, as are a
  * synced add and its deletion check (`PasswordDao.deleteAndRecordDeletion`,
  * `PasswordDao.insertIfAbsentUnlessDeleted`), and nothing outside
- * `PasswordDao` calls the raw statements those are built from.
+ * `PasswordDao` calls the raw statements those are built from. A HOTP
+ * counter is advanced only by compare-and-set
+ * (`OathCredentialDao.advanceCounter`, from `OathRepository.generateCode`),
+ * so a counter a sync raised is never rewound.
  */
 class SyncChokePointTest {
 
@@ -53,5 +56,13 @@ class SyncChokePointTest {
         for (method in listOf("deleteAndRecordDeletion", "insertIfAbsentUnlessDeleted")) {
             assertTrue(method, Regex("""@Transaction\s+suspend fun $method\(""").containsMatchIn(dao))
         }
+    }
+
+    @Test
+    fun `a HOTP counter moves only by compare-and-set, from generateCode`() {
+        val unconditional = sources.filter { Regex("""\bupdateCounter\s*\(""").containsMatchIn(it.readText()) }
+        assertEquals(emptyList<File>(), unconditional)
+        val callers = sources.filter { Regex("""\.\s*advanceCounter\s*\(""").containsMatchIn(it.readText()) }
+        assertEquals(listOf("OathRepository.kt"), callers.map { it.name })
     }
 }

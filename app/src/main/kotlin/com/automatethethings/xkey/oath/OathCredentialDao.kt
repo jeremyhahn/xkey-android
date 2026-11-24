@@ -27,7 +27,7 @@ import kotlinx.coroutines.flow.Flow
  * - Insert and replace credentials
  * - Query all credentials or filter by issuer / OATH ID
  * - Track usage statistics (last used timestamp, use count)
- * - Update HOTP counter values
+ * - Advance HOTP counter values (compare-and-set)
  * - Observe credential list and count reactively via [Flow]
  *
  * All mutation operations are suspend functions for coroutine compatibility.
@@ -116,16 +116,20 @@ interface OathCredentialDao {
     suspend fun recordUsage(oathId: String, timestamp: Long = System.currentTimeMillis())
 
     /**
-     * Update the HOTP counter for a credential.
-     *
-     * Should be called after each successful HOTP code generation to advance
-     * the counter and keep the credential in sync with the verifying server.
+     * Advance the HOTP counter of a credential from [expected] to [next],
+     * only while the stored counter is still [expected]: the one statement
+     * both checks and writes, so a counter a sync raised meanwhile
+     * ([updateSynced]) or another code took is never rewound.
      *
      * @param oathId The unique OATH identifier of the HOTP credential.
-     * @param counter The new counter value.
+     * @param expected The counter the caller read and generated a code for.
+     * @param next The counter to store.
+     * @return The number of rows updated: 0 if the counter moved since it was
+     *         read (or no row has [oathId]), and the code for [expected] must
+     *         not be used.
      */
-    @Query("UPDATE oath_credentials SET counter = :counter WHERE oath_id = :oathId")
-    suspend fun updateCounter(oathId: String, counter: Long)
+    @Query("UPDATE oath_credentials SET counter = :next WHERE oath_id = :oathId AND counter = :expected")
+    suspend fun advanceCounter(oathId: String, expected: Long, next: Long): Int
 
     /**
      * Update a synced credential in place: only its label and HOTP counter.

@@ -467,46 +467,55 @@ class OathRepository(
      *
      * For TOTP credentials, computes the code based on the current system time.
      * For HOTP credentials, computes the code using the stored counter value
-     * and automatically increments the counter after generation.
+     * and advances the counter by compare-and-set
+     * ([OathCredentialDao.advanceCounter]): when the counter moved since it
+     * was read (a sync raised it, or another code took it), that code is
+     * discarded and the row read again, so no code is ever returned for a
+     * counter that is not the one the store moved past.
      *
      * Records the usage timestamp and increments the use count in the database.
      *
      * @param oathId The unique identifier of the OATH credential.
      * @return The generated OTP code string, zero-padded to the configured digit length.
      * @throws NoSuchElementException if no credential exists with the given [oathId].
+     * @throws IllegalStateException if the HOTP counter kept moving for
+     *         [MAX_COUNTER_ATTEMPTS] attempts; the counter is left as it is.
      */
     suspend fun generateCode(oathId: String): String {
-        val credential = dao.getByOathId(oathId)
-            ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
+        repeat(MAX_COUNTER_ATTEMPTS) {
+            val credential = dao.getByOathId(oathId)
+                ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
 
-        val secret = secretManager.decryptSecret(credential.secretEncrypted)
+            val secret = secretManager.decryptSecret(credential.secretEncrypted)
 
-        val code = when (credential.oathType) {
-            "TOTP" -> OathEngine.generateTotpCode(
-                secret = secret,
-                algorithm = credential.algorithm,
-                digits = credential.digits,
-                periodSeconds = credential.periodSeconds
-            )
-            "HOTP" -> {
-                val hotpCode = OathEngine.generateHotpCode(
+            val code = when (credential.oathType) {
+                "TOTP" -> OathEngine.generateTotpCode(
                     secret = secret,
-                    counter = credential.counter,
                     algorithm = credential.algorithm,
-                    digits = credential.digits
+                    digits = credential.digits,
+                    periodSeconds = credential.periodSeconds
                 )
-                // Increment the HOTP counter after successful generation
-                dao.updateCounter(oathId, credential.counter + 1)
-                hotpCode
+                "HOTP" -> {
+                    val hotpCode = OathEngine.generateHotpCode(
+                        secret = secret,
+                        counter = credential.counter,
+                        algorithm = credential.algorithm,
+                        digits = credential.digits
+                    )
+                    // The counter moved since the read: this code's counter is not ours, so read again.
+                    if (dao.advanceCounter(oathId, credential.counter, credential.counter + 1) != 1) return@repeat
+                    hotpCode
+                }
+                else -> throw IllegalStateException(
+                    "Unknown OATH type: ${credential.oathType}"
+                )
             }
-            else -> throw IllegalStateException(
-                "Unknown OATH type: ${credential.oathType}"
-            )
+
+            dao.recordUsage(oathId, System.currentTimeMillis())
+
+            return code
         }
-
-        dao.recordUsage(oathId, System.currentTimeMillis())
-
-        return code
+        throw IllegalStateException("HOTP counter of $oathId kept changing; no code generated")
     }
 
     /**
@@ -594,6 +603,9 @@ class OathRepository(
     // -------------------------------------------------------------------------
 
     companion object {
+
+        /** How many times [generateCode] reads a HOTP counter that keeps moving before it gives up. */
+        const val MAX_COUNTER_ATTEMPTS = 8
 
         /**
          * RFC 4648 Base32 alphabet (A-Z, 2-7).
