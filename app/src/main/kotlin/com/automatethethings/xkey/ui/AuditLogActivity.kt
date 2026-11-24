@@ -827,10 +827,7 @@ class AuditLogActivity : AppCompatActivity() {
     private fun applyFilters() {
         var filtered = allEntries
 
-        // Apply operation type filter
-        if (currentOperationFilter != null) {
-            filtered = filtered.filter { it.operationType == currentOperationFilter }
-        }
+        filtered = AuditOperationLabels.filterByOperation(filtered, currentOperationFilter)
 
         // Apply key type filter
         if (currentKeyTypeFilter != null) {
@@ -1101,9 +1098,7 @@ class AuditLogActivity : AppCompatActivity() {
             ContextCompat.getColor(this, R.color.tertiary),
             ContextCompat.getColor(this, R.color.on_tertiary)
         )
-        AuditOperationType.PAIRING_DENIED,
-        AuditOperationType.POLICY_DENIED,
-        AuditOperationType.BIOMETRIC_FAILURE -> Pair(
+        in AuditOperationLabels.refusalTypes -> Pair(
             ContextCompat.getColor(this, R.color.security_warning),
             ContextCompat.getColor(this, R.color.on_primary)
         )
