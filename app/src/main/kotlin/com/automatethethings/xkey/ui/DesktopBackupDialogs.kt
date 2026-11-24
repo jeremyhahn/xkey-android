@@ -43,8 +43,8 @@ import kotlinx.coroutines.launch
  * (`remote.listBackups`) and says whether the desktop holds it, then asks for
  * its password once. The
  * password is read from its field into a [CharArray] only when it is sent,
- * the fields are wiped, and [XKeyGattService] zeroes the array once the
- * request is done. The fields keep no saved state, offer nothing to autofill
+ * the fields are wiped, and the array is zeroed once the request is done,
+ * whether it returned or threw. The fields keep no saved state, offer nothing to autofill
  * and ask the keyboard not to learn from them.
  */
 class DesktopBackupDialogs(
@@ -100,7 +100,7 @@ class DesktopBackupDialogs(
                 }
                 val secret = take(password)
                 dialog.dismiss()
-                runWithNotice(R.string.desktop_backup_in_progress, onRetry = null) { gatt ->
+                runWithNotice(R.string.desktop_backup_in_progress, secret, onRetry = null) { gatt ->
                     val result = gatt.createDesktopBackup(secret, include)
                     Snackbar.make(
                         root,
@@ -165,7 +165,11 @@ class DesktopBackupDialogs(
                 }
                 val secret = take(password)
                 dialog.dismiss()
-                runWithNotice(R.string.desktop_backup_restore_in_progress, onRetry = { showRestore(backupId, note) }) { gatt ->
+                runWithNotice(
+                    R.string.desktop_backup_restore_in_progress,
+                    secret,
+                    onRetry = { showRestore(backupId, note) }
+                ) { gatt ->
                     showRestoreResult(gatt.restoreDesktopBackup(backupId, secret))
                 }
             }
@@ -203,10 +207,12 @@ class DesktopBackupDialogs(
      * Shows the progress notice [progress] while [block] runs, then dismisses
      * it on every exit: success, a typed failure, or cancellation when the
      * activity goes away. A failure [DesktopBackupForm.canRetry] allows offers
-     * [onRetry].
+     * [onRetry]. [secret], the password copied for the call, is zeroed on
+     * every exit too, whether or not the service got to zero it.
      */
     private fun runWithNotice(
         @StringRes progress: Int,
+        secret: CharArray,
         onRetry: (() -> Unit)?,
         block: suspend (XKeyGattService) -> Unit
     ) {
@@ -231,6 +237,7 @@ class DesktopBackupDialogs(
                 }
                 failure.show()
             } finally {
+                secret.fill('\u0000')
                 notice.dismiss()
             }
         }
