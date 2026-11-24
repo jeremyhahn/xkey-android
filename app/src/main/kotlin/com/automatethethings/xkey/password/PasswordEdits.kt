@@ -15,8 +15,7 @@
 package com.automatethethings.xkey.password
 
 import com.automatethethings.xkey.audit.AuditLogger
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.withContext
+import com.automatethethings.xkey.audit.auditedWrite
 
 /**
  * Password adds and deletes made on the phone, each written to the audit log
@@ -52,20 +51,15 @@ class PasswordEdits(private val repository: PasswordRepository) {
         )
 
     /**
-     * The one path for a vault write and its audit entry. Both run under
-     * [NonCancellable]: a cancellation cannot land between a committed write
+     * The one path for a vault write and its audit entry, through the shared
+     * [auditedWrite]: a cancellation cannot land between a committed write
      * and its audit. A write that throws is not audited and the exception
-     * reaches the caller; a pending cancellation is seen at the caller's next
-     * suspension point.
+     * reaches the caller.
      */
     private suspend fun <T> writeThenAudit(
         write: suspend () -> T,
         audit: (T) -> Unit
-    ): T = withContext(NonCancellable) {
-        val result = write()
-        audit(result)
-        result
-    }
+    ): T = auditedWrite(write, audit)
 
     private fun displayName(record: PasswordRecord): String =
         record.title?.takeIf { it.isNotBlank() } ?: record.name

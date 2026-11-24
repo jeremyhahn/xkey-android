@@ -16,6 +16,7 @@ package com.automatethethings.xkey.oath
 
 import android.net.Uri
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.audit.auditedWrite
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.net.URLEncoder
@@ -171,10 +172,13 @@ class OathRepository(
             createdAt = now
         )
 
-        dao.insert(entity)
         // Every add (QR scan, manual entry, local.oathAdd) passes here: the
-        // one place it is audited. The row names the credential, never its secret.
-        AuditLogger.logOathCredentialCreated(oathId, issuer, accountName, entity.oathType)
+        // one place it is audited, even when the caller is cancelled after
+        // the insert commits. The row names the credential, never its secret.
+        auditedWrite(
+            write = { dao.insert(entity) },
+            audit = { AuditLogger.logOathCredentialCreated(oathId, issuer, accountName, entity.oathType) }
+        )
         return oathId
     }
 
@@ -334,35 +338,43 @@ class OathRepository(
                     digits = credential.digits,
                     periodSeconds = credential.periodSeconds
                 )
-                "HOTP" -> {
-                    val hotpCode = OathEngine.generateHotpCode(
-                        secret = secret,
-                        counter = credential.counter,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits
-                    )
-                    // Claim this counter value; another generation may have taken it.
-                    val advanced = dao.advanceCounter(oathId, credential.counter, credential.counter + 1)
-                    if (advanced != 1) {
-                        attempt++
-                        if (attempt >= MAX_COUNTER_ATTEMPTS) {
-                            throw IllegalStateException(
-                                "HOTP counter for $oathId could not be advanced after $MAX_COUNTER_ATTEMPTS attempts"
-                            )
-                        }
-                        continue
-                    }
-                    hotpCode
-                }
+                "HOTP" -> OathEngine.generateHotpCode(
+                    secret = secret,
+                    counter = credential.counter,
+                    algorithm = credential.algorithm,
+                    digits = credential.digits
+                )
                 else -> throw IllegalStateException(
                     "Unknown OATH type: ${credential.oathType}"
                 )
             }
 
-            dao.recordUsage(oathId, System.currentTimeMillis())
-            // A generation the user or desktop asked for (an HOTP copy advances
-            // the counter); list refreshes go through observeAll and are not audited.
-            AuditLogger.logOathCodeGenerated(oathId, credential.issuer, credential.accountName)
+            // The HOTP counter claim, the usage and the audit row are one
+            // audited write: a caller cancelled after the counter commits
+            // still leaves its row. A generation the user or desktop asked for
+            // (an HOTP copy advances the counter) is audited; list refreshes
+            // go through observeAll and are not.
+            val claimed = auditedWrite(
+                write = {
+                    // Claim this counter value; another generation may have taken it.
+                    val won = credential.oathType != "HOTP" ||
+                        dao.advanceCounter(oathId, credential.counter, credential.counter + 1) == 1
+                    if (won) dao.recordUsage(oathId, System.currentTimeMillis())
+                    won
+                },
+                audit = { won ->
+                    if (won) AuditLogger.logOathCodeGenerated(oathId, credential.issuer, credential.accountName)
+                }
+            )
+            if (!claimed) {
+                attempt++
+                if (attempt >= MAX_COUNTER_ATTEMPTS) {
+                    throw IllegalStateException(
+                        "HOTP counter for $oathId could not be advanced after $MAX_COUNTER_ATTEMPTS attempts"
+                    )
+                }
+                continue
+            }
 
             return code
         }
@@ -435,8 +447,10 @@ class OathRepository(
      */
     suspend fun deleteCredential(oathId: String): Boolean {
         val credential = dao.getByOathId(oathId) ?: return false
-        dao.deleteByOathId(oathId)
-        AuditLogger.logOathCredentialDeleted(oathId, credential.issuer, credential.accountName)
+        auditedWrite(
+            write = { dao.deleteByOathId(oathId) },
+            audit = { AuditLogger.logOathCredentialDeleted(oathId, credential.issuer, credential.accountName) }
+        )
         return true
     }
 
