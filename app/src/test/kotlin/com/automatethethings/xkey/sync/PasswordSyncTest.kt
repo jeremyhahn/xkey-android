@@ -71,6 +71,11 @@ class PasswordSyncTest {
     private lateinit var sync: PasswordSync
     private var hashes = 0
 
+    /** The phone's clock, read by both the repository and the sync: an hour after [updatedAt]. */
+    private var now = updatedAt + 60 * MINUTE
+
+    private fun iso(millis: Long): String = SyncCodec.toRfc3339(millis)
+
     private class InMemoryPasswordDao : PasswordDao {
         val rows = linkedMapOf<String, PasswordEntity>()
         private var rowId = 0L
@@ -174,7 +179,7 @@ class PasswordSyncTest {
             firstArg<ByteArray>().copyOfRange(1, firstArg<ByteArray>().size)
         }
         dao = InMemoryPasswordDao()
-        repository = PasswordRepository(dao, cipher)
+        repository = PasswordRepository(dao, cipher, clock = { now })
         factors = InMemoryFactorStore()
         vault = PasswordVault(factors, InMemoryAttemptStore(), PassphraseHasher { phrase, salt ->
             hashes++
@@ -183,7 +188,7 @@ class PasswordSyncTest {
                 digest(phrase.toByteArray(Charsets.UTF_8))
             }
         })
-        sync = PasswordSync(repository, factors)
+        sync = PasswordSync(repository, factors, clock = { now })
     }
 
     @After
@@ -480,5 +485,76 @@ class PasswordSyncTest {
         for (id in listOf("tenant-entry", "shared-entry", "expiring-entry")) {
             assertFalse(warning.captured.contains(id))
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Deletions: a peer that still holds a deleted entry does not bring it back
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `an entry deleted on the phone is not restored by a peer copy older than the delete`() = runTest {
+        storeLocal(id = "remote-1")
+        val deletedAt = now
+        assertTrue(repository.delete("remote-1"))
+        now += MINUTE
+
+        val result = sync.mergeWithDetail(incoming(id = "remote-1", at = iso(deletedAt - MINUTE)))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), result.counts)
+        assertEquals(1, result.keptDeleted)
+        assertFalse(dao.rows.containsKey("remote-1"))
+    }
+
+    @Test
+    fun `a peer copy with the deletion time itself does not restore the entry`() = runTest {
+        storeLocal(id = "remote-1")
+        val deletedAt = now
+        assertTrue(repository.delete("remote-1"))
+
+        val counts = sync.merge(incoming(id = "remote-1", at = iso(deletedAt)))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
+        assertFalse(dao.rows.containsKey("remote-1"))
+    }
+
+    @Test
+    fun `a peer copy edited after the phone deleted the entry restores it`() = runTest {
+        storeLocal(id = "remote-1")
+        val deletedAt = now
+        assertTrue(repository.delete("remote-1"))
+        now += 2 * MINUTE
+
+        val counts = sync.merge(incoming(id = "remote-1", password = "edited", at = iso(deletedAt + MINUTE)))
+
+        assertEquals(SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 0), counts)
+        assertEquals("edited", repository.get("remote-1")!!.password)
+    }
+
+    @Test
+    fun `a deletion record older than the retention no longer holds the entry back`() = runTest {
+        storeLocal(id = "remote-1")
+        val deletedAt = now
+        assertTrue(repository.delete("remote-1"))
+        now = deletedAt + PasswordRepository.DELETION_RETENTION_MS + MINUTE
+
+        val counts = sync.merge(incoming(id = "remote-1", at = iso(deletedAt - MINUTE)))
+
+        assertEquals(SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 0), counts)
+        assertTrue(dao.rows.containsKey("remote-1"))
+        assertEquals(null, dao.deletions.deletedAt["remote-1"])
+    }
+
+    @Test
+    fun `an id the phone never deleted is added as before`() = runTest {
+        assertFalse(repository.delete("remote-1"))
+
+        val counts = sync.merge(incoming(id = "remote-1"))
+
+        assertEquals(SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 0), counts)
+    }
+
+    private companion object {
+        const val MINUTE = 60_000L
+        const val DAY = 24 * 60 * MINUTE
     }
 }
