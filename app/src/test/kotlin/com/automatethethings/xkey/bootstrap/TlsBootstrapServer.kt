@@ -60,9 +60,10 @@ internal class TlsBootstrapServer(
         status: Int = 200
     ) : this(chain, privateKey, status, body.toByteArray(Charsets.UTF_8))
 
-    private val server: SSLServerSocket = SSLContext.getInstance("TLS").run {
-        init(arrayOf<KeyManager>(ChainKeyManager()), null, null)
-        serverSocketFactory.createServerSocket(0, BACKLOG, InetAddress.getLoopbackAddress())
+    private val server: SSLServerSocket = run {
+        val context = SSLContext.getInstance("TLS")
+        context.init(arrayOf<KeyManager>(ChainKeyManager()), null, null)
+        context.serverSocketFactory.createServerSocket(0, BACKLOG, InetAddress.getLoopbackAddress())
             as SSLServerSocket
     }
 
@@ -188,8 +189,8 @@ internal class TlsBootstrapServer(
         private const val BACKLOG = 8
         private const val SOCKET_TIMEOUT_MS = 10_000
         private const val MAX_HEAD_BYTES = 16 * 1024
-        private const val CR = '\r'.code.toByte()
-        private const val LF = '\n'.code.toByte()
+        private const val CR: Byte = 13
+        private const val LF: Byte = 10
 
         /**
          * The client a test injects into `BootstrapClient`: every name resolves
