@@ -186,10 +186,11 @@ class RemoteShareClient(
          * caller owns the buffer and must zero it.
          */
         fun encodeWithSecret(id: Long, method: String, params: JSONObject, field: String, secret: ByteArray): ByteArray {
+            require(!params.has(field)) { "params already hold $field" }
             val head = Request(id, method, params).toJsonString()
             check(head.endsWith("}}")) { "unexpected request shape" }
             val prefix = head.substring(0, head.length - 2).toByteArray(Charsets.UTF_8)
-            val sep = (if (params.length() == 0) "\"" else ",\"") + field + "\":\""
+            val sep = (if (params.length() == 0) "" else ",") + JSONObject.quote(field) + ":\""
             val sepBytes = sep.toByteArray(Charsets.UTF_8)
             val encoded = Base64.getEncoder().encode(secret)
             try {
