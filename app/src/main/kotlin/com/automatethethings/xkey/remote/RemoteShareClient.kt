@@ -16,6 +16,7 @@ package com.automatethethings.xkey.remote
 
 import android.util.Log
 import com.automatethethings.xkey.ca.DeviceIdentity
+import com.automatethethings.xkey.crypto.DeviceAttestationKey
 import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SoftwareKey
@@ -309,13 +310,14 @@ object DesktopShareGate {
     }
 
     /**
-     * The phone's own identity keys: DeviceIdentity's enrollment keys and the
-     * user-verification key. Their writers replace them outside
+     * The phone's own identity keys: DeviceIdentity's enrollment keys, the
+     * user-verification key and the device attestation key. Their writers replace them outside
      * [SharePermissionLedger], so a share could not tell a retired key from
      * the current one; they are never shared.
      */
     fun isIdentityKey(keyId: String): Boolean =
-        keyId.startsWith(DeviceIdentity.ALIAS_PREFIX) || keyId == KeystoreUserVerificationKey.ALIAS
+        keyId.startsWith(DeviceIdentity.ALIAS_PREFIX) || keyId == KeystoreUserVerificationKey.ALIAS ||
+            keyId == DeviceAttestationKey.ALIAS
 
     /**
      * FileEncryptor's ephemeral agreement keys, deleted when their one
