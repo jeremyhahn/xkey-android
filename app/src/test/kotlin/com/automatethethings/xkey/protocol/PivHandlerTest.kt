@@ -28,6 +28,8 @@ import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivPublicKeyEncoding
 import com.automatethethings.xkey.piv.PivSlotDao
 import com.automatethethings.xkey.piv.PivTestCertificates
+import com.automatethethings.xkey.piv.SUPPORTED_TEST_SDK
+import com.automatethethings.xkey.piv.testPivKeyManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -380,7 +382,7 @@ class PivHandlerTest {
         send(
             MethodNames.LOCAL_PIV_IMPORT_CERT,
             JSONObject().put("slot", "9A").put("certificate_der", certificateBase64),
-            manager = PivKeyManager(pivSlotDao)
+            manager = testPivKeyManager(pivSlotDao)
         )
 
     /**
@@ -391,9 +393,9 @@ class PivHandlerTest {
     private suspend fun send(
         method: String,
         params: JSONObject,
-        sdkInt: Int = 33,
+        sdkInt: Int = SUPPORTED_TEST_SDK,
         level: KeySecurityLevel? = KeySecurityLevel.TEE,
-        manager: PivKeyManager = PivKeyManager(
+        manager: PivKeyManager = testPivKeyManager(
             pivSlotDao,
             generateKeyPair = { _, algorithm -> keyFor(algorithm).also { keystore.live = it } },
             sdkInt = sdkInt,

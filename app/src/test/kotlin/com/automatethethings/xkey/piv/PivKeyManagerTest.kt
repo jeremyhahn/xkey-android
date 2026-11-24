@@ -124,7 +124,7 @@ class PivKeyManagerTest {
         coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
         val cert = PivTestCertificates.selfSigned(slotKey)
 
-        PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, cert)
+        testPivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, cert)
 
         coVerify { pivSlotDao.upsert(match { it.slotId == "9A" && it.certificateDer.contentEquals(cert) }) }
     }
@@ -133,7 +133,7 @@ class PivKeyManagerTest {
     fun `importCertificate writes one audit entry naming the slot and subject`() = runTest {
         coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
 
-        PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, PivTestCertificates.selfSigned(slotKey))
+        testPivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, PivTestCertificates.selfSigned(slotKey))
 
         verify(exactly = 1) { AuditLogger.logPivCertImported(any(), any()) }
         verify(exactly = 1) { AuditLogger.logPivCertImported("9A", "CN=xkey PIV test") }
@@ -165,7 +165,7 @@ class PivKeyManagerTest {
         coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
         val cert = PivTestCertificates.selfSigned(slotKey)
 
-        PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, cert)
+        testPivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, cert)
 
         coVerify { pivSlotDao.upsert(match { it.slotId == "9A" && it.certificateDer.contentEquals(cert) }) }
     }
@@ -227,8 +227,8 @@ class PivKeyManagerTest {
             readGate.await()
             PivTestCertificates.slotRow(slotKey.public.encoded)
         }
-        val importer = PivKeyManager(pivSlotDao)
-        val deleter = PivKeyManager(pivSlotDao)
+        val importer = testPivKeyManager(pivSlotDao)
+        val deleter = testPivKeyManager(pivSlotDao)
         val cert = PivTestCertificates.selfSigned(slotKey)
 
         val import = launch { importer.importCertificate(PivSlot.AUTHENTICATION, cert) }
@@ -279,7 +279,7 @@ class PivKeyManagerTest {
         keystore.live = liveKey
         val cert = PivTestCertificates.selfSigned(liveKey)
 
-        PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, cert)
+        testPivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, cert)
 
         coVerify {
             pivSlotDao.upsert(match {
@@ -300,7 +300,7 @@ class PivKeyManagerTest {
         keystore.generatesOnNextCall(newKey)
         coEvery { pivSlotDao.upsert(match { it.publicKeyDer.contentEquals(newKey.public.encoded) }) } throws
             IllegalStateException("database is closed")
-        val manager = PivKeyManager(pivSlotDao)
+        val manager = testPivKeyManager(pivSlotDao)
 
         val generateError = runCatching { manager.generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ES256) }
             .exceptionOrNull()
@@ -330,7 +330,7 @@ class PivKeyManagerTest {
             1L
         }
 
-        val generate = launch { PivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ES256) }
+        val generate = launch { testPivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ES256) }
         runCurrent()
         assertTrue("generate did not reach its upsert", keystore.live === newKey)
         generate.cancel()
@@ -366,10 +366,10 @@ class PivKeyManagerTest {
             1L
         }
 
-        val generate = launch { PivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.RS2048) }
+        val generate = launch { testPivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.RS2048) }
         runCurrent()
         assertTrue("generate did not reach its upsert", keystore.live === newKey)
-        val listing = async { PivKeyManager(pivSlotDao).listSlots() }
+        val listing = async { testPivKeyManager(pivSlotDao).listSlots() }
         runCurrent()
         upsertGate.complete(Unit)
         generate.join()
@@ -389,6 +389,34 @@ class PivKeyManagerTest {
             .generateCertificate(cert.inputStream())
 
         assertArrayEquals(slotKey.public.encoded, parsed.publicKey.encoded)
+    }
+
+    @Test
+    fun `the JVM fixture level makes every algorithm available`() {
+        assertTrue(PivAlgorithm.entries.all { it.isAvailableOn(SUPPORTED_TEST_SDK) })
+    }
+
+    /**
+     * A manager left on a level below [PivAlgorithm.minSdk], as one on the
+     * platform default is off a device, refuses even ES256 before its
+     * generator runs: a fixture that skips [testPivKeyManager] fails this way.
+     */
+    @Test
+    fun `a manager below the algorithm's minSdk refuses ES256 before its generator runs`() = runTest {
+        val manager = testPivKeyManager(
+            pivSlotDao,
+            generateKeyPair = { _, _ ->
+                generatorCalls++
+                PivTestCertificates.ecKeyPair()
+            },
+            sdkInt = PivAlgorithm.ES256.minSdk - 1
+        )
+
+        val error = generateError(manager, PivAlgorithm.ES256)
+
+        assertTrue("got $error", error is PivAlgorithmUnavailableException)
+        assertEquals("the generator ran", 0, generatorCalls)
+        assertTrue("the slot lost its key", keystore.live === slotKey)
     }
 
     // -------------------------------------------------------------------------
@@ -614,11 +642,11 @@ class PivKeyManagerTest {
      * as every key's security level.
      */
     private fun manager(
-        sdkInt: Int = 33,
+        sdkInt: Int = SUPPORTED_TEST_SDK,
         level: KeySecurityLevel? = KeySecurityLevel.TEE,
         generates: KeyPair? = null,
         generatorError: Exception? = null
-    ) = PivKeyManager(
+    ) = testPivKeyManager(
         pivSlotDao,
         generateKeyPair = { _, _ ->
             generatorCalls++
@@ -635,7 +663,7 @@ class PivKeyManagerTest {
         runCatching { manager.generateKey(PivSlot.AUTHENTICATION, algorithm) }.exceptionOrNull()
 
     private suspend fun importError(certDer: ByteArray): Throwable? =
-        runCatching { PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, certDer) }
+        runCatching { testPivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, certDer) }
             .exceptionOrNull()
 }
 
