@@ -5,14 +5,19 @@
 # limits from the repository variables CI_HOSTED_SHARE,
 # CI_SELF_HOSTED_BIGDISK and CI_SELF_HOSTED_BIGDISK_DOCKER; the
 # HOSTED_JOBS_PER_REPO and HOSTED_QUEUE_GRACE_SECONDS env values are removed.
-# (adapted: the repo line of v1.48 and v1.49 is kept, no job change. This
-# repository is public and has no self-hosted runners registered, so a run
-# sent to a self-hosted pool would queue forever, and a runner registered
-# later could run a fork's pull request code. Every job stays GitHub-hosted
-# on ubuntu-latest, `Runner (GitHub-hosted only)` makes no Actions API call
-# and needs no actions: read, and neither the balancing step nor its
-# variables are added. A fork's pull request never reaches a self-hosted
-# runner.)
+# (adapted: applied as `Balanced runner pool`, see v1.54-local.)
+# v1.54-local: the balanced pool is on, with the template's v1.55-v1.59 fixes
+# to that step (a listing short of its total_count is a lower bound and the
+# pick still uses it); the template's other v1.55-v1.59 changes are not
+# taken. Every job stays on GitHub-hosted ubuntu-latest until the
+# repository variables CI_SELF_HOSTED_BIGDISK and
+# CI_SELF_HOSTED_BIGDISK_DOCKER are whole numbers above 0 (CI_HOSTED_SHARE
+# defaults to 12) and bigdisk runners are registered for this repository.
+# A pull request whose head repository is not this one (a fork, or a deleted
+# fork) runs every job on ubuntu-latest whatever the variables hold, decided
+# before any API call. preflight gets actions: read to list this
+# repository's runs and jobs. No `Mask the LAN addresses` step: no internal
+# registry here.
 # v1.53: on main the concurrency group is one per event, `main-{event}`, so a
 # newer push to main cancels the older main run still queued or in progress,
 # and the newest run validates every merge under it; a schedule run keeps
@@ -31,8 +36,9 @@
 # (adapted: applied; no schedule `busy` clause, see the schedule guard note.)
 # v1.53 also: `Runner labels` lets code-review.yml's API-only jobs take a
 # self-hosted label set for a same-repository head under a pull request event.
-# (adapted: no `Runner labels` step here, see v1.51, and every runs-on in
-# code-review.yml stays GitHub-hosted, so no change.)
+# (adapted: no `Runner labels` step here, see v1.51. code-review.yml's scope
+# job takes the bigdisk pool for a same-repository head only while
+# CI_SELF_HOSTED_BIGDISK is above 0; actionlint checks the label set.)
 # v1.53 also: main-green for a release tag is a successful ci.yml run for the
 # exact commit tagged, a push run or a workflow_dispatch run on main.
 # (adapted: a release practice, no job change in this file.)
@@ -45,35 +51,27 @@
 # v1.52: a pull request whose head repository is not this repository (a fork)
 # runs every job on ubuntu-latest: preflight's runs-on and the runner
 # selection never pick a self-hosted runner for a fork's head.
-# (adapted: already so here, no job change. preflight's runs-on is
-# ubuntu-latest on every event, and `Runner (GitHub-hosted only)` outputs
-# ubuntu-latest for every run with no API call, so every job reading it is
-# GitHub-hosted on github.com, a fork's pull request included. No `Runner
-# labels` step to extend, see below.)
+# (adapted: applied. preflight's runs-on and `Balanced runner pool` give a
+# fork's head ubuntu-latest on every variable setting.)
 # v1.51: `Runner labels` also checks every runs-on under pull_request_target,
 # where a fork's head never reaches a self-hosted runner.
-# (adapted: no `Runner labels` step here, see below. Every runs-on in
-# code-review.yml and signatures.yml, the pull_request_target workflows,
-# resolves to ubuntu-latest on github.com, so no change.)
+# (adapted: no `Runner labels` step here, see below. code-review.yml's
+# bigdisk route requires a same-repository head; signatures.yml stays on
+# ubuntu-latest.)
 # v1.50: `Hosted or overflow runner` treats a queued list short of its
 # total_count as a lower bound that may still overflow.
-# (adapted: no overflow step here, see v1.48, so no short-list handling.)
+# (adapted: superseded by the balanced pool's v1.59 short-list handling.)
 # v1.49: preflight runs on the bigdisk pool on github.com; CI_PREFLIGHT_RUNS_ON (runs-on JSON) switches it back.
 # (adapted, a repo line kept on every later adoption: preflight stays on
-# GitHub-hosted ubuntu-latest with no variable. This public repository has no
-# self-hosted runners, so a bigdisk preflight would queue forever, and one
-# registered later would run fork pull request code. Every job here is
-# GitHub-hosted on github.com.)
+# GitHub-hosted ubuntu-latest while CI_PREFLIGHT_RUNS_ON is unset, so it
+# never waits on a self-hosted label with no runner registered; a fork's
+# head takes ubuntu-latest whatever the variable holds.)
 # v1.48: preflight outputs `runner` and `runner_docker` as runs-on JSON; image,
 # lint-gates, integration and soak read runner_docker, CI Gate reads runner,
 # and `Free runner disk` runs only on a GitHub-hosted runner.
-# (adapted: no overflow to a self-hosted pool. This repository is public and
-# has no self-hosted runners registered, and a fork's pull request must never
-# reach a self-hosted runner, so preflight always outputs the GitHub-hosted
-# default, ubuntu-latest, makes no Actions API call and needs no actions: read;
-# no HOSTED_JOBS_PER_REPO / HOSTED_QUEUE_GRACE_SECONDS env and no
-# `Mask the LAN addresses` step or scripts/ci-mask-lan.sh, which serve only
-# that path.)
+# (adapted: the overflow is v1.54's balanced pool, see v1.54-local; no
+# HOSTED_JOBS_PER_REPO / HOSTED_QUEUE_GRACE_SECONDS env and no `Mask the LAN
+# addresses` step or scripts/ci-mask-lan.sh.)
 # (adapted: the template's Go jobs and steps are this repository's Gradle
 # stages: lint is Android lint plus `make lint-gates`, build and coverage run
 # Gradle, integration is `make it-jvm-test`; no build tags, gosec, race,
@@ -82,8 +80,9 @@
 # its images from its own inputs, IMAGE_FRESH on a trusted run.)
 # (adapted: no schedule guard: this workflow has no schedule trigger, and the
 # scheduled scans are .github/workflows/scans.yml.)
-# (adapted: no `Runner labels` lint step: every runs-on here is ubuntu-latest
-# or reads the preflight outputs; actionlint checks the label set.)
+# (adapted: no `Runner labels` lint step: every runs-on here is ubuntu-latest,
+# CI_PREFLIGHT_RUNS_ON behind the fork guard, or reads the preflight
+# outputs; actionlint checks the label set.)
 # (adapted: no image history check: no image these jobs build is pushed.)
 # (adapted: the signatures job is .github/workflows/signatures.yml.)
 #
@@ -241,9 +240,14 @@ jobs:
   # so the job stays on the PR tier.
   preflight:
     name: Preflight [changed files, architecture gates]
-    runs-on: ubuntu-latest   # repo line over v1.49: GitHub-hosted on every forge (see the header)
+    # ubuntu-latest unless the repository variable CI_PREFLIGHT_RUNS_ON
+    # (runs-on JSON) names another runner; a pull request whose head
+    # repository is not this one always takes ubuntu-latest. Off github.com
+    # the forge's ubuntu-latest label, as before.
+    runs-on: ${{ github.server_url == 'https://github.com' && vars.CI_PREFLIGHT_RUNS_ON != '' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON) || 'ubuntu-latest' }}   # repo line over v1.52
     timeout-minutes: 10
     permissions:
+      actions: read     # Balanced runner pool: list this repository's runs and jobs
       contents: read
     outputs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
@@ -255,16 +259,151 @@ jobs:
     # A draft PR runs no CI; the image job needs this one and skips with it.
     if: ${{ !github.event.pull_request.draft }}
     steps:
-      # v1.48 runner outputs, with the overflow off (see the header): every
-      # job of every run takes the GitHub-hosted default, ubuntu-latest. The
-      # step makes no API call and reads no repository code. Off github.com
-      # each job keeps its forge label.
-      - name: Runner (GitHub-hosted only)
+      # v1.54 runner outputs (v1.59 short listings): the pool this
+      # repository uses less, GitHub-hosted ubuntu-latest or the self-hosted
+      # bigdisk pool, from the queued and in-progress jobs of its runs and
+      # the limits in the repository variables CI_HOSTED_SHARE,
+      # CI_SELF_HOSTED_BIGDISK and CI_SELF_HOSTED_BIGDISK_DOCKER. With either
+      # bigdisk limit unset or 0, or any API answer incomplete, every job is
+      # hosted. A fork's head is hosted before any API call. The step reads
+      # no repository code. Off github.com each job keeps its forge label.
+      - name: Balanced runner pool
         id: runner
+        env:
+          SERVER: ${{ github.server_url }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          API: ${{ github.api_url }}/repos/${{ github.repository }}/actions
+          RUN_ID: ${{ github.run_id }}
+          JOB_TOKEN: ${{ github.token }}
+          HS: ${{ vars.CI_HOSTED_SHARE }}
+          C1: ${{ vars.CI_SELF_HOSTED_BIGDISK }}
+          C2: ${{ vars.CI_SELF_HOSTED_BIGDISK_DOCKER }}
         run: |
+          set -uo pipefail
           HOSTED='"ubuntu-latest"'
-          echo "runner: $HOSTED; runner_docker: $HOSTED (no overflow in this public repository)"
-          { echo "runner=$HOSTED"; echo "runner_docker=$HOSTED"; } >> "$GITHUB_OUTPUT"
+          selfhosted() { printf '["self-hosted","linux","x64","%s"]' "$1"; }
+          emit() {
+            echo "runner: $1; runner_docker: $2"
+            { echo "runner=$1"; echo "runner_docker=$2"; } >> "$GITHUB_OUTPUT"
+          }
+          # hosted <why>: no count, so the default, with the reason shown.
+          hosted() {
+            echo "::warning::runner selection: $1; every job of this run takes the GitHub-hosted default, ubuntu-latest, and none runs on a self-hosted runner (ci-template v1.54)"
+            emit "$HOSTED" "$HOSTED"
+            exit 0
+          }
+          if [ "$SERVER" != https://github.com ]; then
+            echo "not github.com: each job keeps its forge label (bigdisk, ci-gate); no selection"
+            emit "$HOSTED" "$HOSTED"
+            exit 0
+          fi
+          # v1.52: a pull request whose head repository is not this one (a
+          # fork, or a deleted fork with no head repository) runs every job
+          # on GitHub-hosted runners.
+          case "$EVENT" in
+            pull_request|pull_request_target)
+              if [ "$HEAD_REPO" != "$REPO" ]; then
+                echo "::notice::runner selection: this pull request's head repository is not this repository (a fork); every job of this run takes the GitHub-hosted default, ubuntu-latest, and none reaches a self-hosted runner (ci-template v1.52)"
+                emit "$HOSTED" "$HOSTED"
+                exit 0
+              fi ;;
+          esac
+          # whole <value>: a whole number above 0, at most 6 digits.
+          whole() { [[ "$1" =~ ^[0-9]{1,6}$ ]] && [ "$((10#$1))" -gt 0 ]; }
+          whole "$C1" || hosted "CI_SELF_HOSTED_BIGDISK='$C1' is unset, 0 or not a whole number, so no bigdisk job can be placed"
+          whole "$C2" || hosted "CI_SELF_HOSTED_BIGDISK_DOCKER='$C2' is unset, 0 or not a whole number, so no bigdisk-docker job can be placed"
+          C1=$((10#$C1)) C2=$((10#$C2))
+          if whole "$HS"; then
+            HS=$((10#$HS))
+          else
+            echo "::warning::runner selection: CI_HOSTED_SHARE='$HS' is unset, 0 or not a whole number; HS=12 until it is set (ci-template v1.54)"
+            HS=12
+          fi
+          # get <url> <file>: 0 on a 200 reply, saved in <file>; the answer in
+          # CODE. The token reaches curl as a header from a file descriptor.
+          get() {
+            CODE=$(curl -sS --max-time 30 -o "$2" -w '%{http_code}' \
+              -H @<(printf 'Authorization: Bearer %s\n' "$JOB_TOKEN") \
+              -H 'Accept: application/vnd.github+json' "$1") || CODE="curl exit $?"
+            [ "$CODE" = 200 ]
+          }
+          # pages <url> <key> <out>: every page of a listing, its <key> items
+          # one JSON object per line in <out>. 1, with WHY set, when a reply is
+          # not 200, has no total_count or list, or passes 1000 entries. A list
+          # short of its total_count (runs change state while it is read) is
+          # kept as a lower bound and named in SHORT (v1.59).
+          pages() {
+            local p=1 got=0 total n
+            : > "$3"
+            while :; do
+              get "$1&per_page=100&page=$p" "$RUNNER_TEMP/sel-page.json" || { WHY="$1: $CODE"; return 1; }
+              total=$(jq -er '.total_count | numbers' "$RUNNER_TEMP/sel-page.json") || { WHY="$1: 200 with no total_count"; return 1; }
+              n=$(jq -er --arg k "$2" '.[$k] | arrays | length' "$RUNNER_TEMP/sel-page.json") || { WHY="$1: 200 with no $2 list"; return 1; }
+              jq -c --arg k "$2" '.[$k][]' "$RUNNER_TEMP/sel-page.json" >> "$3"
+              got=$((got + n))
+              { [ "$got" -lt "$total" ] && [ "$n" -gt 0 ]; } || break
+              [ "$p" -lt 10 ] || { WHY="$1: more than 1000 entries"; return 1; }
+              p=$((p + 1))
+            done
+            [ "$got" -ge "$total" ] || SHORT="${SHORT:+$SHORT; }${1#"$API"/}: $got of $total entries"
+            return 0
+          }
+          SHORT=
+          : > "$RUNNER_TEMP/sel-runs.jsonl"
+          for st in queued in_progress; do
+            pages "$API/runs?status=$st" workflow_runs "$RUNNER_TEMP/sel-r.jsonl" || hosted "the Actions API gave no complete run list ($WHY)"
+            cat "$RUNNER_TEMP/sel-r.jsonl" >> "$RUNNER_TEMP/sel-runs.jsonl"
+          done
+          : > "$RUNNER_TEMP/sel-jobs.jsonl"
+          for id in $(jq -r '.id' "$RUNNER_TEMP/sel-runs.jsonl" | sort -u); do
+            [ "$id" != "$RUN_ID" ] || continue
+            pages "$API/runs/$id/jobs?filter=latest" jobs "$RUNNER_TEMP/sel-j.jsonl" || hosted "the Actions API gave no complete job list ($WHY)"
+            cat "$RUNNER_TEMP/sel-j.jsonl" >> "$RUNNER_TEMP/sel-jobs.jsonl"
+          done
+          # H, S1, S2: hosted, bigdisk (not bigdisk-docker) and bigdisk-docker
+          # jobs in progress plus queued; HQ, SQ: the queued hosted and
+          # self-hosted (both kinds) ones. A job of this run is not counted.
+          read -r H S1 S2 HQ SQ < <(jq -rs --argjson run "$RUN_ID" '
+              [.[] | select(.run_id != $run and (.status == "queued" or .status == "in_progress"))
+                   | (.labels // []) as $l
+                   | {q: (.status == "queued"),
+                      p: (if ($l | any(. == "self-hosted")) then
+                            (if ($l | any(. == "bigdisk-docker")) then "s2"
+                             elif ($l | any(. == "bigdisk")) then "s1" else "x" end)
+                          elif ($l | any(startswith("ubuntu-"))) then "h"
+                          else "x" end)}] as $j
+              | def n(f): $j | map(select(f)) | length;
+              [n(.p == "h"), n(.p == "s1"), n(.p == "s2"), n(.p == "h" and .q),
+               n((.p == "s1" or .p == "s2") and .q)]
+              | map(tostring) | join(" ")' "$RUNNER_TEMP/sel-jobs.jsonl") || hosted "the job list could not be counted"
+          [ -n "${SQ:-}" ] || hosted "the job list could not be counted"
+          echo "this repository: hosted $H of CI_HOSTED_SHARE=$HS ($HQ queued); bigdisk $S1 of CI_SELF_HOSTED_BIGDISK=$C1, bigdisk-docker $S2 of CI_SELF_HOSTED_BIGDISK_DOCKER=$C2 ($SQ self-hosted queued)"
+          # v1.59: a short listing is a lower bound; still choose.
+          [ -z "$SHORT" ] || echo "::notice::runner selection: the listing returned fewer entries than its total ($SHORT); the counts are a lower bound and the choice below uses them (ci-template v1.59)"
+          pick=hosted hfull=0 sfull=0
+          [ "$H" -lt "$HS" ] || hfull=1
+          { [ "$S1" -lt "$C1" ] && [ "$S2" -lt "$C2" ]; } || sfull=1
+          if [ "$hfull" = 1 ] && [ "$sfull" = 1 ]; then
+            [ "$SQ" -lt "$HQ" ] && pick=self
+            why="both pools full: hosted $HQ queued, self-hosted $SQ queued"
+          elif [ "$hfull" = 1 ]; then
+            pick=self; why="the hosted pool is full ($H of $HS)"
+          elif [ "$sfull" = 1 ]; then
+            why="the self-hosted pool is full (bigdisk $S1 of $C1, bigdisk-docker $S2 of $C2)"
+          else
+            # self-hosted use, max(S1/C1, S2/C2), below hosted use H/HS.
+            [ $((S1 * HS)) -lt $((H * C1)) ] && [ $((S2 * HS)) -lt $((H * C2)) ] && pick=self
+            why="use hosted $H/$HS, bigdisk $S1/$C1, bigdisk-docker $S2/$C2"
+          fi
+          if [ "$pick" = self ]; then
+            echo "::notice::runner selection: $why; this run's jobs run on the self-hosted pool (bigdisk, bigdisk-docker) (ci-template v1.54)"
+            emit "$(selfhosted bigdisk)" "$(selfhosted bigdisk-docker)"
+          else
+            echo "::notice::runner selection: $why; this run's jobs take the GitHub-hosted default, ubuntu-latest (ci-template v1.54)"
+            emit "$HOSTED" "$HOSTED"
+          fi
 
       # One checkout for every step: the diff step needs the history on a PR
       # run, and the source checks need the tree on every event.
@@ -304,6 +443,9 @@ jobs:
       # Drafts are not reviewed, by job condition and by the live PR (code-review v5.12.13).
       - name: Code review draft tests
         run: python3 -I scripts/testdata/code-review-v51213-tests.py .github/workflows/code-review.yml
+      # Only code is code reviewed, and only on a SPEC row PR (code-review v5.12.14).
+      - name: Code review code-only tests
+        run: python3 -I scripts/testdata/code-review-v51214-tests.py .github/workflows/code-review.yml
 
   # Every stage runs in the project's own devcontainer image and no other. One
   # image job builds the images once from build/docker/devcontainer/Dockerfile
@@ -335,7 +477,8 @@ jobs:
   # (`env`, `printenv`, `set -x`) or a matched line: lint steps and `make
   # check-public-literals` report path and line only.
   #
-  # Runner: GitHub-hosted ubuntu-latest, which has Docker. The cold image
+  # Runner: preflight's runner_docker, GitHub-hosted ubuntu-latest or the
+  # self-hosted bigdisk-docker pool, both with Docker. The cold image
   # builds (no layer cache survives a run) and the stages fit 150 minutes.
   image:
     name: Devcontainer image [lint, build, test]
