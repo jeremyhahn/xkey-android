@@ -15,9 +15,11 @@
 package com.automatethethings.xkey.ui
 
 import android.app.Application
+import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathRepository
@@ -31,7 +33,9 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.time.Duration
 
 /**
  * [OathCodeClipboard], the one copy path of the OATH screens: the clip is
@@ -96,6 +100,44 @@ class OathCodeClipboardTest {
         assertEquals("287082", clipboard.primaryClip!!.getItemAt(0).text.toString())
         coVerify(exactly = 2) { repository.generateCode("hotp-1") }
     }
+
+    @Test
+    fun `the copied code is cleared from the clipboard after 45 seconds`() = runBlocking {
+        OathCodeClipboard.create(context, repository).copy(credential("TOTP"), "287082")
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(44))
+        assertEquals("287082", clipText())
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        assertTrue("clipboard still holds the code", clipText().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a clip set by someone else after the copy is not cleared`() = runBlocking {
+        OathCodeClipboard.create(context, repository).copy(credential("TOTP"), "287082")
+        clipboard.setPrimaryClip(ClipData.newPlainText("note", "shopping list"))
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(45))
+
+        assertEquals("shopping list", clipText())
+    }
+
+    @Test
+    fun `a second copy is not cleared by the first copy's timer`() = runBlocking {
+        val copier = OathCodeClipboard.create(context, repository)
+        copier.copy(credential("TOTP"), "287082")
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(30))
+        copier.copy(credential("TOTP"), "755224")
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(15))
+        assertEquals("755224", clipText())
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(30))
+        assertTrue("clipboard still holds the second code", clipText().isNullOrEmpty())
+    }
+
+    private fun clipText(): String? =
+        clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
 
     private fun credential(type: String, oathId: String = "id-$type") = OathCredentialEntity(
         oathId = oathId,
