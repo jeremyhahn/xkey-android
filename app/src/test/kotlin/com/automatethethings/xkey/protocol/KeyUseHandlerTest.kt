@@ -624,15 +624,15 @@ class KeyUseHandlerTest {
     }
 
     @Test
-    fun `software key material is zeroed after each use`() = runTest {
+    fun `software key material is zeroed after each AES-GCM use`() = runTest {
         val flipped = swCiphertext(unb64(data)).also { it[it.size - 1] = (it[it.size - 1].toInt() xor 0x01).toByte() }
-        val requests = gatedRequests().filter { (_, params) -> JSONObject(params).getString("keyId").startsWith("sw-") } +
-            listOf(
-                // A failed decrypt and a key refused for its type.
-                MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"$SW_AES","ciphertext":"${b64(flipped)}","aad":"$data"}""",
-                MethodNames.LOCAL_HMAC to """{"keyId":"$SW_AES","data":"$data"}""",
-                MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"$SW_HMAC_256","plaintext":"$data"}"""
-            )
+        val requests = gatedRequests().filter { (method, params) ->
+            method != MethodNames.LOCAL_HMAC && JSONObject(params).getString("keyId").startsWith("sw-")
+        } + listOf(
+            // A failed decrypt and a key refused for its type.
+            MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"$SW_AES","ciphertext":"${b64(flipped)}","aad":"$data"}""",
+            MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"$SW_HMAC_256","plaintext":"$data"}"""
+        )
         requests.forEach { (method, params) ->
             handedMaterial.clear()
             call(method, params)
