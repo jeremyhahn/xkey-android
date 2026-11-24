@@ -42,7 +42,7 @@ import java.net.URLDecoder
  * OATH add, delete and code generation are audited in [OathRepository], so
  * the phone's own screens (QR scan, manual entry, delete, HOTP copy) and the
  * desktop's local.oath* requests write the same row, each exactly once. A
- * list refresh ([OathRepository.observeAll]) and a sync merge write none.
+ * list refresh ([OathRepository.observeAll]) writes none.
  */
 class OathRepositoryAuditTest {
 
@@ -63,7 +63,6 @@ class OathRepositoryAuditTest {
 
         dao = mockk(relaxed = true)
         coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }
-        coEvery { dao.insertIfAbsent(any()) } returns 1L
         coEvery { dao.getByOathId(any()) } returns null
         coEvery { dao.getByOathId(HOTP_ID) } returns stored(HOTP_ID, "HOTP")
         coEvery { dao.getByOathId(TOTP_ID) } returns stored(TOTP_ID, "TOTP")
@@ -103,13 +102,6 @@ class OathRepositoryAuditTest {
 
         verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, null, "host:user", "TOTP") }
         verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) }
-    }
-
-    @Test
-    fun `a sync merge writes no created row`() = runTest {
-        repository.upsertStructured(oathId = "synced", type = "totp", issuer = "Acme", accountName = "a", secret = SECRET)
-
-        verify(exactly = 0) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) }
     }
 
     @Test
