@@ -91,7 +91,8 @@ class SyncEngine(
                 continue
             }
             val label = obj.optString("purpose", "").ifBlank { "sync" }
-            if (repo.importCertificate(der, label) != null) added++ else skipped++
+            // Stored as synced: shown and synced back out, never a trust anchor.
+            if (repo.importSyncedCertificate(der, label) != null) added++ else skipped++
         }
         return CertCounts(added, skipped)
     }

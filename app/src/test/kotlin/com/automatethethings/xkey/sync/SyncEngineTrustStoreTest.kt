@@ -141,13 +141,13 @@ class SyncEngineTrustStoreTest {
 
         assertEquals(0, counts.added)
         assertEquals(0, counts.skipped)
-        coVerify(exactly = 0) { anyConstructed<TrustStoreRepository>().importCertificate(any(), any()) }
+        coVerify(exactly = 0) { anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), any()) }
     }
 
     @Test
     fun `mergeCertificates imports a certificate the phone does not have`() = runTest {
         coEvery { anyConstructed<TrustStoreRepository>().hasCertificate(any()) } returns false
-        coEvery { anyConstructed<TrustStoreRepository>().importCertificate(any(), any()) } returns
+        coEvery { anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), any()) } returns
             trustedCA("aa11")
 
         val counts = engine.mergeCertificates(incoming(syncCertificate("aa11")))
@@ -164,7 +164,7 @@ class SyncEngineTrustStoreTest {
 
         assertEquals(0, counts.added)
         assertEquals(1, counts.skipped)
-        coVerify(exactly = 0) { anyConstructed<TrustStoreRepository>().importCertificate(any(), any()) }
+        coVerify(exactly = 0) { anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), any()) }
     }
 
     @Test
@@ -181,13 +181,13 @@ class SyncEngineTrustStoreTest {
 
         assertEquals(0, counts.added)
         assertEquals(3, counts.skipped)
-        coVerify(exactly = 0) { anyConstructed<TrustStoreRepository>().importCertificate(any(), any()) }
+        coVerify(exactly = 0) { anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), any()) }
     }
 
     @Test
     fun `mergeCertificates counts a rejected import as skipped`() = runTest {
         coEvery { anyConstructed<TrustStoreRepository>().hasCertificate(any()) } returns false
-        coEvery { anyConstructed<TrustStoreRepository>().importCertificate(any(), any()) } returns null
+        coEvery { anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), any()) } returns null
 
         val counts = engine.mergeCertificates(incoming(syncCertificate("aa11")))
 
@@ -200,7 +200,7 @@ class SyncEngineTrustStoreTest {
         val label = slot<String>()
         coEvery { anyConstructed<TrustStoreRepository>().hasCertificate(any()) } returns false
         coEvery {
-            anyConstructed<TrustStoreRepository>().importCertificate(any(), capture(label))
+            anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), capture(label))
         } returns trustedCA("aa11")
 
         engine.mergeCertificates(incoming(syncCertificate("aa11", purpose = "idevid")))
@@ -218,7 +218,7 @@ class SyncEngineTrustStoreTest {
         val der = slot<ByteArray>()
         coEvery { anyConstructed<TrustStoreRepository>().hasCertificate(any()) } returns false
         coEvery {
-            anyConstructed<TrustStoreRepository>().importCertificate(capture(der), any())
+            anyConstructed<TrustStoreRepository>().importSyncedCertificate(capture(der), any())
         } returns trustedCA("aa11")
 
         engine.mergeCertificates(
@@ -232,7 +232,7 @@ class SyncEngineTrustStoreTest {
     fun `mergeCertificates imports an entry with a blank fingerprint`() = runTest {
         // A blank fingerprint skips the duplicate check entirely, so the
         // repository is the only thing standing between it and the trust store.
-        coEvery { anyConstructed<TrustStoreRepository>().importCertificate(any(), any()) } returns
+        coEvery { anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), any()) } returns
             trustedCA("aa11")
 
         val counts = engine.mergeCertificates(
@@ -248,7 +248,7 @@ class SyncEngineTrustStoreTest {
         // Documents current accounting: malformed array elements are dropped
         // silently and appear in neither the added nor the skipped total.
         coEvery { anyConstructed<TrustStoreRepository>().hasCertificate(any()) } returns false
-        coEvery { anyConstructed<TrustStoreRepository>().importCertificate(any(), any()) } returns
+        coEvery { anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), any()) } returns
             trustedCA("aa11")
         val array = JSONArray().apply {
             put("just a string")
@@ -266,7 +266,7 @@ class SyncEngineTrustStoreTest {
         coEvery { anyConstructed<TrustStoreRepository>().hasCertificate("aa11") } returns true
         coEvery { anyConstructed<TrustStoreRepository>().hasCertificate("bb22") } returns false
         coEvery { anyConstructed<TrustStoreRepository>().hasCertificate("cc33") } returns false
-        coEvery { anyConstructed<TrustStoreRepository>().importCertificate(any(), any()) } returns
+        coEvery { anyConstructed<TrustStoreRepository>().importSyncedCertificate(any(), any()) } returns
             trustedCA("bb22")
 
         val counts = engine.mergeCertificates(
