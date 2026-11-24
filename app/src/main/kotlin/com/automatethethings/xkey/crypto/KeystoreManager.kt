@@ -1938,6 +1938,33 @@ class KeystoreManager(
         softwareEd25519Supported() && hasEd25519Key(alias)
 
     /**
+     * True only when no key material for [keyId] is stored anywhere
+     * [resolveKeystoreAlias] looks. [resolveKeystoreAlias] reads a software
+     * key store it cannot open as "no key", which is safe for a lookup but
+     * not for a caller that removes a key's row on "absent"; such a caller
+     * asks here instead.
+     *
+     * @throws KeyDeletionException if the software Ed25519 key store cannot
+     *   be read, so presence is unknown: the caller must keep the row.
+     */
+    fun keyMaterialAbsent(keyId: String): Boolean {
+        if (resolveKeystoreAlias(keyId) != null) return false
+        if (!softwareEd25519Supported()) return true
+        // Ask the software store again, failing loudly where
+        // resolveKeystoreAlias answered "no key" for an unreadable store.
+        if (softwareEd25519KeyStoredOrThrow(KEY_ALIAS_PREFIX_GENERAL + keyId)) return false
+        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && softwareEd25519KeyStoredOrThrow(keyId)) return false
+        return true
+    }
+
+    /** [hasEd25519Key], but an unreadable store throws [KeyDeletionException]. */
+    private fun softwareEd25519KeyStoredOrThrow(alias: String): Boolean = try {
+        ed25519Prefs().contains(alias)
+    } catch (e: Exception) {
+        throw KeyDeletionException("The software key store could not be read", e)
+    }
+
+    /**
      * List all key aliases managed by xKey.
      *
      * Returns both credential keys (prefixed with "xkey_credential_") and

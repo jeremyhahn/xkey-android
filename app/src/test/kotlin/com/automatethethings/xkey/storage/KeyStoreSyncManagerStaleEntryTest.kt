@@ -16,6 +16,7 @@
 package com.automatethethings.xkey.storage
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
@@ -83,5 +84,25 @@ class KeyStoreSyncManagerStaleEntryTest {
 
         coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
         verify { Log.e(any(), match<String> { "ed" in it }, any()) }
+    }
+
+    @Test
+    fun `sync still removes the row of a key absent from a readable store`() = runBlocking<Unit> {
+        val prefs = mockk<SharedPreferences>()
+        every { prefs.contains(any()) } returns false
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        every { manager.softwareEd25519Supported() } returns true
+        every { manager.ed25519Prefs() } returns prefs
+        val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
+        coEvery { credentialDao.getAll() } returns emptyList()
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val key = mockk<KeyEntity>(relaxed = true)
+        every { key.keyId } returns "gone"
+        every { key.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(key)
+
+        KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll()
+
+        coVerify { keyDao.deleteByKeyId("gone") }
     }
 }
