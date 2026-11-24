@@ -261,6 +261,31 @@ class KeySharingBottomSheetDesktopSendTest {
     }
 
     @Test
+    fun `a long multi-line desktop error is shown bounded on one line`() {
+        sender.failWith(-32000, "line one\\nline two " + "x".repeat(5000))
+        val sheet = openReady()
+        button(sheet).performClick()
+        val prefix = app.getString(R.string.sharing_desktop_failed, "")
+        waitUntil("the failure was never shown") { status(sheet).text.startsWith(prefix) }
+        val text = status(sheet).text.toString()
+        assertTrue("status is ${text.length} chars", text.length <= prefix.length + DESKTOP_TEXT_BOUND)
+        assertFalse("status holds a control character", text.any { it.isISOControl() })
+        assertTrue(text.contains("line one line two"))
+    }
+
+    @Test
+    fun `a long import id with control characters is shown bounded`() {
+        sender.succeedWith("""{"accepted":true,"import_id":"id\u0007${"y".repeat(5000)}","backend":"software"}""")
+        val sheet = openReady()
+        button(sheet).performClick()
+        val base = app.getString(R.string.sharing_desktop_sent, "")
+        waitUntil("the import was never shown") { status(sheet).text.contains("yyyy") }
+        val text = status(sheet).text.toString()
+        assertTrue("status is ${text.length} chars", text.length <= base.length + DESKTOP_TEXT_BOUND)
+        assertFalse("status holds a control character", text.any { it.isISOControl() })
+    }
+
+    @Test
     fun `a timeout shows failed and enables the button again`() {
         sender.neverReply()
         val sheet = openReady()
@@ -396,6 +421,8 @@ class KeySharingBottomSheetDesktopSendTest {
     private companion object {
         const val KEY_ID = "desk-key"
         const val PEER = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"
+        /** The most desktop-supplied text a status line may carry, the ellipsis included. */
+        const val DESKTOP_TEXT_BOUND = 201
         const val PEM = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n"
 
         fun entityWith(policy: EntitySharingPolicyType) = KeyEntity(
