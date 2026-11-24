@@ -525,25 +525,33 @@ class KeyUseHandlerTest {
     }
 
     @Test
-    fun `found - symmetricDecrypt takes a payload sent as plaintext`() = runTest {
-        // LocalSymmetricParams reads plaintext ?: ciphertext ?: data for both
-        // directions, so a decrypt request naming its input "plaintext" is
-        // decrypted rather than refused.
-        val ciphertext = result(
-            call(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, """{"keyId":"$SW_AES","plaintext":"$data"}""")
-        ).getString("ciphertext")
-        val decrypted = result(
-            call(MethodNames.LOCAL_SYMMETRIC_DECRYPT, """{"keyId":"$SW_AES","plaintext":"$ciphertext"}""")
-        )
-        assertEquals(data, decrypted.getString("plaintext"))
+    fun `symmetricDecrypt refuses a payload sent as plaintext`() = runTest {
+        val ciphertext = b64(swCiphertext(unb64(data)))
+        listOf(SW_AES, HW_AES).forEach { keyId ->
+            val response = call(MethodNames.LOCAL_SYMMETRIC_DECRYPT, """{"keyId":"$keyId","plaintext":"$ciphertext"}""")
+            assertCleanError(keyId, ErrorCodes.INVALID_PARAMS, response)
+            assertTrue(errorMessage(response), errorMessage(response).contains("plaintext"))
+        }
+        assertNoKeyOperation()
     }
 
     @Test
-    fun `found - symmetricEncrypt takes a payload sent as ciphertext`() = runTest {
-        val encrypted = result(
-            call(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, """{"keyId":"$SW_AES","ciphertext":"$data"}""")
+    fun `symmetricEncrypt refuses a payload sent as ciphertext`() = runTest {
+        listOf(SW_AES, HW_AES).forEach { keyId ->
+            val response = call(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, """{"keyId":"$keyId","ciphertext":"$data"}""")
+            assertCleanError(keyId, ErrorCodes.INVALID_PARAMS, response)
+            assertTrue(errorMessage(response), errorMessage(response).contains("ciphertext"))
+        }
+        assertNoKeyOperation()
+    }
+
+    @Test
+    fun `symmetric requests still take the older data field`() = runTest {
+        val encrypted = result(call(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, """{"keyId":"$SW_AES","data":"$data"}"""))
+        val decrypted = result(
+            call(MethodNames.LOCAL_SYMMETRIC_DECRYPT, """{"keyId":"$SW_AES","data":"${encrypted.getString("ciphertext")}"}""")
         )
-        assertArrayEquals(unb64(data), javaxGcmDecrypt(aesMaterial, unb64(encrypted.getString("ciphertext")), null))
+        assertEquals(data, decrypted.getString("plaintext"))
     }
 
     // ---------------------------------------------------------------------
