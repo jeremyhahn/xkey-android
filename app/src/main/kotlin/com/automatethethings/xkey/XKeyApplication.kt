@@ -90,7 +90,11 @@ class XKeyApplication : Application() {
         /** High-priority channel for biometric authentication requests. */
         const val BIOMETRIC_CHANNEL_ID = "xkey_biometric"
 
-        /** The biometric request channel (high priority for lock screen visibility). */
+        /**
+         * The biometric request channel: high priority, so it wakes a locked
+         * phone, and private, so the lock screen shows each notification's
+         * public version, which names no relying party.
+         */
         @RequiresApi(Build.VERSION_CODES.O)
         internal fun biometricChannel(context: Context): NotificationChannel = NotificationChannel(
             BIOMETRIC_CHANNEL_ID,
@@ -101,7 +105,7 @@ class XKeyApplication : Application() {
             enableVibration(true)
             vibrationPattern = longArrayOf(0, 250, 250, 250)
             enableLights(true)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
             setShowBadge(true)
         }
     }

@@ -152,8 +152,18 @@ class BiometricNotificationHelper(private val context: Context) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Create the notification content
+        // Create the notification content. It names the relying party, so it
+        // is private: a locked screen shows the public version, which names
+        // none.
         val displayName = rpName ?: context.getString(R.string.app_name)
+        val publicVersion = NotificationCompat.Builder(context, XKeyApplication.BIOMETRIC_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_fingerprint)
+            .setContentTitle(context.getString(R.string.biometric_notification_title))
+            .setContentText(context.getString(R.string.biometric_notification_public_text))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
         val notification = NotificationCompat.Builder(context, XKeyApplication.BIOMETRIC_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_fingerprint)
             .setContentTitle(context.getString(R.string.biometric_notification_title))
@@ -165,7 +175,8 @@ class BiometricNotificationHelper(private val context: Context) {
             .setAutoCancel(true)
             .setOngoing(true)
             .setTimeoutAfter(timeoutMs)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
             .build()
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)
