@@ -193,6 +193,23 @@ class PqcSoftwareKeyStoreTest {
         assertFalse(store.delete("xkey_key_del"))
     }
 
+    @Test
+    fun `a record that cannot be removed makes delete throw and the key stays usable`() {
+        store.generate("xkey_key_stuck", MlDsaParameterSet.ML_DSA_44)
+        store.removeFile = { false }
+
+        assertThrows(java.io.IOException::class.java) { store.delete("xkey_key_stuck") }
+        assertTrue(store.contains("xkey_key_stuck"))
+        store.sign("xkey_key_stuck", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1))
+    }
+
+    @Test
+    fun `deleting a missing key is a no-op even when removal would fail`() {
+        store.removeFile = { false }
+
+        assertFalse(store.delete("xkey_key_absent"))
+    }
+
     private fun contains(haystack: ByteArray, needle: ByteArray): Boolean =
         (0..haystack.size - needle.size).any { start ->
             needle.indices.all { haystack[start + it] == needle[it] }

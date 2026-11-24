@@ -435,6 +435,24 @@ class PivKeyManagerTest {
         }
     }
 
+    @Test
+    fun `a software ML-DSA slot key whose record cannot be removed keeps its row and is not audited as deleted`() =
+        runTest {
+            keystore.live = null
+            val store = softwareStore()
+            val alias = PivSlot.AUTHENTICATION.keystoreAlias
+            store.generate(alias, MlDsaParameterSet.ML_DSA_44)
+            store.removeFile = { false }
+
+            val error = runCatching { PivKeyManager(pivSlotDao, pqcStore = store).deleteKey(PivSlot.AUTHENTICATION) }
+                .exceptionOrNull()
+
+            assertTrue("delete must fail, got $error", error != null)
+            coVerify(exactly = 0) { pivSlotDao.deleteBySlotId(any()) }
+            verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+            assertTrue(store.contains(alias))
+        }
+
     /** A software ML-DSA store over a temporary directory and a stand-in seal. */
     private fun softwareStore(): PqcSoftwareKeyStore {
         val cipher = mockk<KeystoreAeadCipher>()

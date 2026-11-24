@@ -200,6 +200,25 @@ class KeystoreManagerPqcLifecycleTest {
     }
 
     @Test
+    fun `a software key whose record cannot be removed keeps its row and is not audited as deleted`() {
+        val spki = generate("stuck", -1)
+        store.removeFile = { false }
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.deleteByKeyId(any()) } returns 1
+        val softwareKeys = mockk<SoftwareKeyStore>(relaxed = true)
+        every { softwareKeys.contains(any()) } returns false
+
+        assertTrue(runCatching { runBlocking { keyDao.deleteKeyRow(row("stuck"), manager, softwareKeys) } }.isFailure)
+        assertTrue(runCatching { manager.deleteGeneralKey("stuck") }.isFailure)
+        assertTrue(runCatching { manager.deleteKey("stuck") }.isFailure)
+
+        io.mockk.coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+        assertTrue(manager.pqcSoftwareKeyExists("stuck"))
+        signApproved("stuck", spki)
+    }
+
+    @Test
     fun `no internal wrap key is resolved or deleted and a software key still signs`() {
         val spki = generate("kept", -1)
         every { keyStore.containsAlias(any()) } answers { firstArg<String>() in INTERNAL_ALIASES }

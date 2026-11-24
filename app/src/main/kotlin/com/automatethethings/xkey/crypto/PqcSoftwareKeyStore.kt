@@ -176,8 +176,11 @@ class PqcSoftwareKeyStore(
     @Synchronized
     fun delete(alias: String): Boolean {
         val file = fileFor(alias)
-        return file.exists() && file.delete()
+        return file.exists() && removeFile(file)
     }
+
+    /** Removes a record file; a test swaps in one that fails. */
+    internal var removeFile: (File) -> Boolean = { it.delete() }
 
     /** The record under [alias], or null when it is missing, damaged or another alias's. */
     private fun record(alias: String): Record? {
