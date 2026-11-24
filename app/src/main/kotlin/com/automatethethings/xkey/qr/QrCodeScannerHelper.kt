@@ -74,7 +74,9 @@ class QrCodeScannerHelper(
     fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
+    /** Starts scanning; after a delivered value, scans again for the next one. */
     fun start() {
+        processing = false
         frames.bind(::analyze)
     }
 
