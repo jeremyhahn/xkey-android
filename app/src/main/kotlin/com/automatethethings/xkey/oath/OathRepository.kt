@@ -577,7 +577,14 @@ class OathRepository(
             )
         }
 
-        dao.recordUsage(oathId, System.currentTimeMillis())
+        // The HOTP counter is already claimed, so a failed usage record must not discard the code.
+        try {
+            dao.recordUsage(oathId, System.currentTimeMillis())
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Usage record failed for OATH credential $oathId: ${e.javaClass.simpleName}")
+        }
 
         return code
     }
