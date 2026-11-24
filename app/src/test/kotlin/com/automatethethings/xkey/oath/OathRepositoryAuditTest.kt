@@ -72,6 +72,8 @@ class OathRepositoryAuditTest {
         coEvery { dao.getByOathId(TOTP_ID) } returns stored(TOTP_ID, "TOTP")
         // A relaxed mock returns 0, which reads as a lost counter race.
         coEvery { dao.advanceCounter(any(), any(), any()) } returns 1
+        // Likewise a delete count of 0 reads as a delete that removed nothing.
+        coEvery { dao.deleteByOathId(any()) } returns 1
 
         val secretManager = mockk<OathSecretManager>()
         every { secretManager.encryptSecret(any()) } answers { firstArg() }
@@ -127,6 +129,30 @@ class OathRepositoryAuditTest {
         assertFalse(deleted)
         coVerify(exactly = 0) { dao.deleteByOathId(any()) }
         verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+    }
+
+    @Test
+    fun `two deletes that both read the credential write one deleted row`() = runTest {
+        // Both calls read the stored credential before either deletes it (a
+        // phone delete racing local.oathRemove); the row is removed once.
+        var rowsLeft = 1
+        coEvery { dao.deleteByOathId(HOTP_ID) } coAnswers {
+            yield()
+            if (rowsLeft > 0) { rowsLeft--; 1 } else 0
+        }
+
+        var first: Boolean? = null
+        var second: Boolean? = null
+        launch { first = repository.deleteCredential(HOTP_ID) }
+        launch { second = repository.deleteCredential(HOTP_ID) }
+        advanceUntilIdle()
+
+        coVerify(exactly = 2) { dao.getByOathId(HOTP_ID) }
+        coVerify(exactly = 2) { dao.deleteByOathId(HOTP_ID) }
+        assertEquals(true, first)
+        assertEquals(false, second)
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
     }
 
     @Test
@@ -188,6 +214,7 @@ class OathRepositoryAuditTest {
         coEvery { dao.deleteByOathId(HOTP_ID) } coAnswers {
             committed = true
             cancelAfterCommit { job }
+            1
         }
 
         job = launch { repository.deleteCredential(HOTP_ID) }
