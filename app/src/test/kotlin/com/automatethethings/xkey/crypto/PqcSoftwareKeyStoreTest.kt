@@ -139,6 +139,36 @@ class PqcSoftwareKeyStoreTest {
     }
 
     @Test
+    fun `a key's user-authentication policy is sealed with it and enforced on sign`() {
+        val defaultClock = PqcSoftwareKeyStore.clock
+        PqcSoftwareKeyStore.clock = { 500_000L }
+        try {
+            store.generate("xkey_key_auth", MlDsaParameterSet.ML_DSA_44, authDurationSeconds = 0)
+            store.generate("xkey_key_open", MlDsaParameterSet.ML_DSA_44)
+
+            assertEquals(0, store.authDurationSeconds("xkey_key_auth"))
+            assertEquals(-1, store.authDurationSeconds("xkey_key_open"))
+            assertNull(store.authDurationSeconds("xkey_key_none"))
+            assertThrows(BiometricRequiredException::class.java) { store.sign("xkey_key_auth", byteArrayOf(1)) }
+            store.sign("xkey_key_auth", byteArrayOf(1), userAuthenticatedAt = 500_000L)
+            store.sign("xkey_key_open", byteArrayOf(1))
+        } finally {
+            PqcSoftwareKeyStore.clock = defaultClock
+        }
+    }
+
+    @Test
+    fun `a record in the earlier format is refused`() {
+        store.generate("xkey_key_old", MlDsaParameterSet.ML_DSA_44)
+        val bytes = store.fileFor("xkey_key_old").readBytes()
+        "XPQ1".toByteArray().copyInto(bytes)
+        store.fileFor("xkey_key_old").writeBytes(bytes)
+
+        assertFalse(store.contains("xkey_key_old"))
+        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_old", byteArrayOf(1)) }
+    }
+
+    @Test
     fun `delete removes the key once`() {
         store.generate("xkey_key_del", MlDsaParameterSet.ML_DSA_87)
         assertTrue(store.delete("xkey_key_del"))
