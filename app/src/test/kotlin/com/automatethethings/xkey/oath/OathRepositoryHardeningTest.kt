@@ -21,6 +21,9 @@ import androidx.test.core.app.ApplicationProvider
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -32,6 +35,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Input that [OathEngine] cannot compute a code from never reaches the
@@ -44,6 +48,7 @@ class OathRepositoryHardeningTest {
 
     private lateinit var database: XKeyDatabase
     private lateinit var dao: OathCredentialDao
+    private lateinit var secretManager: OathSecretManager
     private lateinit var repository: OathRepository
 
     @Before
@@ -52,7 +57,7 @@ class OathRepositoryHardeningTest {
             .allowMainThreadQueries()
             .build()
         dao = database.oathCredentialDao()
-        val secretManager = mockk<OathSecretManager>()
+        secretManager = mockk()
         every { secretManager.encryptSecret(any()) } answers { firstArg() }
         every { secretManager.decryptSecret(any()) } answers { firstArg() }
         every { secretManager.decryptSecret(match { it.contentEquals(CORRUPT) }) } throws
@@ -133,6 +138,33 @@ class OathRepositoryHardeningTest {
 
         repository.deleteCredential(bad)
         assertEquals(listOf(good), repository.observeAll().first().map { it.credential.oathId })
+    }
+
+    @Test
+    fun `two concurrent HOTP generations hand out two codes and advance the counter twice`() = runBlocking {
+        val id = repository.addCredential(issuer = "A", accountName = "hotp", secret = RFC_SEED, type = "HOTP")
+        // Both calls read the stored counter before either writes: the
+        // interleaving of a desktop generate and a phone tap.
+        val reads = AtomicInteger()
+        val bothRead = CompletableDeferred<Unit>()
+        val racing = OathRepository(
+            object : OathCredentialDao by dao {
+                override suspend fun getByOathId(oathId: String): OathCredentialEntity? {
+                    val row = dao.getByOathId(oathId)
+                    val n = reads.incrementAndGet()
+                    if (n == 2) bothRead.complete(Unit)
+                    if (n <= 2) bothRead.await()
+                    return row
+                }
+            },
+            secretManager
+        )
+
+        val codes = listOf(async { racing.generateCode(id) }, async { racing.generateCode(id) }).awaitAll()
+
+        // RFC 4226 appendix D: counter 0 and counter 1.
+        assertEquals(setOf("755224", "287082"), codes.toSet())
+        assertEquals(2L, dao.getByOathId(id)!!.counter)
     }
 
     private companion object {
