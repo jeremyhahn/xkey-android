@@ -35,6 +35,7 @@ import java.security.KeyStore
 import java.util.Collections
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -211,6 +212,39 @@ class KeystoreManagerPqcLifecycleTest {
 
         verify(exactly = 0) { keyStore.deleteEntry(any()) }
         assertEquals(SET.signatureBytes, signApproved("kept", spki).size)
+    }
+
+    @Test
+    fun `a software key whose ID is a Keystore key's alias is not shadowed by that key`() {
+        val spki = generate("xkey_key_a", -1)
+        val hardwareDer = java.security.KeyPairGenerator.getInstance("EC").generateKeyPair().public.encoded
+        val certificate = mockk<java.security.cert.Certificate>()
+        every { certificate.publicKey.encoded } returns hardwareDer
+        every { keyStore.containsAlias("xkey_key_a") } returns true
+        every { keyStore.getCertificate("xkey_key_a") } returns certificate
+
+        assertEquals(KeystoreManager.generalKeyAlias("xkey_key_a"), manager.resolveKeystoreAlias("xkey_key_a"))
+        assertArrayEquals(spki, manager.getPublicKeyDER("xkey_key_a"))
+        assertEquals(KeySecurityLevel.SOFTWARE, manager.keySecurityLevel("xkey_key_a"))
+
+        assertTrue(manager.deleteGeneralKey("xkey_key_a"))
+        verify(exactly = 0) { keyStore.deleteEntry("xkey_key_a") }
+        assertFalse(manager.pqcSoftwareKeyExists("xkey_key_a"))
+        assertTrue("key a is left", manager.generalKeyExists("a"))
+        assertArrayEquals(hardwareDer, manager.getPublicKeyDER("a"))
+    }
+
+    @Test
+    fun `no raw-alias check of a key ID runs outside resolveKeystoreAlias`() {
+        val source = File("src/main/kotlin/com/automatethethings/xkey/crypto/KeystoreManager.kt").readText()
+        val rawCheck = Regex("""keyStore\.containsAlias\(keyId\)|hasSoftwareEd25519Key\(keyId\)""")
+        val function = Regex("""fun (\w+)\(""")
+        val checks = rawCheck.findAll(source).toList()
+        assertTrue("the resolver keeps its raw-alias fallback", checks.isNotEmpty())
+        for (check in checks) {
+            val owner = function.findAll(source.substring(0, check.range.first)).last().groupValues[1]
+            assertEquals("raw-alias check at offset ${check.range.first}", "resolveKeystoreAlias", owner)
+        }
     }
 
     @Test
