@@ -442,7 +442,10 @@ class PivKeyManager(
      * @throws IllegalStateException If the slot does not contain a key in Android Keystore.
      * @throws java.security.GeneralSecurityException If the signing operation fails.
      */
-    suspend fun sign(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm): ByteArray {
+    suspend fun sign(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm): ByteArray =
+        PivSlotLocks.withSlot(slot) { signLocked(slot, data, algorithm) }
+
+    private suspend fun signLocked(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm): ByteArray {
         val alias = slot.keystoreAlias
         val set = algorithm.mlDsaSet
         val startTime = System.currentTimeMillis()
@@ -450,14 +453,13 @@ class PivKeyManager(
         val signatureAlgorithm: String
         val signatureBytes: ByteArray
         if (set != null && !keyStore.containsAlias(alias)) {
-            // A software ML-DSA slot key: the store checks the record is this
-            // alias's and this set's before it signs.
+            // A software ML-DSA slot key: the store checks the record is this alias's and this set's as it signs.
             val store = mlDsaStore
             if (store == null || store.parameterSet(alias) != set) {
                 throw IllegalStateException("No ${set.wireName} key in PIV slot ${slot.hexId} (${slot.label})")
             }
             signatureAlgorithm = set.wireName
-            signatureBytes = store.sign(alias, data)
+            signatureBytes = store.sign(alias, set, data)
         } else {
             val privateKey = keyStore.getKey(alias, null)
                 ?: throw IllegalStateException("No key found in Android Keystore for PIV slot ${slot.hexId} (${slot.label})")
@@ -587,8 +589,9 @@ class PivKeyManager(
  * certificate against key A must finish before another caller can replace or
  * delete A, or its upsert would bring A's row back. [PivKeyManager.listSlots]
  * reads each slot under its lock so a listing never mixes two generations.
- * Different slots do not wait for each other; signing and the getters take
- * no lock.
+ * [PivKeyManager.sign] holds it from the key lookup to the usage record, so
+ * a regenerate cannot swap the key it checked. Different slots do not wait
+ * for each other; the getters take no lock.
  */
 internal object PivSlotLocks {
     private val locks: Map<PivSlot, Mutex> = PivSlot.entries.associateWith { Mutex() }

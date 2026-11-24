@@ -138,12 +138,14 @@ class PqcSoftwareKeyStore(
      * @throws BiometricRequiredException when the key needs a user
      *   authentication and [userAuthenticatedAt] is null, too old or ahead
      *   of the clock.
-     * @throws PqcKeyRecordException when there is no such key, or its record
-     *   was sealed for another alias or set.
+     * @throws PqcKeyRecordException when there is no such key, its record is
+     *   not a [set] key, or it was sealed for another alias or set.
      */
     @Synchronized
-    fun sign(alias: String, data: ByteArray, userAuthenticatedAt: Long? = null): ByteArray {
+    fun sign(alias: String, set: MlDsaParameterSet, data: ByteArray, userAuthenticatedAt: Long? = null): ByteArray {
         val record = record(alias) ?: throw PqcKeyRecordException("No ML-DSA key under this alias")
+        // Checked under the store's lock: a concurrent generate cannot swap the record after this.
+        if (record.set != set) throw PqcKeyRecordException("ML-DSA key under this alias is not ${set.wireName}")
         val plaintext = cipher.decrypt(record.sealed)
         var pkcs8: ByteArray? = null
         try {

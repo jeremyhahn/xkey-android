@@ -1465,7 +1465,7 @@ class KeystoreManager(
         MlDsaParameterSet.requireSpkiSet(current, set)
         if (!keyStore.containsAlias(alias)) {
             try {
-                return@withAliasGate pqcStore.sign(alias, data, userAuthenticatedAt)
+                return@withAliasGate pqcStore.sign(alias, set, data, userAuthenticatedAt)
             } catch (e: PqcKeyRecordException) {
                 throw SigningException("Signing with ${set.wireName} failed", e)
             }
