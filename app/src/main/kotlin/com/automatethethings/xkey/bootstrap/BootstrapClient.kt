@@ -90,6 +90,7 @@ class BootstrapClient(
         private const val MAX_FRAME_SIZE = 65535
         private const val KEY_SIZE = 32
         private const val TAG_SIZE = 16
+        private const val MAX_CAUSE_DEPTH = 16
 
         /**
          * Upper bound on certificates accepted from a bootstrap bundle. A trust
@@ -389,6 +390,17 @@ class BootstrapClient(
                 certificates = derCerts,
                 method = BootstrapMethod.NOISE
             )
+        } catch (e: BootstrapException) {
+            throw e
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A tampered or truncated exchange surfaces from the AEAD, the
+            // stream or the JSON parser; report it as the method's failure.
+            throw NoiseBootstrapException(
+                "Noise exchange with $host:$port failed: ${e.javaClass.simpleName}",
+                e
+            )
         } finally {
             socket.close()
         }
@@ -427,6 +439,13 @@ class BootstrapClient(
         } catch (e: SPKIException) {
             throw e
         } catch (e: Exception) {
+            // The TLS stack wraps the trust manager's SPKIException (JSSE in an
+            // SSLException), so look for it before reporting a transport failure.
+            generateSequence(e.cause) { it.cause }
+                .take(MAX_CAUSE_DEPTH)
+                .filterIsInstance<SPKIException>()
+                .firstOrNull()
+                ?.let { throw it }
             throw DirectException("SPKI fetch failed from $url", cause = e)
         }
 
@@ -563,15 +582,16 @@ class BootstrapClient(
                     throw SPKIException(expectedPin)
                 }
 
-                for (cert in chain) {
-                    val actualPin = computeSPKIPin(cert)
-                    if (actualPin == expectedPin) {
+                // A pin on chain[i] counts only when the leaf really chains up to
+                // it: the pinned certificate is public, so a server could
+                // otherwise append it after a leaf of its own.
+                for (index in chain.indices) {
+                    if (computeSPKIPin(chain[index]) == expectedPin && leafChainsTo(chain, index)) {
                         return // Pin matched
                     }
                 }
 
-                val actualPin = if (chain.isNotEmpty()) computeSPKIPin(chain[0]) else null
-                throw SPKIException(expectedPin, actualPin)
+                throw SPKIException(expectedPin, computeSPKIPin(chain[0]))
             }
 
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
@@ -593,6 +613,25 @@ class BootstrapClient(
         val digest = MessageDigest.getInstance("SHA-256")
         val hash = digest.digest(spki)
         return bytesToHex(hash)
+    }
+
+    /**
+     * True when every certificate from the leaf up to `chain[index]` names the
+     * next one as its issuer and carries a signature that verifies under the
+     * next one's key. A pin on the leaf itself (index 0) needs no signature.
+     */
+    private fun leafChainsTo(chain: Array<X509Certificate>, index: Int): Boolean {
+        for (i in 0 until index) {
+            val child = chain[i]
+            val parent = chain[i + 1]
+            if (child.issuerX500Principal != parent.subjectX500Principal) return false
+            try {
+                child.verify(parent.publicKey)
+            } catch (_: Exception) {
+                return false
+            }
+        }
+        return true
     }
 
     /**
