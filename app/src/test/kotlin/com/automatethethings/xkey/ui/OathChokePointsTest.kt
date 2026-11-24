@@ -59,6 +59,15 @@ class OathChokePointsTest {
     }
 
     @Test
+    fun pendingClearsRetryFromOneAppWideHook() {
+        assertEquals(
+            "retryPendingClears called outside the app-wide focus hook",
+            mapOf("ui/SensitiveClipboard.kt" to 1, "ui/ClipboardFocusRetry.kt" to 1),
+            occurrences(Regex("""retryPendingClears\("""))
+        )
+    }
+
+    @Test
     fun codesAreComputedOnlyAtTheirChokePoints() {
         val found = occurrences(Regex("""OathEngine\.generate"""))
         val allowed = setOf("oath/OathEngine.kt", "oath/OathCurrentCode.kt", "oath/OathRepository.kt")
