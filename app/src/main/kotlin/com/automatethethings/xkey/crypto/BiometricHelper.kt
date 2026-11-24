@@ -14,6 +14,8 @@
  */
 package com.automatethethings.xkey.crypto
 
+import android.os.Build
+import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
@@ -217,17 +219,12 @@ class BiometricHelper(
             .setTitle(title)
             .setSubtitle(subtitle)
             .setConfirmationRequired(true)
-        if (allowDeviceCredential && cryptoObject == null) {
-            // The screen lock stands in for a biometric; the system draws its
-            // own cancel, so no negative button may be set.
-            promptInfoBuilder.setAllowedAuthenticators(
-                BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                    BiometricManager.Authenticators.DEVICE_CREDENTIAL
-            )
-        } else {
-            promptInfoBuilder
-                .setNegativeButtonText(NEGATIVE_BUTTON_TEXT)
-                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+        val allowCredential = allowDeviceCredential && cryptoObject == null
+        promptInfoBuilder.setAllowedAuthenticators(promptAuthenticators(allowCredential))
+        if (!allowCredential) {
+            // The screen lock draws its own cancel, so a negative button is
+            // set only when the screen lock is not accepted.
+            promptInfoBuilder.setNegativeButtonText(NEGATIVE_BUTTON_TEXT)
         }
 
         if (description != null) {
@@ -334,6 +331,20 @@ class BiometricHelper(
         private const val DEFAULT_TITLE = "xKey Authentication"
         private const val DEFAULT_SUBTITLE = "Verify your identity"
         private const val NEGATIVE_BUTTON_TEXT = "Cancel"
+
+        /** The authenticators of a prompt; BIOMETRIC_STRONG | DEVICE_CREDENTIAL is refused by PromptInfo before API 30. */
+        @VisibleForTesting
+        internal fun promptAuthenticators(allowDeviceCredential: Boolean, sdkInt: Int = Build.VERSION.SDK_INT): Int =
+            when {
+                !allowDeviceCredential -> BiometricManager.Authenticators.BIOMETRIC_STRONG
+                sdkInt >= Build.VERSION_CODES.R ->
+                    BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                // Android 9 and 10 accept the screen lock only beside BIOMETRIC_WEAK.
+                else ->
+                    BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            }
     }
 }
 
