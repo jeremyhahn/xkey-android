@@ -124,6 +124,15 @@ class StreamPairingSession(
         /** How long the frames read before the end of a stream have to be delivered. */
         private const val DRAIN_TIMEOUT_MS = 5_000L
 
+        /** The Noise AEAD tag each encrypted frame carries after its plaintext. */
+        private const val NOISE_TAG_SIZE = 16
+
+        /**
+         * The largest plaintext one frame carries: the 65535-byte frame less
+         * the Noise tag. A reply over it is answered with an error instead.
+         */
+        const val MAX_PLAINTEXT_SIZE = StreamMessageFraming.MAX_MESSAGE_SIZE - NOISE_TAG_SIZE
+
         /**
          * How long a peer has, from the start of [serve], to finish the
          * identity exchange and the Noise XX handshake (#64). One deadline
@@ -653,7 +662,7 @@ class StreamPairingSession(
             // whose peer went away while it ran.
             if (responseBytes != null && !connection.inputEnded) {
                 try {
-                    send(connection, responseBytes, phoneInitiated = false)
+                    send(connection, fitOneFrame(plaintext, responseBytes), phoneInitiated = false)
                 } catch (e: IOException) {
                     Log.e(TAG, "[$transportLabel] failed to send response", e)
                     break
@@ -664,6 +673,28 @@ class StreamPairingSession(
                 break
             }
         }
+    }
+
+    /**
+     * [reply] to [request], or, when it is over [MAX_PLAINTEXT_SIZE] and so
+     * cannot go out in one frame, an INTERNAL_ERROR carrying the request's
+     * id and generation: the peer gets an answer and the connection goes on.
+     */
+    private fun fitOneFrame(request: ByteArray, reply: ByteArray): ByteArray {
+        if (reply.size <= MAX_PLAINTEXT_SIZE) return reply
+        val requestText = String(request, Charsets.UTF_8)
+        val method = try {
+            JSONObject(requestText).optString("method", "?")
+        } catch (e: JSONException) {
+            "?"
+        }
+        Log.w(TAG, "[$transportLabel] response to $method is ${reply.size} bytes, over $MAX_PLAINTEXT_SIZE; answering with an error")
+        return ProtocolResponse.error(
+            RpcId.read(requestText) ?: RpcId.NULL,
+            ErrorCodes.INTERNAL_ERROR,
+            "Response of ${reply.size} bytes does not fit one frame",
+            generation = readGeneration(requestText)
+        ).toJson()
     }
 
     /**
@@ -1100,6 +1131,12 @@ class StreamPairingSession(
         expected: ConfirmedConnection? = null,
         check: () -> Unit = {}
     ) {
+        // Refused before admission: no nonce is spent, so the connection goes on.
+        if (plaintext.size > MAX_PLAINTEXT_SIZE) {
+            throw MessageTooLargeException(
+                "Plaintext of ${plaintext.size} bytes exceeds the $MAX_PLAINTEXT_SIZE a frame carries"
+            )
+        }
         beforeSendLockForTest?.invoke()
         connection.sendLock.withLock {
             currentCoroutineContext().ensureActive()
