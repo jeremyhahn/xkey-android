@@ -512,6 +512,7 @@
     <string name="biometric_channel_description">High-priority notifications for authentication requests requiring biometric verification</string>
     <string name="biometric_notification_title">Authentication Required</string>
     <string name="biometric_notification_text">Tap to approve request from %1$s</string>
+    <string name="biometric_notification_public_text">Unlock to review an authentication request</string>
     <string name="biometric_notification_timeout">Request expired</string>
 
     <!-- Key Sharing Settings -->
