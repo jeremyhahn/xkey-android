@@ -16,12 +16,14 @@
 package com.automatethethings.xkey.ble
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
 import java.security.MessageDigest
 import java.security.SecureRandom
 import kotlinx.coroutines.test.runTest
@@ -637,6 +639,77 @@ class NoiseHandshakeTest {
         val first = NoiseSession().also { it.loadStaticKey(context) }
         val second = NoiseSession().also { it.loadStaticKey(context) }
         assertArrayEquals(first.getStaticPublicKey(), second.getStaticPublicKey())
+    }
+
+    /**
+     * A freshly generated static key the store refuses to commit is not the
+     * device identity: the session fails closed instead of answering under a
+     * key no paired desktop knows and the next connection would replace.
+     */
+    @Test
+    fun loadStaticKeyFailsClosedWhenANewKeyCannotBeCommitted() = runTest {
+        val editor = mockk<SharedPreferences.Editor>()
+        every { editor.putString(any(), any()) } returns editor
+        every { editor.commit() } returns false
+        val store = emptyStoreWith(editor)
+        NoiseSession.keyStoreOpener = { store }
+
+        assertNewKeyRefused(editor)
+    }
+
+    /** A store whose editor throws while saving a new key fails the session closed. */
+    @Test
+    fun loadStaticKeyFailsClosedWhenSavingANewKeyThrows() = runTest {
+        val editor = mockk<SharedPreferences.Editor>()
+        every { editor.putString(any(), any()) } returns editor
+        every { editor.commit() } throws IllegalStateException("keystore write failed")
+        val store = emptyStoreWith(editor)
+        NoiseSession.keyStoreOpener = { store }
+
+        assertNewKeyRefused(editor)
+    }
+
+    /** The same, when the editor throws on the first `putString`. */
+    @Test
+    fun loadStaticKeyFailsClosedWhenPuttingANewKeyThrows() = runTest {
+        val editor = mockk<SharedPreferences.Editor>()
+        every { editor.putString(any(), any()) } throws IllegalStateException("keystore write failed")
+        val store = emptyStoreWith(editor)
+        NoiseSession.keyStoreOpener = { store }
+
+        assertNewKeyRefused(editor)
+    }
+
+    /** A store holding no key pair, whose edits go to [editor]. */
+    private fun emptyStoreWith(editor: SharedPreferences.Editor): SharedPreferences {
+        val store = mockk<SharedPreferences>()
+        every { store.getString(any(), any()) } returns null
+        every { store.edit() } returns editor
+        return store
+    }
+
+    /**
+     * Asserts that [NoiseSession.loadStaticKey] generated a key and tried to
+     * save it through [editor], then refused: it throws [NoiseException], no
+     * static key is left on the session and the session will not answer msg1.
+     */
+    private suspend fun assertNewKeyRefused(editor: SharedPreferences.Editor) {
+        val responder = NoiseSession()
+        try {
+            responder.loadStaticKey(context)
+            fail("expected loadStaticKey to refuse a key it could not save")
+        } catch (expected: NoiseException) {
+            // fails closed
+        }
+        // The failure came from saving a generated key, not from reading the store.
+        verify { editor.putString("static_private_key", any()) }
+        assertNull("no unsaved static key may be left behind", responder.getStaticPublicKey())
+        try {
+            responder.processHandshakeMessage(NoiseInitiatorSession(randomBytes(KEY_SIZE)).createHandshakeMessage1())
+            fail("a session whose static key was not saved must not answer msg1")
+        } catch (expected: NoiseException) {
+            // refused
+        }
     }
 
     // -----------------------------------------------------------------
