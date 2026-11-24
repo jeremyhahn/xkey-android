@@ -721,7 +721,13 @@ class KeystoreManager(
         // actually removed; callers that deleted through the FIDO2-only alias
         // were silently leaking those entries.
         val alias = resolveKeystoreAlias(credentialId) ?: return false
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
+        // A general alias may hold a software ML-DSA record instead of a Keystore entry.
+        val deleted = withAliasGate(alias) {
+            val inKeystore = keyStore.containsAlias(alias)
+            if (inKeystore) keyStore.deleteEntry(alias)
+            pqcStore.delete(alias) || inKeystore
+        }
+        if (!deleted) return false
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
@@ -1776,10 +1782,8 @@ class KeystoreManager(
      * @return DER-encoded public key bytes, or null if the key does not exist.
      */
     fun getPublicKeyDER(keyId: String): ByteArray? {
-        val alias = resolveKeystoreAlias(keyId)
-            ?: return pqcStore.publicKeyDer(buildGeneralAlias(keyId))
-        val cert = keyStore.getCertificate(alias) ?: return null
-        return cert.publicKey.encoded
+        val alias = resolveKeystoreAlias(keyId) ?: return null
+        return publicKeyDERAt(alias)
     }
 
     /**
@@ -1935,30 +1939,34 @@ class KeystoreManager(
      *
      * Tries the following patterns in order:
      * 1. FIDO2 credential alias: xkey_credential_ + keyId
-     * 2. General key alias: xkey_key_ + keyId
-     * 3. Raw alias: keyId itself (for non-xKey keys)
+     * 2. General key alias: xkey_key_ + keyId, holding a Keystore entry, a
+     *    software ML-DSA record or a software Ed25519 key
+     * 3. Raw alias: keyId itself (for non-xKey keys), only when no general
+     *    key form exists, so a general key is never shadowed by a raw one
+     *
+     * A general alias may hold no Keystore entry (a software key): callers
+     * read its public key through [publicKeyDERAt].
      *
      * @param keyId The key identifier to resolve.
-     * @return The Keystore alias, or null if no matching entry exists.
+     * @return The alias, or null if no matching key exists.
      */
     fun resolveKeystoreAlias(keyId: String): String? {
         val credentialAlias = KEY_ALIAS_PREFIX + keyId
         if (keyStore.containsAlias(credentialAlias)) return credentialAlias
 
+        // Every general key form is checked before any raw-alias fallback.
         val generalAlias = KEY_ALIAS_PREFIX_GENERAL + keyId
         if (keyStore.containsAlias(generalAlias)) return generalAlias
+        if (pqcStore.contains(generalAlias)) return generalAlias
+        if (hasSoftwareEd25519Key(generalAlias)) return generalAlias
 
         // A PIV slot key is reached only through PivKeyManager, which keeps
         // its piv_slots row in step; a raw alias must not resolve to it.
         // An internal wrap key is never a user key's raw alias.
         if (KeystoreAeadCipher.isInternalAlias(keyId)) return null
-        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return keyId
-
-        // Check Ed25519 software-backed keys. Callers use the result as a
-        // Keystore alias, so a key stored under the general alias resolves to
-        // that alias, never to keyId: keyId may be a PIV slot's raw alias.
-        if (hasSoftwareEd25519Key(generalAlias)) return generalAlias
-        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && hasSoftwareEd25519Key(keyId)) return keyId
+        if (keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return null
+        if (keyStore.containsAlias(keyId)) return keyId
+        if (hasSoftwareEd25519Key(keyId)) return keyId
 
         return null
     }
@@ -2032,10 +2040,8 @@ class KeystoreManager(
     fun pqcSoftwareKeyExists(keyId: String): Boolean = pqcStore.contains(buildGeneralAlias(keyId))
 
     /**
-     * Whether [keyId] has live key material: a Keystore (or software Ed25519)
-     * alias [resolveKeystoreAlias] finds, or a software ML-DSA record under
-     * its general alias. [resolveKeystoreAlias] stays Keystore-only, since
-     * its callers pass the alias to the Keystore.
+     * Whether [keyId] has live key material: an alias [resolveKeystoreAlias]
+     * finds (Keystore, software ML-DSA or software Ed25519).
      */
     fun keyMaterialExists(keyId: String): Boolean =
         resolveKeystoreAlias(keyId) != null || pqcSoftwareKeyExists(keyId)
