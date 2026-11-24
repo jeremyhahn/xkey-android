@@ -1354,7 +1354,8 @@ class KeystoreManager(
      */
     private fun removeAliasLocked(alias: String): Boolean {
         val inKeystore = try {
-            keyStore.containsAlias(alias).also { if (it) keyStore.deleteEntry(alias) }
+            // The gate is reentrant: callers already hold it, this keeps the delete gated on its own.
+            withAliasGate(alias) { keyStore.containsAlias(alias).also { if (it) keyStore.deleteEntry(alias) } }
         } catch (e: Exception) {
             throw KeyDeletionException("Keystore entry $alias could not be deleted", e)
         }
