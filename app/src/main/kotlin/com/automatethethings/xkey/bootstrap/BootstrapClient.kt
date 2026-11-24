@@ -390,6 +390,17 @@ class BootstrapClient(
                 certificates = derCerts,
                 method = BootstrapMethod.NOISE
             )
+        } catch (e: BootstrapException) {
+            throw e
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A tampered or truncated exchange surfaces from the AEAD, the
+            // stream or the JSON parser; report it as the method's failure.
+            throw NoiseBootstrapException(
+                "Noise exchange with $host:$port failed: ${e.javaClass.simpleName}",
+                e
+            )
         } finally {
             socket.close()
         }
