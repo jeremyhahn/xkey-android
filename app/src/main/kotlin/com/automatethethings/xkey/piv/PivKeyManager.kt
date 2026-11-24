@@ -20,6 +20,7 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Log
 import androidx.annotation.RequiresApi
+import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
@@ -43,6 +44,8 @@ import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
+import java.util.Collections
+import java.util.EnumMap
 import javax.crypto.KeyAgreement
 
 /**
@@ -136,9 +139,11 @@ const val PIV_KEYSTORE_ALIAS_PREFIX = "xkey_piv_"
  * - **Delete**: Destroy a key and remove its metadata.
  *
  * Ed25519 and X25519 keys exist only in secure hardware: on a device below
- * Android 13 they are refused before the slot is touched, and a generated key
- * the Keystore reports as software-backed (or whose level cannot be read) is
- * removed and refused. There is no software fallback.
+ * Android 13, or where a probe key the Keystore makes under a disposable
+ * alias is not in the TEE or StrongBox, they are refused before the slot is
+ * touched and are not in [availableAlgorithms]. A slot key the Keystore still
+ * reports as software-backed (or whose level cannot be read) is removed and
+ * refused. There is no software fallback.
  *
  * All operations that modify key material or perform cryptographic operations
  * are logged via [AuditLogger] for security auditing.
@@ -151,12 +156,17 @@ const val PIV_KEYSTORE_ALIAS_PREFIX = "xkey_piv_"
  * @param securityLevelOf Reads the security level of the key under an alias,
  *   or null when it cannot be read; the Android Keystore's [KeyInfo] unless a
  *   test substitutes it.
+ * @param probeSecurityLevel Reads the security level the Keystore gives a
+ *   curve 25519 key, or null when it cannot make one; by default a probe key
+ *   generated with [generateKeyPair] under a disposable alias, read with
+ *   [securityLevelOf], always deleted, and kept for the process.
  */
 class PivKeyManager(
     private val pivSlotDao: PivSlotDao,
     private val generateKeyPair: (alias: String, algorithm: PivAlgorithm) -> KeyPair = ::generateInAndroidKeystore,
     private val sdkInt: Int = Build.VERSION.SDK_INT,
-    securityLevelOf: ((alias: String) -> KeySecurityLevel?)? = null
+    securityLevelOf: ((alias: String) -> KeySecurityLevel?)? = null,
+    private val probeSecurityLevel: ((algorithm: PivAlgorithm) -> KeySecurityLevel?)? = null
 ) {
 
     // Opened on first use, so constructing a manager does not need the
@@ -167,6 +177,98 @@ class PivKeyManager(
 
     companion object {
         private const val TAG = "PivKeyManager"
+
+        /**
+         * One probe at a time for the process: probes of one algorithm share
+         * an alias, and the GATT service and the PIV screens each build a
+         * manager.
+         */
+        private val probeLock = Mutex()
+
+        /** Each probed algorithm's level (null: the Keystore cannot make it), for the process. */
+        private val probedLevels: MutableMap<PivAlgorithm, KeySecurityLevel?> =
+            Collections.synchronizedMap(EnumMap(PivAlgorithm::class.java))
+
+        /**
+         * The disposable alias the Keystore probe for [algorithm] generates
+         * under. It carries [PIV_KEYSTORE_ALIAS_PREFIX], so the general key
+         * paths skip it, and no [PivSlot.keystoreAlias] (the prefix and a
+         * two-character hex id) can equal it.
+         */
+        internal fun probeAlias(algorithm: PivAlgorithm): String =
+            "${PIV_KEYSTORE_ALIAS_PREFIX}probe_${algorithm.name}"
+
+        /** Drop the process's probe answers, so the next check probes again. */
+        @VisibleForTesting
+        internal fun forgetHardwareProbes() = probedLevels.clear()
+
+        private fun KeySecurityLevel?.isSecureHardware(): Boolean =
+            this == KeySecurityLevel.TEE || this == KeySecurityLevel.STRONGBOX
+    }
+
+    /**
+     * The algorithms this device can make a PIV slot key with: the API level
+     * allows it and, for Ed25519 and X25519, the Keystore's probe key is in
+     * the TEE or StrongBox. The PIV screens offer exactly this list. The
+     * first call for a curve may generate and delete a probe key, so call it
+     * off the main thread.
+     */
+    suspend fun availableAlgorithms(): List<PivAlgorithm> = PivAlgorithm.entries.filter { algorithm ->
+        algorithm.isAvailableOn(sdkInt) &&
+            (!algorithm.isCurve25519 || hardwareSecurityLevel(algorithm).isSecureHardware())
+    }
+
+    /**
+     * Refuse a curve 25519 [algorithm] whose probe key is not in secure
+     * hardware. Runs before the slot's alias is touched, so a refused
+     * generation leaves the slot's key, row and certificate as they were.
+     */
+    private suspend fun requireSecureHardware(algorithm: PivAlgorithm) {
+        if (!algorithm.isCurve25519) return
+        val level = hardwareSecurityLevel(algorithm)
+        if (level.isSecureHardware()) return
+        Log.w(TAG, "Refused ${algorithm.displayName} PIV key: the Keystore probe read $level")
+        throw PivAlgorithmUnavailableException(
+            algorithm,
+            if (level == null) "the Keystore cannot make it in secure hardware" else "the Keystore makes ${level.wire} keys"
+        )
+    }
+
+    /**
+     * The security level the Keystore gives a curve 25519 [algorithm] key, or
+     * null when it cannot make one: [probeSecurityLevel] when a test injects
+     * it, otherwise [probeInKeystore], once per algorithm for the process.
+     */
+    private suspend fun hardwareSecurityLevel(algorithm: PivAlgorithm): KeySecurityLevel? {
+        probeSecurityLevel?.let { probe -> return runCatching { probe(algorithm) }.getOrNull() }
+        return probeLock.withLock {
+            if (probedLevels.containsKey(algorithm)) {
+                probedLevels[algorithm]
+            } else {
+                // A cancelled caller must not leave the probe key behind.
+                withContext(NonCancellable) { probeInKeystore(algorithm) }.also { probedLevels[algorithm] = it }
+            }
+        }
+    }
+
+    /**
+     * Generate [algorithm] under its [probeAlias], read the key's security
+     * level with the same reader as a slot key, and always delete the probe
+     * key. Null when the Keystore cannot make the key or its level cannot be
+     * read.
+     */
+    private fun probeInKeystore(algorithm: PivAlgorithm): KeySecurityLevel? {
+        val alias = probeAlias(algorithm)
+        return try {
+            generateKeyPair(alias, algorithm)
+            readSecurityLevel(alias)
+        } catch (e: Exception) {
+            Log.w(TAG, "Keystore probe for ${algorithm.displayName} failed: ${e.message}")
+            null
+        } finally {
+            runCatching { keyStore.deleteEntry(alias) }
+                .onFailure { Log.w(TAG, "Could not remove the ${algorithm.displayName} probe key: ${it.message}") }
+        }
     }
 
     /**
@@ -194,7 +296,12 @@ class PivKeyManager(
         if (!algorithm.isAvailableOn(sdkInt)) {
             throw PivAlgorithmUnavailableException(algorithm, "this device runs API level $sdkInt")
         }
-        return PivSlotLocks.withSlot(slot) { generateKeyLocked(slot, algorithm) }
+        return PivSlotLocks.withSlot(slot) {
+            // Before the revoke and the slot's alias: a curve the Keystore
+            // cannot make in secure hardware never replaces the slot's key.
+            requireSecureHardware(algorithm)
+            generateKeyLocked(slot, algorithm)
+        }
     }
 
     private suspend fun generateKeyLocked(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
@@ -218,8 +325,11 @@ class PivKeyManager(
             }
 
             if (algorithm.isCurve25519) {
+                // Backstop: the probe passed, yet this key is not in secure
+                // hardware. The slot's key is already replaced, so the slot
+                // is emptied rather than left holding a software key.
                 val level = runCatching { readSecurityLevel(alias) }.getOrNull()
-                if (level != KeySecurityLevel.TEE && level != KeySecurityLevel.STRONGBOX) {
+                if (!level.isSecureHardware()) {
                     withContext(NonCancellable) { discardUnrecordedKey(slot) }
                     Log.w(TAG, "Refused ${algorithm.displayName} key in PIV slot ${slot.hexId}: security level $level")
                     throw PivAlgorithmUnavailableException(

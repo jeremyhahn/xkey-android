@@ -21,7 +21,6 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Gravity
@@ -54,6 +53,7 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -63,6 +63,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -949,9 +950,17 @@ class PivActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     private fun showGenerateKeyDialog(slot: PivSlot) {
-        // Ed25519 and X25519 need the Android 13 Keystore in secure
-        // hardware; below Android 13 they are not offered at all.
-        val algorithms = PivAlgorithm.entries.filter { it.isAvailableOn(Build.VERSION.SDK_INT) }.toTypedArray()
+        lifecycleScope.launch {
+            // Ed25519 and X25519 need the Android 13 Keystore in secure
+            // hardware; the manager's list leaves them out on a device that
+            // cannot make them there. Its first check may generate a probe
+            // key, so it runs off the main thread.
+            val algorithms = withContext(Dispatchers.IO) { pivKeyManager.availableAlgorithms() }
+            if (!isFinishing && !isDestroyed) showGenerateKeyDialog(slot, algorithms.toTypedArray())
+        }
+    }
+
+    private fun showGenerateKeyDialog(slot: PivSlot, algorithms: Array<PivAlgorithm>) {
         val algorithmNames = algorithms.map { it.displayName }.toTypedArray()
         var selectedIndex = 0
 

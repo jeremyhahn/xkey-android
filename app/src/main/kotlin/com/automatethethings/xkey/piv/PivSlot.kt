@@ -150,7 +150,11 @@ enum class PivAlgorithm(
     /** Diffie-Hellman over curve25519 (RFC 7748); agreement only, never signs. */
     X25519("X25519", "EC", 256, 0xE1, canSign = false, canAgree = true, minSdk = 33);
 
-    /** Whether the Keystore on API level [sdkInt] can generate this key. */
+    /**
+     * Whether API level [sdkInt] is new enough for the Keystore to generate
+     * this key. The level alone does not say the device's secure hardware
+     * makes it: [PivKeyManager.availableAlgorithms] adds that check.
+     */
     fun isAvailableOn(sdkInt: Int): Boolean = sdkInt >= minSdk
 
     /** Whether this is an Ed25519 or X25519 key, whose PIV public key is the raw 32 bytes. */
