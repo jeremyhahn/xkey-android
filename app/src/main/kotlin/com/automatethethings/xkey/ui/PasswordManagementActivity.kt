@@ -77,6 +77,7 @@ class PasswordManagementActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SecureScreens.protect(window)
 
         adapter = PasswordAdapter { showDetailDialog(it) }
 
@@ -293,7 +294,8 @@ class PasswordManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showDetailDialog(record: PasswordRecord) {
@@ -317,7 +319,8 @@ class PasswordManagementActivity : AppCompatActivity() {
             .setPositiveButton(R.string.password_copy) { _, _ -> copyPassword(record.password) }
             .setNeutralButton(R.string.password_delete) { _, _ -> confirmDelete(record) }
             .setNegativeButton(R.string.password_close, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun confirmDelete(record: PasswordRecord) {
@@ -334,7 +337,8 @@ class PasswordManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun copyPassword(password: String) {
