@@ -1,7 +1,7 @@
 # OATH architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of the phone's OATH (TOTP/HOTP) credentials: the `local.oath*` wire family, the code engine, and how secrets are stored.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> As-built description of the phone's OATH (TOTP/HOTP) credentials: the `local.oath*` and `remote.oath*` wire methods, the code engine and how secrets are stored.
 
 ## Summary
 
@@ -14,10 +14,16 @@ it imports `otpauth://` URIs, generates codes (advancing the HOTP counter) and
 records use.
 
 The desktop drives this through `local.oathAdd`, `local.oathGenerate`,
-`local.oathList` and `local.oathRemove`. On the phone, `OathActivity`,
-`OathAdapter` and `AddOathDialog` show the codes and add credentials.
-`local.syncOATH` (`handleSyncOATH`) replicates credentials both ways and is
-covered by the sync feature, not here.
+`local.oathList` and `local.oathRemove`. On the phone, `OathActivity` lists the
+credentials with their current codes. A credential is added by scanning an
+`otpauth://` QR code (`QrScannerActivity`) or by typing it in
+(`AddOathDialog`).
+
+The phone can also copy one of its credentials to the paired desktop and ask
+the desktop for that copy's code, through `remote.oathAdd` and
+`remote.oathGenerate` from the credential's long-press menu. `local.syncOATH`
+(`handleSyncOATH`) replicates credentials both ways; it belongs to
+[store sync](../store-sync/architecture.md) and is not covered here.
 
 ## Components
 
@@ -27,8 +33,11 @@ covered by the sync feature, not here.
 | `OathRepository`, `OathCredentialWithCode` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathRepository.kt` | `addCredential` (new random UUID `oathId`), `importStructured` (app-held fields), `importFromUri` (external URIs), `otpauthUri`, `generateCode`, `observeAll`, `deleteCredential`, `getCredentialsForSync`; RFC 4648 Base32 decoding |
 | `OathEngine` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathEngine.kt` | `generateHotpCode`, `generateTotpCode`; stateless |
 | `OathSecretManager` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathSecretManager.kt` | `encryptSecret` / `decryptSecret`: Keystore AES-256-GCM, output `IV(12) || ciphertext || tag` |
-| `OathCredentialEntity`, `OathCredentialDao` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathCredentialEntity.kt`, `OathCredentialDao.kt` | Row: `oathId`, `oathType`, `algorithm`, `digits`, `periodSeconds`, `counter`, `issuer`, `accountName`, `secretEncrypted`, `source`; DAO `getAll`, `getByOathId`, `updateCounter`, `recordUsage`, `deleteByOathId` |
-| `OathActivity`, `OathAdapter`, `AddOathDialog` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone screens |
+| `OathCredentialEntity`, `OathCredentialDao` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathCredentialEntity.kt`, `OathCredentialDao.kt` | Row: `oathId`, `oathType`, `algorithm`, `digits`, `periodSeconds`, `counter`, `issuer`, `accountName`, `secretEncrypted`, `source`; DAO `getAll`, `getByOathId`, `getByIssuer`, `getBySource`, `count`, `observeCount`, `updateCounter`, `recordUsage`, `deleteByOathId` |
+| `parseOathLabel`, `parseStructuredOathLabel` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathLabel.kt` | Split an `otpauth://` label into issuer and account |
+| `OathActivity`, `OathAdapter`, `AddOathDialog`, `QrScannerActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone screens: the list with live codes, manual entry, QR import |
+| `OathDesktopActions`, `PrefsDesktopOathLinks` | `app/src/main/kotlin/com/automatethethings/xkey/ui/OathActivity.kt` | The long-press menu's desktop entries; remembers, per desktop, the id the desktop gave each copied credential (SharedPreferences `oath_desktop_links`, ids only) |
+| `RemoteOathClient` | `app/src/main/kotlin/com/automatethethings/xkey/remote/RemoteOathClient.kt` | `remote.oathAdd` and `remote.oathGenerate`; builds the add request without putting the Base32 secret in a `String`, and zeroes the secret and the encoded body after sending |
 | `AuditLogger` (`logOathCodeGenerated`, `logOathCredentialCreated`, `logOathCredentialDeleted`) | `app/src/main/kotlin/com/automatethethings/xkey/audit/AuditLogger.kt` | Audit records |
 
 ## Wire methods served
@@ -38,7 +47,19 @@ covered by the sync feature, not here.
 | `local.oathList` | `MethodNames.LOCAL_OATH_LIST` | none | `credentials[]`: `name` (the stored `oathId`), `issuer`, `account_name`, `secret` (always `""`), `type` (lower case), `algorithm`, `digits`, `period`, `counter` |
 | `local.oathGenerate` | `LOCAL_OATH_GENERATE` | `credential_id` (an `oathId`) | `code`, `expires_in` (seconds left in the TOTP window; 0 for HOTP) |
 | `local.oathAdd` | `LOCAL_OATH_ADD` | `credential` {`name`, `account_name`, `secret` (Base32), `issuer`, `type` (default `totp`), `algorithm` (`SHA1`), `digits` (6), `period` (30), `counter` (HOTP, 0)} | `success: true`, `credential_id` |
-| `local.oathRemove` | `LOCAL_OATH_REMOVE` | `credential_id` | `deleted: true` |
+| `local.oathRemove` | `LOCAL_OATH_REMOVE` | `credential_id` | `deleted: true`, or `deleted: false` when no credential has that id |
+
+## Wire methods sent
+
+| Method | Constant | Params | Result |
+|--------|----------|--------|--------|
+| `remote.oathAdd` | `REMOTE_OATH_ADD` | `credential` with the same fields as `local.oathAdd`; `name` is the phone's `oathId` | `credential_id`, the desktop's id for its copy |
+| `remote.oathGenerate` | `REMOTE_OATH_GENERATE` | `credential_id` (the desktop's id) | `code`, `expires_in` |
+
+The wire shapes follow go-xkms `pkg/pairing/protocol_oath.go`. Replies are type
+checked strictly; an off-shape reply throws `ProtocolException`. The "desktop
+code" entry appears only for a credential this phone has already copied to the
+connected desktop.
 
 `OathRepository` has two import paths:
 
@@ -105,8 +126,8 @@ sequenceDiagram
 | Missing params, `credential`, `credential_id`, or any of `name` / `account_name` / `secret` | `INVALID_PARAMS` |
 | `local.oathGenerate` for an unknown id (`NoSuchElementException`) | `INVALID_PARAMS` ("Credential not found") |
 | Bad type, missing or invalid Base32 secret, other import failure | `INTERNAL_ERROR` ("Failed to add: ...") |
-| `local.oathRemove` for an unknown id | Success, `deleted: true` (the DAO delete is a no-op) |
-| List or generate failure | `INTERNAL_ERROR` |
+| `local.oathRemove` for an unknown id | Success, `deleted: false`; nothing is audited |
+| List, generate or remove failure | `INTERNAL_ERROR` |
 
 The `local.oath*` handlers do not check a PIN or prompt the user. Secrets are
 never returned by `local.oathList`; `local.syncOATH` does return decrypted
@@ -114,7 +135,7 @@ secrets (see its handler documentation).
 
 ## Tests
 
-- Unit (`app/src/test`): `OathEngineTest`, `OathEngineRfcVectorTest` (RFC 4226 / RFC 6238 vectors, the basis for codes matching the desktop's), `OathCredentialEntityTest`, `OathAdapterTest`.
+- Unit (`app/src/test`): `OathEngineTest`, `OathEngineRfcVectorTest` (RFC 4226 / RFC 6238 vectors, the basis for codes matching the desktop's), `OathCredentialEntityTest`, `OathLabelTest`, `OathManualEntryUriTest`, `OathRepositoryImportPathTest`, `OathAddHandlerTest`, `PinOathHandlerErrorsTest`, `RemoteOathClientTest`, `OathAdapterTest`, `OathDesktopActionsTest`.
 - Instrumented (`app/src/androidTest`): `OathRepositoryTest`, `OathSecretManagerTest`, `OathImportIntegrityTest`, `OathActivityUiTest`, `OathFlowTest`, `OathManualEntryFlowTest`, `AddOathDialogFlowTest`.
 
 ## Related features
@@ -122,4 +143,5 @@ secrets (see its handler documentation).
 - [PIN](../pin/architecture.md)
 - [PIV](../piv/architecture.md)
 - [Audit log](../audit-log/architecture.md)
-- [Noise pairing](../noise-pairing/architecture.md) — the channel `local.syncOATH` secrets cross.
+- [Store sync](../store-sync/architecture.md): `local.syncOATH`.
+- [Noise pairing](../noise-pairing/architecture.md): the channel synced and copied secrets cross.

@@ -1,6 +1,6 @@
 # PIN architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
+> **Status: REFERENCE** · Last verified: 2026-11-23
 > As-built description of the phone's SO PIN and User PIN: the `local.pin*` wire family, hashing, lockout and storage.
 
 ## Summary
@@ -25,8 +25,8 @@ call with `FEATURE_UNAVAILABLE`.
 |-----------|------|------|
 | `RequestHandler` (`handlePinStatus`, `handlePinVerify`, `handlePinSet`, `handlePinChange`, `handlePinResetLockout`) | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | Wire handlers; map `PinManager` exceptions to error codes |
 | `PinManager`, `PinType`, `LockoutStatus`, `PinException`, `PinLockedException` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinManager.kt` | PIN lifecycle and lockout; every read-modify-write runs under one process-wide `pinStateMutex`, shared by all `PinManager` instances |
-| `PinHasher` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinHasher.kt` | Argon2id (Signal `org.signal.argon2`): 64 MiB, 3 iterations, 4 lanes, 32-byte hash, 16-byte salt; PIN length 6 to 63 (`MIN_PIN_LENGTH`, `MAX_PIN_LENGTH`) |
-| `PinLockout` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinLockout.kt` | One lockout rule (also used by the password vault): once the consecutive failure count reaches `maxAttempts`, each failure locks for `lockoutDurationSeconds`; only a success clears the count |
+| `PinHasher` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinHasher.kt` | Argon2id (Signal `org.signal.argon2`): 64 MiB, 3 iterations, 4 lanes, 32-byte hash, 16-byte salt; PIN length 6 to 63 UTF-8 bytes (`MIN_PIN_LENGTH`, `MAX_PIN_LENGTH`) |
+| `PinLockout` | `app/src/main/kotlin/com/automatethethings/xkey/pin/PinLockout.kt` | One lockout rule, also used for the password vault's passphrase (`PasswordVault`, which keeps its counter in the same settings through `PinSettingsVaultUnlockAttemptStore`): once the consecutive failure count reaches `maxAttempts`, each failure locks for `lockoutDurationSeconds`; only a success clears the count |
 | `PinSettingsData`, `PinSettingsRepository` | `app/src/main/kotlin/com/automatethethings/xkey/settings/PinSettings.kt` | Jetpack DataStore persistence of the hashes and salts (Base64, `NO_WRAP`), attempt counters and lock times (epoch ms, so a lockout survives a restart); defaults `maxPinAttempts = 5`, `lockoutDurationSeconds = 300` |
 | `PinManagementActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/PinManagementActivity.kt` | On-phone PIN screen over its own `PinManager` |
 | `AuditLogger` (`logPinSet`, `logPinChanged`, `logPinVerificationSuccess`, `logPinVerificationFailed`, `logPinLockoutReset`) | `app/src/main/kotlin/com/automatethethings/xkey/audit/AuditLogger.kt` | Audit records for every PIN event |
@@ -81,21 +81,22 @@ sequenceDiagram
 | Condition | Error code |
 |-----------|------------|
 | Handler built without a `PinManager` | `FEATURE_UNAVAILABLE` ("PIN support is not available on this transport") |
-| Missing params, missing `newPin` / `currentPin` on change, unknown `pinType` (an absent `pinType` on verify is the User PIN) | `INVALID_PARAMS` |
-| New PIN outside 6 to 63 characters (`PinHasher.validatePinLength`, checked before the `PinManager` is called) | `INVALID_PARAMS` |
-| Empty `pin` on verify; missing `soPin` on User PIN set or reset | `PIN_REQUIRED` |
+| Missing params, missing `newPin` on set or change, unknown `pinType` (an absent `pinType` on verify is the User PIN) | `INVALID_PARAMS` |
+| New PIN outside 6 to 63 UTF-8 bytes (`PinHasher.validatePinLength`, checked before the `PinManager` is called) | `INVALID_PARAMS` |
+| Empty `pin` on verify; missing `currentPin` on change; missing `soPin` on User PIN set or reset | `PIN_REQUIRED` |
 | PIN not set (or its hash not stored); SO PIN already set and set without `currentPin` (`PinRequiredException`) | `PIN_REQUIRED` |
 | Wrong PIN (`PinIncorrectException`; the failed attempt is counted) | `PIN_INCORRECT` |
 | Locked PIN on verify, set, change or reset lockout | `PIN_LOCKED` with `lockoutUntil` and `failedAttempts` in the error data |
+| Any other exception | `INTERNAL_ERROR` |
 
 ## Tests
 
-- Unit (`app/src/test`): `PinManagerTest`, `PinHasherTest`, `PinSettingsDataTest`, `ProtocolConstantsTest`, `PinOathHandlerErrorsTest` (the handler error codes above).
-- Instrumented (`app/src/androidTest`): `PinHasherInstrumentedTest`, `RequestHandlerPinAndDataFamilyTest`, `RequestHandlerErrorPathTest`, `ProtocolIntegrationTest`, `PinManagementActivityUiTest`, `PinManagementFlowTest`.
+- Unit (`app/src/test`): `PinManagerTest`, `PinHasherTest`, `PinSettingsDataTest`, `ProtocolConstantsTest`, `PinOathHandlerErrorsTest` (the handler error codes above), `PinSettingsVaultUnlockAttemptStoreTest`.
+- Instrumented (`app/src/androidTest`): `PinHasherInstrumentedTest`, `PinSettingsRepositoryTest`, `RequestHandlerPinAndDataFamilyTest`, `RequestHandlerErrorPathTest`, `ProtocolIntegrationTest`, `PinManagementActivityUiTest`, `PinManagementFlowTest`.
 
 ## Related features
 
-- [PIV](../piv/architecture.md) — the other smart-card style family served next to it.
+- [PIV](../piv/architecture.md): the other smart-card style family served next to it.
 - [User verification](../user-verification/architecture.md)
-- [Audit log](../audit-log/)
-- [Password vault RPCs](../password-vault-rpcs/) — shares the `PinLockout` rule for the vault passphrase.
+- [Audit log](../audit-log/architecture.md)
+- [Password vault RPCs](../password-vault-rpcs/engineering.md): shares the `PinLockout` rule for the vault passphrase.
