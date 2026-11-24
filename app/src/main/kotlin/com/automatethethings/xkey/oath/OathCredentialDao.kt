@@ -18,6 +18,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -27,7 +28,7 @@ import kotlinx.coroutines.flow.Flow
  * - Insert and replace credentials
  * - Query all credentials or filter by issuer / OATH ID
  * - Track usage statistics (last used timestamp, use count)
- * - Update HOTP counter values
+ * - Advance HOTP counter values (compare-and-set, [claimCounter])
  * - Observe credential list and count reactively via [Flow]
  *
  * All mutation operations are suspend functions for coroutine compatibility.
@@ -52,6 +53,15 @@ interface OathCredentialDao {
      */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(credential: OathCredentialEntity): Long
+
+    /**
+     * Insert an OATH credential only while no row has its
+     * [OathCredentialEntity.oathId]; an existing row is left untouched.
+     *
+     * @return The new row ID, or -1 if a row with that OATH ID already exists.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(credential: OathCredentialEntity): Long
 
     // -------------------------------------------------------------------------
     // Query Operations
@@ -120,6 +130,28 @@ interface OathCredentialDao {
     suspend fun updateCounter(oathId: String, counter: Long)
 
     /**
+     * Update a synced credential in place: only its label and HOTP counter.
+     * The row keeps its primary key, creation time, usage statistics,
+     * source, remote device and key material (secret, type, algorithm,
+     * digits, period): the sync wire item carries no timestamp, so a stale
+     * peer could otherwise revert a re-keyed credential. The counter only
+     * moves forward (`MAX(counter, :counter)`), so a peer that has generated
+     * fewer codes never rewinds it.
+     *
+     * @return The number of rows updated: 0 if no row has [oathId].
+     */
+    @Query(
+        "UPDATE oath_credentials SET counter = MAX(counter, :counter), issuer = :issuer, " +
+            "account_name = :accountName WHERE oath_id = :oathId"
+    )
+    suspend fun updateSynced(
+        oathId: String,
+        counter: Long,
+        issuer: String?,
+        accountName: String
+    ): Int
+
+    /**
      * Claim the HOTP counter value [expected]: advance the stored counter
      * by one only while it still is [expected]. One SQL statement, so two
      * callers that read the same value cannot both claim it. A counter at
@@ -153,6 +185,65 @@ interface OathCredentialDao {
     @Query("DELETE FROM oath_credentials WHERE oath_id = :oathId")
     suspend fun deleteByOathId(oathId: String)
 
+    /**
+     * Record that [oathId] was deleted on the phone at [deletedAt], so a
+     * sync never adds it back. A later deletion of the same id replaces the
+     * earlier record.
+     */
+    @Query("INSERT OR REPLACE INTO oath_deletions (oath_id, deleted_at) VALUES (:oathId, :deletedAt)")
+    suspend fun recordDeletion(oathId: String, deletedAt: Long)
+
+    /**
+     * @return true if [oathId] has a delete record ([recordDeletion]).
+     */
+    @Query("SELECT EXISTS(SELECT 1 FROM oath_deletions WHERE oath_id = :oathId)")
+    suspend fun isDeleted(oathId: String): Boolean
+
+    /**
+     * Delete the credential with [oathId] and record its deletion at
+     * [deletedAt] ([recordDeletion]), in one transaction: no sync merge,
+     * gather or interruption sees the record without the delete or the
+     * delete without the record. The id is recorded even when no row has it.
+     */
+    @Transaction
+    suspend fun deleteAndRecordDeletion(oathId: String, deletedAt: Long) {
+        recordDeletion(oathId, deletedAt)
+        deleteByOathId(oathId)
+    }
+
+    /**
+     * If [oathId] has a deletion record, delete any row still stored under
+     * it, in one transaction with the check: a row an earlier, interrupted
+     * merge left beside its record never stays usable. Synced ids are never
+     * reused by local adds (those get random UUIDs), so such a row is always
+     * a leftover.
+     *
+     * @return true if [oathId] has a deletion record.
+     */
+    @Transaction
+    suspend fun removeIfDeleted(oathId: String): Boolean {
+        if (!isDeleted(oathId)) return false
+        deleteByOathId(oathId)
+        return true
+    }
+
+    /**
+     * Add a synced [credential] while no row has its oath id, unless the
+     * phone deleted that id ([recordDeletion]), in one transaction: the
+     * deletion check and the insert see the same state, so a delete cannot
+     * land between them, and no interruption leaves the row stored beside
+     * its record. A row already there for a deleted id is removed
+     * ([removeIfDeleted]).
+     *
+     * @return [OATH_KEPT_DELETED] (-2) when the id is deleted, otherwise
+     *         what [insertIfAbsent] returns (-1 when a row has the id).
+     */
+    @Transaction
+    suspend fun insertIfAbsentUnlessDeleted(credential: OathCredentialEntity): Long {
+        if (removeIfDeleted(credential.oathId)) return OATH_KEPT_DELETED
+        return insertIfAbsent(credential)
+    }
+
     // -------------------------------------------------------------------------
     // Aggregate Queries
     // -------------------------------------------------------------------------
@@ -173,3 +264,6 @@ interface OathCredentialDao {
     @Query("SELECT COUNT(*) FROM oath_credentials")
     fun observeCount(): Flow<Int>
 }
+
+/** [OathCredentialDao.insertIfAbsentUnlessDeleted]: the id was deleted on the phone and stays deleted. */
+const val OATH_KEPT_DELETED = -2L

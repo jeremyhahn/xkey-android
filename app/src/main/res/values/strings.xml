@@ -1112,6 +1112,7 @@
     <string name="audit_log_op_oath_code">OATH Code Generated</string>
     <string name="audit_log_op_oath_sync">OATH Sync Performed</string>
     <string name="audit_log_op_password_sync">Password Sync Performed</string>
+    <string name="audit_log_op_trust_store_sync">Trust Store Sync Performed</string>
     <string name="audit_log_op_cosign_initiated">Co-Sign Initiated</string>
     <string name="audit_log_op_cosign_received">Co-Sign Received</string>
 
