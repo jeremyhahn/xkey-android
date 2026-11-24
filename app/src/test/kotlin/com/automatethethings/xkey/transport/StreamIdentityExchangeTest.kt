@@ -250,6 +250,15 @@ class StreamIdentityExchangeTest {
         assertUnknownAckFor("cd".repeat(33))
     }
 
+    /**
+     * A stored fingerprint of the right length that is not hex cannot be
+     * the desktop's fingerprint: the phone must not send it as a known ack.
+     */
+    @Test
+    fun aNonHexFingerprintGetsTheUnknownAck() = runBlocking {
+        assertUnknownAckFor("zz".repeat(32))
+    }
+
     // ---------------------------------------------------------------------
     // First frames that are not identity messages
     // ---------------------------------------------------------------------
