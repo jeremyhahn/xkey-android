@@ -257,11 +257,11 @@ check "B GitHub: a Gitea-shaped label entry is not a GitHub addition" \
 
 # ---- C: the marker, the hist parser and the reconcile block -----------------
 extract body_prog "${T}/post.txt" \
-	$'--arg p "$PATCH_ID" --arg x "$HUNK_CTX" --arg r "$ROUND" --arg t "$stop" --arg o "$resume" \'\n' \
+	$'--arg p "$PATCH_ID" --arg x "$HUNK_CTX" --arg r "$ROUND" --arg t "$stop" --arg o "$resume" --arg n "$unread" \'\n' \
 	$'\' \\\n' "the posting step's body program"
 body() {
 	jq -r --arg e REQUEST_CHANGES --arg s "${SHA}" --arg m m --arg f high --arg u https://example.invalid/run \
-		--arg p "" --arg x "" --arg r 1 --arg t "" --arg o "$1" "${body_prog}" <<< '{"summary": "ok", "findings": []}'
+		--arg p "" --arg x "" --arg r 1 --arg t "" --arg o "$1" --arg n "" "${body_prog}" <<< '{"summary": "ok", "findings": []}'
 }
 b=$(body 4242)
 check "C the marker carries resume= when the round started on the label" \
