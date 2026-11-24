@@ -141,6 +141,18 @@ class SettingsActivityBootstrapRefusalTest {
     }
 
     @Test
+    fun `the SPKI refusal says the stored server URL and pin are unchanged`() {
+        val message = context.getString(R.string.bootstrap_spki_pin_refused)
+        assertTrue(message, message.contains("stored server URL and pin are unchanged"))
+    }
+
+    @Test
+    fun `the Noise refusal says the stored server address and key are unchanged`() {
+        val message = context.getString(R.string.bootstrap_noise_key_refused)
+        assertTrue(message, message.contains("stored server address and key are unchanged"))
+    }
+
+    @Test
     fun `a valid SPKI pin is saved and shows no message`() {
         val pin = "ab".repeat(32)
         val message = context.getString(R.string.bootstrap_spki_pin_refused)
