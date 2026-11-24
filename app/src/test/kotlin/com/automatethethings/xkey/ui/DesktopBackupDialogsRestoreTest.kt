@@ -21,6 +21,7 @@ import com.automatethethings.xkey.remote.RemoteBackupClient
 import com.automatethethings.xkey.remote.RemoteBackupException
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.unmockkAll
 import org.junit.After
@@ -425,6 +426,51 @@ class DesktopBackupDialogsRestoreTest {
         assertEquals(listOf(host.string(R.string.sync_not_connected)), host.snackbarTexts())
         assertFalse(host.anyDialogShowing())
         coVerify(exactly = 0) { host.gatt.latestStoredBackupId() }
+    }
+
+    @Test
+    fun `no guard passes on a bound service alone`() {
+        storedAndListed()
+        // Each guard runs with the desktop gone just before it checks.
+        val guards: List<Pair<String, () -> Unit>> = listOf(
+            "entry menu" to {
+                host.desktop = null
+                host.dialogs.show()
+            },
+            "restore pick" to {
+                host.dialogs.show()
+                host.idle()
+                val menu = host.shownDialog()
+                host.desktop = null
+                host.pickMenuItem(menu, RESTORE)
+            },
+            "create send" to {
+                host.open(0)
+                val dialog = host.shownDialog()
+                host.fields(dialog).forEach { it.setText("hunter22") }
+                host.desktop = null
+                host.clickPositive(dialog)
+            },
+            "restore send" to {
+                val dialog = openRestore()
+                host.fields(dialog)[0].setText("hunter22")
+                host.desktop = null
+                host.clickPositive(dialog)
+            }
+        )
+        for ((name, guard) in guards) {
+            host.desktop = mockk()
+            repeat(4) { host.settle() }
+            assertTrue("the previous notice must be gone before $name", host.snackbars().isEmpty())
+
+            guard()
+            host.settle()
+
+            assertEquals("$name must say not connected", listOf(host.string(R.string.sync_not_connected)), host.snackbarTexts())
+            assertFalse("$name must leave no dialog open", host.anyDialogShowing())
+        }
+        coVerify(exactly = 0) { host.gatt.createDesktopBackup(any(), any()) }
+        coVerify(exactly = 0) { host.gatt.restoreDesktopBackup(any(), any()) }
     }
 
     // --------------------------------------------------------------- helpers
