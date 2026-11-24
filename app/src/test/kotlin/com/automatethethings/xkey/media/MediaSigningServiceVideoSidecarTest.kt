@@ -161,10 +161,9 @@ class MediaSigningServiceVideoSidecarTest {
     }
 
     /**
-     * The writer routes by file name (a `.jpg` is embedded) and the hash by
-     * the resolver's type. A JPEG file the resolver does not type as JPEG is
-     * embedded, so its hash must be the canonical one: a whole-file hash can
-     * never match the file once the signature is in it.
+     * A JPEG file the resolver does not type as JPEG is still a JPEG: it is
+     * signed in place over its canonical hash, and the app finds and checks
+     * that signature through its URI with the resolver's own type.
      */
     @Test
     fun `a jpg file the resolver does not type as JPEG gets a hash its embedded signature accepts`() {
@@ -175,10 +174,15 @@ class MediaSigningServiceVideoSidecarTest {
 
         assertFalse("a .jpg carries its own signature, no sidecar", capture.sidecar.exists())
         val data = assertSignedByKey(capture)
+        val resolver = fixture.resolver
+        assertEquals("application/octet-stream", resolver.getType(capture.uri))
+        val found = XmpMetadataHelper.readSignatureFromUri(resolver, capture.uri, resolver.getType(capture.uri))
+        assertNotNull("the embedded signature must be found through the URI", found)
+        assertEquals(data.contentHash, found!!.contentHash)
         assertTrue(
             "an in-band verifier must accept the stored hash of the signed file",
-            MediaHasher.contentHashMatches(
-                data.contentHash, capture.file.readBytes(), "image/jpeg", MediaHasher.SignatureSource.IN_BAND
+            MediaHasher.contentHashMatchesUri(
+                resolver, capture.uri, data.contentHash, MediaHasher.SignatureSource.IN_BAND
             )
         )
     }

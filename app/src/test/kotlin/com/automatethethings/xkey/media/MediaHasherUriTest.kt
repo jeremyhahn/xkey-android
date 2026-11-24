@@ -85,6 +85,41 @@ class MediaHasherUriTest {
     }
 
     // -------------------------------------------------------------------------
+    // contentHashMatchesUri with a resolver type that is not JPEG
+    // -------------------------------------------------------------------------
+
+    private fun resolverServing(bytes: ByteArray, type: String?): ContentResolver {
+        val resolver = mockk<ContentResolver>()
+        every { resolver.openInputStream(any()) } answers { ByteArrayInputStream(bytes) }
+        every { resolver.getType(any()) } returns type
+        return resolver
+    }
+
+    private fun assertCanonicalJpegAccepted(type: String?) {
+        val jpeg = jpeg("camera=test")
+        val canonical = MediaHasher.hashCanonical(jpeg, "image/jpeg")
+        assertNotEquals(MediaHasher.hashBytes(jpeg), canonical)
+
+        assertTrue(
+            "a JPEG typed $type must match its canonical hash in band",
+            MediaHasher.contentHashMatchesUri(
+                resolverServing(jpeg, type), mockk<Uri>(relaxed = true), canonical,
+                MediaHasher.SignatureSource.IN_BAND
+            )
+        )
+    }
+
+    @Test
+    fun `contentHashMatchesUri accepts the canonical hash of a JPEG typed application octet-stream`() {
+        assertCanonicalJpegAccepted("application/octet-stream")
+    }
+
+    @Test
+    fun `contentHashMatchesUri accepts the canonical hash of a JPEG with no resolver type`() {
+        assertCanonicalJpegAccepted(null)
+    }
+
+    // -------------------------------------------------------------------------
     // hashUri
     // -------------------------------------------------------------------------
 

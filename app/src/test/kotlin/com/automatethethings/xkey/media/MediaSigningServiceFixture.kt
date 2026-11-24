@@ -16,6 +16,7 @@
 package com.automatethethings.xkey.media
 
 import android.content.ContentProvider
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
 import android.database.ContentObserver
@@ -221,6 +222,9 @@ class MediaSigningServiceFixture(private val dir: File) {
     private var destroyed = false
 
     val service: MediaSigningService get() = checkNotNull(controller) { "start() first" }.get()
+
+    /** The resolver the service reads captures through. */
+    val resolver: ContentResolver get() = service.contentResolver
 
     fun setUp() {
         captures.clear()
