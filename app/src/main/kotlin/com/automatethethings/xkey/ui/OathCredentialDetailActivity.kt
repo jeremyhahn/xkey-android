@@ -19,6 +19,8 @@ import android.content.Intent
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.text.TextPaint
+import android.util.TypedValue
 import android.view.MenuItem
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -27,6 +29,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.AppCompatTextView
 import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -143,7 +146,8 @@ class OathCredentialDetailActivity : AppCompatActivity() {
         scroll.addView(column)
         root.addView(scroll)
 
-        // Code card: the code never wraps or ellipsizes.
+        // Code card: the code never wraps or ellipsizes; it shrinks to fit
+        // when a narrow screen or a large font scale leaves too little room.
         val codeCard = PremiumCardFactory.createElevatedCard(this)
         val codeColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -151,7 +155,7 @@ class OathCredentialDetailActivity : AppCompatActivity() {
             setPadding(pad, pad, pad, pad)
         }
         codeColumn.addView(label(getString(R.string.oath_detail_code)))
-        codeText = TextView(this).apply {
+        codeText = FitWidthTextView(this).apply {
             keepWhole()
             textSize = 32f
             typeface = Typeface.MONOSPACE
@@ -257,5 +261,37 @@ class OathCredentialDetailActivity : AppCompatActivity() {
                 Toast.makeText(this@OathCredentialDetailActivity, e.message ?: e.javaClass.simpleName, Toast.LENGTH_LONG).show()
             }
         }
+    }
+}
+
+/**
+ * A single-line text that scales its size down, never below what fits,
+ * when the width it is measured at cannot hold it at its own size, so the
+ * end of the code is never cut off. The size set before the first measure
+ * is the size it returns to whenever there is room.
+ */
+internal class FitWidthTextView(context: Context) : AppCompatTextView(context) {
+
+    private var baseTextSize = 0f
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        if (baseTextSize == 0f) baseTextSize = textSize
+        val target = fittedSize(widthMeasureSpec)
+        if (textSize != target) setTextSize(TypedValue.COMPLEX_UNIT_PX, target)
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    }
+
+    private fun fittedSize(widthMeasureSpec: Int): Float {
+        if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.UNSPECIFIED) return baseTextSize
+        val room = MeasureSpec.getSize(widthMeasureSpec) - compoundPaddingLeft - compoundPaddingRight
+        val measurePaint = TextPaint(paint).apply { textSize = baseTextSize }
+        val needed = measurePaint.measureText(text.toString())
+        if (room <= 0 || needed <= room) return baseTextSize
+        return baseTextSize * room / needed * SHRINK_MARGIN
+    }
+
+    private companion object {
+        /** Keeps a scaled-down code clear of rounding at the edge. */
+        const val SHRINK_MARGIN = 0.98f
     }
 }
