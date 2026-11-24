@@ -367,6 +367,7 @@ class PinOathHandlerErrorsTest {
 
         assertFalse(response.has("error"))
         assertFalse(response.getJSONObject("result").getBoolean("deleted"))
+        coVerify(exactly = 0) { oathDao.deleteAndRecordDeletion(any(), any()) }
         coVerify(exactly = 0) { oathDao.deleteByOathId(any()) }
         verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
     }
@@ -378,7 +379,9 @@ class PinOathHandlerErrorsTest {
         val response = call(MethodNames.LOCAL_OATH_REMOVE, """{"credential_id":"known"}""")
 
         assertEquals(true, response.getJSONObject("result").getBoolean("deleted"))
-        coVerify { oathDao.deleteByOathId("known") }
+        // Recorded and deleted in one DAO transaction, never as two statements.
+        coVerify { oathDao.deleteAndRecordDeletion("known", any()) }
+        coVerify(exactly = 0) { oathDao.recordDeletion(any(), any()) }
     }
 
     private suspend fun call(method: String, params: String): JSONObject {
