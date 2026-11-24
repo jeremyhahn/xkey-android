@@ -506,11 +506,6 @@ class OathHandlerWireTest {
         }
     }
 
-    @Ignore(
-        "Fails on main: OathRepository.generateCode hands the decrypted secret to OathEngine " +
-            "and never zeroes it. The fix is in OathRepository.generateCode (fill the array " +
-            "with 0 in a finally block after each code)."
-    )
     @Test
     fun `oathGenerate zeroes the decrypted secret after the code`() = runTest {
         totpAtSeconds = 59L
