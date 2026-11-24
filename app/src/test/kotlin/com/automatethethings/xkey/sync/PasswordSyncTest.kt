@@ -386,39 +386,41 @@ class PasswordSyncTest {
     }
 
     // -------------------------------------------------------------------------
-    // Policy fields: SyncPassword carries none, so a merge never resets them
+    // Policy fields: SyncPassword carries none, so a merge writes only default-policy entries
     // -------------------------------------------------------------------------
 
     @Test
-    fun `merging an existing entry keeps its expiry, tenant and sharing`() = runTest {
+    fun `merging leaves an entry of another tenant, a shared one and an expiring one unchanged`() = runTest {
+        repository.upsert(
+            PasswordRecord(passwordId = "work-1", name = "Work", password = "old", updatedAt = updatedAt, tenantId = "work")
+        )
+        repository.upsert(
+            PasswordRecord(passwordId = "shared-1", name = "Team", password = "old", updatedAt = updatedAt, shared = true)
+        )
         repository.upsert(
             PasswordRecord(
-                passwordId = "remote-1",
-                name = "GitHub",
-                title = "Work",
+                passwordId = "expiring-1",
+                name = "Temp",
                 password = "old",
                 updatedAt = updatedAt,
-                expiresAt = "2030-01-01T00:00:00Z",
-                shared = true,
-                tenantId = "t1"
+                expiresAt = "2030-01-01T00:00:00Z"
             )
         )
-        val createdAt = dao.rows.getValue("remote-1").createdAt
+        val before = dao.rows.toMap()
+        val incoming = JSONArray()
+        for (id in listOf("work-1", "shared-1", "expiring-1")) {
+            incoming.put(incoming(id = id, password = "new", at = newerIso).getJSONObject(0))
+        }
 
-        val counts = sync.merge(incoming(id = "remote-1", password = "new", at = newerIso))
+        val result = sync.mergeWithDetail(incoming)
 
-        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 1, skipped = 0), counts)
-        val row = dao.rows.getValue("remote-1")
-        assertEquals("2030-01-01T00:00:00Z", row.expiresAt)
-        assertTrue(row.shared)
-        assertEquals("t1", row.tenantId)
-        // The remote copy's fields replace the local ones, a blank one clearing it, as before.
-        assertEquals("Mail", row.name)
-        assertEquals(null, row.title)
-        assertEquals("octo", row.username)
-        assertEquals("remote", row.source)
-        assertEquals(createdAt, row.createdAt)
-        assertEquals("new", repository.get("remote-1", "t1")!!.password)
+        // gather() never sends these, so a sync never writes them either: a default-tenant copy is not theirs.
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 3), result.counts)
+        assertEquals(3, result.notSyncable)
+        assertEquals(before, dao.rows.toMap())
+        assertEquals("old", repository.get("work-1", "work")!!.password)
+        assertEquals("old", repository.get("shared-1")!!.password)
+        assertEquals("old", repository.get("expiring-1")!!.password)
     }
 
     @Test
@@ -452,13 +454,13 @@ class PasswordSyncTest {
             )
         }
 
-        // A's copy is newer than B's and the expiry edit, so it wins on the fields it carries.
+        // A's copy is newer than B's and the expiry edit, but the entry now expires, which no sync writes.
         val counts = racingSync.merge(incoming(id = "remote-1", password = "from-a", at = newerIso))
 
-        // A patches the entry B added instead of replacing it, so the expiry stays.
-        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 1, skipped = 0), counts)
+        // A neither replaces the entry B added nor patches it, so the expiry and B's password stay.
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
         assertEquals("2030-01-01T00:00:00Z", racingDao.rows.getValue("remote-1").expiresAt)
-        assertEquals("from-a", racingRepository.get("remote-1")!!.password)
+        assertEquals("from-b", racingRepository.get("remote-1")!!.password)
     }
 
     @Test
