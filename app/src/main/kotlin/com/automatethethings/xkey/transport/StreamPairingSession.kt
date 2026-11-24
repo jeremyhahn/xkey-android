@@ -880,7 +880,7 @@ class StreamPairingSession(
         }
 
         return if (confirmed) {
-            // addDevice upserts, removing stale entries matching by key/address/name.
+            // addDevice upserts, removing a stale entry under the same key.
             repo.addDevice(peerKeyHex, pairingParams.deviceName)
             if (connection.revoked) {
                 // A removal landed between the check and the add: it wins.

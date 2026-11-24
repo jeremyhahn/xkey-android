@@ -1837,8 +1837,8 @@ class GattServer(
         }
 
         if (confirmed) {
-            // Always upsert device — addDevice removes stale entries matching by key,
-            // BLE address, or device name, preventing duplicates on re-pairing
+            // Always upsert device: addDevice removes stale entries matching by key
+            // or BLE address, so a re-pairing over the same radio replaces its entry
             repo.addDevice(peerKeyHex, pairingParams.deviceName, connectedDevice?.address)
             val accepted = synchronized(revocationLock) {
                 isCurrent(session).also { if (it) pairingConfirmed = true }
