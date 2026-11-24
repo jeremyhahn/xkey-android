@@ -67,6 +67,7 @@ class OathRepositoryAuditTest {
         coEvery { dao.getByOathId(any()) } returns null
         coEvery { dao.getByOathId(HOTP_ID) } returns stored(HOTP_ID, "HOTP")
         coEvery { dao.getByOathId(TOTP_ID) } returns stored(TOTP_ID, "TOTP")
+        coEvery { dao.claimCounter(HOTP_ID, 5L) } returns 1
 
         val secretManager = mockk<OathSecretManager>()
         every { secretManager.encryptSecret(any()) } answers { firstArg() }
@@ -117,7 +118,7 @@ class OathRepositoryAuditTest {
         val deleted = repository.deleteCredential(HOTP_ID)
 
         assertTrue(deleted)
-        coVerify(exactly = 1) { dao.deleteByOathId(HOTP_ID) }
+        coVerify(exactly = 1) { dao.deleteAndRecordDeletion(HOTP_ID, any()) }
         verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT) }
         verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
     }
@@ -127,7 +128,7 @@ class OathRepositoryAuditTest {
         val deleted = repository.deleteCredential("nope")
 
         assertFalse(deleted)
-        coVerify(exactly = 0) { dao.deleteByOathId(any()) }
+        coVerify(exactly = 0) { dao.deleteAndRecordDeletion(any(), any()) }
         verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
     }
 
@@ -135,7 +136,7 @@ class OathRepositoryAuditTest {
     fun `an HOTP code generation writes one generated row`() = runTest {
         repository.generateCode(HOTP_ID)
 
-        coVerify(exactly = 1) { dao.updateCounter(HOTP_ID, 6L) }
+        coVerify(exactly = 1) { dao.claimCounter(HOTP_ID, 5L) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
     }
