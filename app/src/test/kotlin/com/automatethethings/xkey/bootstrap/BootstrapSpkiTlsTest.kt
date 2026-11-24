@@ -24,6 +24,8 @@ import kotlinx.coroutines.runBlocking
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.BasicConstraints
 import org.bouncycastle.asn1.x509.Extension
+import org.bouncycastle.asn1.x509.GeneralName
+import org.bouncycastle.asn1.x509.GeneralNames
 import org.bouncycastle.asn1.x509.KeyUsage
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
@@ -190,7 +192,72 @@ class BootstrapSpkiTlsTest {
         assertEquals(BootstrapMethod.SPKI, result.method)
     }
 
+    /**
+     * A leaf for [host] that names [claimedIssuer] as its issuer but is signed
+     * by its own key: the names line up with the pinned certificate, the
+     * signature does not.
+     */
+    private fun forgedLeaf(claimedIssuer: TestCertificate): TestCertificate {
+        val keyPair = TestPki.ecKeyPair()
+        val subject = X500Name("CN=SPKI Forged Leaf")
+        val now = System.currentTimeMillis()
+        val holder = JcaX509v3CertificateBuilder(
+            claimedIssuer.subject,
+            BigInteger(64, SecureRandom()),
+            Date(now - 86_400_000L),
+            Date(now + 30L * 86_400_000L),
+            subject,
+            keyPair.public
+        )
+            .addExtension(
+                Extension.subjectAlternativeName,
+                false,
+                GeneralNames(GeneralName(GeneralName.dNSName, host))
+            )
+            .build(JcaContentSignerBuilder("SHA256withECDSA").build(keyPair.private))
+        return TestCertificate(JcaX509CertificateConverter().getCertificate(holder), keyPair, subject)
+    }
+
     // ------------------------------------------------------------- refused
+
+    @Test(timeout = 30_000)
+    fun aLeafWhoseKeyDoesNotMatchThePinIsRefusedWithBothPins() {
+        val leaf = TestPki.selfSigned("SPKI Leaf", dnsNames = listOf(host))
+        val expected = pinOf(TestPki.selfSigned("SPKI Someone Else").certificate)
+        val tls = serve(listOf(leaf.certificate), leaf)
+
+        val failure = assertFetchFails(tls, expected, SPKIException::class.java)
+
+        assertEquals(expected, failure.expectedPin)
+        assertEquals(pinOf(leaf.certificate), failure.actualPin)
+        assertEquals(emptyList<String>(), tls.requests)
+    }
+
+    @Test(timeout = 30_000)
+    fun aSelfSignedLeafFollowedByTheGenuinePinnedCertificateIsRefused() {
+        // The pinned certificate is public: anyone can append it to a chain.
+        // The server below holds only its own leaf key, never the pinned one.
+        val pinned = TestPki.selfSigned("SPKI Genuine Pinned CA", isCa = true)
+        val attacker = TestPki.selfSigned("SPKI Attacker Leaf", dnsNames = listOf(host))
+        val tls = serve(listOf(attacker.certificate, pinned.certificate), attacker)
+
+        val failure = assertFetchFails(tls, pinOf(pinned.certificate), SPKIException::class.java)
+
+        assertEquals(pinOf(pinned.certificate), failure.expectedPin)
+        assertEquals(pinOf(attacker.certificate), failure.actualPin)
+        assertEquals(emptyList<String>(), tls.requests)
+    }
+
+    @Test(timeout = 30_000)
+    fun aLeafThatOnlyNamesThePinnedCertificateAsIssuerIsRefused() {
+        val pinned = TestPki.selfSigned("SPKI Genuine Pinned CA", isCa = true)
+        val forged = forgedLeaf(pinned)
+        val tls = serve(listOf(forged.certificate, pinned.certificate), forged)
+
+        assertFetchFails(tls, pinOf(pinned.certificate), SPKIException::class.java)
+
+        assertEquals(emptyList<String>(), tls.requests)
+    }
 
     @Test(timeout = 30_000)
     fun theDefaultHostnameVerifierStillRefusesALeafForAnotherName() {
