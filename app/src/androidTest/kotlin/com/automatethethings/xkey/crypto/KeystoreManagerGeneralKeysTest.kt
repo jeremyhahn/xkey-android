@@ -358,14 +358,13 @@ class KeystoreManagerGeneralKeysTest {
         }
     }
 
-    @Test
     fun rejectsASymmetricKeySizeAesDoesNotDefine() {
-        val keyId = newKeyId("aes192")
+        val keyId = newKeyId("aes512")
 
         val failure = assertThrows(KeyGenerationException::class.java) {
-            runBlocking { keystoreManager.generateSymmetricKey(keyId, 192, -1) }
+            runBlocking { keystoreManager.generateSymmetricKey(keyId, 512, -1) }
         }
-        assertTrue(failure.message!!, failure.message!!.contains("128 or 256"))
+        assertTrue(failure.message!!, failure.message!!.contains("128, 192 or 256"))
         assertFalse(keystoreManager.generalKeyExists(keyId))
     }
 
