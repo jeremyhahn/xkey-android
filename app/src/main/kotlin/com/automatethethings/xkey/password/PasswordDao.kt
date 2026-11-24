@@ -18,6 +18,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
@@ -28,7 +29,7 @@ import kotlinx.coroutines.flow.Flow
  * reactive UI updates.
  */
 @Dao
-interface PasswordDao {
+interface PasswordDao : PasswordDeletionQueries {
 
     /**
      * Insert or replace a password entry, keyed by the unique
@@ -151,6 +152,49 @@ interface PasswordDao {
     @Query("DELETE FROM passwords WHERE password_id = :passwordId AND tenant_id = :tenantId")
     suspend fun deleteByPasswordIdInTenant(passwordId: String, tenantId: String): Int
 
+    /**
+     * Delete the entry with [passwordId], in any tenant or, with a [tenantId],
+     * only if it belongs to that tenant, and record its deletion at
+     * [deletedAt] when a row went, in one transaction: no sync can add a peer
+     * copy back between the delete and its record. Returns whether a row went.
+     */
+    @Transaction
+    suspend fun deleteAndRecordDeletion(passwordId: String, tenantId: String?, deletedAt: Long): Boolean {
+        val deleted = if (tenantId == null) {
+            deleteByPasswordId(passwordId) > 0
+        } else {
+            deleteByPasswordIdInTenant(passwordId, tenantId) > 0
+        }
+        if (deleted) recordDeletion(PasswordDeletionEntity(passwordId, deletedAt))
+        return deleted
+    }
+
+    /**
+     * Add [password] as a synced entry, in one transaction, unless this phone
+     * deleted it since: the deletion check and the add see the same state, so
+     * a delete cannot land between them.
+     *
+     * The deletion is compared with [sentUpdatedAt], the time the peer sent
+     * for the copy, never with [password]'s stored `updated_at`, which is the
+     * phone's time when the peer sent none. An entry the phone deleted at or
+     * after [sentUpdatedAt] is not added back: the peer's copy predates the
+     * delete. A null or non-positive [sentUpdatedAt] means the copy's real
+     * time is unknown (sent without one, blank, or clamped as too far
+     * ahead), so any deletion record holds it back. This is the one place a
+     * synced copy is compared with a deletion. Returns [KEPT_DELETED] (-2)
+     * when held back, otherwise what [insertIfAbsent] returns (-1 when an
+     * entry with that id is there).
+     */
+    @Transaction
+    suspend fun insertIfAbsentUnlessDeleted(password: PasswordEntity, sentUpdatedAt: Long?): Long {
+        val deletedAt = getDeletedAt(password.passwordId)
+        if (deletedAt != null) {
+            val sent = sentUpdatedAt?.takeIf { it > 0 }
+            if (sent == null || sent <= deletedAt) return KEPT_DELETED
+        }
+        return insertIfAbsent(password)
+    }
+
     /** Total number of stored password entries. */
     @Query("SELECT COUNT(*) FROM passwords")
     suspend fun count(): Int
@@ -158,4 +202,26 @@ interface PasswordDao {
     /** Observe the total number of stored password entries. */
     @Query("SELECT COUNT(*) FROM passwords")
     fun observeCount(): Flow<Int>
+}
+
+/** [PasswordDao.insertIfAbsentUnlessDeleted]: the entry was deleted on this phone since the copy, and stays deleted. */
+const val KEPT_DELETED = -2L
+
+/**
+ * The `password_deletions` queries of [PasswordDao]: when this phone deleted
+ * an entry, so that sync does not add it back ([PasswordDeletionEntity]).
+ */
+interface PasswordDeletionQueries {
+
+    /** Record (or move forward) the deletion of an entry; one record per id. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun recordDeletion(deletion: PasswordDeletionEntity)
+
+    /** When the entry with [passwordId] was deleted on this phone, or null if no record is kept. */
+    @Query("SELECT deleted_at FROM password_deletions WHERE password_id = :passwordId")
+    suspend fun getDeletedAt(passwordId: String): Long?
+
+    /** Drop the deletion records made before [cutoff]. Returns how many were dropped. */
+    @Query("DELETE FROM password_deletions WHERE deleted_at < :cutoff")
+    suspend fun pruneDeletionsBefore(cutoff: Long): Int
 }

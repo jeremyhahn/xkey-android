@@ -7,6 +7,7 @@ package com.automatethethings.xkey.crypto
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -30,8 +31,8 @@ class SyncCodecTest {
     }
 
     @Test
-    fun `pemToDer returns null on empty body`() {
-        assertNull(SyncCodec.pemToDer("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n"))
+    fun `pemToDer rejects an empty body`() {
+        assertMalformed { SyncCodec.pemToDer("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n") }
     }
 
     @Test
@@ -47,9 +48,33 @@ class SyncCodecTest {
     }
 
     @Test
-    fun `parseRfc3339 zero on blank or garbage`() {
+    fun `parseRfc3339 zero on blank`() {
         assertEquals(0L, SyncCodec.parseRfc3339(""))
-        assertEquals(0L, SyncCodec.parseRfc3339("not-a-date"))
+        assertEquals(0L, SyncCodec.parseRfc3339("   "))
+    }
+
+    @Test
+    fun `parseRfc3339 rejects garbage instead of reading it as zero`() {
+        assertMalformed { SyncCodec.parseRfc3339("not-a-date") }
+    }
+
+    @Test
+    fun `a malformed value is not quoted in the error`() {
+        val error = assertMalformed { SyncCodec.parseRfc3339("secret-ish value") }
+        assertFalse(error.message.orEmpty().contains("secret-ish"))
+        assertNull(error.cause)
+        val pemError = assertMalformed { SyncCodec.pemToDer("-----BEGIN CERTIFICATE-----\nsecret!!\n-----END CERTIFICATE-----") }
+        assertFalse(pemError.message.orEmpty().contains("secret"))
+        assertNull(pemError.cause)
+    }
+
+    private fun assertMalformed(block: () -> Any): MalformedSyncValueException {
+        try {
+            block()
+        } catch (expected: MalformedSyncValueException) {
+            return expected
+        }
+        throw AssertionError("expected a MalformedSyncValueException")
     }
 
     // -----------------------------------------------------------------------
@@ -129,14 +154,14 @@ class SyncCodecTest {
     }
 
     @Test
-    fun `pemToDer returns null on non-base64 content`() {
-        assertNull(SyncCodec.pemToDer("-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----"))
+    fun `pemToDer rejects non-base64 content`() {
+        assertMalformed { SyncCodec.pemToDer("-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----") }
     }
 
     @Test
-    fun `pemToDer returns null on empty input`() {
-        assertNull(SyncCodec.pemToDer(""))
-        assertNull(SyncCodec.pemToDer("   \n  \n"))
+    fun `pemToDer rejects empty input`() {
+        assertMalformed { SyncCodec.pemToDer("") }
+        assertMalformed { SyncCodec.pemToDer("   \n  \n") }
     }
 
     @Test
@@ -173,8 +198,8 @@ class SyncCodecTest {
     }
 
     @Test
-    fun `parseRfc3339 returns zero for a date without a time zone`() {
-        assertEquals(0L, SyncCodec.parseRfc3339("2023-11-14T22:13:20"))
-        assertEquals(0L, SyncCodec.parseRfc3339("2023-11-14"))
+    fun `parseRfc3339 rejects a date without a time zone`() {
+        assertMalformed { SyncCodec.parseRfc3339("2023-11-14T22:13:20") }
+        assertMalformed { SyncCodec.parseRfc3339("2023-11-14") }
     }
 }

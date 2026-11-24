@@ -16,6 +16,7 @@ import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.sync.SyncEngine
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
@@ -85,7 +86,16 @@ class RemoteSyncClient(
 
     /** Runs a full bidirectional sync of all stores and records the sync time. */
     suspend fun syncAll(): SyncResult {
-        val certs = syncTrustStore()
+        // A trust-store failure is recorded by its own audit entry and must
+        // not stop the OATH and password legs.
+        val certs = try {
+            syncTrustStore()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "trust store not synced: ${e.javaClass.simpleName}")
+            0 to 0
+        }
         val oath = syncOath()
         // A phone-initiated sync carries no unlocked vault, so with a factor
         // enrolled the password leg is refused before anything is sent; the
@@ -105,13 +115,20 @@ class RemoteSyncClient(
         )
     }
 
-    /** Pushes the phone's certificates and merges the laptop's. Returns (pushed, pulled). */
-    suspend fun syncTrustStore(): Pair<Int, Int> {
-        val mine = engine.gatherCertificates()
-        val resp = sendRequest(MethodNames.REMOTE_SYNC_TRUST_STORE, JSONObject().put("certificates", mine))
-        val merged = engine.mergeCertificates(resp.result?.optJSONArray("local") ?: JSONArray())
-        return acceptedByPeer(resp) to merged.added
-    }
+    /**
+     * Pushes the phone's certificates and merges the laptop's. Returns
+     * (pushed, pulled). Records one outbound audit entry, failed or not.
+     */
+    suspend fun syncTrustStore(): Pair<Int, Int> = audited(
+        AuditLogger::logTrustStoreSyncPerformed,
+        send = {
+            sendRequest(MethodNames.REMOTE_SYNC_TRUST_STORE, JSONObject().put("certificates", engine.gatherCertificates()))
+        },
+        merge = { local ->
+            val counts = engine.mergeCertificates(local)
+            SyncEngine.ItemCounts(added = counts.added, updated = 0, skipped = counts.skipped)
+        }
+    )
 
     /**
      * Pushes the phone's OATH credentials and merges the laptop's. Returns

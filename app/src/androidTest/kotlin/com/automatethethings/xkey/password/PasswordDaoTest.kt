@@ -290,6 +290,57 @@ class PasswordDaoTest {
         assertEquals(0, dao.count())
     }
 
+    @Test
+    fun insertIfAbsentUnlessDeleted_holdsBackACopyWithAnUnknownTimeWhenADeletionIsRecorded() = runBlocking {
+        dao.insert(password("pw-1"))
+        assertTrue(dao.deleteAndRecordDeletion("pw-1", tenantId = null, deletedAt = now))
+
+        // The stored copy carries the phone's time, later than the deletion: only the sent time counts.
+        val result = dao.insertIfAbsentUnlessDeleted(
+            password("pw-1").copy(updatedAt = now + 60_000),
+            sentUpdatedAt = null
+        )
+
+        assertEquals(KEPT_DELETED, result)
+        assertNull(dao.getByPasswordId("pw-1"))
+    }
+
+    @Test
+    fun insertIfAbsentUnlessDeleted_holdsBackACopySentNoLaterThanTheDeletion() = runBlocking {
+        dao.insert(password("pw-1"))
+        assertTrue(dao.deleteAndRecordDeletion("pw-1", tenantId = null, deletedAt = now))
+
+        val result = dao.insertIfAbsentUnlessDeleted(
+            password("pw-1").copy(updatedAt = now + 60_000),
+            sentUpdatedAt = now
+        )
+
+        assertEquals(KEPT_DELETED, result)
+        assertNull(dao.getByPasswordId("pw-1"))
+    }
+
+    @Test
+    fun insertIfAbsentUnlessDeleted_addsACopySentAfterTheDeletion() = runBlocking {
+        dao.insert(password("pw-1"))
+        assertTrue(dao.deleteAndRecordDeletion("pw-1", tenantId = null, deletedAt = now))
+
+        val result = dao.insertIfAbsentUnlessDeleted(
+            password("pw-1", name = "Edited").copy(updatedAt = now + 60_000),
+            sentUpdatedAt = now + 60_000
+        )
+
+        assertTrue(result > 0)
+        assertEquals("Edited", dao.getByPasswordId("pw-1")!!.name)
+    }
+
+    @Test
+    fun insertIfAbsentUnlessDeleted_addsACopyWithAnUnknownTimeWhenNoDeletionIsRecorded() = runBlocking {
+        val result = dao.insertIfAbsentUnlessDeleted(password("pw-1"), sentUpdatedAt = null)
+
+        assertTrue(result > 0)
+        assertEquals(1, dao.count())
+    }
+
     private suspend fun updateFieldsIfUnchanged(read: PasswordEntity, notes: String) =
         dao.updateFieldsIfUnchanged(
             id = read.id,
