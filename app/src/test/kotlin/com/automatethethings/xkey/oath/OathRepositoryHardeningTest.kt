@@ -18,10 +18,15 @@ package com.automatethethings.xkey.oath
 import android.app.Application
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.first
@@ -253,6 +258,51 @@ class OathRepositoryHardeningTest {
         assertFalse("not an exhausted counter", error is OathCounterExhaustedException)
         assertFalse("the message must not carry the secret", error!!.message.orEmpty().contains("1234567890"))
         assertEquals(3L, dao.getByOathId(id)!!.counter)
+    }
+
+    @Test
+    fun `an HOTP generation whose usage write fails throws, keeps the counter and writes no audit row`() = runBlocking {
+        val id = repository.addCredential(
+            issuer = "A", accountName = "hotp", secret = RFC_SEED, type = "HOTP", counter = 5
+        )
+        failUsageWrites()
+
+        val error = withAuditMocked { failureOf { repository.generateCode(id) } }
+
+        assertTrue("${error?.javaClass}", error != null && error !is TimeoutCancellationException)
+        assertEquals("the claim rolls back with the usage", 5L, dao.getByOathId(id)!!.counter)
+    }
+
+    @Test
+    fun `a TOTP generation whose usage write fails throws and writes no audit row`() = runBlocking {
+        val id = repository.addCredential(issuer = "A", accountName = "totp", secret = RFC_SEED)
+        failUsageWrites()
+
+        val error = withAuditMocked { failureOf { repository.generateCode(id) } }
+
+        assertTrue("${error?.javaClass}", error != null && error !is TimeoutCancellationException)
+        assertEquals(0, dao.getByOathId(id)!!.useCount)
+    }
+
+    /** Makes every write of use_count abort, as a failing disk would. */
+    private fun failUsageWrites() {
+        database.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_usage BEFORE UPDATE OF use_count ON oath_credentials " +
+                "BEGIN SELECT RAISE(ABORT, 'usage write failed'); END"
+        )
+    }
+
+    /** Runs [block] with AuditLogger mocked and checks it wrote no OATH_CODE_GENERATED row. */
+    private suspend fun <T> withAuditMocked(block: suspend () -> T): T {
+        mockkObject(AuditLogger)
+        try {
+            every { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) } returns Unit
+            val result = block()
+            verify(exactly = 0) { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) }
+            return result
+        } finally {
+            unmockkObject(AuditLogger)
+        }
     }
 
     /** What [block] throws, bounded so a claim loop fails the test instead of hanging it. */
