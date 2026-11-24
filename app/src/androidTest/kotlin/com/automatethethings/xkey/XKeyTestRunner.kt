@@ -68,16 +68,14 @@ class XKeyTestRunner : AndroidJUnitRunner() {
         super.onDestroy()
     }
 
-    private fun prepareDevice() {
-        TESTING_VALUES.forEach { (setting, value) ->
-            val saved = shell("settings get global $SAVED_PREFIX${setting.name}")
-            if (isUnset(saved)) {
-                // No earlier run left a value behind: the current one is the owner's.
-                val current = shell("settings get ${setting.table} ${setting.name}")
-                shell("settings put global $SAVED_PREFIX${setting.name} ${encode(current)}")
-            }
-            shell("settings put ${setting.table} ${setting.name} $value")
+    private val guard by lazy {
+        SettingsGuard(DeviceSettings(SettingsShell { shell(it) }), TESTING_VALUES) { message, error ->
+            Log.w(TAG, message, error)
         }
+    }
+
+    private fun prepareDevice() {
+        guard.prepare()
         shell("input keyevent KEYCODE_WAKEUP")
         shell("wm dismiss-keyguard") // only clears a swipe keyguard; a secure one stays
     }
@@ -86,19 +84,7 @@ class XKeyTestRunner : AndroidJUnitRunner() {
     private fun restoreDevice() {
         if (restored) return
         restored = true
-        TESTING_VALUES.keys.forEach { setting ->
-            runCatching {
-                val saved = shell("settings get global $SAVED_PREFIX${setting.name}")
-                if (isUnset(saved)) return@runCatching
-                val original = saved.trim()
-                if (original == UNSET_MARKER) {
-                    shell("settings delete ${setting.table} ${setting.name}")
-                } else {
-                    shell("settings put ${setting.table} ${setting.name} $original")
-                }
-                shell("settings delete global $SAVED_PREFIX${setting.name}")
-            }.onFailure { Log.w(TAG, "could not restore ${setting.name}", it) }
-        }
+        guard.restore()
     }
 
     /** Runs [command] as the shell user and returns its standard output. */
@@ -108,8 +94,6 @@ class XKeyTestRunner : AndroidJUnitRunner() {
             stream.readBytes().toString(Charsets.UTF_8)
         }
     }
-
-    private data class Setting(val table: String, val name: String)
 
     /**
      * Shows every activity of the app process over the keyguard, turns the
@@ -141,10 +125,7 @@ class XKeyTestRunner : AndroidJUnitRunner() {
         private const val TAG = "XKeyTestRunner"
 
         /** Prefix of the `Settings.Global` keys holding the owner's values mid-run. */
-        const val SAVED_PREFIX = "xkey_test_saved_"
-
-        /** Stored for a setting that had no value, so restore deletes it again. */
-        private const val UNSET_MARKER = "__unset__"
+        const val SAVED_PREFIX = SettingsGuard.SAVED_PREFIX
 
         /** Thirty minutes: long enough that the stay-on setting never races it. */
         private const val SCREEN_OFF_TIMEOUT_MS = 30 * 60 * 1000
@@ -152,21 +133,12 @@ class XKeyTestRunner : AndroidJUnitRunner() {
         /** `BatteryManager.BATTERY_PLUGGED_AC | USB | WIRELESS | DOCK`. */
         private const val STAY_ON_ANY_POWER = 1 or 2 or 4 or 8
 
-        private val TESTING_VALUES: Map<Setting, String> = linkedMapOf(
-            Setting("global", "window_animation_scale") to "0",
-            Setting("global", "transition_animation_scale") to "0",
-            Setting("global", "animator_duration_scale") to "0",
-            Setting("global", "stay_on_while_plugged_in") to STAY_ON_ANY_POWER.toString(),
-            Setting("system", "screen_off_timeout") to SCREEN_OFF_TIMEOUT_MS.toString(),
+        private val TESTING_VALUES: Map<DeviceSetting, String> = linkedMapOf(
+            DeviceSetting("global", "window_animation_scale") to "0",
+            DeviceSetting("global", "transition_animation_scale") to "0",
+            DeviceSetting("global", "animator_duration_scale") to "0",
+            DeviceSetting("global", "stay_on_while_plugged_in") to STAY_ON_ANY_POWER.toString(),
+            DeviceSetting("system", "screen_off_timeout") to SCREEN_OFF_TIMEOUT_MS.toString(),
         )
-
-        /** `settings get` prints `null` for a setting that has no value. */
-        internal fun isUnset(output: String): Boolean {
-            val value = output.trim()
-            return value.isEmpty() || value == "null"
-        }
-
-        internal fun encode(current: String): String =
-            if (isUnset(current)) UNSET_MARKER else current.trim()
     }
 }
