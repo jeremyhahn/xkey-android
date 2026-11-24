@@ -188,4 +188,32 @@ class PivSlotTest {
         assertEquals(2048, PivAlgorithm.RS2048.keySizeBits)
         assertEquals("RSA 2048", PivAlgorithm.RS2048.displayName)
     }
+
+    @Test
+    fun `PivAlgorithm RS3072 has correct properties`() {
+        assertEquals("RSA", PivAlgorithm.RS3072.keyAlgorithm)
+        assertEquals(3072, PivAlgorithm.RS3072.keySizeBits)
+        assertEquals("RSA 3072", PivAlgorithm.RS3072.displayName)
+    }
+
+    @Test
+    fun `PivAlgorithm RS4096 has correct properties`() {
+        assertEquals("RSA", PivAlgorithm.RS4096.keyAlgorithm)
+        assertEquals(4096, PivAlgorithm.RS4096.keySizeBits)
+        assertEquals("RSA 4096", PivAlgorithm.RS4096.displayName)
+    }
+
+    @Test
+    fun `PivAlgorithm carries the PIV algorithm ids`() {
+        assertEquals(0x11, PivAlgorithm.ES256.pivAlgorithmId)
+        assertEquals(0x14, PivAlgorithm.ES384.pivAlgorithmId)
+        assertEquals(0x07, PivAlgorithm.RS2048.pivAlgorithmId)
+        assertEquals(0x05, PivAlgorithm.RS3072.pivAlgorithmId)
+        assertEquals(0x16, PivAlgorithm.RS4096.pivAlgorithmId)
+        assertEquals(
+            "every algorithm has its own id",
+            PivAlgorithm.entries.size,
+            PivAlgorithm.entries.map { it.pivAlgorithmId }.toSet().size
+        )
+    }
 }
