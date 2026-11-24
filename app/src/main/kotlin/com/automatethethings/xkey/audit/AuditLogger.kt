@@ -1485,6 +1485,23 @@ object AuditLogger {
     }
 
     /**
+     * Records a synced OATH item the merge refused: the phone holds [oathId]
+     * with other key material (secret, type, algorithm, digits or period)
+     * and the wire item carries no timestamp to say which copy is newer, so
+     * the phone's copy is kept. Only the id is recorded, never a secret.
+     */
+    fun logOathSyncConflict(oathId: String) {
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.OATH_SYNC_PERFORMED,
+                keyId = oathId,
+                success = false,
+                errorMessage = "sync conflict: key material differs, local copy kept"
+            )
+        )
+    }
+
+    /**
      * Records one password sync with a paired device. Only counts are
      * recorded: never a password, site or user name.
      *

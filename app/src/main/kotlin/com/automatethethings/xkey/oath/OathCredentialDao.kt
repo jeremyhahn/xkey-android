@@ -128,28 +128,25 @@ interface OathCredentialDao {
     suspend fun updateCounter(oathId: String, counter: Long)
 
     /**
-     * Update a synced credential in place: the row keeps its primary key,
-     * creation time, usage statistics, source and remote device, and its
-     * HOTP counter only moves forward (`MAX(counter, :counter)`), so a peer
-     * that has generated fewer codes never rewinds it.
+     * Update a synced credential in place: only its label and HOTP counter.
+     * The row keeps its primary key, creation time, usage statistics,
+     * source, remote device and key material (secret, type, algorithm,
+     * digits, period): the sync wire item carries no timestamp, so a stale
+     * peer could otherwise revert a re-keyed credential. The counter only
+     * moves forward (`MAX(counter, :counter)`), so a peer that has generated
+     * fewer codes never rewinds it.
      *
      * @return The number of rows updated: 0 if no row has [oathId].
      */
     @Query(
-        "UPDATE oath_credentials SET oath_type = :oathType, algorithm = :algorithm, digits = :digits, " +
-            "period_seconds = :periodSeconds, counter = MAX(counter, :counter), issuer = :issuer, " +
-            "account_name = :accountName, secret_encrypted = :secretEncrypted WHERE oath_id = :oathId"
+        "UPDATE oath_credentials SET counter = MAX(counter, :counter), issuer = :issuer, " +
+            "account_name = :accountName WHERE oath_id = :oathId"
     )
     suspend fun updateSynced(
         oathId: String,
-        oathType: String,
-        algorithm: String,
-        digits: Int,
-        periodSeconds: Int,
         counter: Long,
         issuer: String?,
-        accountName: String,
-        secretEncrypted: ByteArray
+        accountName: String
     ): Int
 
     // -------------------------------------------------------------------------

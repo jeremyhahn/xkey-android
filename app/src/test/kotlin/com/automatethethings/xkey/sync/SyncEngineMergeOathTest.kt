@@ -17,6 +17,7 @@ package com.automatethethings.xkey.sync
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathRepository
@@ -29,6 +30,7 @@ import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.test.runTest
 import org.json.JSONArray
 import org.json.JSONObject
@@ -82,7 +84,7 @@ class SyncEngineMergeOathTest {
             }
         }
         coEvery {
-            dao.updateSynced(any(), any(), any(), any(), any(), any(), any(), any(), any())
+            dao.updateSynced(any(), any(), any(), any())
         } answers {
             val oathId = arg<String>(0)
             val row = rows[oathId]
@@ -91,14 +93,9 @@ class SyncEngineMergeOathTest {
             } else {
                 // As the SQL does: the counter only moves forward.
                 rows[oathId] = row.copy(
-                    oathType = arg(1),
-                    algorithm = arg(2),
-                    digits = arg(3),
-                    periodSeconds = arg(4),
-                    counter = maxOf(row.counter, arg<Long>(5)),
-                    issuer = arg(6),
-                    accountName = arg(7),
-                    secretEncrypted = arg(8)
+                    counter = maxOf(row.counter, arg<Long>(1)),
+                    issuer = arg(2),
+                    accountName = arg(3)
                 )
                 1
             }
@@ -120,6 +117,9 @@ class SyncEngineMergeOathTest {
 
         mockkStatic(Log::class)
         every { Log.w(any(), any<String>()) } returns 0
+
+        mockkObject(AuditLogger)
+        every { AuditLogger.logOathSyncConflict(any()) } returns Unit
 
         engine = SyncEngine(mockk<Context>())
     }
@@ -240,7 +240,8 @@ class SyncEngineMergeOathTest {
         val counts = engine.mergeOath(JSONArray().put(credential("x", "Acme", "alice", secret = "JBSWY3DPEHPK3PXP")))
 
         assertArrayEquals("the stored secret is kept", rekeyed, rows.getValue("x").secretEncrypted)
-        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1, conflicts = 1), counts)
+        verify(exactly = 1) { AuditLogger.logOathSyncConflict("x") }
     }
 
     @Test
@@ -261,7 +262,7 @@ class SyncEngineMergeOathTest {
         val counts = engine.mergeOath(JSONArray().put(credential("z", "Acme", "alice").put("digits", 8)))
 
         assertEquals(6, rows.getValue("z").digits)
-        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1, conflicts = 1), counts)
     }
 
     @Test

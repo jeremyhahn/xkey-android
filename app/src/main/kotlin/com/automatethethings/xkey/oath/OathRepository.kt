@@ -15,9 +15,11 @@
 package com.automatethethings.xkey.oath
 
 import android.net.Uri
+import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -46,7 +48,13 @@ enum class SyncMergeOutcome {
     UPDATED,
 
     /** The id was deleted on the phone: nothing was written. */
-    DELETED
+    DELETED,
+
+    /**
+     * A row had the id with other key material (secret, type, algorithm,
+     * digits or period): nothing was written and an audit entry names the id.
+     */
+    CONFLICT
 }
 
 /**
@@ -254,8 +262,11 @@ class OathRepository(
      * Merge a credential a paired peer synced, under the peer's [oathId]: the
      * one entry point that turns a synced item into an OATH row. The fields
      * are decoded and validated as [importStructured] does them. While no
-     * row has [oathId] one is added under it; otherwise that row is updated
-     * in place ([OathCredentialDao.updateSynced]), keeping its primary key,
+     * row has [oathId] one is added under it. A row with other key material
+     * (secret, type, algorithm, digits or period) is a conflict: the wire
+     * item carries no timestamp, so nothing is written and an audit entry
+     * names the id. Otherwise the row's label is updated in place
+     * ([OathCredentialDao.updateSynced]), keeping its primary key,
      * creation time and usage statistics, with the HOTP counter the larger
      * of the stored one and [counter]. Merging the same item again therefore
      * never adds a second row. An id deleted on the phone
@@ -308,16 +319,17 @@ class OathRepository(
         )
         // Never REPLACE: that deletes the row and inserts a new one, losing its usage statistics.
         if (dao.insertIfAbsent(entity) != -1L) return addedUnlessDeleted(oathId)
+        val stored = dao.getByOathId(oathId)
+        if (stored != null && !sameKeyMaterial(stored, entity, parsed.secret)) {
+            // The wire item has no timestamp to say which copy is newer: the phone's key material is kept.
+            AuditLogger.logOathSyncConflict(oathId)
+            return SyncMergeOutcome.CONFLICT
+        }
         val updated = dao.updateSynced(
             oathId = oathId,
-            oathType = entity.oathType,
-            algorithm = entity.algorithm,
-            digits = entity.digits,
-            periodSeconds = entity.periodSeconds,
             counter = entity.counter,
             issuer = entity.issuer,
-            accountName = entity.accountName,
-            secretEncrypted = entity.secretEncrypted
+            accountName = entity.accountName
         )
         if (updated > 0) return SyncMergeOutcome.UPDATED
         // Gone between the insert and the update: added again only if the phone did not delete it.
@@ -330,6 +342,36 @@ class OathRepository(
      * between the delete-record check and the insert wins, and the row the
      * merge just added is removed again.
      */
+    /**
+     * True if [stored] has the same secret, type, algorithm, digits and
+     * period as [incoming] (whose plain secret is [incomingSecret]). A
+     * stored secret that cannot be decrypted counts as different, so the
+     * merge never replaces it.
+     */
+    private fun sameKeyMaterial(
+        stored: OathCredentialEntity,
+        incoming: OathCredentialEntity,
+        incomingSecret: ByteArray
+    ): Boolean {
+        if (!stored.oathType.equals(incoming.oathType, ignoreCase = true) ||
+            !stored.algorithm.equals(incoming.algorithm, ignoreCase = true) ||
+            stored.digits != incoming.digits ||
+            stored.periodSeconds != incoming.periodSeconds
+        ) {
+            return false
+        }
+        val storedSecret = try {
+            secretManager.decryptSecret(stored.secretEncrypted)
+        } catch (e: Exception) {
+            return false
+        }
+        return try {
+            MessageDigest.isEqual(storedSecret, incomingSecret)
+        } finally {
+            storedSecret.fill(0)
+        }
+    }
+
     private suspend fun addedUnlessDeleted(oathId: String): SyncMergeOutcome {
         if (!dao.isDeleted(oathId)) return SyncMergeOutcome.ADDED
         dao.deleteByOathId(oathId)

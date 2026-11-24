@@ -70,8 +70,8 @@ vault is locked.
   or the PEM does not decode; otherwise imported with the `purpose` field as its
   label (`sync` when blank).
 - OATH: an entry without an id (or name), secret or `account_name` is
-  skipped; the rest are imported through `OathRepository.importStructured`, counted
-  as updated when the id already existed.
+  skipped; the rest go through `OathRepository.upsertStructured`. See
+  [OATH merge rules](#oath-merge-rules).
 - Passwords: `PasswordSync.merge` patches an existing entry in place or adds
   a new personal, non-expiring entry in the default tenant. `PasswordSync.gather`
   leaves out entries with a non-default tenant, sharing or an expiry, because
@@ -96,6 +96,28 @@ vault is locked.
 - `PasswordSync.mergeWithDetail` counts kept deletes, clamps and policy skips
   on top of the usual counts. The wire format and the sync response are
   unchanged.
+
+### OATH merge rules
+
+The OATH wire item carries no created or updated time, so the merge cannot
+tell which copy of a credential is newer. It therefore never lets a synced
+item replace key material the phone holds:
+
+- **Delete records.** Deleting a credential on the phone records its id and
+  the time in `oath_deletions` (schema version 14). A synced item with that id
+  is skipped and never re-inserted. A credential added on the phone gets a new
+  random id, so a record never hides it.
+- **Key material.** When an id is already stored and the incoming secret,
+  type, algorithm, digits or period differ from the stored ones, the item is
+  skipped and counted as a conflict, and an audit entry names the credential
+  id (never the secret). The phone's copy is kept unchanged.
+- **Labels and counter.** When the key material matches, the issuer and
+  account name are taken from the incoming item, and the HOTP counter becomes
+  the larger of the stored and the incoming one.
+
+If the wire item gains an `updated_at`, these rules can move to
+last-writer-wins with the password clamp (a time more than 5 minutes ahead of
+the phone counts as now).
 
 ## Main flow
 

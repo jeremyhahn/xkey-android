@@ -53,8 +53,12 @@ class SyncEngine(
     /** Result of merging incoming certificates. */
     data class CertCounts(val added: Int, val skipped: Int)
 
-    /** Result of merging incoming OATH credentials or passwords. */
-    data class ItemCounts(val added: Int, val updated: Int, val skipped: Int)
+    /**
+     * Result of merging incoming OATH credentials or passwords. [conflicts]
+     * counts the OATH items skipped because the phone holds other key
+     * material under the same id; they are also in [skipped].
+     */
+    data class ItemCounts(val added: Int, val updated: Int, val skipped: Int, val conflicts: Int = 0)
 
     private val db by lazy { XKeyDatabase.getInstance(context) }
 
@@ -136,7 +140,10 @@ class SyncEngine(
      * ([OathRepository.upsertStructured]): an item whose id is already stored
      * updates that row in place, its HOTP counter never moving back, so
      * merging the same payload again adds no rows. An item whose id was
-     * deleted on the phone is skipped and never added back. An item without an id,
+     * deleted on the phone is skipped and never added back. An item whose
+     * secret, type, algorithm, digits or period differ from the stored ones
+     * is skipped and counted as a conflict: only a matching item updates
+     * the label and counter. An item without an id,
      * secret or account, or with an invalid field (a secret that is not
      * Base32, say), is counted as skipped and the rest still merge.
      */
@@ -146,6 +153,7 @@ class SyncEngine(
         var added = 0
         var updated = 0
         var skipped = 0
+        var conflicts = 0
         for (i in 0 until incoming.length()) {
             val obj = incoming.optJSONObject(i) ?: continue
             val id = obj.optString("id", "").ifBlank { obj.optString("name", "") }
@@ -177,10 +185,15 @@ class SyncEngine(
                 SyncMergeOutcome.UPDATED -> updated++
                 // Deleted on the phone: the peer's copy never brings it back.
                 SyncMergeOutcome.DELETED -> skipped++
+                // The phone holds other key material: kept, and counted as a skipped conflict.
+                SyncMergeOutcome.CONFLICT -> {
+                    skipped++
+                    conflicts++
+                }
             }
         }
-        if (skipped > 0) Log.w(TAG, "Skipped $skipped incoming OATH credentials")
-        return ItemCounts(added, updated, skipped)
+        if (skipped > 0) Log.w(TAG, "Skipped $skipped incoming OATH credentials ($conflicts conflicts)")
+        return ItemCounts(added, updated, skipped, conflicts)
     }
 
     // --- Passwords ---
