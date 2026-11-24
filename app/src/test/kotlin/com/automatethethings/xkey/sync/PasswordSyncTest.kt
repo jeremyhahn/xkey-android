@@ -42,6 +42,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -372,6 +373,26 @@ class PasswordSyncTest {
     @Test
     fun `an incoming entry with an unparseable updated_at keeps the local one`() = runTest {
         assertKeptLocal("yesterday")
+    }
+
+    @Test
+    fun `a new entry with a malformed updated_at is rejected and the rest still merge`() = runTest {
+        val batch = incoming(id = "bad-time", password = "x", at = "yesterday")
+            .put(incoming(id = "remote-2", password = "y", at = newerIso).getJSONObject(0))
+
+        val counts = sync.merge(batch)
+
+        assertEquals(SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 1), counts)
+        assertNull("a malformed timestamp must not be stored as zero", repository.get("bad-time"))
+        assertEquals("y", repository.get("remote-2")!!.password)
+    }
+
+    @Test
+    fun `a new entry with a blank updated_at is still added`() = runTest {
+        val counts = sync.merge(incoming(id = "no-time", password = "x", at = ""))
+
+        assertEquals(SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 0), counts)
+        assertEquals("x", repository.get("no-time")!!.password)
     }
 
     private suspend fun assertKeptLocal(at: String?) {
