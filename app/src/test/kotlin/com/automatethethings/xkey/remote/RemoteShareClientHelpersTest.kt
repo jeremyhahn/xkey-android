@@ -177,6 +177,12 @@ class RemoteShareClientHelpersTest {
     }
 
     @Test
+    fun `parseImportedKey rejects a negative key_size`() {
+        malformed { client.parseImportedKey(imported().put("key_size", -1)) }
+        malformed { client.parseImportedKey(imported().put("key_size", Int.MIN_VALUE)) }
+    }
+
+    @Test
     fun `parseImportedKey reads an empty wrapped_key as a zero-length array`() {
         val k = client.parseImportedKey(imported().put("wrapped_key", ""))
         assertArrayEquals(ByteArray(0), k.wrappedKey)
