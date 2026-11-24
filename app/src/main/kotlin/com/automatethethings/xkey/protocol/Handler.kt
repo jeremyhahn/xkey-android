@@ -1953,7 +1953,14 @@ class RequestHandler(
             requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
             requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
             val swStart = System.currentTimeMillis()
-            val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
+            // Bad key material answers as the Keystore path does.
+            val ct = try {
+                com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
+            } catch (e: java.security.GeneralSecurityException) {
+                throw EncryptionException("AES-GCM encryption failed", e)
+            } catch (e: IllegalArgumentException) {
+                throw EncryptionException("invalid AES key", e)
+            }
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(symParams.keyId)
             logKeyUse(
