@@ -1091,7 +1091,7 @@ class LocalMessagesTest {
                 "version", "deviceName", "supportedAlgorithms", "strongBoxAvailable",
                 "currentKeyCount", "supportedFormats", "attestationSupport",
                 "algorithms", "keyTypes", "hasStrongBox", "hasBiometrics", "supportsAttestation",
-                "supportsECDH", "supportsSymmetric", "supportsHMAC", "maxKeys"
+                "supportsECDH", "supportsSymmetric", "supportsHMAC", "maxKeys", "hardwareAlgorithms"
             ),
             json.keySet()
         )
