@@ -207,6 +207,13 @@ class GetCredentialHandler(
         var clientDataJsonBase64: String? = null
         Log.d(TAG, "clientDataHash provided: ${clientDataHash != null}")
 
+        // Whether the caller brings its own hash or not, it must be a
+        // privileged browser on an origin the rpId is valid for: a supplied
+        // hash fixes the origin the relying party will see.
+        val origin = CallerOrigin.verify(request.callingAppInfo, rpId) { reason, cause ->
+            CredentialAssertionException(reason, cause)
+        }
+
         if (clientDataHash == null) {
             // Browser didn't provide clientDataHash - construct clientDataJSON
             // ourselves. Because this provider is signing the client data, the
@@ -219,30 +226,7 @@ class GetCredentialHandler(
             } catch (e: JSONException) {
                 throw InvalidRequestException("Request is missing a challenge", e)
             }
-            val callingPackage = request.callingAppInfo.packageName
-            val verifiedOrigin = try {
-                request.callingAppInfo.getOrigin(BROWSER_PRIVILEGED_ALLOWLIST)
-            } catch (e: Exception) {
-                Log.e(TAG, "Origin verification failed for $callingPackage", e)
-                throw CredentialAssertionException(
-                    "Could not verify the calling app's origin ($callingPackage)",
-                    e
-                )
-            }
-            val origin = verifiedOrigin ?: throw CredentialAssertionException(
-                "Calling app $callingPackage provided no client data hash and has no " +
-                    "verified web origin; refusing to sign an assertion"
-            )
             Log.d(TAG, "Using origin: $origin")
-
-            // The origin goes into clientDataJSON and the rpId is hashed into
-            // authenticator data. Signing a response where they are unrelated
-            // would let an app obtain an assertion for a site it does not control.
-            if (!RelyingPartyOrigin.isRpIdValidForOrigin(rpId, origin)) {
-                throw CredentialAssertionException(
-                    "Relying party $rpId is not valid for the caller's origin $origin"
-                )
-            }
 
             val clientDataJson = JSONObject().apply {
                 put("type", "webauthn.get")
