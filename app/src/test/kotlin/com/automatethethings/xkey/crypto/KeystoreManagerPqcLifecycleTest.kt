@@ -18,6 +18,11 @@ package com.automatethethings.xkey.crypto
 import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.storage.KeyStoreSyncManager
+import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
+import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
@@ -144,6 +149,32 @@ class KeystoreManagerPqcLifecycleTest {
 
         assertThrows(BiometricRequiredException::class.java) { store.sign(alias, DATA) }
         assertEquals(SET.signatureBytes, store.sign(alias, DATA, userAuthenticatedAt = now).size)
+    }
+
+    private fun row(keyId: String) = KeyEntity(
+        keyId = keyId, keyType = "signing", algorithm = SET.wireName, label = keyId,
+        keySizeBits = SET.publicKeyBytes * 8, source = "local"
+    )
+
+    @Test
+    fun `a full sync keeps the row of a live software key and drops one whose record is gone`() {
+        generate("live", -1)
+        generate("gone", -1)
+        store.delete(KeystoreManager.generalKeyAlias("gone"))
+        val rows = listOf(row("live"), row("gone"))
+        val deleted = mutableListOf<String>()
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.getAll() } returns rows
+        coEvery { keyDao.deleteByKeyId(any()) } answers { deleted += firstArg<String>(); 1 }
+        coEvery { keyDao.countAll() } returns rows.size
+        val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
+        coEvery { credentialDao.getAll() } returns emptyList()
+
+        assertTrue(manager.keyMaterialExists("live"))
+        assertFalse(manager.keyMaterialExists("gone"))
+        runBlocking { KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll() }
+
+        assertEquals(listOf("gone"), deleted)
     }
 
     private companion object {
