@@ -245,7 +245,10 @@ class OathHandlerWireTest {
     fun `oathList answers INTERNAL_ERROR when the store fails`() = runTest {
         coEvery { dao.getAll() } throws IllegalStateException("database is closed")
 
-        assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(call(MethodNames.LOCAL_OATH_LIST)))
+        val response = call(MethodNames.LOCAL_OATH_LIST)
+
+        assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(response))
+        assertFalse(errorMessage(response), errorMessage(response).contains("database is closed"))
     }
 
     // -------------------------------------------------------------------------
@@ -472,6 +475,7 @@ class OathHandlerWireTest {
         val response = remove(ID_HOTP)
 
         assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(response))
+        assertFalse(errorMessage(response), errorMessage(response).contains("disk I/O error"))
         assertTrue(audit.isEmpty())
     }
 
