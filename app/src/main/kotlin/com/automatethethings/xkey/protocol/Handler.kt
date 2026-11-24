@@ -2143,7 +2143,7 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.useAndZero { sw ->
             requireSoftwareKeyType(sw, otherType = "AES", operation = "HMAC")
             val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
