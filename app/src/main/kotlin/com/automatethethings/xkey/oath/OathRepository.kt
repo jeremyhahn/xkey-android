@@ -331,27 +331,37 @@ class OathRepository(
      * @throws NoSuchElementException if no credential exists with the given [oathId].
      */
     suspend fun generateCode(oathId: String): String {
-        val credential = dao.getByOathId(oathId)
+        var credential = dao.getByOathId(oathId)
             ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
-
-        val secret = secretManager.decryptSecret(credential.secretEncrypted)
 
         val code = when (credential.oathType) {
             "TOTP" -> OathEngine.generateTotpCode(
-                secret = secret,
+                secret = secretManager.decryptSecret(credential.secretEncrypted),
                 algorithm = credential.algorithm,
                 digits = credential.digits,
                 periodSeconds = credential.periodSeconds
             )
             "HOTP" -> {
-                val hotpCode = OathEngine.generateHotpCode(
-                    secret = secret,
-                    counter = credential.counter,
-                    algorithm = credential.algorithm,
-                    digits = credential.digits
-                )
-                // Increment the HOTP counter after successful generation
-                dao.updateCounter(oathId, credential.counter + 1)
+                // A code is handed out only once its counter value is claimed
+                // (compare-and-set, one statement): two callers that read the
+                // same counter (a desktop generate and a phone tap) cannot
+                // both claim it, so the loser re-reads and takes the next
+                // value. The code is computed before the claim, so a decrypt
+                // or engine failure never burns a counter value.
+                var hotpCode: String
+                do {
+                    hotpCode = OathEngine.generateHotpCode(
+                        secret = secretManager.decryptSecret(credential.secretEncrypted),
+                        counter = credential.counter,
+                        algorithm = credential.algorithm,
+                        digits = credential.digits
+                    )
+                    val claimed = dao.claimCounter(oathId, credential.counter) > 0
+                    if (!claimed) {
+                        credential = dao.getByOathId(oathId)
+                            ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
+                    }
+                } while (!claimed)
                 hotpCode
             }
             else -> throw IllegalStateException(
