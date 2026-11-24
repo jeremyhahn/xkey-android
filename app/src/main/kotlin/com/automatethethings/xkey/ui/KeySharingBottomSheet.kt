@@ -978,11 +978,6 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         private const val RADIO_ID_ALL_PEERS = 0x7f0a0002
         private const val RADIO_ID_SELECTED_PEERS = 0x7f0a0003
 
-        /**
-         * The status line for a [DesktopShareGate] decision: what will be
-         * sent, or why nothing will.
-         */
-        @StringRes
         /** The most characters of desktop-supplied text a status line shows. */
         private const val DESKTOP_TEXT_MAX = 200
 
@@ -1004,6 +999,11 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             return line.substring(0, end) + "…"
         }
 
+        /**
+         * The status line for a [DesktopShareGate] decision: what will be
+         * sent, or why nothing will.
+         */
+        @StringRes
         internal fun desktopStatusFor(decision: DesktopShareDecision): Int = when (decision) {
             DesktopShareDecision.PUBLIC_KEY -> R.string.sharing_desktop_ready
             DesktopShareDecision.NO_PEER -> R.string.sharing_desktop_no_peer
