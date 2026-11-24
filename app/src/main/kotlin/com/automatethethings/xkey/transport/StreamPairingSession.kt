@@ -982,7 +982,7 @@ class StreamPairingSession(
                 return null
             }
             if (!confirm(connection, peerKeyHex)) return null
-            val result = PairingConfirmResult(confirmed = true, deviceName = android.os.Build.MODEL)
+            val result = PairingConfirmResult(confirmed = true, deviceName = phoneModelName())
             ProtocolResponse.success(id, result.toJson(), generation = generation).toJson()
         } else {
             Log.w(TAG, "[$transportLabel] user rejected pairing from \"${pairingParams.deviceName}\"")
@@ -1170,7 +1170,14 @@ internal fun confirmAlreadyPaired(plaintext: ByteArray): ByteArray? {
     if (json.getStringOrNull("method") != MethodNames.PAIRING_CONFIRM) return null
 
     val id = json.optLong("id", -1)
-    val deviceName = android.os.Build.MODEL ?: "Android device"
-    val result = PairingConfirmResult(confirmed = true, deviceName = deviceName)
+    val result = PairingConfirmResult(confirmed = true, deviceName = phoneModelName())
     return ProtocolResponse.success(id, result.toJson(), generation = readGeneration(text)).toJson()
 }
+
+/**
+ * The name the `pairing.confirm` answer gives for this phone.
+ *
+ * [android.os.Build.MODEL] is a platform type that can read null; a null
+ * names the phone "Android device" instead of failing the approval.
+ */
+internal fun phoneModelName(): String = android.os.Build.MODEL ?: "Android device"

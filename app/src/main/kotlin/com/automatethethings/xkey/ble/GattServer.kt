@@ -57,6 +57,7 @@ import com.automatethethings.xkey.protocol.Response as ProtocolResponse
 import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.transport.confirmAlreadyPaired
+import com.automatethethings.xkey.transport.phoneModelName
 import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRemovalListener
@@ -1861,8 +1862,7 @@ class GattServer(
             // so PAIRED_DEVICES_SKIP attestation policy can check device trust
             requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex)
 
-            val deviceName = android.os.Build.MODEL
-            val result = PairingConfirmResult(confirmed = true, deviceName = deviceName)
+            val result = PairingConfirmResult(confirmed = true, deviceName = phoneModelName())
             val response = ProtocolResponse.success(id, result.toJson(), generation = generation)
             val responseBytes = response.toJson()
 
