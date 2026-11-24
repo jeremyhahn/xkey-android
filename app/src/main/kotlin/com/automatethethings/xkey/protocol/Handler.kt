@@ -2338,10 +2338,11 @@ class RequestHandler(
         }
 
         // Log the export; the entry names the key, the format and the desktop.
+        val keyType = auditKeyType(pubKeyParams.keyId)
         AuditLogger.logKeyExported(
             keyId = pubKeyParams.keyId,
             keyLabel = keyEntity.label,
-            keyType = auditKeyType(pubKeyParams.keyId),
+            keyType = keyType,
             format = pubKeyParams.format,
             deviceId = caller.peerPublicKeyHex,
             deviceName = caller.deviceName
