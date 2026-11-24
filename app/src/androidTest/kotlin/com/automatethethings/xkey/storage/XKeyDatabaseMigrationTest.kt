@@ -335,6 +335,61 @@ class XKeyDatabaseMigrationTest {
     }
 
     /**
+     * The one MIGRATION_13_14 adds both deletion tables at once: a password
+     * and an OATH credential written at 13 are both kept whole, and
+     * `password_deletions` and `oath_deletions` both start empty.
+     */
+    @Test
+    fun migration13To14KeepsPasswordsAndOathAndStartsBothDeletionTablesEmpty() {
+        createLegacyDatabase(13) { db ->
+            insertRow(
+                db,
+                "passwords",
+                mapOf(
+                    "password_id" to "pw-both",
+                    "name" to "Both",
+                    "username" to "user@example.com",
+                    "password_encrypted" to byteArrayOf(7, 8, 9),
+                    "source" to "local",
+                    "created_at" to 1_000L,
+                    "updated_at" to 2_000L,
+                    "shared" to 0,
+                    "tenant_id" to "default"
+                )
+            )
+            db.execSQL(
+                "INSERT INTO oath_credentials (oath_id, oath_type, algorithm, digits, period_seconds, counter, " +
+                    "issuer, account_name, secret_encrypted, source, remote_device_id, created_at, last_used_at, use_count) " +
+                    "VALUES ('oath-both', 'TOTP', 'SHA256', 8, 60, 0, 'Example', 'bob', X'0A0B0C', 'local', NULL, 1500, NULL, 2)"
+            )
+        }
+
+        withMigratedDatabase { db ->
+            val password = requireNotNull(db.passwordDao().getByPasswordId("pw-both"))
+            assertEquals("Both", password.name)
+            assertEquals("user@example.com", password.username)
+            assertEquals(1_000L, password.createdAt)
+            assertEquals(2_000L, password.updatedAt)
+            assertTrue(password.passwordEncrypted.contentEquals(byteArrayOf(7, 8, 9)))
+
+            val oath = requireNotNull(db.oathCredentialDao().getByOathId("oath-both"))
+            assertEquals("Example", oath.issuer)
+            assertEquals("bob", oath.accountName)
+            assertEquals(8, oath.digits)
+            assertEquals(60, oath.periodSeconds)
+            assertEquals(2, oath.useCount)
+            assertEquals(listOf<Byte>(10, 11, 12), oath.secretEncrypted.toList())
+
+            for (table in listOf("password_deletions", "oath_deletions")) {
+                db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM `$table`").use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals("$table starts empty", 0, cursor.getInt(0))
+                }
+            }
+        }
+    }
+
+    /**
      * MIGRATION_3_4 introduced the per-key sharing policy and had to decide
      * what the pre-existing boolean `shareable` flag meant. A key that was
      * shareable keeps working (ALL_PEERS); one that was not stays PRIVATE.
