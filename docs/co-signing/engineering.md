@@ -63,9 +63,11 @@ A payload that fails to parse is reported by type: `NotJson`,
 `UnsupportedVersion`, `MissingField`, `UnsupportedHashAlgorithm`,
 `InvalidHash` or `InvalidSignature`.
 
-The witness signs the hash bytes with the JCA algorithm for its key (for
-example `SHA256withECDSA` for ES256), so the signature covers the SHA-256 of
-the content hash. This matches how Sign in file operations signs and how
+The witness signs the hash bytes with the JCA algorithm for its key
+(`KeystoreManager.jcaSignatureAlgorithm`), which hashes them again with the
+key algorithm's own digest: SHA-256 for ES256 and RS256, SHA-384 for ES384 and
+RS384, SHA-512 for ES512 and RS512. That digest follows the key, not the
+request's `alg`. This matches how Sign in file operations signs and how
 `SignatureVerifier` checks.
 
 ## Storing co-signatures

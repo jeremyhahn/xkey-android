@@ -133,8 +133,10 @@ sharing policy set from its detail screen. Private halves of hardware keys never
 leave the phone. [docs/key-sharing](docs/key-sharing/architecture.md)
 
 **User verification.** Settings chooses when the phone asks for a biometric:
-per operation, once per time window, or once per session (until the app goes to
-the background). User verification can also be turned off for phones without an
+per operation, once per time window, or once per session. A session is one
+connection: a desktop approved in that mode stays approved while its
+connection is up, even with the app in the background or closed, and a
+disconnect clears the approvals. User verification can also be turned off for phones without an
 enrolled biometric. [docs/user-verification](docs/user-verification/architecture.md),
 [docs/fido2-built-in-uv](docs/fido2-built-in-uv/architecture.md)
 

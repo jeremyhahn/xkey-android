@@ -67,9 +67,12 @@ for the key.
 1. `MediaHasher.hashCanonicalUri` hashes the file. For JPEG it skips the
    `APPn` and `COM` segments; anything else is hashed whole.
 2. `KeystoreManager.signWithAlgorithm(keyId, hashBytes, key.algorithm)` signs
-   the 32 hash bytes. The JCA algorithm (for example `SHA256withECDSA` for
-   ES256) hashes its input again, so the signature is over SHA-256 of the
-   content hash. Verification does the same.
+   the 32 hash bytes. The JCA algorithm hashes its input again with the
+   key algorithm's own digest: SHA-256 for ES256 and RS256 (`SHA256withECDSA`,
+   `SHA256withRSA`), SHA-384 for ES384 and RS384, SHA-512 for ES512 and RS512.
+   An Ed25519 key shows in the picker but signing with it fails, since
+   `KeystoreManager.jcaSignatureAlgorithm` has no mapping for it.
+   Verification (`SignatureVerifier`) uses the same mapping.
 3. The activity builds a `ContentAuthenticityData` with one `SignatureEntry`
    whose role is `CREATOR`. `keyFingerprint` is the SHA-256 of the key's
    public key DER, or the key ID when the row has no public key.

@@ -42,9 +42,11 @@ The set lives in memory only. A restarted service can sign a URI again if
 | Anything else | `MediaHasher.hashUri`: SHA-256 of the whole file, streamed |
 
 The service turns the hex hash into bytes and signs those bytes with the JCA
-algorithm for the key (`KeystoreManager.jcaSignatureAlgorithm`), so the
-signature covers the SHA-256 of the content hash. Verification in the app
-does the same.
+algorithm for the key (`KeystoreManager.jcaSignatureAlgorithm`). That
+algorithm hashes the content-hash bytes again with its own digest before
+signing: SHA-256 for ES256 and RS256, SHA-384 for ES384 and RS384, SHA-512 for
+ES512 and RS512. No other algorithm signs; an Ed25519 key is refused.
+Verification in the app (`SignatureVerifier`) uses the same mapping.
 
 ## Signature block
 
