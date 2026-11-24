@@ -232,6 +232,9 @@ class StreamPairingSession(
         /** The peer has sent its one pairing.confirm; see [beginConfirm]. */
         @Volatile var confirmAttempted = false
 
+        /** The reply being sent is the last: the message loop ends the connection after it. */
+        @Volatile var closeAfterReply = false
+
         /** The handshake was not followed by pairing.confirm in time, which ended the connection. */
         @Volatile var confirmExpired = false
 
@@ -372,10 +375,11 @@ class StreamPairingSession(
 
         /**
          * Records that the peer's pairing.confirm has arrived, which stops the
-         * confirm deadline, unless the deadline ended the connection first.
+         * confirm deadline, unless the deadline ended the connection first or
+         * the peer has already sent its one confirm.
          */
         fun beginConfirm(): Boolean = synchronized(state) {
-            if (ended) return false
+            if (ended || confirmAttempted) return false
             confirmAttempted = true
             true
         }
@@ -644,16 +648,18 @@ class StreamPairingSession(
                 Log.i(TAG, "[$transportLabel] connection ended while a request ran: ${e.message}")
                 break
             }
-            if (responseBytes == null || connection.inputEnded) {
-                // A response to one of our outbound requests, or a request
-                // whose peer went away while it ran.
-                continue
+            // Null: a response to one of our outbound requests, or a request
+            // whose peer went away while it ran.
+            if (responseBytes != null && !connection.inputEnded) {
+                try {
+                    send(connection, responseBytes, phoneInitiated = false)
+                } catch (e: IOException) {
+                    Log.e(TAG, "[$transportLabel] failed to send response", e)
+                    break
+                }
             }
-
-            try {
-                send(connection, responseBytes, phoneInitiated = false)
-            } catch (e: IOException) {
-                Log.e(TAG, "[$transportLabel] failed to send response", e)
+            if (connection.closeAfterReply) {
+                Log.i(TAG, "[$transportLabel] pairing.confirm did not confirm the peer; closing the connection")
                 break
             }
         }
@@ -730,7 +736,21 @@ class StreamPairingSession(
         // A session without a paired-device store cannot approve anyone, so it
         // is gated like any other: nothing it serves runs unpaired.
         if (connection?.confirmed != true) {
-            if (connection != null && isPairingConfirm(plaintext) && !connection.beginConfirm()) return null
+            // One pairing.confirm per connection: one that does not confirm
+            // ends it once answered, so a peer cannot repeat the prompt
+            // until the user approves one by mistake.
+            if (connection != null && isPairingConfirm(plaintext)) {
+                if (!connection.beginConfirm()) {
+                    if (!connection.isLive) return null
+                    connection.closeAfterReply = true
+                    Log.w(TAG, "[$transportLabel] a second pairing.confirm on one connection; refusing it and closing")
+                    return refuseRepeatedConfirm(plaintext)
+                }
+                val answer = handlePairingConfirm(plaintext, connection)
+                    ?: if (connection.isCurrent) rejectUnpaired(plaintext) else null
+                if (!connection.confirmed) connection.closeAfterReply = true
+                return answer
+            }
             handlePairingConfirm(plaintext, connection)?.let { return it }
             // A request that outlived its connection answers nothing.
             if (connection != null && !connection.isCurrent) return null
@@ -831,6 +851,17 @@ class StreamPairingSession(
         JSONObject(String(plaintext, Charsets.UTF_8)).getStringOrNull("method") == MethodNames.PAIRING_CONFIRM
     } catch (e: JSONException) {
         false
+    }
+
+    /** Refuses a pairing.confirm sent on a connection that already sent one, without a prompt. */
+    private fun refuseRepeatedConfirm(plaintext: ByteArray): ByteArray {
+        val text = String(plaintext, Charsets.UTF_8)
+        return ProtocolResponse.error(
+            JSONObject(text).optLong("id", -1),
+            ErrorCodes.PAIRING_REJECTED,
+            "Only one pairing.confirm per connection; reconnect to pair",
+            generation = readGeneration(text)
+        ).toJson()
     }
 
     /**

@@ -346,6 +346,13 @@ class StreamPairingSessionTest {
             val noParams = peer.callExpectingError("pairing.confirm", null)
             assertNotNull("pairing.confirm without params must not pair", noParams)
             assertEquals(ErrorCodes.PAIRING_REQUIRED, noParams!!.getInt("code"))
+            // A pairing.confirm that does not confirm ends the connection.
+            assertThrows(IOException::class.java) { peer.readRawFrame(timeoutMs = 5000) }
+            assertFalse(pairedDevices.isDeviceKnown(peer.publicKeyHex))
+        }
+        RawStreamPeer(TEST_PORT, randomStaticKey()).use { peer ->
+            peer.handshake()
+            registeredPeers.add(peer.publicKeyHex)
 
             val noKey = peer.callExpectingError(
                 "pairing.confirm",
@@ -388,8 +395,8 @@ class StreamPairingSessionTest {
             assertNotNull("pairing.confirm must not pair without a store", confirm)
             assertEquals(ErrorCodes.PAIRING_REJECTED, confirm!!.getInt("code"))
 
-            val afterConfirm = peer.callExpectingError("local.listKeys", JSONObject())
-            assertEquals(ErrorCodes.PAIRING_REQUIRED, afterConfirm!!.getInt("code"))
+            // The refused pairing.confirm ends the connection.
+            assertThrows(IOException::class.java) { peer.readRawFrame(timeoutMs = 5000) }
         }
     }
 
