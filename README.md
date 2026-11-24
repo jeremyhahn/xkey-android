@@ -248,6 +248,11 @@ a change to the Keystore code, Room or the wire protocol.
 
 ### Instrumented tests on a personal phone
 
+The test phone on the bench is a personal phone, there only to test the xkey
+application. App install and test over adb only; it is never wiped, flashed,
+unlocked, enrolled or otherwise modified. Flashing and enrollment tests wait
+for a second phone, not yet bought.
+
 The instrumented suite runs under `XKeyTestRunner`
 (`app/src/androidTest/kotlin/com/automatethethings/xkey/XKeyTestRunner.kt`),
 which makes an unattended run on a locked, everyday phone behave like one on
