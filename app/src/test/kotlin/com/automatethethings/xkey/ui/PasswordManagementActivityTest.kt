@@ -16,11 +16,14 @@ package com.automatethethings.xkey.ui
 
 import android.app.Application
 import android.app.Dialog
+import android.content.DialogInterface
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.EditText
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreAeadCipher
@@ -64,6 +67,11 @@ class PasswordManagementActivityTest {
     private lateinit var dao: PasswordDao
     private lateinit var cipher: KeystoreAeadCipher
     private val marker: Byte = 0x7f
+
+    private companion object {
+        const val NAME_FIELD = 0
+        const val PASSWORD_FIELD = 2
+    }
 
     @Before
     fun setUp() {
@@ -145,8 +153,57 @@ class PasswordManagementActivityTest {
         )
     }
 
+    @Test
+    fun `saving without a name keeps the add dialog open with a name error and the typed password`() {
+        val activity = launch()
+        val dialog = openAddDialog(activity) as AlertDialog
+        val fields = editTexts(dialog.window!!.decorView)
+        val typed = fixtureSecret(3)
+        fields[PASSWORD_FIELD].setText(typed)
+
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick()
+        idle()
+
+        assertTrue("add dialog still showing", dialog.isShowing)
+        assertEquals(
+            activity.getString(R.string.password_name_required),
+            fields[NAME_FIELD].error?.toString()
+        )
+        assertEquals(typed, fields[PASSWORD_FIELD].text.toString())
+    }
+
+    @Test
+    fun `saving without a password keeps the add dialog open with a password error and the typed name`() {
+        val activity = launch()
+        val dialog = openAddDialog(activity) as AlertDialog
+        val fields = editTexts(dialog.window!!.decorView)
+        fields[NAME_FIELD].setText("Example")
+
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick()
+        idle()
+
+        assertTrue("add dialog still showing", dialog.isShowing)
+        assertEquals(
+            activity.getString(R.string.password_password_required),
+            fields[PASSWORD_FIELD].error?.toString()
+        )
+        assertEquals("Example", fields[NAME_FIELD].text.toString())
+    }
+
     // -------------------------------------------------------------------------
     // Fixtures
+
+    /** The add dialog's fields in order: name, username, password, URL, notes. */
+    private fun editTexts(root: View): List<EditText> {
+        val found = mutableListOf<EditText>()
+        fun walk(view: View) {
+            if (view is EditText) found += view
+            if (view is ViewGroup) for (i in 0 until view.childCount) walk(view.getChildAt(i))
+        }
+        walk(root)
+        assertEquals("add dialog fields", 5, found.size)
+        return found
+    }
 
     private fun dialogMessage(dialog: Dialog): String =
         dialog.findViewById<TextView>(android.R.id.message).text.toString()
