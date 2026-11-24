@@ -50,6 +50,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -87,6 +88,9 @@ class MainActivity : AppCompatActivity() {
     // Service binding state
     private var gattService: XKeyGattService? = null
     private var serviceBound = false
+
+    // The Sync Now card's running sync, if any
+    private var syncJob: Job? = null
 
     // Dashboard card visibility state
     private var isAuthRequestActive = false
@@ -262,7 +266,9 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             Snackbar.make(binding.root, R.string.sync_in_progress, Snackbar.LENGTH_SHORT).show()
-            lifecycleScope.launch {
+            // A tap while a sync runs only says so: one sync at a time.
+            if (syncJob?.isActive == true) return@setOnClickListener
+            syncJob = lifecycleScope.launch {
                 try {
                     val result = service.syncNow()
                     // The desktop's own view of sync (remote.syncStatus); a
