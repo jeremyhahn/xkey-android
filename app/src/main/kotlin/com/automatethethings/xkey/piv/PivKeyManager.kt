@@ -196,41 +196,29 @@ class PivKeyManager(
         // Checked before the old key is touched: a refused backing leaves the slot as it was.
         algorithm.mlDsaSet?.let { requireMlDsaBacking(it, backing) }
 
+        val makeKey = slotKeyMaker(alias, algorithm, backing)
+
         // The slot's alias is the key ID KeyStoreSyncManager discovers it by, so
         // a share of it may be waiting: replacing the key is a revoke of that ID.
         val (publicKeyDer, now) = SharePermissionLedger.revoking(alias) {
-            // This replaces any key the slot held: from here the row must be made
-            // to describe the new key, or the slot must be emptied.
-            val publicKeyDer = when (val set = algorithm.mlDsaSet) {
-                null -> {
-                    mlDsaStore?.delete(alias)
-                    generateKeyPair(alias, algorithm).public.encoded
-                }
-                else -> generateMlDsa(alias, set, backing)
-            }
-            val now = System.currentTimeMillis()
+            replaceSlotKey(slot) {
+                val publicKeyDer = makeKey()
+                val now = System.currentTimeMillis()
 
-            // Persist metadata in Room
-            val entity = PivSlotEntity(
-                slotId = slot.hexId,
-                algorithm = algorithm.name,
-                publicKeyDer = publicKeyDer,
-                hasKey = true,
-                createdAt = now,
-                lastUsedAt = null,
-                useCount = 0
-            )
-            // A cancelled caller must not stop the upsert half way: the row would
-            // keep the replaced key's public key and algorithm.
-            withContext(NonCancellable) {
-                try {
-                    pivSlotDao.upsert(entity)
-                } catch (e: Exception) {
-                    discardUnrecordedKey(slot)
-                    throw e
-                }
+                // Persist metadata in Room
+                val entity = PivSlotEntity(
+                    slotId = slot.hexId,
+                    algorithm = algorithm.name,
+                    publicKeyDer = publicKeyDer,
+                    hasKey = true,
+                    createdAt = now,
+                    lastUsedAt = null,
+                    useCount = 0
+                )
+                // A cancelled caller must not stop the upsert half way.
+                withContext(NonCancellable) { pivSlotDao.upsert(entity) }
+                publicKeyDer to now
             }
-            publicKeyDer to now
         }
 
         // Log to audit system
@@ -254,6 +242,20 @@ class PivKeyManager(
             useCount = 0
         )
     }
+
+    /**
+     * Runs [replace], which swaps [slot]'s key and writes its row: the one
+     * path a slot key is generated through. Any failure, cancellation
+     * included, empties the slot, so no row (or certificate) is left
+     * describing a key the slot no longer holds.
+     */
+    private suspend fun <T> replaceSlotKey(slot: PivSlot, replace: suspend () -> T): T =
+        try {
+            replace()
+        } catch (e: Throwable) {
+            withContext(NonCancellable) { discardUnrecordedKey(slot) }
+            throw e
+        }
 
     /**
      * Empty [slot] after its Keystore key was replaced but the row could not
@@ -296,21 +298,37 @@ class PivKeyManager(
     }
 
     /**
-     * Makes a [set] key under [alias] with [backing], replacing a key of
-     * either backing there, and returns its SubjectPublicKeyInfo DER.
+     * Resolves how [algorithm] is made under [alias] with [backing], and
+     * returns the step that replaces a key of either backing there and gives
+     * its SubjectPublicKeyInfo DER. Nothing is touched until the step runs, so
+     * a missing store or backend leaves the slot as it was.
      */
-    private fun generateMlDsa(alias: String, set: MlDsaParameterSet, backing: PqcBacking): ByteArray {
-        if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
-        mlDsaStore?.delete(alias)
-        return when (backing) {
-            PqcBacking.SOFTWARE -> (mlDsaStore ?: throw UnsupportedAlgorithmException(set.wireName))
-                .generate(alias, set)
-            PqcBacking.HARDWARE -> {
+    private fun slotKeyMaker(alias: String, algorithm: PivAlgorithm, backing: PqcBacking): () -> ByteArray {
+        val set = algorithm.mlDsaSet
+        val step: () -> ByteArray = when {
+            set == null -> {
+                { mlDsaStore?.delete(alias); generateKeyPair(alias, algorithm).public.encoded }
+            }
+            backing == PqcBacking.SOFTWARE -> {
+                val store = mlDsaStore ?: throw UnsupportedAlgorithmException(set.wireName)
+                val generate: () -> ByteArray = {
+                    if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+                    store.generate(alias, set)
+                }
+                generate
+            }
+            else -> {
                 val backend = PqcHardware.backend?.takeIf { set in it.supportedParameterSets() }
                     ?: throw UnsupportedAlgorithmException(set.wireName)
-                backend.generate(alias, set, authDurationSeconds = -1, preferStrongBox = true)
+                val generate: () -> ByteArray = {
+                    mlDsaStore?.delete(alias)
+                    if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+                    backend.generate(alias, set, authDurationSeconds = -1, preferStrongBox = true)
+                }
+                generate
             }
         }
+        return step
     }
 
     /**
