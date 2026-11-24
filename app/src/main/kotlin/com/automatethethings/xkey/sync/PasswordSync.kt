@@ -106,7 +106,7 @@ class PasswordSync(
      *
      * A sync never writes an entry's tenant, sharing or expiry over the ones
      * it holds: an entry is added only while no entry has its id
-     * ([PasswordRepository.insertIfAbsent]), and one added by another writer
+     * ([PasswordRepository.insertIfAbsentUnlessDeleted]), and one added by another writer
      * between the check and the add is patched in place instead, or, if it
      * has been given a policy sync does not carry since, left unchanged.
      *
@@ -119,7 +119,9 @@ class PasswordSync(
      * An entry the phone deleted ([PasswordRepository.deletedAt]) is not added
      * back by a copy whose `updated_at` is the deletion time or earlier: the
      * peer has not seen the delete yet. It is counted as skipped. A copy
-     * changed after the delete is added again. Deletion records older than
+     * changed after the delete is added again. The check and the add are one
+     * transaction, and so are a delete and its record, so a delete running
+     * alongside the sync is never undone. Deletion records older than
      * [PasswordRepository.DELETION_RETENTION_MS] are dropped first.
      *
      * The phone does not trust a peer clock running ahead of its own: a copy
@@ -184,20 +186,28 @@ class PasswordSync(
             val existed = try {
                 // In any tenant: an id names one entry, wherever it lives, but only one gather() would send is written.
                 // Last writer wins: an existing entry is patched only while it is older than the incoming copy.
-                when {
-                    repository.updateFields(id, patch, onlyIfOlderThan = olderThan, onlyIfSyncable = true) -> true
-                    // Deleted on the phone, and this copy is no newer than the delete: it stays deleted.
-                    isDeletedSince(id, record.updatedAt, isClamped) -> {
-                        keptDeleted++
-                        skipped++
-                        continue
+                if (repository.updateFields(id, patch, onlyIfOlderThan = olderThan, onlyIfSyncable = true)) {
+                    true
+                } else {
+                    // Added only while still absent and not deleted since this copy, in one transaction with
+                    // the deletion check: never replaces an entry another writer added, nor undoes a delete.
+                    when (repository.insertIfAbsentUnlessDeleted(record, isClamped)) {
+                        PasswordRepository.SyncInsert.ADDED -> false
+                        // Deleted on the phone, and this copy is no newer than the delete: it stays deleted.
+                        PasswordRepository.SyncInsert.DELETED -> {
+                            keptDeleted++
+                            skipped++
+                            continue
+                        }
+                        // Added meanwhile: patched in place like any existing entry, keeping the policy it was given.
+                        PasswordRepository.SyncInsert.PRESENT ->
+                            if (repository.updateFields(id, patch, onlyIfOlderThan = olderThan, onlyIfSyncable = true)) {
+                                true
+                            } else {
+                                // Added and deleted again between the two: it keeps moving, so the next sync retries.
+                                throw PasswordUpdateConflictException()
+                            }
                     }
-                    // Added only while still absent: never replaces an entry another writer added since.
-                    repository.insertIfAbsent(record) -> false
-                    // Added meanwhile: patched in place like any existing entry, keeping the policy it was given.
-                    repository.updateFields(id, patch, onlyIfOlderThan = olderThan, onlyIfSyncable = true) -> true
-                    // Added and deleted again between the two: it keeps moving, so the next sync retries.
-                    else -> throw PasswordUpdateConflictException()
                 }
             } catch (e: PasswordEntryTooLargeException) {
                 // Too large for go-xkms to read back over USB: nothing is written for it.
@@ -222,16 +232,6 @@ class PasswordSync(
         return MergeResult(SyncEngine.ItemCounts(added, updated, skipped), keptDeleted = keptDeleted, clamped = clamped, notSyncable = notSyncable)
     }
 
-    /**
-     * Whether the phone deleted [id] at or after [updatedAt], the incoming
-     * copy's time: the peer's copy predates the delete, so it must not add
-     * the entry back. A [clamped] copy's real time is unknown, so any
-     * deletion record holds it back.
-     */
-    private suspend fun isDeletedSince(id: String, updatedAt: Long, clamped: Boolean): Boolean {
-        val deletedAt = repository.deletedAt(id) ?: return false
-        return clamped || updatedAt <= deletedAt
-    }
 
     /**
      * The patch that sets every field this incoming [PasswordRecord] carries,

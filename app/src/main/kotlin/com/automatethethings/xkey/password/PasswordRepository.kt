@@ -251,31 +251,60 @@ class PasswordRepository(
      * that lands between the caller's read and this one, such as a
      * `PasswordUpdate` setting the entry's expiry.
      */
-    suspend fun insertIfAbsent(record: PasswordRecord): Boolean {
+    suspend fun insertIfAbsent(record: PasswordRecord): Boolean = dao.insertIfAbsent(newEntity(record)) != -1L
+
+    /** What [insertIfAbsentUnlessDeleted] did with a synced entry. */
+    enum class SyncInsert {
+        /** Added as a new entry. */
+        ADDED,
+
+        /** Not written: an entry with that id is there. */
+        PRESENT,
+
+        /** Not written: deleted on this phone since the copy, so it stays deleted. */
+        DELETED
+    }
+
+    /**
+     * Add a synced [record] like [insertIfAbsent], unless this phone deleted
+     * it at or after its `updated_at` (any deletion record, when [clamped]),
+     * in one transaction with the deletion check
+     * ([PasswordDao.insertIfAbsentUnlessDeleted]): a delete landing meanwhile
+     * cannot let a copy that predates it back in.
+     */
+    suspend fun insertIfAbsentUnlessDeleted(record: PasswordRecord, clamped: Boolean): SyncInsert =
+        when (dao.insertIfAbsentUnlessDeleted(newEntity(record), clamped)) {
+            KEPT_DELETED -> SyncInsert.DELETED
+            -1L -> SyncInsert.PRESENT
+            else -> SyncInsert.ADDED
+        }
+
+    /**
+     * [record] as a new row, its value encrypted: encrypted and measured
+     * before any transaction, so no Keystore call runs inside one.
+     */
+    private fun newEntity(record: PasswordRecord): PasswordEntity {
         val now = System.currentTimeMillis()
         val createdAt = if (record.createdAt > 0) record.createdAt else now
         val updatedAt = if (record.updatedAt > 0) record.updatedAt else now
         // Measured as PasswordGet answers it, with the timestamps it is stored under.
         PasswordEntryLimit.requireFits(record.copy(createdAt = createdAt, updatedAt = updatedAt))
-        val rowId = dao.insertIfAbsent(
-            PasswordEntity(
-                passwordId = record.passwordId,
-                name = record.name,
-                title = record.title,
-                username = record.username,
-                passwordEncrypted = cipher.encrypt(record.password.toByteArray(Charsets.UTF_8)),
-                url = record.url,
-                notes = record.notes,
-                folderPath = record.folderPath,
-                source = record.source,
-                createdAt = createdAt,
-                updatedAt = updatedAt,
-                expiresAt = record.expiresAt,
-                shared = record.shared,
-                tenantId = record.tenantId
-            )
+        return PasswordEntity(
+            passwordId = record.passwordId,
+            name = record.name,
+            title = record.title,
+            username = record.username,
+            passwordEncrypted = cipher.encrypt(record.password.toByteArray(Charsets.UTF_8)),
+            url = record.url,
+            notes = record.notes,
+            folderPath = record.folderPath,
+            source = record.source,
+            createdAt = createdAt,
+            updatedAt = updatedAt,
+            expiresAt = record.expiresAt,
+            shared = record.shared,
+            tenantId = record.tenantId
         )
-        return rowId != -1L
     }
 
     /**
@@ -393,17 +422,12 @@ class PasswordRepository(
      *
      * A deleted entry gets a deletion record ([PasswordDeletionEntity]) at
      * the current time, so that a sync with a peer which still holds it does
-     * not add it back ([deletedAt]).
+     * not add it back ([deletedAt]). The delete and its record are one
+     * transaction ([PasswordDao.deleteAndRecordDeletion]), so a sync never
+     * sees the entry gone and its record not yet written.
      */
-    suspend fun delete(passwordId: String, tenantId: String? = null): Boolean {
-        val deleted = if (tenantId == null) {
-            dao.deleteByPasswordId(passwordId) > 0
-        } else {
-            dao.deleteByPasswordIdInTenant(passwordId, tenantId) > 0
-        }
-        if (deleted) dao.recordDeletion(PasswordDeletionEntity(passwordId, clock()))
-        return deleted
-    }
+    suspend fun delete(passwordId: String, tenantId: String? = null): Boolean =
+        dao.deleteAndRecordDeletion(passwordId, tenantId, clock())
 
     /**
      * When the entry with [passwordId] was last deleted on this phone, or

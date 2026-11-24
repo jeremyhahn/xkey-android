@@ -38,6 +38,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
@@ -89,6 +91,14 @@ class PasswordSyncTest {
     ) : PasswordDao, PasswordDeletionQueries by deletions {
         val rows = linkedMapOf<String, PasswordEntity>()
         private var rowId = 0L
+
+        /** Room runs one write transaction at a time: so does this DAO. */
+        private val transaction = Mutex()
+
+        override suspend fun deleteAndRecordDeletion(passwordId: String, tenantId: String?, deletedAt: Long): Boolean =
+            transaction.withLock { super<PasswordDao>.deleteAndRecordDeletion(passwordId, tenantId, deletedAt) }
+        override suspend fun insertIfAbsentUnlessDeleted(password: PasswordEntity, clamped: Boolean): Long =
+            transaction.withLock { super<PasswordDao>.insertIfAbsentUnlessDeleted(password, clamped) }
 
         override suspend fun insert(password: PasswordEntity): Long {
             val id = if (password.id != 0L) password.id else ++rowId

@@ -18,6 +18,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
@@ -151,6 +152,41 @@ interface PasswordDao : PasswordDeletionQueries {
     @Query("DELETE FROM passwords WHERE password_id = :passwordId AND tenant_id = :tenantId")
     suspend fun deleteByPasswordIdInTenant(passwordId: String, tenantId: String): Int
 
+    /**
+     * Delete the entry with [passwordId], in any tenant or, with a [tenantId],
+     * only if it belongs to that tenant, and record its deletion at
+     * [deletedAt] when a row went, in one transaction: no sync can add a peer
+     * copy back between the delete and its record. Returns whether a row went.
+     */
+    @Transaction
+    suspend fun deleteAndRecordDeletion(passwordId: String, tenantId: String?, deletedAt: Long): Boolean {
+        val deleted = if (tenantId == null) {
+            deleteByPasswordId(passwordId) > 0
+        } else {
+            deleteByPasswordIdInTenant(passwordId, tenantId) > 0
+        }
+        if (deleted) recordDeletion(PasswordDeletionEntity(passwordId, deletedAt))
+        return deleted
+    }
+
+    /**
+     * Add [password] as a synced entry, in one transaction, unless this phone
+     * deleted it since: the deletion check and the add see the same state, so
+     * a delete cannot land between them.
+     *
+     * An entry the phone deleted at or after the incoming copy's
+     * `updated_at` is not added back: the peer's copy predates the delete.
+     * A [clamped] copy's real time is unknown, so any deletion record holds
+     * it back. Returns [KEPT_DELETED] (-2) when held back, otherwise what
+     * [insertIfAbsent] returns (-1 when an entry with that id is there).
+     */
+    @Transaction
+    suspend fun insertIfAbsentUnlessDeleted(password: PasswordEntity, clamped: Boolean): Long {
+        val deletedAt = getDeletedAt(password.passwordId)
+        if (deletedAt != null && (clamped || password.updatedAt <= deletedAt)) return KEPT_DELETED
+        return insertIfAbsent(password)
+    }
+
     /** Total number of stored password entries. */
     @Query("SELECT COUNT(*) FROM passwords")
     suspend fun count(): Int
@@ -159,6 +195,9 @@ interface PasswordDao : PasswordDeletionQueries {
     @Query("SELECT COUNT(*) FROM passwords")
     fun observeCount(): Flow<Int>
 }
+
+/** [PasswordDao.insertIfAbsentUnlessDeleted]: the entry was deleted on this phone since the copy, and stays deleted. */
+const val KEPT_DELETED = -2L
 
 /**
  * The `password_deletions` queries of [PasswordDao]: when this phone deleted
