@@ -18,6 +18,7 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.oath.OATH_KEPT_DELETED
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathRepository
@@ -72,15 +73,25 @@ class SyncEngineMergeOathTest {
         coEvery { dao.deleteByOathId(any()) } answers { rows.remove(firstArg<String>()) }
         coEvery { dao.recordDeletion(any(), any()) } answers { deleted += firstArg<String>() }
         coEvery { dao.isDeleted(any()) } answers { firstArg<String>() in deleted }
-        coEvery { dao.insertIfAbsent(any()) } answers {
+        // The DAO's transactions, as their bodies leave the table (a mock does not run interface bodies).
+        coEvery { dao.removeIfDeleted(any()) } answers {
+            val oathId = firstArg<String>()
+            if (oathId in deleted) rows.remove(oathId)
+            oathId in deleted
+        }
+        coEvery { dao.deleteAndRecordDeletion(any(), any()) } answers {
+            deleted += firstArg<String>()
+            rows.remove(firstArg<String>())
+            Unit
+        }
+        coEvery { dao.insertIfAbsent(any()) } answers { insertIfAbsent(firstArg()) }
+        coEvery { dao.insertIfAbsentUnlessDeleted(any()) } answers {
             val row = firstArg<OathCredentialEntity>()
-            if (rows.containsKey(row.oathId)) {
-                -1L
+            if (row.oathId in deleted) {
+                rows.remove(row.oathId)
+                OATH_KEPT_DELETED
             } else {
-                val stored = row.copy(id = rows.size + 1L)
-                rows[row.oathId] = stored
-                inserted += stored
-                stored.id
+                insertIfAbsent(row)
             }
         }
         coEvery {
@@ -127,6 +138,15 @@ class SyncEngineMergeOathTest {
     @After
     fun tearDown() {
         unmockkAll()
+    }
+
+    /** What the DAO's `INSERT OR IGNORE` leaves: the new row id, or -1 if a row has the oath id. */
+    private fun insertIfAbsent(row: OathCredentialEntity): Long {
+        if (rows.containsKey(row.oathId)) return -1L
+        val stored = row.copy(id = rows.size + 1L)
+        rows[row.oathId] = stored
+        inserted += stored
+        return stored.id
     }
 
     /** An android [Uri] answering what `importFromUri` reads, from [URI]. */

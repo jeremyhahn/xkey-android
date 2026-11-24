@@ -77,6 +77,12 @@ class OathHotpCounterRaceTest {
 
         override suspend fun isDeleted(oathId: String): Boolean = false
 
+        // Nothing here is ever deleted: the merge's transactions reduce to the plain insert.
+        override suspend fun removeIfDeleted(oathId: String): Boolean = false
+
+        override suspend fun insertIfAbsentUnlessDeleted(credential: OathCredentialEntity): Long =
+            insertIfAbsent(credential)
+
         override suspend fun recordUsage(oathId: String, timestamp: Long) {
             val current = row?.takeIf { it.oathId == oathId } ?: return
             row = current.copy(lastUsedAt = timestamp, useCount = current.useCount + 1)
@@ -227,16 +233,16 @@ class OathSyncDeletionRaceTest {
         }
 
         /** One transaction: a deleted id's leftover row goes. Returns whether the id has a deletion record. */
-        suspend fun removeIfDeleted(oathId: String): Boolean = call {
+        override suspend fun removeIfDeleted(oathId: String): Boolean = call {
             if (oathId in deletions) rows.remove(oathId)
             oathId in deletions
         }
 
         /** One transaction: a deleted id's leftover row goes, and nothing is added for it. */
-        suspend fun insertIfAbsentUnlessDeleted(credential: OathCredentialEntity): Long = call {
+        override suspend fun insertIfAbsentUnlessDeleted(credential: OathCredentialEntity): Long = call {
             if (credential.oathId in deletions) {
                 rows.remove(credential.oathId)
-                KEPT_DELETED_IN_FAKE
+                OATH_KEPT_DELETED
             } else if (rows.containsKey(credential.oathId)) {
                 -1L
             } else {
@@ -246,7 +252,7 @@ class OathSyncDeletionRaceTest {
         }
 
         /** One transaction: the record and the delete land together. */
-        suspend fun deleteAndRecordDeletion(oathId: String, deletedAt: Long): Unit = call {
+        override suspend fun deleteAndRecordDeletion(oathId: String, deletedAt: Long): Unit = call {
             deletions[oathId] = deletedAt
             rows.remove(oathId)
             Unit
@@ -348,6 +354,5 @@ class OathSyncDeletionRaceTest {
     private companion object {
         const val ID = "desk-1:totp"
         const val SECRET = "JBSWY3DPEHPK3PXP"
-        const val KEPT_DELETED_IN_FAKE = -2L
     }
 }

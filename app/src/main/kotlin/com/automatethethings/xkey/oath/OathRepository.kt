@@ -270,7 +270,10 @@ class OathRepository(
      * creation time and usage statistics, with the HOTP counter the larger
      * of the stored one and [counter]. Merging the same item again therefore
      * never adds a second row. An id deleted on the phone
-     * ([deleteCredential]) is never added back.
+     * ([deleteCredential]) is never added back: the deletion check and each
+     * insert run in one DAO transaction
+     * ([OathCredentialDao.insertIfAbsentUnlessDeleted]), and a row still
+     * stored under a deleted id is removed.
      *
      * @return what the merge did with the item ([SyncMergeOutcome]).
      * @throws IllegalArgumentException if [oathId] is blank or the fields are
@@ -288,7 +291,8 @@ class OathRepository(
         counter: Long? = null
     ): SyncMergeOutcome {
         require(oathId.isNotBlank()) { "Missing OATH credential id" }
-        if (dao.isDeleted(oathId)) return SyncMergeOutcome.DELETED
+        // A row an interrupted merge left beside the deletion record goes too, in the same transaction.
+        if (dao.removeIfDeleted(oathId)) return SyncMergeOutcome.DELETED
         val otpType = type.lowercase()
         val parsed = parseOathUri(
             otpauthUri(
@@ -318,7 +322,8 @@ class OathRepository(
             createdAt = System.currentTimeMillis()
         )
         // Never REPLACE: that deletes the row and inserts a new one, losing its usage statistics.
-        if (dao.insertIfAbsent(entity) != -1L) return addedUnlessDeleted(oathId)
+        // The deletion check and the insert are one transaction: a delete cannot land between them.
+        insertedUnlessDeleted(entity)?.let { return it }
         val stored = dao.getByOathId(oathId)
         if (stored != null && !sameKeyMaterial(stored, entity, parsed.secret)) {
             // The wire item has no timestamp to say which copy is newer: the phone's key material is kept.
@@ -333,15 +338,21 @@ class OathRepository(
         )
         if (updated > 0) return SyncMergeOutcome.UPDATED
         // Gone between the insert and the update: added again only if the phone did not delete it.
-        if (dao.isDeleted(oathId)) return SyncMergeOutcome.DELETED
-        return if (dao.insertIfAbsent(entity) != -1L) addedUnlessDeleted(oathId) else SyncMergeOutcome.UPDATED
+        return insertedUnlessDeleted(entity) ?: SyncMergeOutcome.UPDATED
     }
 
     /**
-     * After a sync insert of [oathId]: a deletion on the phone that landed
-     * between the delete-record check and the insert wins, and the row the
-     * merge just added is removed again.
+     * Add [entity] through [OathCredentialDao.insertIfAbsentUnlessDeleted]:
+     * [SyncMergeOutcome.ADDED] or [SyncMergeOutcome.DELETED], or null when a
+     * row already has its oath id and nothing was written.
      */
+    private suspend fun insertedUnlessDeleted(entity: OathCredentialEntity): SyncMergeOutcome? =
+        when (dao.insertIfAbsentUnlessDeleted(entity)) {
+            OATH_KEPT_DELETED -> SyncMergeOutcome.DELETED
+            -1L -> null
+            else -> SyncMergeOutcome.ADDED
+        }
+
     /**
      * True if [stored] has the same secret, type, algorithm, digits and
      * period as [incoming] (whose plain secret is [incomingSecret]). A
@@ -370,12 +381,6 @@ class OathRepository(
         } finally {
             storedSecret.fill(0)
         }
-    }
-
-    private suspend fun addedUnlessDeleted(oathId: String): SyncMergeOutcome {
-        if (!dao.isDeleted(oathId)) return SyncMergeOutcome.ADDED
-        dao.deleteByOathId(oathId)
-        return SyncMergeOutcome.DELETED
     }
 
     private suspend fun importParsed(uri: String, structuredLabel: Boolean): String {
@@ -574,15 +579,15 @@ class OathRepository(
      * Delete an OATH credential by its unique identifier.
      *
      * Removes the credential and its encrypted secret from the database.
-     * This operation is irreversible. The id is recorded first
-     * ([OathCredentialDao.recordDeletion]), so a sync merge running at the
-     * same time, or any later one, never adds the credential back.
+     * This operation is irreversible. The id is recorded and the row deleted
+     * in one transaction ([OathCredentialDao.deleteAndRecordDeletion]), so
+     * a sync merge running at the same time, or any later one, never adds
+     * the credential back, and no interruption leaves one without the other.
      *
      * @param oathId The unique identifier of the credential to delete.
      */
     suspend fun deleteCredential(oathId: String) {
-        dao.recordDeletion(oathId, System.currentTimeMillis())
-        dao.deleteByOathId(oathId)
+        dao.deleteAndRecordDeletion(oathId, System.currentTimeMillis())
     }
 
     /**
