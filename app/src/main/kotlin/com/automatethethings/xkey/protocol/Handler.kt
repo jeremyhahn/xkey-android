@@ -1226,7 +1226,7 @@ class RequestHandler(
             UserVerificationPolicy.REQUIRED -> {
                 when (settings.authMode) {
                     BiometricAuthMode.PER_OPERATION -> 0
-                    BiometricAuthMode.TIME_WINDOW -> settings.timeWindowSeconds
+                    BiometricAuthMode.TIME_WINDOW -> settings.effectiveTimeWindowSeconds
                     BiometricAuthMode.PER_SESSION -> DEFAULT_SESSION_DURATION_SECONDS
                 }
             }
