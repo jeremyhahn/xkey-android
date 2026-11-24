@@ -555,6 +555,8 @@
     <string name="bootstrap_dns_server_hint">DNS Server (e.g., 8.8.8.8:53)</string>
     <string name="bootstrap_static_key_hint">64 hex characters</string>
     <string name="bootstrap_spki_pin_hint">64 hex characters</string>
+    <string name="bootstrap_spki_pin_refused">SPKI pin not saved: it must be 64 hex characters</string>
+    <string name="bootstrap_noise_key_refused">Noise static key not saved: it must be 64 hex characters</string>
     <string name="bootstrap_timeout_label">Per-Method Timeout</string>
 
     <!-- Audit Log -->
