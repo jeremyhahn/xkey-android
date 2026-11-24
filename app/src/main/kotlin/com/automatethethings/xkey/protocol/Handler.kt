@@ -3725,9 +3725,27 @@ class RequestHandler(
     // -------------------------------------------------------------------------
 
     /**
+     * The OATH methods hand out one-time codes and change the credential
+     * store, so they are key use: a paired desktop whose settings require a
+     * current attestation for key use is refused until it attests, and a
+     * paired-device store that cannot be read refuses, as for the key
+     * operations ([isDeviceAttestationCurrent]). Called before each handler's
+     * own try block, so the refusal reaches dispatch as its error code.
+     */
+    private suspend fun requireOathAttestation() {
+        if (!isDeviceAttestationCurrent(forKeyUse = true)) {
+            throw ProtocolException(
+                "Device attestation required before key use",
+                errorCode = ErrorCodes.DEVICE_ATTESTATION_REQUIRED
+            )
+        }
+    }
+
+    /**
      * Lists all local OATH credentials (without secrets).
      */
     private suspend fun handleOathList(request: Request): Response {
+        requireOathAttestation()
         return try {
             val db = XKeyDatabase.getInstance(context)
             val credentials = db.oathCredentialDao().getAll()
@@ -3757,6 +3775,7 @@ class RequestHandler(
      * Generates and returns the current OTP code for a credential.
      */
     private suspend fun handleOathGenerate(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3809,6 +3828,7 @@ class RequestHandler(
      * Adds (imports) an OATH credential pushed from the desktop (local.oathAdd).
      */
     private suspend fun handleOathAdd(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3869,6 +3889,7 @@ class RequestHandler(
      * Removes an OATH credential (local.oathRemove).
      */
     private suspend fun handleOathRemove(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
