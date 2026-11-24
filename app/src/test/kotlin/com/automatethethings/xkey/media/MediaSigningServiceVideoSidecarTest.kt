@@ -159,4 +159,27 @@ class MediaSigningServiceVideoSidecarTest {
         verify(exactly = 1) { AuditLogger.logMediaAutoSigned(any(), any(), any()) }
         assertEquals("the sidecar must not be rewritten", sidecar, capture.sidecar.readText())
     }
+
+    /**
+     * The writer routes by file name (a `.jpg` is embedded) and the hash by
+     * the resolver's type. A JPEG file the resolver does not type as JPEG is
+     * embedded, so its hash must be the canonical one: a whole-file hash can
+     * never match the file once the signature is in it.
+     */
+    @Test
+    fun `a jpg file the resolver does not type as JPEG gets a hash its embedded signature accepts`() {
+        val bytes = MediaSigningServiceFixture.jpeg()
+        val capture = fixture.addCapture(IMAGES, "IMG_0005.jpg", bytes, "application/octet-stream")
+
+        fixture.deliver(capture.uri)
+
+        assertFalse("a .jpg carries its own signature, no sidecar", capture.sidecar.exists())
+        val data = assertSignedByKey(capture)
+        assertTrue(
+            "an in-band verifier must accept the stored hash of the signed file",
+            MediaHasher.contentHashMatches(
+                data.contentHash, capture.file.readBytes(), "image/jpeg", MediaHasher.SignatureSource.IN_BAND
+            )
+        )
+    }
 }
